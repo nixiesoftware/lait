@@ -144,13 +144,22 @@ const LAYOUT_PANEL_IDS = ["sidebar", "main", "detail"];
  * pinned 340px console that left the issue list narrower than it would have been
  * with both.
  *
- * `RAIL_DRAWER_QUERY` is the twin of the `max-[768px]:` utilities on the rail,
- * its separator and the drawer. It has to exist in both languages — Tailwind's
- * arbitrary variants take a literal, and the shell has to *know* which mode it is
- * in to draw the control that opens the drawer — so the number is written down
- * once here and the utilities are the copies to keep in step. The console has no
- * such twin: it is gated in JS alone, because the control that toggles it has to
- * disappear with it.
+ * `RAIL_DRAWER_QUERY` is the twin of the `max-[768px]:` utilities on the rail's
+ * separator and the drawer, and of the `@media` block in `styles.css` that takes
+ * the rail's PANEL out of the layout. It has to exist in all three languages —
+ * Tailwind's arbitrary variants take a literal, the shell has to *know* which
+ * mode it is in to draw the control that opens the drawer, and the panel's own
+ * element is reachable from neither — so the number is written down once here
+ * and the rest are the copies to keep in step.
+ *
+ * The stylesheet copy is not redundant with the utilities, and assuming it was
+ * cost a bug. `Panel` applies `className` to a nested div by design; hiding that
+ * hides the rail and leaves its 180px flex item behind, so at any width below
+ * the threshold the shell sat in an empty left-hand column. Only a rule on the
+ * panel element reclaims the width.
+ *
+ * The console has no twin at all: it is gated in JS alone, because the control
+ * that toggles it has to disappear with it.
  */
 const CONSOLE_QUERY = "(max-width: 960px)";
 const RAIL_DRAWER_QUERY = "(max-width: 768px)";
@@ -2149,7 +2158,12 @@ export function App() {
         collapsedSize={0}
         groupResizeBehavior="preserve-pixel-size"
         onResize={(size) => setSidebarCollapsed(size.inPixels === 0)}
-        className="bg-sunken max-[768px]:hidden"
+        // Just the fill. The `max-[768px]:hidden` that used to ride here could
+        // never do its job: `Panel` routes `className` to a nested div, so it
+        // hid the rail's contents and left the flex item holding 180px of empty
+        // window. The rule that takes the panel out of the layout is in
+        // `styles.css`, keyed on the element the library documents.
+        className="bg-sunken"
       >
         <Sidebar
           spaces={spaces}

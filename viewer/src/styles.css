@@ -1003,6 +1003,42 @@
   opacity: 0.55;
 }
 
+/* The workspace rail, taken out of the layout when it becomes a drawer.
+   ────────────────────────────────────────────────────────────────────────
+   The third copy of `RAIL_DRAWER_QUERY` (App.tsx owns the number), and the
+   only one that reclaims the space.
+
+   `Panel` puts its `className` on a NESTED div — the library says so in as
+   many words, "to avoid styles that interfere with Flex layout" — so the
+   `max-[768px]:hidden` written there hides the sidebar's CONTENTS while the
+   flex item above them keeps its share of the group. Below 768px that share
+   is the panel's 180px `minSize`, floored: an empty column down the left of
+   the window with the whole shell pushed off it, which is exactly the
+   interference the library was trying to prevent, arrived at from the other
+   side.
+
+   So the rule has to land on the element the library owns. It documents that
+   element's shape — `<div data-panel id="panel-id-prop">` — which is what
+   makes this safe to target rather than a reach into someone's internals.
+
+   CSS rather than `panel.collapse()` on the `railIsDrawer` state, though
+   both would clear the gutter. A collapse is a SIZE, so it would be written
+   into the persisted layout and it would race the effect that already
+   collapses this panel for Settings — two hands on one panel, arguing across
+   a resize. Hiding is a display concern and leaves no state to restore: the
+   window widens, the rule stops matching, and the size the person chose is
+   still the size the library is holding.
+
+   `!important` is load-bearing and this is the case it exists for: the
+   library writes `display: flex` INLINE on the panel, so the rule loses
+   without it. Measured — the selector matched, the query matched, and the
+   computed display was still `flex`. */
+@media (max-width: 768px) {
+  [data-panel]#sidebar {
+    display: none !important;
+  }
+}
+
 /* A focused issue becomes a document with a stable Linear-style property rail.
    The split pane stays single-column until it has enough *container* width; the
    browser window is not the relevant measurement when panels are resizable. */
