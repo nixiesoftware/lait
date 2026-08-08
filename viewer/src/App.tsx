@@ -25,6 +25,7 @@ import {
   carriesFilter,
   DEFAULT_ROUTE,
   formatRoute,
+  isTeamDestination,
   loadLastRoute,
   parseRoute,
   resolveLocalSpace,
@@ -42,6 +43,7 @@ import { classifyFailure, EmptyState, InlineError, recoveryForError, StandingNot
 import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
+import { mergeBoards, projectsOf, teamAsProject } from "./core/teams";
 import { ProjectTimeline } from "./ui/ProjectTimeline";
 import { Roadmap } from "./ui/Roadmap";
 import { DisplayOptions } from "./ui/DisplayOptions";
@@ -104,6 +106,7 @@ import {
   useProjectRegistry,
   useProjectViewerStore,
   useSpec,
+  useTeams,
 } from "./projectStore";
 import {
   isReadOnly,
@@ -274,6 +277,15 @@ export function App() {
    *  this call site means the only project there is — no branch hint reaches it
    *  and no default is configured for it. */
   const [project, setProject] = useState<string | null>(initialRoute.project);
+  /**
+   * The team the navigation is scoped to, by KEY.
+   *
+   * A peer of `project` and mutually exclusive with it: you are looking at one
+   * project or at a team's worth of them. Every `goto` clears it unless the
+   * caller is asking for a team destination, so a team scope cannot follow you
+   * out of the team the way a project scope deliberately does.
+   */
+  const [team, setTeam] = useState<string | null>(initialRoute.team ?? null);
   /** The picker a keybinding has asked for. Also an overlay: it owns the keymap. */
   const [field, setField] = useState<IssueField | null>(null);
   /** Doc-ids the daemon says qualify. `null` = the daemon wasn't asked, which is
@@ -312,8 +324,14 @@ export function App() {
     if (isIssueMode(view)) setIssueLayout(view);
   }, [view]);
   const projectStore = useProjectViewerStore();
-  const boardSpace = isProjectView(view) ? current : null;
-  const { board } = useProjectBoard(boardSpace, isProjectView(view) ? project : null);
+  // Not while a team is in scope: `project` is null there, and a null project
+  // is the request the daemon answers with a teaching error on any space with
+  // more than one project. The team's rows come from the fan-out below.
+  const boardSpace = isProjectView(view) && !team ? current : null;
+  const { board: projectBoard } = useProjectBoard(
+    boardSpace,
+    isProjectView(view) && !team ? project : null,
+  );
   const labelsResource = useProjectRegistry(
     current ? projectKeys.labels(current) : "project:none/labels",
     useCallback(
@@ -362,6 +380,45 @@ export function App() {
   /** Projects offered for navigation/creation. Archived ones stay cached but are
    * hidden from navigation until explicitly opened. */
   const liveProjects = useMemo(() => projects.filter((p) => !p.archived), [projects]);
+  const teams = useTeams(current).data ?? [];
+  /**
+   * The team the route names, and the projects it owns.
+   *
+   * Resolved by KEY because that is what the address carries. An address naming
+   * a team that no longer exists resolves to nothing and the surfaces below
+   * fall back to the whole space — the same forgiving read a missing project
+   * key gets.
+   */
+  const activeTeam = useMemo(
+    () => (team ? (teams.find((candidate) => candidate.key === team) ?? null) : null),
+    [team, teams],
+  );
+  const teamProjects = useMemo(
+    () => (activeTeam ? projectsOf(activeTeam, liveProjects) : liveProjects),
+    [activeTeam, liveProjects],
+  );
+  /**
+   * A team's issues: every project it owns, merged into one board.
+   *
+   * `board { project: null }` cannot serve this — the daemon resolves a null
+   * project through a CLI chain that reaches a teaching error on any space with
+   * more than one project (see `useProjectBoard`). So it is the same per-project
+   * fan-out the roadmap uses, and each board is the same cached resource the
+   * project view reads.
+   */
+  const teamBoardsWanted =
+    activeTeam !== null && (view === "list" || view === "board") ? teamProjects : [];
+  const teamBoards = useSpaceBoards(
+    current ?? "",
+    teamBoardsWanted.map((p) => p.key),
+  ).data ?? {};
+  const teamBoard = useMemo(() => {
+    if (!activeTeam) return null;
+    const loaded = teamProjects.map((p) => teamBoards[p.key]).filter((b) => b !== undefined);
+    return mergeBoards(loaded, teamAsProject(activeTeam));
+  }, [activeTeam, teamBoards, teamProjects]);
+  /** One name for "the rows on screen", whichever scope produced them. */
+  const board = activeTeam ? teamBoard : projectBoard;
 
   useEffect(() => {
     // Appearance is applied by `<Theme mode>`, not from here. Density still is:
@@ -398,6 +455,7 @@ export function App() {
     const local = resolveLocalSpace(route.spaceId, spacesRef.current);
     setCurrent(local?.id ?? null);
     setProject(route.project);
+    setTeam(route.team ?? null);
     setView(route.view);
     setSelection(route.issue);
     setOpenSpec(route.spec ?? null);
@@ -428,6 +486,7 @@ export function App() {
     const route = {
       spaceId: routeSpace,
       project,
+      ...(team ? { team } : {}),
       view,
       issue: detail ? selection : null,
       ...(openSpec ? { spec: openSpec } : {}),
@@ -441,7 +500,7 @@ export function App() {
       window.history.replaceState(null, "", href);
     }
     saveLastRoute(route);
-  }, [routeSpace, project, view, selection, detail, openSpec, openBaseline, filter, composing?.page, settingsTab]);
+  }, [routeSpace, project, team, view, selection, detail, openSpec, openBaseline, filter, composing?.page, settingsTab]);
 
   // Settings is a page state, not a panel: its own left rail owns the hierarchy,
   // so the workspace sidebar steps aside while it's open and returns as you left
@@ -709,11 +768,16 @@ export function App() {
   // and defaulting a project into it made the workspace chart unreachable the
   // moment a space had a project to default to. It also does not need the
   // resolution: the workspace chart asks for every project's board by name.
+  //
+  // A team scope is the second exception, and the same one wearing a different
+  // hat: under a team `project` is null on purpose — the surfaces read every
+  // project the team owns — so defaulting one in would narrow a team's issues
+  // to whichever project happened to sort first.
   useEffect(() => {
-    if (!isProjectView(view) || view === "timeline" || project !== null) return;
+    if (!isProjectView(view) || view === "timeline" || project !== null || team) return;
     if (projects.length === 0) return;
     setProject((projects.find((candidate) => !candidate.archived) ?? projects[0])!.key);
-  }, [projects, project, view]);
+  }, [projects, project, team, view]);
 
   // The trash. Scoped to the board's project so the group matches the view,
   // re-read on every doorbell (a remote delete is exactly the news it carries).
@@ -724,7 +788,9 @@ export function App() {
       try {
         const r = await rpc(current, {
           cmd: "list",
-          project: board?.project.key ?? null,
+          // The *project's* key, never the stand-in a team board reports —
+          // `list` resolves a project reference, and a team key is not one.
+          project: team ? null : (board?.project.key ?? null),
           filter: { all: true },
         });
         if (alive && r.kind === "list") setDeletedRows(r.rows.filter((x) => x.tombstone));
@@ -735,7 +801,7 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [current, display.deleted, board?.project.key, revision]);
+  }, [current, display.deleted, board?.project.key, team, revision]);
 
   // `mine`/`label` are server truth: ask `list`, keep the doc-ids, intersect.
   useEffect(() => {
@@ -1028,6 +1094,11 @@ export function App() {
           formatRoute({ spaceId: routeSpace, project: nextProject, view: v, issue: null, filter: scoped }),
         );
         setProject(nextProject);
+        // A team scope does not follow you out of the team. A project scope
+        // does — deliberately, so switching layouts keeps you where you are —
+        // but a team is the wider claim, and carrying it onto a destination the
+        // caller named without one would silently narrow that destination.
+        setTeam(null);
         setView(v);
         // Asking for the Board means the board, not the issue you were reading
         // drawn over it. The selection survives so returning to the list keeps
@@ -1041,6 +1112,38 @@ export function App() {
         setOpenBaseline(null);
         setComposingSpec(null);
         if (scoped !== filter) setFilter(scoped);
+      },
+      /**
+       * Scope the navigation to one team, or clear the scope.
+       *
+       * A separate verb from `goto` for the reason `goto`'s own note gives about
+       * `pickProject`: naming the destination is better than inferring it. A
+       * team is a *scope* over several views, so this keeps the view you are on
+       * when that view has a team form and falls back to Issues when it does
+       * not — the same rule `gotoMilestone` follows, and for the same reason.
+       */
+      gotoTeam: (toTeam, toView) => {
+        const nextView = toView ?? (isTeamDestination(view) ? view : "list");
+        window.history.pushState(
+          null,
+          "",
+          formatRoute({
+            spaceId: routeSpace,
+            project: null,
+            ...(toTeam ? { team: toTeam } : {}),
+            view: nextView,
+            issue: null,
+            filter,
+          }),
+        );
+        setTeam(toTeam);
+        // A team owns projects, so being in one is being in none of them in
+        // particular. Leaving `project` set would have the surfaces below read
+        // one project's rows under a team's heading.
+        setProject(null);
+        setView(nextView);
+        setSelection(null);
+        setDetail(false);
       },
       /**
        * A milestone is a filter, not a destination.
@@ -1875,7 +1978,9 @@ export function App() {
           spaces={spaces}
           current={current}
           projects={liveProjects}
-          currentProject={board?.project.key ?? project}
+          teams={teams}
+          currentTeam={team}
+          currentProject={team ? null : (board?.project.key ?? project)}
           view={view}
           unread={unread}
           currentName={statusInfo?.name}
@@ -1885,6 +1990,7 @@ export function App() {
           onSearch={() => run("search.issues")}
           onOpenProjectView={(key, next) => api.goto(next, key)}
           onGo={api.goto}
+          onGoTeam={api.gotoTeam}
           onMyIssues={openMyIssues}
           onApplySavedView={applySavedView}
           onToggleFavorite={toggleFavorite}
@@ -2219,6 +2325,8 @@ export function App() {
               spaceDescription={statusInfo?.description ?? ""}
               labels={labels}
               projects={projects}
+              teams={teams}
+              members={members}
               readOnly={readOnly}
               revision={revision}
               tab={settingsTab}
@@ -2236,7 +2344,10 @@ export function App() {
           ) : view === "projects" ? (
             <Projects
               spaceId={current}
-              projects={projects}
+              // Scoped when a team is in the address, the whole space otherwise.
+              // Archived projects still show here — this is the page you go to
+              // to find one — so it takes `projects`, not `liveProjects`.
+              projects={activeTeam ? projectsOf(activeTeam, projects) : projects}
               revision={revision}
               spaceDescription={statusInfo?.description ?? ""}
               onOpen={(key) => api.goto("overview", key)}
@@ -2365,7 +2476,7 @@ export function App() {
             />
           ) : view === "timeline" ? (
             <Roadmap
-              projects={liveProjects}
+              projects={teamProjects}
               boards={spaceBoards}
               milestones={spaceMilestones}
               // The workflow is the space's, and at the workspace there is no
@@ -2454,6 +2565,7 @@ export function App() {
               spaceId={current}
               project={activeProject}
               members={members}
+              teams={teams}
               counts={projectCounts}
               readOnly={readOnly}
               activeMilestone={filter.milestone}
@@ -2529,7 +2641,9 @@ export function App() {
               spaces={spaces}
               current={current}
               projects={liveProjects}
-              currentProject={board?.project.key ?? project}
+              teams={teams}
+              currentTeam={team}
+              currentProject={team ? null : (board?.project.key ?? project)}
               view={view}
               unread={unread}
               currentName={statusInfo?.name}
@@ -2549,6 +2663,10 @@ export function App() {
               }}
               onGo={(next) => {
                 api.goto(next);
+                setMobileNav(false);
+              }}
+              onGoTeam={(nextTeam, nextView) => {
+                api.gotoTeam(nextTeam, nextView);
                 setMobileNav(false);
               }}
               onMyIssues={() => {

@@ -13,6 +13,25 @@ import { EMPTY_FILTER, isActive, type FilterState } from "./filter";
 export interface ViewerRoute {
   spaceId: string | null;
   project: string | null;
+  /**
+   * The team the navigation is scoped to, by KEY.
+   *
+   * A third structural scope beside space and project, and it sits *between*
+   * them: a team owns projects, so `/teams/PLAT/issues` is every issue in every
+   * project that team owns. Mutually exclusive with `project` — you are either
+   * looking at one project or at a team's worth of them, and a route carrying
+   * both would have to say which one won.
+   *
+   * By key rather than by id, like `project`: an address a person can read and
+   * type. The projection resolves it, and a re-key breaks the link the same way
+   * renaming a project key does — which is the trade the project segment
+   * already makes.
+   *
+   * Absent rather than null when there is no team scope, for the reason `spec`
+   * gives: a route without one then compares equal to a route that never had
+   * the key, which is what keeps `sameRoute` and every round-trip honest.
+   */
+  team?: string | null;
   view: View;
   issue: string | null;
   /** The open Spec, on the Specs register. Absent rather than null when closed,
@@ -56,7 +75,7 @@ export interface ViewerRoute {
 
 /** The Settings sub-pages that have an address. Mirrors `Settings.tsx`'s `Tab`;
  *  an unknown value falls back to `general` rather than rendering nothing. */
-const SETTINGS_TABS = new Set(["members", "devices", "labels", "workflow", "access"]);
+const SETTINGS_TABS = new Set(["teams", "members", "devices", "labels", "workflow", "access"]);
 
 export const DEFAULT_ROUTE: ViewerRoute = {
   spaceId: null,
@@ -84,6 +103,7 @@ const LAST_ROUTE = "lait.last-route";
  * Canonical URL grammar:
  *
  *   /spaces/:space/:workspace-view
+ *   /spaces/:space/teams/:team/:team-view
  *   /spaces/:space/projects/:project/:project-view
  *
  * Project identity is structural because it owns Overview, Issues, Board,
@@ -97,6 +117,8 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
 
   const candidate = parts[2];
   const projectCandidate = candidate === "projects" && parts[3] ? clean(parts[3]) : null;
+  const teamCandidate = candidate === "teams" && parts[3] ? clean(parts[3]) : null;
+  const teamViewCandidate = teamCandidate ? teamView(parts[4]) : null;
   const projectViewCandidate = projectCandidate ? projectView(parts[4]) : null;
   // `/projects/:key/issues/new` — the trailing segment is the only one the
   // grammar takes after a project view, and only after `issues`. Anything else
@@ -107,6 +129,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
   // settings; old bookmarks still land in Settings instead of a project list.
   const view =
     projectViewCandidate ??
+    teamViewCandidate ??
     (candidate === "members"
       ? "settings"
       : candidate && VIEWS.has(candidate as View)
@@ -140,6 +163,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
     project: projectCandidate ?? legacyOverview ?? (isProjectDestination(view) ? clean(query.get("project")) : null),
     view: legacyOverview ? "overview" : view,
     issue,
+    ...(teamCandidate ? { team: teamCandidate } : {}),
     ...(spec ? { spec } : {}),
     ...(baseline ? { baseline } : {}),
     ...(composing ? { composing: true } : {}),
@@ -177,13 +201,18 @@ export function formatRoute(route: ViewerRoute): string {
     if (route.filter.milestone !== null) query.set("milestone", route.filter.milestone);
   }
 
+  // Project wins when both are set, because it is the narrower claim — and the
+  // two are only ever both set transiently, while a navigation is being applied.
   const underProject = route.project && isProjectDestination(route.view);
+  const underTeam = !underProject && route.team && isTeamDestination(route.view);
   // The composer only has an address under a project's Issues: it files into a
   // project key, so there is nowhere else for the segment to hang.
   const draft = underProject && route.composing && route.view === "list" ? "/new" : "";
   const path = underProject
     ? `/spaces/${encodeURIComponent(route.spaceId)}/projects/${encodeURIComponent(route.project!)}/${projectSegment(route.view)}${draft}`
-    : `/spaces/${encodeURIComponent(route.spaceId)}/${route.view}`;
+    : underTeam
+      ? `/spaces/${encodeURIComponent(route.spaceId)}/teams/${encodeURIComponent(route.team!)}/${projectSegment(route.view)}`
+      : `/spaces/${encodeURIComponent(route.spaceId)}/${route.view}`;
   const search = query.toString();
   return search ? `${path}?${search}` : path;
 }
@@ -192,6 +221,7 @@ export function sameRoute(a: ViewerRoute, b: ViewerRoute): boolean {
   return (
     a.spaceId === b.spaceId &&
     a.project === b.project &&
+    (a.team ?? null) === (b.team ?? null) &&
     a.view === b.view &&
     a.issue === b.issue &&
     (a.spec ?? null) === (b.spec ?? null) &&
@@ -256,6 +286,26 @@ export function carriesFilter(view: View): boolean {
 
 function displaysIssue(view: View): boolean {
   return view === "list" || view === "board" || view === "calendar" || view === "timeline";
+}
+
+/**
+ * What a team can host.
+ *
+ * Everything that draws rows, plus the project list and the roadmap — all four
+ * are a question about a set of projects, and a team is a set of projects. The
+ * ones left out are the ones that are about a *single* project (Overview,
+ * Activity, Specs) or about the whole space (Settings, Inbox).
+ */
+export const TEAM_VIEWS: readonly View[] = ["list", "board", "timeline", "projects"];
+
+export function isTeamDestination(view: View): boolean {
+  return TEAM_VIEWS.includes(view);
+}
+
+function teamView(segment: string | undefined): View | null {
+  if (!segment) return "list";
+  if (segment === "issues" || segment === "list") return "list";
+  return segment === "board" || segment === "timeline" || segment === "projects" ? segment : null;
 }
 
 function projectSegment(view: View): string {

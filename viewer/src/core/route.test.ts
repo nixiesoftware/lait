@@ -321,3 +321,62 @@ function space(id: string, canonical: string, identity: SpaceRow["identity"]): S
     projects: [],
   };
 }
+
+const loc = (pathname: string) => ({ pathname, search: "" });
+
+describe("team scope", () => {
+  it("round-trips a team's issues", () => {
+    const route = parseRoute(loc("/spaces/ws_1/teams/PLAT/issues"));
+    expect(route).toEqual({
+      spaceId: "ws_1",
+      project: null,
+      team: "PLAT",
+      view: "list",
+      issue: null,
+    });
+    expect(formatRoute(route)).toBe("/spaces/ws_1/teams/PLAT/issues");
+  });
+
+  it("defaults a bare team address to its issues", () => {
+    expect(parseRoute(loc("/spaces/ws_1/teams/PLAT")).view).toBe("list");
+  });
+
+  it("carries the roadmap and the project list, and nothing that is about one project", () => {
+    for (const [segment, view] of [
+      ["board", "board"],
+      ["timeline", "timeline"],
+      ["projects", "projects"],
+    ] as const) {
+      const route = parseRoute(loc(`/spaces/ws_1/teams/PLAT/${segment}`));
+      expect([route.view, route.team]).toEqual([view, "PLAT"]);
+      expect(formatRoute(route)).toBe(`/spaces/ws_1/teams/PLAT/${segment}`);
+    }
+    // Overview, Activity and Specs are about a single project, so a team
+    // address for one of them is not a route we wrote.
+    expect(parseRoute(loc("/spaces/ws_1/teams/PLAT/activity")).view).toBe("list");
+  });
+
+  /**
+   * The two structural scopes are mutually exclusive: you are looking at one
+   * project or at a team's worth of them, and an address carrying both would
+   * have to say which won. Project does, being the narrower claim.
+   */
+  it("lets a project win when a navigation leaves both set", () => {
+    expect(
+      formatRoute({ spaceId: "ws_1", project: "ENG", team: "PLAT", view: "list", issue: null }),
+    ).toBe("/spaces/ws_1/projects/ENG/issues");
+  });
+
+  it("drops team scope on a destination that has no team form", () => {
+    expect(
+      formatRoute({ spaceId: "ws_1", project: null, team: "PLAT", view: "settings", issue: null }),
+    ).toBe("/spaces/ws_1/settings");
+  });
+
+  it("is absent rather than null when unset, so routes compare equal", () => {
+    const bare = parseRoute(loc("/spaces/ws_1/list"));
+    expect("team" in bare).toBe(false);
+    expect(sameRoute(bare, { ...bare, team: null })).toBe(true);
+    expect(sameRoute(bare, { ...bare, team: "PLAT" })).toBe(false);
+  });
+});

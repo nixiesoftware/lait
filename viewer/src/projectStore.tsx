@@ -23,6 +23,7 @@ import type {
   ProjectGraphView,
   ProjectDto,
   ProjectUpdateDto,
+  TeamDto,
   Response,
   Row,
   SpaceDoorbell,
@@ -70,6 +71,7 @@ export const projectKeys = {
   labels: (space: string) => `${prefix(space)}labels`,
   members: (space: string) => `${prefix(space)}members`,
   projects: (space: string) => `${prefix(space)}projects`,
+  teams: (space: string) => `${prefix(space)}teams`,
   status: (space: string) => `${prefix(space)}status`,
   standing: (space: string) => `${prefix(space)}standing`,
 };
@@ -847,6 +849,21 @@ export class ProjectViewerStore {
     }, { catalog: ["projects"] }, force);
   }
 
+  /**
+   * The space's teams.
+   *
+   * Depends on the `teams` plane *and* on `projects`: a team's `projects`
+   * back-reference changes when a project is reassigned, and that write lands
+   * on the project rather than on the team.
+   */
+  ensureTeams(space: string, force = false): Promise<TeamDto[]> {
+    return this.load(projectKeys.teams(space), async () => {
+      const result = await this.rpc(space, { cmd: "team_list" });
+      if (result.kind !== "teams") throw new Error("Expected teams response");
+      return result.teams;
+    }, { catalog: ["teams", "projects"] }, force);
+  }
+
   ensureStatus(space: string, force = false): Promise<StatusInfo> {
     return this.load(projectKeys.status(space), async () => {
       const result = await this.spaceRpc(space, { cmd: "status" });
@@ -1181,6 +1198,24 @@ export function useProjectBoard(space: string | null, project: string | null) {
   return useMemo(
     () => ({ resource, board: space ? store.selectBoard(space, project) : null }),
     [project, resource, space, store],
+  );
+}
+
+/**
+ * The space's teams, live.
+ *
+ * One resource for the whole space rather than one per team: the list is short,
+ * it is read by the sidebar on every render, and a team's own membership
+ * changes on the same plane as every other team's.
+ */
+export function useTeams(space: string | null): ResourceSnapshot<TeamDto[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<TeamDto[]>(
+    space ? projectKeys.teams(space) : "project:none/teams",
+    useCallback(
+      () => (space ? store.ensureTeams(space) : Promise.resolve([])),
+      [space, store],
+    ),
   );
 }
 

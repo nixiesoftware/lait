@@ -4,6 +4,7 @@ import {
   Bookmark,
   Bot,
   ChevronRight,
+  CircleDot,
   Cog,
   Copy,
   ExternalLink,
@@ -27,7 +28,8 @@ import {
   type View,
 } from "../core/registry";
 import type { SavedView } from "../core/savedViews";
-import type { ProjectDto, SpaceRow } from "../types";
+import type { ProjectDto, SpaceRow, TeamDto } from "../types";
+import { ungrouped } from "../core/teams";
 import { catalogColor } from "./colors";
 
 import { Badge, ContextMenu, Divider, DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu, IconButton } from "@astryxdesign/core";
@@ -38,6 +40,8 @@ export function Sidebar({
   spaces,
   current,
   projects,
+  teams,
+  currentTeam,
   currentProject,
   view,
   unread,
@@ -48,6 +52,7 @@ export function Sidebar({
   onSearch,
   onOpenProjectView,
   onGo,
+  onGoTeam,
   onMyIssues,
   onApplySavedView,
   onToggleFavorite,
@@ -59,6 +64,9 @@ export function Sidebar({
   spaces: SpaceRow[];
   current: string | null;
   projects: ProjectDto[];
+  teams: TeamDto[];
+  /** The team the address is scoped to, by KEY. */
+  currentTeam: string | null;
   currentProject: string | null;
   view: View;
   unread: number;
@@ -72,6 +80,7 @@ export function Sidebar({
   onSearch: () => void;
   onOpenProjectView: (key: string, view: ProjectView) => void;
   onGo: (view: View, project?: string | null) => void;
+  onGoTeam: (team: string | null, view?: View) => void;
   onMyIssues: () => void;
   onApplySavedView: (view: SavedView) => void;
   onToggleFavorite: (key: string) => void;
@@ -104,6 +113,37 @@ export function Sidebar({
       return !open;
     });
   };
+
+  /**
+   * Which teams are unfolded.
+   *
+   * Stored as the set of *collapsed* ids rather than open ones, so a team
+   * created after this was last written opens by default. The alternative — a
+   * set of open ids — hides every new team behind a chevron nobody knows to
+   * click.
+   */
+  const [foldedTeams, setFoldedTeams] = useState<ReadonlySet<string>>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("lait.sidebar.teams") ?? "[]");
+      return new Set(Array.isArray(stored) ? (stored as string[]) : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const toggleTeam = (id: string) => {
+    setFoldedTeams((folded) => {
+      const next = new Set(folded);
+      if (!next.delete(id)) next.add(id);
+      try {
+        localStorage.setItem("lait.sidebar.teams", JSON.stringify([...next]));
+      } catch {
+        // A fold state is a convenience; navigation is unaffected.
+      }
+      return next;
+    });
+  };
+
+  const looseProjects = ungrouped(teams, projects);
 
   const activeView = isProjectView(view) ? view : null;
 
@@ -151,28 +191,117 @@ export function Sidebar({
         </div>
       )}
 
-      <div className="mt-3 flex flex-col gap-px">
+      <div className="mt-3 flex flex-col gap-0.5">
         <NavItem icon={<Inbox />} label="Inbox" active={view === "inbox"} badge={unread} onClick={() => onGo("inbox")} />
         <NavItem icon={<UserRound />} label="My issues" active={view === "my-issues"} onClick={onMyIssues} />
       </div>
 
       <Section title="Workspace" />
-      <div className="flex flex-col gap-px">
-        <NavItem icon={<FolderKanban />} label="Projects" active={view === "projects"} onClick={() => onGo("projects")} />
+      <div className="flex flex-col gap-0.5">
+        {/* `!currentTeam` on both, and it is the whole of the second fix.
+ 
+            A team's Projects and the workspace's Projects are the same *view*
+            at two scopes, so `view === "projects"` was true for both and both
+            lit. Selection has to follow the entry point you used, not the
+            destination you landed on — otherwise the sidebar says you are in
+            two places, and neither of them is wrong enough to be obviously
+            wrong. */}
+        <NavItem icon={<FolderKanban />} label="Projects" active={view === "projects" && !currentTeam} onClick={() => onGo("projects")} />
         {/* `null` and not the default. `goto` keeps the project you are in for
             any project-capable view, and Timeline is one — so without this the
             workspace Roadmap landed on whichever project you last had open, and
             the space-wide chart was unreachable while any project existed. */}
-        <NavItem icon={<GanttChart />} label="Roadmap" active={view === "timeline"} onClick={() => onGo("timeline", null)} />
+        <NavItem icon={<GanttChart />} label="Roadmap" active={view === "timeline" && !currentTeam} onClick={() => onGo("timeline", null)} />
         {savedViews.length > 0 && <MiniSection title="Saved views" />}
         {savedViews.map((saved) => (
           <NavItem key={saved.id} icon={<Bookmark />} label={saved.name} onClick={() => onApplySavedView(saved)} compact />
         ))}
       </div>
 
+      {/* Teams.
+ 
+          A team is a set of projects, so every destination under one is the
+          destination it names *scoped to those projects*. That is the answer to
+          a flat list of seventeen projects: three entries a team rather than one
+          a project, and the projects themselves reachable through the team's
+          own Projects page.
+ 
+          No icon on the header, and none was ever needed — a team has a name,
+          and a glyph beside it would be one more thing to look at in a column
+          whose whole problem was having too many. */}
+      {teams.length > 0 && <Section title="Teams" count={teams.length} />}
+      <div className="flex flex-col gap-0.5">
+        {teams.map((candidate) => {
+          const open = !foldedTeams.has(candidate.id);
+          const scoped = currentTeam === candidate.key;
+          return (
+            <div key={candidate.id}>
+              {/* A fold toggle, never a destination — so it never takes the
+                  selected fill. It used to, which is how three things came to
+                  be highlighted at once: the header, the child under it, and
+                  the workspace entry for the same view. Being *inside* a team
+                  is an ancestor relationship, and an ancestor is worth marking
+                  quietly — the name brightens, and that is all. */}
+              <button
+                onClick={() => toggleTeam(candidate.id)}
+                aria-expanded={open}
+                className={cn(
+                  navigationItem({ size: "md" }),
+                  "font-medium",
+                  scoped && "text-fg",
+                )}
+              >
+                <span className="min-w-0 flex-1 truncate">{candidate.name}</span>
+                <ChevronRight
+                  className={cn(
+                    "text-mute size-icon-xs shrink-0 transition-transform",
+                    open && "rotate-90",
+                  )}
+                  aria-hidden
+                />
+              </button>
+              {/* Indented, and the indent is the only thing saying these belong
+                  to the team above them — which is enough, and is what the
+                  reference does. */}
+              {open && (
+                <div className="flex flex-col gap-0.5 pl-4">
+                  <NavItem
+                    icon={<CircleDot />}
+                    label="Issues"
+                    compact
+                    active={scoped && (view === "list" || view === "board")}
+                    onClick={() => onGoTeam(candidate.key, "list")}
+                  />
+                  <NavItem
+                    icon={<FolderKanban />}
+                    label="Projects"
+                    compact
+                    active={scoped && view === "projects"}
+                    onClick={() => onGoTeam(candidate.key, "projects")}
+                  />
+                  <NavItem
+                    icon={<GanttChart />}
+                    label="Roadmap"
+                    compact
+                    active={scoped && view === "timeline"}
+                    onClick={() => onGoTeam(candidate.key, "timeline")}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* What no team owns.
+ 
+          Always rendered, even with no teams at all — which is the whole of a
+          fresh space, and the heading is how you learn there is a grouping to
+          opt into. These are listed as projects rather than as a fourth team
+          section because there is no team here to scope a destination *to*. */}
       <Section
-        title="Projects"
-        count={projects.length}
+        title={teams.length > 0 ? "No team" : "Projects"}
+        count={looseProjects.length}
         open={projectsOpen}
         onToggle={toggleProjects}
         action={
@@ -199,16 +328,18 @@ export function Sidebar({
           </div>
         )}
         {projectsOpen ? (
-          projects.length === 0 ? (
-            <p className="text-mute px-2 py-1 text-sm">No projects yet.</p>
+          looseProjects.length === 0 ? (
+            <p className="text-mute px-2 py-1 text-base">
+              {teams.length > 0 ? "Every project has a team." : "No projects yet."}
+            </p>
           ) : (
-            projects.map(projectNode)
+            looseProjects.map(projectNode)
           )
         ) : (
           // Collapsed still anchors you: the project you're in stays visible
           // unless it's already pinned under Favorites.
           (() => {
-            const active = projects.find(
+            const active = looseProjects.find(
               (project) => project.key === currentProject && !favoriteProjects.includes(project.key),
             );
             return active ? projectNode(active) : null;
@@ -283,7 +414,7 @@ function SpaceSwitcher({
           // not undo it — neither utility names `justify-content`, so Astryx's
           // rule stands unopposed.
           className:
-            "hover:bg-hover -mx-1 flex h-ctl-md min-w-0 flex-1 items-center justify-start gap-1.5 rounded-full px-1.5",
+            "hover:bg-hover -mx-1 flex h-ctl-md min-w-0 flex-1 items-center justify-start gap-1.5 rounded-row px-1.5",
           variant: "ghost",
           size: "sm",
           icon:
@@ -512,14 +643,14 @@ function Section({
     <div className="mt-4 mb-1 flex h-ctl-xs items-center px-2">
       {onToggle ? (
         <button
-          className="text-mute hover:text-fg flex min-w-0 items-center gap-1 text-2xs font-semibold tracking-[0.08em] uppercase"
+          className="text-mute hover:text-fg flex min-w-0 items-center gap-1 text-xs font-semibold tracking-[0.08em] uppercase"
           onClick={onToggle}
           aria-expanded={open}
         >
           {label}
         </button>
       ) : (
-        <h2 className="text-mute flex min-w-0 items-center gap-1 text-2xs font-semibold tracking-[0.08em] uppercase">
+        <h2 className="text-mute flex min-w-0 items-center gap-1 text-xs font-semibold tracking-[0.08em] uppercase">
           {label}
         </h2>
       )}
@@ -529,7 +660,7 @@ function Section({
 }
 
 function MiniSection({ title }: { title: string }) {
-  return <p className="text-mute mt-1 px-2 text-[9px] font-semibold tracking-[0.08em] uppercase">{title}</p>;
+  return <p className="text-mute mt-1 px-2 text-2xs font-semibold tracking-[0.08em] uppercase">{title}</p>;
 }
 
 function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React.ReactElement; label: string; active?: boolean; badge?: number; compact?: boolean; onClick: () => void }) {

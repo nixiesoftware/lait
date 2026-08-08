@@ -123,6 +123,23 @@ const RAIL_MAX = 560;
 /** A bar with no estimate still has to be visible and still has to read as
  *  "unsized" rather than as "small". */
 const BAR_MIN = 26;
+/**
+ * The one left inset the whole chart shares, and the gutter at its far end.
+ *
+ * There were three left edges on this page — the tabs at 8px, the legend at
+ * 16px, the rail at 12px — three vertical lines within 8px of each other, which
+ * is the kind of thing that reads as sloppy without ever being nameable. The
+ * legend, the rail and the scale's rail spacer now all carry `px-4`, so the
+ * chart has one edge down its left side.
+ *
+ * `BAR_INSET` is the matching statement on the other axis: a bar sits 6px into
+ * its column, so its column's label has to as well, or every heading on the
+ * scale is 6px left of the marks it names.
+ */
+const BAR_INSET = 6;
+/** Air at the end of the track, so the last bar is not flush against the window
+ *  the way every other surface in the app is not. */
+const GUTTER = 16;
 const BAR_MAX = COL - 14;
 /**
  * How long the cursor must rest on a row before it means it.
@@ -546,7 +563,7 @@ function SequenceChart({
       <Legend model={model} waveCount={waveCount} shown={lines.length} filtered={filtered} />
       <div className="relative min-h-0 flex-1">
         <div ref={attachPort} onScroll={onScroll} className="h-full overflow-auto">
-          <div className="relative" style={{ width: rail + trackWidth, minWidth: "100%" }}>
+          <div className="relative" style={{ width: rail + trackWidth + GUTTER, minWidth: "100%" }}>
             <WaveScale
               waveCount={waveCount}
               lines={lines}
@@ -736,7 +753,7 @@ function WaveScale({
         style={{ width: rail }}
       />
       {counts.map((count, wave) => (
-        <div key={wave} className="shrink-0 pb-1.5" style={{ width: COL }}>
+        <div key={wave} className="shrink-0 pb-1.5" style={{ width: COL, paddingLeft: BAR_INSET }}>
           <div className={cn("text-2xs", wave === 0 ? "text-dim font-medium" : "text-mute")}>
             {wave === 0 ? "Ready" : wave}
           </div>
@@ -895,7 +912,7 @@ function TimelineRow({
         onBlur={() => onFocusHover(null)}
         title={row.title}
         className={cn(
-          "bg-bg group-hover:bg-hover sticky left-0 z-30 flex h-full shrink-0 items-center gap-2 pr-3 pl-3 text-left transition-colors",
+          "bg-bg group-hover:bg-hover sticky left-0 z-30 flex h-full shrink-0 items-center gap-2 px-4 text-left transition-colors",
           open && "bg-active group-hover:bg-active",
           scrolled && "shadow-[1px_0_0_var(--color-line)]",
         )}
@@ -983,7 +1000,7 @@ function TimelineRow({
           // is the hand's. A 12px-tall hit area is a miss waiting to happen;
           // this one is the whole row and invisible.
           className="absolute top-0 z-20 flex h-full items-center"
-          style={{ left: node.wave * COL + 6, width }}
+          style={{ left: node.wave * COL + BAR_INSET, width }}
         >
           <span
             title={node.impossible ? conflict : undefined}
@@ -1236,8 +1253,8 @@ function Wires({
       const a = model.byDoc.get(edge.from);
       const b = model.byDoc.get(edge.to);
       if (y1 === undefined || y2 === undefined || !a || !b) continue;
-      const x1 = rail + a.wave * COL + 6 + widthOf(a.row.estimate);
-      const x2 = rail + b.wave * COL + 6;
+      const x1 = rail + a.wave * COL + BAR_INSET + widthOf(a.row.estimate);
+      const x2 = rail + b.wave * COL + BAR_INSET;
       // A single cubic with horizontal handles: it leaves the bar going right
       // and arrives going right, so the eye follows it as flow rather than as a
       // wire that happens to join two points.

@@ -12,11 +12,12 @@ import {
   Tag,
   Trash2,
   Users,
+  UsersRound,
   X,
 } from "lucide-react";
 
 import { rpc, spaceRpc } from "../api";
-import type { AssignmentDto, LabelDto, MemberDto, ProjectDto } from "../types";
+import type { AssignmentDto, LabelDto, MemberDto, ProjectDto, TeamDto } from "../types";
 import { memberName } from "./Avatar";
 import { catalogColor } from "./colors";
 import { ColorPicker } from "./ColorPicker";
@@ -24,13 +25,14 @@ import * as ask from "./dialogs";
 import { StatusIcon } from "./icons";
 import { Breadcrumbs, DestinationCrumb, SurfaceHeader, WorkspaceCrumb } from "./layout";
 import { Members } from "./Members";
+import { TeamsPanel } from "./TeamsPanel";
 import { Combobox } from "./Picker";
 import { Button, IconButton, TextArea, TextInput } from "@astryxdesign/core";
 import { cn, navigationItem } from "./primitives";
 
-type Tab = "general" | "members" | "devices" | "labels" | "workflow" | "access";
+type Tab = "general" | "teams" | "members" | "devices" | "labels" | "workflow" | "access";
 
-const TABS: readonly Tab[] = ["general", "members", "devices", "labels", "workflow", "access"];
+const TABS: readonly Tab[] = ["general", "teams", "members", "devices", "labels", "workflow", "access"];
 
 /** Narrow a route value to a sub-page. The route already refuses names it does
  *  not know, so this is the second half of one contract rather than a second
@@ -54,6 +56,8 @@ export function Settings({
   spaceDescription,
   labels,
   projects,
+  teams,
+  members,
   readOnly,
   revision,
   tab: routeTab,
@@ -66,6 +70,8 @@ export function Settings({
   spaceDescription: string;
   labels: LabelDto[];
   projects: ProjectDto[];
+  teams: TeamDto[];
+  members: MemberDto[];
   readOnly: boolean;
   /** Bumped by the doorbell; re-reads the panels that fetch. */
   revision: number;
@@ -106,6 +112,9 @@ export function Settings({
   }, [onTabChange]);
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: "general", label: "General", icon: <SlidersHorizontal className="size-icon-sm" /> },
+    // Beside Members, and above it, because a team is the container a member
+    // is in — which is the order Linear puts them in for the same reason.
+    { id: "teams", label: "Teams", icon: <UsersRound className="size-icon-sm" /> },
     { id: "members", label: "Members", icon: <Users className="size-icon-sm" /> },
     { id: "devices", label: "Devices & recovery", icon: <Laptop className="size-icon-sm" /> },
     { id: "labels", label: "Labels", icon: <Tag className="size-icon-sm" /> },
@@ -169,6 +178,16 @@ export function Settings({
                 spaceId={spaceId}
                 spaceName={spaceName}
                 spaceDescription={spaceDescription}
+                readOnly={readOnly}
+                onError={onError}
+              />
+            )}
+            {tab === "teams" && (
+              <TeamsPanel
+                spaceId={spaceId}
+                teams={teams}
+                projects={projects}
+                members={members}
                 readOnly={readOnly}
                 onError={onError}
               />

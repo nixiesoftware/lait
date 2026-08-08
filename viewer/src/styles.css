@@ -259,7 +259,8 @@
      generates no utility for them: they are the private ladder, and the only
      public vocabulary is the three roles here. That is the closest thing CSS
      gives us to atyard's `_internal/` — you cannot write `rounded-8`, so a
-     corner is always chosen by what the thing IS.
+     corner is always chosen by what the thing IS. Four roles now: a mark, a
+     row, a control, a surface.
 
      **These three lines are the seam.** Roundness is retuned by pointing a role
      at a different rung, never at the ~155 call sites that flow through. That is
@@ -267,6 +268,13 @@
      ordinally: a multiplier would make `--radius-8` render something other than
      8px and the name would start lying. Remapping keeps every name honest. */
   --radius-mark: var(--radius-4);
+  /* A list row's fill — the sidebar's nav items, the settings tabs, the teams
+     list. A fourth role rather than bending one of the other three: `control`
+     (8px) reads as a lozenge on a 28px row, and `mark` (4px) is the corner of a
+     swatch and came out sharper than a row of stacked fills wants. 6px was one
+     of the two rungs the ladder carried unmapped, which is what an unmapped
+     rung is for. */
+  --radius-row: var(--radius-6);
   --radius-control: var(--radius-8);
   --radius-surface: var(--radius-12);
 

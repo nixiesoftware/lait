@@ -497,10 +497,23 @@ export const interactiveRow = cva(
 
 /** One navigation hit-area and state language for the app rail and settings. */
 export const navigationItem = cva(
-  // Fully rounded, same family as the property rail and the crumb it sits
-  // under: a nav row carries no border, so a hover or selected fill is the
-  // only thing describing its shape.
-  "flex w-full min-w-0 items-center gap-2 rounded-full px-2 text-left text-sm outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1",
+  // A box, and a tight one.
+  //
+  // It was fully rounded, matching the property rail and the crumb above it —
+  // which held while every nav row was a leaf. Nesting broke it: a team's
+  // children indent under their header, and a column of stacked capsules at two
+  // indents reads as a scatter of unrelated lozenges rather than as a list with
+  // structure. A shared corner lets the rows line up as a block, which is what
+  // an indent needs to be legible against.
+  //
+  // `row` (6px) — a role added for this, rather than either of the two it sat
+  // between. `control` (8px) reads as a lozenge on a 28px row, where the corner
+  // is more than a quarter of the height; `mark` (4px) is a swatch's corner and
+  // came out sharper than a column of stacked fills wants. 6px was one of the
+  // two rungs the ladder deliberately carried unmapped, which is exactly what
+  // an unmapped rung is for — the alternative was repointing `control` and
+  // moving every button in the app to settle a sidebar.
+  "flex w-full min-w-0 items-center gap-2 rounded-row px-2 text-left text-base outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1",
   {
     variants: {
       selected: {

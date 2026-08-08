@@ -147,6 +147,9 @@ export interface AppApi {
   /** The one navigation verb. `project` names the destination's project when
    *  the caller knows it; omitted keeps the current one, `null` clears it. */
   goto(view: View, project?: string | null): void;
+  /** Scope navigation to one team by KEY, or `null` to clear it. `view` names
+   *  the destination; omitted keeps the current one if a team can host it. */
+  gotoTeam(team: string | null, view?: View): void;
   openFilter(): void;
   /** Reset every filter facet to the neutral state (show all). */
   clearFilter(): void;

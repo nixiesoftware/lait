@@ -81,6 +81,34 @@ export interface ProjectDto {
   target_date?: number | null;
   /** Soft-hidden from pickers and all-project lists (still openable directly). */
   archived?: boolean;
+  /**
+   * The `tm_` team that owns this project (absent/empty = none).
+   *
+   * The id, not the key — a team rename must not orphan a project, for the same
+   * reason `Row.milestone` holds an `mls_`.
+   */
+  team?: string;
+}
+
+/**
+ * A team: a named slice of the space that owns some of its projects.
+ *
+ * The engine has had this since GOV-7 and the viewer never read it. `projects`
+ * is a back-reference the projection maintains, so a sidebar can group without
+ * joining anything — but `ProjectDto.team` is the authority, and the two are
+ * kept in step by the same write.
+ */
+export interface TeamDto {
+  id: string;
+  name: string;
+  key: string;
+  /** Icon name (absent/empty = none). Unused by this client. */
+  icon?: string;
+  /** Lead actor key (absent/empty = none). */
+  lead?: string;
+  members: string[];
+  /** KEYs — not ids — of the projects this team owns. */
+  projects: string[];
 }
 
 export interface LabelDto {
@@ -888,6 +916,25 @@ export type Request =
   | { cmd: "project_graph"; project: string }
   | { cmd: "project_new"; name: string; key: string; color?: string | null }
   | { cmd: "project_list" }
+  | { cmd: "team_list" }
+  /**
+   * Create, edit or delete a team — one verb for all three.
+   *
+   * `team` omitted mints a new one; `remove: true` deletes the one named. The
+   * engine shape, kept rather than split into three client-side commands: a
+   * rename and a create differ only by whether the id already exists.
+   */
+  | {
+      cmd: "team_set";
+      team?: string;
+      name?: string;
+      key?: string;
+      icon?: string;
+      lead?: string;
+      add_members?: string[];
+      remove_members?: string[];
+      remove?: boolean;
+    }
   | {
       cmd: "project_edit";
       project: string;
@@ -899,6 +946,8 @@ export type Request =
       target?: string | null;
       /** Soft-hide toggle: true archives, false restores, absent leaves it. */
       archived?: boolean | null;
+      /** Owning team, by key or `tm_` id. `""` clears it. */
+      team?: string | null;
     }
   /** Reply is `updates` — the project's status feed, newest first. */
   | { cmd: "project_updates"; project: string }
@@ -1141,6 +1190,7 @@ export type Response =
   | { kind: "activity"; events: ActivityEvent[]; last: number }
   | { kind: "inbox"; entries: InboxEntry[]; unread: number }
   | { kind: "projects"; projects: ProjectDto[] }
+  | { kind: "teams"; teams: TeamDto[] }
   | { kind: "updates"; updates: ProjectUpdateDto[] }
   | { kind: "milestones"; milestones: MilestoneDto[] }
   /** Exactly one of `content` and `data_b64` is present, and which one says

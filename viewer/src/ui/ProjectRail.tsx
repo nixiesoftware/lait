@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { ArrowDown, ArrowUp, MoreHorizontal, Plus, Trash2, UserPlus } from "lucide-react";
+import { ArrowDown, ArrowUp, MoreHorizontal, Plus, Trash2, UserPlus, UsersRound } from "lucide-react";
 
 import { rpc } from "../api";
 import { useProjectMilestones, useProjectViewerStore } from "../projectStore";
 import { milestonePercent, milestoneProgress } from "../core/milestone";
-import type { MemberDto, MilestoneDto, ProjectDto } from "../types";
+import type { MemberDto, MilestoneDto, ProjectDto, TeamDto } from "../types";
 import { Avatar, memberName } from "./Avatar";
 import { DatePicker } from "./DatePicker";
 import { Combobox } from "./Picker";
@@ -38,6 +38,7 @@ export function ProjectRail({
   spaceId,
   project,
   members,
+  teams,
   counts,
   readOnly,
   activeMilestone,
@@ -47,6 +48,8 @@ export function ProjectRail({
   spaceId: string;
   project: ProjectDto;
   members: MemberDto[];
+  /** Every team in the space, for the owner picker. */
+  teams: TeamDto[];
   counts: { backlog: number; active: number; done: number; total: number };
   readOnly: boolean;
   /** The `mls_` id currently scoping the issue surfaces, `""` for the
@@ -65,6 +68,7 @@ export function ProjectRail({
   };
 
   const lead = members.find((m) => m.key === project.lead);
+  const team = teams.find((candidate) => candidate.id === project.team);
   const { backlog, active, done, total } = counts;
 
   return (
@@ -103,6 +107,41 @@ export function ProjectRail({
                   })),
                 ]}
                 onPick={(id) => void edit({ lead: id === "none" ? "none" : id })}
+              />
+            </RailRow>
+            {/* Which team owns this project — the write the sidebar's grouping
+                reads. Above the dates because it decides where the project
+                *is*, and the dates only decide when it happens.
+
+                Offered even with no teams yet, so the row is where you learn
+                the concept exists; picking "No team" is the same write as
+                clearing a lead. */}
+            <RailRow label="Team">
+              <Combobox
+                tone="quiet"
+                label="Team"
+                disabled={readOnly}
+                value={team ? { id: team.id, label: team.name, hint: team.key } : null}
+                face={
+                  team ? undefined : (
+                    <>
+                      <UsersRound className="text-mute size-icon-sm shrink-0" />
+                      <span className="text-mute">
+                        {teams.length === 0 ? "No teams yet" : "Set team"}
+                      </span>
+                    </>
+                  )
+                }
+                options={[
+                  { id: "none", label: "No team" },
+                  ...teams.map((candidate) => ({
+                    id: candidate.id,
+                    label: candidate.name,
+                    hint: candidate.key,
+                    keywords: [candidate.key, candidate.name],
+                  })),
+                ]}
+                onPick={(id) => void edit({ team: id === "none" ? "" : id })}
               />
             </RailRow>
             <RailRow label="Start date">
