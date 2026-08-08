@@ -255,7 +255,22 @@ export function NewIssue({
         ...(priority !== "none" ? { priority } : {}),
         ...(picked.length ? { labels: picked } : {}),
         ...(assignees.length ? { assignees } : {}),
-        ...(project !== projectKey ? { project } : {}),
+        // ALWAYS named, never inferred.
+        //
+        // This used to send `project` only when it differed from the one you
+        // opened the composer in — on the theory that the daemon would fill in
+        // the obvious answer. It does not have one. A null project is resolved
+        // through the CLI's chain (git branch, then `project.default`, then
+        // "is there exactly one?"), and a browser satisfies none of those
+        // links, so on any space with a second project the chain ran out and
+        // refused: "no project chosen and no single default — pass -p
+        // <project>".
+        //
+        // Which made the composer work only when you picked a project you were
+        // NOT in — the one case that took the branch — and fail on the default
+        // every time. `board` learned this same lesson (see `useProjectBoard`);
+        // this is the write side of it.
+        project,
         ...(due ? { due } : {}),
       });
       if (r.kind === "ref") created = r.reff;

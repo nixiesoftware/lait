@@ -437,6 +437,27 @@ export function App() {
   }, [activeTeam, teamBoards, teamProjects]);
   /** One name for "the rows on screen", whichever scope produced them. */
   const board = activeTeam ? teamBoard : projectBoard;
+  /**
+   * The project a new issue files into.
+   *
+   * Not `board.project.key`, which is what the composer used to be handed and
+   * is wrong in exactly one place: under a team the board is several projects
+   * merged, and it reports itself as the TEAM — a synthetic project carrying
+   * the team's own key, so that nothing keyed on `board.project.id` can
+   * confuse two teams. That key is not a project reference, and `issue_new`
+   * resolves one. The same trap `list` already documents where it refuses to
+   * send a team key as a project.
+   *
+   * So a team scope files into the first project it owns, which the composer
+   * then shows in a picker you can change. It is a *default*, and defaults are
+   * allowed to be arbitrary as long as they are visible and correctable — what
+   * is not allowed is a default that cannot be filed.
+   */
+  const composerProject =
+    (activeTeam ? teamProjects[0]?.key : board?.project.key) ??
+    project ??
+    liveProjects[0]?.key ??
+    null;
 
   useEffect(() => {
     // Appearance is applied by `<Theme mode>`, not from here. Density still is:
@@ -2440,7 +2461,7 @@ export function App() {
               caller of `setFounding` was the empty state that a selected space
               replaces. Someone invited to a *second* space then had nowhere to
               paste the link. */}
-          {composing?.page && current && routeSpace && board ? (
+          {composing?.page && current && routeSpace && board && composerProject ? (
             /* The draft, as the work area. Ahead of the view chain because it
                stands in for whichever view is underneath, and after the
                space-availability states because a draft you cannot file is not
@@ -2448,7 +2469,7 @@ export function App() {
             <NewIssue
               spaceId={current}
               canonicalSpaceId={routeSpace}
-              projectKey={board.project.key}
+              projectKey={composerProject}
               projects={liveProjects}
               states={states}
               labels={labels}
@@ -2773,11 +2794,11 @@ export function App() {
 
       {/* The sheet only. The expanded form is not an overlay — it is the work
           area, and it is rendered up there in the content chain. */}
-      {composing && !composing.page && current && routeSpace && board && (
+      {composing && !composing.page && current && routeSpace && board && composerProject && (
         <NewIssue
           spaceId={current}
           canonicalSpaceId={routeSpace}
-          projectKey={board.project.key}
+          projectKey={composerProject}
           projects={liveProjects}
           states={states}
           labels={labels}
