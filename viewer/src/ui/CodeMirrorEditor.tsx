@@ -466,7 +466,6 @@ export default function CodeMirrorEditor({
   remotePreviews = [],
   acceptRemote = true,
   onAwareness,
-  openAt,
 }: {
   value: string;
   readOnly?: boolean;
@@ -478,17 +477,6 @@ export default function CodeMirrorEditor({
   remoteContexts?: RemoteContext[];
   remotePreviews?: RemoteTextPreview[];
   acceptRemote?: boolean;
-  /**
-   * Where to put the caret when the editor mounts, as an offset into `value`.
-   *
-   * The description is read as rendered prose and edited as source, and this is
-   * what makes the hand-off between them not feel like one: a click on a word
-   * in the render resolves to the source offset behind it (`core/sourceMap.ts`)
-   * and arrives here, so the caret appears where the pointer was rather than at
-   * the top of the document. Absent = do not focus, which is the read path and
-   * every other caller.
-   */
-  openAt?: number;
   onAwareness?: (
     anchor: number | null,
     focus: number | null,
@@ -565,25 +553,10 @@ export default function CodeMirrorEditor({
       ...(placeholder ? [placeholderExtension(placeholder)] : []),
     ];
     const editor = new EditorView({
-      state: EditorState.create({
-        doc: value,
-        extensions,
-        // Scalar offsets in, code units out: `openAt` is measured in the same
-        // unit the CRDT and the source map speak, and CodeMirror indexes UTF-16.
-        // An emoji anywhere earlier in the document is the difference.
-        ...(openAt === undefined
-          ? {}
-          : { selection: EditorSelection.single(codeUnitOffset(value, openAt)) }),
-      }),
+      state: EditorState.create({ doc: value, extensions }),
       parent: mount.current,
     });
     view.current = editor;
-    if (openAt !== undefined) {
-      // After the view is in the DOM, or the scroll lands before layout knows
-      // where the line is.
-      editor.focus();
-      editor.dispatch({ effects: EditorView.scrollIntoView(editor.state.selection.main.head) });
-    }
     const refresh = setInterval(() => publish(editor), cursorRefreshMs);
     return () => {
       clearInterval(refresh);

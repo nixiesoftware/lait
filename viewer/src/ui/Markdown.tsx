@@ -55,15 +55,7 @@ export function Markdown({
   const prose = density === "tight" ? "prose prose-tight" : "prose";
 
   if (!blocks) {
-    return (
-      <p
-        data-md-from={0}
-        data-md-to={text.length}
-        className={cn(prose, "whitespace-pre-wrap", className)}
-      >
-        {text}
-      </p>
-    );
+    return <p className={cn(prose, "whitespace-pre-wrap", className)}>{text}</p>;
   }
   return (
     <div className={cn(prose, className)}>
@@ -75,19 +67,11 @@ export function Markdown({
 }
 
 function BlockView({ block }: { block: Block }) {
-  /* Where this block came from, stamped onto its root element.
-     `core/sourceMap.ts` reads it to turn a click on the rendered document into
-     a caret in the Markdown source — see `Description`. Data attributes rather
-     than a wrapper element, because a wrapper would become the `.prose > *` the
-     rhythm rules select and every heading and list would lose its spacing. */
-  const src = block.span
-    ? { "data-md-from": block.span.from, "data-md-to": block.span.to }
-    : {};
   switch (block.kind) {
     case "heading": {
       const Tag = `h${block.level}` as "h1";
       return (
-        <Tag {...src} id={block.id} className="group/h scroll-mt-4">
+        <Tag id={block.id} className="group/h scroll-mt-4">
           {inlines(block.children)}
           {/* The docs convention: a link to the section, revealed on hover so
               it costs the heading nothing while you are reading it. */}
@@ -102,25 +86,21 @@ function BlockView({ block }: { block: Block }) {
       );
     }
     case "paragraph":
-      return <p {...src} className="whitespace-pre-wrap">{inlines(block.children)}</p>;
+      return <p className="whitespace-pre-wrap">{inlines(block.children)}</p>;
     case "quote":
       return (
-        <blockquote {...src} className="border-line-strong text-dim border-l-2 pl-4 whitespace-pre-wrap italic">
+        <blockquote className="border-line-strong text-dim border-l-2 pl-4 whitespace-pre-wrap italic">
           {inlines(block.children)}
         </blockquote>
       );
     case "callout":
-      return (
-        <Callout tone={block.tone} src={src}>
-          {inlines(block.children)}
-        </Callout>
-      );
+      return <Callout tone={block.tone}>{inlines(block.children)}</Callout>;
     case "table":
       return (
         // The scroll container is the wrapper, not the table: a wide table has
         // to be reachable without the whole page scrolling sideways, and the
         // prose measure is narrow on purpose.
-        <div {...src} className="prose-figure border-line overflow-x-auto rounded-surface border">
+        <div className="prose-figure border-line overflow-x-auto rounded-surface border">
           <table className="w-full border-collapse text-[0.875em]">
             <thead>
               <tr className="border-line/70 bg-active/30 border-b">
@@ -156,13 +136,13 @@ function BlockView({ block }: { block: Block }) {
         </div>
       );
     case "code":
-      return <CodeBlock lang={block.lang} text={block.text} src={src} />;
+      return <CodeBlock lang={block.lang} text={block.text} />;
     case "hr":
-      return <hr {...src} className="border-line" />;
+      return <hr className="border-line" />;
     case "list": {
       const Tag = block.ordered ? "ol" : "ul";
       return (
-        <Tag {...src} className={block.ordered ? "list-decimal pl-6" : "list-disc pl-6"}>
+        <Tag className={block.ordered ? "list-decimal pl-6" : "list-disc pl-6"}>
           {block.items.map((item, i) => (
             <li key={i} className={item.checked !== null ? "-ml-6 list-none" : "pl-1"}>
               {item.checked !== null && (
@@ -229,21 +209,10 @@ const CALLOUT: Record<
   },
 };
 
-/** The source stamp a block carries; see `BlockView`. */
-type SourceStamp = { "data-md-from"?: number; "data-md-to"?: number };
-
-function Callout({
-  tone,
-  children,
-  src,
-}: {
-  tone: CalloutTone;
-  children: React.ReactNode;
-  src?: SourceStamp;
-}) {
+function Callout({ tone, children }: { tone: CalloutTone; children: React.ReactNode }) {
   const { label, icon: Glyph, tone: colour, edge } = CALLOUT[tone];
   return (
-    <div {...src} className={cn("prose-figure rounded-surface border px-4 py-3", edge)}>
+    <div className={cn("prose-figure rounded-surface border px-4 py-3", edge)}>
       <div className={cn("mb-1 flex items-center gap-1.5 text-[0.875em] font-semibold", colour)}>
         <Glyph className="size-icon-md shrink-0" aria-hidden />
         {label}
@@ -264,15 +233,7 @@ function Callout({
  * most quotable thing on the page the smallest, which is backwards for a
  * tracker where an agent's repro *is* the report.
  */
-function CodeBlock({
-  lang,
-  text,
-  src,
-}: {
-  lang: string | null;
-  text: string;
-  src?: SourceStamp;
-}) {
+function CodeBlock({ lang, text }: { lang: string | null; text: string }) {
   const [copied, setCopied] = useState(false);
   const tokens = useHighlighted(text, lang);
 
@@ -284,7 +245,7 @@ function CodeBlock({
   };
 
   return (
-    <div {...src} className="prose-figure border-line bg-bg group/code relative overflow-hidden rounded-surface border">
+    <div className="prose-figure border-line bg-bg group/code relative overflow-hidden rounded-surface border">
       {lang && (
         <div className="border-line/70 text-mute flex h-ctl-md items-center border-b px-3 font-mono text-2xs">
           {lang}

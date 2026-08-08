@@ -32,9 +32,6 @@ export function MarkdownEditor(props: {
   remoteContexts?: RemoteContext[];
   remotePreviews?: RemoteTextPreview[];
   acceptRemote?: boolean;
-  /** Caret offset to open at, when the editor is being entered from the
-   *  rendered view. See `CodeMirrorEditor`. */
-  openAt?: number;
   onAwareness?: (
     anchor: number | null,
     focus: number | null,
