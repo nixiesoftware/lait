@@ -1484,10 +1484,20 @@ export function useIssueDetail(space: string, reff: string): IssueDetailSnapshot
   // The detail rail's milestone picker and the project overview's milestone list
   // are the same resource under the same key — one fetch, one invalidation, and
   // the two surfaces can never disagree about a milestone's progress.
-  useProjectMilestones(space, projectId);
+  //
+  // Its snapshot is a DEPENDENCY, not just a side effect, and leaving it out was
+  // a real defect rather than a tidiness point. `selectIssueDetail` reads the
+  // milestone resource and caches on it, but this memo decides whether that
+  // function runs at all — so when the list landed, nothing in the old list
+  // changed identity, the memo handed back the snapshot it had built *before*
+  // the fetch resolved, and the rail kept the empty array forever. The picker's
+  // face falls back to the id when the name is not in the list, so the rail
+  // showed `mls_01jvf099ajqn6mhug6m8cl6291` where it meant "Launch" — and kept
+  // showing it, because nothing was ever going to invalidate the memo again.
+  const milestones = useProjectMilestones(space, projectId);
   return useMemo(
     () => store.selectIssueDetail(space, reff),
     // The resource objects are immutable change tokens.
-    [body, graph, history, reff, row, space, store, projectId],
+    [body, graph, history, milestones, reff, row, space, store, projectId],
   );
 }

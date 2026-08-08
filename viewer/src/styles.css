@@ -1053,8 +1053,38 @@
    becomes a direct flex child of the strip and wraps against its siblings
    rather than against its group.
 
-   The terms are already `sr-only` at every width (the rail dropped its label
-   column), so nothing needs hiding here that isn't hidden already. */
+   THE TERMS GO TOO, and that is the correction. This block used to say they
+   were already `sr-only` "at every width", and it was true when it was written
+   — then `RailRow` made the term visible on purpose, which is right for the
+   rail (a column of values with nothing naming them does not scan) and wrong
+   here, where there are no columns to name. What shipped was every term inline
+   with its value in one wrapping run: "Status Backlog Priority Medium
+   Assignees Assign Estimate Set estimate", a sentence built out of a table.
+   Each also held an 80px column that nothing in a wrapping strip lines up
+   with, so a third of the strip's width went to labels the layout had already
+   stopped using. Linear's compact head is the values alone and so is this.
+
+   Which leaves the values needing to be legible as separate things, hence the
+   two rules on the trigger. Both undo something the `quiet` tone does for a
+   RAIL, where each control has a row to itself:
+
+   - `margin-inline: 0` cancels its `-mx-1` bleed. In a column the bleed only
+     ever ran into empty gutter; in a wrapping row it ate the strip's own 8px
+     gap from both sides, so measured, "Backlog" ended at 308 and "Set
+     priority" began at 308. Adjacent chips touched.
+   - The border is what makes a chip a chip. `quiet` has no shape until you
+     point at it, which is the correct restraint for a rail read top-down and
+     not enough here: a row of unbounded words reads as prose, and these are
+     eight separate controls. It is the one place the strip departs from the
+     rail's tone, because it is the one place the tone's premise does not hold.
+
+   The selector names the trigger through the three shapes it appears in — a
+   `Combobox` in its popover wrapper, the same wrapped again in the span that
+   lets a label run wrap, and Notifications, which is a plain Astryx `Button`
+   and was the one chip in the row still drawing no edge. Naming them beats
+   reaching for `dd button`, which would also paint the buttons inside a label
+   chip; a fourth shape simply would not match, which is a visible failure
+   rather than a wrong one. */
 @container (max-width: 919px) {
   .issue-detail-properties {
     flex-flow: row wrap;
@@ -1066,7 +1096,8 @@
     display: contents;
   }
 
-  .issue-detail-properties .rail-caption {
+  .issue-detail-properties .rail-caption,
+  .issue-detail-properties .issue-property > dt {
     display: none;
   }
 
@@ -1079,6 +1110,15 @@
   .issue-detail-properties .issue-property > dd {
     flex: none;
     max-width: 220px;
+  }
+
+  .issue-detail-properties .issue-property > dd > div > button,
+  .issue-detail-properties .issue-property > dd > span > div > button,
+  .issue-detail-properties .issue-property > dd > button {
+    margin-inline: 0;
+    border: 1px solid var(--color-line);
+    border-radius: 9999px;
+    padding-inline: 8px;
   }
 }
 
