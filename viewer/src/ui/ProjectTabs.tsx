@@ -1,6 +1,6 @@
 import { isIssueMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
 import { Button } from "@astryxdesign/core";
-import { toolbarControl } from "./primitives";
+import { cn, toolbarControl } from "./primitives";
 
 /** The faces a project offers as tabs. Board and Calendar are absent on purpose:
  *  they are LAYOUTS of Issues, chosen beside grouping and ordering, so they live
@@ -59,19 +59,68 @@ export function ProjectTabs({
             aria-current={current ? "page" : undefined}
             onClick={() => onPick(tab)}
             label={`${PROJECT_VIEW_LABEL[tab]}`}
-            // Both states are CHIPS: a resting tab is filled and faintly
-            // raised, the current one is filled brighter and flattened. The
-            // edge is doing real work — it is what says these four are
-            // controls rather than a row of words — so it stays, and the
-            // difference between selected and not is carried by fill and
-            // elevation together rather than by one of them alone.
+            // Both states are CHIPS, and that part stays: a ghost resting
+            // state was tried and removed because it read as text and the
+            // strip lost its footing on the band. The edge is doing real work —
+            // it is what says these four are controls rather than a row of
+            // words.
             //
-            // A ghost resting state was tried and removed: it read as text,
-            // and the strip lost its footing on the band.
+            // What did not work was leaving the *whole* difference to the fill.
+            // Measured, the two states were `oklch(0.282)` against
+            // `oklch(0.228)`: five hundredths of lightness, on chips whose text
+            // was the same colour at the same weight. Four tabs that look
+            // alike, with the current one identifiable only by staring.
+            //
+            // So the label carries it now, which is the channel that was going
+            // spare. `bright` against `dim` is most of the neutral ramp —
+            // unmistakable at a glance, in both themes — and the semibold is
+            // what a tab strip in every other product uses to say which one you
+            // are on. The fill difference stays underneath doing what it can;
+            // it is no longer being asked to do all of it.
             variant={current ? "active" : "secondary"}
             elevation={current ? "none" : "low"}
             size="sm"
-            className={toolbarControl}
+            // And a real border, which the strip never had. The comment above
+            // used to credit "the edge" for saying these are controls — but
+            // measured, `border-width` was `0px` on all four and the edge was a
+            // *shadow*: an inset hairline on the current tab, a drop shadow on
+            // the rest. A drop shadow is not an outline, and on a dark ground
+            // it is very nearly nothing.
+            className={cn(
+              toolbarControl,
+              // Taller and narrower. The vertical is a *rung* move rather than
+              // a padding one: the height is pinned by `h-ctl-*` and the box is
+              // border-box, so adding padding to a 24px chip only squeezes the
+              // label — `md` (28px) is what four more pixels of vertical
+              // actually means here.
+              //
+              // Which reverses a rule this file used to state: the tabs were
+              // dropped to `sm` precisely so they matched the filter and
+              // display controls at the tail of the same band. They are a step
+              // above their neighbours again, deliberately — a tab strip is the
+              // band's subject and the tail controls are its instruments, and
+              // asking them to be the same size was treating a hierarchy as a
+              // symmetry.
+              "!h-ctl-md !px-2.5 !py-2.5",
+              "!border",
+              // Weight is deliberately NOT one of the channels.
+              //
+              // Semibold on the current tab was the obvious third cue and it
+              // moved the strip: measured, the same label is 0.4–1.1px wider at
+              // 600 than at 500, so selecting a tab widened it and nudged every
+              // tab to its right. A control that changes size when you choose
+              // it is a control you cannot click twice in the same place.
+              //
+              // Reserving the bold width would need a hidden copy of the label
+              // inside a component that renders its own label, and colour is
+              // already carrying this at full strength — `bright` against `dim`
+              // is most of the neutral ramp, on top of a fill and a border that
+              // both change too. Three channels is enough without the one that
+              // reflows.
+              current
+                ? "!border-line-strong !text-bright"
+                : "!border-line !text-dim hover:!text-fg hover:!border-line-strong",
+            )}
           />
         );
       })}

@@ -235,7 +235,11 @@ export function Sidebar({
           const open = !foldedTeams.has(candidate.id);
           const scoped = currentTeam === candidate.key;
           return (
-            <div key={candidate.id}>
+            // The block carries the same 2px its rows do, so the header sits
+            // off its first child by exactly what separates any two rows. It
+            // had no gap at all, which read as the header and the first item
+            // being one welded object rather than as a heading over a list.
+            <div key={candidate.id} className="flex flex-col gap-0.5">
               {/* A fold toggle, never a destination — so it never takes the
                   selected fill. It used to, which is how three things came to
                   be highlighted at once: the header, the child under it, and
@@ -265,24 +269,27 @@ export function Sidebar({
                   reference does. */}
               {open && (
                 <div className="flex flex-col gap-0.5 pl-4">
+                  {/* Full height, not `compact`. The indent already says these
+                      belong to the team above them, so shrinking them as well
+                      was saying it twice — and it left the children reading as
+                      a denser, lesser kind of row than every other entry in the
+                      column. Every nav row in this sidebar is one height now;
+                      indent alone carries the hierarchy. */}
                   <NavItem
                     icon={<CircleDot />}
                     label="Issues"
-                    compact
                     active={scoped && (view === "list" || view === "board")}
                     onClick={() => onGoTeam(candidate.key, "list")}
                   />
                   <NavItem
                     icon={<FolderKanban />}
                     label="Projects"
-                    compact
                     active={scoped && view === "projects"}
                     onClick={() => onGoTeam(candidate.key, "projects")}
                   />
                   <NavItem
                     icon={<GanttChart />}
                     label="Roadmap"
-                    compact
                     active={scoped && view === "timeline"}
                     onClick={() => onGoTeam(candidate.key, "timeline")}
                   />
