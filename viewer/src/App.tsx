@@ -1910,7 +1910,23 @@ export function App() {
                   tone="quiet" size="sm" swatchSlot="md"
                   label="Project"
                   swatchShape="square"
-                  className="max-w-[min(32cqw,240px)] font-medium"
+                  // The switcher is a crumb before it is a picker, so it takes
+                  // the trail's shape rather than its tone's. Two overrides,
+                  // both cancelling something `quiet` does for the *property
+                  // rail*, which is the other surface that tone dresses:
+                  //
+                  // `rounded-row` — `quiet` is a pill, and the rail's comment
+                  // argues for one because a hover fill is the only shape those
+                  // rows have. In a trail it is the odd corner in a row of
+                  // boxes.
+                  //
+                  // `mx-0` — `quiet` carries `-mx-1` so its text sits flush
+                  // while its fill overhangs. `Breadcrumbs` now owns that bleed
+                  // at the nav, and it has to: the trail clips, so a crumb that
+                  // bleeds on its own gets its left edge shaved off. Leaving
+                  // this one in place made the switcher the last sheared crumb
+                  // after the other two were fixed.
+                  className="max-w-[min(32cqw,240px)] !mx-0 !rounded-row font-medium"
                   value={
                     activeProject
                       ? {

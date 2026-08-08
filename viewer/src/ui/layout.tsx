@@ -224,8 +224,21 @@ export type BreadcrumbItem = {
  *  the same baseline and the same padding, or the trail visibly steps. The picker
  *  crumb gets here as `tone="quiet" size="sm"`, which resolves to these same
  *  values — the `sm` rung IS this height, so the two cannot drift apart the way
- *  they could when the crumb's height was hard-coded inside its own variant. */
-const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-full transition-colors";
+ *  they could when the crumb's height was hard-coded inside its own variant.
+ *
+ *  `rounded-row`, which is the sidebar's corner and now the trail's. Pills were
+ *  wrong twice over. They said "chip" on a row of text that is a *path*, where
+ *  the sidebar had already settled on a box for the same gesture — and at
+ *  `rounded-full` a 24px crumb carries a 12px radius, so the 4px the trail bled
+ *  past its own clip (see the nav below) sheared the left cap into a flat edge
+ *  while the right stayed a full semicircle. One crumb, two different corners.
+ *  A 6px box has no cap to lose. */
+const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-row transition-colors";
+
+/** Every crumb's own padding — the inset that becomes the hover fill's overhang.
+ *  Not on the picker crumb: its trigger brings the same 6px itself, and padding
+ *  it twice is what made the switcher sit a step in from its neighbours. */
+const crumbPad = "px-1.5";
 
 
 export function Breadcrumbs({
@@ -236,7 +249,25 @@ export function Breadcrumbs({
   className?: string;
 }) {
   return (
-    <nav aria-label="Breadcrumb" className={cn("min-w-0 flex-1 overflow-hidden", className)}>
+    <nav
+      aria-label="Breadcrumb"
+      // The bleed belongs to the trail, not to each crumb.
+      //
+      // Every crumb used to carry `-mx-1` so its *text* sat flush with the
+      // header's content edge while its fill overhung — a normal trick, and
+      // fatal here, because this element clips. The first crumb's box started
+      // 4px outside the clip box and had that 4px cut off, so its hover fill
+      // was a different shape from every other crumb's: flat down the left,
+      // round on the right. Moving the same −4px onto the nav puts the clip
+      // boundary and the first crumb's left edge in the same place, and nothing
+      // is sheared. Text lands where it always did; there is 8px of header
+      // padding to the left, so the 4px is room the bar already had.
+      //
+      // It also stops the crumbs overlapping each other. With −4px on both
+      // sides, adjacent boxes ran under the chevron between them — invisible
+      // until a hover fill slid beneath it.
+      className={cn("-ml-1 min-w-0 flex-1 overflow-hidden", className)}
+    >
       <ol className="flex min-w-0 items-center text-sm">
         {items.map((item, index) => {
           const leaf = index === items.length - 1;
@@ -261,7 +292,8 @@ export function Breadcrumbs({
                   onClick={item.onNavigate}
                   className={cn(
                     crumbFace,
-                    "text-dim hover:bg-hover hover:text-fg focus-visible:ring-accent/50 -mx-1 px-1.5 outline-none focus-visible:ring-1",
+                    crumbPad,
+                    "text-dim hover:bg-hover hover:text-fg focus-visible:ring-accent/50 outline-none focus-visible:ring-1",
                   )}
                 >
                   {item.content}
@@ -273,15 +305,18 @@ export function Breadcrumbs({
                   className={cn(
                     crumbFace,
                     leaf ? "text-fg font-medium" : "text-dim",
-                    !item.control && "-mx-1 px-1.5",
+                    !item.control && crumbPad,
                   )}
                 >
                   {item.content}
                 </span>
               )}
               {/* The separator belongs to the crumb before it: a dropped ancestor
-                  takes its chevron with it, so the trail never opens with a stray ›. */}
-              {!leaf && <ChevronRight className="text-mute mx-0.5 size-icon-xs shrink-0" aria-hidden />}
+                  takes its chevron with it, so the trail never opens with a stray ›.
+                  Unmargined: the crumbs on either side bring 6px of padding each,
+                  so the chevron already sits in 12px of air and its own margin was
+                  spending width the trail needs for the titles. */}
+              {!leaf && <ChevronRight className="text-mute size-icon-xs shrink-0" aria-hidden />}
             </li>
           );
         })}
