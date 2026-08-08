@@ -39,6 +39,7 @@ import { rpc } from "../api";
 import { downloadUrl, upload as uploadContent } from "../content";
 import { useIssueDetail, useProjectBaselines, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
+import { sourceOffsetFromPoint } from "../core/sourceMap";
 import {
   describeEventRich,
   EDIT_KINDS,
@@ -2973,6 +2974,11 @@ function Description({
   const [draft, setDraft] = useState(
     () => loadDraft(draftKey.spaceId, draftKey.reff, "description") || value,
   );
+  /** Reading, or writing. See the note above the read branch. */
+  const [editing, setEditing] = useState(false);
+  /** Where the caret goes when the editor opens; `null` = do not focus. */
+  const [openAt, setOpenAt] = useState<number | null>(null);
+  const readRef = useRef<HTMLDivElement | null>(null);
   const [authoritative, setAuthoritative] = useState(value);
   const [pending, setPending] = useState(0);
   const dirty = useRef(draft !== value);
@@ -3047,11 +3053,93 @@ function Description({
     );
   }
 
+  /**
+   * Read as prose, write as source — and the click is the hinge.
+   *
+   * The body is Markdown in the engine and CodeMirror edits that string
+   * literally, which means every newline the author's editor happened to insert
+   * is a line here. A paragraph hard-wrapped at 78 columns therefore came out
+   * as a stack of ragged part-lines: measured, nine visual rows where the same
+   * prose flows in five. CommonMark says a lone newline inside a paragraph is a
+   * space, `parseMarkdown` has implemented that for a while, and the reading
+   * view has been right the whole time — it was only ever the *writing* view
+   * anyone actually looked at.
+   *
+   * So the reading view is what you get until you ask to write. `openAt` is the
+   * part that makes it a hand-off rather than a mode switch: the click point
+   * resolves through `sourceOffsetFromPoint` to an offset in the Markdown, and
+   * the editor opens with the caret already there. Without it this would trade
+   * one irritation for a worse one.
+   *
+   * The editor is unmounted while reading, deliberately. Keeping it alive
+   * behind the render would preserve its undo history, but CodeMirror cannot
+   * measure a hidden editor and every remote update would be applied to
+   * something nobody can see; the document state that matters lives in this
+   * component and in the CRDT, not in the view.
+   */
+  if (!editing) {
+    return (
+      <div
+        ref={readRef}
+        // `mousedown`, not `click`: the caret has to be resolved from the point
+        // while the render is still on screen. By `click` the editor has
+        // replaced it and the coordinates mean something else.
+        onMouseDown={(event) => {
+          if (event.button !== 0) return;
+          // A link, or a selection being dragged, is not a request to edit.
+          if ((event.target as HTMLElement).closest("a")) return;
+          const at = readRef.current
+            ? sourceOffsetFromPoint(readRef.current, authoritative, event.clientX, event.clientY)
+            : null;
+          setOpenAt(at ?? authoritative.length);
+          setEditing(true);
+        }}
+        // Keyboard entry. `??` rather than an assignment, because a real click
+        // fires `mousedown` and then `focus`, and both land in one React batch:
+        // written plainly this would overwrite the offset the pointer just
+        // resolved with 0 and drop the caret at the top of the document. Only
+        // an entry that had no point to start from gets one.
+        onFocus={() => {
+          setOpenAt((held) => held ?? 0);
+          setEditing(true);
+        }}
+        // Reachable without a pointer: the body is a field like any other, and
+        // Tab has to land somewhere that opens it.
+        tabIndex={0}
+        role="textbox"
+        aria-label="Description"
+        className="min-h-ctl-xl cursor-text py-2 outline-none"
+      >
+        {/* `authoritative`, not `draft`. The two agree while you are typing,
+            but `draft` is seeded once at mount and the body arrives after —
+            so a description read straight off a fresh load showed its
+            placeholder. It is also the string the editor opens with, which is
+            what makes a click offset mean the same thing on both sides. */}
+        {authoritative ? (
+          <Markdown text={authoritative} />
+        ) : (
+          <span className="text-mute">Add description…</span>
+        )}
+      </div>
+    );
+  }
+
   return (
+    <div
+      // Leaving is a focusout that lands outside — clicking the page, or
+      // tabbing on. `relatedTarget` inside means focus is still in the editor
+      // (a popover, the scroller) and the document should stay open.
+      onBlur={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        setEditing(false);
+        setOpenAt(null);
+      }}
+    >
     <MarkdownEditor
       value={authoritative}
       placeholder="Add description…"
       className="min-h-ctl-xl py-2"
+      {...(openAt === null ? {} : { openAt })}
       remoteCursors={remoteCursors}
       remoteContexts={remoteContexts}
       remotePreviews={remotePreviews}
@@ -3198,5 +3286,6 @@ function Description({
         checkpoint();
       }}
     />
+    </div>
   );
 }

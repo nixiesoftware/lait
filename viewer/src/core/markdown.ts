@@ -46,7 +46,23 @@ export type Align = "left" | "center" | "right" | null;
 export const CALLOUT_TONES = ["note", "tip", "important", "warning", "caution"] as const;
 export type CalloutTone = (typeof CALLOUT_TONES)[number];
 
-export type Block =
+/**
+ * Where a block came from, as offsets into the source string.
+ *
+ * Carried so a click on the RENDERED document can be turned back into a caret
+ * in the source — see `core/sourceMap.ts`. Optional on the type because it is
+ * derived, not authored: nothing downstream may depend on it being present,
+ * and every test that predates it still describes the same AST.
+ *
+ * Offsets are into the newline-normalised text (`\r\n` folded to `\n`),
+ * which is what `parseMarkdown` walks and what the editor holds.
+ */
+export interface Span {
+  from: number;
+  to: number;
+}
+
+export type Block = (
   | { kind: "heading"; level: 1 | 2 | 3 | 4; id: string; children: Inline[] }
   /** Text runs keep their soft line breaks — render with `pre-wrap`. */
   | { kind: "paragraph"; children: Inline[] }
@@ -55,7 +71,8 @@ export type Block =
   | { kind: "code"; lang: string | null; text: string }
   | { kind: "list"; ordered: boolean; items: ListItem[] }
   | { kind: "table"; align: Align[]; head: Inline[][]; rows: Inline[][][] }
-  | { kind: "hr" };
+  | { kind: "hr" }
+) & { span?: Span };
 
 const BULLET = /^\s*([-*+]|\d+[.)])\s+(.*)$/;
 const CHECKBOX = /^\[([ xX])\]\s+(.*)$/;
@@ -166,6 +183,33 @@ export function parseMarkdown(text: string): Block[] {
   const anchors = new Map<string, number>();
   let i = 0;
 
+  /**
+   * Where every line starts, so a block can say which bytes it came from.
+   *
+   * One prefix sum rather than a search per block: the renderer stamps these
+   * onto the DOM and `core/sourceMap.ts` turns a click back into a caret, which
+   * means every block pays for this and none of them should pay twice.
+   */
+  const starts: number[] = [];
+  {
+    let at = 0;
+    for (const line of lines) {
+      starts.push(at);
+      at += line.length + 1; // the newline the split consumed
+    }
+  }
+  /** The line this block opened on. Set once per iteration, read by `emit`. */
+  let opened = 0;
+  /** Push a block, stamped with the source it was built from. `i` has already
+   *  advanced past the block's last line by the time this is called. */
+  const emit = (block: Block) => {
+    const last = Math.min(Math.max(i - 1, opened), lines.length - 1);
+    blocks.push({
+      ...block,
+      span: { from: starts[opened]!, to: starts[last]! + lines[last]!.length },
+    });
+  };
+
   /** Accumulate consecutive lines matching `test`, mapped through `pick`. */
   const run = (test: (l: string) => boolean, pick: (l: string) => string): string[] => {
     const out: string[] = [];
@@ -178,6 +222,7 @@ export function parseMarkdown(text: string): Block[] {
 
   while (i < lines.length) {
     const line = lines[i]!;
+    opened = i;
 
     if (line.trim() === "") {
       i++;
@@ -193,7 +238,7 @@ export function parseMarkdown(text: string): Block[] {
         i++;
       }
       i++; // the closing fence (or EOF, which closes it too — never eat prose)
-      blocks.push({ kind: "code", lang: fence[1] || null, text: body.join("\n") });
+      emit({ kind: "code", lang: fence[1] || null, text: body.join("\n") });
       continue;
     }
 
@@ -203,7 +248,7 @@ export function parseMarkdown(text: string): Block[] {
       const base = slug(heading[2]!);
       const seen = anchors.get(base) ?? 0;
       anchors.set(base, seen + 1);
-      blocks.push({
+      emit({
         kind: "heading",
         level: heading[1]!.length as 1 | 2 | 3 | 4,
         id: seen === 0 ? base : `${base}-${seen + 1}`,
@@ -224,13 +269,13 @@ export function parseMarkdown(text: string): Block[] {
         rows.push(cells(lines[i]!).map((c) => parseInline(c)));
         i++;
       }
-      blocks.push({ kind: "table", align, head, rows });
+      emit({ kind: "table", align, head, rows });
       continue;
     }
 
     if (HR.test(line)) {
       i++;
-      blocks.push({ kind: "hr" });
+      emit({ kind: "hr" });
       continue;
     }
 
@@ -244,14 +289,14 @@ export function parseMarkdown(text: string): Block[] {
       // something bracket-shaped stays a quote.
       const alert = ALERT.exec(body[0]?.trim() ?? "");
       if (alert) {
-        blocks.push({
+        emit({
           kind: "callout",
           tone: alert[1]!.toLowerCase() as CalloutTone,
           children: parseInline(joinSoft(body.slice(1)).trim()),
         });
         continue;
       }
-      blocks.push({ kind: "quote", children: parseInline(joinSoft(body)) });
+      emit({ kind: "quote", children: parseInline(joinSoft(body)) });
       continue;
     }
 
@@ -270,7 +315,7 @@ export function parseMarkdown(text: string): Block[] {
             : { checked: null, children: parseInline(m[2]!) },
         );
       }
-      blocks.push({ kind: "list", ordered, items });
+      emit({ kind: "list", ordered, items });
       continue;
     }
 
@@ -295,7 +340,7 @@ export function parseMarkdown(text: string): Block[] {
       para.push(l);
       i++;
     }
-    blocks.push({ kind: "paragraph", children: parseInline(joinSoft(para)) });
+    emit({ kind: "paragraph", children: parseInline(joinSoft(para)) });
   }
 
   return blocks;
