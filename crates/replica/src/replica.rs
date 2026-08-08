@@ -2130,6 +2130,7 @@ impl Replica {
             ctx,
             &[(tx.clone(), payloads.to_vec())],
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &[],
             authority,
         )
@@ -2143,12 +2144,241 @@ impl Replica {
     /// a failure in transaction N never leaves transactions 0..N-1 committed
     /// under an error result, and a crash at any staging or journal boundary
     /// exposes the complete old or the complete new root.
+    /// The declarations rule 8 validated that this bundle would otherwise drop.
+    ///
+    /// Rule 8 ([`Replica::validate_contact`]) checks the content ids of **every**
+    /// entry in the advertised manifest and the sealed bundle carries their
+    /// descriptors — but incorporation only ever reached [`Replica::persist`]
+    /// for Bodies the bundle *changed*. A declaration for a Body we already hold
+    /// at the advertised head was therefore validated, sealed, and then dropped
+    /// on the floor. Its trigger — "the receiver already holds this head" — only
+    /// ever becomes more true, so it never repaired: two honest, fully converged
+    /// peers ended up with published roots that could never agree.
+    ///
+    /// Returns the `changed`-shaped map `persist` wants, each key mapped to the
+    /// record it *already* has. The refcount pass then nets to zero (prior and
+    /// now are the same object set) and only the declaration, the manifest entry
+    /// and the content catalog move.
+    fn declarations_left_behind(
+        &self,
+        bundle_declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
+        bundle_declaration_heads: &BTreeMap<BodyKey, Vec<ManifestHead>>,
+        bundle_descriptors: &[crate::content::ContentDescriptor],
+    ) -> BTreeMap<BodyKey, Option<BodyRecord>> {
+        let mut pending: BTreeMap<BodyKey, Option<BodyRecord>> = BTreeMap::new();
+        for (key, refs) in bundle_declared {
+            let Some(record) = self.bodies.get(key) else {
+                continue;
+            };
+            let local_heads: Vec<ManifestHead> = record
+                .heads
+                .iter()
+                .map(|head| ManifestHead {
+                    descriptor_hash: head.descriptor_hash,
+                    transaction_commitment: head.tx_commitment,
+                })
+                .collect();
+            if bundle_declaration_heads.get(key) != Some(&local_heads) {
+                continue;
+            }
+            let held = self.declared_content.get(key).map(Vec::as_slice);
+            if held != Some(refs.as_slice()) {
+                pending.insert(key.clone(), Some(record.clone()));
+            }
+        }
+        // A descriptor the catalog is missing has to land even when the
+        // declaration itself already matches — that gap is this defect's own
+        // residue on any replica that ran the dropping version.
+        if pending.is_empty()
+            && bundle_descriptors
+                .iter()
+                .any(|d| self.content_descriptor(&d.content_ref()).is_none())
+        {
+            for key in bundle_declared.keys() {
+                if let Some(record) = self.bodies.get(key) {
+                    let local_heads: Vec<ManifestHead> = record
+                        .heads
+                        .iter()
+                        .map(|head| ManifestHead {
+                            descriptor_hash: head.descriptor_hash,
+                            transaction_commitment: head.tx_commitment,
+                        })
+                        .collect();
+                    if bundle_declaration_heads.get(key) != Some(&local_heads) {
+                        continue;
+                    }
+                    pending.insert(key.clone(), Some(record.clone()));
+                }
+            }
+        }
+        pending
+    }
+
+    /// Adopt [`Replica::declarations_left_behind`] on a path that is about to
+    /// return without changing a single Body. One journal commit, no Body
+    /// records altered, frontier untouched — the bundle was already validated.
+    fn adopt_declarations_only(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        bundle_declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
+        bundle_declaration_heads: &BTreeMap<BodyKey, Vec<ManifestHead>>,
+        bundle_descriptors: &[crate::content::ContentDescriptor],
+    ) -> Result<(), Failure> {
+        if self.durable.is_none() {
+            return Ok(());
+        }
+        let pending = self.declarations_left_behind(
+            bundle_declared,
+            bundle_declaration_heads,
+            bundle_descriptors,
+        );
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut causal = Vec::new();
+        for (key, refs) in bundle_declared {
+            if pending.contains_key(key) {
+                causal.extend_from_slice(&body_index_key(key));
+                for reference in refs {
+                    causal.extend_from_slice(reference);
+                }
+            }
+        }
+        let frontier = advance_published(self.frontier, &causal);
+        self.persist(
+            Some(ctx),
+            &pending,
+            bundle_declared,
+            bundle_descriptors,
+            None,
+            Vec::new(),
+            frontier,
+        )?;
+        self.frontier = frontier;
+        Ok(())
+    }
+
+    /// Revalidate a complete opaque head set from the bytes already retained
+    /// locally. These transactions were authorized and commitment-checked when
+    /// they first landed, so this is deliberately not another incorporation:
+    /// it adds no transaction units, consumes no quota, and does not advance
+    /// the published frontier. Either every retained head can now be opened and
+    /// interpreted, or the record remains opaque.
+    fn upgrade_retained_opaque(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        keys: &BTreeSet<BodyKey>,
+    ) -> Result<(), Failure> {
+        for key in keys {
+            let Some(record) = self.bodies.get(key).cloned() else {
+                continue;
+            };
+            if record.interpreted {
+                continue;
+            }
+            let Some(retained) = self.raw_material.get(key).cloned() else {
+                continue;
+            };
+            let Some((encoding, model)) = self.supported.lookup(
+                &key.world,
+                &record.binding.schema,
+                record.binding.schema_version,
+            ) else {
+                continue;
+            };
+            if encoding != &record.binding.encoding {
+                continue;
+            }
+
+            let mut opened = Vec::with_capacity(retained.len());
+            for (tx_id, envelope, transaction_bytes) in &retained {
+                let transaction = Transaction::decode_canonical(transaction_bytes)
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                let Some(descriptor) = transaction
+                    .core
+                    .descriptors
+                    .iter()
+                    .find(|descriptor| descriptor.key() == *key)
+                else {
+                    return Err(Failure::Integrity(Defect::MissingMaterial));
+                };
+                if !descriptor.commits_to(envelope) {
+                    return Err(Failure::Integrity(Defect::MissingMaterial));
+                }
+                let Some(epoch) = mechanics::authorization::body_epoch_id(envelope) else {
+                    opened.clear();
+                    break;
+                };
+                let Some(opening) = self.keys.as_ref().and_then(|keys| keys.opening_key(&epoch))
+                else {
+                    opened.clear();
+                    break;
+                };
+                let material = Material::open(&opening, envelope)
+                    .map_err(|_| Failure::Integrity(Defect::MissingMaterial))?;
+                if material.mutation_model != *model {
+                    opened.clear();
+                    break;
+                }
+                opened.push((*tx_id, material));
+            }
+            if opened.len() != retained.len() {
+                continue;
+            }
+            opened.sort_by_key(|(tx_id, _)| *tx_id);
+            let mut chain: Option<ReplicaFrontier> = None;
+            for (_, material) in &opened {
+                self.fabric
+                    .import_body(&fabric_key(key), &material.payload)
+                    .map_err(Failure::Engine)?;
+                chain = Some(match (&material.payload, chain) {
+                    (_, None) => material.resulting_frontier,
+                    (BodyExport::Atomic(_), Some(current)) => {
+                        if chain_order(&material.resulting_frontier, &current).is_gt() {
+                            material.resulting_frontier
+                        } else {
+                            current
+                        }
+                    }
+                    (BodyExport::Collaborative(_), Some(current)) => {
+                        combine_chains(&current, &material.resulting_frontier)
+                    }
+                });
+            }
+            let mut upgraded = record;
+            upgraded.interpreted = true;
+            if let Some(chain) = chain {
+                upgraded.chain = chain;
+            }
+            if self.durable.is_some() {
+                let changed = BTreeMap::from([(key.clone(), Some(upgraded.clone()))]);
+                self.persist(
+                    Some(ctx),
+                    &changed,
+                    &BTreeMap::new(),
+                    &[],
+                    None,
+                    Vec::new(),
+                    self.frontier,
+                )?;
+            }
+            self.bodies.insert(key.clone(), upgraded);
+            // A non-durable Replica still needs the bytes in order to re-serve
+            // the heads it advertises. Durable stores can read their objects.
+            if self.durable.is_some() {
+                self.raw_material.remove(key);
+            }
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn incorporate_units(
         &mut self,
         ctx: &CommitContext<'_>,
         units: &[IncorporationUnit],
         bundle_declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
+        bundle_declaration_heads: &BTreeMap<BodyKey, Vec<ManifestHead>>,
         bundle_descriptors: &[crate::content::ContentDescriptor],
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, Failure> {
@@ -2157,7 +2387,20 @@ impl Replica {
         }
         let previous = self.frontier;
         let mut outcome = ConvergenceOutcome::unchanged(previous);
+        let touched: BTreeSet<BodyKey> = units
+            .iter()
+            .flat_map(|(_, payloads)| payloads.iter().map(|(key, _)| key.clone()))
+            .collect();
+        self.upgrade_retained_opaque(ctx, &touched)?;
         if units.is_empty() {
+            // No Body material, but the manifest may still declare content for
+            // Bodies we already hold — validated by rule 8 and dropped here.
+            self.adopt_declarations_only(
+                ctx,
+                bundle_declared,
+                bundle_declaration_heads,
+                bundle_descriptors,
+            )?;
             return Ok(outcome);
         }
 
@@ -2210,6 +2453,33 @@ impl Replica {
                 resolved.push((idx, descriptor, payload));
             }
         }
+        // Classification writes a per-Body overlay, so transaction-id order
+        // must not decide the meaning of a mixed bundle. Process locally
+        // interpretable heads first and opaque heads second; the latter then
+        // joins the staged record and conservatively leaves the whole Body
+        // opaque, preserving every head until all can be interpreted.
+        resolved.sort_by(
+            |(left_unit, left, left_envelope), (right_unit, right, right_envelope)| {
+                let rank = |descriptor: &Descriptor, envelope: &[u8]| {
+                    let supported = self
+                        .supported
+                        .lookup(
+                            &descriptor.key().world,
+                            &descriptor.schema,
+                            descriptor.schema_version,
+                        )
+                        .is_some();
+                    let openable = mechanics::authorization::body_epoch_id(envelope)
+                        .and_then(|epoch| self.keys.as_ref()?.opening_key(&epoch))
+                        .is_some();
+                    u8::from(!(supported && openable))
+                };
+                left.key()
+                    .cmp(&right.key())
+                    .then_with(|| rank(left, left_envelope).cmp(&rank(right, right_envelope)))
+                    .then_with(|| units[*left_unit].0.id().cmp(&units[*right_unit].0.id()))
+            },
+        );
 
         // ---- Phase 3: classification over an overlay of the current index. --
         // Each planned change carries everything the engine + persist phases
@@ -2420,13 +2690,31 @@ impl Replica {
                         // Opaque material is retained byte-identically per
                         // author: a distinct envelope for a Body we already
                         // hold joins the set rather than replacing it.
-                        merge_append: self.bodies.contains_key(&key),
+                        //
+                        // "Already hold" must be asked of the STAGED view, not
+                        // the committed one. `overlay` exists so that successive
+                        // writes to one Body inside a single bundle classify
+                        // against what this bundle has already planned; every
+                        // other classification in this loop honours it, and the
+                        // placeholder chain ten lines above already does. Asking
+                        // `self.bodies` here instead made two opaque heads of a
+                        // Body that is NEW to this replica both plan a replace,
+                        // so the second silently overwrote the first — and the
+                        // receiver then served that truncation onward as a
+                        // complete, root-validated Body.
+                        merge_append: current_chain.is_some(),
                     });
                 }
             }
         }
 
         if planned.is_empty() {
+            self.adopt_declarations_only(
+                ctx,
+                bundle_declared,
+                bundle_declaration_heads,
+                bundle_descriptors,
+            )?;
             return Ok(outcome);
         }
 
@@ -2558,6 +2846,12 @@ impl Replica {
 
         if changed.is_empty() {
             outcome.current = previous;
+            self.adopt_declarations_only(
+                ctx,
+                bundle_declared,
+                bundle_declaration_heads,
+                bundle_descriptors,
+            )?;
             return Ok(outcome);
         }
         outcome.bodies = changed.iter().map(|c| c.key.clone()).collect();
@@ -2814,6 +3108,7 @@ impl Replica {
                 authority_receipt,
                 units: Vec::new(),
                 declared_content: BTreeMap::new(),
+                declaration_heads: BTreeMap::new(),
                 descriptors: Vec::new(),
             });
         }
@@ -2982,8 +3277,14 @@ impl Replica {
         descriptors.sort_by_key(|d| *d.content_ref().as_bytes());
         descriptors.dedup_by_key(|d| *d.content_ref().as_bytes());
 
+        let declaration_heads = entries
+            .iter()
+            .filter(|(_, entry)| !entry.content_refs.is_empty())
+            .map(|(key, entry)| (key.clone(), entry.heads.clone()))
+            .collect();
         Ok(crate::convergence::ValidatedContactBundle {
             declared_content,
+            declaration_heads,
             authority_receipt,
             units: units.into_values().collect(),
             descriptors,
@@ -3036,6 +3337,7 @@ impl Replica {
             ctx,
             &bundle.units,
             &bundle.declared_content,
+            &bundle.declaration_heads,
             &bundle.descriptors,
             authority,
         )

@@ -176,6 +176,11 @@ pub struct ValidatedContactBundle {
     /// falling back to them drops the author's references and the receiver
     /// republishes a Body whose content it no longer names.
     pub(crate) declared_content: std::collections::BTreeMap<crate::ids::BodyKey, Vec<[u8; 32]>>,
+    /// The exact head set the remote declaration described. Declaration-only
+    /// adoption is safe only while this still equals the receiver's head set;
+    /// otherwise an older catalog could overwrite a newer local declaration.
+    pub(crate) declaration_heads:
+        std::collections::BTreeMap<crate::ids::BodyKey, Vec<crate::manifest::ManifestHead>>,
     /// The content descriptors the advertisement carried, for content this
     /// receiver does not already hold a descriptor for.
     ///

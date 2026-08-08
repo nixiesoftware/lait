@@ -20,5 +20,6 @@ mod coordinates_fixtures;
 mod independent_world;
 mod live_acceptance;
 mod plane_fixtures;
+mod reciprocal_dial_loop;
 mod signal_wire;
 mod two_node_convergence;

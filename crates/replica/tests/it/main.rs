@@ -11,10 +11,12 @@
 //!
 //! Add a file here and declare it below; nothing else changes.
 
+mod adversary_incorporation;
 mod algebra_fixtures;
 mod batch_atomicity;
 mod canonical_ids;
 mod concurrent_heads;
+mod content_declaration_convergence;
 mod quotas_and_bundle;
 mod store_growth;
 mod transaction_marker_fixtures;

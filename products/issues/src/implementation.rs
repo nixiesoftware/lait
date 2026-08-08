@@ -34,7 +34,7 @@ use crate::ids::{ActorId, DocId};
 
 use super::contract::{
     self, baseline_key, board_path, catalog_key, issue_key, spec_key, EventChange, IssueEffect,
-    IssueEvent, IssueIntent, IssueQuery, Pos, StoredComment, WorkAction, DEFAULT_STATUS,
+    IssueEvent, IssueIntent, IssueQuery, NewLabel, Pos, StoredComment, WorkAction, DEFAULT_STATUS,
     LINK_KINDS, VIEW_SCHEMA_VERSION,
 };
 use super::rank;
@@ -536,6 +536,65 @@ fn checked_catalog_view(ctx: &Context<'_>) -> Result<Option<fabric::Collaborativ
 /// Load the catalog state from the committed snapshot (integrity-checked).
 fn catalog_state(ctx: &Context<'_>) -> Result<CatalogState, Rejection> {
     Ok(CatalogState::from_view(checked_catalog_view(ctx)?.as_ref()))
+}
+
+/// Resolve caller-proposed new labels against the catalog this write actually
+/// lands on. Returns the labels still worth creating, and the full id set to
+/// apply to the issue.
+///
+/// A caller resolves label names against *its* snapshot. On a lagging Station
+/// that snapshot is older than the Replica the write lands on — and the staler
+/// it is, the more names fail to resolve and the more rival ids it mints for
+/// labels this Space already has. Resolving again here, where the catalog is
+/// read under the same lock as the write, is what stops one stale label
+/// becoming a permanent pair of same-named labels that keeps the Catalog — the
+/// single Space-wide Body every concurrent writer contends on — churning.
+///
+/// It also collapses duplicates *within* one request, which no caller loop can
+/// do: the loop never sees its own mints, so `--label bug --label bug` minted
+/// two ids for one name every time, with no concurrency involved at all.
+///
+/// It cannot stop two Stations minting the same name concurrently — nothing
+/// short of coordination can, and this is a CRDT. But that window is now
+/// genuinely concurrent instead of being as wide as the caller's snapshot is
+/// stale, which is the difference between a rare collision and a desync that
+/// widens itself every time somebody types a label name.
+fn reconcile_new_labels(
+    catalog: &CatalogState,
+    existing: &[String],
+    proposed: &[NewLabel],
+) -> (Vec<NewLabel>, Vec<String>) {
+    let mut create: Vec<NewLabel> = Vec::new();
+    let mut apply: Vec<String> = Vec::new();
+    for id in existing {
+        if !apply.contains(id) {
+            apply.push(id.clone());
+        }
+    }
+    let adopt = |id: &String, apply: &mut Vec<String>| {
+        if !apply.contains(id) {
+            apply.push(id.clone());
+        }
+    };
+    for proposal in proposed {
+        let name = proposal.name.trim();
+        if let Some((id, _)) = catalog
+            .labels
+            .iter()
+            .find(|(_, meta)| meta.name.eq_ignore_ascii_case(name))
+        {
+            adopt(id, &mut apply);
+            continue;
+        }
+        if let Some(minted) = create.iter().find(|c| c.name.eq_ignore_ascii_case(name)) {
+            let id = minted.id.clone();
+            adopt(&id, &mut apply);
+            continue;
+        }
+        create.push(proposal.clone());
+        adopt(&proposal.id, &mut apply);
+    }
+    (create, apply)
 }
 
 fn issue_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
@@ -1599,6 +1658,7 @@ impl World for IssuesWorld {
                         },
                     );
                 }
+                let (new_labels, label_ids) = reconcile_new_labels(&catalog, &labels, &new_labels);
                 for new_label in &new_labels {
                     staging.catalog(map_set(
                         "labels",
@@ -1610,7 +1670,7 @@ impl World for IssuesWorld {
                         .expect("label json"),
                     ));
                 }
-                for label in labels.iter().chain(new_labels.iter().map(|l| &l.id)) {
+                for label in &label_ids {
                     staging.issue(
                         &key,
                         Op::SetAdd {
@@ -1923,6 +1983,7 @@ impl World for IssuesWorld {
                     }
                 }
                 let key = issue_key(&doc);
+                let (new_labels, label_ids) = reconcile_new_labels(&catalog, &add, &new_labels);
                 for new_label in &new_labels {
                     staging.catalog(map_set(
                         "labels",
@@ -1934,7 +1995,7 @@ impl World for IssuesWorld {
                         .expect("label json"),
                     ));
                 }
-                for label in add.iter().chain(new_labels.iter().map(|l| &l.id)) {
+                for label in &label_ids {
                     staging.issue(
                         &key,
                         Op::SetAdd {

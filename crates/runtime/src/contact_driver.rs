@@ -544,8 +544,72 @@ fn record_result(ctx: &DriverContext, station: &Key, result: &Result<ContactOutc
     }
 }
 
-/// Dial a Neighbor, run the initiator side, validate, and incorporate.
+/// What one attempt at a Contact came to.
+enum Attempt {
+    Done(ContactOutcome),
+    /// Root completeness refused material the responder omitted *because this
+    /// Station declared it*. Our own declaration was stale; a repair pass that
+    /// declares nothing converges.
+    StaleDeclaration(Failure),
+    Failed(Failure),
+}
+
+/// Dial a Neighbor, converge, and repair a stale declaration once.
+///
+/// The holdings declaration is snapshotted before a full network round trip and
+/// checked after it, with no lock held across the gap — so a local commit in
+/// that window collapses a head set and destroys a head this Station truthfully
+/// declared. The responder honestly omitted exactly that material, and root
+/// completeness then refuses **the whole root**: every Body in the transfer,
+/// not just the one whose head moved. On a Station whose hot Body is written by
+/// nearly every intent, that window is hit constantly, and each miss throws away
+/// a complete, otherwise-valid transfer.
+///
+/// The repair is to declare nothing and pull whole. That is O(catalog) and so it
+/// is bounded to a single retry per dial: the condition is rare, self-clearing,
+/// and if the second pass fails too then the cause was never the declaration.
+///
+/// Note what is deliberately NOT done: root completeness is not relaxed for
+/// heads we declared. "I declared it" cannot distinguish *superseded by a local
+/// commit* (safe — our own successor covers it) from *never held* (a lying or
+/// corrupt declaration), and adopting a root under the second is precisely how a
+/// Body gets served onward truncated.
 async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactOutcome, Failure> {
+    match contact_once(ctx, station, true).await {
+        Attempt::Done(outcome) => Ok(outcome),
+        Attempt::Failed(failure) => Err(failure),
+        Attempt::StaleDeclaration(failure) => {
+            tracing::debug!(
+                peer = %station,
+                "our holdings declaration went stale mid-Contact; pulling whole"
+            );
+            match contact_once(ctx, station, false).await {
+                Attempt::Done(outcome) => Ok(outcome),
+                Attempt::StaleDeclaration(_) => Err(failure),
+                Attempt::Failed(failure) => Err(failure),
+            }
+        }
+    }
+}
+
+/// One dial: the initiator side, validation, and incorporation.
+async fn contact_once(ctx: &DriverContext, station: &Key, declare: bool) -> Attempt {
+    match contact_attempt(ctx, station, declare).await {
+        Ok(outcome) => Attempt::Done(outcome),
+        // Only a declaration we sent can have caused the responder to omit
+        // material, so this discriminant is only worth retrying when we sent one.
+        Err((failure, true)) if declare => Attempt::StaleDeclaration(failure),
+        Err((failure, _)) => Attempt::Failed(failure),
+    }
+}
+
+/// Dial a Neighbor, run the initiator side, validate, and incorporate. The bool
+/// in the error says whether root completeness was what refused it.
+async fn contact_attempt(
+    ctx: &DriverContext,
+    station: &Key,
+    declare: bool,
+) -> Result<ContactOutcome, (Failure, bool)> {
     let peer = station.as_device();
     let deadline = Instant::now() + ctx.options.whole_deadline;
     let mut stream = step(
@@ -554,12 +618,19 @@ async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactO
         ctx.options.transport.connect(peer, CONTACT_ALPN),
     )
     .await
-    .map_err(|_| Failure::Unreachable("connect: no route answered within the deadline".into()))?
+    .map_err(|_| {
+        (
+            Failure::Unreachable("connect: no route answered within the deadline".into()),
+            false,
+        )
+    })?
     // The transport's own connect error is the one that says WHY a peer is
     // unreachable -- no route, refused, TLS -- and it used to be discarded here.
-    .map_err(|e| Failure::Unreachable(format!("connect: {e:#}")))?;
+    .map_err(|e| (Failure::Unreachable(format!("connect: {e:#}")), false))?;
 
-    let (received, bytes_moved) = initiate(ctx, &mut *stream, station, deadline).await?;
+    let (received, bytes_moved) = initiate(ctx, &mut *stream, station, deadline, declare)
+        .await
+        .map_err(|failure| (failure, false))?;
     drop(stream); // dialer close: we have the transcript
 
     // Stage → validate (authority first, durable) → incorporate under the
@@ -602,7 +673,17 @@ async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactO
                 // the caller sees it inline, and an operator reading the daemon
                 // afterwards does not have to have been holding the connection.
                 tracing::warn!(?failure, peer = %station, "contact material was refused");
-                Failure::Convergence(format!("{failure:?}"))
+                // Keep the discriminant alive across the stringification. Root
+                // completeness is the one refusal this Station can repair by
+                // itself, and it can only do that if it can still tell that is
+                // what happened.
+                let incomplete = matches!(
+                    failure,
+                    replica::transaction::commit::Failure::Illegitimate(
+                        replica::transaction::commit::Invalid::IncompleteMaterial
+                    )
+                );
+                (Failure::Convergence(format!("{failure:?}")), incomplete)
             })
     };
     // ---- One Contact, one published change. -------------------------------
@@ -669,6 +750,7 @@ async fn initiate(
     stream: &mut dyn comms::Stream,
     responder: &Key,
     deadline: Instant,
+    declare: bool,
 ) -> Result<(ReceivedMaterial, u64), Failure> {
     let progress = ctx.options.progress_deadline;
     let contact = ContactId::mint();
@@ -721,9 +803,24 @@ async fn initiate(
     // streamed as chunked frames after the hello; a root is 40 bytes whatever
     // the catalog contains, and equal roots prove equal catalogs outright
     // because the encoding is canonical.
-    let published = ctx
+    //
+    // The root and the head declaration are read under ONE lock. They used to be
+    // two acquisitions seventeen lines apart, which let a signed hello carry a
+    // root describing catalog version N beside a declaration digest over N+1 —
+    // inert only for as long as nobody compares the root to anything, and a
+    // trap primed for exactly the descent this file keeps promising.
+    let (published, held) = ctx
         .core
-        .with_replica(|replica| Ok(replica.published_root()))
+        .with_replica(|replica| {
+            Ok((
+                replica.published_root(),
+                if declare {
+                    replica.head_commitments()
+                } else {
+                    Vec::new()
+                },
+            ))
+        })
         .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?;
     let holdings_root = published.map(|r| r.0).unwrap_or([0u8; 32]);
 
@@ -738,10 +835,15 @@ async fn initiate(
     // advertisement, which is served unconditionally today. Collecting that
     // needs a receive path that can adopt payloads against a root it already
     // holds rather than one just offered — the F4 remainder.
-    let held = ctx
-        .core
-        .with_replica(|replica| Ok(replica.head_commitments()))
-        .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?;
+    //
+    // `declare == false` is the repair pass. This declaration is a snapshot
+    // taken BEFORE a full network round trip, and nothing holds the Replica
+    // still across it: a local commit landing in that window collapses a head
+    // set, so a head we truthfully declared is simply gone by the time root
+    // completeness looks for it — while the responder, believing us, omitted
+    // exactly that material. Declaring nothing makes the responder omit
+    // nothing, so completeness can always be satisfied from what arrived.
+    // See `contact_neighbor`.
     let holdings_bytes = crate::plane::contact::encode_holdings(&held);
     let holdings_count = held.len() as u32;
     let holdings_digest = if held.is_empty() {
@@ -952,17 +1054,6 @@ async fn serve_contact(
             "the hello addressed a different Station".into(),
         ));
     }
-    // Arm a reciprocal dial to the initiator: the responder only SERVES material
-    // here, so a pull back is what redeems a joiner's admission and converges us.
-    // First-contact gated (see `note_reciprocable`) so converged peers do not
-    // ping-pong. Only in the autonomous-convergence (gossip) mode a live daemon
-    // runs — a bare harness driving explicit Contacts stays deterministic, with
-    // no background dials injected behind its assertions.
-    if ctx.options.gossip.is_some() {
-        let lease_ms = ctx.options.route_lease.as_millis() as u64;
-        let mut registry = ctx.registry.lock_recovering();
-        let _ = registry.note_reciprocable(&transport_peer, now_ms(), lease_ms);
-    }
     // Receive the holdings declaration the signed hello committed to; a
     // digest/count mismatch is a protocol violation, and a wrong (or lying)
     // declaration can only starve the initiator — the transfer we build from
@@ -1036,6 +1127,31 @@ async fn serve_contact(
                 }
             }
         }
+    }
+    // Arm a reciprocal dial to the initiator: the responder only SERVES material
+    // here, so a pull back is the only thing that can converge *this* side.
+    //
+    // The signed catalog root is the divergence signal. Unlike the holdings
+    // declaration it includes opaque heads, so two peers with different schema
+    // support still reach a fixpoint after retaining the same material.
+    //
+    // Only in the autonomous-convergence (gossip) mode a live daemon runs — a
+    // bare harness driving explicit Contacts stays deterministic, with no
+    // background dials injected behind its assertions.
+    if ctx.options.gossip.is_some() {
+        let ours = ctx
+            .core
+            .with_replica(|replica| {
+                Ok(replica
+                    .published_root()
+                    .map(|root| root.0)
+                    .unwrap_or([0; 32]))
+            })
+            .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?;
+        let peer_holds_news = hello.holdings_root != ours;
+        let lease_ms = ctx.options.route_lease.as_millis() as u64;
+        let mut registry = ctx.registry.lock_recovering();
+        let _ = registry.note_reciprocable(&transport_peer, peer_holds_news, now_ms(), lease_ms);
     }
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| Failure::Entropy)?;

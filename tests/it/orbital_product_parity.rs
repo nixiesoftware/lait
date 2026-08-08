@@ -680,6 +680,113 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The World resolves caller-proposed labels against the catalog the write
+/// lands on, not against the caller's snapshot.
+///
+/// A caller resolves label names against its own view and proposes a `NewLabel`
+/// for every name that misses. On a lagging Station that view is older than the
+/// Replica, so the staler it gets the more rival ids it mints for labels the
+/// Space already has — and every mint is another write to the Catalog, the one
+/// Space-wide Body every concurrent writer contends on. The desync widened
+/// itself. Worse, no caller loop can see its own mints, so the same name twice
+/// in one request minted two ids deterministically, with no concurrency at all.
+#[test]
+fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
+    let root = temp_root("label-reconcile");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (_project, doc, _alias) = seed_space(&mut driver);
+
+    // The same name twice in ONE request. No concurrency, no staleness — the
+    // caller simply cannot see the id it is about to mint.
+    let first = LabelId::mint(&SystemUlidSource).as_str().to_string();
+    let second = LabelId::mint(&SystemUlidSource).as_str().to_string();
+    assert_ne!(first, second);
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::Label {
+            doc: doc.clone(),
+            add: vec![],
+            new_labels: vec![
+                contract::NewLabel {
+                    id: first.clone(),
+                    name: "bug".into(),
+                    color: "red".into(),
+                },
+                contract::NewLabel {
+                    id: second.clone(),
+                    name: "bug".into(),
+                    color: "blue".into(),
+                },
+            ],
+            remove: vec![],
+            device: my_device().as_str().to_string(),
+            ts,
+        })
+        .unwrap();
+    let labels: Vec<LabelDto> = driver.query(&IssueQuery::Labels);
+    assert_eq!(labels.len(), 1, "one name is one label: {labels:?}");
+    assert_eq!(labels[0].name, "bug");
+    assert_eq!(
+        labels[0].id.as_str(),
+        first,
+        "the first proposal wins deterministically"
+    );
+
+    // Now a caller whose snapshot never saw "bug" proposes a rival id for it.
+    // The catalog this write lands on has it, so the rival is dropped and the
+    // existing label is adopted instead.
+    let rival = LabelId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::Label {
+            doc: doc.clone(),
+            add: vec![],
+            new_labels: vec![contract::NewLabel {
+                id: rival.clone(),
+                name: "BUG".into(),
+                color: "green".into(),
+            }],
+            remove: vec![],
+            device: my_device().as_str().to_string(),
+            ts,
+        })
+        .unwrap();
+    let labels: Vec<LabelDto> = driver.query(&IssueQuery::Labels);
+    assert_eq!(
+        labels.len(),
+        1,
+        "a stale proposal must not mint a rival for a label the Space has: {labels:?}"
+    );
+    assert_eq!(labels[0].id.as_str(), first);
+
+    // And the issue carries the adopted id, not the rival that was proposed.
+    let rows: Vec<Row> = driver.query(&IssueQuery::List {
+        project: None,
+        label: Some(first.clone()),
+        status: None,
+        milestone: None,
+        mine: None,
+        all: false,
+        me: None,
+    });
+    assert_eq!(rows.len(), 1, "the issue is labelled with the adopted id");
+    let rows: Vec<Row> = driver.query(&IssueQuery::List {
+        project: None,
+        label: Some(rival),
+        status: None,
+        milestone: None,
+        mine: None,
+        all: false,
+        me: None,
+    });
+    assert!(rows.is_empty(), "the rival id was never applied");
+
+    drop(driver);
+    let _ = station.vacate();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn a_denied_or_invalid_request_commits_and_publishes_nothing() {
     let root = temp_root("refusals");

@@ -412,10 +412,16 @@ impl NeighborRegistry {
         Ok(true)
     }
 
-    /// The eager-push belt (W0-S3): a fresh local durable commit marks every
-    /// known Neighbor pending-Contact, so loopback-scale convergence never
+    /// The eager-convergence belt (W0-S3): a fresh local durable commit marks
+    /// every known Neighbor pending-Contact, so loopback-scale convergence never
     /// waits for the beacon floor. Eligibility still gates on backoff and an
     /// unexpired route lease.
+    ///
+    /// It is a **pull**, despite the "push" this was once called. Contact is
+    /// initiator-driven and only the dialer incorporates, so a local commit
+    /// makes this Station dial *out and read*; it does not deliver the commit
+    /// anywhere. What tells a neighbour we have news is the Beacon, and — once
+    /// it dials us — the holdings declaration it reads in [`note_reciprocable`].
     pub fn mark_all_pending(&mut self, now_ms: u64) -> Result<usize, Failure> {
         let mut flipped = 0;
         for entry in self.entries.values_mut() {
@@ -454,23 +460,50 @@ impl NeighborRegistry {
     /// direct, leased route toward the peer — dialing resolves by Key, so
     /// the route only needs to be present and unexpired to pass eligibility.
     /// Never overwrites a fresher Beacon-derived frontier/coordinate.
+    ///
+    /// `peer_holds_news` is the responder's read of the initiator's signed
+    /// holdings declaration: true when it named an interpreted head this
+    /// Replica does not hold. See the gate below for why that predicate, and
+    /// not root inequality, is the one that is safe to arm on.
     pub fn note_reciprocable(
         &mut self,
         station: &Key,
+        peer_holds_news: bool,
         now_ms: u64,
         route_lease_ms: u64,
     ) -> Result<(), Failure> {
-        // Gate to first-contact: arm a reciprocal dial only for a peer we have
-        // not yet successfully pulled (unknown reachability). Once the reciprocal
-        // exchange succeeds (`record_success` → reachable), later inbound
-        // Contacts do not re-arm — so two Stations do not ping-pong forever after
-        // they have converged. Steady-state reconciliation is the Beacon's job.
-        if let Some(existing) = self.entries.get(station) {
-            if existing.reachability != REACH_UNKNOWN {
-                return Ok(());
-            }
-        } else {
-            self.evict_for_insert();
+        // Two reasons to dial back at a peer that just dialed us.
+        //
+        // * **First contact** — a peer we have never pulled from (unknown
+        //   reachability). This is what redeems a joiner's admission.
+        // * **`peer_holds_news`** — its declaration named an interpreted head
+        //   we lack. A peer dials because it just committed, so that
+        //   declaration is the most reliable evidence of divergence this
+        //   Station will ever get: signed, digest-bound, and delivered on a
+        //   stream that already exists. Without this arm it is discarded and
+        //   the lossy Beacon — whose floor decays to five minutes — becomes the
+        //   only way a passive node ever hears about a neighbour's work.
+        //
+        // First contact alone used to be the whole gate, to stop two Stations
+        // ping-ponging once converged. It bought that at the price of going
+        // permanently deaf: `reachability` leaves `REACH_UNKNOWN` on the first
+        // Beacon (`observe_beacon`) or swarm `NeighborUp` (`note_swarm`), both
+        // of which normally land before any Contact, so in a live daemon the
+        // gate shut before it ever opened.
+        //
+        // `peer_holds_news` restores the arm without restoring the ping-pong,
+        // because it is **positive evidence the peer is ahead**, not a
+        // symmetric "we differ". Once we pull, its heads are a subset of ours
+        // and it stops arming — the predicate has a fixpoint and converged
+        // peers fall quiet on their own. Root inequality has no fixpoint and
+        // must not be used here: opaque Bodies append heads where interpreted
+        // Bodies replace them, so a peer holding material it cannot yet decrypt
+        // would differ forever and dial forever.
+        match self.entries.get(station) {
+            Some(existing) if existing.reachability == REACH_UNKNOWN => {}
+            Some(_) if peer_holds_news => {}
+            Some(_) => return Ok(()),
+            None => self.evict_for_insert(),
         }
         let entry = self
             .entries
@@ -488,6 +521,7 @@ impl NeighborRegistry {
                 pending: false,
                 last_seen_ms: 0,
             });
+        let pending_flipped = !entry.pending;
         entry.pending = true;
         entry.last_seen_ms = now_ms;
         // A direct route toward the inbound peer (scheme 0, no address bytes):
@@ -505,7 +539,14 @@ impl NeighborRegistry {
                 expires_at_ms,
             });
         }
-        self.persist_now(now_ms)
+        // This now runs on every inbound Contact from a peer that is ahead,
+        // not once per peer per lifetime, so a re-arm that changes nothing
+        // durable must not cost a write+rename of the whole registry.
+        if pending_flipped {
+            self.persist_now(now_ms)
+        } else {
+            self.persist_soft(now_ms)
+        }
     }
 
     /// The Neighbors eligible for a Contact attempt now: pending, past their
@@ -847,6 +888,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The station whose Beacon `beacon()` emits, so a registry entry created
+    /// by `observe_beacon` and one addressed by `note_reciprocable` are the
+    /// same neighbour.
+    fn beacon_station() -> Key {
+        beacon(1, 1, [0u8; 32]).station().clone()
+    }
+
+    #[test]
+    fn an_established_peer_that_declares_news_re_arms_a_dial_back() {
+        let dir = temp_dir("reciprocable-news");
+        let mut reg = NeighborRegistry::load(&dir, &space()).unwrap();
+        let local = [0u8; 32];
+        let station = beacon_station();
+
+        // Meet the peer over gossip, converge, and settle: reachability leaves
+        // REACH_UNKNOWN and nothing is queued. This is the steady state a live
+        // daemon spends all its time in, and the state the old first-contact
+        // gate made permanently deaf.
+        reg.observe_beacon(&beacon(1, 1, local), (&local, 0), 1_000, 600_000)
+            .unwrap();
+        reg.record_success(&station, 1_000).unwrap();
+        assert!(!reg.snapshot()[0].pending, "converged peers queue nothing");
+
+        // It dials us carrying no head we lack: still nothing to do.
+        reg.note_reciprocable(&station, false, 2_000, 600_000)
+            .unwrap();
+        assert!(
+            !reg.snapshot()[0].pending,
+            "a peer with nothing we lack must not arm a dial — this is the \
+             ping-pong the first-contact gate existed to prevent"
+        );
+
+        // It dials us declaring an interpreted head we do not hold. That is
+        // positive evidence it is ahead, and the only reliable news a responder
+        // ever gets, so it must arm.
+        reg.note_reciprocable(&station, true, 3_000, 600_000)
+            .unwrap();
+        let entry = &reg.snapshot()[0];
+        assert!(entry.pending, "a peer that is ahead of us must arm a pull");
+        assert_eq!(
+            reg.eligible(3_000),
+            vec![station.clone()],
+            "arming must also leave the entry dialable, not merely pending"
+        );
+
+        // And the arm has a fixpoint: once we pull, the peer stops being ahead
+        // and the next inbound Contact goes quiet again.
+        reg.record_success(&station, 4_000).unwrap();
+        reg.note_reciprocable(&station, false, 5_000, 600_000)
+            .unwrap();
+        assert!(
+            !reg.snapshot()[0].pending,
+            "convergence must silence the arm, or it is a dial loop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_first_contact_still_arms_without_news() {
+        let dir = temp_dir("reciprocable-first");
+        let mut reg = NeighborRegistry::load(&dir, &space()).unwrap();
+        let station = Key::from_key_bytes([9u8; 32]);
+        // A joiner pre-admission publishes nothing, so it declares nothing —
+        // the reciprocal pull is what redeems its admission and it must still
+        // be armed on a bare first contact.
+        reg.note_reciprocable(&station, false, 1_000, 600_000)
+            .unwrap();
+        assert!(reg.snapshot()[0].pending);
+        assert_eq!(reg.eligible(1_000), vec![station]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_registry_is_capped_and_evicts_the_least_valuable() {
         let dir = temp_dir("cap");
@@ -858,7 +971,7 @@ mod tests {
             key[..8].copy_from_slice(&(i as u64).to_le_bytes());
             key[31] = 1;
             let station = Key::from_key_bytes(key);
-            reg.note_reciprocable(&station, 1_000 + i as u64, 600_000)
+            reg.note_reciprocable(&station, false, 1_000 + i as u64, 600_000)
                 .unwrap();
         }
         assert_eq!(reg.snapshot().len(), MAX_NEIGHBOR_ENTRIES);
