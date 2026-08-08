@@ -17,8 +17,11 @@ const MODE_ICON = { list: List, board: SquareKanban, timeline: GanttChart } as c
  * popover would be the one overlay the registry couldn't reach.
  *
  * Grouping applies to the list (the board's columns *are* the status grouping);
- * ordering applies to both. Deleted issues are a dedicated list recovery mode;
- * choosing it from the board moves to that destination.
+ * ordering applies to both. Neither applies to the timeline, whose order is the
+ * dependency graph's and not a preference — so it is told that rather than being
+ * offered two controls that accept a click and change nothing. Deleted issues
+ * are a dedicated list recovery mode; choosing it from the board moves to that
+ * destination.
  */
 export function DisplayOptions({
   display,
@@ -42,8 +45,12 @@ export function DisplayOptions({
   density: "compact" | "comfortable";
   onDensityChange: (density: "compact" | "comfortable") => void;
 }) {
+  // Only count what this view actually spends. A timeline showing the "changed"
+  // dot because the *list* is grouped by assignee points at a panel where that
+  // choice is not even on screen.
   const changed =
-    display.group !== "status" || display.order !== "board" || display.deleted;
+    display.deleted ||
+    (view !== "timeline" && (display.group !== "status" || display.order !== "board"));
 
   return (
     <Popover
@@ -82,45 +89,62 @@ export function DisplayOptions({
             })}
           </div>
 
-          <Axis label="Group by">
-            {(
-              [
-                ["status", "Status"],
-                ["assignee", "Assignee"],
-                ["priority", "Priority"],
-                ["none", "None"],
-              ] as const
-            )
-              // "None" is a list-only shape — a single-column board is just the
-              // list; the board's other axes (status/assignee/priority) become
-              // its columns.
-              .filter(([id]) => !(view === "board" && id === "none"))
-              .map(([id, label]) => (
-                <Choice
-                  key={id}
-                  label={label}
-                  active={display.group === id}
-                  onClick={() => onChange({ ...display, group: id as GroupBy })}
-                />
-              ))}
-          </Axis>
+          {/* Neither axis exists on the timeline, and pretending otherwise was
+              worse than omitting them: both rendered live, both took a click,
+              both lit up as chosen, and neither moved a single row — the chart
+              is ordered by dependency depth and there is nothing for "group by
+              assignee" to mean. A control that accepts input and does nothing
+              is a lie about what the view can do, so the timeline gets the one
+              sentence that is true instead. */}
+          {view === "timeline" ? (
+            <p className="text-mute px-1 text-xs leading-5">
+              Rows are ordered by what blocks what — dependency depth first, then
+              the project's milestone order. Grouping and ordering belong to the
+              list and the board.
+            </p>
+          ) : (
+            <>
+              <Axis label="Group by">
+                {(
+                  [
+                    ["status", "Status"],
+                    ["assignee", "Assignee"],
+                    ["priority", "Priority"],
+                    ["none", "None"],
+                  ] as const
+                )
+                  // "None" is a list-only shape — a single-column board is just
+                  // the list; the board's other axes (status/assignee/priority)
+                  // become its columns.
+                  .filter(([id]) => !(view === "board" && id === "none"))
+                  .map(([id, label]) => (
+                    <Choice
+                      key={id}
+                      label={label}
+                      active={display.group === id}
+                      onClick={() => onChange({ ...display, group: id as GroupBy })}
+                    />
+                  ))}
+              </Axis>
 
-          <Axis label="Order by">
-            {(
-              [
-                ["board", "Board order"],
-                ["priority", "Priority"],
-                ["title", "Title"],
-              ] as const
-            ).map(([id, label]) => (
-              <Choice
-                key={id}
-                label={label}
-                active={display.order === id}
-                onClick={() => onChange({ ...display, order: id as OrderBy })}
-              />
-            ))}
-          </Axis>
+              <Axis label="Order by">
+                {(
+                  [
+                    ["board", "Board order"],
+                    ["priority", "Priority"],
+                    ["title", "Title"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <Choice
+                    key={id}
+                    label={label}
+                    active={display.order === id}
+                    onClick={() => onChange({ ...display, order: id as OrderBy })}
+                  />
+                ))}
+              </Axis>
+            </>
+          )}
 
           {/* TWO-VALUED AXES ARE SWITCHES, NOT PAIRS OF PILLS.
               A pill pair asks you to read both labels and work out which is lit;

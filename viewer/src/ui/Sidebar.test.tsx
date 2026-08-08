@@ -56,7 +56,9 @@ describe("Sidebar navigation", () => {
     click("Projects");
     expect(onGo).toHaveBeenCalledWith("projects");
     click("Roadmap");
-    expect(onGo).toHaveBeenCalledWith("timeline");
+    // Explicitly project-less: Roadmap is the workspace chart, and `goto`
+    // would otherwise carry the open project into it.
+    expect(onGo).toHaveBeenCalledWith("timeline", null);
     click("My issues");
     expect(onMyIssues).toHaveBeenCalledOnce();
     click("Search issues");

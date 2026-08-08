@@ -1143,3 +1143,66 @@
     top: 40px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   The sequence chart's chain reveal.
+
+   Picking one issue lights everything it reaches, transitively — which on its
+   own would light most of the project and say nothing. What makes it readable
+   is that it arrives as a *wavefront*: each connector draws itself from its
+   source toward its target, and the pill at the far end lights as the line
+   lands on it. Distance is carried by when a thing happens rather than by
+   whether it happens, so a twelve-hop chain reads as twelve steps instead of as
+   a lit blob.
+
+   `pathLength="1"` on the path is what makes this two rules instead of a
+   measurement: the dash array is normalised, so one keyframe draws a curve of
+   any real length. The per-hop delay is set inline.
+   --------------------------------------------------------------------------- */
+/* Forward: the line grows from its source toward its target. */
+@keyframes lait-chain-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Backward, for the half of the chain that runs the other way.
+ *
+ * The reveal spreads out from the pill you picked, so an edge on the blocker
+ * side has to draw from its *target* end — which is the end nearest the focus —
+ * back toward its source. Drawing every edge source-first made the upstream
+ * half appear to grow inward at the wavefront, against the motion of everything
+ * else. A negative offset unrolls the dash from the other end. */
+@keyframes lait-chain-draw-back {
+  from {
+    stroke-dashoffset: -1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes lait-chain-land {
+  from {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* A wavefront is motion, and motion is the thing this preference turns off. The
+   highlight still happens — every mark on the chain still lights, and the
+   answer is identical — it just arrives at once instead of travelling. */
+@media (prefers-reduced-motion: reduce) {
+  .lait-chain-draw,
+  .lait-chain-draw-back,
+  .lait-chain-land {
+    animation: none !important;
+  }
+}

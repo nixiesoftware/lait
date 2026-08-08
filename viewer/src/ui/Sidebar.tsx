@@ -71,7 +71,7 @@ export function Sidebar({
   onPickSpace: (id: string) => void;
   onSearch: () => void;
   onOpenProjectView: (key: string, view: ProjectView) => void;
-  onGo: (view: View) => void;
+  onGo: (view: View, project?: string | null) => void;
   onMyIssues: () => void;
   onApplySavedView: (view: SavedView) => void;
   onToggleFavorite: (key: string) => void;
@@ -159,7 +159,11 @@ export function Sidebar({
       <Section title="Workspace" />
       <div className="flex flex-col gap-px">
         <NavItem icon={<FolderKanban />} label="Projects" active={view === "projects"} onClick={() => onGo("projects")} />
-        <NavItem icon={<GanttChart />} label="Roadmap" active={view === "timeline"} onClick={() => onGo("timeline")} />
+        {/* `null` and not the default. `goto` keeps the project you are in for
+            any project-capable view, and Timeline is one — so without this the
+            workspace Roadmap landed on whichever project you last had open, and
+            the space-wide chart was unreachable while any project existed. */}
+        <NavItem icon={<GanttChart />} label="Roadmap" active={view === "timeline"} onClick={() => onGo("timeline", null)} />
         {savedViews.length > 0 && <MiniSection title="Saved views" />}
         {savedViews.map((saved) => (
           <NavItem key={saved.id} icon={<Bookmark />} label={saved.name} onClick={() => onApplySavedView(saved)} compact />

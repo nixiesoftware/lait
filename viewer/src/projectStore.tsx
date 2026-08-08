@@ -438,6 +438,81 @@ export class ProjectViewerStore {
     }, force);
   }
 
+  /**
+   * Every project's milestones, for the workspace roadmap.
+   *
+   * Same fan-out as the boards and for the same reasons: one cached resource
+   * per project, one slow project cannot blank the rest.
+   */
+  async ensureSpaceMilestones(
+    space: string,
+    projectIds: readonly string[],
+  ): Promise<Record<string, MilestoneDto[]>> {
+    const loaded = await Promise.all(
+      projectIds.map((id) =>
+        this.ensureMilestones(space, id)
+          .then((milestones) => [id, milestones] as const)
+          .catch(() => null),
+      ),
+    );
+    return Object.fromEntries(loaded.filter((entry) => entry !== null));
+  }
+
+  /**
+   * Every project's board, for the workspace-wide sequence chart.
+   *
+   * One board per project rather than `board { project: null }`, which is the
+   * request that *looks* right and cannot work here: the daemon resolves a null
+   * project through a CLI chain (git branch → `project.default` → the only
+   * project) and a space with two projects reaches the teaching error every
+   * time. See `useProjectBoard`'s note. Fanning out also means every board is
+   * the same cached resource the project view reads, so opening a project after
+   * the workspace chart costs nothing.
+   *
+   * Keyed by project KEY, which is what `ensureBoard` takes.
+   */
+  async ensureSpaceBoards(
+    space: string,
+    projectKeys: readonly string[],
+  ): Promise<Record<string, BoardView>> {
+    const loaded = await Promise.all(
+      projectKeys.map((key) =>
+        this.ensureBoard(space, key)
+          .then((board) => [key, board] as const)
+          .catch(() => null),
+      ),
+    );
+    return Object.fromEntries(loaded.filter((entry) => entry !== null));
+  }
+
+  /**
+   * Every project's dependency graph, for the workspace-wide sequence chart.
+   *
+   * Fans out over `ensureProjectGraph` rather than asking for a space-wide
+   * graph, and that is deliberate: each project's answer stays under its own
+   * resource key, with its own dependencies, so a write in one project
+   * refreshes one graph instead of all of them. The workspace view is a reader
+   * of N cached resources, not an N+1th resource with its own copy of them.
+   *
+   * A project whose graph fails to load contributes no edges rather than
+   * failing the whole chart. One unreachable project should not blank the other
+   * nine — the chart is honest about a missing edge set the same way it is
+   * honest about a project that simply has none.
+   */
+  async ensureSpaceGraphs(
+    space: string,
+    projectIds: readonly string[],
+  ): Promise<Record<string, ProjectGraphView>> {
+    const loaded = await Promise.all(
+      projectIds.map((id) =>
+        this.ensureProjectGraph(space, id)
+          .then((graph) => [id, graph] as const)
+          .catch(() => null),
+      ),
+    );
+    return Object.fromEntries(loaded.filter((entry) => entry !== null));
+  }
+
   ensureMilestones(space: string, project: string, force = false): Promise<MilestoneDto[]> {
     return this.load(projectKeys.milestones(space, project), async () => {
       const result = await this.rpc(space, { cmd: "milestone_list", project });
@@ -1148,6 +1223,66 @@ export function useProjectGraph(
           ? store.ensureProjectGraph(space, projectId)
           : Promise.resolve({ schema_version: 0, project: "", edges: [], parents: [] }),
       [projectId, space, store],
+    ),
+  );
+}
+
+/**
+ * Every project's dependency graph at once, for the workspace sequence chart.
+ *
+ * Keyed on the project ids themselves, so adding or removing a project
+ * re-resolves and switching spaces cannot read the last one's edges. The ids
+ * are sorted into the key because the caller's array order is the sidebar's,
+ * and a reorder there is not a different question.
+ */
+/**
+ * Every project's board at once, for the workspace sequence chart.
+ *
+ * Pass an empty list to park: the workspace chart is the only caller and every
+ * other surface would be paying N requests for rows it does not draw.
+ */
+export function useSpaceBoards(
+  space: string,
+  projectKeys: readonly string[],
+): ResourceSnapshot<Record<string, BoardView>> {
+  const store = useProjectViewerStore();
+  const signature = [...projectKeys].sort().join(",");
+  return useWorldResource<Record<string, BoardView>>(
+    `${prefix(space)}spaceboards:${signature}`,
+    useCallback(
+      () => store.ensureSpaceBoards(space, signature ? signature.split(",") : []),
+      [signature, space, store],
+    ),
+  );
+}
+
+/** Every project's milestones at once, for the workspace roadmap. */
+export function useSpaceMilestones(
+  space: string,
+  projectIds: readonly string[],
+): ResourceSnapshot<Record<string, MilestoneDto[]>> {
+  const store = useProjectViewerStore();
+  const signature = [...projectIds].sort().join(",");
+  return useWorldResource<Record<string, MilestoneDto[]>>(
+    `${prefix(space)}spacemilestones:${signature}`,
+    useCallback(
+      () => store.ensureSpaceMilestones(space, signature ? signature.split(",") : []),
+      [signature, space, store],
+    ),
+  );
+}
+
+export function useSpaceGraphs(
+  space: string,
+  projectIds: readonly string[],
+): ResourceSnapshot<Record<string, ProjectGraphView>> {
+  const store = useProjectViewerStore();
+  const signature = [...projectIds].sort().join(",");
+  return useWorldResource<Record<string, ProjectGraphView>>(
+    `${prefix(space)}spacegraphs:${signature}`,
+    useCallback(
+      () => store.ensureSpaceGraphs(space, signature ? signature.split(",") : []),
+      [signature, space, store],
     ),
   );
 }

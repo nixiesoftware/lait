@@ -21,12 +21,29 @@ import type { GraphEdgeDto, Row, StatusCategory, WorkflowState } from "../types"
  * - **wave** — an issue's dependency depth. Wave 0 is everything nothing
  *   blocks: the work that could start this morning. Wave N is what waits on
  *   wave N-1.
- * - **critical path** — the longest chain of blockers. Its length *is* the
- *   number of waves, so nothing finishes sooner than this chain does, however
- *   many people you add.
+ * - **slack** — how many rounds an issue could sit later in the order without
+ *   pushing the end of the project out. Zero slack means it is on *a* longest
+ *   chain, and that if it slips the whole project slips.
+ *
+ *   This replaced a single "critical path". The path was the wrong shape for
+ *   two reasons. Its *length* was already on screen twice — the longest chain's
+ *   length is by construction the number of waves, so the legend printed one
+ *   number under two labels. And when several chains tied, which of them got
+ *   drawn came down to total estimate and then to **doc id**: the chart painted
+ *   one arbitrarily chosen chain as the constraint while an equally
+ *   constraining one sat next to it in grey. Slack has no winner to pick. It
+ *   names every issue that constrains the finish, which is both the honest
+ *   answer and the one you can act on.
  * - **cycle** — `blocks` edges have no CRDT stopping them forming a loop (the
  *   sub-issue tree does; this is not that tree). A loop has no depth, so it is
  *   detected and set aside rather than being allowed to hang the layout.
+ * - **stalled** — not in a loop, but downstream of one, so it has no depth
+ *   either. Kahn's cannot tell these two apart on its own and the first cut did
+ *   not try: everything the queue failed to drain was reported as "these issues
+ *   block each other", which is a false statement about a node that merely
+ *   waits on a loop it is not part of. They are separated here because the view
+ *   says different sentences about them and one of those sentences has to be
+ *   true.
  */
 
 /** An issue placed in the sequence. */
@@ -38,10 +55,23 @@ export interface SequenceNode {
   blockedBy: string[];
   /** Doc ids of the issues this one directly blocks. */
   blocks: string[];
-  /** On the longest chain — the run of work that sets the floor on finishing. */
+  /**
+   * Rounds this issue could slip before the project's finish moves.
+   *
+   * `0` means it is on a longest chain. A project of one column has no chain to
+   * be on, so nothing there has zero slack — reporting otherwise would badge
+   * every issue in a dependency-free project as constraining.
+   */
+  slack: number;
+  /** `slack === 0`: nothing between this and the end of the project has room. */
   critical: boolean;
-  /** In a dependency loop, so it has no honest depth. Parked in its own bucket. */
+  /** On a dependency loop, so it has no honest depth. Parked in its own bucket. */
   cyclic: boolean;
+  /**
+   * Downstream of a loop, so it has no honest depth either — but it is not in
+   * one, and must not be described as if it were.
+   */
+  stalled: boolean;
   /** Every blocker is finished, so the only thing between this and starting is
    *  someone picking it up. False for anything already done. */
   ready: boolean;
@@ -54,6 +84,14 @@ export interface SequenceNode {
    * claim this view is entitled to make.
    */
   impossible: boolean;
+  /**
+   * The blockers behind `impossible`, by doc id.
+   *
+   * The flag alone was a warning triangle a person could not act on: it said a
+   * contradiction existed and refused to say between which two dates. Naming
+   * the other end is what turns it from an alarm into a fix.
+   */
+  conflicts: string[];
 }
 
 export interface SequenceModel {
@@ -61,10 +99,17 @@ export interface SequenceModel {
   waves: SequenceNode[][];
   /** Every node by doc id, for connector lookup. */
   byDoc: Map<string, SequenceNode>;
-  /** Nodes in a dependency loop, which have no depth and are drawn apart. */
+  /** Nodes on a dependency loop, which have no depth and are drawn apart. */
   cyclic: SequenceNode[];
-  /** Doc ids on the critical path, in order. Empty when nothing blocks anything. */
-  criticalPath: string[];
+  /** Nodes downstream of a loop: no depth either, but not part of the loop. */
+  stalled: SequenceNode[];
+  /**
+   * Each loop, as its members in the order the edges run, so the view can name
+   * the cycle ("A → B → A") instead of listing a set and hoping.
+   */
+  loops: string[][];
+  /** How many nodes have zero slack. `0` when nothing blocks anything. */
+  criticalCount: number;
   /** Direct `blocks` edges between nodes that both survived into the model. */
   edges: SequenceEdge[];
 }
@@ -72,7 +117,8 @@ export interface SequenceModel {
 export interface SequenceEdge {
   from: string;
   to: string;
-  /** Both ends on the critical path, adjacently — drawn with emphasis. */
+  /** A step along a longest chain: both ends have zero slack and the second
+   *  sits exactly one round after the first. Drawn with emphasis. */
   critical: boolean;
   /** The blocker is done, so this constraint is already satisfied. */
   cleared: boolean;
@@ -116,7 +162,7 @@ export function buildSequence(
     blocks.get(edge.from)!.push(edge.to);
   }
 
-  const { wave, cyclic } = depths(rowByDoc, blockedBy);
+  const { wave, cyclic, stalled, loops } = depths(rowByDoc, blockedBy, blocks);
 
   // Structural depth, computed over every edge regardless of status — a done
   // blocker still holds its position in the sequence.
@@ -130,30 +176,38 @@ export function buildSequence(
   for (const [doc, row] of rowByDoc) {
     const blockers = blockedBy.get(doc)!;
     const due = row.due_date ?? null;
+    const conflicts =
+      due === null
+        ? []
+        : blockers.filter((b) => {
+            const blockerDue = rowByDoc.get(b)?.due_date ?? null;
+            return blockerDue !== null && blockerDue >= due;
+          });
     nodes.set(doc, {
       row,
       wave: wave.get(doc) ?? 0,
       blockedBy: blockers,
       blocks: blocks.get(doc)!,
+      slack: 0,
       critical: false,
       cyclic: cyclic.has(doc),
+      stalled: stalled.has(doc),
       ready: !done(row) && blockers.every((b) => {
         const blocker = rowByDoc.get(b);
         return blocker !== undefined && done(blocker);
       }),
-      impossible:
-        due !== null &&
-        blockers.some((b) => {
-          const blocker = rowByDoc.get(b);
-          const blockerDue = blocker?.due_date ?? null;
-          return blockerDue !== null && blockerDue >= due;
-        }),
+      impossible: conflicts.length > 0,
+      conflicts,
     });
   }
 
-  const criticalPath = longestChain(nodes, cyclic);
-  const onPath = new Set(criticalPath);
-  for (const doc of criticalPath) nodes.get(doc)!.critical = true;
+  // A node with no honest depth has no honest slack either, whether it is in
+  // the loop or merely behind one.
+  const unplaced = new Set([...cyclic, ...stalled]);
+  const placed = [...nodes.values()].filter((n) => !unplaced.has(n.row.doc_id));
+  const depth = Math.max(0, ...placed.map((n) => n.wave));
+  assignSlack(nodes, placed, depth);
+  const criticalCount = placed.filter((n) => n.critical).length;
 
   const modelEdges: SequenceEdge[] = [];
   for (const [doc, node] of nodes) {
@@ -163,32 +217,70 @@ export function buildSequence(
       modelEdges.push({
         from: doc,
         to: target,
-        // Adjacent on the path, not merely both on it: a chord between two
-        // path members is a different constraint and drawing it with the same
-        // emphasis would claim the path runs through it.
-        critical:
-          onPath.has(doc) &&
-          onPath.has(target) &&
-          criticalPath.indexOf(target) === criticalPath.indexOf(doc) + 1,
+        // A step, not merely a pair of constrained ends. A chord skipping a
+        // round joins two zero-slack issues without being a link in any longest
+        // chain, and drawing it with the same weight would claim the chain runs
+        // through it.
+        critical: node.critical && to.critical && to.wave === node.wave + 1,
         cleared: done(node.row),
       });
     }
   }
 
-  const depth = Math.max(0, ...[...nodes.values()].filter((n) => !n.cyclic).map((n) => n.wave));
-  const waves: SequenceNode[][] = Array.from({ length: nodes.size ? depth + 1 : 0 }, () => []);
-  for (const node of nodes.values()) {
-    if (node.cyclic) continue;
-    waves[node.wave]!.push(node);
-  }
+  const waves: SequenceNode[][] = Array.from({ length: placed.length ? depth + 1 : 0 }, () => []);
+  for (const node of placed) waves[node.wave]!.push(node);
 
   return {
     waves,
     byDoc: nodes,
     cyclic: [...nodes.values()].filter((n) => n.cyclic),
-    criticalPath,
+    stalled: [...nodes.values()].filter((n) => n.stalled),
+    loops,
+    criticalCount,
     edges: modelEdges,
   };
+}
+
+/**
+ * How far each issue could slip before the project's end moves.
+ *
+ * `wave` is already the earliest round an issue can sit in — the longest path
+ * down to it. The other half is the longest path *onward* from it to something
+ * nothing waits on; subtract that from the last round and you have the latest
+ * round it could occupy. The gap between the two is its slack, and zero slack
+ * is the precise statement of "this one constrains the finish".
+ *
+ * The onward walk goes in reverse wave order, which is a valid topological
+ * order for the placed subgraph by construction — every edge runs from a lower
+ * wave to a higher one, so a node's dependents are all settled before it is
+ * reached. No second sort, and no risk of recursing down a chain of user data.
+ *
+ * A project of one column is exempt. Every issue in it would otherwise measure
+ * zero slack and get badged as constraining the finish, which is technically
+ * consistent and useless: with nothing blocking anything, nothing is holding
+ * anything up.
+ */
+function assignSlack(
+  nodes: ReadonlyMap<string, SequenceNode>,
+  placed: readonly SequenceNode[],
+  depth: number,
+): void {
+  if (depth === 0) return;
+  /** Longest path in hops from this node to something nothing waits on. */
+  const onward = new Map<string, number>();
+  for (const node of [...placed].sort((a, b) => b.wave - a.wave)) {
+    let longest = 0;
+    for (const next of node.blocks) {
+      const dependent = nodes.get(next);
+      if (!dependent || !onward.has(next)) continue;
+      longest = Math.max(longest, onward.get(next)! + 1);
+    }
+    onward.set(node.row.doc_id, longest);
+  }
+  for (const node of placed) {
+    node.slack = depth - (onward.get(node.row.doc_id) ?? 0) - node.wave;
+    node.critical = node.slack === 0;
+  }
 }
 
 /**
@@ -199,14 +291,28 @@ export function buildSequence(
  * column after its nearest blocker and draw the rest of its constraints as
  * lines running backwards.
  *
- * Kahn's also answers the cycle question for free. A node in a loop never
- * reaches in-degree zero, so whatever the queue does not drain is exactly the
- * set with no honest depth — no separate cycle hunt needed.
+ * Kahn's also answers *whether* there is a cycle for free: a node in a loop
+ * never reaches in-degree zero, so whatever the queue does not drain is exactly
+ * the set with no honest depth.
+ *
+ * What it cannot answer is *which* of those nodes are in the loop. Everything
+ * downstream of a loop also fails to drain, and calling those "issues that
+ * block each other" is simply false — a fixture with a two-issue loop reported
+ * three, and the third was an ordinary issue waiting behind it. So the
+ * undrained set is split by strong connectivity: a component of more than one
+ * node is a loop, and everything else that failed to drain is stalled behind
+ * one.
  */
 function depths(
   rowByDoc: ReadonlyMap<string, Row>,
   blockedBy: ReadonlyMap<string, string[]>,
-): { wave: Map<string, number>; cyclic: Set<string> } {
+  blocks: ReadonlyMap<string, string[]>,
+): {
+  wave: Map<string, number>;
+  cyclic: Set<string>;
+  stalled: Set<string>;
+  loops: string[][];
+} {
   const indegree = new Map<string, number>();
   const dependents = new Map<string, string[]>();
   for (const doc of rowByDoc.keys()) {
@@ -237,82 +343,165 @@ function depths(
     }
   }
 
+  const undrained: string[] = [];
+  for (const doc of rowByDoc.keys()) if (!wave.has(doc)) undrained.push(doc);
+
+  // Strong connectivity over the undrained subgraph only. The drained part is
+  // acyclic by construction, so there is nothing there to find and no reason to
+  // walk it.
+  const within = new Set(undrained);
+  const onward = new Map<string, string[]>();
+  for (const doc of undrained) {
+    onward.set(doc, (blocks.get(doc) ?? []).filter((next) => within.has(next)));
+  }
+
   const cyclic = new Set<string>();
-  for (const doc of rowByDoc.keys()) if (!wave.has(doc)) cyclic.add(doc);
-  return { wave, cyclic };
+  const loops: string[][] = [];
+  for (const component of stronglyConnected(undrained, onward)) {
+    // A component of one is a node that cannot reach itself — a self-edge would
+    // make it a loop of one, and those are rejected before they ever get here.
+    if (component.length < 2) continue;
+    for (const doc of component) cyclic.add(doc);
+    loops.push(traverseLoop(component, onward));
+  }
+
+  const stalled = new Set(undrained.filter((doc) => !cyclic.has(doc)));
+  return { wave, cyclic, stalled, loops };
 }
 
 /**
- * The longest chain of blockers, as doc ids from first to last.
+ * Tarjan's strongly connected components, iteratively.
  *
- * Ties break on total estimate, then on doc id. The estimate tie-break is the
- * useful one — two chains of equal length are not equally alarming if one holds
- * three times the work — and the doc-id fallback is what makes the answer
- * stable: without it, two equal chains would swap places between renders
- * depending on map order, and the highlight would flicker.
+ * Iterative rather than the textbook recursion because the recursion depth is
+ * the size of the component, and the input here is user data: a project that
+ * has managed to chain several thousand issues into one loop should get a
+ * warning, not a blown stack in the middle of a render.
  */
-function longestChain(
-  nodes: ReadonlyMap<string, SequenceNode>,
-  cyclic: ReadonlySet<string>,
-): string[] {
-  const weight = (doc: string) => nodes.get(doc)?.row.estimate ?? 1;
-  const best = new Map<string, { length: number; cost: number; prev: string | null }>();
+function stronglyConnected(
+  nodes: readonly string[],
+  onward: ReadonlyMap<string, string[]>,
+): string[][] {
+  const index = new Map<string, number>();
+  const low = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const components: string[][] = [];
+  let counter = 0;
 
-  const ordered = [...nodes.values()]
-    .filter((n) => !cyclic.has(n.row.doc_id))
-    .sort((a, b) => a.wave - b.wave || a.row.doc_id.localeCompare(b.row.doc_id));
+  const open = (doc: string) => {
+    index.set(doc, counter);
+    low.set(doc, counter);
+    counter += 1;
+    stack.push(doc);
+    onStack.add(doc);
+  };
 
-  for (const node of ordered) {
-    const doc = node.row.doc_id;
-    let pick: { length: number; cost: number; prev: string | null } = {
-      length: 1,
-      cost: weight(doc),
-      prev: null,
-    };
-    for (const blocker of node.blockedBy) {
-      const from = best.get(blocker);
-      if (!from) continue;
-      const candidate = {
-        length: from.length + 1,
-        cost: from.cost + weight(doc),
-        prev: blocker,
-      };
-      if (
-        candidate.length > pick.length ||
-        (candidate.length === pick.length && candidate.cost > pick.cost) ||
-        (candidate.length === pick.length &&
-          candidate.cost === pick.cost &&
-          pick.prev !== null &&
-          blocker.localeCompare(pick.prev) < 0)
-      ) {
-        pick = candidate;
+  for (const root of nodes) {
+    if (index.has(root)) continue;
+    open(root);
+    /** The explicit call stack: which node, and how far through its edges. */
+    const frames: Array<{ doc: string; cursor: number }> = [{ doc: root, cursor: 0 }];
+
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]!;
+      const edges = onward.get(frame.doc) ?? [];
+      if (frame.cursor < edges.length) {
+        const next = edges[frame.cursor]!;
+        frame.cursor += 1;
+        if (!index.has(next)) {
+          open(next);
+          frames.push({ doc: next, cursor: 0 });
+        } else if (onStack.has(next)) {
+          low.set(frame.doc, Math.min(low.get(frame.doc)!, index.get(next)!));
+        }
+        continue;
+      }
+
+      frames.pop();
+      const parent = frames[frames.length - 1];
+      if (parent) low.set(parent.doc, Math.min(low.get(parent.doc)!, low.get(frame.doc)!));
+      if (low.get(frame.doc) === index.get(frame.doc)) {
+        const component: string[] = [];
+        for (;;) {
+          const popped = stack.pop()!;
+          onStack.delete(popped);
+          component.push(popped);
+          if (popped === frame.doc) break;
+        }
+        components.push(component);
       }
     }
-    best.set(doc, pick);
   }
+  return components;
+}
 
-  let tail: string | null = null;
-  for (const [doc, entry] of best) {
-    const champion = tail ? best.get(tail)! : null;
-    if (
-      !champion ||
-      entry.length > champion.length ||
-      (entry.length === champion.length && entry.cost > champion.cost) ||
-      (entry.length === champion.length &&
-        entry.cost === champion.cost &&
-        doc.localeCompare(tail!) < 0)
-    ) {
-      tail = doc;
+/**
+ * A loop's members in the order its edges actually run.
+ *
+ * Tarjan hands back a set in finish order, which is not the order anybody wants
+ * to read: "these four block each other" says nothing a person can act on,
+ * while "A blocks B blocks C blocks A" names the edge to cut. Starts at the
+ * lexicographically first member so the same loop reads the same way twice.
+ */
+function traverseLoop(component: readonly string[], onward: ReadonlyMap<string, string[]>): string[] {
+  const members = new Set(component);
+  const start = [...component].sort()[0]!;
+  const order: string[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined = start;
+  while (cursor !== undefined && !seen.has(cursor)) {
+    seen.add(cursor);
+    order.push(cursor);
+    cursor = (onward.get(cursor) ?? [])
+      .filter((next) => members.has(next))
+      .sort()
+      .find((next) => !seen.has(next));
+  }
+  // Anything the walk could not reach in one pass (a component woven from more
+  // than one loop) still belongs in the answer; appending beats dropping it.
+  for (const doc of [...component].sort()) if (!seen.has(doc)) order.push(doc);
+  return order;
+}
+
+/**
+ * One issue's chain: everything it waits on, everything that waits on it, and
+ * how many hops away each of those is.
+ *
+ * Two separate walks, one up the `blockedBy` edges and one down the `blocks`
+ * edges — and never a mixture. That is the whole correctness of this function.
+ * A single walk that follows both directions at each step does not trace a
+ * chain at all: from `a` it goes up to a blocker and straight back down to
+ * every *sibling* that shares it, which is not something `a` depends on nor
+ * something that depends on `a`. In a graph of any density that reaches almost
+ * everything, which is why the first cut lit thirty-one of thirty-four rows and
+ * the animation played across the whole page for any issue you touched.
+ *
+ * Transitive within each direction, though, which the one-hop version this
+ * replaced deliberately was not. The argument then was that breadth says
+ * nothing — true, when breadth is all that is on screen. The view animates the
+ * reach outward a hop at a time now, so distance is carried by *when* a mark
+ * lights, and the ancestors-and-descendants set is exactly the set a person
+ * means by "this issue's chain".
+ */
+export function reachFrom(model: SequenceModel, doc: string): Map<string, number> {
+  const hops = new Map<string, number>();
+  if (!model.byDoc.has(doc)) return hops;
+  hops.set(doc, 0);
+  for (const direction of ["blockedBy", "blocks"] as const) {
+    let frontier = [doc];
+    let depth = 0;
+    while (frontier.length > 0) {
+      depth += 1;
+      const next: string[] = [];
+      for (const at of frontier) {
+        for (const other of model.byDoc.get(at)?.[direction] ?? []) {
+          if (hops.has(other) || !model.byDoc.has(other)) continue;
+          hops.set(other, depth);
+          next.push(other);
+        }
+      }
+      frontier = next;
     }
   }
-
-  // A chain of one is not a critical path — it is an issue. Reporting it would
-  // put a "critical path" badge on a project where nothing blocks anything.
-  if (tail === null || best.get(tail)!.length < 2) return [];
-
-  const chain: string[] = [];
-  for (let cursor: string | null = tail; cursor !== null; cursor = best.get(cursor)!.prev) {
-    chain.push(cursor);
-  }
-  return chain.reverse();
+  return hops;
 }

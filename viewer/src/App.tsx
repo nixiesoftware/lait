@@ -42,8 +42,8 @@ import { classifyFailure, EmptyState, InlineError, recoveryForError, StandingNot
 import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
-import { Timeline } from "./ui/Timeline";
 import { ProjectTimeline } from "./ui/ProjectTimeline";
+import { Roadmap } from "./ui/Roadmap";
 import { DisplayOptions } from "./ui/DisplayOptions";
 import { FilterMenu } from "./ui/FilterMenu";
 import type { IssueMutators } from "./ui/fields";
@@ -99,6 +99,8 @@ import {
   useProjectBoard,
   useProjectMilestones,
   useProjectGraph,
+  useSpaceBoards,
+  useSpaceMilestones,
   useProjectRegistry,
   useProjectViewerStore,
   useSpec,
@@ -700,8 +702,16 @@ export function App() {
    * (Reading `project.default` outright is not possible from here — `config` is a
    * `Special` CLI handler, not a `Request`, so no HTTP endpoint reaches it.)
    */
+  //
+  // Timeline is the exception, and it is the reason the rule needed one. It is
+  // a project view *and* a workspace view — the same chart at two scales — so a
+  // project-less timeline route is a destination rather than an unresolved one,
+  // and defaulting a project into it made the workspace chart unreachable the
+  // moment a space had a project to default to. It also does not need the
+  // resolution: the workspace chart asks for every project's board by name.
   useEffect(() => {
-    if (!isProjectView(view) || project !== null || projects.length === 0) return;
+    if (!isProjectView(view) || view === "timeline" || project !== null) return;
+    if (projects.length === 0) return;
     setProject((projects.find((candidate) => !candidate.archived) ?? projects[0])!.key);
   }, [projects, project, view]);
 
@@ -1397,7 +1407,11 @@ export function App() {
     // `?issue=` while composing — and the two have to agree or a reload lands
     // somewhere the app was not.
     !composing?.page &&
-    (view === "list" || view === "board" || view === "calendar"),
+    // Timeline belongs here for the same reason the other three do: its rows
+    // are issues and its rail is a select target. Leaving it out meant a click
+    // on a timeline row wrote `?issue=` and set `detail`, and then nothing
+    // appeared — the one gesture every row advertises did nothing at all.
+    (view === "list" || view === "board" || view === "calendar" || view === "timeline"),
   );
   // Keep one panel topology for every view. The old two-id declaration mounted a
   // third panel only for issue-capable views, so the library rebalanced the
@@ -1542,6 +1556,32 @@ export function App() {
   // reads it, but the hook has to be called unconditionally — and it costs
   // nothing when no project is open, which is exactly when it resolves empty.
   const projectGraph = useProjectGraph(current ?? "", activeProject?.id).data ?? null;
+  /**
+   * Every project's edge set, for the workspace sequence chart.
+   *
+   * Asked for only when the workspace timeline is what is on screen: it is N
+   * requests, and the other workspace surfaces have no use for them. Each one
+   * lands in its own resource, so opening a project afterwards reads the graph
+   * this already fetched rather than asking again.
+   */
+  /**
+   * The roadmap's data, fetched only while the roadmap is what is on screen.
+   *
+   * Two fan-outs of N requests each, so they are gated: every other workspace
+   * surface would be paying for rows and milestones it does not draw. Each
+   * project's answer lands in its own resource, so opening a project afterwards
+   * reads what this already fetched.
+   */
+  const atRoadmap = view === "timeline" && project === null;
+  const spaceBoards =
+    useSpaceBoards(current ?? "", atRoadmap ? liveProjects.map((p) => p.key) : []).data ?? {};
+  const spaceMilestones =
+    useSpaceMilestones(current ?? "", atRoadmap ? liveProjects.map((p) => p.id) : []).data ?? {};
+  const roadmapStates = useMemo(() => {
+    if (states.length > 0) return states;
+    const any = Object.values(spaceBoards)[0];
+    return any?.columns.map((c) => c.state) ?? [];
+  }, [spaceBoards, states]);
   const projectCounts = useMemo(() => {
     const counts = { backlog: 0, active: 0, done: 0, total: 0 };
     for (const column of board?.columns ?? []) {
@@ -2293,28 +2333,49 @@ export function App() {
               readOnly={readOnly}
             />
           ) : shown && view === "timeline" && activeProject ? (
-            /* Two different charts share this route, and which one you get is
-               decided by whether a project is open. At the workspace it is the
-               roadmap: projects as bars on a time axis, from the start and
-               target dates a project carries. Inside a project it is the
-               sequence chart, because an ISSUE has no start date to place on
-               such an axis — and what it has instead is the dependency graph.
-               Same word, "timeline", for the same question at two scales:
-               what happens in what order. */
+            /* One chart at two scales, and the scale is decided by whether a
+               project is open. Inside a project it is that project's sequence;
+               at the workspace it is every project's, grouped and read against
+               one ruler.
+
+               It used to be two different charts. The workspace one was a
+               roadmap — projects as bars on a month axis, from the start and
+               target dates a project carries — and it was the weaker half of
+               the pair by some distance: it could only draw the projects
+               somebody had typed two dates for, and it said nothing about what
+               was holding anything up. The dependency graph is data the tracker
+               keeps whether or not anyone fills a date in, so it is the thing
+               that can actually answer "what is happening in what order" at
+               both scales. */
             <ProjectTimeline
               board={shown}
+              // The whole project as well as the visible slice: the sequence is
+              // a fact about the project, so a filter scopes what is drawn and
+              // must not quietly restate how many rounds of work there are.
+              whole={board ?? shown}
               graph={projectGraph}
               milestones={milestones}
-              projectName={shown.project.name}
+              project={shown.project}
+              filtered={isActive(filter)}
+              selection={selection}
               onSelect={(reff) => {
                 api.select(reff);
                 setDetail(true);
               }}
             />
           ) : view === "timeline" ? (
-            <Timeline
+            <Roadmap
               projects={liveProjects}
-              onOpenProject={(key) => api.goto("list", key)}
+              boards={spaceBoards}
+              milestones={spaceMilestones}
+              // The workflow is the space's, and at the workspace there is no
+              // open project to read it off. Any loaded board carries it, so
+              // the roadmap takes it from the first one that landed rather than
+              // from `states`, which is empty whenever no project is open —
+              // and an empty workflow makes every issue read as backlog.
+              states={roadmapStates}
+              members={members}
+              onOpenProject={(key) => api.goto("timeline", key)}
             />
           ) : shown && view === "list" ? (
             <IssueList
