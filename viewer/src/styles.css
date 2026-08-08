@@ -1046,6 +1046,19 @@
   container-type: inline-size;
 }
 
+/* The rail's wording is an unset chip's default; the strip swaps it below.
+   Stated here rather than inside the wide query so that any container the strip
+   is not in — a card, a list cell, anything reusing these chips later — gets
+   the verb, and only the one layout that hides the term has to say otherwise.
+
+   ABOVE the container query, not after it. Both rules are unlayered and equally
+   specific, so the later one wins outright: written underneath, this hid the
+   field name at every width while the query hid the verb, and the strip drew
+   four chips with a glyph and no word at all. */
+.prop-field {
+  display: none;
+}
+
 /* Too narrow for a rail, so the aside collapses into Linear's compact metadata
    strip: one wrapping row of controls above the body. The group captions go
    with it — "Labels" over a single label chip is a caption doing nothing — and
@@ -1150,6 +1163,17 @@
     border: 1px solid var(--color-line);
     border-radius: 9999px;
     padding-inline: 8px;
+  }
+
+  /* An unset chip names its FIELD here, where nothing else does. See
+     `EmptyValue` — the rail's wording says what clicking does, which it can
+     afford because the term is sitting next to it. */
+  .prop-verb {
+    display: none;
+  }
+
+  .prop-field {
+    display: inline;
   }
 }
 

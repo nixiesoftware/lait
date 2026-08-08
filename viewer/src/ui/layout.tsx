@@ -567,6 +567,36 @@ export function RailCard({
   );
 }
 
+/**
+ * What an unset property's chip says — which is not the same sentence at both
+ * widths, and that is the whole reason this exists.
+ *
+ * In the RAIL the term sits beside the chip, so the chip is free to say what
+ * clicking it *does*: `Priority │ Set priority`. In the compact STRIP the term
+ * is gone and the chip is the only thing naming the field, so a verb there is
+ * wrong twice over — it is longer, and it answers "what will happen" when the
+ * question the reader is asking is "what is this".
+ *
+ * Measured against Linear's row at the same width, that is most of what makes
+ * theirs read cleaner. Theirs is six short nouns on one line — `Backlog ·
+ * Priority · Assignee · Project · Labels · 3 related`. Ours was `Assign · Set
+ * estimate · Add due date · Add label`, long enough that eight chips wrapped
+ * onto a second row.
+ *
+ * Both strings are rendered and the container query in `styles.css` picks one.
+ * A component cannot ask how wide its container is without measuring it, and
+ * measuring to choose a *word* would be a resize observer per property; the
+ * stylesheet already knows, and this is the question container queries are for.
+ */
+export function EmptyValue({ verb, field }: { verb: string; field: string }) {
+  return (
+    <span className="text-mute">
+      <span className="prop-verb">{verb}</span>
+      <span className="prop-field">{field}</span>
+    </span>
+  );
+}
+
 export function RailRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     // THE TERM IS VISIBLE. It used to be `sr-only`, so the rail was a column of

@@ -84,8 +84,11 @@ export function DatePicker({
   onChange: (next: string | null) => void;
   disabled?: boolean;
   ariaLabel?: string;
-  /** Trigger text (and colour) when `value` is null. */
-  placeholder?: string;
+  /** Trigger content (and colour) when `value` is null. A node rather than a
+   *  string because both branches below already render it as children, and the
+   *  issue rail's empty chip carries two wordings for a container query to
+   *  choose between — see `EmptyValue`. */
+  placeholder?: React.ReactNode;
   /** Extra trigger classes — the caller's tone colour rides here. */
   className?: string;
   tone?: ControlTone;

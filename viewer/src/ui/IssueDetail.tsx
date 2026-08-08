@@ -101,7 +101,7 @@ import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
 import { Button, Divider, DropdownMenu, DropdownMenuItem, IconButton, Popover, TextInput } from "@astryxdesign/core";
 import { ChipButton, LabelChip, cn, interactiveRow } from "./primitives";
-import { Disclosure, HeaderActions, RailRow, RailSection, Toast } from "./layout";
+import { Disclosure, EmptyValue, HeaderActions, RailRow, RailSection, Toast } from "./layout";
 import * as ask from "./dialogs";
 import { dueToInput, dueTone, short, when } from "./time";
 
@@ -561,13 +561,11 @@ export function IssueDetail({
               face={
                 <>
                   <PriorityIcon priority={issue.priority} />
-                  <span
-                    className={
-                      issue.priority === "none" ? "text-mute" : "min-w-0 truncate capitalize"
-                    }
-                  >
-                    {issue.priority === "none" ? "Set priority" : issue.priority}
-                  </span>
+                  {issue.priority === "none" ? (
+                    <EmptyValue verb="Set priority" field="Priority" />
+                  ) : (
+                    <span className="min-w-0 truncate capitalize">{issue.priority}</span>
+                  )}
                 </>
               }
               // Highest first: the list you scan top-down should start where the
@@ -597,7 +595,7 @@ export function IssueDetail({
                 issue.assignees.length === 0 ? (
                   <>
                     <UserPlus className="text-mute size-icon-sm shrink-0" />
-                    <span className="text-mute">Assign</span>
+                    <EmptyValue verb="Assign" field="Assignees" />
                   </>
                 ) : (
                   <span className="flex min-w-0 items-center gap-1.5">
@@ -646,9 +644,11 @@ export function IssueDetail({
               face={
                 <>
                   <Gauge className="text-mute size-icon-sm shrink-0" />
-                  <span className={issue.estimate == null ? "text-mute" : "min-w-0 truncate"}>
-                    {issue.estimate != null ? `${issue.estimate} pt` : "Set estimate"}
-                  </span>
+                  {issue.estimate == null ? (
+                    <EmptyValue verb="Set estimate" field="Estimate" />
+                  ) : (
+                    <span className="min-w-0 truncate">{`${issue.estimate} pt`}</span>
+                  )}
                 </>
               }
               // Fibonacci-ish, Linear's default scale; "None" clears. The
@@ -731,7 +731,7 @@ export function IssueDetail({
                   issue.label_names.length === 0 ? (
                     <>
                       <Tag className="text-mute size-icon-sm shrink-0" />
-                      <span className="text-mute">Add label</span>
+                      <EmptyValue verb="Add label" field="Labels" />
                     </>
                   ) : (
                     <Plus className="text-mute size-icon-sm shrink-0" />
@@ -829,12 +829,14 @@ export function IssueDetail({
                 face={
                   <>
                     <Milestone className="text-mute size-icon-sm shrink-0" />
-                    <span className={issue.milestone ? "min-w-0 truncate" : "text-mute"}>
-                      {issue.milestone
-                        ? (milestones.find((m) => m.id === issue.milestone)?.name ??
-                          issue.milestone)
-                        : "Set milestone"}
-                    </span>
+                    {issue.milestone ? (
+                      <span className="min-w-0 truncate">
+                        {milestones.find((m) => m.id === issue.milestone)?.name ??
+                          issue.milestone}
+                      </span>
+                    ) : (
+                      <EmptyValue verb="Set milestone" field="Milestone" />
+                    )}
                   </>
                 }
                 options={[
@@ -1455,7 +1457,20 @@ function FollowToggle({
       // trade until the neighbours were measured — their hover fills hug their
       // text exactly the same way, so a padded pill here would have been the
       // odd one out rather than the polished one.
-      className="mx-0 gap-1.5 px-0"
+      // And the rail's TYPE, which the geometry note above stopped short of.
+      // Measured across the compact strip, every other chip is `dim` at 12px
+      // and weight 400; this one was `bright` at 13px and 500 — the full
+      // neutral ramp, a step of size and a step of weight, all three louder.
+      // In a row of eight reference chips it read as the only thing you were
+      // being asked to do.
+      //
+      // `dim` only while it is off. Following flips the variant to `secondary`,
+      // and that fill is the "on" signal — dimming the label under it would
+      // take back what the fill just said.
+      className={cn(
+        "mx-0 gap-1.5 px-0 !text-sm !font-normal",
+        !following && "!text-dim",
+      )}
       isDisabled={readOnly || meKey == null}
       onClick={() => onToggle(!following)}
       label={following ? "Following" : "Follow"}
@@ -1773,7 +1788,12 @@ function DueDate({
       tone="quiet"
       value={value !== null ? dueToInput(value) : null}
       disabled={readOnly}
-      placeholder="Add due date"
+      // A node, not a string — this is the one unset chip whose label the
+      // component owns, and it needs both wordings for the container query to
+      // choose between (see `EmptyValue`). Passed as the placeholder rather
+      // than as a `face` so the calendar glyph and the set-date formatting stay
+      // the component's, which is the whole reason it has a placeholder.
+      placeholder={<EmptyValue verb="Add due date" field="Due date" />}
       className={tone}
       onChange={(next) => onChange(next ?? "none")}
     />
