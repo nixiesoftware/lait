@@ -2299,8 +2299,13 @@ impl Replica {
 
             let mut opened = Vec::with_capacity(retained.len());
             for (tx_id, envelope, transaction_bytes) in &retained {
-                let transaction = Transaction::decode_canonical(transaction_bytes)
-                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                let transaction =
+                    Transaction::decode_canonical(transaction_bytes).map_err(|error| {
+                        Failure::IllegitimateContact {
+                            kind: Invalid::Encoding,
+                            reason: format!("retained transaction is not canonical: {error}"),
+                        }
+                    })?;
                 let Some(descriptor) = transaction
                     .core
                     .descriptors
@@ -2321,8 +2326,12 @@ impl Replica {
                     opened.clear();
                     break;
                 };
-                let material = Material::open(&opening, envelope)
-                    .map_err(|_| Failure::Integrity(Defect::MissingMaterial))?;
+                let material = Material::open(&opening, envelope).map_err(|error| {
+                    Failure::IllegitimateContact {
+                        kind: Invalid::IncompleteMaterial,
+                        reason: format!("retained Body material could not be opened: {error}"),
+                    }
+                })?;
                 if material.mutation_model != *model {
                     opened.clear();
                     break;
