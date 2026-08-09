@@ -736,23 +736,23 @@ Status unavailable`;const n=e.degraded_recovery??[];return["Lait recovery diagno
     margin-right: `).concat(f,"px ").concat(i,`;
     `),a==="padding"&&"padding-right: ".concat(f,"px ").concat(i,";")].filter(Boolean).join(""),`
   }
-  
+
   .`).concat(ef,` {
     right: `).concat(f,"px ").concat(i,`;
   }
-  
+
   .`).concat(tf,` {
     margin-right: `).concat(f,"px ").concat(i,`;
   }
-  
+
   .`).concat(ef," .").concat(ef,` {
     right: 0 `).concat(i,`;
   }
-  
+
   .`).concat(tf," .").concat(tf,` {
     margin-right: 0 `).concat(i,`;
   }
-  
+
   body[`).concat(Wl,`] {
     `).concat(vR,": ").concat(f,`px;
   }

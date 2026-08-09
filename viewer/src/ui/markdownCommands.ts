@@ -157,7 +157,15 @@ export const TASK = (): string => "- [ ] ";
 export function toggleFence(state: EditorState): TransactionSpec {
   const range = state.selection.main;
   const first = state.doc.lineAt(range.from);
-  const last = state.doc.lineAt(range.to);
+  const endLine = state.doc.lineAt(range.to);
+  // A range ending at a line's first position selected the newline before it,
+  // not any character on that line. Match the block toggles' boundary rule so
+  // fencing two complete lines does not silently swallow a third.
+  const last = state.doc.line(
+    endLine.from === range.to && endLine.number > first.number
+      ? endLine.number - 1
+      : endLine.number,
+  );
 
   const above = first.number > 1 ? state.doc.line(first.number - 1) : null;
   const below = last.number < state.doc.lines ? state.doc.line(last.number + 1) : null;

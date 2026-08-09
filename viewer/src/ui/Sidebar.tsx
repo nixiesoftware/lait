@@ -206,7 +206,7 @@ export function Sidebar({
       <Section title="Workspace" />
       <div className="flex flex-col gap-0.5">
         {/* `!currentTeam` on both, and it is the whole of the second fix.
- 
+
             A team's Projects and the workspace's Projects are the same *view*
             at two scopes, so `view === "projects"` was true for both and both
             lit. Selection has to follow the entry point you used, not the
@@ -226,13 +226,13 @@ export function Sidebar({
       </div>
 
       {/* Teams.
- 
+
           A team is a set of projects, so every destination under one is the
           destination it names *scoped to those projects*. That is the answer to
           a flat list of seventeen projects: three entries a team rather than one
           a project, and the projects themselves reachable through the team's
           own Projects page.
- 
+
           No icon on the header, and none was ever needed — a team has a name,
           and a glyph beside it would be one more thing to look at in a column
           whose whole problem was having too many. */}
@@ -308,7 +308,7 @@ export function Sidebar({
       </div>
 
       {/* What no team owns.
- 
+
           Always rendered, even with no teams at all — which is the whole of a
           fresh space, and the heading is how you learn there is a grouping to
           opt into. These are listed as projects rather than as a fourth team

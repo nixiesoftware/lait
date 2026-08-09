@@ -511,6 +511,9 @@ function ProjectBand({
   const { project } = work;
   const tone = catalogColor(project.color);
   const total = work.done + work.remaining;
+  const milestoneOrder = new Map(
+    work.stops.map((stop, index) => [stop.milestone.id, index]),
+  );
   return (
     <div
       className={cn(interactiveRow(), "group absolute inset-x-0 flex cursor-pointer items-center")}
@@ -572,19 +575,24 @@ function ProjectBand({
             which is the question a stop on its own cannot answer. Alternating
             rather than coloured: they are a grouping, and a hue here would
             compete with the stage tones that carry the actual state. */}
-        {work.stops.map((stop, i) => (
-          <span
-            key={`band:${stop.milestone.id}`}
-            className={cn(
-              "absolute inset-y-1 rounded-control",
-              i % 2 === 0 ? "bg-hover/70" : "bg-transparent",
-            )}
-            style={{
-              left: xOf(stop.from),
-              width: Math.max(2, xOf(stop.at) - xOf(stop.from)),
-            }}
-          />
-        ))}
+        {work.segments
+          .filter((segment) => segment.milestone !== null)
+          .map((segment) => {
+            const index = milestoneOrder.get(segment.milestone!) ?? 0;
+            return (
+              <span
+                key={`band:${segment.from}:${segment.milestone}`}
+                className={cn(
+                  "absolute inset-y-1 rounded-control",
+                  index % 2 === 0 ? "bg-hover/70" : "bg-transparent",
+                )}
+                style={{
+                  left: xOf(segment.from),
+                  width: Math.max(2, xOf(segment.to) - xOf(segment.from)),
+                }}
+              />
+            );
+          })}
         {/* Runs, on the one ramp. The project's own catalog hue used to fill
             the in-flight run, which put N arbitrary saturated colours on the
             one segment that is supposed to mean "happening" — the roadmap's
@@ -612,7 +620,7 @@ function ProjectBand({
           />
         ))}
         {/* Labels only where they fit.
- 
+
             The names used to be printed unconditionally and overlapped into
             mush the moment two milestones were close — `FoundatiSync ∆ Oct 4
             30, 2023un 14, 2027`. No mainstream roadmap persistently labels
@@ -620,30 +628,31 @@ function ProjectBand({
             `Name ~date` if there is room for it, the date alone if not, and
             nothing at all below that. The diamond is never dropped, and the
             tooltip always carries the whole story. Evaluated left to right so
-            the *earlier* milestone wins a contested gap — it is the one you can
-            still do something about. */}
+            the leftmost stop wins a contested gap. */}
         {(() => {
           let lastLabelEnd = -Infinity;
-          return work.stops.map((stop) => {
-            const x = xOf(stop.at);
-            const full = labelWidth(stop.milestone.name) + DATE_LABEL_PX;
-            const short = DATE_LABEL_PX;
-            const detail =
-              x - full / 2 > lastLabelEnd + 8
-                ? "full"
-                : x - short / 2 > lastLabelEnd + 8
-                  ? "date"
-                  : "none";
-            if (detail !== "none") lastLabelEnd = x + (detail === "full" ? full : short) / 2;
-            return (
-              <MilestoneStopMark
-                key={stop.milestone.id}
-                stop={stop}
-                x={x}
-                detail={detail}
-              />
-            );
-          });
+          return [...work.stops]
+            .sort((a, b) => a.at - b.at)
+            .map((stop) => {
+              const x = xOf(stop.at);
+              const full = labelWidth(stop.milestone.name) + DATE_LABEL_PX;
+              const short = DATE_LABEL_PX;
+              const detail =
+                x - full / 2 > lastLabelEnd + 8
+                  ? "full"
+                  : x - short / 2 > lastLabelEnd + 8
+                    ? "date"
+                    : "none";
+              if (detail !== "none") lastLabelEnd = x + (detail === "full" ? full : short) / 2;
+              return (
+                <MilestoneStopMark
+                  key={stop.milestone.id}
+                  stop={stop}
+                  x={x}
+                  detail={detail}
+                />
+              );
+            });
         })()}
       </span>
     </div>

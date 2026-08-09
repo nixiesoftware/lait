@@ -53,12 +53,10 @@ export interface WorkSegment {
 
 export interface MilestoneStop {
   milestone: MilestoneDto;
-  /** Cumulative work where this milestone's own run begins. With `at`, this is
-   *  the milestone's *share* of the project — which is the reading the bands
-   *  under the bar exist to give: a milestone that is a third of the work looks
-   *  like a third of the work. */
+  /** Left edge of this milestone's earliest work. A milestone may have several
+   *  runs because completed work is kept left of now and unfinished work right. */
   from: number;
-  /** Cumulative work at which this milestone's last issue is finished. */
+  /** Right edge of this milestone's latest work. */
   at: number;
   /** Units of this milestone's work still outstanding. */
   remaining: number;
@@ -130,11 +128,12 @@ const rowsOf = (board: BoardView | undefined): Row[] =>
 /**
  * Lay one project out along the work axis.
  *
- * Order is the order the work has to happen in: milestones in the project's own
- * order, and inside each one, finished work first, then what is moving, then
- * what has not been picked up. That ordering is what makes the left arm mean
- * "spent" and the boundary at zero mean "now" — without it, the bar would be a
- * bag of issues and its midpoint would mean nothing.
+ * Order is stage first — finished work, then what is moving, then what has not
+ * been picked up — and milestone order inside each stage. Stage has to be the
+ * outer sort: `cursor` starts at `-done`, so every finished issue must occupy
+ * one of those first `done` slots or the origin lies about which work is past.
+ * Milestone-first sorting put an unfinished issue in an early milestone left of
+ * now whenever a later milestone already had completed work.
  */
 export function layOutProject(
   project: ProjectDto,
@@ -152,9 +151,9 @@ export function layOutProject(
   const STAGE_ORDER: Record<StatusCategory, number> = { done: 0, active: 1, backlog: 2 };
   const ordered = [...rows].sort(
     (a, b) =>
+      STAGE_ORDER[stageOf(a)] - STAGE_ORDER[stageOf(b)] ||
       (rank.get(a.milestone ?? "") ?? milestones.length) -
         (rank.get(b.milestone ?? "") ?? milestones.length) ||
-      STAGE_ORDER[stageOf(a)] - STAGE_ORDER[stageOf(b)] ||
       a.reff.localeCompare(b.reff),
   );
 

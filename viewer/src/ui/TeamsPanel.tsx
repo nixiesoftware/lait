@@ -43,11 +43,13 @@ export function TeamsPanel({
     at: "list",
   });
 
-  const send = async (fn: () => Promise<unknown>) => {
+  const send = async (fn: () => Promise<unknown>): Promise<boolean> => {
     try {
       await fn();
+      return true;
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
+      return false;
     }
   };
 
@@ -57,8 +59,9 @@ export function TeamsPanel({
         readOnly={readOnly}
         onBack={() => setStep({ at: "list" })}
         onCreate={async (name, key) => {
-          await send(() => rpc(spaceId, { cmd: "team_set", name, key }));
-          setStep({ at: "list" });
+          if (await send(() => rpc(spaceId, { cmd: "team_set", name, key }))) {
+            setStep({ at: "list" });
+          }
         }}
       />
     );

@@ -132,6 +132,25 @@ describe("laying a project out on the work axis", () => {
     expect(work.blocks.at(-1)!.to).toBe(2);
   });
 
+  it("keeps later-milestone completions behind now and earlier unfinished work ahead", () => {
+    const work = layOutProject(
+      project(),
+      board([
+        row("todo", { milestone: "m1" }),
+        row("done", { milestone: "m2", status: "done" }),
+      ]),
+      [milestone("m1"), milestone("m2")],
+      STATES,
+      1,
+      NOW,
+    );
+    expect(work.blocks.map((block) => [block.row.doc_id, block.from, block.to])).toEqual([
+      ["done", -1, 0],
+      ["todo", 0, 1],
+    ]);
+    expect(work.stops.find((stop) => stop.milestone.id === "m2")?.projected).toBeNull();
+  });
+
   /** Contiguous same-stage work in the same milestone is one drawn block; the
    *  chart should not paint four rectangles where one says the same thing. */
   it("merges a run of one stage inside one milestone", () => {

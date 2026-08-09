@@ -142,6 +142,13 @@ describe("toggleFence", () => {
     expect(state.update(toggleFence(state)).state.doc.toString()).toBe("a\n```\nbcde\n```\nf");
   });
 
+  it("does not fence the line a selection merely ends at", () => {
+    const state = at("|one\ntwo\n|three");
+    expect(state.update(toggleFence(state)).state.doc.toString()).toBe(
+      "```\none\ntwo\n```\nthree",
+    );
+  });
+
   it("unfences a block it already put fences around", () => {
     const state = at("```\n|x|\n```");
     expect(state.update(toggleFence(state)).state.doc.toString()).toBe("x");

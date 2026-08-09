@@ -1320,11 +1320,11 @@ export function App() {
         if (!picked) return;
         const next = { spaceId: picked.space, project: null, view: "projects" as const, issue: null };
         push(formatRoute(next));
-        setRouteSpace(picked.space);
-        setCurrent(picked.id);
-        setProject(null);
-        setView("projects");
-        setSelection(null);
+        // One route application clears every scope the old Space owned — team,
+        // document, filter and composer included. Hand-setting five fields here
+        // left `team` behind, and the reconciler rewrote this destination under
+        // the previous Space's team key.
+        applyRoute(next);
       },
       // A picker needs its subject visible: opening the assignee menu over a pane
       // you closed is a menu with no context. Revealing it is `openIssue` and
@@ -1778,22 +1778,25 @@ export function App() {
    * Pushing it would put two entries for one draft in the history and make Back
    * re-expand something you just shrank.
    */
-  const composerHref = (composingPage: boolean) =>
-    formatRoute({
-      spaceId: routeSpace,
-      project: board?.project.key ?? project,
-      view: "list",
-      issue: null,
-      ...(composingPage ? { composing: true } : {}),
-      filter,
-    });
-  const expandComposer = () => {
-    push(composerHref(true));
-    setComposing((c) => ({ ...c, page: true }));
+  const composerRoute = (composingPage: boolean, intoProject = composerProject ?? project) => ({
+    spaceId: routeSpace,
+    project: intoProject,
+    view: "list" as const,
+    issue: null,
+    ...(composingPage ? { composing: true } : {}),
+    filter,
+  });
+  const expandComposer = (intoProject: string) => {
+    const route = composerRoute(true, intoProject);
+    push(formatRoute(route));
+    // A team board's project is a synthetic team identity. Expanding therefore
+    // enters the real project selected in the composer, which is the only place
+    // `/issues/new` can be addressed and the place the issue will be filed.
+    applyRoute(route);
   };
   /** Leave the page — to the sheet (`collapse`) or to the board. */
   const leaveComposerPage = (collapse: boolean) => {
-    replace(composerHref(false));
+    replace(formatRoute(composerRoute(false)));
     setComposing(collapse ? {} : null);
   };
   const applySavedView = (saved: SavedView) => {

@@ -80,7 +80,7 @@ export function NewIssue({
   onClose: () => void;
   /** Take the draft to its own route. Absent when there is nowhere to expand
    *  to — the composer has to know a project key to have an address. */
-  onExpand?: (() => void) | undefined;
+  onExpand?: ((project: string) => void) | undefined;
   /** Back to the sheet. Present only in `page`. */
   onCollapse?: (() => void) | undefined;
   onError: (m: string) => void;
@@ -387,7 +387,7 @@ export function NewIssue({
             {onExpand && !page && (
               <IconButton
                 label="Expand to full page"
-                onClick={onExpand}
+                onClick={() => onExpand(project)}
                 variant="ghost"
                 size="sm"
                 tooltip="Expand to full page"

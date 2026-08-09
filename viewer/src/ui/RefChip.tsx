@@ -123,24 +123,30 @@ export function RefResolutionProvider({
 
   const resolution = useMemo<RefResolution>(() => {
     const keyOf = (ref: string) => ref.slice(0, ref.lastIndexOf("-")).toUpperCase();
+    // An alias is unique inside one Space, not across every Space this mounted
+    // provider may visit. Scoping both settled and in-flight entries prevents a
+    // late reply from Space A becoming the answer to the same alias in Space B.
+    const cacheKey = (ref: string) => `${spaceId}\u0000${ref.toUpperCase()}`;
     return {
       states,
       projects,
       open: onOpen,
       lookup: (ref) => {
         const key = ref.toUpperCase();
+        const cached = cacheKey(ref);
         const local = seed.get(key);
         if (local) return local;
-        if (fetched.has(key)) return fetched.get(key) ?? null;
+        if (fetched.has(cached)) return fetched.get(cached) ?? null;
         // A candidate no project could own is settled without asking anyone.
         if (!keys.has(keyOf(ref))) return null;
         return undefined;
       },
       request: (ref) => {
         const key = ref.toUpperCase();
-        if (!spaceId || seed.has(key) || asked.current.has(key)) return;
+        const cached = cacheKey(ref);
+        if (!spaceId || seed.has(key) || asked.current.has(cached)) return;
         if (!keys.has(keyOf(ref))) return;
-        asked.current.add(key);
+        asked.current.add(cached);
         void rpc(spaceId, { cmd: "issue_view", reff: ref })
           .then((reply) => {
             const issue = reply as { kind: string } & Partial<IssueView>;
@@ -155,7 +161,7 @@ export function RefResolutionProvider({
                     project: issue.project_id ?? "",
                   }
                 : null;
-            setFetched((held) => new Map(held).set(key, target));
+            setFetched((held) => new Map(held).set(cached, target));
           })
           .catch(() => {
             // A ref that does not resolve is prose. This is the ordinary
@@ -163,7 +169,7 @@ export function RefResolutionProvider({
             // really called `SHA` would make `SHA-256` a fair question), and
             // it is also what a denied or not-yet-converged issue looks like —
             // all three render as the words the author typed.
-            setFetched((held) => new Map(held).set(key, null));
+            setFetched((held) => new Map(held).set(cached, null));
           });
       },
     };
