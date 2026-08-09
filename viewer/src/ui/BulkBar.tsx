@@ -147,7 +147,7 @@ export function BulkBar({
         options={[...PRIORITY_ORDER].reverse().map((p) => ({
           id: p,
           label: p,
-          icon: <PriorityIcon priority={p} />,
+          icon: <PriorityIcon priority={p} tone="neutral" />,
         }))}
         onPick={onPriority}
       />

@@ -53,6 +53,7 @@ import { FilterMenu } from "./ui/FilterMenu";
 import type { IssueMutators } from "./ui/fields";
 import { Inbox } from "./ui/Inbox";
 import { IssueSearch, rememberIssue } from "./ui/IssueSearch";
+import { RefResolutionProvider } from "./ui/RefChip";
 import { Projects } from "./ui/Projects";
 import { ProjectOverview } from "./ui/ProjectOverview";
 import { ProjectRail } from "./ui/ProjectRail";
@@ -2162,6 +2163,17 @@ export function App() {
   return (
     <Theme theme={laitTheme} mode={theme}>
     <HeaderSlotProvider>
+    {/* Every surface that draws prose sits inside this, because a description
+        is rendered in five places and a chip that only resolves in one of them
+        is worse than no chip. `rows` seeds it with what is already on screen —
+        the refs a description actually names are usually its neighbours. */}
+    <RefResolutionProvider
+      spaceId={current ?? ""}
+      rows={rows}
+      projects={projects}
+      states={states}
+      onOpen={api.openIssue}
+    >
     <Group
       orientation="horizontal"
       // Persisted per-user: a sidebar width you set once should survive a reload,
@@ -3010,6 +3022,7 @@ export function App() {
         </div>
       )}
     </Group>
+    </RefResolutionProvider>
     </HeaderSlotProvider>
     </Theme>
   );

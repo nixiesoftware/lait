@@ -22,23 +22,33 @@ import type { Priority, StatusCategory } from "../types";
 export function PriorityIcon({
   priority,
   size = "md",
+  tone = "signal",
   className = "",
 }: {
   priority: Priority;
   size?: "md" | "sm";
+  /** `neutral` drops the urgent badge's red for the same ink the bars use. In a
+   *  row, red is the signal — it is what makes an urgent issue findable. In a
+   *  menu of five choices it signals nothing (you are looking *at* the choices),
+   *  and one red mark among four grey ones just reads as the odd one out. */
+  tone?: "signal" | "neutral";
   className?: string;
 }) {
   const box = size === "sm" ? "size-icon-xs" : "size-icon-md";
   if (priority === "urgent") {
+    const neutral = tone === "neutral";
     return (
       <span
-        className={`inline-flex ${box} shrink-0 items-center justify-center ${size === "sm" ? "rounded-full" : "rounded-mark"} bg-urgent ${className}`}
+        className={`inline-flex ${box} shrink-0 items-center justify-center ${size === "sm" ? "rounded-full" : "rounded-mark"} ${neutral ? "bg-dim" : "bg-urgent"} ${className}`}
         role="img"
         aria-label="Urgent priority"
       >
         <svg
           viewBox="0 0 16 16"
-          className={`${size === "sm" ? "size-[8px]" : "size-icon-xs"} fill-white`}
+          // Knocked out of the surface rather than painted white: `bg-dim` is
+          // dark in light mode and light in dark mode, and white only survives
+          // one of those.
+          className={`${size === "sm" ? "size-[8px]" : "size-icon-xs"} ${neutral ? "fill-raised" : "fill-white"}`}
           aria-hidden="true"
         >
           <rect x="7" y="3.5" width="2" height="6" rx="1" />
@@ -74,6 +84,69 @@ export function PriorityIcon({
   );
 }
 
+export const STATUS_LABEL: Record<StatusCategory, string> = {
+  backlog: "Backlog",
+  active: "In progress",
+  done: "Done",
+};
+
+/**
+ * The ring, as data rather than as JSX.
+ *
+ * There are two renderers now — the React one below, and a plain-DOM builder
+ * the CodeMirror live preview needs, because a widget in a CodeMirror
+ * decoration is a `Node` and there is no React underneath it. The glyph is the
+ * product's most-repeated mark; two hand-kept copies of it would disagree
+ * within a release. So the shape lives here once and both renderers spell it
+ * out from the same list.
+ */
+export function statusRing(
+  category: StatusCategory,
+): Array<{ tag: "circle" | "path"; attrs: Record<string, string> }> {
+  const rim = {
+    tag: "circle" as const,
+    attrs: {
+      cx: "7",
+      cy: "7",
+      r: "6",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.5",
+      // Backlog is not started, and a dashed ring says so before the colour does.
+      ...(category === "backlog" ? { "stroke-dasharray": "2.5 2", opacity: "0.65" } : {}),
+    },
+  };
+  if (category === "active") {
+    return [
+      rim,
+      // A half-filled pie: "started, not finished".
+      { tag: "path", attrs: { d: "M7 7 L7 2.5 A4.5 4.5 0 0 1 7 11.5 Z", fill: "currentColor" } },
+    ];
+  }
+  if (category === "done") {
+    return [
+      rim,
+      { tag: "circle", attrs: { cx: "7", cy: "7", r: "6", fill: "currentColor" } },
+      // Scaled out from the centre by about a quarter. The old check sat in the
+      // middle of a 12px disc looking like a tick someone had dropped in rather
+      // than the mark the disc was drawn for. Its furthest point reaches 3.9
+      // from centre and the stroke adds 0.9, so it still clears the r=6 rim.
+      {
+        tag: "path",
+        attrs: {
+          d: "M3.8 7.2 L6.1 9.5 L10.2 4.8",
+          fill: "none",
+          stroke: "var(--color-bg)",
+          "stroke-width": "1.8",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        },
+      },
+    ];
+  }
+  return [rim];
+}
+
 /**
  * Status as a progress ring, shaped by category so it reads without colour —
  * which matters for the ~8% of users who would otherwise see three identical
@@ -88,50 +161,36 @@ export function StatusIcon({
   color: string;
   className?: string;
 }) {
-  const label = { backlog: "Backlog", active: "In progress", done: "Done" }[category];
   return (
     <svg
       viewBox="0 0 14 14"
       className={`size-icon-sm shrink-0 ${className}`}
       role="img"
-      aria-label={label}
+      aria-label={STATUS_LABEL[category]}
       style={{ color }}
     >
-      <circle
-        cx="7"
-        cy="7"
-        r="6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        // Backlog is not started, and a dashed ring says so before the colour does.
-        strokeDasharray={category === "backlog" ? "2.5 2" : undefined}
-        opacity={category === "backlog" ? 0.65 : 1}
-      />
-      {category === "active" && (
-        // A half-filled pie: "started, not finished".
-        <path d="M7 7 L7 2.5 A4.5 4.5 0 0 1 7 11.5 Z" fill="currentColor" />
-      )}
-      {category === "done" && (
-        <>
-          <circle cx="7" cy="7" r="6" fill="currentColor" />
-          {/* Scaled out from the centre by about a quarter. The old check sat
-              in the middle of a 12px disc looking like a tick someone had
-              dropped in rather than the mark the disc was drawn for. Its
-              furthest point reaches 3.9 from centre and the stroke adds 0.9,
-              so it still clears the r=6 rim with room to spare. */}
-          <path
-            d="M3.8 7.2 L6.1 9.5 L10.2 4.8"
-            fill="none"
-            stroke="var(--color-bg)"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </>
-      )}
+      {statusRing(category).map(({ tag: Tag, attrs }, i) => (
+        <Tag key={i} {...attrs} />
+      ))}
     </svg>
   );
+}
+
+/** The same ring, built as DOM. See `statusRing` for why there are two. */
+export function statusIconElement(category: StatusCategory, color: string): SVGSVGElement {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 14 14");
+  svg.setAttribute("class", "size-icon-sm shrink-0");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", STATUS_LABEL[category]);
+  svg.style.color = color;
+  for (const { tag, attrs } of statusRing(category)) {
+    const child = document.createElementNS(NS, tag);
+    for (const [name, value] of Object.entries(attrs)) child.setAttribute(name, value);
+    svg.append(child);
+  }
+  return svg;
 }
 
 /**

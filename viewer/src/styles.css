@@ -946,6 +946,111 @@
   padding-left: 12px;
 }
 
+.codemirror-markdown .cm-md-strike {
+  text-decoration: line-through;
+  color: var(--color-mute);
+}
+
+.codemirror-markdown .cm-md-underline {
+  text-decoration: underline;
+  text-decoration-skip-ink: auto;
+  text-underline-offset: 2px;
+}
+
+/* The child selector is load-bearing, for the reason the heading rule above
+   states: the colour comes from a generated class nothing here can name, so
+   the mark has to reach the span inside it. */
+.codemirror-markdown .cm-md-tag,
+.codemirror-markdown .cm-md-tag span {
+  color: var(--color-mute);
+  font-weight: 400;
+}
+
+.codemirror-markdown .cm-md-link {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--color-accent) 40%, transparent);
+  text-underline-offset: 2px;
+}
+
+/* THE BLOCKS THE READING VIEW DRAWS, DRAWN HERE TOO.
+   ─────────────────────────────────────────────────
+   Everything below closes a gap where `Markdown.tsx` formatted something and
+   the editor left it as punctuation. The rule for all of them is the same one
+   the heading sizes follow: match the reading view rather than approximate it,
+   because a document that changes shape when you click into it is the defect
+   this whole layer exists to avoid.
+
+   What these CANNOT do is reflow. A line decoration styles a line; it cannot
+   turn three source lines into a bordered table with aligned columns, because
+   the source line IS the layout. So a table gets the reading view's surface
+   and its monospace measure — enough for the columns to line up while you type
+   — and the rest is the reading view's job. */
+.codemirror-markdown .cm-md-li {
+  padding-left: 1.5em;
+  text-indent: -1.5em;
+}
+
+/* A bullet standing in for the `-` that produced it. Fixed-width so a list's
+   text edge does not shift between the marker and its replacement when the
+   caret enters the line. */
+.codemirror-markdown .cm-md-bullet,
+.codemirror-markdown .cm-md-task {
+  display: inline-block;
+  width: 1ch;
+  color: var(--color-mute);
+}
+
+.codemirror-markdown .cm-md-hr {
+  /* The characters are replaced away, so the line box is empty and the rule is
+     the only thing in it. Centred in that box rather than sitting on the
+     baseline of nothing. */
+  border-bottom: 1px solid var(--color-line);
+  height: 0;
+  margin: 0.6em 0;
+}
+
+.codemirror-markdown .cm-md-fence {
+  background: color-mix(in oklab, var(--color-active) 45%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
+.codemirror-markdown .cm-md-table {
+  background: color-mix(in oklab, var(--color-active) 30%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
+/* The callout's tone, from the same five colours `Markdown.tsx` tints with —
+   the whole point of `> [!WARNING]` is that it must not read like `> [!NOTE]`
+   while you are skimming, and that has to hold in the editor too. */
+.codemirror-markdown .cm-md-callout {
+  border-left: 3px solid var(--callout);
+  background: color-mix(in oklab, var(--callout) 8%, transparent);
+  padding-left: 12px;
+}
+
+.codemirror-markdown .cm-md-callout-note {
+  --callout: var(--color-accent);
+}
+
+.codemirror-markdown .cm-md-callout-tip {
+  --callout: var(--color-ok);
+}
+
+.codemirror-markdown .cm-md-callout-important {
+  --callout: var(--color-accent);
+}
+
+.codemirror-markdown .cm-md-callout-warning {
+  --callout: var(--color-warn);
+}
+
+.codemirror-markdown .cm-md-callout-caution {
+  --callout: var(--color-danger);
+}
+
 /* Multiplayer awareness lives in the document, where the action is. The
    widget has no width and therefore never reflows prose; its label follows the
    compact name flag Linear uses and the selection tint shares that identity

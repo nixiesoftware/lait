@@ -218,6 +218,12 @@ export const laitTheme = defineTheme({
         }
       }
     },
+    "tooltip": {
+      "base": {
+        "borderRadius": "var(--radius-element)",
+        "border": "1px solid var(--color-border)"
+      }
+    },
     "statusdot": {
       "variant:urgent": {
         "backgroundColor": "light-dark(oklch(0.581 0.18 22), oklch(0.631 0.145 22))"

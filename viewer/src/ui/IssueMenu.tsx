@@ -115,7 +115,7 @@ export function IssueMenuItems({
               <DropdownMenuItem
                 key={p}
                 label={<span className="capitalize">{p === "none" ? "No priority" : p}</span>}
-                icon={<PriorityIcon priority={p} />}
+                icon={<PriorityIcon priority={p} tone="neutral" />}
                 endContent={p === priority ? <Check className="size-icon-xs" /> : undefined}
                 onClick={() => {
                   if (p !== priority) mutators.setPriority(reff, p);

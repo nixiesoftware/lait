@@ -309,7 +309,7 @@ export function FilterMenu({
                     .map((p) => (
                       <Value
                         key={p}
-                        icon={<PriorityIcon priority={p} />}
+                        icon={<PriorityIcon priority={p} tone="neutral" />}
                         label={p}
                         className="capitalize"
                         selected={filter.priority.includes(p)}

@@ -5,7 +5,9 @@ import {
   looksLikeMarkdown,
   parseInline,
   parseMarkdown,
+  parseRefs,
   type Block,
+  type Inline,
 } from "./markdown";
 
 describe("looksLikeMarkdown", () => {
@@ -226,5 +228,90 @@ describe("soft line breaks", () => {
         .map((i) => (i as { text: string }).text)
         .join(""),
     ).toBe("one two");
+  });
+});
+
+describe("issue refs", () => {
+  const refs = (parts: Inline[]) =>
+    parts.filter((p) => p.kind === "ref").map((p) => (p as { ref: string }).ref);
+
+  it("reads a bare alias out of a sentence", () => {
+    expect(refs(parseInline("blocked on ENG-142 until the gate lands"))).toEqual(["ENG-142"]);
+  });
+
+  it("keeps the collision suffix the engine mints", () => {
+    // Two issues created in the same second get `ENG-7` and `ENG-7b`.
+    expect(refs(parseInline("see ENG-7b"))).toEqual(["ENG-7b"]);
+  });
+
+  it("will not half-match a longer token", () => {
+    // Bounded on both sides by a non-word: a key is at most 8 letters, and the
+    // boundary is what stops `SUPERSENG-1` reading as `SENG-1`.
+    expect(refs(parseInline("SUPERSENG-1"))).toEqual([]);
+    expect(refs(parseInline("ENG-142-b"))).toEqual([]);
+    expect(refs(parseInline("release-ENG-1"))).toEqual([]);
+  });
+
+  it("finds one after a path separator, which is a boundary", () => {
+    expect(refs(parseInline("docs/ENG-1"))).toEqual(["ENG-1"]);
+  });
+
+  it("stays out of code, links and URLs", () => {
+    expect(refs(parseInline("`ENG-1`"))).toEqual([]);
+    expect(refs(parseInline("[text](https://x.test/ENG-1)"))).toEqual([]);
+    expect(refs(parseInline("https://x.test/ENG-1"))).toEqual([]);
+  });
+
+  it("resolves inside a link's own text, where prose still applies", () => {
+    const [link] = parseInline("[see ENG-1](https://x.test)");
+    expect(link!.kind).toBe("link");
+    expect(refs((link as Extract<Inline, { kind: "link" }>).children)).toEqual(["ENG-1"]);
+  });
+
+  it("is uppercase only, because that is the form the product shows", () => {
+    expect(refs(parseInline("eng-142"))).toEqual([]);
+    expect(refs(parseInline("step-1 then part-2"))).toEqual([]);
+  });
+
+  it("reports acronyms too, and lets the resolver settle them", () => {
+    // The parser has no catalog. These are candidates; `UTF` and `SHA` name no
+    // project, so the resolver rejects them without a round trip and they
+    // render as the words they are.
+    expect(refs(parseInline("UTF-8 and SHA-256"))).toEqual(["UTF-8", "SHA-256"]);
+  });
+
+  it("does not drag plain prose into the block grammar", () => {
+    // The cost of the line above: `looksLikeMarkdown` must NOT fire on a ref,
+    // or a plain paragraph mentioning SHA-256 would start folding its own line
+    // breaks the way a Markdown paragraph does.
+    expect(looksLikeMarkdown("hashed with SHA-256\nand stored")).toBe(false);
+  });
+
+  it("parseRefs leaves every other character exactly where it was", () => {
+    const parts = parseRefs("a\n\n  b ENG-1 c  \n");
+    const text = parts
+      .map((p) => (p.kind === "ref" ? p.ref : (p as { text: string }).text))
+      .join("");
+    expect(text).toBe("a\n\n  b ENG-1 c  \n");
+    expect(refs(parts)).toEqual(["ENG-1"]);
+  });
+});
+
+describe("underline", () => {
+  it("reads the one HTML tag the grammar admits", () => {
+    const [u] = parseInline("<u>held</u>");
+    expect(u!.kind).toBe("underline");
+    expect(looksLikeMarkdown("a <u>b</u> c")).toBe(true);
+  });
+
+  it("parses its content like any other emphasis", () => {
+    const [u] = parseInline("<u>**held**</u>");
+    const inner = (u as Extract<Inline, { kind: "underline" }>).children;
+    expect(inner[0]!.kind).toBe("strong");
+  });
+
+  it("leaves every other tag as the text it is", () => {
+    expect(parseInline("<script>x</script>").every((p) => p.kind === "text")).toBe(true);
+    expect(parseInline("<b>x</b>").every((p) => p.kind === "text")).toBe(true);
   });
 });

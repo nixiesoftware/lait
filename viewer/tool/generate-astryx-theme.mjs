@@ -495,6 +495,34 @@ const components = {
       ":focus-visible": { backgroundColor: "var(--color-tint-hover)" },
     },
   },
+  /**
+   * A tooltip is a small sheet, and it should read as one.
+   *
+   * Astryx gives it `--radius-container` — 12px, the menu panel's radius, and
+   * right for a menu panel. A tooltip is one line of text in 4px of padding,
+   * about 26px tall, and 12px of radius on a 26px box is a *pill*: the corner
+   * arcs meet before the straight edge starts, so a hint that is the same
+   * species as the popover beside it renders as a different one. `element` is
+   * the rung a control that size already sits on, and it leaves enough flat
+   * edge for the box to read as a box.
+   *
+   * The hairline is the popover's argument, inverted along with the fill. The
+   * sheet is `--color-text-primary` on the page's own background, which in
+   * dark mode is a light box on a dark page separated by nothing but the step
+   * — the same hole the menus grew before `styles.css` drew their edge. Same
+   * token, so the two floating surfaces are held off the page by one number.
+   *
+   * Unlike the popover, this one CAN live in the theme: `.astryx-tooltip` is
+   * the element that paints the fill and the radius (`themeProps('tooltip')`
+   * and the container xstyle land on the same box in `renderTooltip`), so a
+   * border set here draws around the sheet rather than inside it.
+   */
+  tooltip: {
+    base: {
+      borderRadius: "var(--radius-element)",
+      border: "1px solid var(--color-border)",
+    },
+  },
   statusdot: Object.fromEntries(
     Object.entries(p).map(([name, [light, dark]]) => [
       `variant:${name}`,

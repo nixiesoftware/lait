@@ -573,7 +573,7 @@ export function IssueDetail({
               options={[...PRIORITY_ORDER].reverse().map((p) => ({
                 id: p,
                 label: PRIORITY_LABEL[p],
-                icon: <PriorityIcon priority={p} />,
+                icon: <PriorityIcon priority={p} tone="neutral" />,
               }))}
               onPick={(id) =>
                 void runCommand(projectStore.setPriority(spaceId, reff, id))

@@ -23,6 +23,18 @@
  * What it still deliberately does not do: nested lists, images, HTML
  * passthrough. Lines that don't parse stay visible as text — prose must never
  * be eaten by its formatting.
+ *
+ * `<u>` is the one exception to the no-HTML rule, and it is an exception on
+ * purpose rather than the first crack in the wall. Markdown has no underline —
+ * CommonMark, GFM and every extension of them spell emphasis with `*` and `_`
+ * and leave underline to HTML, because in a document an underlined run that is
+ * not a link is a word-processor habit. The toolbar has the button anyway, so
+ * the choice is between a button that writes a tag this parser then renders as
+ * literal text, and one tag admitted by name. It is admitted by name: the
+ * pattern below matches `<u>…</u>` exactly and nothing else, so this is a
+ * second spelling of emphasis, not an HTML subset with a boundary to defend.
+ * Everything the safety argument rests on is unchanged — the tag becomes an
+ * AST node, and no string reaches `innerHTML`.
  */
 
 export type Inline =
@@ -31,6 +43,12 @@ export type Inline =
   | { kind: "strong"; children: Inline[] }
   | { kind: "em"; children: Inline[] }
   | { kind: "strike"; children: Inline[] }
+  | { kind: "underline"; children: Inline[] }
+  /** A bare `KEY-7` that *might* name an issue. The parser cannot know — it has
+   *  no catalog — so it reports the shape and the renderer resolves it. An
+   *  unresolvable ref renders as the text it always was, which is what makes
+   *  matching `UTF-8` and `COVID-19` free rather than wrong. */
+  | { kind: "ref"; ref: string }
   | { kind: "link"; href: string; children: Inline[] };
 
 export interface ListItem {
@@ -68,10 +86,33 @@ const ALERT = /^\[!(note|tip|important|warning|caution)\]\s*$/i;
 /** The `|---|:--:|` line that makes the row above a header. */
 const TABLE_RULE = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
 
+/**
+ * An issue alias as the engine derives it: a project KEY of 1–8 ASCII letters,
+ * a sequence number, and the lowercase collision suffix a same-second pair of
+ * issues gets (`ENG-7`, `ENG-7b`). Bounded on both sides by a non-word so a
+ * path segment or a hyphenated compound cannot half-match — `x/ENG-1` finds it,
+ * `SUPERSENG-1` does not.
+ *
+ * UPPERCASE ONLY, though the engine resolves an alias case-insensitively. The
+ * display form everywhere in the product is uppercase, so that is what people
+ * and agents type; accepting `step-1` and `part-2` as candidate refs would put
+ * this pattern through ordinary prose for nothing. The cost is that a lowercase
+ * `eng-142` renders as text — which is what an unresolvable ref does anyway.
+ *
+ * Exported because the CodeMirror live preview matches the same shape against
+ * its own document, and two regexes for one grammar drift.
+ */
+export const ISSUE_REF = /(?<![\w-])([A-Z]{1,8}-\d+[a-z]*)(?![\w-])/;
+
 /** Whether this text uses any Markdown at all — a plain paragraph should render
- *  exactly as it always has, without even entering the block path. */
+ *  exactly as it always has, without even entering the block path.
+ *
+ *  Refs are deliberately NOT a trigger. `UTF-8`, `SHA-256` and `COVID-19` all
+ *  have a ref's shape, and a plain paragraph that mentions one must not change
+ *  how its line breaks render just because something in it *might* be an issue.
+ *  The plain path resolves refs on its own — see `parseRefs`. */
 export function looksLikeMarkdown(text: string): boolean {
-  return /(^|\n)\s*(#{1,4}\s|[-*+]\s|\d+[.)]\s|>|```|\|)|(\*\*|__|~~|`|\[[^\]]*\]\()/.test(text);
+  return /(^|\n)\s*(#{1,4}\s|[-*+]\s|\d+[.)]\s|>|```|\|)|(\*\*|__|~~|`|\[[^\]]*\]\(|<u>)/.test(text);
 }
 
 /**
@@ -316,6 +357,10 @@ const INLINE: Array<{
   { re: /\*\*([^*\n]+)\*\*/, make: (m) => ({ kind: "strong", children: parseInline(m[1]!) }) },
   { re: /__([^_\n]+)__/, make: (m) => ({ kind: "strong", children: parseInline(m[1]!) }) },
   { re: /~~([^~\n]+)~~/, make: (m) => ({ kind: "strike", children: parseInline(m[1]!) }) },
+  {
+    re: /<u>([^<\n]+)<\/u>/,
+    make: (m) => ({ kind: "underline", children: parseInline(m[1]!) }),
+  },
   { re: /\*([^*\n]+)\*/, make: (m) => ({ kind: "em", children: parseInline(m[1]!) }) },
   // `_`-emphasis must not fire inside snake_case_names: both edges are guarded.
   {
@@ -331,7 +376,36 @@ const INLINE: Array<{
     re: /https?:\/\/[^\s<>()]*[^\s<>().,;:!?'"]/,
     make: (m) => ({ kind: "link", href: m[0], children: [{ kind: "text", text: m[0] }] }),
   },
+  // Last, so that on a tie every explicit marker wins. It cannot fire inside a
+  // URL or a link target either: both patterns start earlier than the ref they
+  // contain, and only a link's *text* is parsed recursively.
+  { re: ISSUE_REF, make: (m) => ({ kind: "ref", ref: m[1]! }) },
 ];
+
+/**
+ * Refs and nothing else.
+ *
+ * The plain-text path in the renderer needs chips without paying for the block
+ * grammar: a description with no Markdown in it renders inside one `pre-wrap`
+ * paragraph, byte for byte, and running `parseInline` over it would collapse
+ * its line breaks and start reading stray asterisks as emphasis. This walks the
+ * same `ISSUE_REF` and leaves every other character exactly where it was.
+ */
+export function parseRefs(text: string): Inline[] {
+  const out: Inline[] = [];
+  let rest = text;
+  while (rest.length > 0) {
+    const m = ISSUE_REF.exec(rest);
+    if (!m) {
+      out.push({ kind: "text", text: rest });
+      break;
+    }
+    if (m.index > 0) out.push({ kind: "text", text: rest.slice(0, m.index) });
+    out.push({ kind: "ref", ref: m[1]! });
+    rest = rest.slice(m.index + m[0].length);
+  }
+  return out;
+}
 
 export function parseInline(text: string): Inline[] {
   const out: Inline[] = [];

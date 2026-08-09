@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { markdown } from "@codemirror/lang-markdown";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import {
   Annotation,
@@ -21,12 +21,16 @@ import {
 } from "@codemirror/view";
 
 import { codeUnitOffset } from "../core/anchor";
+import { ISSUE_REF } from "../core/markdown";
 import {
   applyTextSplice,
   textRevision,
   textSplice,
   type TextSplice,
 } from "../core/textPreview";
+import { insertLink, toggleWrap } from "./markdownCommands";
+import { refChipElement, useRefs, type Refs, type ResolvedRef } from "./RefChip";
+import { SelectionToolbar } from "./SelectionToolbar";
 
 export { applyTextSplice, extendTextSplice, textRevision, textSplice } from "../core/textPreview";
 export type { TextSplice } from "../core/textPreview";
@@ -384,48 +388,293 @@ function previewCaretBaseOffset(preview: RemoteTextPreview): number | null {
   return null;
 }
 
-/** Source-native live preview. Markdown punctuation is hidden only away from
- * the active line, so every byte is directly editable whenever the caret
- * approaches it. */
+/**
+ * A resolved ref, drawn where its text was.
+ *
+ * `eq` compares the resolution rather than the identity, so a re-render with an
+ * unchanged issue reuses the DOM — otherwise every keystroke elsewhere in the
+ * document would rebuild every chip in it.
+ */
+class RefChipWidget extends WidgetType {
+  constructor(
+    private readonly target: ResolvedRef,
+    private readonly open: (reff: string) => void,
+  ) {
+    super();
+  }
+
+  eq(other: RefChipWidget): boolean {
+    return (
+      other.target.reff === this.target.reff &&
+      other.target.alias === this.target.alias &&
+      other.target.title === this.target.title &&
+      other.target.status === this.target.status
+    );
+  }
+
+  toDOM(): HTMLElement {
+    return refChipElement(this.target, this.open);
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+/** A bullet, standing in for the `-` that produced it. */
+class GlyphWidget extends WidgetType {
+  constructor(
+    private readonly glyph: string,
+    private readonly cls: string,
+  ) {
+    super();
+  }
+
+  eq(other: GlyphWidget): boolean {
+    return other.glyph === this.glyph && other.cls === this.cls;
+  }
+
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = this.cls;
+    span.textContent = this.glyph;
+    span.setAttribute("aria-hidden", "true");
+    return span;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+/** The resolver, carried in editor state so `livePreview` can reach it — a
+ *  decoration widget is a DOM node with no React above it. */
+const setRefs = StateEffect.define<Refs | null>();
+const refsField = StateField.define<Refs | null>({
+  create: () => null,
+  update(held, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setRefs)) return effect.value;
+    }
+    return held;
+  },
+});
+
+const CALLOUT = /^\s*\[!(note|tip|important|warning|caution)\]/i;
+/** The same pair `core/markdown.ts` admits, and nothing else. */
+const UNDERLINE = /<u>([^<\n]+)<\/u>/g;
+
+/**
+ * Source-native live preview. Markdown punctuation is hidden only away from the
+ * active line, so every byte is directly editable whenever the caret approaches
+ * it — and everything the reading view formats gets formatted here, because a
+ * body you write and a body you read that disagree about what a list looks like
+ * are two documents wearing one name.
+ *
+ * "Active" is every line the selection touches, not just the head's. Dragging
+ * across a heading used to leave its `##` hidden under the selection, so the
+ * highlight covered characters that were not on screen.
+ */
 function livePreview(state: EditorState): DecorationSet {
-  const active = new Set(state.selection.ranges.map((range) => state.doc.lineAt(range.head).number));
+  const active = new Set<number>();
+  for (const range of state.selection.ranges) {
+    const first = state.doc.lineAt(range.from).number;
+    const last = state.doc.lineAt(range.to).number;
+    for (let n = first; n <= last; n += 1) active.add(n);
+  }
+
+  const refs = state.field(refsField, false) ?? null;
   const decorations: Array<ReturnType<Decoration["range"]>> = [];
+  /** Spans a ref must not be looked for inside: code and link targets. */
+  const literal: Array<{ from: number; to: number }> = [];
+
+  const line = (at: number, cls: string) =>
+    decorations.push(Decoration.line({ class: cls }).range(state.doc.lineAt(at).from));
+  const eachLine = (from: number, to: number, visit: (number: number, at: number) => void) => {
+    let pos = from;
+    for (;;) {
+      const l = state.doc.lineAt(pos);
+      visit(l.number, l.from);
+      if (l.to >= to) break;
+      pos = l.to + 1;
+    }
+  };
+  const hide = (from: number, to: number) =>
+    decorations.push(Decoration.replace({}).range(from, to));
+
   syntaxTree(state).iterate({
     enter(node) {
-      const line = state.doc.lineAt(node.from);
-      const inactive = !active.has(line.number);
-      if (/^ATXHeading[1-6]$/.test(node.name)) {
-        const level = node.name.slice(-1);
-        decorations.push(Decoration.line({ class: `cm-md-heading cm-md-h${level}` }).range(line.from));
-      } else if (node.name === "StrongEmphasis") {
-        decorations.push(Decoration.mark({ class: "cm-md-strong" }).range(node.from, node.to));
-      } else if (node.name === "Emphasis") {
-        decorations.push(Decoration.mark({ class: "cm-md-emphasis" }).range(node.from, node.to));
-      } else if (node.name === "InlineCode") {
-        decorations.push(Decoration.mark({ class: "cm-md-inline-code" }).range(node.from, node.to));
-      } else if (node.name === "CodeText") {
-        decorations.push(Decoration.mark({ class: "cm-md-code-block" }).range(node.from, node.to));
-      } else if (node.name === "Blockquote") {
-        decorations.push(Decoration.line({ class: "cm-md-quote" }).range(line.from));
+      const at = state.doc.lineAt(node.from);
+      const inactive = !active.has(at.number);
+
+      switch (true) {
+        case /^ATXHeading[1-6]$/.test(node.name): {
+          line(node.from, `cm-md-heading cm-md-h${node.name.slice(-1)}`);
+          break;
+        }
+        case node.name === "StrongEmphasis":
+          decorations.push(Decoration.mark({ class: "cm-md-strong" }).range(node.from, node.to));
+          break;
+        case node.name === "Emphasis":
+          decorations.push(Decoration.mark({ class: "cm-md-emphasis" }).range(node.from, node.to));
+          break;
+        case node.name === "Strikethrough":
+          decorations.push(Decoration.mark({ class: "cm-md-strike" }).range(node.from, node.to));
+          break;
+        case node.name === "InlineCode":
+          decorations.push(
+            Decoration.mark({ class: "cm-md-inline-code" }).range(node.from, node.to),
+          );
+          literal.push({ from: node.from, to: node.to });
+          break;
+        case node.name === "Link" || node.name === "Autolink":
+          decorations.push(Decoration.mark({ class: "cm-md-link" }).range(node.from, node.to));
+          break;
+        case node.name === "URL":
+          literal.push({ from: node.from, to: node.to });
+          break;
+        case node.name === "FencedCode" || node.name === "CodeBlock":
+          eachLine(node.from, node.to, (_, from) => line(from, "cm-md-fence"));
+          literal.push({ from: node.from, to: node.to });
+          break;
+        case node.name === "CodeText":
+          decorations.push(
+            Decoration.mark({ class: "cm-md-code-block" }).range(node.from, node.to),
+          );
+          break;
+        case node.name === "Blockquote": {
+          // GitHub's alert syntax reads as a quote to the grammar — the marker
+          // is prose to lezer — so the tone is recovered the same way the
+          // reading parser recovers it, off the first line.
+          const head = state.sliceDoc(at.from, at.to).replace(/^\s*>\s?/, "");
+          const alert = CALLOUT.exec(head);
+          const cls = alert
+            ? `cm-md-callout cm-md-callout-${alert[1]!.toLowerCase()}`
+            : "cm-md-quote";
+          eachLine(node.from, node.to, (_, from) => line(from, cls));
+          break;
+        }
+        case node.name === "ListItem": {
+          const ordered = node.node.parent?.name === "OrderedList";
+          eachLine(node.from, node.to, (_, from) =>
+            line(from, ordered ? "cm-md-li cm-md-li-ordered" : "cm-md-li"),
+          );
+          break;
+        }
+        case node.name === "Table":
+          eachLine(node.from, node.to, (_, from) => line(from, "cm-md-table"));
+          break;
+        case node.name === "HorizontalRule":
+          line(node.from, "cm-md-hr");
+          break;
       }
+
+      // Everything below removes characters, and the active line keeps all of
+      // its own — the invariant that makes this a source editor rather than a
+      // second document model.
       if (!inactive) return;
-      if (node.name === "HeaderMark") {
-        const after = state.sliceDoc(node.to, Math.min(node.to + 1, state.doc.length));
-        decorations.push(Decoration.replace({}).range(node.from, node.to + (after === " " ? 1 : 0)));
-      } else if (node.name === "EmphasisMark" || node.name === "CodeMark") {
-        decorations.push(Decoration.replace({}).range(node.from, node.to));
-      } else if (node.name === "LinkMark" || node.name === "URL") {
-        decorations.push(Decoration.replace({}).range(node.from, node.to));
+      switch (node.name) {
+        case "HeaderMark": {
+          // The space after `##` belongs to the syntax, not the sentence.
+          const after = state.sliceDoc(node.to, Math.min(node.to + 1, state.doc.length));
+          hide(node.from, node.to + (after === " " ? 1 : 0));
+          break;
+        }
+        case "EmphasisMark":
+        case "StrikethroughMark":
+        case "LinkMark":
+        case "URL":
+          hide(node.from, node.to);
+          break;
+        case "CodeMark":
+          // Inline backticks go; a fence's ``` stays. Hiding it would collapse
+          // the opening line to nothing and leave a blank gap where the reader
+          // expects the top of a code block.
+          if (node.node.parent?.name === "InlineCode") hide(node.from, node.to);
+          break;
+        case "QuoteMark":
+          // The `>` and the space after it — the line's left bar says it now.
+          hide(node.from, Math.min(node.to + 1, at.to));
+          break;
+        case "ListMark":
+          if (node.node.parent?.parent?.name !== "OrderedList") {
+            decorations.push(
+              Decoration.replace({ widget: new GlyphWidget("•", "cm-md-bullet") }).range(
+                node.from,
+                node.to,
+              ),
+            );
+          }
+          break;
+        case "TaskMarker":
+          decorations.push(
+            Decoration.replace({
+              widget: new GlyphWidget(
+                state.sliceDoc(node.from, node.to).toLowerCase() === "[x]" ? "☑" : "☐",
+                "cm-md-task",
+              ),
+            }).range(node.from, node.to),
+          );
+          break;
+        case "HorizontalRule":
+          hide(node.from, node.to);
+          break;
       }
     },
   });
+
+  // Underline, which the grammar hands back as two `HTMLTag` nodes with prose
+  // between them rather than as one span — lezer has no reason to pair them.
+  // The reading parser recognises the pair by the same regex, so scanning here
+  // is what keeps the two renderers agreeing on what an underline is.
+  {
+    const text = state.doc.toString();
+    for (let m = UNDERLINE.exec(text); m; m = UNDERLINE.exec(text)) {
+      const open = m.index;
+      const inner = open + 3;
+      const close = inner + m[1]!.length;
+      if (literal.some((span) => open < span.to && close + 4 > span.from)) continue;
+      decorations.push(Decoration.mark({ class: "cm-md-underline" }).range(inner, close));
+      if (active.has(state.doc.lineAt(open).number)) {
+        // Visible, because the active line keeps every character it has — but
+        // dressed as punctuation. `defaultHighlightStyle` paints a tag name
+        // green, which is right in a code editor and reads as an error in the
+        // middle of a sentence: seven loud characters where `**` shows two
+        // quiet ones.
+        decorations.push(Decoration.mark({ class: "cm-md-tag" }).range(open, inner));
+        decorations.push(Decoration.mark({ class: "cm-md-tag" }).range(close, close + 4));
+      } else {
+        hide(open, inner);
+        hide(close, close + 4);
+      }
+    }
+    UNDERLINE.lastIndex = 0;
+  }
+
+  if (refs) {
+    const text = state.doc.toString();
+    const pattern = new RegExp(ISSUE_REF.source, "g");
+    for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
+      const from = m.index;
+      const to = from + m[0].length;
+      if (literal.some((span) => from < span.to && to > span.from)) continue;
+      if (active.has(state.doc.lineAt(from).number)) continue;
+      const target = refs.resolve(m[1]!);
+      if (!target) continue;
+      decorations.push(
+        Decoration.replace({ widget: new RefChipWidget(target, refs.open) }).range(from, to),
+      );
+    }
+  }
+
   return Decoration.set(decorations, true);
 }
 
 const livePreviewField = StateField.define<DecorationSet>({
   create: livePreview,
   update(held, transaction) {
-    if (!transaction.docChanged && !transaction.selection) return held;
+    const resolved = transaction.effects.some((effect) => effect.is(setRefs));
+    if (!transaction.docChanged && !transaction.selection && !resolved) return held;
     return livePreview(transaction.state);
   },
   provide: (field) => EditorView.decorations.from(field),
@@ -453,6 +702,29 @@ const editorTheme = EditorView.theme({
 });
 
 export const cursorRefreshMs = 10_000;
+
+/** The selection's box and the host's origin — everything the format bar needs
+ *  to decide where it fits. Host-relative, except the two `host*` fields, which
+ *  carry the viewport origin so the bar can tell where the window's edges are. */
+export interface BarAnchor {
+  top: number;
+  bottom: number;
+  left: number;
+  hostTop: number;
+  hostLeft: number;
+  state: EditorState;
+}
+
+/** Run one of the toolbar's commands from a key binding. Refuses on an empty
+ *  selection — ⌘B with no range would wrap nothing in `****`. */
+function apply(
+  editor: EditorView,
+  command: (state: EditorState) => Parameters<EditorView["dispatch"]>[0],
+): boolean {
+  if (editor.state.selection.main.empty) return false;
+  editor.dispatch(command(editor.state));
+  return true;
+}
 
 export default function CodeMirrorEditor({
   value,
@@ -484,8 +756,19 @@ export default function CodeMirrorEditor({
     markdown: string,
   ) => void;
 }) {
+  const refs = useRefs();
   const mount = useRef<HTMLDivElement | null>(null);
+  const host = useRef<HTMLDivElement | null>(null);
   const view = useRef<EditorView | null>(null);
+  /** Where the format bar sits, and the state its pressed flags read. `null`
+   *  whenever there is nothing to format: no range, no focus, no write access,
+   *  or a selection still being dragged. */
+  const [bar, setBar] = useState<BarAnchor | null>(null);
+  /** True from pointerdown until the gesture that follows it ends. The bar is
+   *  about a selection, and a selection under the pointer is not finished. */
+  const selecting = useRef(false);
+  /** `placeBar`, reachable from the pointer listeners outside the setup effect. */
+  const place = useRef<((editor: EditorView) => void) | null>(null);
   const emit = useRef(onChange);
   const commit = useRef(onCommit);
   const awareness = useRef(onAwareness);
@@ -498,6 +781,43 @@ export default function CodeMirrorEditor({
 
   useLayoutEffect(() => {
     if (!mount.current) return;
+    /**
+     * Anchor the format bar to the selection.
+     *
+     * Recomputed rather than remembered, because both ends move for reasons
+     * that are not edits: the pane scrolls, a remote preview widget above the
+     * range reflows it, the window resizes. Coordinates come from the view in
+     * viewport space and are made relative to the host, which is the element
+     * `position: relative` is on — the bar has to travel with the text, so
+     * `absolute` inside the host rather than `fixed` to the window.
+     *
+     * It reports the range's box and the host's origin and stops there. Which
+     * side the bar takes and how far it may slide are the bar's own business:
+     * they depend on how wide it is, and only it knows that.
+     */
+    const placeBar = (editor: EditorView) => {
+      const range = editor.state.selection.main;
+      if (readOnly || range.empty || !editor.hasFocus || selecting.current) {
+        setBar(null);
+        return;
+      }
+      const start = editor.coordsAtPos(range.from);
+      const end = editor.coordsAtPos(range.to);
+      const box = host.current?.getBoundingClientRect();
+      if (!start || !end || !box) {
+        setBar(null);
+        return;
+      }
+      setBar({
+        top: Math.min(start.top, end.top) - box.top,
+        bottom: Math.max(start.bottom, end.bottom) - box.top,
+        left: (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2 - box.left,
+        hostTop: box.top,
+        hostLeft: box.left,
+        state: editor.state,
+      });
+    };
+    place.current = placeBar;
     const publish = (editor: EditorView, active = typing.current) => {
       if (!awareness.current || !editor.hasFocus) return;
       const text = editor.state.doc.toString();
@@ -510,9 +830,23 @@ export default function CodeMirrorEditor({
       );
     };
     const extensions: Extension[] = [
-      markdown(),
+      // GFM, not strict CommonMark: tables, strikethrough and task lists are
+      // three of the things `core/markdown.ts` renders, and under the default
+      // base the grammar has no node for any of them — the live preview would
+      // be silently unable to see what the reading view formats.
+      markdown({ base: markdownLanguage }),
       syntaxHighlighting(defaultHighlightStyle),
+      refsField,
       history(),
+      // The four every editor binds. They are the toolbar's commands, so a
+      // shortcut and a button cannot drift; `preventDefault` is what stops
+      // ⌘B reaching the shell's own binding for it.
+      keymap.of([
+        { key: "Mod-b", run: (editor) => apply(editor, (s) => toggleWrap(s, "**")) },
+        { key: "Mod-i", run: (editor) => apply(editor, (s) => toggleWrap(s, "*")) },
+        { key: "Mod-u", run: (editor) => apply(editor, (s) => toggleWrap(s, "<u>", "</u>")) },
+        { key: "Mod-k", run: (editor) => apply(editor, (s) => insertLink(s)) },
+      ]),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.lineWrapping,
       EditorView.editable.of(!readOnly),
@@ -520,6 +854,26 @@ export default function CodeMirrorEditor({
       editorTheme,
       livePreviewField,
       remoteDecorations,
+      // A selection under the pointer is not a selection yet. Without this the
+      // bar appears on the first character of a drag and then chases the
+      // pointer across the paragraph, which is both distracting and a target
+      // that moves out from under the cursor. `pointerup` goes on the window,
+      // not the editor: a drag that ends outside the pane still ends.
+      EditorView.domEventHandlers({
+        pointerdown(_event, editor) {
+          selecting.current = true;
+          setBar(null);
+          const done = () => {
+            window.removeEventListener("pointerup", done);
+            window.removeEventListener("pointercancel", done);
+            selecting.current = false;
+            place.current?.(editor);
+          };
+          window.addEventListener("pointerup", done);
+          window.addEventListener("pointercancel", done);
+          return false;
+        },
+      }),
       EditorView.updateListener.of((update: ViewUpdate) => {
         const editor = update.view;
         if (update.docChanged) {
@@ -548,6 +902,9 @@ export default function CodeMirrorEditor({
           commit.current();
         } else if (editor.hasFocus && (update.docChanged || update.selectionSet || update.focusChanged)) {
           publish(editor);
+        }
+        if (update.docChanged || update.selectionSet || update.focusChanged || update.geometryChanged) {
+          placeBar(editor);
         }
       }),
       ...(placeholder ? [placeholderExtension(placeholder)] : []),
@@ -608,12 +965,43 @@ export default function CodeMirrorEditor({
     });
   }, [remoteCursors, remotePreviews, value, acceptRemote]);
 
+  // Hand the resolver to editor state, and re-hand it every time a lookup
+  // settles: `refs` is memoised on the resolution map, so a new identity IS the
+  // news that a chip can now be drawn.
+  useEffect(() => {
+    view.current?.dispatch({ effects: setRefs.of(refs) });
+  }, [refs]);
+
+  // Ask for what the document mentions. Outside CodeMirror on purpose — the
+  // decoration field runs during a state update, and firing a fetch from there
+  // would be a side effect inside a pure computation.
+  useEffect(() => {
+    if (!refs) return;
+    const pattern = new RegExp(ISSUE_REF.source, "g");
+    for (let m = pattern.exec(value); m; m = pattern.exec(value)) refs.request(m[1]!);
+  }, [refs, value]);
+
   useEffect(() => () => {
     if (typingTimer.current !== null) clearTimeout(typingTimer.current);
   }, []);
 
   return (
-    <div className="markdown-editor-host">
+    <div className="markdown-editor-host" ref={host}>
+      {bar && (
+        <SelectionToolbar
+          at={bar}
+          state={bar.state}
+          run={(spec) => {
+            const editor = view.current;
+            if (!editor) return;
+            editor.dispatch(spec);
+            // The bar acted without ever taking focus, so the editor still has
+            // it — but a browser that dropped it anyway would leave the caret
+            // nowhere, and the next keystroke would go to the page.
+            editor.focus();
+          }}
+        />
+      )}
       {remoteContexts.length > 0 && (
         <div className="remote-contexts" aria-label="Collaborators editing this description">
           {remoteContexts.map((remote) => (

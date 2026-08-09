@@ -13,11 +13,13 @@ import { highlight, isHighlightable, type Token } from "../core/highlight";
 import {
   looksLikeMarkdown,
   parseMarkdown,
+  parseRefs,
   type Block,
   type CalloutTone,
   type Inline,
 } from "../core/markdown";
 import { cn } from "./primitives";
+import { RefChip } from "./RefChip";
 
 /**
  * Issue prose, rendered.
@@ -54,8 +56,13 @@ export function Markdown({
   );
   const prose = density === "tight" ? "prose prose-tight" : "prose";
 
+  // Plain text still gets its chips. `parseRefs` walks refs and nothing else,
+  // so every other character — including every line break `pre-wrap` is here to
+  // keep — comes through exactly as typed.
   if (!blocks) {
-    return <p className={cn(prose, "whitespace-pre-wrap", className)}>{text}</p>;
+    return (
+      <p className={cn(prose, "whitespace-pre-wrap", className)}>{inlines(parseRefs(text))}</p>
+    );
   }
   return (
     <div className={cn(prose, className)}>
@@ -344,6 +351,12 @@ function InlineView({ inline }: { inline: Inline }) {
       return <em>{inlines(inline.children)}</em>;
     case "strike":
       return <s className="text-mute">{inlines(inline.children)}</s>;
+    case "underline":
+      // `decoration-from-font` where the font offers a position, so the rule
+      // clears descenders instead of striking through them.
+      return <u className="underline decoration-from-font underline-offset-2">{inlines(inline.children)}</u>;
+    case "ref":
+      return <RefChip reff={inline.ref} />;
     case "link":
       // The parser admits only http(s) hrefs; `noreferrer` because an issue
       // tracker's prose links to the whole internet.

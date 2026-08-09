@@ -532,7 +532,7 @@ export function NewIssue({
               options={[...PRIORITY_ORDER].reverse().map((p) => ({
                 id: p,
                 label: PRIORITY_LABEL[p],
-                icon: <PriorityIcon priority={p} />,
+                icon: <PriorityIcon priority={p} tone="neutral" />,
               }))}
               onPick={(id) => setPriority(id as Priority)}
             />
