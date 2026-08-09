@@ -8,11 +8,11 @@ import {
   Bot,
   ChevronRight,
   Folder,
-  FolderKanban,
   GanttChart,
   Inbox,
   UserRound,
 } from "lucide-react";
+import { ProjectIcon } from "./icons";
 
 /**
  * Every surface's title bar: one frame, three slots.
@@ -345,10 +345,7 @@ export function ProjectCrumb({ name, color }: { name: string; color?: string | u
   return (
     <>
       <span className={crumbGlyph} aria-hidden>
-        <span
-          className="size-mark-sm rounded-mark"
-          style={{ background: color ?? "var(--color-mute)" }}
-        />
+        <ProjectIcon color={color ?? "var(--color-mute)"} />
       </span>
       <span className="truncate">{name}</span>
     </>
@@ -421,7 +418,7 @@ export function DestinationCrumb({ icon, label }: { icon?: React.ReactNode; labe
 export const DESTINATION_ICON = {
   inbox: <Inbox />,
   "my-issues": <UserRound />,
-  projects: <FolderKanban />,
+  projects: <ProjectIcon />,
   timeline: <GanttChart />,
   workspace: <Folder />,
 } as const;
@@ -543,7 +540,7 @@ export function RailCard({
   };
 
   return (
-    <section className="border-line bg-raised rounded-surface border">
+    <section className="border-line bg-raised shadow-raised rounded-surface border">
       <div className="flex h-ctl-lg items-center gap-1 px-2">
         <button
           type="button"
@@ -562,7 +559,18 @@ export function RailCard({
             do not hide until you find them with the pointer. */}
         {action && <span className="ml-auto flex items-center">{action}</span>}
       </div>
-      {!collapsed && <div id={bodyId} className="px-2 pb-2">{children}</div>}
+      <div
+        className={cn(
+          "grid transition-[grid-template-rows,opacity] duration-150 ease-out motion-reduce:transition-none",
+          collapsed ? "grid-rows-[0fr] opacity-0" : "grid-rows-[1fr] opacity-100",
+        )}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div id={bodyId} inert={collapsed} aria-hidden={collapsed} className="px-2 pb-2">
+            {children}
+          </div>
+        </div>
+      </div>
     </section>
   );
 }

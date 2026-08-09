@@ -20,7 +20,7 @@ import {
   type WorkflowState,
 } from "../types";
 import { catalogColor } from "./colors";
-import { PriorityIcon, StatusIcon, statusIconElement } from "./icons";
+import { PriorityIcon, ProjectIcon, StatusIcon, statusIconElement } from "./icons";
 import { cn } from "./primitives";
 
 /**
@@ -455,10 +455,7 @@ function RefHoverCard() {
         )}
         {target.projectName && (
           <span className="inline-flex items-center gap-1.5">
-            <span
-              className="size-mark-sm rounded-mark shrink-0"
-              style={{ background: target.projectColor }}
-            />
+            <ProjectIcon color={target.projectColor} />
             {target.projectName}
           </span>
         )}

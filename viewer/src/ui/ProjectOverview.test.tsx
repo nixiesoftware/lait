@@ -89,6 +89,7 @@ describe("ProjectOverview", () => {
       host?.querySelector<HTMLInputElement>('input[aria-label^="Milestone name"]')?.value;
     expect(heading()).toBe("Beta");
     expect(host.textContent).toContain("2 issues · 0%");
+    expect(host.querySelector("svg.lucide-box")).not.toBeNull();
 
     milestones = [{ id: "mls_1", name: "Beta", total: 2, done: 1 }];
     await act(async () => {

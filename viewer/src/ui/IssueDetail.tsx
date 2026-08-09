@@ -87,7 +87,7 @@ import { conflictPhrase, sourcePhrase } from "../core/specs";
 import { Avatar, AvatarStack, memberName as nameOf, stackFor } from "./Avatar";
 import { LoadingState } from "./AppState";
 import { avatarColor, catalogColor } from "./colors";
-import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
+import { PriorityIcon, ProgressRing, ProjectIcon, StatusIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import type {
@@ -795,23 +795,22 @@ export function IssueDetail({
             <Combobox
               tone="quiet"
               label="Project"
-              swatchShape="square"
-              // 14px slot, so `Beacon` starts on the same column as `Backlog`
-              // and `Add label`. Without it the 8px swatch pulls the label 6px
-              // left and the rail grows a hanging indent on one row.
-              swatchSlot="sm"
               disabled={locked}
               open={pickerOpen("project")}
               onOpenChange={setPicker("project")}
               value={
                 project
-                  ? { id: project.id, label: project.name, swatch: catalogColor(project.color) }
+                  ? {
+                      id: project.id,
+                      label: project.name,
+                      icon: <ProjectIcon color={catalogColor(project.color)} />,
+                    }
                   : { id: issue.project_id, label: issue.project_key ?? "—" }
               }
               options={projects.map((p) => ({
                 id: p.id,
                 label: p.name,
-                swatch: catalogColor(p.color),
+                icon: <ProjectIcon color={catalogColor(p.color)} />,
                 hint: p.key,
                 keywords: [p.key],
               }))}

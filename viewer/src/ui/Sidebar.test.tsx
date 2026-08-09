@@ -82,6 +82,7 @@ describe("Sidebar navigation", () => {
     // The name opens the project, naming the face it lands on: there is one
     // navigation verb and the destination is its argument, not its identity.
     const name = [...host.querySelectorAll("button")].find((b) => b.title?.startsWith("Web ·"));
+    expect(name?.querySelector("svg.lucide-box")).not.toBeNull();
     act(() => name?.click());
     expect(onOpenProjectView).toHaveBeenLastCalledWith("WEB", "list");
 

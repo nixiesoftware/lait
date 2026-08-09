@@ -18,6 +18,7 @@ import {
 import { EmptyState } from "./AppState";
 import { Avatar } from "./Avatar";
 import { catalogColor } from "./colors";
+import { ProjectIcon } from "./icons";
 import { cn, interactiveRow } from "./primitives";
 import { dueLabel } from "./time";
 
@@ -532,18 +533,8 @@ function ProjectBand({
           className="flex h-full min-w-0 flex-1 flex-col justify-center gap-0.5 text-left"
           title={project.name}
         >
-          {/* The dot stays, and the distinction from the sequence chart's
-              retired left-edge spine is the whole point: this one is bound to
-              the name it colours, sits inside the row's padding rather than on
-              its edge, and is round. That is a catalog swatch. A saturated bar
-              at x=0 is a selection marker, which is why the other one had to
-              go. */}
           <span className="flex items-center gap-2">
-            <span
-              aria-hidden
-              className="size-mark-md shrink-0 rounded-full"
-              style={{ background: tone }}
-            />
+            <ProjectIcon color={tone} />
             <span className="text-fg group-hover:text-bright min-w-0 flex-1 truncate text-xs font-medium transition-colors">
               {project.name}
             </span>

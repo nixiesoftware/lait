@@ -15,7 +15,7 @@ import { ColorPicker } from "./ColorPicker";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { Combobox } from "./Picker";
-import { MilestoneIcon } from "./icons";
+import { MilestoneIcon, ProjectIcon } from "./icons";
 import { Button, IconButton, Popover } from "@astryxdesign/core";
 import { cn } from "./primitives";
 import { when } from "./time";
@@ -85,16 +85,16 @@ export function ProjectOverview({
                     aria-label="Project colour"
                     className="hover:ring-line-strong rounded-mark p-0.5 hover:ring-1"
                   >
-                    <span
-                      className="block size-mark-xl rounded-mark"
-                      style={{ background: catalogColor(project.color) }}
+                    <ProjectIcon
+                      color={catalogColor(project.color)}
+                      className="size-icon-lg"
                     />
                   </button>
                 </Popover>
               ) : (
-                <span
-                  className="block size-mark-xl rounded-mark"
-                  style={{ background: catalogColor(project.color) }}
+                <ProjectIcon
+                  color={catalogColor(project.color)}
+                  className="size-icon-lg"
                 />
               )}
               <input

@@ -1,13 +1,15 @@
 import { useMemo, useState } from "react";
-import { ArrowLeft, Trash2, Users } from "lucide-react";
+import { ArrowLeft, Search, Trash2, UserPlus } from "lucide-react";
 
 import { rpc } from "../api";
 import { projectsOf } from "../core/teams";
 import type { MemberDto, ProjectDto, TeamDto } from "../types";
-import { memberName } from "./Avatar";
+import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";
+import { Combobox } from "./Picker";
 import { Button, IconButton, TextInput } from "@astryxdesign/core";
-import { cn, navigationItem } from "./primitives";
+import { Badge } from "./primitives";
+import { SettingsPageHeader } from "./settingsLayout";
 
 /**
  * Teams — the administration surface for the grouping the sidebar navigates by.
@@ -139,28 +141,27 @@ function TeamList({
   }, [query, teams]);
 
   return (
-    <section className="mb-8">
-      <div className="mb-4 flex items-center gap-2">
-        <h2 className="flex-1 text-base font-semibold">Teams</h2>
-        {!readOnly && (
-          <Button label="Create team" variant="primary" size="sm" onClick={onNew} />
-        )}
+    <section>
+      <SettingsPageHeader
+        title="Teams"
+        description="Group projects and members into durable areas of ownership."
+        actions={
+          !readOnly ? (
+            <Button label="Create team" variant="primary" size="sm" onClick={onNew} />
+          ) : undefined
+        }
+      />
+      <div className="mb-4 max-w-md">
+        <TextInput
+          label="Filter teams"
+          isLabelHidden
+          value={query}
+          onChange={setQuery}
+          placeholder="Filter by name…"
+          size="sm"
+          width="100%"
+        />
       </div>
-      {/* Only once there is enough to filter. A search field over two rows is
-          furniture. */}
-      {teams.length > 4 && (
-        <div className="mb-3">
-          <TextInput
-            label="Filter teams"
-            isLabelHidden
-            value={query}
-            onChange={setQuery}
-            placeholder="Filter by name…"
-            size="sm"
-            width="100%"
-          />
-        </div>
-      )}
 
       {teams.length === 0 ? (
         <p className="text-mute text-sm">
@@ -168,23 +169,33 @@ function TeamList({
           and Roadmap, each scoped to what that team owns.
         </p>
       ) : (
-        <ul className="flex flex-col gap-0.5">
-          {shown.length === 0 && <li className="text-mute text-sm">Nothing matches “{query}”.</li>}
+        <div className="overflow-hidden">
+          <div className="text-mute grid grid-cols-[minmax(0,1fr)_6rem_7rem_7rem] gap-3 px-3 py-2 pr-12 text-2xs">
+            <span>Name</span>
+            <span>Key</span>
+            <span className="text-right">Projects</span>
+            <span className="text-right">Members</span>
+          </div>
+          <div className="bg-sunken text-mute rounded-row px-3 py-2 text-2xs">
+            Active&nbsp; {shown.length}
+          </div>
+        <ul className="mt-1 flex flex-col gap-0.5">
+          {shown.length === 0 && <li className="text-mute px-3 py-3 text-sm">Nothing matches “{query}”.</li>}
           {shown.map((team) => {
             const owned = projectsOf(team, projects);
             return (
-              <li key={team.id} className="group/team flex items-center gap-2">
+              <li key={team.id} className="group/team hover:bg-hover flex min-h-ctl-lg items-center rounded-row">
                 <button
                   onClick={() => onOpen(team.id)}
-                  className={cn(navigationItem({ size: "lg" }), "min-w-0 flex-1")}
+                  className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_6rem_7rem_7rem] items-center gap-3 px-3 py-2 text-left outline-none"
                 >
-                  <span className="text-fg min-w-0 flex-1 truncate text-sm">{team.name}</span>
-                  <span className="text-mute shrink-0 font-mono text-2xs">{team.key}</span>
-                  <span className="text-mute w-20 shrink-0 text-right text-2xs tabular-nums">
-                    {owned.length} project{owned.length === 1 ? "" : "s"}
+                  <span className="text-fg min-w-0 truncate text-sm font-medium">{team.name}</span>
+                  <span className="text-mute font-mono text-2xs">{team.key}</span>
+                  <span className="text-mute text-right text-2xs tabular-nums">
+                    {owned.length}
                   </span>
-                  <span className="text-mute w-20 shrink-0 text-right text-2xs tabular-nums">
-                    {team.members.length} member{team.members.length === 1 ? "" : "s"}
+                  <span className="text-mute text-right text-2xs tabular-nums">
+                    {team.members.length}
                   </span>
                 </button>
                 {!readOnly && (
@@ -202,6 +213,7 @@ function TeamList({
             );
           })}
         </ul>
+        </div>
       )}
     </section>
   );
@@ -243,12 +255,12 @@ function CreateTeam({
         <ArrowLeft className="size-icon-sm" />
         Teams
       </button>
-      <h2 className="text-base font-semibold">Create a new team</h2>
-      <p className="text-mute mt-0.5 text-sm">
-        A team owns projects. The sidebar gets Issues, Projects and Roadmap for it, each scoped to
-        what it owns.
-      </p>
-      <div className="border-line mt-4 flex flex-col gap-4 rounded-surface border p-4">
+      <SettingsPageHeader
+        title="Create a new team"
+        description="A team owns projects. Its Issues, Projects, and Roadmap views are scoped to that ownership."
+        className="mb-4"
+      />
+      <div className="border-line flex flex-col gap-4 rounded-surface border p-4">
         <Field label="Name" hint="What the sidebar calls it.">
           <TextInput
             label="Team name"
@@ -311,7 +323,35 @@ function TeamDetail({
 }) {
   const [name, setName] = useState(team.name);
   const [key, setKey] = useState(team.key);
+  const [memberQuery, setMemberQuery] = useState("");
+  const [roleFilter, setRoleFilter] = useState("all");
   const owned = projectsOf(team, projects);
+  const teamMembers = useMemo(
+    () =>
+      team.members.map((memberKey) => ({
+        key: memberKey,
+        member: members.find((candidate) => candidate.key === memberKey),
+      })),
+    [members, team.members],
+  );
+  const shownMembers = useMemo(() => {
+    const needle = memberQuery.trim().toLowerCase();
+    return teamMembers.filter(({ key: memberKey, member }) => {
+      const matchesRole =
+        roleFilter === "all" ||
+        (roleFilter === "agents" ? Boolean(member?.sponsor) : member?.role === roleFilter);
+      const matchesQuery =
+        !needle ||
+        [memberName(memberKey, member), member?.alias, member?.did, memberKey]
+          .filter(Boolean)
+          .some((value) => value!.toLowerCase().includes(needle));
+      return matchesRole && matchesQuery;
+    });
+  }, [memberQuery, roleFilter, teamMembers]);
+  const availableMembers = useMemo(
+    () => members.filter((candidate) => !team.members.includes(candidate.key)),
+    [members, team.members],
+  );
 
   const send = async (fn: () => Promise<unknown>) => {
     try {
@@ -338,12 +378,15 @@ function TeamDetail({
         <ArrowLeft className="size-icon-sm" />
         Teams
       </button>
-      <h2 className="text-base font-semibold">{team.name}</h2>
-      <p className="text-mute mt-0.5 text-sm">
-        {owned.length === 0
-          ? "Owns no projects yet — assign one from its overview."
-          : `Owns ${owned.length} project${owned.length === 1 ? "" : "s"}.`}
-      </p>
+      <SettingsPageHeader
+        title={team.name}
+        description={
+          owned.length === 0
+            ? "Owns no projects yet — assign one from its overview."
+            : `Owns ${owned.length} project${owned.length === 1 ? "" : "s"}.`
+        }
+        className="mb-4"
+      />
 
       <div className="border-line mt-4 flex flex-col gap-4 rounded-surface border p-4">
         <Field label="Name">
@@ -387,63 +430,168 @@ function TeamDetail({
         ))}
       </ul>
 
-      <h3 className="mt-6 flex items-center gap-1.5 text-sm font-semibold">
-        <Users className="size-icon-sm" />
-        Members
-      </h3>
-      <ul className="mt-2 flex flex-col gap-0.5">
-        {team.members.length === 0 && <li className="text-mute text-sm">Nobody yet.</li>}
-        {team.members.map((who) => {
-          const member = members.find((candidate) => candidate.key === who);
-          return (
-            <li key={who} className="group/member flex items-center gap-2 px-2 py-1.5 text-sm">
-              <span className="min-w-0 flex-1 truncate">
-                {memberName(who, member)}
-              </span>
-              {!readOnly && (
-                <IconButton
-                  label="Remove from team"
-                  tooltip="Remove from team"
-                  variant="ghost"
-                  size="sm"
-                  className="opacity-0 group-hover/member:opacity-100 focus-visible:opacity-100"
-                  onClick={() =>
-                    void send(() =>
-                      rpc(spaceId, { cmd: "team_set", team: team.id, remove_members: [who] }),
-                    )
-                  }
-                  icon={<Trash2 className="size-icon-sm" />}
-                />
-              )}
-            </li>
-          );
-        })}
-      </ul>
-      {!readOnly && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {members
-            .filter((candidate) => !team.members.includes(candidate.key))
-            .map((candidate) => (
-              <Button
-                key={candidate.key}
-                label={`+ ${memberName(candidate.key, candidate)}`}
-                variant="ghost"
-                size="sm"
-                onClick={() =>
+      <section className="mt-9">
+        <h2 className="text-xl font-semibold tracking-tight">Team members</h2>
+
+        <div className="mt-4 flex items-center gap-2">
+          <div className="w-full max-w-xs">
+            <TextInput
+              label="Search team members"
+              isLabelHidden
+              value={memberQuery}
+              onChange={setMemberQuery}
+              placeholder="Search by name or identity"
+              startIcon={<Search className="size-icon-sm" />}
+              size="sm"
+              width="100%"
+            />
+          </div>
+          <Combobox
+            label="Filter team members by role"
+            value={TEAM_MEMBER_FILTERS.find((option) => option.id === roleFilter) ?? TEAM_MEMBER_FILTERS[0]!}
+            options={TEAM_MEMBER_FILTERS}
+            onPick={setRoleFilter}
+            size="md"
+          />
+          <div className="flex-1" />
+          {!readOnly &&
+            (availableMembers.length > 0 ? (
+              <Combobox
+                label="Add a member"
+                value={null}
+                placeholder="Add a member"
+                face={
+                  <>
+                    <UserPlus className="size-icon-sm" />
+                    <span>Add a member</span>
+                  </>
+                }
+                options={availableMembers.map((candidate) => ({
+                  id: candidate.key,
+                  label: memberName(candidate.key, candidate),
+                  icon: (
+                    <Avatar
+                      deviceKey={candidate.key}
+                      alias={candidate.alias}
+                      me={candidate.me}
+                      size="sm"
+                    />
+                  ),
+                  hint: teamMemberRole(candidate.role),
+                  keywords: [candidate.alias, candidate.did ?? "", candidate.key],
+                }))}
+                onPick={(memberKey) =>
                   void send(() =>
                     rpc(spaceId, {
                       cmd: "team_set",
                       team: team.id,
-                      add_members: [candidate.key],
+                      add_members: [memberKey],
                     }),
                   )
                 }
+                className="border-accent bg-accent text-accent-fg hover:bg-accent/90"
+                size="md"
+                wide
               />
+            ) : (
+              <Button label="Add a member" variant="primary" size="sm" isDisabled />
             ))}
         </div>
-      )}
+
+        <div className="mt-5 overflow-hidden">
+          <div className="text-mute border-line grid grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)_9rem_2rem] items-center gap-4 border-b px-1 py-2 text-2xs">
+            <span>Name</span>
+            <span>Identity</span>
+            <span>Role</span>
+            <span aria-hidden />
+          </div>
+          {shownMembers.length === 0 ? (
+            <div className="text-mute flex min-h-28 items-center justify-center text-sm">
+              {team.members.length === 0
+                ? "No team members yet."
+                : `Nothing matches “${memberQuery || TEAM_MEMBER_FILTERS.find((option) => option.id === roleFilter)?.label}”.`}
+            </div>
+          ) : (
+            <ul className="divide-line divide-y">
+              {shownMembers.map(({ key: memberKey, member }) => (
+                <li
+                  key={memberKey}
+                  className="group/member grid min-h-ctl-xl grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)_9rem_2rem] items-center gap-4 px-1 py-2"
+                >
+                  <span className="flex min-w-0 items-center gap-2.5">
+                    <Avatar
+                      deviceKey={memberKey}
+                      {...(member ? { alias: member.alias, me: member.me } : {})}
+                      className="size-avatar-lg"
+                    />
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-medium">
+                        {memberName(memberKey, member)}
+                      </span>
+                      <span className="text-mute block truncate text-xs">
+                        {member?.me ? "You" : member?.sponsor ? "Sponsored agent" : member?.alias || "Member"}
+                      </span>
+                    </span>
+                  </span>
+                  <code className="text-mute truncate text-xs" title={member?.did ?? memberKey}>
+                    {member?.did ?? memberKey}
+                  </code>
+                  <span>
+                    <Badge
+                      tone={member?.role === "admin" || member?.role === "administrator" ? "accent" : "neutral"}
+                      className="rounded-mark border-0"
+                    >
+                      {teamMemberRole(member?.role)}
+                    </Badge>
+                  </span>
+                  {!readOnly && (
+                    <IconButton
+                      label={`Remove ${memberName(memberKey, member)} from team`}
+                      tooltip="Remove from team"
+                      variant="ghost"
+                      size="sm"
+                      className="opacity-0 group-hover/member:opacity-100 focus-visible:opacity-100"
+                      onClick={() =>
+                        void send(() =>
+                          rpc(spaceId, {
+                            cmd: "team_set",
+                            team: team.id,
+                            remove_members: [memberKey],
+                          }),
+                        )
+                      }
+                      icon={<Trash2 className="size-icon-sm" />}
+                    />
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
     </section>
   );
+}
+
+const TEAM_MEMBER_FILTERS = [
+  { id: "all", label: "All" },
+  { id: "admin", label: "Workspace admins" },
+  { id: "member", label: "Members" },
+  { id: "contributor", label: "Contributors" },
+  { id: "viewer", label: "Viewers" },
+  { id: "agents", label: "Agents" },
+];
+
+function teamMemberRole(role?: string): string {
+  return (
+    {
+      admin: "Workspace admin",
+      administrator: "Workspace admin",
+      member: "Member",
+      contributor: "Contributor",
+      viewer: "Viewer",
+    } as Record<string, string>
+  )[role ?? ""] ?? "Member";
 }
 
 /** A labelled row in a settings card — label and hint left, control right. */

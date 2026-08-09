@@ -12,7 +12,6 @@ import {
   Folder,
   FolderPlus,
   Inbox,
-  FolderKanban,
   GanttChart,
   Plus,
   Search,
@@ -31,6 +30,7 @@ import type { SavedView } from "../core/savedViews";
 import type { ProjectDto, SpaceRow, TeamDto } from "../types";
 import { ungrouped } from "../core/teams";
 import { catalogColor } from "./colors";
+import { ProjectIcon } from "./icons";
 
 import { Badge, ContextMenu, Divider, DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu, IconButton } from "@astryxdesign/core";
 import { cn, navigationItem } from "./primitives";
@@ -213,7 +213,7 @@ export function Sidebar({
             destination you landed on — otherwise the sidebar says you are in
             two places, and neither of them is wrong enough to be obviously
             wrong. */}
-        <NavItem icon={<FolderKanban />} label="Projects" active={view === "projects" && !currentTeam} onClick={() => onGo("projects")} />
+        <NavItem icon={<ProjectIcon />} label="Projects" active={view === "projects" && !currentTeam} onClick={() => onGo("projects")} />
         {/* `null` and not the default. `goto` keeps the project you are in for
             any project-capable view, and Timeline is one — so without this the
             workspace Roadmap landed on whichever project you last had open, and
@@ -289,7 +289,7 @@ export function Sidebar({
                     onClick={() => onGoTeam(candidate.key, "list")}
                   />
                   <NavItem
-                    icon={<FolderKanban />}
+                    icon={<ProjectIcon />}
                     label="Projects"
                     active={scoped && view === "projects"}
                     onClick={() => onGoTeam(candidate.key, "projects")}
@@ -618,9 +618,9 @@ function ProjectRow({
           aria-current={active ? "page" : undefined}
           className={cn(navigationItem({ selected: active }), "px-1.5")}
         >
-          <span
-            className={cn("size-mark-xs shrink-0 rounded-mark opacity-75", active && "opacity-100")}
-            style={{ background: catalogColor(project.color) }}
+          <ProjectIcon
+            color={catalogColor(project.color)}
+            className={cn("size-icon-sm opacity-75", active && "opacity-100")}
           />
           <span className="min-w-0 flex-1 truncate">{project.name}</span>
         </button>

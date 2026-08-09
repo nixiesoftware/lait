@@ -19,7 +19,7 @@ import {
 } from "../types";
 import { Avatar, AvatarStack } from "./Avatar";
 import { catalogColor } from "./colors";
-import { PriorityIcon, StatusIcon } from "./icons";
+import { PriorityIcon, ProjectIcon, StatusIcon } from "./icons";
 import { Combobox } from "./Picker";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
@@ -467,25 +467,21 @@ export function NewIssue({
           <div className="flex flex-wrap items-center gap-2 px-4 py-3">
             <Combobox
               label="Project"
-              // Square, like every other surface that identifies a project —
-              // sidebar, project card, breadcrumb crumb. No `swatchSlot`: a chip
-              // row has no column for the label to line up against.
-              swatchShape="square"
               value={(() => {
                 const chosen = projects.find((candidate) => candidate.key === project);
-                // The face carries the swatch the menu just showed you. Without
-                // it, picking a project makes its colour disappear.
                 return {
                   id: project,
                   label: chosen?.name ?? project,
-                  ...(chosen ? { swatch: catalogColor(chosen.color) } : {}),
+                  ...(chosen
+                    ? { icon: <ProjectIcon color={catalogColor(chosen.color)} /> }
+                    : {}),
                 };
               })()}
               options={projects.map((candidate) => ({
                 id: candidate.key,
                 label: candidate.name,
                 hint: candidate.key,
-                swatch: catalogColor(candidate.color),
+                icon: <ProjectIcon color={catalogColor(candidate.color)} />,
               }))}
               onPick={setProject}
             />

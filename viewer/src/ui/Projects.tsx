@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowRight, FolderKanban } from "lucide-react";
+import { AlertTriangle, ArrowRight } from "lucide-react";
 
 import { rpc } from "../api";
 import type { BoardView, ProjectDto } from "../types";
 import { ApplicationState, LoadingState } from "./AppState";
 import { catalogColor } from "./colors";
+import { ProjectIcon } from "./icons";
 
 type ProjectHealth = {
   project: ProjectDto;
@@ -74,7 +75,7 @@ export function Projects({
     return (
       <ApplicationState
         kind="empty"
-        icon={<FolderKanban className="size-icon-lg" />}
+        icon={<ProjectIcon className="size-icon-lg" />}
         title="No projects yet"
         body="Projects give issues a workflow, identity, and stable place in the space."
       />
@@ -107,7 +108,7 @@ export function Projects({
                 }`}
               >
                 <span className="flex w-full items-center gap-2">
-                  <span className="size-mark-lg rounded-mark" style={{ background: catalogColor(project.color) }} />
+                  <ProjectIcon color={catalogColor(project.color)} className="size-icon-md" />
                   <strong className="min-w-0 flex-1 truncate">{project.name}</strong>
                   {project.archived && (
                     <span className="border-line text-mute rounded-full border px-1.5 text-2xs">

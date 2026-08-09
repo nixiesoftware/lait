@@ -83,6 +83,7 @@ import { Shortcuts } from "./ui/Shortcuts";
 import { Specs } from "./ui/Specs";
 import { Welcome } from "./ui/Welcome";
 import { catalogColor } from "./ui/colors";
+import { ProjectIcon } from "./ui/icons";
 import * as ask from "./ui/dialogs";
 import { DialogHost } from "./ui/dialogs";
 import { Combobox } from "./ui/Picker";
@@ -123,7 +124,7 @@ import {
   type WorkflowState,
 } from "./types";
 import "./commands";
-import { toolbarControl, toolbarIconControl } from "./ui/primitives";
+import { cn, toolbarControl, toolbarIconControl } from "./ui/primitives";
 
 type Modal = "palette" | "issueSearch" | "shortcuts" | "workflow" | "roles" | null;
 type ThemePreference = "system" | "light" | "dark";
@@ -546,27 +547,6 @@ export function App() {
     replace(formatRoute(route));
     saveLastRoute(route);
   }, [routeSpace, project, team, view, selection, detail, openSpec, openBaseline, filter, composing?.page, settingsTab]);
-
-  // Settings is a page state, not a panel: its own left rail owns the hierarchy,
-  // so the workspace sidebar steps aside while it's open and returns as you left
-  // it on the way out. Only touches the desktop rail; the mobile drawer is modal
-  // and already dismissed on navigation.
-  const sidebarBeforeSettings = useRef<boolean | null>(null);
-  useEffect(() => {
-    const panel = sidebar.current;
-    if (!panel || window.matchMedia(RAIL_DRAWER_QUERY).matches) return;
-    if (view === "settings") {
-      if (sidebarBeforeSettings.current === null) {
-        sidebarBeforeSettings.current = panel.isCollapsed();
-      }
-      if (!panel.isCollapsed()) panel.collapse();
-    } else if (sidebarBeforeSettings.current !== null) {
-      if (!sidebarBeforeSettings.current && panel.isCollapsed()) panel.expand();
-      sidebarBeforeSettings.current = null;
-    }
-    // `sidebar` is a stable ref; `view` is the trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view]);
 
   const space = spaces.find((s) => s.id === current) ?? null;
   const standing = (standingResource.data ?? null) as WhoamiInfo | null;
@@ -1941,9 +1921,8 @@ export function App() {
               control: true,
               content: (
                 <Combobox
-                  tone="quiet" size="sm" swatchSlot="md"
+                  tone="quiet" size="sm"
                   label="Project"
-                  swatchShape="square"
                   // The switcher is a crumb before it is a picker, so it takes
                   // the trail's shape rather than its tone's. Two overrides,
                   // both cancelling something `quiet` does for the *property
@@ -1966,7 +1945,7 @@ export function App() {
                       ? {
                           id: activeProject.key,
                           label: activeProject.name,
-                          swatch: catalogColor(activeProject.color),
+                          icon: <ProjectIcon color={catalogColor(activeProject.color)} />,
                         }
                       : null
                   }
@@ -1979,7 +1958,7 @@ export function App() {
                   ].map((candidate) => ({
                     id: candidate.key,
                     label: candidate.name,
-                    swatch: catalogColor(candidate.color),
+                    icon: <ProjectIcon color={catalogColor(candidate.color)} />,
                     hint: candidate.key,
                   }))}
                   onPick={(key) => api.goto(isProjectView(view) ? view : "overview", key)}
@@ -2182,7 +2161,7 @@ export function App() {
       // Persisted per-user: a sidebar width you set once should survive a reload,
       // and the library already owns that — no state of ours to get wrong.
       {...layout}
-      className="flex h-full"
+      className={`flex h-full${view === "settings" ? " settings-shell-open" : ""}`}
     >
       <Panel
         id="sidebar"
@@ -2773,19 +2752,28 @@ export function App() {
             lead, milestones, progress — and none of it is a property of the
             issue you are writing, so next to a composer it is a second column
             of properties competing with the row that actually files. */}
-        {projectShell && consoleFits && railOpen && activeProject && current && !composing?.page && (
-          <aside className="border-line w-rail shrink-0 overflow-y-auto border-l p-3">
-            <ProjectRail
-              spaceId={current}
-              project={activeProject}
-              members={members}
-              teams={teams}
-              counts={projectCounts}
-              readOnly={readOnly}
-              activeMilestone={filter.milestone}
-              onError={setError}
-              onOpenMilestone={(id: string | null) => api.gotoMilestone(activeProject.key, id)}
-            />
+        {projectShell && consoleFits && activeProject && current && !composing?.page && (
+          <aside
+            aria-hidden={!railOpen}
+            inert={!railOpen}
+            className={cn(
+              "shrink-0 overflow-x-hidden overflow-y-auto transition-[width,opacity,transform] duration-150 ease-out motion-reduce:transition-none",
+              railOpen ? "w-rail translate-x-0 opacity-100" : "w-0 translate-x-2 opacity-0",
+            )}
+          >
+            <div className="w-rail py-3 pr-3">
+              <ProjectRail
+                spaceId={current}
+                project={activeProject}
+                members={members}
+                teams={teams}
+                counts={projectCounts}
+                readOnly={readOnly}
+                activeMilestone={filter.milestone}
+                onError={setError}
+                onOpenMilestone={(id: string | null) => api.gotoMilestone(activeProject.key, id)}
+              />
+            </div>
           </aside>
         )}
         </div>

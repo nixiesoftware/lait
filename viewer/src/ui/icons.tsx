@@ -1,5 +1,25 @@
+import { Box } from "lucide-react";
+
 import type { MilestoneProgress } from "../core/milestone";
 import type { Priority, StatusCategory } from "../types";
+
+/** The canonical project identity glyph. Project colour survives as its stroke,
+ * while the shape stays stable everywhere a project is named. */
+export function ProjectIcon({
+  color,
+  className = "size-icon-sm",
+}: {
+  color?: string;
+  className?: string;
+}) {
+  return (
+    <Box
+      className={`shrink-0 ${className}`}
+      style={color ? { color } : undefined}
+      aria-hidden
+    />
+  );
+}
 
 /**
  * The two glyphs a tracker row lives or dies by.

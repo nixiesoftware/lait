@@ -141,7 +141,7 @@ describe("mark axis is pinned, not scalar-derived", () => {
   });
 
   it("the ladder is the only mark size vocabulary in use", () => {
-    expect(rungsUsed("mark")).toEqual(["lg", "md", "sm", "xl", "xs"]);
+    expect(rungsUsed("mark")).toEqual(["lg", "sm", "xs"]);
   });
 });
 

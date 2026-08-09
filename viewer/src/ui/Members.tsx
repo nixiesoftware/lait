@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bot,
   Check,
@@ -17,8 +17,9 @@ import type { MemberDto, MemberLogEntry } from "../types";
 import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";
 import { Combobox } from "./Picker";
-import { Button, IconButton } from "@astryxdesign/core";
+import { Button, IconButton, TextInput } from "@astryxdesign/core";
 import { EmptyState, InlineError, LoadingState } from "./AppState";
+import { SettingsPageHeader } from "./settingsLayout";
 
 /**
  * Members and the invite link. Admission needs no controls here: accepting an
@@ -47,6 +48,7 @@ export function Members({
   const [logError, setLogError] = useState("");
   const [ticket, setTicket] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -72,6 +74,15 @@ export function Members({
   }, [load, revision]);
 
   const isAdmin = members?.some((m) => m.me && m.role === "admin") ?? false;
+  const shownMembers = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return members ?? [];
+    return (members ?? []).filter((member) =>
+      [member.alias, member.did, member.key, member.role]
+        .filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(needle)),
+    );
+  }, [members, query]);
 
   /** The busy key for the one action that belongs to no row. */
   const SPONSOR = "agent:new";
@@ -99,22 +110,31 @@ export function Members({
   return (
     <div className={embedded ? undefined : "min-h-0 flex-1 overflow-y-auto"}>
       <div className={embedded ? "flex flex-col gap-6" : "mx-auto flex max-w-2xl flex-col gap-6 p-6"}>
-        {/* Sentence case, like every other section on this page.
-            These four headings were the app's rail vocabulary — `text-2xs`
-            micro-caps, which is what labels a *group of rows* in the sidebar or
-            the issue rail. Settings is a page of sections, and its other five
-            tabs all render `Section`'s `text-base font-semibold` with a hint
-            under it. Members had the same structure and a different voice, so
-            one page spoke two. */}
+        <SettingsPageHeader
+          title={`Members · ${members.length}`}
+          description="People and agents with verified access to this encrypted space. Names are private labels on this device."
+          className="mb-0"
+        />
+        <div className="max-w-md">
+          <TextInput
+            label="Filter members"
+            isLabelHidden
+            value={query}
+            onChange={setQuery}
+            placeholder="Search by name or identity…"
+            size="sm"
+            width="100%"
+          />
+        </div>
         <section>
-          <h2 className="text-base font-semibold">
-            Members · {members.length}
-          </h2>
-          <p className="text-mute mt-0.5 mb-3 text-sm">People and agents with verified access to this encrypted space. Names are private labels on this device.</p>
           {members.length === 0 ? (
             <EmptyState title="No verified members" body="The local replica does not currently contain a readable membership graph." />
+          ) : shownMembers.length === 0 ? (
+            <div className="text-mute flex min-h-40 items-center justify-center text-sm">
+              Nothing matches “{query}”.
+            </div>
           ) : <ul className="border-line divide-line divide-y rounded-surface border">
-            {members.map((m) => (
+            {shownMembers.map((m) => (
               <li key={m.key} className="flex items-center gap-3 p-3">
                 <Avatar deviceKey={m.key} alias={m.alias} me={m.me} className="size-avatar-lg" />
                 <span className="min-w-0 flex-1">
@@ -300,11 +320,11 @@ function MemberLog({ entries, members }: { entries: MemberLogEntry[]; members: M
   };
 
   return (
-    <section>
-      <h2 className="text-base font-semibold">
+    <details className="border-line overflow-hidden rounded-surface border">
+      <summary className="hover:bg-hover cursor-pointer px-3 py-2.5 text-base font-semibold">
         Access log · {entries.length}
-      </h2>
-      <ul className="border-line divide-line divide-y rounded-surface border">
+      </summary>
+      <ul className="border-line divide-line divide-y border-t">
         {/* Newest first — an audit log answers "what just changed access". */}
         {[...entries].reverse().map((e) => (
           <li key={e.op} className="flex items-start gap-2 p-2.5 text-sm">
@@ -331,7 +351,7 @@ function MemberLog({ entries, members }: { entries: MemberLogEntry[]; members: M
           </li>
         ))}
       </ul>
-    </section>
+    </details>
   );
 }
 

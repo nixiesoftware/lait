@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
-  Cog,
   Hash,
   KeyRound,
   Laptop,
@@ -22,13 +21,18 @@ import { memberName } from "./Avatar";
 import { catalogColor } from "./colors";
 import { ColorPicker } from "./ColorPicker";
 import * as ask from "./dialogs";
-import { StatusIcon } from "./icons";
-import { Breadcrumbs, DestinationCrumb, SurfaceHeader, WorkspaceCrumb } from "./layout";
+import { ProjectIcon, StatusIcon } from "./icons";
 import { Members } from "./Members";
 import { TeamsPanel } from "./TeamsPanel";
 import { Combobox } from "./Picker";
 import { Button, IconButton, TextArea, TextInput } from "@astryxdesign/core";
 import { cn, navigationItem } from "./primitives";
+import {
+  SettingsField,
+  SettingsPageHeader,
+  SettingsSection,
+  SettingsSurface,
+} from "./settingsLayout";
 
 type Tab = "general" | "teams" | "members" | "devices" | "labels" | "workflow" | "access";
 
@@ -123,56 +127,36 @@ export function Settings({
   ];
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* Same bar geometry as every other surface, so entering Settings doesn't
-          shift the content down. The rail marks the section, so the trail stops
-          at Settings — the same rule the project tabs follow.
-
-          The space is a crumb *here only*: this page hides the workspace sidebar,
-          so this is the one surface where nothing else says which space you are
-          about to administer. */}
-      <SurfaceHeader
-        leading={
-          <IconButton
-            label="Back to app"
-            onClick={onExit}
-            variant="ghost"
-            size="sm"
-            tooltip="Back to app"
-            icon={<ArrowLeft className="size-icon-md" />}
-          />
-        }
-        trail={
-          <Breadcrumbs
-            items={[
-              {
-                // Not `optional`: this is the one crumb that carries information
-                // no other surface element holds, so it stays at every width.
-                key: "workspace",
-                label: spaceName || "Workspace",
-                content: <WorkspaceCrumb name={spaceName || "Workspace"} />,
-                onNavigate: onExit,
-              },
-              { key: "settings", content: <DestinationCrumb icon={<Cog />} label="Settings" /> },
-            ]}
-          />
-        }
-      />
-      <div className="flex min-h-0 flex-1">
-        <nav className="border-line flex w-48 shrink-0 flex-col gap-0.5 border-r p-2">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={cn(navigationItem({ selected: tab === t.id, size: "lg" }))}
-            >
-              {t.icon}
-              {t.label}
-            </button>
-          ))}
-        </nav>
-        <div className="min-h-0 flex-1 overflow-y-auto p-6">
-          <div className="mx-auto max-w-2xl">
+    <div className="bg-sunken flex h-full min-h-0">
+      <nav className="flex w-48 shrink-0 flex-col gap-0.5 p-2">
+        <button
+          onClick={onExit}
+          className={cn(navigationItem({ size: "lg" }), "text-mute mb-3")}
+        >
+          <ArrowLeft className="size-icon-sm" />
+          Back to app
+        </button>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={cn(navigationItem({ selected: tab === t.id, size: "lg" }))}
+          >
+            {t.icon}
+            {t.label}
+          </button>
+        ))}
+      </nav>
+      <section className="border-line bg-bg m-1 min-h-0 flex-1 overflow-hidden rounded-surface border">
+        <div className="h-full overflow-y-auto px-6 py-7">
+          <div
+            className={cn(
+              "mx-auto w-full",
+              tab === "teams" || tab === "members" || tab === "labels"
+                ? "max-w-4xl"
+                : "max-w-2xl",
+            )}
+          >
             {tab === "general" && (
               <GeneralPanel
                 spaceId={spaceId}
@@ -232,18 +216,8 @@ export function Settings({
             )}
           </div>
         </div>
-      </div>
+      </section>
     </div>
-  );
-}
-
-function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <section className="mb-8">
-      <h2 className="text-base font-semibold">{title}</h2>
-      {hint && <p className="text-mute mt-0.5 text-sm">{hint}</p>}
-      <div className="mt-3">{children}</div>
-    </section>
   );
 }
 
@@ -294,73 +268,76 @@ function GeneralPanel({
 
   return (
     <>
-      <Section title="Space name" hint="A mutable display label. The space's identity (below) never changes.">
-        {/* `width` on the field, measure on the wrapper.
-            Astryx's inputs size to their content, so `max-w-sm` was capping
-            something that was already 148px — and in a `flex items-center` row
-            nothing stretched it back. The editable name ended up a third the
-            width of the read-only identity below it, which is the wrong way
-            round for the two fields on this page. */}
-        {/* `max-w-lg`, the same measure the description below uses. Editable
-            fields on one page share one width or the page reads as assembled;
-            Identity keeps the section's full width because a 64-hex id you copy
-            is a different kind of field and needs the room. */}
-        <div className="flex max-w-lg items-center gap-2">
-          <TextInput
-            label="Space name"
-            isLabelHidden
-            value={name}
-            isDisabled={readOnly}
-            onChange={setName}
-            className="flex-1"
-            width="100%"
-          />
-          <Button
-            isDisabled={!dirty || readOnly}
-            isLoading={saving}
-            onClick={() => void save()}
-            label="Update"
-            variant="primary"
-            size="md"
-          />
-        </div>
-      </Section>
-      <Section title="Description" hint="A short overview of what this space is for. Shared with everyone in the space.">
-        {/* `items-start` is what kept the textarea at its intrinsic width — it
-            is here so the button below does not stretch, so the button gets its
-            own row instead and the column stretches as a column should. */}
-        <div className="flex max-w-lg flex-col gap-2">
-          <TextArea
-            label="Description"
-            isLabelHidden
-            value={description}
-            isDisabled={readOnly}
-            rows={3}
-            placeholder="What is this space for? Goals, scope, links…"
-            onChange={setDescription}
-            aria-label="Space description"
-            width="100%"
-          />
-          {!readOnly && (
-            <div className="flex">
-              <Button
-                isDisabled={!descDirty}
-                isLoading={savingDesc}
-                onClick={() => void saveDescription()}
-                label="Save description"
-                variant="primary"
-                size="md"
-              />
-            </div>
-          )}
-        </div>
-      </Section>
-      <Section title="Identity" hint="The seed id — derived at founding from keys, not the name. It cannot be changed.">
-        <div className="border-line bg-raised text-dim flex items-center gap-2 rounded-surface border px-2 py-1.5 font-mono text-xs">
-          <Hash className="text-mute size-icon-sm shrink-0" />
-          {spaceId}
-        </div>
-      </Section>
+      <SettingsPageHeader
+        title="General"
+        description="Manage the shared name, description, and immutable identity of this space."
+      />
+      <SettingsSurface>
+        <SettingsField
+          label="Space name"
+          hint="A mutable display label. The space identity never changes."
+        >
+          <div className="flex items-center gap-2">
+            <TextInput
+              label="Space name"
+              isLabelHidden
+              value={name}
+              isDisabled={readOnly}
+              onChange={setName}
+              className="flex-1"
+              width="100%"
+            />
+            <Button
+              isDisabled={!dirty || readOnly}
+              isLoading={saving}
+              onClick={() => void save()}
+              label="Update"
+              variant="primary"
+              size="md"
+            />
+          </div>
+        </SettingsField>
+        <SettingsField
+          label="Description"
+          hint="Shared with everyone in the space."
+          align="start"
+        >
+          <div className="flex flex-col gap-2">
+            <TextArea
+              label="Description"
+              isLabelHidden
+              value={description}
+              isDisabled={readOnly}
+              rows={3}
+              placeholder="What is this space for? Goals, scope, links…"
+              onChange={setDescription}
+              aria-label="Space description"
+              width="100%"
+            />
+            {!readOnly && (
+              <div className="flex justify-end">
+                <Button
+                  isDisabled={!descDirty}
+                  isLoading={savingDesc}
+                  onClick={() => void saveDescription()}
+                  label="Save description"
+                  variant="primary"
+                  size="md"
+                />
+              </div>
+            )}
+          </div>
+        </SettingsField>
+        <SettingsField
+          label="Identity"
+          hint="Derived at founding from keys, not the name. It cannot be changed."
+        >
+          <div className="border-line bg-hover text-dim flex items-center gap-2 rounded-control border px-2 py-1.5 font-mono text-xs">
+            <Hash className="text-mute size-icon-sm shrink-0" />
+            <span className="min-w-0 truncate">{spaceId}</span>
+          </div>
+        </SettingsField>
+      </SettingsSurface>
     </>
   );
 }
@@ -435,16 +412,21 @@ function DevicesPanel({
 
   return (
     <>
-      <Section
+      <SettingsPageHeader
+        title="Devices & recovery"
+        description="Manage the devices that sign as you and the custody material that protects recovery."
+      />
+      <SettingsSection
         title="Your devices"
         hint="Every machine that signs as you in this space. Each holds its own key; none of them is a copy of another."
       >
-        {devices.length === 0 ? (
-          <p className="text-mute text-sm">Only this device.</p>
-        ) : (
-          <ul className="border-line divide-line divide-y rounded-surface border">
+        <SettingsSurface>
+          {devices.length === 0 ? (
+            <div className="text-mute px-4 py-3 text-sm">Only this device.</div>
+          ) : (
+            <div className="divide-line divide-y">
             {devices.map((line) => (
-              <li key={line} className="flex items-center gap-2 p-2.5 text-sm">
+              <div key={line} className="flex items-center gap-2 px-4 py-3 text-sm">
                 <Laptop className="text-mute size-icon-sm shrink-0" />
                 <code className="min-w-0 flex-1 truncate">{line}</code>
                 {!readOnly && !line.includes("(this device)") && (
@@ -473,21 +455,25 @@ function DevicesPanel({
                     icon={<Trash2 className="size-icon-sm" />}
                   />
                 )}
-              </li>
+              </div>
             ))}
-          </ul>
-        )}
-      </Section>
+            </div>
+          )}
+        </SettingsSurface>
+      </SettingsSection>
 
       {!readOnly && (
-        <Section
+        <SettingsSection
           title="Add a device"
           hint="Three steps, two machines. Nothing here leaves this space unencrypted."
         >
-          <ol className="text-dim flex flex-col gap-3 text-sm">
-            <li>
-              <div className="flex items-center gap-2">
-                <span className="flex-1">Mint an enrolment token on this machine.</span>
+          <SettingsSurface>
+            <SettingsField
+              label="Enrollment token"
+              hint="Mint it here, then open lait on the other machine and give it the token. That machine signs its consent."
+              align="start"
+            >
+              <div className="flex flex-col items-end gap-2">
                 <Button
                   isLoading={busy === "invite"}
                   isDisabled={busy !== ""}
@@ -503,20 +489,18 @@ function DevicesPanel({
                   variant="ghost"
                   size="md"
                 />
-              </div>
-              {token && (
-                <code className="border-line bg-raised mt-2 block rounded-surface border p-2 font-mono text-xs break-all">
+                {token && (
+                <code className="border-line bg-hover block w-full rounded-control border p-2 font-mono text-xs break-all">
                   {token}
                 </code>
               )}
-            </li>
-            <li>
-              Open lait on the other machine and give it that token — it signs its consent without
-              needing a store or a membership of its own.
-            </li>
-            <li>
-              <div className="flex items-center gap-2">
-                <span className="flex-1">Paste the signed consent it hands back.</span>
+              </div>
+            </SettingsField>
+            <SettingsField
+              label="Signed consent"
+              hint="Paste the consent returned by the other machine to finish enrollment."
+            >
+              <div className="flex justify-end">
                 <Button
                   isLoading={busy === "add"}
                   isDisabled={busy !== ""}
@@ -541,35 +525,44 @@ function DevicesPanel({
                   size="md"
                 />
               </div>
-            </li>
-          </ol>
-        </Section>
+            </SettingsField>
+          </SettingsSurface>
+        </SettingsSection>
       )}
 
       {!readOnly && (
-        <Section
+        <SettingsSection
           title="Recovery custody"
           hint="Your share of this space's recovery authority, sealed with a passphrase. Export it somewhere you will still have when this machine is gone; import it when the status panel says the share is missing or unreadable."
         >
-          <div className="flex max-w-lg flex-col gap-2">
-            <TextInput
-              label="Custody file path"
-              isLabelHidden
-              value={custodyPath}
-              placeholder="Path on the machine running lait"
-              onChange={setCustodyPath}
-              width="100%"
-            />
-            <TextInput
-              type="password"
-              label="Custody passphrase"
-              isLabelHidden
-              value={passphrase}
-              placeholder="Passphrase"
-              onChange={setPassphrase}
-              width="100%"
-            />
-            <div className="flex items-center gap-2">
+          <SettingsSurface>
+            <SettingsField label="Custody file" hint="A path on the machine running lait.">
+              <TextInput
+                label="Custody file path"
+                isLabelHidden
+                value={custodyPath}
+                placeholder="Path on the machine running lait"
+                onChange={setCustodyPath}
+                width="100%"
+              />
+            </SettingsField>
+            <SettingsField label="Passphrase" hint="Seals the exported recovery share.">
+              <TextInput
+                type="password"
+                label="Custody passphrase"
+                isLabelHidden
+                value={passphrase}
+                placeholder="Passphrase"
+                onChange={setPassphrase}
+                width="100%"
+              />
+            </SettingsField>
+            <SettingsField
+              label="Recovery share"
+              hint="Export a backup or import one when this machine's share is missing."
+              align="start"
+            >
+              <div className="flex flex-wrap justify-end gap-2">
               <Button
                 isLoading={busy === "export"}
                 isDisabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
@@ -615,10 +608,11 @@ function DevicesPanel({
                   })
                 }
               />
-            </div>
-            {note && <p className="text-dim text-sm">{note}</p>}
-          </div>
-        </Section>
+              </div>
+              {note && <p className="text-dim mt-2 text-sm">{note}</p>}
+            </SettingsField>
+          </SettingsSurface>
+        </SettingsSection>
       )}
     </>
   );
@@ -640,6 +634,11 @@ function LabelsPanel({
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState("blue");
   const [editing, setEditing] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const shown = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return needle ? labels.filter((label) => label.name.toLowerCase().includes(needle)) : labels;
+  }, [labels, query]);
 
   const send = async (fn: () => Promise<unknown>) => {
     try {
@@ -658,10 +657,69 @@ function LabelsPanel({
   };
 
   return (
-    <Section title="Labels" hint="Shared across every project. Renaming re-points every issue that uses one.">
-      <ul className="flex flex-col gap-0.5">
-        {labels.length === 0 && <li className="text-mute text-sm">No labels yet.</li>}
-        {labels.map((l) =>
+    <>
+      <SettingsPageHeader
+        title="Labels"
+        description="Shared across every project. Renaming re-points every issue that uses one."
+        actions={
+          !readOnly && !creating ? (
+            <Button label="New label" variant="primary" size="sm" onClick={() => setCreating(true)} />
+          ) : undefined
+        }
+      />
+      <div className="mb-4 max-w-md">
+        <TextInput
+          label="Filter labels"
+          isLabelHidden
+          value={query}
+          onChange={setQuery}
+          placeholder="Filter by name…"
+          size="sm"
+          width="100%"
+        />
+      </div>
+
+      {!readOnly && creating && (
+        <div className="border-line bg-raised mb-4 flex flex-col gap-3 rounded-surface border p-3">
+          <input
+            autoFocus
+            value={newName}
+            placeholder="Label name"
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && newName.trim()) create();
+              if (e.key === "Escape") setCreating(false);
+            }}
+            className="border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
+            aria-label="New label name"
+          />
+          <ColorPicker value={newColor} onChange={setNewColor} />
+          <div className="flex justify-end gap-2">
+            <Button
+              onClick={() => setCreating(false)}
+              label="Cancel"
+              variant="secondary"
+              elevation="low"
+              size="sm"
+            />
+            <Button
+              isDisabled={!newName.trim()}
+              onClick={create}
+              label="Create label"
+              variant="primary"
+              size="sm"
+            />
+          </div>
+        </div>
+      )}
+
+      {shown.length === 0 ? (
+        <div className="text-mute flex min-h-64 items-center justify-center text-sm">
+          {labels.length === 0 ? "No labels yet." : `Nothing matches “${query}”.`}
+        </div>
+      ) : (
+      <ul className="border-line divide-line divide-y overflow-hidden rounded-surface border">
+        {shown.map((l) =>
           editing === l.id ? (
             <LabelEditor
               key={l.id}
@@ -675,7 +733,7 @@ function LabelsPanel({
           ) : (
             <li
               key={l.id}
-              className="group/label hover:bg-hover -mx-2 flex items-center gap-2 rounded-control px-2 py-1.5"
+              className="group/label hover:bg-hover flex min-h-ctl-lg items-center gap-2 px-3 py-1.5"
             >
               <span
                 className="size-mark-lg shrink-0 rounded-full"
@@ -710,51 +768,8 @@ function LabelsPanel({
           ),
         )}
       </ul>
-
-      {!readOnly &&
-        (creating ? (
-          <div className="border-line mt-3 flex flex-col gap-3 rounded-surface border p-3">
-            <input
-              autoFocus
-              value={newName}
-              placeholder="Label name"
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && newName.trim()) create();
-                if (e.key === "Escape") setCreating(false);
-              }}
-              className="border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
-              aria-label="New label name"
-            />
-            <ColorPicker value={newColor} onChange={setNewColor} />
-            <div className="flex justify-end gap-2">
-              <Button
-                onClick={() => setCreating(false)}
-                label="Cancel"
-                variant="secondary"
-                elevation="low"
-                size="sm"
-              />
-              <Button
-                isDisabled={!newName.trim()}
-                onClick={create}
-                label="Create label"
-                variant="primary"
-                size="sm"
-              />
-            </div>
-          </div>
-        ) : (
-          <Button
-            className="mt-3"
-            onClick={() => setCreating(true)}
-            label="New label"
-            variant="secondary"
-            elevation="low"
-            size="sm"
-          />
-        ))}
-    </Section>
+      )}
+    </>
   );
 }
 
@@ -770,7 +785,7 @@ function LabelEditor({
   const [name, setName] = useState(label.name);
   const [color, setColor] = useState(label.color);
   return (
-    <li className="border-line -mx-2 my-1 flex flex-col gap-3 rounded-surface border p-3">
+    <li className="bg-raised flex flex-col gap-3 p-3">
       <input
         autoFocus
         value={name}
@@ -887,22 +902,30 @@ function WorkflowPanel({
 
   const patch = (id: string, change: Partial<StateWire>) =>
     setDraft((d) => d.map((s) => (s.state_id === id ? { ...s, ...change } : s)));
+  const selectedProject = projects.find((p) => p.key === projectKey);
 
   return (
-    <Section
-      title="Workflow states"
-      hint="Rename and recolor the statuses issues move through. Applies to the selected project."
-    >
+    <>
+      <SettingsPageHeader
+        title="Workflow"
+        description="Configure the states issues move through in each project."
+      />
+      <SettingsSection
+        title="Workflow states"
+        hint="Rename and recolor the statuses issues move through. Applies to the selected project."
+      >
       <div className="mb-4 flex items-center gap-2">
         <span className="text-mute text-sm">Project</span>
         <Combobox
           label="Project"
-          swatchShape="square"
           value={
             projectKey
               ? {
                   id: projectKey,
-                  label: projects.find((p) => p.key === projectKey)?.name ?? projectKey,
+                  label: selectedProject?.name ?? projectKey,
+                  ...(selectedProject
+                    ? { icon: <ProjectIcon color={catalogColor(selectedProject.color)} /> }
+                    : {}),
                 }
               : null
           }
@@ -910,7 +933,7 @@ function WorkflowPanel({
           options={projects.map((p) => ({
             id: p.key,
             label: p.name,
-            swatch: catalogColor(p.color),
+            icon: <ProjectIcon color={catalogColor(p.color)} />,
             hint: p.key,
           }))}
           onPick={setProjectKey}
@@ -993,7 +1016,8 @@ function WorkflowPanel({
           )}
         </>
       )}
-    </Section>
+      </SettingsSection>
+    </>
   );
 }
 
@@ -1076,6 +1100,7 @@ function AccessPanel({
     (id: string) => projects.find((p) => p.id === id || p.key === id)?.key ?? id,
     [projects],
   );
+  const grantProjectDto = projects.find((p) => p.id === grantProject || p.key === grantProject);
 
   /** Assignments folded by actor, so each person reads as one block. */
   const byActor = useMemo(() => {
@@ -1134,7 +1159,11 @@ function AccessPanel({
 
   return (
     <>
-      <Section
+      <SettingsPageHeader
+        title="Roles & access"
+        description="Review signed roles and grant additional capabilities at space or project scope."
+      />
+      <SettingsSection
         title="Roles"
         hint="Named capability sets from the signed policy. Authoring a role is a CAS ceremony — create and edit them with the issues_role_create and issues_role_edit tools."
       >
@@ -1170,9 +1199,9 @@ function AccessPanel({
             </li>
           ))}
         </ul>
-      </Section>
+      </SettingsSection>
 
-      <Section
+      <SettingsSection
         title="Access grants"
         hint="Capabilities granted to an actor beyond their base membership role, at the Space or a single project."
       >
@@ -1223,6 +1252,9 @@ function AccessPanel({
               value={{
                 id: grantProject ?? "",
                 label: grantProject ? projectLabel(grantProject) : "Whole space",
+                ...(grantProjectDto
+                  ? { icon: <ProjectIcon color={catalogColor(grantProjectDto.color)} /> }
+                  : {}),
               }}
               placeholder="Whole space"
               options={[
@@ -1230,7 +1262,7 @@ function AccessPanel({
                 ...projects.map((p) => ({
                   id: p.key,
                   label: p.name,
-                  swatch: catalogColor(p.color),
+                  icon: <ProjectIcon color={catalogColor(p.color)} />,
                   hint: p.key,
                 })),
               ]}
@@ -1283,7 +1315,7 @@ function AccessPanel({
             </li>
           ))}
         </ul>
-      </Section>
+      </SettingsSection>
     </>
   );
 }

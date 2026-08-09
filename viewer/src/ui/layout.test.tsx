@@ -61,6 +61,7 @@ describe("Breadcrumbs", () => {
 
     const crumbs = [...host.querySelectorAll("li")];
     expect(crumbs).toHaveLength(3);
+    expect(crumbs[1]?.querySelector("svg.lucide-box")).not.toBeNull();
 
     // Every ancestor climbs; the leaf is where you already are.
     const links = [...host.querySelectorAll("button")];

@@ -377,6 +377,18 @@
   --field-bg: var(--color-bg);
 }
 
+/* Settings follows the visible depth ladder used by Linear: the grouped card
+   rises above its page and the controls rise once more above the card. This is
+   intentionally local; ordinary fields elsewhere retain the inversion rule. */
+.settings-surface {
+  background-color: var(--color-raised);
+  --field-bg: var(--color-hover);
+}
+.settings-surface .astryx-text-input,
+.settings-surface .astryx-textarea {
+  background-color: var(--color-hover) !important;
+}
+
 :root {
   --radius-4: 4px;
   --radius-6: 6px;
@@ -1179,6 +1191,14 @@
   [data-panel]#sidebar {
     display: none !important;
   }
+}
+
+/* Settings owns a complete two-column shell. Keep the workspace rail out of
+   that shell structurally, including on a direct settings URL where the panel
+   ref may not exist yet, without changing the person's persisted rail size. */
+.settings-shell-open > [data-panel]#sidebar,
+.settings-shell-open > [data-panel]#sidebar + [data-panel-resize-handle] {
+  display: none !important;
 }
 
 /* A focused issue becomes a document with a stable Linear-style property rail.
