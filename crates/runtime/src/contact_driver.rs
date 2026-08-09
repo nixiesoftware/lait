@@ -700,10 +700,11 @@ async fn contact_attempt(
     // from an authority record plus a Body record.
     let authority_advanced = (ctx.options.authority.frontier)() != frontier;
     let (bodies, body_frontier) = match &attempted {
-        Ok(convergence) if convergence.advanced() => {
-            (convergence.bodies.clone(), convergence.current)
-        }
-        Ok(convergence) => (Vec::new(), convergence.current),
+        // A retained opaque Body becoming locally interpretable changes what
+        // readers can see without changing the already-known Body frontier.
+        // `bodies` is the semantic dirty set; do not discard it merely because
+        // no new remote transaction advanced that frontier.
+        Ok(convergence) => (convergence.bodies.clone(), convergence.current),
         Err(_) => (Vec::new(), ctx.core.frontier()),
     };
     if authority_advanced || !bodies.is_empty() {

@@ -1244,7 +1244,10 @@ export function useSpaceBoards(
   const keys = useMemo(() => ids.map((project) => projectKeys.board(space, project)), [ids, space]);
   const snapshots = useWorldResources<BoardView>(
     keys,
-    useCallback((_, index) => store.ensureBoard(space, ids[index]!), [ids, space, store]),
+    useCallback(
+      (_key: string, index: number) => store.ensureBoard(space, ids[index]!),
+      [ids, space, store],
+    ),
   );
   return useMemo(
     () => combineResources(`${prefix(space)}spaceboards:${signature}`, ids, snapshots),
@@ -1266,7 +1269,10 @@ export function useSpaceMilestones(
   );
   const snapshots = useWorldResources<MilestoneDto[]>(
     keys,
-    useCallback((_, index) => store.ensureMilestones(space, ids[index]!), [ids, space, store]),
+    useCallback(
+      (_key: string, index: number) => store.ensureMilestones(space, ids[index]!),
+      [ids, space, store],
+    ),
   );
   return useMemo(
     () => combineResources(`${prefix(space)}spacemilestones:${signature}`, ids, snapshots),
@@ -1294,7 +1300,10 @@ export function useSpaceGraphs(
   );
   const snapshots = useWorldResources<ProjectGraphView>(
     keys,
-    useCallback((_, index) => store.ensureProjectGraph(space, ids[index]!), [ids, space, store]),
+    useCallback(
+      (_key: string, index: number) => store.ensureProjectGraph(space, ids[index]!),
+      [ids, space, store],
+    ),
   );
   return useMemo(
     () => combineResources(`${prefix(space)}spacegraphs:${signature}`, ids, snapshots),

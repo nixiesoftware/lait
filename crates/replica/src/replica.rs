@@ -2263,13 +2263,20 @@ impl Replica {
     /// they first landed, so this is deliberately not another incorporation:
     /// it adds no transaction units, consumes no quota, and does not advance
     /// the published frontier. Either every retained head can now be opened and
-    /// interpreted, or the record remains opaque.
+    /// interpreted, or the record remains opaque. Returns the upgraded Body
+    /// keys and the number of engine changes accepted while importing them.
     fn upgrade_retained_opaque(
         &mut self,
         ctx: &CommitContext<'_>,
-        keys: &BTreeSet<BodyKey>,
-    ) -> Result<(), Failure> {
-        for key in keys {
+    ) -> Result<(Vec<BodyKey>, u32), Failure> {
+        // A key arrives through the authority section, independently of which
+        // Body payloads the peer needed to resend. Revisit every retained Body:
+        // limiting this to the current bundle's units leaves already-held
+        // material opaque forever after an authority-only admission pass.
+        let keys: Vec<BodyKey> = self.raw_material.keys().cloned().collect();
+        let mut upgraded_keys = Vec::new();
+        let mut accepted = 0u32;
+        for key in &keys {
             let Some(record) = self.bodies.get(key).cloned() else {
                 continue;
             };
@@ -2328,9 +2335,14 @@ impl Replica {
             opened.sort_by_key(|(tx_id, _)| *tx_id);
             let mut chain: Option<ReplicaFrontier> = None;
             for (_, material) in &opened {
-                self.fabric
+                if self
+                    .fabric
                     .import_body(&fabric_key(key), &material.payload)
-                    .map_err(Failure::Engine)?;
+                    .map_err(Failure::Engine)?
+                    .is_some()
+                {
+                    accepted = accepted.saturating_add(1);
+                }
                 chain = Some(match (&material.payload, chain) {
                     (_, None) => material.resulting_frontier,
                     (BodyExport::Atomic(_), Some(current)) => {
@@ -2368,8 +2380,9 @@ impl Replica {
             if self.durable.is_some() {
                 self.raw_material.remove(key);
             }
+            upgraded_keys.push(key.clone());
         }
-        Ok(())
+        Ok((upgraded_keys, accepted))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2387,11 +2400,9 @@ impl Replica {
         }
         let previous = self.frontier;
         let mut outcome = ConvergenceOutcome::unchanged(previous);
-        let touched: BTreeSet<BodyKey> = units
-            .iter()
-            .flat_map(|(_, payloads)| payloads.iter().map(|(key, _)| key.clone()))
-            .collect();
-        self.upgrade_retained_opaque(ctx, &touched)?;
+        let (upgraded, accepted) = self.upgrade_retained_opaque(ctx)?;
+        outcome.accepted = accepted;
+        outcome.bodies = upgraded;
         if units.is_empty() {
             // No Body material, but the manifest may still declare content for
             // Bodies we already hold — validated by rule 8 and dropped here.
@@ -2429,8 +2440,9 @@ impl Replica {
         }
 
         // ---- Phase 2: resolve payloads to descriptors; bounds; commitments. --
-        let mut resolved: Vec<(usize, &Descriptor, &[u8])> = Vec::new();
+        let mut resolved: Vec<(usize, [u8; 32], &Descriptor, &[u8])> = Vec::new();
         for (idx, (tx, payloads)) in units.iter().enumerate() {
+            let tx_id = tx.id();
             for (key, payload) in payloads {
                 if payload.len() > MAX_BODY_BYTES {
                     return Err(Failure::Illegitimate(
@@ -2450,7 +2462,7 @@ impl Replica {
                         "payload does not match the signed commitment".into(),
                     ));
                 }
-                resolved.push((idx, descriptor, payload));
+                resolved.push((idx, tx_id, descriptor, payload));
             }
         }
         // Classification writes a per-Body overlay, so transaction-id order
@@ -2459,7 +2471,7 @@ impl Replica {
         // joins the staged record and conservatively leaves the whole Body
         // opaque, preserving every head until all can be interpreted.
         resolved.sort_by(
-            |(left_unit, left, left_envelope), (right_unit, right, right_envelope)| {
+            |(_, left_tx, left, left_envelope), (_, right_tx, right, right_envelope)| {
                 let rank = |descriptor: &Descriptor, envelope: &[u8]| {
                     let supported = self
                         .supported
@@ -2477,7 +2489,7 @@ impl Replica {
                 left.key()
                     .cmp(&right.key())
                     .then_with(|| rank(left, left_envelope).cmp(&rank(right, right_envelope)))
-                    .then_with(|| units[*left_unit].0.id().cmp(&units[*right_unit].0.id()))
+                    .then_with(|| left_tx.cmp(right_tx))
             },
         );
 
@@ -2503,7 +2515,7 @@ impl Replica {
         let mut planned: Vec<Planned> = Vec::new();
         // Overlay: the latest staged (chain, interpreted) per key.
         let mut overlay: BTreeMap<BodyKey, (ReplicaFrontier, bool)> = BTreeMap::new();
-        for (unit, descriptor, envelope) in &resolved {
+        for (unit, _, descriptor, envelope) in &resolved {
             let key = descriptor.key();
             let transaction = units
                 .get(*unit)
@@ -2854,7 +2866,9 @@ impl Replica {
             )?;
             return Ok(outcome);
         }
-        outcome.bodies = changed.iter().map(|c| c.key.clone()).collect();
+        outcome
+            .bodies
+            .extend(changed.iter().map(|change| change.key.clone()));
         outcome.bodies.sort();
         outcome.bodies.dedup();
 

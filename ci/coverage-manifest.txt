@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1351
-pr-platform    1029
-nightly        1378
+pr             1369
+pr-platform    1031
+nightly        1396
 mutants        87
 
 [gates]
@@ -18,13 +18,13 @@ orbital-authority            19
 orbital-formats              212
 core-fabric-foundations      52
 core-plane-shapes            77
-orbital-faults               27
+orbital-faults               30
 orbital-contact-real         4
 orbital-bootstrap-real       15
 orbital-ceremonies           12
 orbital-independent-world    6
 convergence-simulation       6
-orbital-product-parity       19
+orbital-product-parity       20
 
 [tests]
 comms iroh::tests::framing_golden_bytes
@@ -470,6 +470,7 @@ lait::it control_pool::a_daemon_that_takes_the_request_and_vanishes_is_retried
 lait::it control_pool::a_framed_call_survives_a_reaped_connection
 lait::it control_pool::one_connection_carries_many_requests
 lait::it control_pool::the_client_stops_reusing_long_before_the_daemon_hangs_up
+lait::it daemon_reaping::a_stopped_daemon_is_reaped_while_the_head_that_spawned_it_lives_on
 lait::it frost_interop::a_dkg_group_signature_verifies_as_ed25519
 lait::it frost_interop::a_trusted_dealer_group_signature_verifies_as_ed25519
 lait::it guided_join::diagnose_flags_expected_space_mismatch
@@ -571,6 +572,7 @@ lait::it orbital_join_iroh::coordinates_only_two_endpoint_bootstrap_over_real_ir
 lait::it orbital_product_parity::a_denied_or_invalid_request_commits_and_publishes_nothing
 lait::it orbital_product_parity::an_issue_packet_stays_pinned_while_the_next_spec_revision_is_drafted
 lait::it orbital_product_parity::due_dates_estimates_and_comment_reactions_round_trip
+lait::it orbital_product_parity::proposed_labels_resolve_against_the_catalog_the_write_lands_on
 lait::it orbital_product_parity::the_full_issue_surface_round_trips_with_legacy_shapes
 lait::it orbital_product_parity::two_stations_converge_product_issues_over_the_contact_plane
 lait::it orbital_router::the_router_accepts_its_product_protocol
@@ -580,6 +582,7 @@ lait::it orbital_two_node::the_inviter_reciprocates_so_a_joiner_side_only_connec
 lait::it orbital_two_node::two_station_hosts_join_admit_and_converge_over_the_socket
 lait::it product_features::a_follower_hears_about_an_issue_they_are_not_assigned
 lait::it product_features::milestones_cycles_initiatives_teams_triage_delete_and_attachments
+lait::it product_features::project_graph_answers_one_project_whole
 lait::it product_independence::allowlist_is_empty_when_the_shell_stops_depending_on_products
 lait::it product_independence::no_unallowlisted_product_references
 lait::it product_independence::the_rule_has_teeth
@@ -957,6 +960,13 @@ replica receipt::tests::scope_key_distinguishes_every_component
 replica receipt::tests::trailing_bytes_are_non_canonical
 replica receipt::tests::unknown_version_is_rejected_not_negotiated
 replica replica::generation::tests::an_empty_prior_replica_becomes_a_verified_current_store
+replica::it adversary_incorporation::change_a_a_mixed_bundle_lands_in_one_of_two_states_at_random
+replica::it adversary_incorporation::change_b_a_refusal_on_replayed_material_permanently_wedges_the_key
+replica::it adversary_incorporation::change_b_replay_makes_opaque_retention_cost_quadratic_verifications
+replica::it adversary_incorporation::change_b_replay_order_does_not_move_the_published_catalog
+replica::it adversary_incorporation::declaration::change_c_adopts_a_stale_peer_declaration_over_a_newer_local_body
+replica::it adversary_incorporation::declaration::change_c_declaration_only_adoption_equivocates_at_its_own_coordinate
+replica::it adversary_incorporation::opaque_upgrade_reuses_retained_bytes_without_quota_charge
 replica::it algebra_fixtures::body_op_variant_tags_are_frozen
 replica::it algebra_fixtures::every_variant_roundtrips
 replica::it algebra_fixtures::trailing_bytes_break_canonical_reencoding
@@ -971,8 +981,13 @@ replica::it canonical_ids::schema_and_world_ids_encode_as_length_prefixed_string
 replica::it concurrent_heads::a_delta_pull_ships_only_missing_heads_and_converges
 replica::it concurrent_heads::a_false_holdings_declaration_starves_only_the_claimant
 replica::it concurrent_heads::a_local_commit_collapses_the_head_set
+replica::it concurrent_heads::an_honest_local_write_during_a_delta_pull_rejects_the_whole_root
 replica::it concurrent_heads::concurrent_writers_converge_and_reserve_the_union
 replica::it concurrent_heads::merged_heads_survive_a_durable_restart
+replica::it concurrent_heads::two_opaque_heads_in_one_bundle_are_both_retained
+replica::it concurrent_heads::upgrading_an_opaque_body_merges_every_retained_head
+replica::it content_declaration_convergence::a_declaration_crosses_even_when_the_body_does_not
+replica::it content_declaration_convergence::a_declaration_that_rides_its_own_body_change_crosses_normally
 replica::it quotas_and_bundle::a_refused_contact_carries_its_reason_into_the_string_a_caller_sees
 replica::it quotas_and_bundle::a_valid_staging_validates_and_incorporates_with_authority_first
 replica::it quotas_and_bundle::adversarial_stagings_are_rejected_whole
@@ -1262,8 +1277,10 @@ runtime lifecycle::tests::no_task_or_handle_retains_the_lock_after_exit
 runtime lifecycle::tests::observation_is_advisory_and_cannot_operate
 runtime lifecycle::tests::wait_returns_a_recoverable_orbit
 runtime neighbors::tests::a_dormancy_beacon_clears_pending_and_marks_unreachable
+runtime neighbors::tests::a_first_contact_still_arms_without_news
 runtime neighbors::tests::a_known_frontier_does_not_queue_and_duplicates_coalesce
 runtime neighbors::tests::a_v1_registry_file_migrates_in_place
+runtime neighbors::tests::an_established_peer_that_declares_news_re_arms_a_dial_back
 runtime neighbors::tests::backoff_grows_persists_and_route_expiry_suppresses_dialing
 runtime neighbors::tests::corrupt_and_foreign_registries_are_typed_errors_never_deleted
 runtime neighbors::tests::frontier_equality_is_the_full_pair_not_root_alone
@@ -1384,6 +1401,7 @@ runtime::it plane_fixtures::the_openings_inner_bound_is_one_that_can_actually_fi
 runtime::it plane_fixtures::the_raw_flow_ceiling_is_far_below_the_framed_stream_guard
 runtime::it plane_fixtures::the_two_planes_have_distinct_alpns_and_the_alpn_is_the_version_gate
 runtime::it plane_fixtures::the_wire_bounds_agree_with_the_geometry_and_the_store
+runtime::it reciprocal_dial_loop::two_converged_stations_stop_dialling_each_other
 runtime::it signal_wire::a_declared_length_over_the_schema_ceiling_is_refused_before_a_buffer_is_reserved
 runtime::it signal_wire::a_file_offer_crosses_intact_and_triggers_nothing
 runtime::it signal_wire::a_one_way_signal_is_accepted_and_that_is_not_a_delivery_receipt
