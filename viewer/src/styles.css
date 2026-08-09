@@ -1469,15 +1469,15 @@
   margin-top: 0;
 }
 
-/* The rail costs a fixed 264px plus its gutter and the page inset — 400px of
+/* The rail costs a fixed 264px plus its gutter and the page inset — 444px of
    chrome before the document gets a single character. Engaging it at 700px
    left the text 331px, a ~48-character column with a 264px rail beside it:
    the reference material was taking 44% of the room and the thing you came to
    read was wrapping mid-phrase with code blocks running past their edge.
 
    So the threshold is what the DOCUMENT needs, not what the rail fits in. 920px
-   is 400px of chrome plus a 520px column — ~75 characters at this face, the
-   top of the comfortable range. Below it the strip above wins: properties on
+   is 444px of chrome plus a 476px column — enough room to keep the document
+   usable. Below it the strip above wins: properties on
    one wrapping row and the body at full width beats two columns that are both
    too narrow. */
 @container (min-width: 920px) {
@@ -1486,7 +1486,7 @@
      gutter and the rail means the two never drift apart as the window grows,
      and the whole set stays centred in the pane rather than pinned left with a
      widening void beside it. */
-  .issue-detail-body {
+  aside.issue-detail > .issue-detail-body {
     /* Composed, not a round number. The cap is exactly measure + gutter + rail
        + the element's own inset, so any one of them can be retuned and the
        total follows instead of needing to be recomputed by hand.
@@ -1502,8 +1502,8 @@
        ends, and a scroll that stops dead on the composer reads as truncation —
        Linear leaves a screen's worth of quiet under the final block. */
     --issue-rail: 264px;
-    --issue-gutter: 56px;
-    --issue-measure: 1296px;
+    --issue-gutter: 100px;
+    --issue-measure: 850px;
     --issue-inset: 40px;
     display: grid;
     grid-template-columns: minmax(0, 1fr) var(--issue-rail);
@@ -1515,7 +1515,7 @@
        37 unused rows were manufacturing 888px of emptiness under every issue.
        Margins are paid by elements that exist, so the phantom rows cost zero. */
     row-gap: 0;
-    padding: 40px var(--issue-inset) 96px;
+    padding: 60px var(--issue-inset) 96px;
     max-width: calc(
       var(--issue-measure) + var(--issue-gutter) + var(--issue-rail) +
         (2 * var(--issue-inset))
@@ -1524,17 +1524,16 @@
     width: 100%;
   }
 
-  /* The measure is capped, not filled. `saans` runs 6.92px per character at
-     15px, so the old 13px body across a 630px column was ~105 characters per
-     line — nearly half again the 65–75 a reader tracks comfortably. 35rem at
-     15px is ~81, which is where documentation sites sit.
+  /* The measure is capped, not filled. The fixed cap keeps the document and
+     rail composition stable instead of letting the text column absorb every
+     extra pixel in a wide pane.
 
      The cap lands on the whole column rather than on `.prose` alone so the
      title, relations, timeline and composer share one left edge and one right
      edge with the body text. Left-aligned, not centred: the rail is pinned
      right, and centring the column would leave the two drifting apart as the
      window grows. */
-  .issue-detail-body > *:not(.issue-detail-properties) {
+  aside.issue-detail > .issue-detail-body > *:not(.issue-detail-properties) {
     grid-column: 1;
     width: 100%;
     max-width: var(--issue-measure);
@@ -1545,7 +1544,7 @@
     margin-top: 24px;
   }
 
-  .issue-detail-body > *:not(.issue-detail-properties):first-child {
+  aside.issue-detail > .issue-detail-body > *:not(.issue-detail-properties):first-child {
     margin-top: 0;
   }
 
@@ -1555,7 +1554,7 @@
      `align-self: start` is what makes `sticky` work here: without it the grid
      stretches the item to the full row span and a stretched box has nowhere to
      stick to. */
-  .issue-detail-properties {
+  aside.issue-detail > .issue-detail-body > .issue-detail-properties {
     grid-column: 2;
     grid-row: 1 / span 40;
     align-self: start;
@@ -1564,7 +1563,11 @@
        scroll container at rest and then snapped up to meet it on the first
        scroll — a visible jolt that read as the eyebrow sliding out from under
        itself. Sticking where it already sits means it never moves at all. */
-    top: 40px;
+    top: 60px;
+  }
+
+  aside.issue-detail > .issue-detail-body > .issue-detail-properties .issue-property > dt {
+    display: none;
   }
 }
 

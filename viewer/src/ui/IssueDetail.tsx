@@ -775,8 +775,8 @@ export function IssueDetail({
           <RailSection title="Project">
           {graph?.parent && (
             <RailRow label="Parent">
-                // A row, not an action. Astryx's Button adds its own padding and a
-                // pill radius, which fight the row's `px-1` and its flat shape.
+              {/* A row, not an action. Astryx's Button adds its own padding and a
+                  pill radius, which fight the row's `px-1` and its flat shape. */}
                 <button
                 type="button"
                 onClick={() => onNavigate(graph.parent!.reff)}
