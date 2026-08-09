@@ -427,6 +427,37 @@ describe("colour tokens are generated, not authored", () => {
   });
 });
 
+describe("bordered controls share one hover border", () => {
+  it("recolors the existing border without adding an outline", () => {
+    const css = readFileSync(join(__dirname, "..", "styles.css"), "utf8");
+    const token = /--control-border-hover:\s*([^;]+);/.exec(css)?.[1] ?? "";
+
+    expect(token).toContain("var(--color-border-emphasized) 75%");
+    expect(token).toContain("var(--color-text-secondary)");
+    expect(css).toContain("border-color: var(--control-border-hover)");
+    expect(css).not.toContain("--shadow-control-hover");
+    expect(css).toContain("transition-duration: var(--duration-fast)");
+    expect(css).toContain("transition-timing-function: var(--ease-standard)");
+
+    for (const selector of [
+      ".astryx-text-input",
+      ".astryx-textarea",
+      ".astryx-number-input",
+      ".astryx-date-input",
+      ".astryx-time-input",
+      ".astryx-selector",
+      ".astryx-typeahead",
+      ".astryx-tokenizer",
+      'button[data-tone="outline"]',
+      ".control-hover-outline",
+    ]) {
+      expect(css, `${selector} has drifted off the canonical hover border`).toContain(selector);
+    }
+
+    expect(css).toContain(":hover:not(:focus-within)");
+  });
+});
+
 /**
  * `--color-accent` is the one token name BOTH vocabularies declare.
  *

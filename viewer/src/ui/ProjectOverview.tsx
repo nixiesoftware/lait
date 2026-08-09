@@ -404,7 +404,7 @@ function Updates({
       <h2 className="text-mute mb-3 text-2xs font-semibold tracking-wider uppercase">Updates</h2>
 
       {!readOnly && (
-        <div className="border-line focus-within:border-line-strong mb-4 rounded-surface border bg-[var(--field-bg)] p-3 transition-colors">
+        <div className="control-hover-outline border-line focus-within:border-line-strong mb-4 rounded-surface border bg-[var(--field-bg)] p-3 transition-colors">
           <textarea
             value={draft}
             rows={2}

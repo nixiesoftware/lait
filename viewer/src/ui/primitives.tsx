@@ -278,7 +278,7 @@ export function ChipButton({
   return (
     <button
       className={cn(
-        "border-line bg-bg text-dim hover:border-line-strong hover:bg-hover aria-pressed:border-accent/40 aria-pressed:bg-accent/10 aria-pressed:text-fg inline-flex h-ctl-sm items-center gap-1 rounded-full border px-1.5 text-xs outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1 disabled:pointer-events-none disabled:opacity-45",
+        "control-hover-outline border-line bg-bg text-dim hover:border-line-strong hover:bg-hover aria-pressed:border-accent/40 aria-pressed:bg-accent/10 aria-pressed:text-fg inline-flex h-ctl-sm items-center gap-1 rounded-full border px-1.5 text-xs outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1 disabled:pointer-events-none disabled:opacity-45",
         className,
       )}
       {...props}

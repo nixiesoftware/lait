@@ -199,7 +199,7 @@ export function Calendar({
                       }
                     }}
                     title={r.title}
-                    className="bg-raised border-line hover:border-line-strong flex items-center gap-1 rounded-control border px-1 py-0.5 text-left text-2xs"
+                    className="control-hover-outline bg-raised border-line hover:border-line-strong flex items-center gap-1 rounded-control border px-1 py-0.5 text-left text-2xs"
                   >
                     <PriorityChip
                       priority={r.priority}

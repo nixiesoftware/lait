@@ -690,7 +690,7 @@ function LabelsPanel({
               if (e.key === "Enter" && newName.trim()) create();
               if (e.key === "Escape") setCreating(false);
             }}
-            className="border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
+            className="control-hover-outline border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
             aria-label="New label name"
           />
           <ColorPicker value={newColor} onChange={setNewColor} />
@@ -794,7 +794,7 @@ function LabelEditor({
           if (e.key === "Enter" && name.trim()) onSave(name.trim(), color);
           if (e.key === "Escape") onCancel();
         }}
-        className="border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
+        className="control-hover-outline border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
         aria-label="Label name"
       />
       <ColorPicker value={color} onChange={setColor} />

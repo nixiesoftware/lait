@@ -251,7 +251,7 @@ export function Roadmap({
           <button
             type="button"
             onClick={scrollToNow}
-            className="border-line text-fg hover:bg-hover rounded-control border px-2 py-0.5 text-2xs transition-colors"
+            className="control-hover-outline border-line text-fg hover:bg-hover rounded-control border px-2 py-0.5 text-2xs transition-colors"
           >
             Now
           </button>

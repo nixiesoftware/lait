@@ -306,10 +306,9 @@
   /* The middle tier: a surface that lifts without floating. A shadow is a claim
      to be off the page, so most on-page things carry none — a board card, a
      segmented selector and an inline toast had this and it read as elevation
-     they had not earned. What HAS earned it is the comment card and the comment
-     composer: white surfaces sitting on the grey canvas (see the neutral ramp),
-     where a whisper of shadow is what separates "a card on the page" from "a
-     rectangle drawn on it" — Linear's treatment, tuned to be felt, not seen. */
+     they had not earned. What HAS earned it is a comment card sitting on the
+     page canvas, where a whisper of shadow separates "a card on the page" from
+     "a rectangle drawn on it" — Linear's treatment, tuned to be felt, not seen. */
   --shadow-raised: 0 1px 4px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.35));
   /* For the one surface that is genuinely *hovering* over the work rather than
      opening from a control: the bulk bar. `overlay` is tuned for a popover
@@ -339,6 +338,13 @@
     0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1)),
     0 3px 6px -2px light-dark(rgb(0 0 0 / 0.02), rgb(0 0 0 / 0.28)),
     0 1px 1px light-dark(rgb(0 0 0 / 0.04), rgb(0 0 0 / 0.32));
+  /* The canonical hover color for bordered controls. Hover changes only the
+     existing border's ink; it adds no ring, outline, shadow, or geometry. */
+  --control-border-hover: color-mix(
+    in oklch,
+    var(--color-border-emphasized) 75%,
+    var(--color-text-secondary)
+  );
 }
 
 /* Dark by default; the OS decides unless the user overrode it. `color-scheme` is
@@ -387,6 +393,53 @@
 .settings-surface .astryx-text-input,
 .settings-surface .astryx-textarea {
   background-color: var(--color-hover) !important;
+}
+
+/* One hover language for every bordered control. Stable Astryx component/data
+   selectors are the integration seam; `control-hover-outline` covers the few
+   native controls whose document-like editing behaviour keeps them native.
+   Validation and focus remain louder states, so neither is overwritten. */
+@layer utilities {
+  .astryx-text-input,
+  .astryx-textarea,
+  .astryx-number-input,
+  .astryx-date-input,
+  .astryx-time-input,
+  .astryx-selector,
+  .astryx-typeahead,
+  .astryx-tokenizer,
+  .control-hover-outline {
+    transition-property: color, background-color, border-color, box-shadow, opacity;
+    transition-duration: var(--duration-fast);
+    transition-timing-function: var(--ease-standard);
+  }
+
+  button[data-tone="outline"] {
+    transition-property: background-image, background-color, color, border-color, box-shadow, opacity, transform;
+    transition-duration: var(--duration-fast);
+    transition-timing-function: var(--ease-standard);
+  }
+
+  @media (hover: hover) {
+    :where(
+      .astryx-text-input,
+      .astryx-textarea,
+      .astryx-number-input,
+      .astryx-date-input,
+      .astryx-time-input,
+      .astryx-selector,
+      .astryx-typeahead,
+      .astryx-tokenizer
+    ):not([data-status]):hover:not(:focus-within),
+    :where(
+      button[data-tone="outline"],
+      .control-hover-outline
+    ):hover:not(:focus-within) {
+      border-color: var(--control-border-hover);
+      box-shadow: none;
+    }
+
+  }
 }
 
 :root {

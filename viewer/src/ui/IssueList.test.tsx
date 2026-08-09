@@ -56,6 +56,28 @@ describe("IssueList semantics", () => {
     expect(onOpen).toHaveBeenCalledWith(current.reff);
   });
 
+  it("keeps group and row leading columns on shared geometry", () => {
+    render(row("LIST-2"), () => undefined);
+
+    const header = host!.querySelector("section > header") as HTMLElement;
+    const item = host!.querySelector("li[data-issue-ref]") as HTMLElement;
+    expect(header.classList).toContain("mt-1");
+    expect(header.classList).toContain("px-4");
+    expect(item.classList).toContain("px-4");
+    expect(header.classList).toContain("gap-2");
+    expect(item.classList).toContain("gap-2");
+
+    const headerSlots = [...header.querySelectorAll<HTMLElement>(":scope > span")].slice(0, 2);
+    const rowSlots = [...item.querySelectorAll<HTMLElement>(":scope > span[data-row-control]")].slice(0, 2);
+    expect(headerSlots).toHaveLength(2);
+    expect(rowSlots).toHaveLength(2);
+    for (const slot of [...headerSlots, ...rowSlots]) {
+      expect(slot.classList).toContain("size-icon-md");
+      expect(slot.classList).toContain("items-center");
+      expect(slot.classList).toContain("justify-center");
+    }
+  });
+
   it("extends bulk selection across a shift-clicked range", () => {
     const toggled = vi.fn();
     const rows = [row("LIST-1"), row("LIST-2"), row("LIST-3")];

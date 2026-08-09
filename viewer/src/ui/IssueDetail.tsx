@@ -1035,7 +1035,7 @@ export function IssueDetail({
              send control inside the field at the bottom right and lets the
              keyboard shortcut live on its tooltip — the affordance is the
              button, and the hint is there when you go looking for it. */
-          <div className="border-line focus-within:border-line-strong bg-raised shadow-raised rounded-surface border">
+          <div className="control-hover-outline border-line focus-within:border-line-strong bg-raised rounded-surface border">
             <textarea
               ref={commentRef}
               value={comment}

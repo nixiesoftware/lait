@@ -265,7 +265,7 @@ function CodeBlock({ lang, text }: { lang: string | null; text: string }) {
         onClick={copy}
         aria-label={copied ? "Copied" : "Copy code"}
         className={cn(
-          "border-line bg-raised text-mute hover:text-fg hover:border-line-strong absolute right-2 flex size-ctl-sm items-center justify-center rounded-control border opacity-0 transition-opacity group-hover/code:opacity-100 focus-visible:opacity-100",
+          "control-hover-outline border-line bg-raised text-mute hover:text-fg hover:border-line-strong absolute right-2 flex size-ctl-sm items-center justify-center rounded-control border opacity-0 transition-opacity group-hover/code:opacity-100 focus-visible:opacity-100",
           lang ? "top-9" : "top-2",
           copied && "opacity-100",
         )}

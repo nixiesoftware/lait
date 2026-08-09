@@ -20,8 +20,28 @@ import { PriorityIcon, StatusIcon } from "./icons";
 import { IssueMenuItems } from "./IssueMenu";
 import { GroupHeader } from "./layout";
 import { Button, CheckboxInput, ContextMenu, IconButton } from "@astryxdesign/core";
-import { interactiveRow } from "./primitives";
+import { cn, interactiveRow } from "./primitives";
 import { dueLabel, dueTone } from "./time";
+
+/**
+ * The header and every row share the same inset and two leading columns:
+ * collapse/selection, then group/priority. Keeping those dimensions here makes
+ * their glyph centres an invariant rather than a pair of matching literals.
+ */
+const ISSUE_LIST_INSET = "px-4";
+const ISSUE_LEADING_SLOT = "flex size-icon-md shrink-0 items-center justify-center";
+
+/** Issue groups are quiet raised bands, not table headings. The rounded fill
+ * provides the separation, so a rule beneath them would duplicate the boundary
+ * the surface already draws. Adjacent bands keep only a 4px breathing gap. */
+const ISSUE_GROUP_HEADER = cn(
+  "mx-2 mt-1 rounded-row border-b-0 bg-raised",
+  ISSUE_LIST_INSET,
+);
+const ISSUE_ROW_LAYOUT = cn(
+  "group/row flex items-center gap-2 py-2",
+  ISSUE_LIST_INSET,
+);
 
 /**
  * The default view: one flat, grouped list.
@@ -170,11 +190,12 @@ export function IssueList({
           <section>
             <GroupHeader
               sticky
+              className={ISSUE_GROUP_HEADER}
               icon={<Trash2 className="text-mute size-icon-sm" />}
               title="Deleted"
               count={deleted.length}
             />
-            <ul data-issue-collection>
+            <ul className="mx-2 mt-0.5" data-issue-collection>
               {deleted.map((row) => (
                 <IssueRow
                   key={row.reff}
@@ -288,11 +309,12 @@ function Group({
     <section>
       <GroupHeader
         sticky
+        className={ISSUE_GROUP_HEADER}
         leading={
           /* The visible slot is the same 16px column as a row checkbox. The
              control itself remains 24px and overflows the slot symmetrically, so
              alignment does not come at the cost of a usable pointer target. */
-          <span className="relative flex size-icon-md shrink-0 items-center justify-center">
+          <span className={cn("relative", ISSUE_LEADING_SLOT)}>
             <IconButton
               label={`${collapsed ? "Expand" : "Collapse"} ${title}`}
               onClick={() => setCollapsed((value) => !value)}
@@ -305,7 +327,11 @@ function Group({
             />
           </span>
         }
-        icon={<GroupIcon group={group} members={members} />}
+        icon={
+          <span className={ISSUE_LEADING_SLOT}>
+            <GroupIcon group={group} members={members} />
+          </span>
+        }
         title={<span className="capitalize">{title}</span>}
         count={rows.length}
         actions={
@@ -325,7 +351,7 @@ function Group({
           ) : undefined
         }
       />
-      {!collapsed && <ul aria-label={`${title} issues`} data-issue-collection>
+      {!collapsed && <ul className="mx-2 mt-0.5" aria-label={`${title} issues`} data-issue-collection>
         {rows.map((row) => (
           <IssueRow
             key={row.reff}
@@ -447,11 +473,11 @@ function IssueRow({
     <li
       ref={el}
       className={clsxish([
-        interactiveRow({ selected, size: "xl" }),
+        interactiveRow({ surface: "contained", selected, size: "xl" }),
         // One step above the group header that introduces them. The header is
         // punctuation between piles; the rows are the thing you came to read,
         // and when the two were level the list had no figure and ground.
-        "group/row flex h-ctl-xl items-center gap-2 px-4",
+        ISSUE_ROW_LAYOUT,
         checked && !selected && "bg-accent/5 shadow-[inset_2px_0_var(--color-accent)]",
         // The open-menu fill used to come from `data-[state=open]`, which Radix
         // wrote onto its trigger. Astryx's ContextMenu wraps the row instead of
@@ -488,7 +514,7 @@ function IssueRow({
       {/* This 16px column is shared with the group chevron above it. Keeping the
           selection affordance in that column lets priority/status/title retain
           exactly the same geometry when the checkbox appears. */}
-      <span data-row-control="" className="flex size-icon-md shrink-0 items-center justify-center">
+      <span data-row-control="" className={ISSUE_LEADING_SLOT}>
         {!readOnly && (
           <CheckboxInput
             label={`Select ${row.key_alias ?? row.reff}`}
@@ -515,6 +541,7 @@ function IssueRow({
         priority={row.priority}
         disabled={locked}
         onPick={(p) => mutators.setPriority(row.reff, p)}
+        className={ISSUE_LEADING_SLOT}
       />
       {/* One column for every key in the view, sized by the list to its longest
           key (`--key-col`, in ch — exact in this mono font). Content-width was

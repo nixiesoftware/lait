@@ -524,7 +524,7 @@ function Invite({
                   />
                   <a
                     href={mailto(link)}
-                    className="border-line-strong hover:bg-hover flex items-center gap-1.5 rounded-control border px-2 py-1 text-sm"
+                    className="control-hover-outline border-line-strong hover:bg-hover flex items-center gap-1.5 rounded-control border px-2 py-1 text-sm"
                   >
                     <Link2 className="size-icon-sm" />
                     Email it
