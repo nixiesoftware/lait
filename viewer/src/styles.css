@@ -918,6 +918,213 @@
   position: relative;
 }
 
+/* ---------------------------------------------------------------------------
+   The Lait document editor.
+
+   ProseMirror is the browser editing kernel, never the stored document. Its
+   tree is rebuilt from controlled Typst and every transaction is serialized
+   back through the range map before it reaches the collaborative text API. */
+.lait-document-editor-host {
+  position: relative;
+}
+
+.lait-document-editor {
+  min-height: inherit;
+  padding: 8px 0;
+  outline: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.lait-document-editor > *:first-child {
+  margin-top: 0;
+}
+
+.lait-document-editor[data-placeholder] > p:first-child:last-child:has(> br.ProseMirror-trailingBreak)::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  color: var(--color-mute);
+  pointer-events: none;
+}
+
+.lait-document-editor .ProseMirror-selectednode {
+  outline: 2px solid color-mix(in oklab, var(--color-accent) 45%, transparent);
+  outline-offset: 3px;
+}
+
+.lait-document-editor blockquote {
+  border-left: 3px solid var(--color-line-strong);
+  color: var(--color-mute);
+  padding-left: 12px;
+}
+
+.lait-document-editor .lait-doc-inline-code {
+  border-radius: var(--radius-mark);
+  background: color-mix(in oklab, var(--color-active) 60%, transparent);
+  padding: 0 0.25em;
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+.lait-doc-callout {
+  --callout: var(--color-accent);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  border-left: 3px solid var(--callout);
+  background: color-mix(in oklab, var(--callout) 8%, transparent);
+  padding: 10px 12px;
+}
+
+.lait-doc-callout-tip { --callout: var(--color-ok); }
+.lait-doc-callout-warning { --callout: var(--color-warn); }
+.lait-doc-callout-caution { --callout: var(--color-danger); }
+
+.lait-doc-callout-label {
+  color: var(--callout);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.lait-document-editor table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+
+.lait-document-editor th,
+.lait-document-editor td {
+  position: relative;
+  min-width: 72px;
+  border: 1px solid var(--color-line);
+  padding: 7px 9px;
+  vertical-align: top;
+}
+
+.lait-document-editor th {
+  background: color-mix(in oklab, var(--color-active) 45%, transparent);
+  font-weight: 600;
+}
+
+.lait-document-editor .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 4px;
+  background: var(--color-accent);
+  pointer-events: none;
+}
+
+.lait-document-editor li.lait-doc-task {
+  list-style: none;
+}
+
+.lait-document-editor .lait-doc-task-box {
+  float: left;
+  width: 1.5em;
+  margin-left: -1.5em;
+  color: var(--color-mute);
+  user-select: none;
+}
+
+.lait-doc-code-shell {
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-8);
+  background: color-mix(in oklab, var(--color-active) 35%, transparent);
+}
+
+.lait-doc-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--color-line);
+  padding: 5px 9px;
+  color: var(--color-mute);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.lait-doc-code-language {
+  width: 9rem;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-dim);
+  font: inherit;
+  text-align: right;
+  text-transform: none;
+}
+
+.lait-doc-ref {
+  display: inline;
+}
+
+.lait-document-toolbar {
+  position: absolute;
+  z-index: 12;
+  display: flex;
+  gap: 2px;
+  transform: translate(-50%, calc(-100% - 8px));
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-8);
+  background: var(--color-raised);
+  padding: 3px;
+  box-shadow: var(--shadow-overlay);
+}
+
+.lait-document-toolbar button {
+  min-width: 28px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--radius-4);
+  background: transparent;
+  color: var(--color-fg);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.lait-document-toolbar button:hover,
+.lait-document-toolbar button[aria-pressed="true"] {
+  background: var(--color-active);
+}
+
+.lait-document-blockbar {
+  position: absolute;
+  z-index: 10;
+  top: -30px;
+  right: 0;
+  display: flex;
+  gap: 1px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-8);
+  background: var(--color-raised);
+  padding: 2px;
+  box-shadow: var(--shadow-low);
+}
+
+.lait-document-blockbar button {
+  min-width: 25px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-4);
+  background: transparent;
+  color: var(--color-dim);
+  font-size: 0.6875rem;
+  font-weight: 650;
+}
+
+.lait-document-blockbar button:hover {
+  background: var(--color-active);
+  color: var(--color-fg);
+}
+
 .codemirror-markdown .cm-editor {
   min-height: inherit;
 }
@@ -1129,7 +1336,8 @@
    widget has no width and therefore never reflows prose; its label follows the
    compact name flag Linear uses and the selection tint shares that identity
    colour without obscuring syntax or the native local selection. */
-.codemirror-markdown .remote-caret {
+.codemirror-markdown .remote-caret,
+.lait-document-editor-host .remote-caret {
   display: inline-block;
   position: relative;
   width: 0;
@@ -1141,7 +1349,8 @@
   z-index: 2;
 }
 
-.codemirror-markdown .remote-caret-label {
+.codemirror-markdown .remote-caret-label,
+.lait-document-editor-host .remote-caret-label {
   position: absolute;
   left: -2px;
   bottom: calc(100% + 2px);
@@ -1160,11 +1369,13 @@
   user-select: none;
 }
 
-.codemirror-markdown .remote-caret-uncertain {
+.codemirror-markdown .remote-caret-uncertain,
+.lait-document-editor-host .remote-caret-uncertain {
   opacity: 0.55;
 }
 
-.codemirror-markdown .remote-selection {
+.codemirror-markdown .remote-selection,
+.lait-document-editor-host .remote-selection {
   background: color-mix(in oklab, var(--remote-color) 22%, transparent);
   border-radius: 2px;
 }
@@ -1173,7 +1384,8 @@
    The hidden range and inserted widget make the remote result visible without
    mutating CodeMirror's document, so a local edit can never be based on text the CRDT has
    not accepted yet. */
-.codemirror-markdown .remote-preview-insert {
+.codemirror-markdown .remote-preview-insert,
+.lait-document-editor-host .remote-preview-insert {
   border-bottom: 2px solid color-mix(in oklab, var(--remote-color) 72%, transparent);
   background: color-mix(in oklab, var(--remote-color) 12%, transparent);
   border-radius: 2px;

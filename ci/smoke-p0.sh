@@ -37,7 +37,13 @@ unset LAIT_HOME LAIT_STORE LAIT_AGENT LAIT_AS || true
 # Invoke the built binary directly. `cargo run` would re-enter cargo — workspace
 # discovery, lockfile check, fingerprinting — for a binary the build step already
 # produced. This is still the real binary, which is the point of a smoke test.
-LAIT_BIN="target/debug/lait"
+if command -v cygpath >/dev/null 2>&1; then
+  # A checkout used from both Unix and native Windows can contain both build
+  # products. Git Bash must exercise the Windows artifact on the Windows tier.
+  LAIT_BIN="target/debug/lait.exe"
+else
+  LAIT_BIN="target/debug/lait"
+fi
 [ -x "$LAIT_BIN" ] || LAIT_BIN="target/debug/lait.exe"
 [ -x "$LAIT_BIN" ] || { echo "::error::no built lait binary at target/debug"; exit 1; }
 LAIT_BIN="$(cd "$(dirname "$LAIT_BIN")" && pwd)/$(basename "$LAIT_BIN")"

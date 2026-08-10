@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1369
-pr-platform    1031
-nightly        1396
+pr             1375
+pr-platform    1036
+nightly        1402
 mutants        87
 
 [gates]
@@ -24,7 +24,7 @@ orbital-bootstrap-real       15
 orbital-ceremonies           12
 orbital-independent-world    6
 convergence-simulation       6
-orbital-product-parity       20
+orbital-product-parity       21
 
 [tests]
 comms iroh::tests::framing_golden_bytes
@@ -411,10 +411,15 @@ lait-issues spec::tests::baseline_draft_preserves_issue_and_withdrawal_ends_it
 lait-issues spec::tests::canonical_links_make_equal_revisions
 lait-issues spec::tests::concurrent_issued_successors_are_a_visible_conflict
 lait-issues views::tests::completed_issue_keeps_alias_from_authoritative_project
+lait-issues views::tests::missing_document_schema_is_legacy_and_the_register_is_additive
 lait-issues workflow::tests::frozen_canonical_json_tags
 lait-issues workflow::tests::invalid_bodies_reject
 lait-issues workflow::tests::the_default_workflow_is_valid_and_deterministic
 lait-issues workflow::tests::transitions_resolve_to_bounded_canonical_demands
+lait-issues-app document::tests::cannot_read_files_outside_the_in_memory_source
+lait-issues-app document::tests::compiles_the_controlled_document_vocabulary
+lait-issues-app document::tests::reports_body_local_diagnostics_without_exposing_compiler_html
+lait-issues-app document::tests::semantic_plain_text_is_escaped_and_discriminated
 lait-issues-app host::tests::a_peer_named_attachment_is_saved_beside_us_not_wherever_it_asked
 lait-issues-app host::tests::a_world_call_classifies_itself_for_head_policy
 lait-issues-app host::tests::an_explicit_out_is_the_callers_own_choice_and_is_left_alone
@@ -571,6 +576,7 @@ lait::it orbital_join::form_invite_join_autoapprove_and_e2ee_convergence
 lait::it orbital_join_iroh::coordinates_only_two_endpoint_bootstrap_over_real_iroh
 lait::it orbital_product_parity::a_denied_or_invalid_request_commits_and_publishes_nothing
 lait::it orbital_product_parity::an_issue_packet_stays_pinned_while_the_next_spec_revision_is_drafted
+lait::it orbital_product_parity::an_observation_never_governs_and_never_becomes_a_link
 lait::it orbital_product_parity::due_dates_estimates_and_comment_reactions_round_trip
 lait::it orbital_product_parity::proposed_labels_resolve_against_the_catalog_the_write_lands_on
 lait::it orbital_product_parity::the_full_issue_surface_round_trips_with_legacy_shapes
