@@ -288,7 +288,7 @@ jobs:
   # path, which needs no generator at all.
   #
   # `RUSTUP_TOOLCHAIN` overrides rust-toolchain.toml's `channel = "stable"`,
-  # which is the same mechanism ci.yml's `msrv (1.91)` job uses to pin downward.
+  # which is the same mechanism ci.yml's `msrv (1.92)` job uses to pin downward.
   # The `fuzz/` package is excluded from the workspace, so nothing else in the
   # build ever sees nightly.
   #

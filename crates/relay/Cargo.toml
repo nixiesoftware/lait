@@ -2,7 +2,7 @@
 name = "lait-relay"
 version = "0.7.8"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.92"
 description = "Stand up a relay for a lait space. The server half of LAIT_NETWORK=local."
 license = "MIT OR Apache-2.0"
 # Not published, for the same reason the crates it sits on are not: this is one

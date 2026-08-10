@@ -464,14 +464,15 @@ jobs:
           echo "$results" | grep -q '"result": *"skipped"' && exit 1
           exit 0
 
-  # Verify the MSRV floor holds. The floor is driven by iroh 1.0.0-rc.1 (rustc
-  # 1.91). If this breaks, either the floor moved or a dep raised its MSRV.
+  # Verify the MSRV floor holds. The floor is driven by typst 0.15.1 (rustc
+  # 1.92), which products/issues-app pulls in; iroh 1.0.0-rc.1 held it at 1.91
+  # before that. If this breaks, either the floor moved or a dep raised its MSRV.
   msrv:
-    name: msrv (1.91)
+    name: msrv (1.92)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      # dtolnay/rust-toolchain@1.91.0 (branch head at time of pinning) — the same
+      # dtolnay/rust-toolchain@1.92.0 (branch head at time of pinning) — the same
       # commit publish-crates.yml pins for the MSRV floor.
       #
       # NOTE: unlike the @stable branch, the version branches declare NO `toolchain`
@@ -479,17 +480,17 @@ jobs:
       # `toolchain:` here is not an error, it is silently ignored with an
       # "Unexpected input(s)" warning, which is worse: the file would claim to set
       # something it does not. The comment above is what records the version.
-      - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@ad7910d95e317a4b12a9a3dfad520f4b409b3ec0
+      - name: Install Rust 1.92
+        uses: dtolnay/rust-toolchain@87eb139fed4b08a67bd1fa429a21d1f5d523e03e
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # rust-toolchain.toml at the repo root pins `channel = "stable"`, and rustup
       # ranks that file ABOVE the default toolchain — so without this override the
-      # job would silently `cargo check` on stable, not 1.91, and the MSRV floor
+      # job would silently `cargo check` on stable, not 1.92, and the MSRV floor
       # could drift upward undetected. RUSTUP_TOOLCHAIN outranks rust-toolchain.toml,
-      # forcing the 1.91.0 toolchain installed above.
+      # forcing the 1.92.0 toolchain installed above.
       - name: Check on MSRV
         env:
-          RUSTUP_TOOLCHAIN: "1.91.0"
+          RUSTUP_TOOLCHAIN: "1.92.0"
         run: cargo check --workspace --locked --all-targets --all-features
 
   # Supply-chain gate: advisories + licenses + bans + sources (deny.toml). The

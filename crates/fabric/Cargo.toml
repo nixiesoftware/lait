@@ -2,7 +2,7 @@
 name = "fabric"
 version = "0.7.8"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.92"
 description = "The lait fabric: the shared world — documents, persistence, history, convergence, and projection, with the Loro scaffold sealed behind typed wrappers. The ONLY crate that names loro."
 license = "MIT OR Apache-2.0"
 # Not published. These are lait's internal boundaries, not a library surface —

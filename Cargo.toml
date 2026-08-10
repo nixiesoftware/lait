@@ -37,8 +37,12 @@ resolver = "2"
 name = "lait"
 version = "0.7.11"
 edition = "2021"
-# MSRV: driven by iroh 1.0.0-rc.1, which requires rustc 1.91.
-rust-version = "1.91"
+# MSRV: driven by typst 0.15.1 (via products/issues-app), which requires rustc
+# 1.92. iroh 1.0.0-rc.1 held the floor at 1.91 before that; it is no longer the
+# binding constraint. The whole workspace carries the same figure because the
+# gate checks the whole workspace — a lower number on a library crate would be
+# a claim nothing verifies.
+rust-version = "1.92"
 description = "A local-first, peer-to-peer, end-to-end-encrypted issue tracker built on iroh + Loro CRDTs"
 authors = ["onnixi <omar@onnixi.com>"]
 license = "MIT OR Apache-2.0"

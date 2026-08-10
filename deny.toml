@@ -25,6 +25,15 @@ ignore = [
     # heapless -> postcard -> iroh-gossip and via loro. No non-yanked version is
     # reachable without bumping that chain; drop this when iroh-gossip/loro do.
     { crate = "spin", reason = "all in-tree versions yanked upstream; transitive via iroh-gossip + loro" },
+    # The four below arrived with typst 0.15.1 (products/issues-app), which
+    # compiles issue documents. All are `unmaintained` notices rather than
+    # vulnerabilities — no advisory here reports an exploitable defect — and all
+    # sit under typst's rendering stack, which this project neither calls into
+    # nor can upgrade independently. Drop each when typst does.
+    "RUSTSEC-2025-0141", # bincode 1.x: unmaintained (typst-library -> syntect)
+    "RUSTSEC-2026-0206", # rustybuzz: unmaintained (typst-layout, typst-library)
+    "RUSTSEC-2026-0192", # ttf-parser: unmaintained (typst-library -> fontdb/rustybuzz)
+    "RUSTSEC-2024-0320", # yaml-rust: unmaintained (typst-library -> syntect)
 ]
 
 [bans]

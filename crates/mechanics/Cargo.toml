@@ -2,7 +2,7 @@
 name = "mechanics"
 version = "0.7.8"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.92"
 description = "The lait kernel: identity, trust regimes, and derivation rules — the roots lait grows from, depending on no scaffold (no CRDT engine, no transport)."
 license = "MIT OR Apache-2.0"
 # Not published. These are lait's internal boundaries, not a library surface —
