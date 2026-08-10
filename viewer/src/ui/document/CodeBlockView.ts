@@ -16,7 +16,39 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { Selection, TextSelection } from "prosemirror-state";
 import type { EditorView as ProseMirrorView, NodeView } from "prosemirror-view";
 
+import { highlight, type Token } from "../../core/highlight";
+
 type GetPos = () => number | undefined;
+
+/** How long the code has to hold still before it is worth tokenising. Shiki
+ *  colours the whole block at once, so this is a rate limit on a burst of
+ *  keystrokes rather than a delay anybody waits out: the text is on screen the
+ *  moment it is typed and only the colour arrives late. */
+const HIGHLIGHT_IDLE_MS = 120;
+
+/**
+ * Where the outer selection should go when an arrow key runs off the edge of a
+ * code block — or `null` when there is nowhere outside the block to go.
+ *
+ * `Selection.near` promises a *valid* position, not one outside a given node.
+ * A code block that opens or closes the document has no block on its far side,
+ * so the nearest valid position is back inside the block's own content, and
+ * moving the outer selection there puts a caret where ProseMirror cannot draw
+ * one — the node view owns that DOM — and then scrolls the page to it. From the
+ * first line of a leading code block, that position is 1: the top of the
+ * document. Answering `null` leaves the key to CodeMirror's own motion instead.
+ */
+export function escapeSelection(
+  doc: ProseMirrorNode,
+  position: number,
+  nodeSize: number,
+  direction: -1 | 1,
+): Selection | null {
+  const target = position + (direction < 0 ? 0 : nodeSize);
+  const next = Selection.near(doc.resolve(target), direction);
+  const inside = next.from > position && next.to < position + nodeSize;
+  return inside ? null : next;
+}
 
 export interface CodePresenceCursor {
   actor: string;
@@ -37,6 +69,54 @@ const presenceField = StateField.define<DecorationSet>({
   },
   provide: (field) => CodeMirror.decorations.from(field),
 });
+
+/**
+ * Syntax colour, from the same tokeniser the reading view uses.
+ *
+ * Not a CodeMirror language: the app carries one highlighter, and giving the
+ * editor a second one — a lezer grammar per language, with its own theme
+ * mapping — would let an open code block and a closed one disagree about what
+ * Rust looks like. The cost is that Shiki tokenises whole and asynchronously,
+ * so the colour arrives a frame after the character does. Mapping through
+ * `transaction.changes` keeps the existing colours roughly in place until it
+ * does, rather than dropping to plain text on every keystroke.
+ */
+const setHighlight = StateEffect.define<DecorationSet>();
+const highlightField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(held, transaction) {
+    let next = held.map(transaction.changes);
+    for (const effect of transaction.effects) if (effect.is(setHighlight)) next = effect.value;
+    return next;
+  },
+  provide: (field) => CodeMirror.decorations.from(field),
+});
+
+/** Shiki's per-line tokens laid back onto CodeMirror's flat offsets. Tokens
+ *  carry no newline, so one is added between lines — the same accounting the
+ *  reading view does when it emits them into a `pre`. */
+function highlightDecorations(lines: Token[][], length: number): DecorationSet {
+  const ranges: Array<ReturnType<Decoration["range"]>> = [];
+  let at = 0;
+  for (const line of lines) {
+    for (const token of line) {
+      const to = Math.min(at + token.content.length, length);
+      if (to > at) {
+        const style = Object.entries(token.style)
+          .map(([property, value]) => `${property}:${value}`)
+          .join(";");
+        if (style) {
+          ranges.push(
+            Decoration.mark({ class: "cm-shiki", attributes: { style } }).range(at, to),
+          );
+        }
+      }
+      at = to;
+    }
+    at = Math.min(at + 1, length);
+  }
+  return Decoration.set(ranges, true);
+}
 
 class PresenceCaret extends WidgetType {
   constructor(private readonly cursor: CodePresenceCursor) {
@@ -84,6 +164,12 @@ export class CodeBlockView implements NodeView {
   private readonly language: HTMLInputElement;
   private readonly code: CodeMirror;
   private forwarding = false;
+  private highlightTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped on every request so a slow grammar's answer to an older document
+   *  cannot land on a newer one. */
+  private highlightGeneration = 0;
+  /** The `text language` pair the current colours were computed from. */
+  private highlighted: string | null = null;
 
   constructor(
     node: ProseMirrorNode,
@@ -122,6 +208,7 @@ export class CodeBlockView implements NodeView {
         drawSelection(),
         syntaxHighlighting(defaultHighlightStyle),
         presenceField,
+        highlightField,
         codeMirrorKeymap.of([
           { key: "ArrowUp", run: () => this.maybeEscape("line", -1) },
           { key: "ArrowLeft", run: () => this.maybeEscape("char", -1) },
@@ -160,12 +247,55 @@ export class CodeBlockView implements NodeView {
             return false;
           },
         }),
-        CodeMirror.updateListener.of((update) => this.forward(update)),
+        CodeMirror.updateListener.of((update) => {
+          this.forward(update);
+          if (update.docChanged) this.refreshHighlight();
+        }),
       ],
     });
 
     this.dom.append(header, this.code.dom);
     this.refreshPresence();
+    this.refreshHighlight();
+  }
+
+  /**
+   * Re-colour the block, unless it already carries the right colours.
+   *
+   * Guarded at both ends. Before the request, on the `text language` pair, so
+   * that a re-render — a remote caret arriving, the outer document reprojecting
+   * — costs nothing. After it, on the same pair again, because the answer is
+   * asynchronous and the person kept typing while it was in flight.
+   */
+  private refreshHighlight(immediate = false): void {
+    const language = typeof this.node.attrs.language === "string" ? this.node.attrs.language : "";
+    const text = this.code.state.doc.toString();
+    const key = `${language} ${text}`;
+    if (key === this.highlighted) return;
+
+    if (this.highlightTimer !== null) clearTimeout(this.highlightTimer);
+    const generation = (this.highlightGeneration += 1);
+    const run = () => {
+      this.highlightTimer = null;
+      void highlight(text, language || null).then((lines) => {
+        if (generation !== this.highlightGeneration) return;
+        if (this.code.state.doc.toString() !== text) return;
+        this.highlighted = key;
+        this.code.dispatch({
+          effects: setHighlight.of(
+            lines === null
+              ? Decoration.none
+              : highlightDecorations(lines, this.code.state.doc.length),
+          ),
+        });
+      }).catch(() => {
+        // An uncoloured block is a small loss; a throw here would take the
+        // surrounding document editor with it. `highlight` already declines
+        // rather than throws for a language we do not carry.
+      });
+    };
+    if (immediate) run();
+    else this.highlightTimer = setTimeout(run, HIGHLIGHT_IDLE_MS);
   }
 
   private position(): number | null {
@@ -252,8 +382,14 @@ export class CodeBlockView implements NodeView {
     if (!selection.empty) return false;
     const boundary = unit === "line" ? this.code.state.doc.lineAt(selection.head) : selection;
     if (direction < 0 ? boundary.from > 0 : boundary.to < this.code.state.doc.length) return false;
-    const target = position + (direction < 0 ? 0 : this.node.nodeSize);
-    const next = Selection.near(this.outer.state.doc.resolve(target), direction);
+    const next = escapeSelection(
+      this.outer.state.doc,
+      position,
+      this.node.nodeSize,
+      direction,
+    );
+    // Nowhere outside this block to go: leave the key to CodeMirror.
+    if (!next) return false;
     this.outer.dispatch(this.outer.state.tr.setSelection(next).scrollIntoView());
     this.outer.focus();
     return true;
@@ -267,7 +403,12 @@ export class CodeBlockView implements NodeView {
 
     const next = node.textContent;
     const current = this.code.state.doc.toString();
-    if (next === current || this.forwarding) return true;
+    // Still worth asking even when the text is settled: the language can change
+    // on its own, and `refreshHighlight` costs nothing when neither has.
+    if (next === current || this.forwarding) {
+      this.refreshHighlight();
+      return true;
+    }
     let start = 0;
     let currentEnd = current.length;
     let nextEnd = next.length;
@@ -284,6 +425,7 @@ export class CodeBlockView implements NodeView {
     this.code.dispatch({ changes: { from: start, to: currentEnd, insert: next.slice(start, nextEnd) } });
     this.forwarding = false;
     this.refreshPresence();
+    this.refreshHighlight();
     return true;
   }
 
@@ -300,6 +442,9 @@ export class CodeBlockView implements NodeView {
   }
 
   destroy(): void {
+    if (this.highlightTimer !== null) clearTimeout(this.highlightTimer);
+    // Nothing in flight may land on a destroyed view.
+    this.highlightGeneration += 1;
     this.code.destroy();
     this.onDestroy();
   }

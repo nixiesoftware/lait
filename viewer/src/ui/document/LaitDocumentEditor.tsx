@@ -1,4 +1,13 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { Tooltip } from "@astryxdesign/core";
+import {
+  Bold,
+  Code,
+  Italic,
+  Link2,
+  Strikethrough,
+  Underline,
+} from "lucide-react";
 import {
   baseKeymap,
   createParagraphNear,
@@ -20,6 +29,7 @@ import {
 } from "prosemirror-view";
 
 import { documentPlainText } from "../../core/document";
+import { IS_MAC } from "../../core/keys";
 import { ISSUE_REF } from "../../core/markdown";
 import { applyTextSplice, textRevision } from "../../core/textPreview";
 import type {
@@ -46,6 +56,65 @@ import { laitDocumentSchema, safeDocumentHref } from "./schema";
 
 const EXTERNAL = "lait:external-document";
 const TYPING_IDLE_MS = 1_200;
+
+/**
+ * When the formatting bar is allowed to appear.
+ *
+ * A selection is a *gesture*, not an event, and the bar used to react to every
+ * frame of one: drag across two lines and it popped up on the first character,
+ * then chased the pointer to a new position on every mousemove. Whatever it is
+ * pointing at while you are still choosing, it is not the thing you selected —
+ * so it reads as something jumping out of the way of your own cursor.
+ *
+ * The bar therefore appears only once the gesture has *finished*, and the two
+ * ways of finishing want different waits:
+ *
+ * - **Pointer.** The gesture announces its own end. `pointerup` is the signal;
+ *   the delay only has to outlast the browser writing the final range back, so
+ *   it is short enough to feel like a direct response to letting go.
+ * - **Keyboard.** `Shift+→` has no end event — the selection simply stops
+ *   growing. So the bar waits for the range to hold still, which is long enough
+ *   to sit out a run of repeats and short enough not to feel withheld.
+ *
+ * Both are *appearance* gates only. Hiding — a collapsed range, `Escape`, blur —
+ * is always immediate: a bar that lingers over text you no longer have selected
+ * is a lie about the state of the document, and there is no gesture left to
+ * wait for.
+ */
+const BAR_AFTER_POINTER_MS = 80;
+const BAR_AFTER_KEYS_MS = 220;
+
+/**
+ * What the bar offers, in the order it offers it.
+ *
+ * Spelled as icons rather than the letters this bar used to draw. `B`/`I`/`U`
+ * survive as glyphs only because the whole world already reads them as bold,
+ * italic and underline; `<>` and `↗` never had that, and were being asked to
+ * mean "inline code" and "link" on their own. An icon plus a named tooltip is
+ * the pattern every editor this bar competes with converged on, and the name is
+ * the part doing the work — the icon just makes it findable a second time.
+ *
+ * `hint` is only present where the keymap above actually binds the shortcut. A
+ * hint for a chord that does nothing is worse than no hint.
+ */
+const MARK_CONTROLS: ReadonlyArray<{
+  name: "strong" | "em" | "underline" | "strike" | "code";
+  label: string;
+  hint?: string;
+  icon: typeof Bold;
+}> = [
+  { name: "strong", label: "Bold", hint: "b", icon: Bold },
+  { name: "em", label: "Italic", hint: "i", icon: Italic },
+  { name: "underline", label: "Underline", hint: "u", icon: Underline },
+  { name: "strike", label: "Strikethrough", icon: Strikethrough },
+  { name: "code", label: "Code", hint: "`", icon: Code },
+];
+
+/** `Mod-` in a ProseMirror keymap is Cmd on a Mac and Ctrl everywhere else, so
+ *  the hint has to say whichever one this keyboard actually has. */
+function shortcut(key: string): string {
+  return IS_MAC ? `⌘${key.toUpperCase()}` : `Ctrl+${key.toUpperCase()}`;
+}
 
 export const issueReferencePlugin = new Plugin({
   appendTransaction(transactions, _before, state) {
@@ -322,6 +391,21 @@ export default function LaitDocumentEditor({
   const typing = useRef(false);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [toolbar, setToolbar] = useState<ToolbarState | null>(null);
+  // The appearance gate (see `BAR_AFTER_POINTER_MS`). `dragging` is true for the
+  // span of a selection drag; `barTimer` is the pending appearance; `barShown`
+  // mirrors the `toolbar` state for the view's callbacks, which are built once
+  // and never see a re-rendered `toolbar`.
+  const dragging = useRef(false);
+  const barTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const barShown = useRef(false);
+  // Only refs and `setToolbar`, so the mount effect can close over the first
+  // one and still be talking about the current bar on every later render.
+  const hideToolbar = () => {
+    if (barTimer.current !== null) clearTimeout(barTimer.current);
+    barTimer.current = null;
+    barShown.current = false;
+    setToolbar(null);
+  };
   emit.current = onChange;
   commit.current = onCommit;
   awareness.current = onAwareness;
@@ -348,9 +432,28 @@ export default function LaitDocumentEditor({
       );
     };
 
-    const updateToolbar = (view: EditorView) => {
+    const updateToolbar = (view: EditorView, after = BAR_AFTER_KEYS_MS) => {
       if (!host.current) return;
-      setToolbar(writable.current ? toolbarState(view, host.current) : null);
+      const next = writable.current ? toolbarState(view, host.current) : null;
+      // Nothing to point at: go now, and cancel any appearance still owed.
+      if (!next) return hideToolbar();
+      // Mid-drag the range is still being chosen — stay out of the way until
+      // `pointerup` calls back with the finished one.
+      if (dragging.current) return hideToolbar();
+      if (barTimer.current !== null) clearTimeout(barTimer.current);
+      // Already up: the entrance is spent, so follow the range without a wait.
+      // Re-arming the delay here would make the bar blink through every
+      // `Shift+→`, which is the flicker the gate exists to prevent.
+      if (barShown.current) {
+        barTimer.current = null;
+        setToolbar(next);
+        return;
+      }
+      barTimer.current = setTimeout(() => {
+        barTimer.current = null;
+        barShown.current = true;
+        setToolbar(next);
+      }, after);
     };
 
     const state = EditorState.create({
@@ -464,7 +567,7 @@ export default function LaitDocumentEditor({
         blur(_view) {
           typing.current = false;
           awareness.current?.(null, null, false, projection.current.source);
-          setToolbar(null);
+          hideToolbar();
           commit.current();
           return false;
         },
@@ -497,9 +600,36 @@ export default function LaitDocumentEditor({
       },
     });
     editor.current = view;
+
+    // The gesture, watched from outside ProseMirror. `pointerdown` has to be a
+    // capture listener on the mount: a node view that swallows the event (a code
+    // block's CodeMirror, a resolved issue chip) would otherwise start a drag the
+    // bar never learns about. `pointerup` is on the window because a drag that
+    // leaves the editor still ends — releasing over the sidebar must not strand
+    // the bar in the hidden state for the rest of the selection's life.
+    const gestureStart = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || !mount.current?.contains(target)) return;
+      dragging.current = true;
+      hideToolbar();
+    };
+    const gestureEnd = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      updateToolbar(view, BAR_AFTER_POINTER_MS);
+    };
+    mount.current.addEventListener("pointerdown", gestureStart, true);
+    window.addEventListener("pointerup", gestureEnd);
+    window.addEventListener("pointercancel", gestureEnd);
+
     const refresh = window.setInterval(() => publish(view), 10_000);
+    const mounted = mount.current;
     return () => {
       window.clearInterval(refresh);
+      mounted.removeEventListener("pointerdown", gestureStart, true);
+      window.removeEventListener("pointerup", gestureEnd);
+      window.removeEventListener("pointercancel", gestureEnd);
+      if (barTimer.current !== null) clearTimeout(barTimer.current);
       if (typingTimer.current !== null) clearTimeout(typingTimer.current);
       awareness.current?.(null, null, false, projection.current.source);
       view.destroy();
@@ -533,7 +663,7 @@ export default function LaitDocumentEditor({
     const view = editor.current;
     if (!view) return;
     view.setProps({ editable: () => !readOnly });
-    if (readOnly) setToolbar(null);
+    if (readOnly) hideToolbar();
   }, [readOnly]);
 
   useLayoutEffect(() => {
@@ -584,31 +714,28 @@ export default function LaitDocumentEditor({
           aria-label="Text formatting"
           onMouseDown={(event) => event.preventDefault()}
         >
-          {([
-            ["strong", "B"],
-            ["em", "I"],
-            ["underline", "U"],
-            ["strike", "S"],
-            ["code", "<>"],
-          ] as const).map(([name, label]) => (
-            <button
+          {MARK_CONTROLS.map(({ name, label, hint, icon: Glyph }) => (
+            <BarButton
               key={name}
-              type="button"
-              aria-label={name}
-              aria-pressed={toolbar[name]}
-              onClick={() => runMark(name)}
+              label={label}
+              {...(hint ? { hint: shortcut(hint) } : {})}
+              on={toolbar[name]}
+              act={() => runMark(name)}
             >
-              {label}
-            </button>
+              <Glyph className="size-icon-sm" aria-hidden="true" />
+            </BarButton>
           ))}
-          <button
-            type="button"
-            aria-label="link"
-            aria-pressed={toolbar.link}
-            onClick={runLink}
+          {/* Marks change how the selection *reads*; a link changes where it
+              *goes*. The rule is the reference bars' way of saying the last
+              button is not another typeface. */}
+          <span className="lait-document-toolbar-rule" aria-hidden="true" />
+          <BarButton
+            label={toolbar.link ? "Remove link" : "Link"}
+            on={toolbar.link}
+            act={runLink}
           >
-            ↗
-          </button>
+            <Link2 className="size-icon-sm" aria-hidden="true" />
+          </BarButton>
         </div>
       )}
       {remoteContexts.length > 0 && (
@@ -627,5 +754,59 @@ export default function LaitDocumentEditor({
       )}
       <div ref={mount} />
     </div>
+  );
+}
+
+/**
+ * One control on the formatting bar: an icon that says the name out loud.
+ *
+ * The tooltip is the whole point of the component. An icon row is a rebus, and
+ * this one was being read cold by people who had never opened this editor
+ * before — so every button carries its name, and its shortcut where one exists.
+ *
+ * Two details are load-bearing, both about focus:
+ *
+ * - `focusTrigger="never"`. The tooltip's default is to also open on focus,
+ *   which is right for a lone button and wrong inside a `role="toolbar"`: the
+ *   editor's selection is what the bar is *about*, and it survives only because
+ *   nothing here takes focus. Hover is the only trigger this bar can afford.
+ * - `onMouseDown` does the work, not `onClick`. By click time the browser has
+ *   already moved focus and collapsed the range the command was meant to act
+ *   on. Cancelling the mousedown keeps the caret where the user put it.
+ */
+function BarButton({
+  label,
+  hint,
+  on,
+  act,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  on: boolean;
+  act: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip
+      content={hint ? `${label}  ${hint}` : label}
+      placement="above"
+      focusTrigger="never"
+      hasHoverIndication={false}
+      delay={140}
+    >
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={on}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          act();
+        }}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
