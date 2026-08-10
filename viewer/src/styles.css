@@ -1095,36 +1095,6 @@
   background: var(--color-active);
 }
 
-.lait-document-blockbar {
-  position: absolute;
-  z-index: 10;
-  top: -30px;
-  right: 0;
-  display: flex;
-  gap: 1px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-8);
-  background: var(--color-raised);
-  padding: 2px;
-  box-shadow: var(--shadow-low);
-}
-
-.lait-document-blockbar button {
-  min-width: 25px;
-  height: 24px;
-  border: 0;
-  border-radius: var(--radius-4);
-  background: transparent;
-  color: var(--color-dim);
-  font-size: 0.6875rem;
-  font-weight: 650;
-}
-
-.lait-document-blockbar button:hover {
-  background: var(--color-active);
-  color: var(--color-fg);
-}
-
 .codemirror-markdown .cm-editor {
   min-height: inherit;
 }

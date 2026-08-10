@@ -11,6 +11,26 @@ import { laitDocumentSchema } from "./schema";
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
 
+// ProseMirror positions its selection toolbar from DOM Range geometry. jsdom
+// deliberately does not lay text out, so give that positioning seam one stable
+// rectangle without changing the editor code or weakening the assertion.
+if (!(Range.prototype as Range & { getClientRects?: () => DOMRectList }).getClientRects) {
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => [{
+      bottom: 24,
+      height: 16,
+      left: 8,
+      right: 48,
+      top: 8,
+      width: 40,
+      x: 8,
+      y: 8,
+      toJSON: () => ({}),
+    }],
+  });
+}
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -36,6 +56,33 @@ function renderEditor(source: string, extra: Partial<React.ComponentProps<typeof
 }
 
 describe("Lait document editor", () => {
+  it("shows controls only for a real text selection, never from focus alone", () => {
+    const shown = renderEditor(upgradeMarkdown("Select these words.").source).container;
+    const editor = shown.querySelector(".ProseMirror") as HTMLElement;
+
+    act(() => editor.focus());
+    expect(shown.querySelector("[aria-label='Document blocks']")).toBeNull();
+    expect(shown.querySelector("[aria-label='Text formatting']")).toBeNull();
+
+    const text = editor.querySelector("p")!.firstChild!;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 6);
+    act(() => {
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+
+    expect(shown.querySelector("[aria-label='Text formatting']")).not.toBeNull();
+
+    act(() => editor.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true,
+      key: "Escape",
+    })));
+    expect(shown.querySelector("[aria-label='Text formatting']")).toBeNull();
+  });
+
   it("renders the app document instead of exposing canonical Typst", () => {
     const source = upgradeMarkdown([
       "# Plan",

@@ -4,14 +4,13 @@ import {
   createParagraphNear,
   exitCode,
   liftEmptyBlock,
-  setBlockType,
   splitBlock,
   toggleMark,
 } from "prosemirror-commands";
 import { history, redo, undo } from "prosemirror-history";
 import { keymap } from "prosemirror-keymap";
 import { EditorState, Plugin, TextSelection } from "prosemirror-state";
-import { splitListItem, wrapInList } from "prosemirror-schema-list";
+import { splitListItem } from "prosemirror-schema-list";
 import { tableEditing } from "prosemirror-tables";
 import {
   Decoration,
@@ -316,18 +315,19 @@ export default function LaitDocumentEditor({
   const awareness = useRef(onAwareness);
   const cursors = useRef(remoteCursors);
   const previews = useRef(remotePreviews);
+  const writable = useRef(!readOnly);
   const currentRefs = useRef(refs);
   const issueViews = useRef(new Set<IssueRefView>());
   const codeViews = useRef(new Set<CodeBlockView>());
   const typing = useRef(false);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [toolbar, setToolbar] = useState<ToolbarState | null>(null);
-  const [focused, setFocused] = useState(false);
   emit.current = onChange;
   commit.current = onCommit;
   awareness.current = onAwareness;
   cursors.current = remoteCursors;
   previews.current = remotePreviews;
+  writable.current = !readOnly;
   currentRefs.current = refs;
 
   useLayoutEffect(() => {
@@ -350,7 +350,7 @@ export default function LaitDocumentEditor({
 
     const updateToolbar = (view: EditorView) => {
       if (!host.current) return;
-      setToolbar(toolbarState(view, host.current));
+      setToolbar(writable.current ? toolbarState(view, host.current) : null);
     };
 
     const state = EditorState.create({
@@ -365,6 +365,13 @@ export default function LaitDocumentEditor({
           "Mod-`": toggleMark(laitDocumentSchema.marks.code!),
           "Mod-z": undo,
           "Shift-Mod-z": redo,
+          Escape(state, dispatch) {
+            if (state.selection.empty) return false;
+            dispatch?.(
+              state.tr.setSelection(TextSelection.create(state.doc, state.selection.head)),
+            );
+            return true;
+          },
           Enter: splitListItem(laitDocumentSchema.nodes.list_item!),
           "Ctrl-Enter": exitCode,
         }),
@@ -458,12 +465,10 @@ export default function LaitDocumentEditor({
           typing.current = false;
           awareness.current?.(null, null, false, projection.current.source);
           setToolbar(null);
-          setFocused(false);
           commit.current();
           return false;
         },
         focus(view) {
-          setFocused(true);
           publish(view);
           updateToolbar(view);
           return false;
@@ -528,6 +533,7 @@ export default function LaitDocumentEditor({
     const view = editor.current;
     if (!view) return;
     view.setProps({ editable: () => !readOnly });
+    if (readOnly) setToolbar(null);
   }, [readOnly]);
 
   useLayoutEffect(() => {
@@ -568,13 +574,6 @@ export default function LaitDocumentEditor({
     view.focus();
   };
 
-  const runBlock = (kind: DocumentBlockKind) => {
-    const view = editor.current;
-    if (!view) return;
-    insertDocumentBlock(view, kind);
-    view.focus();
-  };
-
   return (
     <div ref={host} className={`lait-document-editor-host ${className ?? ""}`}>
       {toolbar && (
@@ -612,29 +611,6 @@ export default function LaitDocumentEditor({
           </button>
         </div>
       )}
-      {focused && !readOnly && (
-        <div
-          className="lait-document-blockbar"
-          role="toolbar"
-          aria-label="Document blocks"
-          onMouseDown={(event) => event.preventDefault()}
-        >
-          {([
-            ["paragraph", "¶", "Paragraph"],
-            ["heading", "H", "Heading"],
-            ["bullet", "•", "Bulleted list"],
-            ["ordered", "1.", "Numbered list"],
-            ["callout", "!", "Callout"],
-            ["code", "{}", "Code block"],
-            ["table", "▦", "Table"],
-            ["rule", "—", "Divider"],
-          ] as const).map(([kind, label, title]) => (
-            <button key={kind} type="button" aria-label={title} onClick={() => runBlock(kind)}>
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
       {remoteContexts.length > 0 && (
         <div className="remote-contexts" aria-label="Collaborators editing this description">
           {remoteContexts.map((remote) => (
@@ -652,55 +628,4 @@ export default function LaitDocumentEditor({
       <div ref={mount} />
     </div>
   );
-}
-
-export type DocumentBlockKind =
-  | "paragraph"
-  | "heading"
-  | "code"
-  | "bullet"
-  | "ordered"
-  | "callout"
-  | "table"
-  | "rule";
-
-export function insertDocumentBlock(
-  view: EditorView,
-  kind: DocumentBlockKind,
-): boolean {
-  switch (kind) {
-    case "paragraph":
-      return setBlockType(laitDocumentSchema.nodes.paragraph!)(view.state, view.dispatch);
-    case "heading":
-      return setBlockType(laitDocumentSchema.nodes.heading!, { level: 2 })(view.state, view.dispatch);
-    case "code":
-      return setBlockType(laitDocumentSchema.nodes.code_block!)(view.state, view.dispatch);
-    case "bullet":
-      return wrapInList(laitDocumentSchema.nodes.bullet_list!)(view.state, view.dispatch);
-    case "ordered":
-      return wrapInList(laitDocumentSchema.nodes.ordered_list!)(view.state, view.dispatch);
-    case "callout":
-      return setBlockType(laitDocumentSchema.nodes.callout!, { tone: "note" })(
-        view.state,
-        view.dispatch,
-      );
-    case "table": {
-      const cell = (header: boolean) => laitDocumentSchema.nodes[
-        header ? "table_header" : "table_cell"
-      ]!.create({ align: "left" });
-      const row = (header: boolean) => laitDocumentSchema.nodes.table_row!.create(
-        null,
-        [cell(header), cell(header)],
-      );
-      const table = laitDocumentSchema.nodes.table!.create(null, [row(true), row(false)]);
-      view.dispatch(view.state.tr.replaceSelectionWith(table).scrollIntoView());
-      return true;
-    }
-    case "rule":
-      view.dispatch(
-        view.state.tr.replaceSelectionWith(laitDocumentSchema.nodes.horizontal_rule!.create())
-          .scrollIntoView(),
-      );
-      return true;
-  }
 }
