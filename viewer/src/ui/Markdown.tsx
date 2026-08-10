@@ -64,6 +64,24 @@ export function Markdown({
       <p className={cn(prose, "whitespace-pre-wrap", className)}>{inlines(parseRefs(text))}</p>
     );
   }
+  return <RichDocument blocks={blocks} {...(className ? { className } : {})} density={density} />;
+}
+
+/**
+ * Render Lait's typed prose AST. Legacy Markdown and the hidden current
+ * document model deliberately share this structural renderer, so neither path
+ * can introduce HTML strings or a second safety boundary.
+ */
+export function RichDocument({
+  blocks,
+  className,
+  density = "document",
+}: {
+  blocks: readonly Block[];
+  className?: string;
+  density?: "document" | "tight";
+}) {
+  const prose = density === "tight" ? "prose prose-tight" : "prose";
   return (
     <div className={cn(prose, className)}>
       {blocks.map((b, i) => (

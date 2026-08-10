@@ -1,57 +1,77 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Ban, ChevronDown, Eye, History, PencilLine, Plus, Stamp } from "lucide-react";
+import { AlertTriangle, ArrowUp, Ban, ChevronDown, Eye, History, MoreHorizontal, PencilLine, Plus, Stamp, X } from "lucide-react";
 
 import {
+  applyLinkDelta,
   authorityPhrase,
   commonAncestor,
   diffBodies,
+  emptyDelta,
   groupByKind,
   holds,
   incomingFor,
+  linkDelta,
+  linkKey,
   linkPhrase,
   SPEC_KIND_LABEL,
   SPEC_KIND_PLURAL,
   SPEC_REL_LABEL,
+  SPEC_RELS,
   SPEC_STATE_LABEL,
   standing,
   standingLabel,
   targetLabel,
   transitions,
   verificationGap,
+  type LinkDelta,
   type SpecStanding,
   type SpecTransition,
 } from "../core/specs";
+import {
+  DOCUMENT_PREFIX,
+  DOCUMENT_SCHEMA,
+  documentPlainText,
+  upgradeMarkdown,
+} from "../core/document";
 import {
   useBaseline,
   useBaselineHistory,
   useGrants,
   useProjectBaselines,
+  useProjectBoard,
   useProjectSpecs,
   useProjectViewerStore,
+  useSpecObservations,
   useSpecReferences,
   useSpec,
   useSpecHistory,
 } from "../projectStore";
 import type {
   AssignmentDto,
+  BaselineView,
   MemberDto,
+  Row,
   SpecBody,
   SpecKind,
   SpecLink,
+  SpecObservation,
   SpecRef,
   SpecReference,
   SpecRel,
   SpecRevision,
   SpecState,
+  SpecTarget,
   SpecView,
 } from "../types";
 import { ApplicationState } from "./AppState";
 import * as ask from "./dialogs";
 import { GroupHeader } from "./layout";
+import { Document } from "./Document";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { NewSpecDialog } from "./NewSpec";
 import { Button, DropdownMenu, DropdownMenuItem, IconButton, TextArea, TextInput } from "@astryxdesign/core";
+import { Combobox, type Option } from "./Picker";
 import { cn, interactiveRow } from "./primitives";
 import { short, when } from "./time";
 
@@ -158,6 +178,7 @@ export function Specs({
       ) : spec ? (
         <SpecReader
           spaceId={spaceId}
+          project={project}
           spec={spec}
           members={members}
           readOnly={readOnly}
@@ -672,16 +693,48 @@ function BaselineReader({
 function Relations({
   view,
   everySpec,
+  baselines,
+  rows,
   references,
+  readOnly,
   onOpen,
+  onCommit,
 }: {
   view: SpecView;
   everySpec: SpecView[];
+  /** What a relation may name, resolved by the reader — one subscription for
+   *  the two blocks that offer them rather than one each. */
+  baselines: BaselineView[];
+  rows: Row[];
   references: SpecReference[];
+  readOnly: boolean;
   onOpen: (spec: string) => void;
+  onCommit: (delta: LinkDelta) => void;
 }) {
+  /** The assertions as this author has them, or `null` while they match the
+   *  committed body. Staged rather than written per click: each revise mints a
+   *  revision, and wiring up a document's relations one revision at a time
+   *  turns the rail — the one place a reader goes to see what changed — into a
+   *  column of single-link commits. */
+  const [staged, setStaged] = useState<SpecLink[] | null>(null);
+  const [composing, setComposing] = useState(false);
+
+  // A new revision — this author's commit landing, or somebody else's arriving
+  // — retires the staging. A delta composed against a body that has moved is no
+  // longer the edit its author was looking at, and silently carrying it forward
+  // would let them save a claim about text they never read.
+  useEffect(() => {
+    setStaged(null);
+    setComposing(false);
+  }, [view.revision]);
+
+  const links = staged ?? view.body.links;
+  const delta = linkDelta(view.body.links, links);
+  const dirty = !emptyDelta(delta);
+  const editable = !readOnly;
+
   const titles = new Map(everySpec.map((candidate) => [candidate.spec, candidate]));
-  const outgoing = groupLinks(view.body.links.map((link) => ({ link, from: null })));
+  const outgoing = groupLinks(links.map((link) => ({ link, from: null })));
   const incoming = groupLinks(
     incomingFor(view.spec, references).map((reference) => ({
       link: reference.link,
@@ -691,7 +744,10 @@ function Relations({
       revision: reference.revision,
     })),
   );
-  if (outgoing.length === 0 && incoming.length === 0) return null;
+  if (outgoing.length === 0 && incoming.length === 0 && !editable) return null;
+
+  const drop = (link: SpecLink) =>
+    setStaged(links.filter((candidate) => linkKey(candidate) !== linkKey(link)));
 
   const row = (entry: LinkEntry, direction: "in" | "out") => {
     const open =
@@ -708,8 +764,13 @@ function Relations({
       direction === "out"
         ? targetLabel(entry.link.target)
         : `${entry.source}@${short(entry.revision ?? "")}`;
+    const added =
+      direction === "out" && delta.added.some((link) => linkKey(link) === linkKey(entry.link));
     return (
-      <li key={`${direction}-${linkPhrase(entry.link)}-${entry.source ?? ""}`}>
+      <li
+        key={`${direction}-${linkPhrase(entry.link)}-${entry.source ?? ""}`}
+        className="flex items-center gap-2"
+      >
         {open ? (
           <button type="button" className="hover:text-accent text-left" onClick={() => onOpen(open)}>
             {label}
@@ -717,9 +778,23 @@ function Relations({
         ) : (
           <span>{label}</span>
         )}
-        <code className="text-mute ml-2 text-2xs" title={coordinate}>
+        <code className="text-mute text-2xs" title={coordinate}>
           {coordinate}
         </code>
+        {/* Staged, not saved. Said in words on the row that carries it, because
+            the difference between "this document claims that" and "I am about to
+            make it claim that" is the whole of what the save button decides. */}
+        {added && <span className="text-mute text-2xs">not saved yet</span>}
+        {direction === "out" && editable && (
+          <IconButton
+            label={`Remove ${linkPhrase(entry.link)}`}
+            tooltip="Remove this relation"
+            onClick={() => drop(entry.link)}
+            variant="ghost"
+            size="sm"
+            icon={<X className="size-icon-2xs" />}
+          />
+        )}
       </li>
     );
   };
@@ -744,7 +819,7 @@ function Relations({
           ))}
         </div>
       )}
-      {outgoing.length > 0 && (
+      {(outgoing.length > 0 || editable) && (
         <div>
           <h2 className="text-mute mb-1 text-2xs font-semibold tracking-wider uppercase">
             This document
@@ -757,8 +832,397 @@ function Relations({
               </ul>
             </div>
           ))}
+          {/* Removals leave no row behind to annotate, so they are said here or
+              nowhere — and "saved without the thing I deleted" is exactly the
+              outcome somebody needs to be able to check before pressing save. */}
+          {delta.removed.length > 0 && (
+            <p className="text-mute mt-1 text-2xs">
+              {delta.removed.length === 1
+                ? "One relation removed, not saved yet"
+                : `${delta.removed.length} relations removed, not saved yet`}
+              : {delta.removed.map((link) => linkPhrase(link)).join(", ")}
+            </p>
+          )}
+          {editable && (
+            <div className="mt-2 flex flex-col gap-2">
+              {composing ? (
+                <RelationComposer
+                  self={view.spec}
+                  everySpec={everySpec}
+                  baselines={baselines}
+                  rows={rows}
+                  onAdd={(link) => {
+                    setComposing(false);
+                    // Through the same set semantics the rebase uses, so
+                    // asserting something twice is a no-op here exactly as it
+                    // is when it lands on a head that moved.
+                    setStaged(applyLinkDelta(links, { added: [link], removed: [] }));
+                  }}
+                  // A Link's argument is the document it sits in. Only a note,
+                  // which sits in no document, has to carry its own.
+                  onCancel={() => setComposing(false)}
+                />
+              ) : (
+                <span>
+                  <Button
+                    onClick={() => setComposing(true)}
+                    icon={<Plus className="size-icon-sm" />}
+                    label="Add a relation"
+                    variant="secondary"
+                    elevation="low"
+                    size="md"
+                  />
+                </span>
+              )}
+              {dirty && (
+                <div className="flex items-center gap-2">
+                  <Button
+                    onClick={() => onCommit(delta)}
+                    label={
+                      delta.added.length + delta.removed.length === 1
+                        ? "Save 1 change"
+                        : `Save ${delta.added.length + delta.removed.length} changes`
+                    }
+                    variant="primary"
+                    size="md"
+                  />
+                  <Button
+                    onClick={() => setStaged(null)}
+                    label="Discard"
+                    variant="secondary"
+                    elevation="low"
+                    size="md"
+                  />
+                  {/* Saving writes a revision, and on an issued document that
+                      revision is a draft successor rather than a change to what
+                      governs. Said before the press, not discovered after it. */}
+                  <span className="text-mute text-2xs">
+                    Saves as one revision
+                    {view.state === "issued" ? " — a draft successor, not a change to the issued one" : ""}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
+    </section>
+  );
+}
+
+/**
+ * Composing one typed assertion: a verb, a thing, and the exact revision of it.
+ *
+ * The revision is the part that cannot be skipped and the part nobody wants to
+ * choose, so it is chosen for them and then stated: the issued revision when a
+ * document has one, because an assertion about governing material almost always
+ * means the material that governs, and the head otherwise. Stated rather than
+ * silent, because "verifies REQ" and "verifies REQ at the revision that was
+ * current on Tuesday" are different claims and only one of them is what got
+ * written.
+ *
+ * Issues are the exception the model makes deliberately — `Target::Issue`
+ * carries no revision, because an Issue is a stable identity whose changing
+ * work state is not a document revision.
+ */
+function RelationComposer({
+  self,
+  everySpec,
+  baselines,
+  rows,
+  lead,
+  withNote,
+  onAdd,
+  onCancel,
+}: {
+  self: string;
+  everySpec: SpecView[];
+  baselines: BaselineView[];
+  rows: Row[];
+  /** What the sentence opens with — the difference between the document
+   *  asserting something and somebody noticing it. */
+  lead?: string;
+  /** Ask for the reasoning too. An observation binds nobody, so the argument
+   *  behind it is the only thing that makes it worth anything to the next
+   *  reader; a Link has a whole document behind it and needs no such field. */
+  withNote?: boolean;
+  onAdd: (link: SpecLink, note: string) => void;
+  onCancel: () => void;
+}) {
+  const [rel, setRel] = useState<SpecRel>("references");
+  const [kind, setKind] = useState<SpecTarget["kind"]>("spec");
+  const [target, setTarget] = useState<string | null>(null);
+  const [note, setNote] = useState("");
+
+  // Only issued revisions carry a governing claim, but a link may name any
+  // revision that exists — so the default prefers what governs and falls back
+  // to the head rather than refusing to offer a document nobody has issued.
+  const pinned = (candidate: { issued: string[]; revision: string }) =>
+    candidate.issued.length === 1 ? candidate.issued[0]! : candidate.revision;
+
+  const specs = everySpec.filter((candidate) => candidate.spec !== self);
+  const options: Option[] =
+    kind === "spec"
+      ? specs.map((candidate) => ({
+          id: candidate.spec,
+          label: candidate.title,
+          kicker: SPEC_KIND_LABEL[candidate.kind],
+          hint: short(pinned(candidate)),
+        }))
+      : kind === "baseline"
+        ? baselines.map((candidate) => ({
+            id: candidate.baseline,
+            label: candidate.body.name,
+            kicker: "Baseline",
+            hint: short(pinned(candidate)),
+          }))
+        : rows
+            .filter((entry) => !entry.tombstone)
+            .map((entry) => ({ id: entry.reff, label: entry.title, kicker: entry.reff }));
+
+  const chosen = options.find((option) => option.id === target) ?? null;
+
+  const build = (): SpecLink | null => {
+    if (!target) return null;
+    if (kind === "issue") return { rel, target: { kind: "issue", issue: target } };
+    if (kind === "spec") {
+      const candidate = specs.find((entry) => entry.spec === target);
+      return candidate
+        ? { rel, target: { kind: "spec", spec: target, revision: pinned(candidate) } }
+        : null;
+    }
+    const candidate = baselines.find((entry) => entry.baseline === target);
+    return candidate
+      ? { rel, target: { kind: "baseline", baseline: target, revision: pinned(candidate) } }
+      : null;
+  };
+
+  const link = build();
+
+  return (
+    <div className="border-line rounded-surface flex flex-col gap-2 border p-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-mute text-2xs">{lead ?? "This document"}</span>
+        <Combobox
+          label="Relation"
+          heading="Relation"
+          value={{ id: rel, label: SPEC_REL_LABEL[rel] }}
+          onPick={(id) => setRel(id as SpecRel)}
+          options={SPEC_RELS.map((candidate) => ({
+            id: candidate,
+            label: SPEC_REL_LABEL[candidate],
+          }))}
+          size="sm"
+        />
+        <Combobox
+          label="Target kind"
+          heading="Target"
+          value={{ id: kind, label: TARGET_KIND_LABEL[kind] }}
+          onPick={(id) => {
+            setKind(id as SpecTarget["kind"]);
+            setTarget(null);
+          }}
+          options={(["spec", "baseline", "issue"] as const).map((candidate) => ({
+            id: candidate,
+            label: TARGET_KIND_LABEL[candidate],
+          }))}
+          size="sm"
+        />
+        <Combobox
+          label="Choose one"
+          heading={TARGET_KIND_LABEL[kind]}
+          value={chosen}
+          onPick={setTarget}
+          options={options}
+          emptyText={`Nothing to reference — no ${TARGET_KIND_LABEL[kind].toLowerCase()} is readable here.`}
+          size="sm"
+          wide
+        />
+      </div>
+      {link && link.target.kind !== "issue" && (
+        <p className="text-mute text-2xs">
+          Pins revision{" "}
+          <code title={link.target.revision}>{short(link.target.revision)}</code> — the exact one,
+          which does not follow the document if it is revised.
+        </p>
+      )}
+      {withNote && (
+        <TextArea
+          label="Why"
+          value={note}
+          onChange={setNote}
+          placeholder="What did you notice, and what makes you think so?"
+          rows={2}
+          width="100%"
+        />
+      )}
+      <div className="flex items-center gap-2">
+        <Button
+          onClick={() => {
+            if (link) onAdd(link, note.trim());
+          }}
+          isDisabled={!link}
+          label="Add"
+          variant="primary"
+          size="md"
+        />
+        <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="md" />
+      </div>
+    </div>
+  );
+}
+
+/** What a Link may point at, in the words the composer offers them. */
+const TARGET_KIND_LABEL: Record<SpecTarget["kind"], string> = {
+  spec: "Spec",
+  baseline: "Baseline",
+  issue: "Issue",
+};
+
+/**
+ * What people have noticed about this document, as opposed to what it says.
+ *
+ * Its own section, under the relations rather than mixed into them, and phrased
+ * from the observer outward — "Omar noticed this conflicts with X" — because the
+ * subject of the sentence is the whole distinction. A note rendered like a
+ * relation would read as the document's own claim, and the one thing an
+ * Observation must never do is look enforcing: it is in no revision, it is not
+ * issued with the document, and it never reaches an issue's packet.
+ *
+ * So the section says that, once, in a line nobody has to hover to find. A
+ * reader who takes a note for an order has been failed by this surface, not by
+ * the person who wrote it.
+ */
+function Observations({
+  view,
+  observations,
+  members,
+  everySpec,
+  baselines,
+  rows,
+  readOnly,
+  grants,
+  admin,
+  onOpen,
+  onObserve,
+  onRetract,
+}: {
+  view: SpecView;
+  observations: SpecObservation[];
+  members: MemberDto[];
+  everySpec: SpecView[];
+  baselines: BaselineView[];
+  rows: Row[];
+  readOnly: boolean;
+  grants: AssignmentDto[];
+  admin: boolean;
+  onOpen: (spec: string) => void;
+  onObserve: (link: SpecLink, note: string) => void;
+  onRetract: (observation: SpecObservation) => void;
+}) {
+  const [composing, setComposing] = useState(false);
+  const me = members.find((member) => member.me);
+  const titles = new Map(everySpec.map((candidate) => [candidate.spec, candidate]));
+  const named = (key: string) =>
+    members.find((member) => member.key === key)?.alias ?? `${key.slice(0, 10)}…`;
+
+  // Both ends. A note filed against another document that names this one is
+  // every bit as much about this one, and a reader who only saw the near half
+  // would think nobody had raised it.
+  const mine = observations.filter((entry) => entry.spec === view.spec);
+  const about = observations.filter(
+    (entry) =>
+      entry.spec !== view.spec &&
+      entry.target.kind === "spec" &&
+      entry.target.spec === view.spec,
+  );
+  const shown = [...mine, ...about];
+  if (shown.length === 0 && readOnly) return null;
+
+  // Retraction is the observer's own by right; anyone else is making a
+  // judgement about the record, which is the issuing capability's business.
+  const mayRetract = (entry: SpecObservation) =>
+    !readOnly && (entry.observer === me?.key || holds("spec.issue", view, grants, admin));
+
+  return (
+    <section className="flex flex-col gap-2 text-xs">
+      <h2 className="text-mute text-2xs font-semibold tracking-wider uppercase">Noticed</h2>
+      <p className="text-mute text-2xs">
+        Notes about this document, not claims it makes. Nothing here governs any work, is issued
+        with the document, or counts as verification.
+      </p>
+      <ul className="flex flex-col gap-1.5">
+        {shown.map((entry) => {
+          // The sentence turns around depending on which end this document is.
+          // Filed here, it reads "… noticed this conflicts with X"; filed on X,
+          // it reads "… noticed X conflicts with this" — same fact, and the one
+          // that names this document as the subject has to say so.
+          const near = entry.spec === view.spec;
+          const far = near ? entry.target : ({ kind: "spec", spec: entry.spec, revision: "" } as const);
+          const open = far.kind === "spec" ? far.spec : null;
+          const label =
+            far.kind === "spec"
+              ? titles.get(far.spec)?.title ?? far.spec
+              : targetLabel(far);
+          const other = open ? (
+            <button type="button" className="hover:text-accent" onClick={() => onOpen(open)}>
+              {label}
+            </button>
+          ) : (
+            <span>{label}</span>
+          );
+          return (
+            <li key={entry.observation} className="flex flex-col gap-0.5">
+              <span className="text-dim flex flex-wrap items-center gap-x-1.5">
+                <span className="text-fg">{named(entry.observer)}</span>
+                <span>noticed</span>
+                {near ? <span>this</span> : other}
+                <span>{SPEC_REL_LABEL[entry.rel]}</span>
+                {near ? other : <span>this</span>}
+                <span className="text-mute text-2xs">{when(entry.ts)}</span>
+                {mayRetract(entry) && (
+                  <IconButton
+                    label="Retract this note"
+                    tooltip="Retract this note"
+                    onClick={() => onRetract(entry)}
+                    variant="ghost"
+                    size="sm"
+                    icon={<X className="size-icon-2xs" />}
+                  />
+                )}
+              </span>
+              {entry.note && <span className="text-mute pl-3">{entry.note}</span>}
+            </li>
+          );
+        })}
+      </ul>
+      {!readOnly &&
+        (composing ? (
+          <RelationComposer
+            self={view.spec}
+            everySpec={everySpec}
+            baselines={baselines}
+            rows={rows}
+            lead="I noticed this"
+            withNote
+            onAdd={(link, note) => {
+              setComposing(false);
+              onObserve(link, note);
+            }}
+            onCancel={() => setComposing(false)}
+          />
+        ) : (
+          <span>
+            <Button
+              onClick={() => setComposing(true)}
+              icon={<Plus className="size-icon-sm" />}
+              label="Note something"
+              variant="secondary"
+              elevation="low"
+              size="md"
+            />
+          </span>
+        ))}
     </section>
   );
 }
@@ -809,6 +1273,7 @@ function Resolve({
   const [text, setText] = useState(base?.body.text ?? "");
   const [acknowledged, setAcknowledged] = useState(false);
   if (!base) return null;
+  const documentSchema = text.startsWith(DOCUMENT_PREFIX) ? DOCUMENT_SCHEMA : 0;
 
   const rebase = (revision: string) => {
     const next = heads.find((head) => head.revision === revision);
@@ -852,14 +1317,17 @@ function Resolve({
           ))}
         </fieldset>
         <TextInput label="Title" value={title} onChange={setTitle} width="100%" />
-        <TextArea
-          label="Body"
+        <div className="flex flex-col gap-1.5">
+          <span className="text-dim text-xs font-medium">Body</span>
+          <MarkdownEditor
+          key={baseId}
           value={text}
-          rows={10}
-          onChange={setText}
-          className="font-mono text-2xs"
-          width="100%"
-        />
+          documentSchema={documentSchema}
+          onChange={(next) => setText(next)}
+          onCommit={() => undefined}
+          className="min-h-ctl-xl"
+          />
+        </div>
         <label className="text-dim flex items-start gap-2 text-xs">
           <input
             type="checkbox"
@@ -873,7 +1341,11 @@ function Resolve({
           <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="md" />
           <Button
             isDisabled={!acknowledged || !title.trim()}
-            onClick={() => onCommit({ ...base.body, title: title.trim(), text })}
+            onClick={() => onCommit({
+              ...base.body,
+              title: title.trim(),
+              text: text.startsWith(DOCUMENT_PREFIX) ? text : upgradeMarkdown(text).source,
+            })}
             label="Create resolution draft"
             variant="primary"
             size="md"
@@ -915,7 +1387,16 @@ function Compare({
     ancestor && ancestor.revision !== from.revision && ancestor.revision !== to.revision
       ? ancestor
       : from;
-  const changes = diffBodies(base.body, to.body);
+  // A revision comparison is a comparison of what readers saw, not of either
+  // hidden serialization. This also keeps a legacy/current boundary revision
+  // from looking like the whole document changed during migration.
+  const visibleText = (text: string) => documentPlainText(
+    text.startsWith(DOCUMENT_PREFIX) ? text : upgradeMarkdown(text).source,
+  );
+  const changes = diffBodies(
+    { ...base.body, text: visibleText(base.body.text) },
+    { ...to.body, text: visibleText(to.body.text) },
+  );
   const unchanged =
     !changes.title &&
     !changes.state &&
@@ -1183,9 +1664,9 @@ function Lifecycle({
  * The document.
  *
  * A title and a body, set as prose. Editing is not a mode: the title takes a
- * caret and the body is live Markdown, exactly as an issue's are — the two
+ * caret and the body is a live document, exactly as an issue's are — the two
  * surfaces read the same because they are both documents, and only one of them
- * is about to grow a lifecycle.
+ * is about to grow a lifecycle. Its storage language is never a UI concept.
  *
  * What editing *means* here is different, and the difference is the whole model:
  * every commit writes a new immutable revision against the head it was composed
@@ -1194,6 +1675,7 @@ function Lifecycle({
  */
 function SpecReader({
   spaceId,
+  project,
   spec,
   members,
   readOnly,
@@ -1201,6 +1683,8 @@ function SpecReader({
   onError,
 }: {
   spaceId: string;
+  /** The project KEY in scope, for the issues a relation can name. */
+  project: string | null;
   spec: string;
   members: MemberDto[];
   readOnly: boolean;
@@ -1215,6 +1699,10 @@ function SpecReader({
   // the one case where "what relies on this" quietly lied.
   const everySpec = useProjectSpecs(spaceId, null).data ?? [];
   const references = useSpecReferences(spaceId, null).data ?? [];
+  const observations = useSpecObservations(spaceId, null).data ?? [];
+  const baselines = useProjectBaselines(spaceId, null).data ?? [];
+  const { board } = useProjectBoard(spaceId, project);
+  const rows = board?.columns.flatMap((column) => column.rows) ?? [];
   const grants = useGrants(spaceId).data ?? [];
   const admin = members.some((member) => member.me && member.role === "admin");
   const view = resource.data;
@@ -1223,6 +1711,7 @@ function SpecReader({
   /** Two revisions under comparison, or `null`. */
   const [comparing, setComparing] = useState<{ from: string; to: string } | null>(null);
   const [resolving, setResolving] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
   const [title, setTitle] = useState(view?.title ?? "");
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const body = useRef<string | null>(null);
@@ -1250,6 +1739,20 @@ function SpecReader({
       .catch((reason: unknown) => onError(reason instanceof Error ? reason.message : String(reason)));
   };
 
+  const upgradeDocument = () => {
+    if (!view || view.body.text.startsWith(DOCUMENT_PREFIX) || upgrading) return;
+    setUpgrading(true);
+    void store
+      .upgradeSpecDocument(
+        spaceId,
+        view.spec,
+        view.revision,
+        upgradeMarkdown(view.body.text).source,
+      )
+      .catch((reason: unknown) => onError(reason instanceof Error ? reason.message : String(reason)))
+      .finally(() => setUpgrading(false));
+  };
+
   if (resource.error) {
     return (
       <ApplicationState
@@ -1268,6 +1771,8 @@ function SpecReader({
   // a thing a reader should be able to do by clicking into the past.
   const locked = readOnly || past !== undefined;
   const shown = past?.body ?? view.body;
+  const shownDocumentSchema = shown.text.startsWith(DOCUMENT_PREFIX) ? DOCUMENT_SCHEMA : 0;
+  const currentDocumentSchema = view.body.text.startsWith(DOCUMENT_PREFIX) ? DOCUMENT_SCHEMA : 0;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
@@ -1285,7 +1790,7 @@ function SpecReader({
                 that keeps Start/Done off an issue and puts them in its status
                 picker. It reads the head's state, so it says "Draft" on a fresh
                 document: that is the state, and the way to leave it. */}
-            <span className="ml-auto">
+            <span className="ml-auto flex items-center gap-1">
               <Lifecycle
                 view={view}
                 state={state}
@@ -1312,6 +1817,28 @@ function SpecReader({
                   })();
                 }}
               />
+              {!locked && state.conflict === null && currentDocumentSchema === 0 && (
+                <DropdownMenu
+                  alignment="end"
+                  hasChevron={false}
+                  menuWidth={208}
+                  button={{
+                    label: "More spec actions",
+                    variant: "ghost",
+                    size: "sm",
+                    isIconOnly: true,
+                    tooltip: "More spec actions",
+                    icon: <MoreHorizontal className="size-icon-sm" />,
+                  }}
+                >
+                  <DropdownMenuItem
+                    label="Upgrade document"
+                    icon={<ArrowUp className="size-icon-sm" />}
+                    isDisabled={upgrading}
+                    onClick={upgradeDocument}
+                  />
+                </DropdownMenu>
+              )}
             </span>
           </div>
           {/* A textarea, not an input: a long title should wrap rather than
@@ -1462,7 +1989,11 @@ function SpecReader({
         {locked ? (
           <div className="min-h-ctl-xl">
             {shown.text ? (
-              <Markdown text={shown.text} />
+              shownDocumentSchema ? (
+                <Document source={shown.text} />
+              ) : (
+                <Markdown text={shown.text} />
+              )
             ) : (
               <span className="text-mute">No content</span>
             )}
@@ -1473,6 +2004,7 @@ function SpecReader({
             // document; it reads `value` at mount and owns it from there.
             key={view.revision}
             value={view.body.text}
+            documentSchema={currentDocumentSchema}
             placeholder="Write the spec…"
             className="min-h-ctl-xl"
             onChange={(markdown) => {
@@ -1493,8 +2025,53 @@ function SpecReader({
           <Relations
             view={view}
             everySpec={everySpec}
+            baselines={baselines}
+            rows={rows}
             references={references}
+            // A conflicted document refuses every write anyway, so offering the
+            // editor there would be a composer that exists to be refused.
+            readOnly={locked || state.conflict !== null}
             onOpen={onOpen}
+            onCommit={(delta) => {
+              void store
+                .relateSpec(spaceId, view.spec, view.revision, delta)
+                .catch((reason: unknown) =>
+                  onError(reason instanceof Error ? reason.message : String(reason)),
+                );
+            }}
+          />
+        )}
+
+        {/* After the relations, because a note is a comment on the graph and the
+            graph has to be on screen first. Available on a conflicted document
+            — unlike every revision-writing control, a note competes for no head
+            and is often exactly what somebody wants to leave there. */}
+        {!past && (
+          <Observations
+            view={view}
+            observations={observations}
+            members={members}
+            everySpec={everySpec}
+            baselines={baselines}
+            rows={rows}
+            readOnly={locked}
+            grants={grants}
+            admin={admin}
+            onOpen={onOpen}
+            onObserve={(link, note) => {
+              void store
+                .observeSpec(spaceId, view.spec, link.rel, link.target, note)
+                .catch((reason: unknown) =>
+                  onError(reason instanceof Error ? reason.message : String(reason)),
+                );
+            }}
+            onRetract={(entry) => {
+              void store
+                .retractObservation(spaceId, entry.spec, entry.observation)
+                .catch((reason: unknown) =>
+                  onError(reason instanceof Error ? reason.message : String(reason)),
+                );
+            }}
           />
         )}
       </article>

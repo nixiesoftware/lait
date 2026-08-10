@@ -35,7 +35,7 @@ use crate::ids::{ActorId, DocId};
 use super::contract::{
     self, baseline_key, board_path, catalog_key, issue_key, spec_key, EventChange, IssueEffect,
     IssueEvent, IssueIntent, IssueQuery, NewLabel, Pos, StoredComment, WorkAction, DEFAULT_STATUS,
-    LINK_KINDS, VIEW_SCHEMA_VERSION,
+    DOCUMENT_SCHEMA_VERSION, LINK_KINDS, VIEW_SCHEMA_VERSION,
 };
 use super::rank;
 use super::views::{
@@ -1632,6 +1632,18 @@ impl World for IssuesWorld {
                 staging.issue(&key, reg("priority", priority.as_bytes().to_vec()));
                 staging.issue(&key, reg("createdby", actor.as_bytes().to_vec()));
                 staging.issue(&key, reg("createdat", ts.to_string().into_bytes()));
+                if body
+                    .as_deref()
+                    .is_some_and(|body| body.starts_with(contract::DOCUMENT_PREFIX))
+                {
+                    staging.issue(
+                        &key,
+                        reg(
+                            "document_schema",
+                            DOCUMENT_SCHEMA_VERSION.to_string().into_bytes(),
+                        ),
+                    );
+                }
                 if let Some(due) = duedate {
                     staging.issue(&key, reg("duedate", due.to_string().into_bytes()));
                 }
@@ -1847,8 +1859,13 @@ impl World for IssuesWorld {
                 delete,
                 insert,
             } => {
-                issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if delete == 0 && insert.is_empty() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                if issue.document_schema == DOCUMENT_SCHEMA_VERSION
+                    && index < contract::DOCUMENT_PREFIX.chars().count() as u64
+                {
                     return Err(Rejection::InvalidRequest);
                 }
                 staging.issue(
@@ -1859,6 +1876,65 @@ impl World for IssuesWorld {
                         delete,
                         insert,
                     },
+                );
+                Ok(staging.into_effect(Some(doc)))
+            }
+            IssueIntent::IssueDocumentUpgrade {
+                doc,
+                expected,
+                splices,
+                device,
+                ts,
+            } => {
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                if issue.document_schema != 0 || issue.description != expected {
+                    return Err(Rejection::InvalidRequest);
+                }
+
+                let key = issue_key(&doc);
+                let mut working: Vec<char> = expected.chars().collect();
+                for splice in &splices {
+                    if splice.delete == 0 && splice.insert.is_empty() {
+                        return Err(Rejection::InvalidRequest);
+                    }
+                    let start =
+                        usize::try_from(splice.index).map_err(|_| Rejection::InvalidRequest)?;
+                    let delete =
+                        usize::try_from(splice.delete).map_err(|_| Rejection::InvalidRequest)?;
+                    let end = start
+                        .checked_add(delete)
+                        .filter(|end| *end <= working.len())
+                        .ok_or(Rejection::InvalidRequest)?;
+                    working.splice(start..end, splice.insert.chars());
+                    staging.issue(
+                        &key,
+                        Op::TextSplice {
+                            path: "description".into(),
+                            index: splice.index,
+                            delete: splice.delete,
+                            insert: splice.insert.clone(),
+                        },
+                    );
+                }
+                if !working
+                    .iter()
+                    .collect::<String>()
+                    .starts_with(contract::DOCUMENT_PREFIX)
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                staging.issue(
+                    &key,
+                    reg(
+                        "document_schema",
+                        DOCUMENT_SCHEMA_VERSION.to_string().into_bytes(),
+                    ),
+                );
+                push_event(
+                    &mut staging,
+                    ctx,
+                    &doc,
+                    &event("document_upgraded", &device, ts),
                 );
                 Ok(staging.into_effect(Some(doc)))
             }
@@ -2820,6 +2896,55 @@ impl World for IssuesWorld {
                 ));
                 Ok(staging.into_effect(Some(spec)))
             }
+            IssueIntent::SpecDocumentUpgrade {
+                spec,
+                expected,
+                text,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if ActorId::parse(&actor).is_none() || !text.starts_with(contract::DOCUMENT_PREFIX)
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                let heads = current.heads();
+                if heads.len() != 1 || heads[0].revision != expected {
+                    return Err(Rejection::Conflict);
+                }
+                let head = heads[0];
+                if head.body.text.starts_with(contract::DOCUMENT_PREFIX) {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let mut body = head.body.clone();
+                body.text = text;
+                body.author = actor;
+                body.ts = ts;
+                let predecessor =
+                    crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
+                let revision = crate::spec::build_revision(body, vec![predecessor])
+                    .map_err(|_| Rejection::InvalidRequest)?;
+                let key = spec_key(&spec);
+                staging.spec(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
+                    ),
+                );
+                let demand = if matches!(
+                    head.body.state,
+                    crate::spec::State::Issued | crate::spec::State::Withdrawn
+                ) {
+                    contract::demand_project_any("spec.issue", &head.body.project)
+                } else {
+                    contract::demand_project_work("spec.write", &head.body.project)
+                };
+                staging.require(demand);
+                Ok(staging.into_effect(Some(spec)))
+            }
             IssueIntent::SpecState {
                 spec,
                 expected,
@@ -2939,6 +3064,98 @@ impl World for IssuesWorld {
                     "spec.write",
                     &first.body.project,
                 ));
+                Ok(staging.into_effect(Some(spec)))
+            }
+            IssueIntent::SpecObserve {
+                observation,
+                spec,
+                rel,
+                target,
+                note,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if crate::ids::ObservationId::parse(&observation).is_none()
+                    || ActorId::parse(&actor).is_none()
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                let first = current.revisions.first().ok_or(Rejection::InvalidRequest)?;
+                // The same existence check a Link's target gets. A note about a
+                // document nobody here holds is a note nobody can follow, and
+                // the reader would have no way to tell it from a typo.
+                validate_spec_links(
+                    ctx,
+                    std::slice::from_ref(&crate::spec::Link {
+                        rel,
+                        target: target.clone(),
+                    }),
+                )?;
+                let entry = crate::spec::Observation {
+                    observation,
+                    spec: spec.clone(),
+                    observer: actor,
+                    ts,
+                    rel,
+                    target,
+                    note,
+                };
+                entry.validate().map_err(|_| Rejection::InvalidRequest)?;
+                staging.spec(
+                    &spec_key(&spec),
+                    Op::SetAdd {
+                        path: "observations".into(),
+                        value: serde_json::to_vec(&entry).expect("Observation JSON"),
+                    },
+                );
+                // Ordinary contributor standing. Noticing that two documents
+                // disagree is not an act of authority over either, and pricing
+                // it at the issuing capability would mean the people who read
+                // the most specs are the least able to say so.
+                staging.require(contract::demand_project_work(
+                    "spec.write",
+                    &first.body.project,
+                ));
+                Ok(staging.into_effect(Some(spec)))
+            }
+            IssueIntent::SpecRetract {
+                spec,
+                observation,
+                actor,
+                device: _,
+                ts: _,
+            } => {
+                if ActorId::parse(&actor).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                let first = current.revisions.first().ok_or(Rejection::InvalidRequest)?;
+                let entry = current
+                    .observation(&observation)
+                    .ok_or(Rejection::InvalidRequest)?;
+                // `SetRemove` matches the exact member, so the retraction has to
+                // name the bytes that were added — re-encoding the entry we just
+                // read is what makes that exact rather than approximate.
+                let value = serde_json::to_vec(entry).expect("Observation JSON");
+                let project = first.body.project.clone();
+                let own = entry.observer == actor;
+                staging.spec(
+                    &spec_key(&spec),
+                    Op::SetRemove {
+                        path: "observations".into(),
+                        value,
+                    },
+                );
+                // Taking your own note back is part of writing it. Removing
+                // somebody else's is a judgement about the record, which is the
+                // same authority that decides what governs.
+                staging.require(if own {
+                    contract::demand_project_work("spec.write", &project)
+                } else {
+                    contract::demand_project_any("spec.issue", &project)
+                });
                 Ok(staging.into_effect(Some(spec)))
             }
             IssueIntent::BaselineCreate {
@@ -4364,6 +4581,27 @@ impl World for IssuesWorld {
                     serde_json::to_vec(&references).expect("spec references json"),
                 ))
             }
+            IssueQuery::SpecObservations { project } => {
+                let mut observations: Vec<crate::spec::Observation> = Vec::new();
+                for spec in all_specs(ctx) {
+                    // The project is a fact about the document the note is filed
+                    // against, since an Observation carries no project of its
+                    // own — it is a note, not a document.
+                    let Some(first) = spec.revisions.first() else {
+                        continue;
+                    };
+                    if project
+                        .as_ref()
+                        .is_some_and(|project| &first.body.project != project)
+                    {
+                        continue;
+                    }
+                    observations.extend(spec.observations.iter().cloned());
+                }
+                Ok(projection(
+                    serde_json::to_vec(&observations).expect("spec observations json"),
+                ))
+            }
             IssueQuery::BaselineHistory { baseline } => {
                 let baseline = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
                 let revisions = crate::spec::ordered(&baseline.revisions, |revision| {
@@ -4687,6 +4925,7 @@ fn provisional_view(
         key_alias: row.key_alias,
         title: row.title,
         description: String::new(),
+        document_schema: DOCUMENT_SCHEMA_VERSION,
         status: row.status,
         priority: row.priority,
         assignees: vec![],

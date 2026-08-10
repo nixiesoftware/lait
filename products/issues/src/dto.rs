@@ -634,6 +634,10 @@ pub struct IssueView {
     pub key_alias: Option<String>,
     pub title: String,
     pub description: String,
+    /// Version of Lait's user-invisible issue document model. Zero identifies
+    /// a legacy body that can be upgraded from the issue header.
+    #[serde(default)]
+    pub document_schema: u32,
     pub status: String,
     pub priority: Priority,
     pub assignees: Vec<ActorId>,

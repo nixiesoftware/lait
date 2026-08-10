@@ -590,6 +590,7 @@ impl<'a> IssueRouter<'a> {
                 | Request::IssueNew { .. }
                 | Request::IssueEdit { .. }
                 | Request::IssueTextSplice { .. }
+                | Request::IssueDocumentUpgrade { .. }
                 | Request::IssueTextCheckpoint { .. }
                 | Request::IssueMove { .. }
                 | Request::Assign { .. }
@@ -654,11 +655,15 @@ impl<'a> IssueRouter<'a> {
                 | Request::SpecShow { .. }
                 | Request::SpecHistory { .. }
                 | Request::SpecReferences { .. }
+                | Request::SpecObservations { .. }
                 | Request::BaselineHistory { .. }
                 | Request::SpecNew { .. }
                 | Request::SpecRevise { .. }
+                | Request::SpecDocumentUpgrade { .. }
                 | Request::SpecState { .. }
                 | Request::SpecResolve { .. }
+                | Request::SpecObserve { .. }
+                | Request::SpecRetract { .. }
                 | Request::BaselineList { .. }
                 | Request::BaselineShow { .. }
                 | Request::BaselineNew { .. }
@@ -737,6 +742,13 @@ impl<'a> IssueRouter<'a> {
                         }),
                     }
                 }
+                let body = body.map(|body| {
+                    if body.starts_with(contract::DOCUMENT_PREFIX) {
+                        body
+                    } else {
+                        crate::document::plain_document(&body)
+                    }
+                });
                 let doc = DocId::mint(self.clock).as_str().to_string();
                 let effect = self
                     .submit(&IssueIntent::IssueNew {
@@ -771,6 +783,25 @@ impl<'a> IssueRouter<'a> {
                 estimate,
             } => {
                 let doc = self.resolve(&snapshot, &reff)?;
+                let description = if let Some(description) = description {
+                    let issue: IssueView = self
+                        .query(&IssueQuery::View {
+                            doc: doc.clone(),
+                            me: None,
+                        })
+                        .map_err(Self::effect_err)?;
+                    Some(
+                        if issue.document_schema == contract::DOCUMENT_SCHEMA_VERSION
+                            && !description.starts_with(contract::DOCUMENT_PREFIX)
+                        {
+                            crate::document::plain_document(&description)
+                        } else {
+                            description
+                        },
+                    )
+                } else {
+                    None
+                };
                 // `none` clears; absent leaves the field untouched — the
                 // double-option the intent carries.
                 let duedate = match due.as_deref() {
@@ -811,6 +842,34 @@ impl<'a> IssueRouter<'a> {
                     index,
                     delete,
                     insert,
+                })
+                .map_err(Self::effect_err)?;
+                Ok((self.ref_response(&doc), true))
+            }
+            Request::IssueDocumentUpgrade {
+                reff,
+                expected,
+                splices,
+            } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                let upgraded = apply_document_splices(&expected, &splices)
+                    .ok_or_else(|| Response::err("document upgrade could not be completed"))?;
+                if !crate::document::compile_document(&upgraded).valid {
+                    return Err(Response::err("document upgrade could not be completed"));
+                }
+                self.submit(&IssueIntent::IssueDocumentUpgrade {
+                    doc: doc.clone(),
+                    expected,
+                    splices: splices
+                        .into_iter()
+                        .map(|splice| issues::contract::DocumentSplice {
+                            index: splice.index,
+                            delete: splice.delete,
+                            insert: splice.insert,
+                        })
+                        .collect(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
                 })
                 .map_err(Self::effect_err)?;
                 Ok((self.ref_response(&doc), true))
@@ -2042,6 +2101,19 @@ impl<'a> IssueRouter<'a> {
                     .map_err(Self::effect_err)?;
                 Ok((Response::SpecReferences { references }, false))
             }
+            Request::SpecObservations { project } => {
+                let project = project
+                    .map(|project| {
+                        snapshot
+                            .resolve_project(&project)
+                            .ok_or_else(|| Response::not_found("no such project"))
+                    })
+                    .transpose()?;
+                let observations = self
+                    .query(&IssueQuery::SpecObservations { project })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::SpecObservations { observations }, false))
+            }
             Request::BaselineHistory { baseline } => {
                 let revisions = self
                     .query(&IssueQuery::BaselineHistory { baseline })
@@ -2055,6 +2127,14 @@ impl<'a> IssueRouter<'a> {
                 text,
                 links,
             } => {
+                let text = if text.starts_with(contract::DOCUMENT_PREFIX) {
+                    text
+                } else {
+                    crate::document::plain_document(&text)
+                };
+                if !crate::document::compile_document(&text).valid {
+                    return Err(Response::err("document could not be saved"));
+                }
                 let project = snapshot
                     .resolve_project(&project)
                     .ok_or_else(|| Response::not_found("no such project"))?;
@@ -2088,12 +2168,54 @@ impl<'a> IssueRouter<'a> {
                 text,
                 links,
             } => {
+                let text = text.map(|text| {
+                    if text.starts_with(contract::DOCUMENT_PREFIX) {
+                        text
+                    } else {
+                        crate::document::plain_document(&text)
+                    }
+                });
+                if text
+                    .as_deref()
+                    .is_some_and(|text| !crate::document::compile_document(text).valid)
+                {
+                    return Err(Response::err("document could not be saved"));
+                }
                 self.submit(&IssueIntent::SpecRevise {
                     spec: spec.clone(),
                     expected,
                     title,
                     text,
                     links,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Spec { spec })
+                    .map_err(Self::effect_err)?;
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
+            }
+            Request::SpecDocumentUpgrade {
+                spec,
+                expected,
+                text,
+            } => {
+                if !text.starts_with(contract::DOCUMENT_PREFIX)
+                    || !crate::document::compile_document(&text).valid
+                {
+                    return Err(Response::err("document upgrade could not be completed"));
+                }
+                self.submit(&IssueIntent::SpecDocumentUpgrade {
+                    spec: spec.clone(),
+                    expected,
+                    text,
                     actor: facts.actor.clone(),
                     device: facts.device.clone(),
                     ts: facts.now,
@@ -2138,6 +2260,16 @@ impl<'a> IssueRouter<'a> {
                 expected_heads,
                 body_json,
             } => {
+                let mut body: issues::spec::Body = serde_json::from_str(&body_json)
+                    .map_err(|_| Response::err("invalid Spec resolution body"))?;
+                if !body.text.starts_with(contract::DOCUMENT_PREFIX) {
+                    body.text = crate::document::plain_document(&body.text);
+                }
+                if !crate::document::compile_document(&body.text).valid {
+                    return Err(Response::err("document could not be saved"));
+                }
+                let body_json = serde_json::to_string(&body)
+                    .map_err(|_| Response::err("invalid Spec resolution body"))?;
                 self.submit(&IssueIntent::SpecResolve {
                     spec: spec.clone(),
                     expected_heads,
@@ -2156,6 +2288,42 @@ impl<'a> IssueRouter<'a> {
                     },
                     true,
                 ))
+            }
+            Request::SpecObserve {
+                spec,
+                rel,
+                target,
+                note,
+            } => {
+                self.submit(&IssueIntent::SpecObserve {
+                    observation: issues::ids::mint_observation_id(self.clock),
+                    spec: spec.clone(),
+                    rel,
+                    target,
+                    note,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let observations = self
+                    .query(&IssueQuery::SpecObservations { project: None })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::SpecObservations { observations }, true))
+            }
+            Request::SpecRetract { spec, observation } => {
+                self.submit(&IssueIntent::SpecRetract {
+                    spec: spec.clone(),
+                    observation,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let observations = self
+                    .query(&IssueQuery::SpecObservations { project: None })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::SpecObservations { observations }, true))
             }
             Request::BaselineList { project } => {
                 let project = project
@@ -2342,6 +2510,22 @@ impl<'a> IssueRouter<'a> {
         .map_err(Self::effect_err)?;
         Ok((self.ref_response(&doc), true))
     }
+}
+
+fn apply_document_splices(
+    source: &str,
+    splices: &[crate::protocol::DocumentSplice],
+) -> Option<String> {
+    let mut characters = source.chars().collect::<Vec<_>>();
+    for splice in splices {
+        let start = usize::try_from(splice.index).ok()?;
+        let delete = usize::try_from(splice.delete).ok()?;
+        let end = start
+            .checked_add(delete)
+            .filter(|end| *end <= characters.len())?;
+        characters.splice(start..end, splice.insert.chars());
+    }
+    Some(characters.into_iter().collect())
 }
 
 /// A shared clock for the router in production.

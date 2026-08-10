@@ -37,15 +37,20 @@ import type {
   SpaceRequest,
   SpecBody,
   SpecKind,
+  SpecLink,
+  SpecObservation,
   SpecRef,
   SpecReference,
+  SpecRel,
   SpecRevision,
   SpecState,
+  SpecTarget,
   SpecView,
   StatusInfo,
   WhoamiInfo,
   WorldRequest,
 } from "./types";
+import { applyLinkDelta, emptyDelta, type LinkDelta } from "./core/specs";
 
 type Rpc = (space: string, request: WorldRequest) => Promise<Response>;
 /** Generic Space control, injected like `Rpc` so both transports stay substitutable. */
@@ -66,6 +71,8 @@ export const projectKeys = {
   specHistory: (space: string, spec: string) => `${prefix(space)}spec-history:${part(spec)}`,
   specReferences: (space: string, project: string | null) =>
     `${prefix(space)}spec-references:${part(project)}`,
+  specObservations: (space: string, project: string | null) =>
+    `${prefix(space)}spec-observations:${part(project)}`,
   baselines: (space: string, project: string | null) => `${prefix(space)}baselines:${part(project)}`,
   baseline: (space: string, baseline: string) => `${prefix(space)}baseline:${part(baseline)}`,
   baselineHistory: (space: string, baseline: string) =>
@@ -538,13 +545,86 @@ export class ProjectViewerStore {
     space: string,
     spec: string,
     expected: string,
-    patch: { title?: string; text?: string },
+    patch: { title?: string; text?: string; links?: SpecLink[] },
   ): Promise<SpecView> {
     const result = await this.rpc(space, { cmd: "spec_revise", spec, expected, ...patch });
     if (result.kind !== "spec") throw new Error("Expected spec response");
     this.resources.set(projectKeys.spec(space, spec), result.spec);
     await this.refreshSpecRegisters(space);
     return result.spec;
+  }
+
+  /**
+   * Move a legacy Spec body onto the current hidden document schema without
+   * changing its lifecycle. The engine writes an immutable successor and uses
+   * `expected` as the same compare-and-swap guard as every other revision.
+   */
+  async upgradeSpecDocument(
+    space: string,
+    spec: string,
+    expected: string,
+    text: string,
+  ): Promise<SpecView> {
+    const result = await this.rpc(space, {
+      cmd: "spec_document_upgrade",
+      spec,
+      expected,
+      text,
+    });
+    if (result.kind !== "spec") throw new Error("Expected spec response");
+    this.resources.set(projectKeys.spec(space, spec), result.spec);
+    await Promise.all([
+      this.ensureSpecHistory(space, spec, true).catch(() => undefined),
+      this.refreshSpecRegisters(space),
+    ]);
+    return result.spec;
+  }
+
+  /**
+   * Commit a staged change to what a document asserts, rebasing if the head
+   * moved under it.
+   *
+   * `spec_revise` replaces the whole link array against an expected head, so
+   * two people adding *different* relations collide even though the two edits
+   * do not actually disagree. Replaying the delta onto whatever the head is now
+   * is correct without a merge policy, because a link set is a set: the engine
+   * canonicalises the Body before it hashes, so nothing here has to reproduce
+   * Rust's ordering either.
+   *
+   * The retry is deliberately not driven by the error. A stale `expected`
+   * surfaces as a plain 400 carrying prose (`router.rs`), and matching on that
+   * string would make this break the next time somebody rewords it — so the
+   * refusal is only ever *evidence*, and the head having actually moved is the
+   * thing that decides whether to try again. A refusal with a stationary head
+   * is somebody's answer to the request itself, and rethrows untouched.
+   */
+  async relateSpec(
+    space: string,
+    spec: string,
+    expected: string,
+    delta: LinkDelta,
+    attempts = 3,
+  ): Promise<SpecView> {
+    let head = await this.ensureSpec(space, spec);
+    // Nothing staged is not a tiny write, it is no write: every revise mints an
+    // immutable revision onto the rail, and a revision that changed nothing is
+    // noise in the one place a reader goes to find out what changed.
+    if (emptyDelta(delta)) return head;
+    if (head.revision !== expected) head = await this.ensureSpec(space, spec, true);
+    for (let attempt = 0; ; attempt++) {
+      const links = applyLinkDelta(head.body.links, delta);
+      try {
+        return await this.reviseSpec(space, spec, head.revision, { links });
+      } catch (reason) {
+        if (attempt + 1 >= attempts) throw reason;
+        const fresh = await this.ensureSpec(space, spec, true);
+        // Same head: the engine refused the request on its merits — the target
+        // of a new link has gone, the actor cannot write here. Retrying would
+        // only ask the same question again and bury the real answer.
+        if (fresh.revision === head.revision) throw reason;
+        head = fresh;
+      }
+    }
   }
 
   /**
@@ -725,6 +805,57 @@ export class ProjectViewerStore {
       }
       return result.references;
     }, { catalog: ["specs"] }, force);
+  }
+
+  ensureSpecObservations(
+    space: string,
+    project: string | null,
+    force = false,
+  ): Promise<SpecObservation[]> {
+    return this.load(projectKeys.specObservations(space, project), async () => {
+      const result = await this.rpc(space, { cmd: "spec_observations", project });
+      if (result.kind !== "spec_observations") {
+        throw new Error("Expected spec observations response");
+      }
+      return result.observations;
+    }, { catalog: ["specs"] }, force);
+  }
+
+  /**
+   * File a note about the graph.
+   *
+   * No `expected` and no retry, unlike `relateSpec`: an Observation is not a
+   * revision and does not compete for the head, so there is no race here to
+   * lose. That is the ergonomic half of why the concept exists — the other half
+   * being that it binds nobody's document.
+   */
+  async observeSpec(
+    space: string,
+    spec: string,
+    rel: SpecRel,
+    target: SpecTarget,
+    note: string,
+  ): Promise<void> {
+    const result = await this.rpc(space, { cmd: "spec_observe", spec, rel, target, note });
+    if (result.kind !== "spec_observations") throw new Error("Expected spec observations response");
+    await this.refreshSpecObservations(space);
+  }
+
+  async retractObservation(space: string, spec: string, observation: string): Promise<void> {
+    const result = await this.rpc(space, { cmd: "spec_retract", spec, observation });
+    if (result.kind !== "spec_observations") throw new Error("Expected spec observations response");
+    await this.refreshSpecObservations(space);
+  }
+
+  /** Re-read whichever note sets are on screen — same argument as
+   *  `refreshSpecRegisters`: keyed by the caller's project handle, not the
+   *  resolved id a note's Spec reports. */
+  private refreshSpecObservations(space: string): Promise<void> {
+    return this.refreshActive(
+      [...this.loaders.keys()].filter((key) =>
+        key.startsWith(`${prefix(space)}spec-observations:`),
+      ),
+    );
   }
 
   ensureGrants(space: string, force = false): Promise<AssignmentDto[]> {
@@ -1407,6 +1538,19 @@ export function useSpecReferences(
   return useWorldResource<SpecReference[]>(
     projectKeys.specReferences(space, project),
     useCallback(() => store.ensureSpecReferences(space, project), [project, space, store]),
+  );
+}
+
+/** Every note filed in scope, live. Both directions — an Observation names a
+ *  subject and a target, and either end may be the document being read. */
+export function useSpecObservations(
+  space: string,
+  project: string | null,
+): ResourceSnapshot<SpecObservation[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<SpecObservation[]>(
+    projectKeys.specObservations(space, project),
+    useCallback(() => store.ensureSpecObservations(space, project), [project, space, store]),
   );
 }
 

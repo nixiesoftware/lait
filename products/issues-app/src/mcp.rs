@@ -287,6 +287,24 @@ struct SpecNewArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SpecObserveArgs {
+    /// The Spec the note is filed against.
+    spec: String,
+    rel: issues::spec::Rel,
+    target: issues::spec::Target,
+    /// Why you think so. An observation with no argument behind it is a claim
+    /// nobody can weigh.
+    #[serde(default)]
+    note: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpecRetractArgs {
+    spec: String,
+    observation: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct SpecReviseArgs {
     spec: String,
     expected: String,
@@ -479,6 +497,27 @@ pub fn tools() -> Vec<McpTool> {
             "spec_resolve",
             "Resolve concurrent Spec heads.",
             spec_resolve,
+        ),
+        tool::<ProjectArgs>(
+            "spec_observations",
+            "Every observation filed in scope — notes about the graph that bind \
+             nobody's document and never govern anything.",
+            spec_observations,
+        ),
+        tool::<SpecObserveArgs>(
+            "spec_observe",
+            "Note something about this document and another — a conflict, a \
+             dependency, coverage nobody had connected. Not a claim the document \
+             makes: it enters no revision, is not issued with it, and never \
+             reaches an issue's packet. Assert it as a link instead when the \
+             document itself should say it.",
+            spec_observe,
+        ),
+        tool::<SpecRetractArgs>(
+            "spec_retract",
+            "Withdraw one observation. Your own needs write; anyone else's needs \
+             the project's issuing capability.",
+            spec_retract,
         ),
         tool::<ProjectArgs>(
             "baseline_list",
@@ -892,6 +931,29 @@ fn spec_history(input: Value) -> Result<ClientInvocation, Failure> {
     world(IssuesRequest::SpecHistory { spec: a.spec })
 }
 
+fn spec_observations(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: ProjectArgs = args(input)?;
+    world(IssuesRequest::SpecObservations { project: a.project })
+}
+
+fn spec_observe(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: SpecObserveArgs = args(input)?;
+    world(IssuesRequest::SpecObserve {
+        spec: a.spec,
+        rel: a.rel,
+        target: a.target,
+        note: a.note,
+    })
+}
+
+fn spec_retract(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: SpecRetractArgs = args(input)?;
+    world(IssuesRequest::SpecRetract {
+        spec: a.spec,
+        observation: a.observation,
+    })
+}
+
 fn spec_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: SpecNewArgs = args(input)?;
     world(IssuesRequest::SpecNew {
@@ -1059,35 +1121,49 @@ mod tests {
 
     /// The smallest instance a schema's own required fields accept.
     fn minimal_instance(schema: &Value) -> Value {
+        /// The required fields of one object schema, each filled in.
+        fn object(root: &Value, schema: &Value) -> Value {
+            let properties = &schema["properties"];
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            Value::Object(
+                required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|name| (name.to_string(), placeholder(root, &properties[name], name)))
+                    .collect(),
+            )
+        }
+
         fn placeholder(root: &Value, schema: &Value, name: &str) -> Value {
             let schema = schema["$ref"]
                 .as_str()
                 .and_then(|reff| reff.strip_prefix('#'))
                 .and_then(|pointer| root.pointer(pointer))
                 .unwrap_or(schema);
+            // A pinned tag (`"kind": "spec"`) is its own smallest instance.
+            if !schema["const"].is_null() {
+                return schema["const"].clone();
+            }
             if let Some(value) = schema["enum"].as_array().and_then(|values| values.first()) {
                 return value.clone();
+            }
+            // A tagged enum with fields — `Target`, and anything shaped like it.
+            // The smallest instance is its first variant's, which is the same
+            // question one level down rather than a new one.
+            if let Some(variant) = schema["oneOf"].as_array().and_then(|values| values.first()) {
+                return object(root, variant);
             }
             match schema["type"].as_str() {
                 Some("string") => json!("x"),
                 Some("integer" | "number") => json!(0),
                 Some("boolean") => json!(false),
                 Some("array") => json!([]),
+                Some("object") => object(root, schema),
                 other => panic!("no placeholder for a required `{name}` of type {other:?}"),
             }
         }
 
-        let properties = &schema["properties"];
-        let required = schema["required"].as_array().cloned().unwrap_or_default();
-        let object = required
-            .iter()
-            .filter_map(Value::as_str)
-            .map(|name| {
-                let value = placeholder(schema, &properties[name], name);
-                (name.to_string(), value)
-            })
-            .collect();
-        Value::Object(object)
+        object(schema, schema)
     }
 
     /// The command tag every tool actually emits, taken from the call it makes.
@@ -1119,8 +1195,8 @@ mod tests {
     /// `inbox`, `access_plan`, `attach` and `attachment_get` are driven through
     /// a LOCAL invocation — `attach_file` and `attachment_save` are their tools
     /// — so the World call a tool ends up making is not the one it returns. The
-    /// text splice and checkpoint commands are transport primitives for the
-    /// live web editor, not semantic agent actions. The rest have no agent
+    /// text splice, checkpoint, and document-upgrade commands are transport
+    /// primitives for the live web editor, not semantic agent actions. The rest have no agent
     /// surface at all: they shipped on the web client and were never given a
     /// tool.
     ///
@@ -1139,6 +1215,7 @@ mod tests {
         "initiative_list",
         "initiative_set",
         "issue_cycle",
+        "issue_document_upgrade",
         "issue_milestone",
         "issue_text_checkpoint",
         "issue_text_splice",
@@ -1152,6 +1229,7 @@ mod tests {
         "project_updates",
         "space_describe",
         "space_rename",
+        "spec_document_upgrade",
         "team_list",
         "team_set",
         "triage_decide",
@@ -1194,7 +1272,7 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 59);
+        assert_eq!(tools.len(), 62);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()

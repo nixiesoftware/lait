@@ -26,3 +26,5 @@ serde_json = "1"
 postcard = { version = "1", features = ["use-std"] }
 anyhow = "1"
 data-encoding = "2.6"
+typst = "0.15.1"
+typst-html = "0.15.1"

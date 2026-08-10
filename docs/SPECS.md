@@ -22,6 +22,21 @@ other's markdown.
 - `Packet` is the derived effective brief for one Issue. It groups governing
   truth, guidance, proof, records, and unresolved conflicts. A Packet is a
   projection, not another replicated source of truth.
+- `Observation` is a retractable note *about* the graph, filed against a Spec by
+  whoever noticed it. It is the deliberate inverse of a Link on every axis: it
+  carries its own observer, it sits in no revision and so never enters a content
+  hash, issuing the document neither adopts nor freezes it, it lives in a CRDT
+  set so two observers converge instead of colliding, and it is retractable on
+  its own. **An Observation never reaches a Packet and never counts as
+  verification coverage.**
+
+A Link is what a document *says*; an Observation is what somebody *noticed*. The
+distinction exists because some truths — this requirement conflicts with that
+one, this design depends on that one, this proof turns out to cover a second
+requirement — belong to neither endpoint's author, and laundering them through a
+document forces an amendment to material the observer may not own and, on issued
+material, a draft successor that announces a change to governing truth which is
+not happening.
 
 The lifecycle is `draft → review → issued → withdrawn`. Every transition writes
 a new immutable revision. Drafting a successor does not silently revoke its
@@ -56,6 +71,11 @@ POST /api/spaces/{id}/worlds/issues/rpc
 {"cmd":"spec_state","spec":"spc_…","expected":"<revision>","state":"review"}
 {"cmd":"spec_state","spec":"spc_…","expected":"<revision>","state":"issued"}
 
+{"cmd":"spec_observe","spec":"spc_…","rel":"conflicts",
+ "target":{"kind":"spec","spec":"spc_…","revision":"<revision>"},
+ "note":"both claim the session limit and they disagree"}
+{"cmd":"spec_retract","spec":"spc_…","observation":"obs_…"}
+
 {"cmd":"baseline_new","project":"ENG","name":"Login v1",
  "members":[{"spec":"spc_…","revision":"<revision>"}]}
 {"cmd":"baseline_state","baseline":"bas_…","expected":"<revision>","state":"issued"}
@@ -65,6 +85,12 @@ POST /api/spaces/{id}/worlds/issues/rpc
 
 `expected` is a compare-and-swap on the document's current revision: a stale
 one is refused rather than silently overwritten.
+
+`spec_observe` and `spec_retract` carry no `expected`: a note is not a revision
+and does not compete for the head, so two observers never refuse each other.
+Observing rides the writing capability. Retraction is the observer's own by
+right; taking back somebody else's is a judgement about the record and needs the
+project's issuing capability.
 
 The same operations are the `issues_spec_*`, `issues_baseline_*`,
 `issues_issue_baseline` and `issues_packet` MCP tools. The browser issue detail
@@ -88,6 +114,18 @@ affordance with it and takes it away again when it goes.
   *is* the transition, and the body. A second revision brings the rail; an issued
   predecessor under a draft head brings the line that says so; concurrent heads
   bring a banner and suppress every transition.
+- **Relations.** Both directions, grouped by verb and read as sentences. Editing
+  is staged and saved as *one* revision rather than one per link, and a save that
+  meets a moved head replays the delta onto it — adds and removes are set
+  operations, so a rebase needs no merge policy and cannot invent a claim neither
+  author made. Choosing a target pins an exact revision, defaulting to the issued
+  one where there is one, and says which it pinned.
+- **Noticed.** Observations, under the relations and phrased from the observer
+  outward — "Omar noticed this conflicts with X". Its own section, and one line
+  saying that nothing in it governs, is issued, or counts as verification: a note
+  that merely *looked* like a relation is a note somebody will read as an order.
+  Available on a conflicted document, unlike every revision-writing control,
+  because a note competes for no head.
 - **Compare and resolve.** Two revisions diff by line over title, body and typed
   links, against their common ancestor when neither descends from the other.
   Resolution writes one draft whose predecessors are every head.
@@ -103,6 +141,10 @@ demand, so any writing member drafts and sends for review, while `spec.issue`
 needs a project grant or `space.admin`. A transition the actor cannot take stays
 visible and disabled, naming the capability it wants.
 
-This is a schema cutoff. The Spec and Baseline Bodies begin at their current
-schema; there is no legacy markdown importer, compatibility adapter, or staged
-migration path.
+Spec prose uses the same user-invisible document schema as Issue descriptions.
+Readers and editors operate on the controlled document model; CLI and MCP text
+remains semantic plain text. Legacy Markdown heads stay readable and expose an
+**Upgrade document** action in the header menu. Upgrading writes an immutable
+successor, preserves the head's lifecycle state, and leaves the original
+revision in history. Baseline Bodies have no prose field and need no document
+migration.

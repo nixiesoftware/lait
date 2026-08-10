@@ -84,6 +84,7 @@ describe("Specs", () => {
       }
       if (
         request.cmd === "spec_revise" ||
+        request.cmd === "spec_document_upgrade" ||
         request.cmd === "spec_state" ||
         request.cmd === "spec_resolve"
       ) {
@@ -203,6 +204,21 @@ describe("Specs", () => {
     expect(el.textContent).toContain("No two sessions.");
   });
 
+  it("renders a current Spec without exposing its document source", async () => {
+    const el = await render(
+      { spec: "spc_a", readOnly: true },
+      [spec(
+        "spc_a",
+        "requirement",
+        "Login is race-free",
+        "// lait-document:1\n= Guarantee\n\nNo *two* sessions.",
+      )],
+    );
+    expect(el.textContent).toContain("Guarantee");
+    expect(el.textContent).toContain("No two sessions.");
+    expect(el.textContent).not.toContain("lait-document");
+  });
+
   it("revises against the head it is showing", async () => {
     const el = await render({ spec: "spc_a" });
     const title = el.querySelector<HTMLTextAreaElement>("textarea[aria-label='Title']")!;
@@ -243,6 +259,21 @@ describe("Specs", () => {
     const panel = document.getElementById(trigger!.getAttribute("aria-controls") ?? "");
     return [...(panel?.querySelectorAll("[role='menuitem']") ?? [])];
   }
+
+  it("offers legacy migration in the Spec header and preserves it as a schema operation", async () => {
+    const legacy = spec("spc_a", "requirement", "Login is race-free", "# Guarantee\n\nNo **two** sessions.");
+    const el = await render({ spec: "spc_a" }, [legacy]);
+    const items = await openMenu(el, "More spec actions");
+    const upgrade = items.find((item) => item.textContent?.includes("Upgrade document"));
+    expect(upgrade).toBeTruthy();
+    await act(async () => upgrade?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(rpcMock).toHaveBeenCalledWith("local", {
+      cmd: "spec_document_upgrade",
+      spec: "spc_a",
+      expected: "rev_spc_a",
+      text: "// lait-document:1\n= Guarantee\n\nNo *two* sessions.",
+    });
+  });
 
   it("offers the transitions this head can take, and gates issuing on the grant", async () => {
     const el = await render({ spec: "spc_a" }, [spec("spc_a", "requirement", "Login is race-free")]);

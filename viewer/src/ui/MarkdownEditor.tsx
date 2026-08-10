@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 
 import { Markdown } from "./Markdown";
+import { Document } from "./Document";
 import type {
   RemoteContext,
   RemoteCursor,
@@ -32,6 +33,7 @@ export function MarkdownEditor(props: {
   remoteContexts?: RemoteContext[];
   remotePreviews?: RemoteTextPreview[];
   acceptRemote?: boolean;
+  documentSchema?: number;
   onAwareness?: (
     anchor: number | null,
     focus: number | null,
@@ -44,7 +46,7 @@ export function MarkdownEditor(props: {
       fallback={
         <div className={props.className}>
           {props.value ? (
-            <Markdown text={props.value} />
+            props.documentSchema ? <Document source={props.value} /> : <Markdown text={props.value} />
           ) : (
             <span className="text-mute">{props.placeholder}</span>
           )}

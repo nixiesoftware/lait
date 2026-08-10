@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyLinkDelta,
   authorityPhrase,
   commonAncestor,
   conflictPhrase,
   diffBodies,
   diffLines,
+  emptyDelta,
   groupByKind,
   holds,
   incomingFor,
+  linkDelta,
   linkPhrase,
   standing,
   sourcePhrase,
@@ -19,6 +22,7 @@ import {
 import type {
   AssignmentDto,
   SpecKind,
+  SpecLink,
   SpecReference,
   SpecRevision,
   SpecState,
@@ -152,6 +156,44 @@ describe("spec capabilities", () => {
 
   it("gives an admin everything without a scoped grant", () => {
     expect(holds("spec.issue", spec(), [], true)).toBe(true);
+  });
+});
+
+describe("editing links", () => {
+  const to = (spec: string, revision = "rev_1"): SpecLink => ({
+    rel: "verifies",
+    target: { kind: "spec", spec, revision },
+  });
+
+  it("reports what a staged edit added and removed", () => {
+    const delta = linkDelta([to("spc_a"), to("spc_b")], [to("spc_b"), to("spc_c")]);
+    expect(delta.added).toEqual([to("spc_c")]);
+    expect(delta.removed).toEqual([to("spc_a")]);
+    expect(emptyDelta(delta)).toBe(false);
+    expect(emptyDelta(linkDelta([to("spc_a")], [to("spc_a")]))).toBe(true);
+  });
+
+  it("treats the same verb at a different revision as a different claim", () => {
+    const delta = linkDelta([to("spc_a", "rev_1")], [to("spc_a", "rev_2")]);
+    expect(delta.added).toEqual([to("spc_a", "rev_2")]);
+    expect(delta.removed).toEqual([to("spc_a", "rev_1")]);
+  });
+
+  it("replays onto a moved head without dropping the other author's addition", () => {
+    // We staged c over {a, b}; meanwhile someone else added d and removed b.
+    const delta = linkDelta([to("spc_a"), to("spc_b")], [to("spc_a"), to("spc_b"), to("spc_c")]);
+    const rebased = applyLinkDelta([to("spc_a"), to("spc_d")], delta);
+    expect(rebased).toEqual([to("spc_a"), to("spc_d"), to("spc_c")]);
+  });
+
+  it("satisfies a removal whose target is already gone", () => {
+    const delta = linkDelta([to("spc_a")], []);
+    expect(applyLinkDelta([to("spc_b")], delta)).toEqual([to("spc_b")]);
+  });
+
+  it("never duplicates a claim the moved head already carries", () => {
+    const delta = linkDelta([], [to("spc_a")]);
+    expect(applyLinkDelta([to("spc_a")], delta)).toEqual([to("spc_a")]);
   });
 });
 

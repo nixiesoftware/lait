@@ -91,6 +91,51 @@ describe("Sidebar navigation", () => {
     expect(host.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
   });
 
+  it("scrolls the complete navigation body rather than only the project tail", () => {
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+
+    act(() => {
+      root?.render(
+        <Sidebar
+          spaces={[space]}
+          current={space.id}
+          projects={[project]}
+          currentProject={null}
+          view="inbox"
+          unread={0}
+          favoriteProjects={[]}
+          savedViews={[]}
+          onPickSpace={vi.fn()}
+          onSearch={vi.fn()}
+          onOpenProjectView={vi.fn()}
+          onGo={vi.fn()}
+          teams={[]}
+          currentTeam={null}
+          onGoTeam={vi.fn()}
+          onMyIssues={vi.fn()}
+          onApplySavedView={vi.fn()}
+          onToggleFavorite={vi.fn()}
+          onCreateProject={vi.fn()}
+          onAddSpace={vi.fn()}
+          onForgetSpace={vi.fn()}
+          onPruneSpaces={vi.fn()}
+        />,
+      );
+    });
+
+    const nav = host.querySelector<HTMLElement>('nav[aria-label="Workspace"]')!;
+    const body = nav.children[1] as HTMLElement;
+    expect(body.classList).toContain("min-h-0");
+    expect(body.classList).toContain("flex-1");
+    expect(body.classList).toContain("overflow-y-auto");
+    expect(body.textContent).toContain("Inbox");
+    expect(body.textContent).toContain("Workspace");
+    expect(body.textContent).toContain("Projects");
+    expect(body.lastElementChild?.classList).not.toContain("overflow-y-auto");
+  });
+
   it("puts the space's verbs in a menu rather than listing every replica", () => {
     const onGo = vi.fn();
     host = document.createElement("div");

@@ -475,6 +475,9 @@ pub struct IssueState {
     pub created_by: Option<ActorId>,
     pub created_at: u64,
     pub description: String,
+    /// Zero means a body written before the hidden Lait document model. The
+    /// register is additive, so old replicas and old Bodies remain readable.
+    pub document_schema: u32,
     /// Unix seconds; absent register = no due date.
     pub duedate: Option<u64>,
     pub estimate: Option<u32>,
@@ -632,6 +635,9 @@ impl IssueState {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
             description: view.texts.get("description").cloned().unwrap_or_default(),
+            document_schema: reg_str(view, "document_schema")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
             duedate: reg_str(view, "duedate").and_then(|s| s.parse().ok()),
             estimate: reg_str(view, "estimate").and_then(|s| s.parse().ok()),
             assignees,
@@ -880,6 +886,7 @@ pub fn issue_view(
         key_alias: aliases.by_doc.get(doc).cloned(),
         title: issue.title.clone(),
         description: issue.description.clone(),
+        document_schema: issue.document_schema,
         status: issue.status.clone(),
         priority: issue.priority,
         assignees: issue.assignees.clone(),
@@ -1146,6 +1153,19 @@ impl CatalogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_document_schema_is_legacy_and_the_register_is_additive() {
+        let mut view = CollaborativeView::default();
+        view.texts.insert("description".into(), "old prose".into());
+        assert_eq!(IssueState::from_view(&view).document_schema, 0);
+
+        view.registers
+            .insert("document_schema".into(), b"1".to_vec());
+        let issue = IssueState::from_view(&view);
+        assert_eq!(issue.document_schema, 1);
+        assert_eq!(issue.description, "old prose");
+    }
 
     #[test]
     fn completed_issue_keeps_alias_from_authoritative_project() {

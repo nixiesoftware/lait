@@ -939,6 +939,15 @@
   line-height: 1.65;
 }
 
+/* Current issue documents keep their Typst serialization inside the CRDT, but
+   it is not a user-facing source mode. Structural runs collapse even on the
+   caret line; only the document's editable content occupies visual space. */
+.codemirror-document .cm-doc-syntax {
+  font-size: 0;
+  letter-spacing: 0;
+  user-select: none;
+}
+
 .codemirror-markdown .cm-md-heading {
   color: var(--color-fg);
   font-weight: 650;

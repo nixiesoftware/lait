@@ -188,7 +188,7 @@ export function Sidebar({
         />
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col px-3 pb-2">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-2">
       {agent && (
         <div className="border-line bg-bg text-dim mx-1 mt-2 flex items-start gap-2 rounded-surface border p-2 text-xs">
           <Bot className="mt-0.5 size-icon-sm shrink-0" />
@@ -331,7 +331,7 @@ export function Sidebar({
           )
         }
       />
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div>
         {favoriteProjects.length > 0 && (
           <div className="mb-2">
             <MiniSection title="Favorites" />

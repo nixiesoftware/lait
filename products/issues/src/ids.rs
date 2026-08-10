@@ -79,6 +79,11 @@ mechanics::prefixed_id!(
     /// Baseline id — one versioned collection of exact Spec revisions.
     BaselineId, "bas_"
 );
+mechanics::prefixed_id!(
+    /// Observation id — one retractable note about the graph, held in a Spec
+    /// Body's `observations` set rather than in any revision.
+    ObservationId, "obs_"
+);
 
 /// Mint a canonical (lowercase) comment id.
 pub fn mint_comment_id(clock: &dyn UlidSource) -> String {
@@ -108,6 +113,7 @@ mint_lower!(
     mint_attachment_id => AttachmentId,
     mint_spec_id => SpecId,
     mint_baseline_id => BaselineId,
+    mint_observation_id => ObservationId,
 );
 
 #[cfg(test)]

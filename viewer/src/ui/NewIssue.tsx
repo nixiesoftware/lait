@@ -5,6 +5,7 @@ import { LayoutTemplate, Maximize2, Minimize2, Trash2, X } from "lucide-react";
 
 import { rpc } from "../api";
 import { clearDraft, loadDraft, loadFields, saveDraft, saveFields } from "../core/drafts";
+import { plainDocument } from "../core/document";
 import { loadTemplates, removeTemplate, saveTemplate, type IssueTemplate } from "../core/templates";
 import * as ask from "./dialogs";
 
@@ -251,7 +252,7 @@ export function NewIssue({
       const r = await rpc(spaceId, {
         cmd: "issue_new",
         title: t,
-        ...(body.trim() ? { body: body.trim() } : {}),
+        body: plainDocument(body.trim()),
         ...(priority !== "none" ? { priority } : {}),
         ...(picked.length ? { labels: picked } : {}),
         ...(assignees.length ? { assignees } : {}),

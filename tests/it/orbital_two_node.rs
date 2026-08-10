@@ -261,7 +261,8 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
     };
     assert_eq!(view.title, "Secret plan");
     assert_eq!(
-        view.description, "the sealed body",
+        view.description,
+        format!("{}the sealed body", issues::contract::DOCUMENT_PREFIX),
         "the E2EE body decrypted"
     );
 

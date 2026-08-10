@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { projectKeys, ProjectViewerStore } from "./projectStore";
-import type { BoardView, Response, Row, SpaceDoorbell } from "./types";
+import type { BoardView, Response, Row, SpaceDoorbell, SpecLink } from "./types";
 
 const row: Row = {
   reff: "iss_1",
@@ -363,5 +363,82 @@ describe("ProjectViewerStore", () => {
     await store.ensureBoard("local", "ONE");
     await expect(store.toggleLabel("local", row.reff, "infra", true)).rejects.toThrow("refused");
     expect(store.selectRow("local", row.reff)?.label_names ?? []).toEqual([]);
+  });
+
+  describe("relating specs", () => {
+    const link = (spec: string): SpecLink => ({
+      rel: "verifies",
+      target: { kind: "spec", spec, revision: "rev_x" },
+    });
+    /** A `spec_show`/`spec_revise` reply carrying an exact head and link set. */
+    const reply = (revision: string, links: SpecLink[]) => ({
+      kind: "spec",
+      spec: {
+        spec: "spc_1",
+        project: "prj_1",
+        kind: "requirement",
+        title: "Login is race-free",
+        state: "draft",
+        revision,
+        heads: [revision],
+        issued: [],
+        body: {
+          spec: "spc_1", project: "prj_1", kind: "requirement",
+          title: "Login is race-free", text: "", state: "draft",
+          links, author: "act_1", ts: 0,
+        },
+      },
+    }) as unknown as Response;
+
+    it("writes nothing when the staged set matches the committed one", async () => {
+      const rpc = vi.fn(async (_space: string, _request: { cmd: string }) =>
+        reply("rev_1", [link("spc_a")]),
+      );
+      const store = new ProjectViewerStore(rpc as never);
+      await store.relateSpec("local", "spc_1", "rev_1", { added: [], removed: [] });
+      const revises = rpc.mock.calls
+        .map(([, request]) => request)
+        .filter((request) => request.cmd === "spec_revise");
+      expect(revises).toHaveLength(0);
+    });
+
+    it("replays the delta onto a head that moved, keeping the other author's link", async () => {
+      let head = "rev_1";
+      const rpc = vi.fn(async (_space: string, request: { cmd: string; links?: SpecLink[] }) => {
+        if (request.cmd === "spec_show") {
+          // The head has already moved to rev_2, where somebody else added d.
+          return reply(head, head === "rev_1" ? [link("spc_a")] : [link("spc_a"), link("spc_d")]);
+        }
+        if (request.cmd === "spec_revise") {
+          if (head === "rev_1") { head = "rev_2"; throw new Error("that change conflicts with the current state"); }
+          return reply("rev_3", request.links ?? []);
+        }
+        return { kind: "ok", message: null } as Response;
+      });
+      const store = new ProjectViewerStore(rpc as never);
+      await store.relateSpec("local", "spc_1", "rev_1", { added: [link("spc_c")], removed: [] });
+      const revises = rpc.mock.calls
+        .map(([, request]) => request as { cmd: string; expected?: string; links?: SpecLink[] })
+        .filter((request) => request.cmd === "spec_revise");
+      expect(revises).toHaveLength(2);
+      expect(revises[1]?.expected).toBe("rev_2");
+      // The rebase kept d — which this author never saw — and still added c.
+      expect(revises[1]?.links).toEqual([link("spc_a"), link("spc_d"), link("spc_c")]);
+    });
+
+    it("rethrows a refusal the head did not move under", async () => {
+      const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+        if (request.cmd === "spec_show") return reply("rev_1", []);
+        throw new Error("no such target");
+      });
+      const store = new ProjectViewerStore(rpc as never);
+      await expect(
+        store.relateSpec("local", "spc_1", "rev_1", { added: [link("spc_c")], removed: [] }),
+      ).rejects.toThrow("no such target");
+      const revises = rpc.mock.calls
+        .map(([, request]) => request as { cmd: string })
+        .filter((request) => request.cmd === "spec_revise");
+      expect(revises).toHaveLength(1);
+    });
   });
 });

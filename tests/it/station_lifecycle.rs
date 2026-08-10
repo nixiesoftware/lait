@@ -190,7 +190,13 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
         panic!("expected Issue, got {resp:?}");
     };
     assert_eq!(view.title, "Served over the socket");
-    assert_eq!(view.description, "through the Station host");
+    assert_eq!(
+        view.description,
+        format!(
+            "{}through the Station host",
+            issues::contract::DOCUMENT_PREFIX
+        )
+    );
     assert_eq!(view.priority, issues::dto::Priority::High);
 
     // Comment routes too.

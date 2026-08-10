@@ -276,6 +276,9 @@ pub struct Revision {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Spec {
     pub revisions: Vec<Revision>,
+    /// Notes filed against this document, in a set beside the revision map
+    /// rather than inside any revision. See `Observation`.
+    pub observations: Vec<Observation>,
 }
 
 impl Spec {
@@ -288,7 +291,27 @@ impl Spec {
             .filter_map(|raw| serde_json::from_slice(raw).ok())
             .collect();
         revisions.sort_by(|a, b| a.revision.cmp(&b.revision));
-        Self { revisions }
+        let mut observations: Vec<Observation> = view
+            .sets
+            .get("observations")
+            .into_iter()
+            .flatten()
+            .filter_map(|raw| serde_json::from_slice(raw).ok())
+            .collect();
+        // By when they were noticed, then by id so the order is total: a set is
+        // unordered by construction, and a reader scrolling notes wants the
+        // thread they were written in.
+        observations.sort_by(|a, b| (a.ts, &a.observation).cmp(&(b.ts, &b.observation)));
+        Self {
+            revisions,
+            observations,
+        }
+    }
+
+    pub fn observation(&self, id: &str) -> Option<&Observation> {
+        self.observations
+            .iter()
+            .find(|entry| entry.observation == id)
     }
 
     pub fn heads(&self) -> Vec<&Revision> {
@@ -603,6 +626,68 @@ pub struct SpecReference {
     pub issued: bool,
 }
 
+/// One retractable note about the graph, bound to nobody's document.
+///
+/// A `Link` is something a document *says*: it lives inside a revision, it is
+/// covered by that revision's hash, and issuing the document issues it. That is
+/// the right shape for a claim its author is answerable for, and the wrong shape
+/// for the other thing people need to record — that REQ-3 conflicts with REQ-7,
+/// that this design depends on that one, that a Proof turned out to cover a
+/// second requirement nobody had connected. Those are true *about* documents
+/// rather than said *by* one, and laundering them through a document forces an
+/// author to amend material they may not own and, on issued material, to raise a
+/// draft successor that announces a change to governing truth that is not
+/// happening.
+///
+/// So an Observation is deliberately the inverse of a Link on every axis that
+/// matters:
+///
+/// - it carries its own observer, not the document's author;
+/// - it is not in any revision, so it never enters the content hash and issuing
+///   a document neither adopts nor freezes it;
+/// - it lives in a CRDT set, so two observers adding different notes merge
+///   instead of colliding on a compare-and-swap;
+/// - it is retractable on its own, without writing a revision;
+/// - **it never reaches a Packet, and never counts as verification coverage.**
+///
+/// That last one is the whole firewall. An observation that could quietly become
+/// enforcing would be a `governs` Link that skipped issuance, which is precisely
+/// the hole `Rel::References` is worded to keep shut.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    pub observation: String,
+    /// The Spec this note is filed against — the set it lives in.
+    pub spec: String,
+    /// Who noticed. Not the subject document's author, and not its issuer.
+    pub observer: String,
+    pub ts: u64,
+    pub rel: Rel,
+    pub target: Target,
+    /// Why they think so, in their words. An observation with no argument
+    /// behind it is a claim nobody can weigh.
+    #[serde(default)]
+    pub note: String,
+}
+
+impl Observation {
+    pub fn validate(&self) -> Result<(), String> {
+        if crate::ids::ObservationId::parse(&self.observation).is_none() {
+            return Err("invalid Observation id".into());
+        }
+        if crate::ids::SpecId::parse(&self.spec).is_none() {
+            return Err("invalid Spec id".into());
+        }
+        if mechanics::ids::ActorId::parse(&self.observer).is_none() {
+            return Err("invalid Observation observer".into());
+        }
+        if self.note.len() > MAX_TEXT_BYTES {
+            return Err("Observation note is too long".into());
+        }
+        validate_target(&self.target)
+    }
+}
+
 /// One exact Spec revision as it appears in an Issue Packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -889,6 +974,7 @@ mod tests {
         .expect("draft revision");
         let spec = Spec {
             revisions: vec![first.clone(), second],
+            ..Spec::default()
         };
         assert!(matches!(spec.issued(), Issued::One(rev) if rev.revision == first.revision));
     }
@@ -907,6 +993,7 @@ mod tests {
         .expect("issued revision");
         let spec = Spec {
             revisions: vec![first, second.clone()],
+            ..Spec::default()
         };
         assert!(matches!(spec.issued(), Issued::One(rev) if rev.revision == second.revision));
     }
@@ -954,6 +1041,7 @@ mod tests {
         .expect("right");
         let spec = Spec {
             revisions: vec![root, left, right],
+            ..Spec::default()
         };
         assert!(matches!(spec.issued(), Issued::Conflict(heads) if heads.len() == 2));
     }

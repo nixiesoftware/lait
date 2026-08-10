@@ -6,6 +6,7 @@ import {
   Annotation,
   EditorSelection,
   EditorState,
+  Facet,
   StateEffect,
   StateField,
   type Extension,
@@ -21,6 +22,7 @@ import {
 } from "@codemirror/view";
 
 import { codeUnitOffset } from "../core/anchor";
+import { documentPlainText, escapeText } from "../core/document";
 import { ISSUE_REF } from "../core/markdown";
 import {
   applyTextSplice,
@@ -29,6 +31,7 @@ import {
   type TextSplice,
 } from "../core/textPreview";
 import { insertLink, toggleWrap } from "./markdownCommands";
+import { insertDocumentLink } from "./documentCommands";
 import { refChipElement, useRefs, type Refs, type ResolvedRef } from "./RefChip";
 import { SelectionToolbar } from "./SelectionToolbar";
 
@@ -450,6 +453,9 @@ class GlyphWidget extends WidgetType {
 /** The resolver, carried in editor state so `livePreview` can reach it — a
  *  decoration widget is a DOM node with no React above it. */
 const setRefs = StateEffect.define<Refs | null>();
+const documentMode = Facet.define<boolean, boolean>({
+  combine: (values) => values.some(Boolean),
+});
 const refsField = StateField.define<Refs | null>({
   create: () => null,
   update(held, transaction) {
@@ -465,6 +471,123 @@ const CALLOUT = /^\s*\[!(note|tip|important|warning|caution)\]/i;
 const UNDERLINE = /<u>([^<\n]+)<\/u>/g;
 
 /**
+ * Decorations for the current Lait document model. Structural Typst tokens are
+ * collapsed on every line, including the caret line: the storage language is
+ * not an editing mode users can enter. The source stays in CodeMirror so CRDT
+ * splices, remote carets and range anchors retain their existing coordinates.
+ */
+function documentPreview(state: EditorState): DecorationSet {
+  const decorations: Array<ReturnType<Decoration["range"]>> = [];
+  const syntax = (from: number, to: number) => {
+    if (to > from) decorations.push(Decoration.replace({}).range(from, to));
+  };
+  const lineClass = (at: number, cls: string) =>
+    decorations.push(Decoration.line({ class: cls }).range(state.doc.lineAt(at).from));
+  const source = state.doc.toString();
+
+  const discriminator = /^\/\/ lait-document:1\n?/.exec(source);
+  if (discriminator) syntax(0, discriminator[0].length);
+
+  let fenced = false;
+  for (let number = 1; number <= state.doc.lines; number += 1) {
+    const line = state.doc.line(number);
+    const text = line.text;
+    const heading = /^(={1,4})\s+/.exec(text);
+    if (heading) {
+      lineClass(line.from, `cm-md-heading cm-md-h${heading[1]!.length}`);
+      syntax(line.from, line.from + heading[0].length);
+    }
+    const list = /^([+-])\s+/.exec(text);
+    if (list) {
+      lineClass(line.from, `cm-md-li${list[1] === "+" ? " cm-md-li-ordered" : ""}`);
+      decorations.push(
+        Decoration.replace({
+          widget: new GlyphWidget(list[1] === "+" ? "1." : "•", "cm-md-bullet"),
+        }).range(line.from, line.from + list[0].length),
+      );
+    }
+    if (text.startsWith("```")) {
+      syntax(line.from, line.to);
+      lineClass(line.from, "cm-md-fence");
+      fenced = !fenced;
+    } else if (fenced) {
+      lineClass(line.from, "cm-md-fence cm-md-code-block");
+    }
+    const callout = /^#lait-callout\("(note|tip|important|warning|caution)"\)/.exec(text);
+    if (callout) lineClass(line.from, `cm-md-callout cm-md-callout-${callout[1]}`);
+    if (text.startsWith("#quote(")) lineClass(line.from, "cm-md-quote");
+    const task = /^#lait-task\((true|false)\)\[/.exec(text);
+    if (task) {
+      lineClass(line.from, "cm-md-li");
+      decorations.push(
+        Decoration.widget({
+          widget: new GlyphWidget(task[1] === "true" ? "☑" : "☐", "cm-md-task"),
+          side: -1,
+        }).range(line.from),
+      );
+    }
+    if (text.startsWith("#lait-table(") || /^\s*(?:align|header|rows):/.test(text)) {
+      lineClass(line.from, "cm-md-table");
+    }
+    if (text === "#line(length: 100%)") {
+      lineClass(line.from, "cm-md-hr");
+      syntax(line.from, line.to);
+    }
+  }
+
+  // A backslash is an escape in canonical source and never prose itself.
+  for (const pattern of [/\\(?=.)/g, /(?<!\\)[*_]/g, /(?<!\\)[\[\]]/g]) {
+    for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+      syntax(match.index, match.index + match[0].length);
+    }
+  }
+
+  // Hide function names, arguments and the opening content delimiter. Content
+  // remains directly editable; the matching closing bracket is covered above.
+  const calls = /#(?:strike|underline|link|quote|lait-callout|lait-task)\((?:\\.|[^)])*\)\[/g;
+  for (let match = calls.exec(source); match; match = calls.exec(source)) {
+    syntax(match.index, match.index + match[0].length);
+  }
+  for (const prefix of [/#strike\[/g, /#underline\[/g]) {
+    for (let match = prefix.exec(source); match; match = prefix.exec(source)) {
+      syntax(match.index, match.index + match[0].length);
+    }
+  }
+  for (const { pattern, cls } of [
+    { pattern: /(?<!\\)\*([^*\n]+)(?<!\\)\*/g, cls: "cm-md-strong" },
+    { pattern: /(?<!\\)_([^_\n]+)(?<!\\)_/g, cls: "cm-md-emphasis" },
+    { pattern: /#strike\[([^\]\n]+)\]/g, cls: "cm-md-strike" },
+    { pattern: /#underline\[([^\]\n]+)\]/g, cls: "cm-md-underline" },
+    { pattern: /#link\("(?:\\.|[^"])*"\)\[([^\]\n]+)\]/g, cls: "cm-md-link" },
+  ]) {
+    for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+      const content = match[1]!;
+      const from = match.index + match[0].indexOf(content);
+      decorations.push(Decoration.mark({ class: cls }).range(from, from + content.length));
+    }
+  }
+  const raw = /#raw\((?:block:\s*true,\s*)?(?:lang:\s*"(?:\\.|[^"])*",\s*)?"/g;
+  for (let match = raw.exec(source); match; match = raw.exec(source)) {
+    syntax(match.index, match.index + match[0].length);
+  }
+  for (const suffix of source.matchAll(/"\)/g)) syntax(suffix.index, suffix.index + 2);
+
+  const refs = state.field(refsField, false) ?? null;
+  if (refs) {
+    const pattern = new RegExp(ISSUE_REF.source, "g");
+    for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+      const target = refs.resolve(match[1]!);
+      if (!target) continue;
+      decorations.push(
+        Decoration.replace({ widget: new RefChipWidget(target, refs.open) })
+          .range(match.index, match.index + match[0].length),
+      );
+    }
+  }
+  return Decoration.set(decorations, true);
+}
+
+/**
  * Source-native live preview. Markdown punctuation is hidden only away from the
  * active line, so every byte is directly editable whenever the caret approaches
  * it — and everything the reading view formats gets formatted here, because a
@@ -476,6 +599,7 @@ const UNDERLINE = /<u>([^<\n]+)<\/u>/g;
  * highlight covered characters that were not on screen.
  */
 function livePreview(state: EditorState): DecorationSet {
+  if (state.facet(documentMode)) return documentPreview(state);
   const active = new Set<number>();
   for (const range of state.selection.ranges) {
     const first = state.doc.lineAt(range.from).number;
@@ -738,6 +862,7 @@ export default function CodeMirrorEditor({
   remotePreviews = [],
   acceptRemote = true,
   onAwareness,
+  documentSchema = 0,
 }: {
   value: string;
   readOnly?: boolean;
@@ -755,6 +880,7 @@ export default function CodeMirrorEditor({
     typing: boolean,
     markdown: string,
   ) => void;
+  documentSchema?: number;
 }) {
   const refs = useRefs();
   const mount = useRef<HTMLDivElement | null>(null);
@@ -830,6 +956,7 @@ export default function CodeMirrorEditor({
       );
     };
     const extensions: Extension[] = [
+      documentMode.of(documentSchema > 0),
       // GFM, not strict CommonMark: tables, strikethrough and task lists are
       // three of the things `core/markdown.ts` renders, and under the default
       // base the grammar has no node for any of them — the live preview would
@@ -842,15 +969,25 @@ export default function CodeMirrorEditor({
       // shortcut and a button cannot drift; `preventDefault` is what stops
       // ⌘B reaching the shell's own binding for it.
       keymap.of([
-        { key: "Mod-b", run: (editor) => apply(editor, (s) => toggleWrap(s, "**")) },
-        { key: "Mod-i", run: (editor) => apply(editor, (s) => toggleWrap(s, "*")) },
-        { key: "Mod-u", run: (editor) => apply(editor, (s) => toggleWrap(s, "<u>", "</u>")) },
-        { key: "Mod-k", run: (editor) => apply(editor, (s) => insertLink(s)) },
+        { key: "Mod-b", run: (editor) => apply(editor, (s) => toggleWrap(s, documentSchema > 0 ? "*" : "**")) },
+        { key: "Mod-i", run: (editor) => apply(editor, (s) => toggleWrap(s, documentSchema > 0 ? "_" : "*")) },
+        { key: "Mod-u", run: (editor) => apply(editor, (s) => toggleWrap(s, documentSchema > 0 ? "#underline[" : "<u>", documentSchema > 0 ? "]" : "</u>")) },
+        { key: "Mod-k", run: (editor) => apply(editor, (s) => documentSchema > 0 ? insertDocumentLink(s) : insertLink(s)) },
       ]),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.lineWrapping,
       EditorView.editable.of(!readOnly),
       EditorState.readOnly.of(readOnly),
+      ...(documentSchema > 0 ? [EditorView.inputHandler.of((editor, from, to, text) => {
+        const escaped = escapeText(text);
+        if (escaped === text) return false;
+        editor.dispatch({
+          changes: { from, to, insert: escaped },
+          selection: EditorSelection.cursor(from + escaped.length),
+          userEvent: "input.type",
+        });
+        return true;
+      })] : []),
       editorTheme,
       livePreviewField,
       remoteDecorations,
@@ -860,6 +997,17 @@ export default function CodeMirrorEditor({
       // that moves out from under the cursor. `pointerup` goes on the window,
       // not the editor: a drag that ends outside the pane still ends.
       EditorView.domEventHandlers({
+        copy(event, editor) {
+          if (documentSchema <= 0 || !event.clipboardData) return false;
+          const range = editor.state.selection.main;
+          if (range.empty) return false;
+          event.clipboardData.setData(
+            "text/plain",
+            documentPlainText(editor.state.doc.sliceString(range.from, range.to)),
+          );
+          event.preventDefault();
+          return true;
+        },
         pointerdown(_event, editor) {
           selecting.current = true;
           setBar(null);
@@ -922,7 +1070,7 @@ export default function CodeMirrorEditor({
       editor.destroy();
       view.current = null;
     };
-  }, [readOnly]);
+  }, [readOnly, documentSchema]);
 
   useLayoutEffect(() => {
     const editor = view.current;
@@ -991,6 +1139,7 @@ export default function CodeMirrorEditor({
         <SelectionToolbar
           at={bar}
           state={bar.state}
+          document={documentSchema > 0}
           run={(spec) => {
             const editor = view.current;
             if (!editor) return;
@@ -1017,7 +1166,7 @@ export default function CodeMirrorEditor({
           ))}
         </div>
       )}
-      <div ref={mount} className={`codemirror-markdown ${className ?? ""}`} />
+      <div ref={mount} className={`codemirror-markdown${documentSchema > 0 ? " codemirror-document" : ""} ${className ?? ""}`} />
     </div>
   );
 }

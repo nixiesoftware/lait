@@ -47,6 +47,7 @@ import {
 } from "../core/activity";
 import { codeUnitSpan } from "../core/anchor";
 import { continueTextPreview, textRevision } from "../core/textPreview";
+import { upgradeMarkdown } from "../core/document";
 import {
   awarenessReadyFor,
   caretPhrase,
@@ -90,6 +91,7 @@ import { avatarColor, catalogColor } from "./colors";
 import { PriorityIcon, ProgressRing, ProjectIcon, StatusIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { Document } from "./Document";
 import type {
   RemoteContext,
   RemoteCursor,
@@ -248,6 +250,24 @@ export function IssueDetail({
     }
   }, [onError]);
 
+  const upgradeDocument = useCallback(async () => {
+    if (!issue || (issue.document_schema ?? 0) > 0 || pendingAction !== null) return;
+    setPendingAction("document");
+    try {
+      const upgraded = upgradeMarkdown(issue.description);
+      await rpc(spaceId, {
+        cmd: "issue_document_upgrade",
+        reff: issue.reff,
+        expected: issue.description,
+        splices: upgraded.splices,
+      });
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingAction(null);
+    }
+  }, [issue, onError, pendingAction, spaceId]);
+
   const memberOf = useCallback(
     (key: string): MemberDto | undefined => members.find((m) => m.key === key),
     [members],
@@ -331,7 +351,11 @@ export function IssueDetail({
         cmd: "issue_new",
         title: `${issue.title} (copy)`,
         project: issue.project_id,
-        body: issue.description || null,
+        body: issue.description
+          ? (issue.document_schema ?? 0) > 0
+            ? issue.description
+            : upgradeMarkdown(issue.description).source
+          : null,
         priority: issue.priority,
         labels: issue.label_names,
         assignees: issue.assignees,
@@ -380,6 +404,7 @@ export function IssueDetail({
           locked={locked}
           tombstone={tombstone}
           pending={pendingAction !== null}
+          legacyDocument={(issue.document_schema ?? 0) === 0}
           onCopyLink={() => void navigator.clipboard.writeText(window.location.href)}
           onDuplicate={() => void duplicateIssue()}
           onRelate={() => setRelating(true)}
@@ -387,6 +412,7 @@ export function IssueDetail({
           onAttach={() => document.getElementById("issue-attach")?.click()}
           onAssign={() => onOpenField("assignee")}
           onMove={() => onOpenField("project")}
+          onUpgradeDocument={() => void upgradeDocument()}
           onStop={() => void runWorkAction("stop")}
           onRestore={() => void send(() => rpc(spaceId, { cmd: "issue_restore", reff: issue.reff }))}
           onDelete={() => onDelete(issue.reff)}
@@ -896,6 +922,7 @@ export function IssueDetail({
         <Description
           draftKey={{ spaceId: canonicalSpaceId, reff }}
           value={issue.description}
+          documentSchema={issue.document_schema ?? 0}
           readOnly={locked}
           remoteCursors={carets(live.entries)
             .filter((mark) => mark.field === "description" && mark.position.caret === "at")
@@ -1362,6 +1389,7 @@ function IssueOverflow({
   locked,
   tombstone,
   pending,
+  legacyDocument,
   onCopyLink,
   onDuplicate,
   onRelate,
@@ -1369,6 +1397,7 @@ function IssueOverflow({
   onAttach,
   onAssign,
   onMove,
+  onUpgradeDocument,
   onStop,
   onRestore,
   onDelete,
@@ -1378,6 +1407,7 @@ function IssueOverflow({
   locked: boolean;
   tombstone: boolean;
   pending: boolean;
+  legacyDocument: boolean;
   onCopyLink: () => void;
   onDuplicate: () => void;
   onRelate: () => void;
@@ -1385,6 +1415,7 @@ function IssueOverflow({
   onAttach: () => void;
   onAssign: () => void;
   onMove: () => void;
+  onUpgradeDocument: () => void;
   onStop: () => void;
   onRestore: () => void;
   onDelete: () => void;
@@ -1411,6 +1442,14 @@ function IssueOverflow({
       />
       {!locked && !tombstone && (
         <>
+          {legacyDocument && (
+            <DropdownMenuItem
+              label="Upgrade document"
+              icon={<ArrowUp className="size-icon-sm" />}
+              isDisabled={pending}
+              onClick={onUpgradeDocument}
+            />
+          )}
           <DropdownMenuItem label="Duplicate issue" icon={<CopyPlus className="size-icon-sm" />} isDisabled={pending} onClick={onDuplicate} />
           <DropdownMenuItem label="Add relation" icon={<Link2 className="size-icon-sm" />} isDisabled={pending} onClick={onRelate} />
           <DropdownMenuItem label="Add sub-issue" icon={<CornerDownRight className="size-icon-sm" />} isDisabled={pending} onClick={onAddSubIssue} />
@@ -2941,6 +2980,7 @@ function EventGlyph({
 function Description({
   draftKey,
   value,
+  documentSchema,
   readOnly,
   onSplice,
   onCheckpoint,
@@ -2953,6 +2993,7 @@ function Description({
 }: {
   draftKey: { spaceId: string; reff: string };
   value: string;
+  documentSchema: number;
   readOnly: boolean;
   onSplice: (splice: TextSplice) => Promise<unknown>;
   onCheckpoint: () => Promise<unknown>;
@@ -3041,7 +3082,9 @@ function Description({
             out, but won’t be written until you hold write access again.
           </p>
         )}
-        {value ? <Markdown text={value} /> : <span className="text-mute">No description</span>}
+        {value ? (
+          documentSchema > 0 ? <Document source={value} /> : <Markdown text={value} />
+        ) : <span className="text-mute">No description</span>}
       </div>
     );
   }
@@ -3049,6 +3092,7 @@ function Description({
   return (
     <MarkdownEditor
       value={authoritative}
+      documentSchema={documentSchema}
       placeholder="Add description…"
       className="min-h-ctl-xl py-2"
       remoteCursors={remoteCursors}

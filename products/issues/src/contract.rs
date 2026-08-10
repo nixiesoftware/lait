@@ -41,6 +41,12 @@ pub const VIEW_SCHEMA_VERSION: u32 = 4;
 pub const LINK_KINDS: [&str; 3] = ["blocks", "relates", "duplicates"];
 /// The default status a fresh issue carries.
 pub const DEFAULT_STATUS: &str = "backlog";
+/// The canonical, user-invisible document model written by current clients.
+/// A missing/zero `document_schema` register identifies a legacy Markdown body.
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 1;
+/// Internal discriminator on canonical issue source. Client renderers collapse
+/// it; semantic APIs never ask callers to supply it.
+pub const DOCUMENT_PREFIX: &str = "// lait-document:1\n";
 /// The longest reaction emoji accepted, in UTF-8 bytes (a ZWJ family sequence
 /// fits; a paragraph does not).
 pub const MAX_REACTION_EMOJI_BYTES: usize = 32;
@@ -528,6 +534,19 @@ pub enum WorkAction {
     Stop,
 }
 
+/// One source-preserving edit used while upgrading a legacy issue body.
+///
+/// Edits are expressed in the same Unicode-scalar coordinate system as the
+/// live text CRDT and are applied in the order supplied. The adapter emits them
+/// from the end of the document towards the beginning, which keeps unchanged
+/// source material (and therefore range-comment anchors) alive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentSplice {
+    pub index: u64,
+    pub delete: u64,
+    pub insert: String,
+}
+
 /// The product intents (schema `issue` v1). Every id/timestamp is supplied by
 /// the daemon; the World validates and stages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -607,6 +626,16 @@ pub enum IssueIntent {
         index: u64,
         delete: u64,
         insert: String,
+    },
+    /// Atomically move one legacy issue body onto the current hidden document
+    /// schema. `expected` is a compare-and-swap over the exact legacy source;
+    /// a concurrent edit refuses the migration instead of being overwritten.
+    IssueDocumentUpgrade {
+        doc: String,
+        expected: String,
+        splices: Vec<DocumentSplice>,
+        device: String,
+        ts: u64,
     },
     /// A grouped activity marker for a completed burst of description edits.
     /// Text replication is intentionally not coupled to this bookkeeping op.
@@ -1051,6 +1080,17 @@ pub enum IssueIntent {
         device: String,
         ts: u64,
     },
+    /// Create a schema-only successor to one legacy Spec head while preserving
+    /// its lifecycle state. This is separate from an ordinary revision because
+    /// a storage migration must not turn issued truth back into a draft.
+    SpecDocumentUpgrade {
+        spec: String,
+        expected: String,
+        text: String,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
     /// Move the one expected Spec head through review/issue/withdraw. The
     /// transition itself is another immutable revision.
     SpecState {
@@ -1066,6 +1106,30 @@ pub enum IssueIntent {
         spec: String,
         expected_heads: Vec<String>,
         body_json: String,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// File one retractable note about the graph against a Spec.
+    ///
+    /// No `expected`: an Observation is not a revision and does not compete for
+    /// the head, so two observers noting different things converge instead of
+    /// refusing each other. See `spec::Observation` for why this is not a Link.
+    SpecObserve {
+        observation: String,
+        spec: String,
+        rel: crate::spec::Rel,
+        target: crate::spec::Target,
+        note: String,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Withdraw one Observation. The observer takes their own note back; anyone
+    /// else needs the project's issuing capability.
+    SpecRetract {
+        spec: String,
+        observation: String,
         actor: String,
         device: String,
         ts: u64,
@@ -1275,6 +1339,14 @@ pub enum IssueQuery {
     /// per row. Bounded by revisions × links, which is the same order the Packet
     /// derivation already walks.
     SpecReferences {
+        project: Option<String>,
+    },
+    /// Every Observation filed in a project, in both directions at once.
+    ///
+    /// Project-wide for the same reason the references are: a note names a
+    /// subject and a target, so "what has anyone noticed about this document"
+    /// is only answerable by reading the sets of documents other than it.
+    SpecObservations {
         project: Option<String>,
     },
     /// The deterministic effective brief for one Issue.

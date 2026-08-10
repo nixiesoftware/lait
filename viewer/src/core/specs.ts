@@ -287,6 +287,32 @@ export function incomingFor(
  * particular has to read as informative — it is the one verb that deliberately
  * never becomes enforcing, and a bare tag would let it look like the others.
  */
+/**
+ * The verbs, in `spec.rs` `Rel::ALL` order.
+ *
+ * The engine's order rather than the alphabet's or the label's, for the same
+ * reason the kinds keep theirs: it runs derivation before verification before
+ * the annotations, so a picker read top to bottom offers the chain in the order
+ * somebody works it.
+ */
+export const SPEC_RELS = [
+  "derives",
+  "decomposes",
+  "implements",
+  "governs",
+  "amends",
+  "supersedes",
+  "clarifies",
+  "incorporates",
+  "references",
+  "verifies",
+  "validates",
+  "waives",
+  "records",
+  "conflicts",
+  "depends",
+] as const satisfies readonly SpecRel[];
+
 export const SPEC_REL_LABEL: Record<SpecRel, string> = {
   derives: "derives from",
   decomposes: "decomposes into",
@@ -319,6 +345,58 @@ export function targetLabel(target: SpecTarget): string {
 
 export function linkPhrase(link: SpecLink): string {
   return `${SPEC_REL_LABEL[link.rel]} ${targetLabel(link.target)}`;
+}
+
+// ---- editing links ----------------------------------------------------------
+
+/**
+ * What a staged edit did to a document's assertions.
+ *
+ * Kept as a delta rather than as the resulting set because that is what
+ * survives the head moving underneath. `spec_revise` replaces the whole link
+ * array against an expected head, so a client holding "the links should now be
+ * X" can only either win the race or lose it — and losing it by writing X would
+ * silently drop whatever the other author added in between.
+ */
+export interface LinkDelta {
+  added: SpecLink[];
+  removed: SpecLink[];
+}
+
+export function linkDelta(from: readonly SpecLink[], to: readonly SpecLink[]): LinkDelta {
+  const before = new Map(from.map((link) => [linkKey(link), link]));
+  const after = new Map(to.map((link) => [linkKey(link), link]));
+  return {
+    added: [...after].filter(([key]) => !before.has(key)).map(([, link]) => link),
+    removed: [...before].filter(([key]) => !after.has(key)).map(([, link]) => link),
+  };
+}
+
+/**
+ * Replay a delta onto whatever the links are now.
+ *
+ * Safe to replay precisely because a link set is a set: adding `X` and adding
+ * `Y` commute, so a rebase needs no merge policy and cannot invent a claim
+ * neither author made. A remove whose target is already gone is satisfied
+ * rather than an error — the intent was that it not be there.
+ *
+ * Order is not normalised here. `build_revision` canonicalises the Body before
+ * it validates or hashes it (`spec.rs`), so the client must not try to
+ * replicate Rust's derived ordering; deduplicating is enough.
+ */
+export function applyLinkDelta(onto: readonly SpecLink[], delta: LinkDelta): SpecLink[] {
+  const gone = new Set(delta.removed.map(linkKey));
+  const out = new Map<string, SpecLink>();
+  for (const link of onto) {
+    const key = linkKey(link);
+    if (!gone.has(key)) out.set(key, link);
+  }
+  for (const link of delta.added) out.set(linkKey(link), link);
+  return [...out.values()];
+}
+
+export function emptyDelta(delta: LinkDelta): boolean {
+  return delta.added.length === 0 && delta.removed.length === 0;
 }
 
 // ---- comparing revisions ----------------------------------------------------
@@ -390,7 +468,7 @@ export interface BodyDiff {
 }
 
 /** A key that identifies a Link by what it asserts about which exact target. */
-function linkKey(link: SpecLink): string {
+export function linkKey(link: SpecLink): string {
   const target = link.target;
   const at =
     target.kind === "issue"

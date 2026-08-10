@@ -216,6 +216,8 @@ export interface IssueView {
   key_alias: string | null;
   title: string;
   description: string;
+  /** Hidden Lait document-model version. Zero/absent is a legacy issue body. */
+  document_schema?: number;
   status: string;
   priority: Priority;
   assignees: string[];
@@ -291,6 +293,27 @@ export interface SpecReference {
   link: SpecLink;
   head: boolean;
   issued: boolean;
+}
+
+/**
+ * One retractable note about the graph — `spec.rs` `Observation`.
+ *
+ * The inverse of a `SpecLink` on every axis that matters: it carries its own
+ * observer rather than the document's author, it sits in no revision so issuing
+ * the document neither adopts nor freezes it, and it never reaches a Packet or
+ * counts as verification coverage. It is what somebody *noticed*, not what the
+ * document *says*.
+ */
+export interface SpecObservation {
+  observation: string;
+  /** The Spec it is filed against — whose set it lives in. */
+  spec: string;
+  observer: string;
+  /** Unix seconds. */
+  ts: number;
+  rel: SpecRel;
+  target: SpecTarget;
+  note: string;
 }
 
 /** One immutable revision and the revisions it descends from. */
@@ -852,6 +875,12 @@ export type BoardPos =
   | { at: "before"; reff: string }
   | { at: "after"; reff: string };
 
+export interface DocumentSplice {
+  index: number;
+  delete: number;
+  insert: string;
+}
+
 export interface Filter {
   mine?: boolean;
   status?: string | null;
@@ -886,6 +915,8 @@ export type Request =
   | { cmd: "issue_edit"; reff: string; title?: string | null; status?: string | null; priority?: string | null; description?: string | null; due?: string | null; estimate?: string | null }
   /** Unicode-scalar offsets into the collaborative description text. */
   | { cmd: "issue_text_splice"; reff: string; index: number; delete: number; insert: string }
+  /** Atomic upgrade from a legacy body into Lait's hidden document model. */
+  | { cmd: "issue_document_upgrade"; reff: string; expected: string; splices: DocumentSplice[] }
   /** Group a burst of live splices into one activity entry. */
   | { cmd: "issue_text_checkpoint"; reff: string }
   | { cmd: "issue_move"; reff: string; project?: string | null; pos?: BoardPos | null }
@@ -1022,8 +1053,13 @@ export type Request =
   | { cmd: "baseline_history"; baseline: string }
   | { cmd: "spec_new"; project: string; kind: SpecKind; title: string; text?: string; links?: SpecLink[] }
   | { cmd: "spec_revise"; spec: string; expected: string; title?: string | null; text?: string | null; links?: SpecLink[] | null }
+  | { cmd: "spec_document_upgrade"; spec: string; expected: string; text: string }
   | { cmd: "spec_state"; spec: string; expected: string; state: SpecState }
   | { cmd: "spec_resolve"; spec: string; expected_heads: string[]; body_json: string }
+  /** Reply is `spec_observations` — every note filed in scope, both directions. */
+  | { cmd: "spec_observations"; project?: string | null }
+  | { cmd: "spec_observe"; spec: string; rel: SpecRel; target: SpecTarget; note?: string }
+  | { cmd: "spec_retract"; spec: string; observation: string }
   | { cmd: "baseline_list"; project?: string | null }
   | { cmd: "baseline_show"; baseline: string }
   | { cmd: "baseline_new"; project: string; name: string; members: SpecRef[] }
@@ -1221,6 +1257,7 @@ export type Response =
   | { kind: "specs"; specs: SpecView[] }
   | { kind: "spec_revisions"; revisions: SpecRevision[] }
   | { kind: "spec_references"; references: SpecReference[] }
+  | { kind: "spec_observations"; observations: SpecObservation[] }
   | { kind: "baseline_revisions"; revisions: BaselineRevisionDto[] }
   | ({ kind: "baseline" } & BaselineView)
   | { kind: "baselines"; baselines: BaselineView[] }

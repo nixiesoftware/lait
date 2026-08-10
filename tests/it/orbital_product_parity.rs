@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row, StatusCategory};
 use issues::ids::{
-    ActorId, BaselineId, DeviceId, DocId, LabelId, ProjectId, SpecId, SystemUlidSource,
+    ActorId, BaselineId, DeviceId, DocId, LabelId, ObservationId, ProjectId, SpecId,
+    SystemUlidSource,
 };
 use lait::world::contract::{self, IssueIntent, IssueQuery, Pos, WorkAction};
 use lait::world::IssuesWorld;
@@ -372,6 +373,101 @@ fn an_issue_packet_stays_pinned_while_the_next_spec_revision_is_drafted() {
     assert_eq!(after.governing.len(), 1);
     assert_eq!(after.governing[0].revision, issued.revision);
     assert!(after.conflicts.is_empty());
+}
+
+/// An Observation is a note about the graph, and the whole point of the concept
+/// is what it *cannot* do: it must never govern an Issue, and it must never be
+/// mistaken for the verification coverage a Link asserts. Both are one-line
+/// changes away from being wrong forever, so both are asserted here rather than
+/// left to the comments that explain them.
+#[test]
+fn an_observation_never_governs_and_never_becomes_a_link() {
+    let root = temp_root("spec-observation");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, reff) = seed_space(&mut driver);
+    let spec = SpecId::mint(&SystemUlidSource).as_str().to_string();
+
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecCreate {
+            spec: spec.clone(),
+            project,
+            kind: issues::spec::Kind::Requirement,
+            title: "Login is race-free".into(),
+            text: String::new(),
+            links: vec![],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let draft: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: spec.clone(),
+            expected: draft.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+
+    // The same shape a `governs` Link would take, filed as a note instead.
+    let observation = ObservationId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecObserve {
+            observation: observation.clone(),
+            spec: spec.clone(),
+            rel: issues::spec::Rel::Governs,
+            target: issues::spec::Target::Issue { issue: doc.clone() },
+            note: format!("this looks like it constrains {reff}"),
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+
+    let notes: Vec<issues::spec::Observation> =
+        driver.query(&IssueQuery::SpecObservations { project: None });
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].observation, observation);
+    assert_eq!(notes[0].observer, my_actor().as_str());
+
+    // Filed, readable — and governing nothing.
+    let packet: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc });
+    assert!(packet.governing.is_empty());
+    assert!(packet.guidance.is_empty());
+    assert!(packet.conflicts.is_empty());
+
+    // And invisible to the link graph, which is what coverage is read from.
+    let references: Vec<issues::spec::SpecReference> =
+        driver.query(&IssueQuery::SpecReferences { project: None });
+    assert!(references.is_empty());
+    let view: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    assert!(view.body.links.is_empty());
+
+    // Retracting takes it back without touching the revision trail.
+    let before: Vec<issues::spec::Revision> =
+        driver.query(&IssueQuery::SpecHistory { spec: spec.clone() });
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecRetract {
+            spec: spec.clone(),
+            observation,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let after: Vec<issues::spec::Observation> =
+        driver.query(&IssueQuery::SpecObservations { project: None });
+    assert!(after.is_empty());
+    let trail: Vec<issues::spec::Revision> = driver.query(&IssueQuery::SpecHistory { spec });
+    assert_eq!(trail.len(), before.len());
 }
 
 #[test]

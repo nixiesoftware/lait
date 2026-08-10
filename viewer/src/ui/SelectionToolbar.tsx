@@ -31,6 +31,16 @@ import {
   toggleWrap,
   wrapped,
 } from "./markdownCommands";
+import {
+  DOCUMENT_BULLET,
+  DOCUMENT_HEADING,
+  DOCUMENT_ORDERED,
+  documentBlocked,
+  insertDocumentLink,
+  toggleDocumentBlock,
+  toggleDocumentQuote,
+  toggleDocumentTask,
+} from "./documentCommands";
 import { cn } from "./primitives";
 
 /**
@@ -95,10 +105,13 @@ export function SelectionToolbar({
   at,
   state,
   run,
+  document = false,
 }: {
   at: BarAnchor;
   state: EditorState;
   run: (spec: TransactionSpec) => void;
+  /** Current hidden Lait document model rather than a legacy Markdown body. */
+  document?: boolean;
 }) {
   const self = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
@@ -118,6 +131,17 @@ export function SelectionToolbar({
   });
 
   const placed = fit(at, size, window.innerWidth);
+  const heading = (level: number) => document ? DOCUMENT_HEADING(level) : HEADING(level);
+  const isBlocked = (marker: (index: number) => string) =>
+    document ? documentBlocked(state, marker) : blocked(state, marker);
+  const block = (marker: (index: number) => string) =>
+    document ? toggleDocumentBlock(state, marker) : toggleBlock(state, marker);
+  const bold = document ? "*" : "**";
+  const italic = document ? "_" : "*";
+  const strike = document ? ["#strike[", "]"] as const : ["~~", "~~"] as const;
+  const underline = document ? ["#underline[", "]"] as const : ["<u>", "</u>"] as const;
+  const bullet = document ? DOCUMENT_BULLET : BULLET;
+  const ordered = document ? DOCUMENT_ORDERED : ORDERED;
   return (
     <div
       ref={self}
@@ -145,20 +169,20 @@ export function SelectionToolbar({
       <Button
         label="Heading 1"
         icon={<Heading1 className="size-icon-sm" />}
-        on={blocked(state, HEADING(1))}
-        act={() => run(toggleBlock(state, HEADING(1)))}
+        on={isBlocked(heading(1))}
+        act={() => run(block(heading(1)))}
       />
       <Button
         label="Heading 2"
         icon={<Heading2 className="size-icon-sm" />}
-        on={blocked(state, HEADING(2))}
-        act={() => run(toggleBlock(state, HEADING(2)))}
+        on={isBlocked(heading(2))}
+        act={() => run(block(heading(2)))}
       />
       <Button
         label="Heading 3"
         icon={<Heading3 className="size-icon-sm" />}
-        on={blocked(state, HEADING(3))}
-        act={() => run(toggleBlock(state, HEADING(3)))}
+        on={isBlocked(heading(3))}
+        act={() => run(block(heading(3)))}
       />
 
       <Rule />
@@ -167,28 +191,28 @@ export function SelectionToolbar({
         label="Bold"
         hint="⌘B"
         icon={<Bold className="size-icon-sm" />}
-        on={wrapped(state, "**")}
-        act={() => run(toggleWrap(state, "**"))}
+        on={wrapped(state, bold)}
+        act={() => run(toggleWrap(state, bold))}
       />
       <Button
         label="Italic"
         hint="⌘I"
         icon={<Italic className="size-icon-sm" />}
-        on={wrapped(state, "*")}
-        act={() => run(toggleWrap(state, "*"))}
+        on={wrapped(state, italic)}
+        act={() => run(toggleWrap(state, italic))}
       />
       <Button
         label="Strikethrough"
         icon={<Strikethrough className="size-icon-sm" />}
-        on={wrapped(state, "~~")}
-        act={() => run(toggleWrap(state, "~~"))}
+        on={wrapped(state, strike[0], strike[1])}
+        act={() => run(toggleWrap(state, strike[0], strike[1]))}
       />
       <Button
         label="Underline"
         hint="⌘U"
         icon={<Underline className="size-icon-sm" />}
-        on={wrapped(state, "<u>", "</u>")}
-        act={() => run(toggleWrap(state, "<u>", "</u>"))}
+        on={wrapped(state, underline[0], underline[1])}
+        act={() => run(toggleWrap(state, underline[0], underline[1]))}
       />
 
       <Rule />
@@ -197,13 +221,13 @@ export function SelectionToolbar({
         label="Link"
         hint="⌘K"
         icon={<Link2 className="size-icon-sm" />}
-        act={() => run(insertLink(state))}
+        act={() => run(document ? insertDocumentLink(state) : insertLink(state))}
       />
       <Button
         label="Quote"
         icon={<Quote className="size-icon-sm" />}
-        on={blocked(state, QUOTE)}
-        act={() => run(toggleBlock(state, QUOTE))}
+        on={document ? wrapped(state, "#quote(block: true)[", "]") : blocked(state, QUOTE)}
+        act={() => run(document ? toggleDocumentQuote(state) : toggleBlock(state, QUOTE))}
       />
       <Button
         label="Code"
@@ -222,20 +246,20 @@ export function SelectionToolbar({
       <Button
         label="Bulleted list"
         icon={<List className="size-icon-sm" />}
-        on={blocked(state, BULLET)}
-        act={() => run(toggleBlock(state, BULLET))}
+        on={isBlocked(bullet)}
+        act={() => run(block(bullet))}
       />
       <Button
         label="Numbered list"
         icon={<ListOrdered className="size-icon-sm" />}
-        on={blocked(state, ORDERED)}
-        act={() => run(toggleBlock(state, ORDERED))}
+        on={isBlocked(ordered)}
+        act={() => run(block(ordered))}
       />
       <Button
         label="Task list"
         icon={<ListTodo className="size-icon-sm" />}
-        on={blocked(state, TASK)}
-        act={() => run(toggleBlock(state, TASK))}
+        on={document ? wrapped(state, "#lait-task(false)[", "]") : blocked(state, TASK)}
+        act={() => run(document ? toggleDocumentTask(state) : toggleBlock(state, TASK))}
       />
     </div>
   );

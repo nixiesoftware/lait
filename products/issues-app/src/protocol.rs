@@ -17,6 +17,14 @@ pub enum BoardPos {
     After { reff: String },
 }
 
+/// One Unicode-scalar edit in an atomic legacy-document upgrade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentSplice {
+    pub index: u64,
+    pub delete: u64,
+    pub insert: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Filter {
     #[serde(default)]
@@ -108,6 +116,13 @@ pub enum IssuesRequest {
         index: u64,
         delete: u64,
         insert: String,
+    },
+    /// Upgrade a legacy issue body without exposing either storage language in
+    /// the user interface. `expected` prevents a concurrent edit being lost.
+    IssueDocumentUpgrade {
+        reff: String,
+        expected: String,
+        splices: Vec<DocumentSplice>,
     },
     /// Record one human-readable history entry after a burst of live splices.
     /// This is deliberately separate from replication: its quiet window must
@@ -494,6 +509,13 @@ pub enum IssuesRequest {
         #[serde(default)]
         links: Option<Vec<issues::spec::Link>>,
     },
+    /// Upgrade one legacy Spec body without exposing either document language
+    /// in the user interface. The immutable successor keeps the same state.
+    SpecDocumentUpgrade {
+        spec: String,
+        expected: String,
+        text: String,
+    },
     SpecState {
         spec: String,
         expected: String,
@@ -503,6 +525,21 @@ pub enum IssuesRequest {
         spec: String,
         expected_heads: Vec<String>,
         body_json: String,
+    },
+    SpecObservations {
+        #[serde(default)]
+        project: Option<String>,
+    },
+    SpecObserve {
+        spec: String,
+        rel: issues::spec::Rel,
+        target: issues::spec::Target,
+        #[serde(default)]
+        note: String,
+    },
+    SpecRetract {
+        spec: String,
+        observation: String,
     },
     BaselineList {
         #[serde(default)]
@@ -631,6 +668,9 @@ pub enum IssuesResponse {
     },
     SpecReferences {
         references: Vec<issues::spec::SpecReference>,
+    },
+    SpecObservations {
+        observations: Vec<issues::spec::Observation>,
     },
     BaselineRevisions {
         revisions: Vec<issues::spec::BaselineRevision>,
@@ -767,6 +807,7 @@ impl IssuesRequest {
             | SpecShow { .. }
             | SpecHistory { .. }
             | SpecReferences { .. }
+            | SpecObservations { .. }
             | BaselineList { .. }
             | BaselineShow { .. }
             | BaselineHistory { .. }
@@ -774,6 +815,7 @@ impl IssuesRequest {
             IssueNew { .. }
             | IssueEdit { .. }
             | IssueTextSplice { .. }
+            | IssueDocumentUpgrade { .. }
             | IssueTextCheckpoint { .. }
             | IssueMove { .. }
             | Assign { .. }
@@ -816,8 +858,11 @@ impl IssuesRequest {
             | WorkflowSet { .. }
             | SpecNew { .. }
             | SpecRevise { .. }
+            | SpecDocumentUpgrade { .. }
             | SpecState { .. }
             | SpecResolve { .. }
+            | SpecObserve { .. }
+            | SpecRetract { .. }
             | BaselineNew { .. }
             | BaselineRevise { .. }
             | BaselineState { .. }
@@ -1023,5 +1068,28 @@ mod tests {
         })
         .unwrap();
         assert_eq!(checkpoint["cmd"], "issue_text_checkpoint");
+
+        let upgrade = serde_json::to_value(IssuesRequest::IssueDocumentUpgrade {
+            reff: "ORB-1".into(),
+            expected: "# old".into(),
+            splices: vec![DocumentSplice {
+                index: 0,
+                delete: 1,
+                insert: "=".into(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(upgrade["cmd"], "issue_document_upgrade");
+        assert_eq!(upgrade["splices"][0]["index"], 0);
+        assert_eq!(upgrade["splices"][0]["insert"], "=");
+
+        let spec_upgrade = serde_json::to_value(IssuesRequest::SpecDocumentUpgrade {
+            spec: "spc_00000000000000000000000000".into(),
+            expected: "spr_0000000000000000000000000000000000000000000000000000".into(),
+            text: "// lait-document:1\n= Current".into(),
+        })
+        .unwrap();
+        assert_eq!(spec_upgrade["cmd"], "spec_document_upgrade");
+        assert_eq!(spec_upgrade["text"], "// lait-document:1\n= Current");
     }
 }

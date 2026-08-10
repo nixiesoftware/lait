@@ -25,6 +25,7 @@
 //! no dependency on any particular head: it answers in values, and whoever
 //! composed it decides what a person sees.
 
+pub mod document;
 pub mod host;
 pub mod lifecycle;
 pub mod mcp;
