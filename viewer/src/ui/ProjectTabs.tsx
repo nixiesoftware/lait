@@ -1,4 +1,4 @@
-import { isIssueMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
+import { isIssueMode, isSpecMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
 import { Button } from "@astryxdesign/core";
 import { cn, toolbarControl } from "./primitives";
 
@@ -9,7 +9,15 @@ import { cn, toolbarControl } from "./primitives";
  *  Specs earns a tab by the same rule that denies Board one: it is a different
  *  NOUN with its own query, not another drawing of the issues. It sits beside
  *  Issues because that is what it is beside — the work, and what the work is
- *  meant to satisfy. */
+ *  meant to satisfy.
+ *
+ *  Timeline briefly had one, on the argument that it answers a different
+ *  question from Issues — what order the work happens in, rather than which
+ *  work exists. True, and still not a tab: it answers that question about the
+ *  *plan*, and Specs is already the tab for the plan. So it is a layout under
+ *  Specs, and this strip is back to the four faces a project coordinates
+ *  between. A fifth pill for a drawing of one of the other four is the thing
+ *  the Board is denied a tab for. */
 const TABS: readonly ProjectView[] = ["overview", "activity", "list", "specs"];
 
 /**
@@ -49,10 +57,13 @@ export function ProjectTabs({
   return (
     <nav aria-label="Project views" className="flex shrink-0 items-center gap-1">
       {TABS.map((tab) => {
-        // Board and Calendar are Issues wearing a different layout, so the
-        // Issues tab stays lit under all three. Letting it go dark on a board
-        // would say you had left the issues, when you are looking at them.
-        const current = tab === "list" ? isIssueMode(view) : view === tab;
+        // A board is Issues wearing a different layout and a timeline is the
+        // plan wearing one, so each tab stays lit under all of its own layouts.
+        // Letting Issues go dark on a board would say you had left the issues
+        // when you are looking at them, and the same is true of the timeline
+        // and the plan it draws.
+        const current =
+          tab === "list" ? isIssueMode(view) : tab === "specs" ? isSpecMode(view) : view === tab;
         return (
           <Button
             key={tab}

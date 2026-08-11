@@ -52,26 +52,31 @@ export type ProjectView = (typeof PROJECT_VIEWS)[number];
 
 /**
  * The layouts of a project's issues the switcher offers — one query, drawn
- * three ways.
+ * two ways.
  *
  * They are still routes, because a board is a place you can send someone. They
  * are not *destinations*: the nav offers "Issues" once and the layout is chosen
  * beside grouping and ordering, with the other things that decide how the same
  * rows are drawn rather than which rows they are.
  *
- * `timeline` reads the same rows as the other two but also needs the project's
- * edge set, which neither of them asks for. That is a difference in what a
- * layout *fetches*, not in which rows it draws, so it is a mode rather than a
- * destination of its own.
+ * Two views are withdrawn from the picker, for different reasons. Neither is
+ * deleted — both still route and still render, so old links and any saved view
+ * holding one keep working.
  *
- * **`calendar` is deliberately absent.** It is withdrawn from the picker, not
- * deleted: `/projects/:key/calendar` still routes and still renders, so old
- * links and any saved view holding that mode keep working. What it no longer
- * is, is a layout `isIssueMode` recognises — so a calendar URL does not light
- * the Issues tab and is not remembered as the layout to return to, which is
- * the right behaviour for a mode you can no longer choose.
+ * **`calendar`** is a layout nobody chose. `/projects/:key/calendar` still
+ * works; it is simply no longer offered.
+ *
+ * **`timeline`** is withdrawn because it is not a layout *of the issues*. The
+ * switcher's promise is that its buttons show the same rows rearranged, and the
+ * timeline breaks it: nodes are placed by what blocks what, grouping and
+ * ordering mean nothing there, and the question it answers is "in what order
+ * does this project happen" rather than "which issues are there". It is a
+ * layout of the *plan* instead — see `SPEC_MODES`.
+ *
+ * `isIssueMode` carries the consequence for both: their URLs no longer light
+ * the Issues tab and are no longer remembered as the layout to return to.
  */
-export const ISSUE_MODES = ["list", "board", "timeline"] as const;
+export const ISSUE_MODES = ["list", "board"] as const;
 export type IssueMode = (typeof ISSUE_MODES)[number];
 export function isIssueMode(v: View): v is IssueMode {
   return (ISSUE_MODES as readonly string[]).includes(v);
@@ -82,6 +87,37 @@ export function isIssueMode(v: View): v is IssueMode {
 export const ISSUE_MODE_LABEL: Record<IssueMode, string> = {
   list: "List",
   board: "Board",
+};
+
+/**
+ * The layouts of a project's *plan* the Specs switcher offers.
+ *
+ * `specs` is the register — the documents themselves, as a list. `timeline` is
+ * the morphology those documents are about: the same work the Plans name,
+ * placed by what blocks what.
+ *
+ * It sits here rather than beside Board because of what a Plan turned out to
+ * be. A Plan stores no phases, no membership and no ordering — only roots — and
+ * Blueprint compiles the shape from canonical Issue relations. So the timeline
+ * is not a second drawing of the issue rows; it is the *rendered plan*, and the
+ * register and the drawing are two views of one thing. That is exactly the test
+ * `ISSUE_MODES` states and that Board passes: same subject, different drawing.
+ *
+ * It briefly had a tab of its own beside Overview and Specs. A tab claims a
+ * face of the project coordinate with the other four, and this is not one — it
+ * is how you look at the plan, which is a choice you make while reading the
+ * plan, next to the other choices about how the same subject is drawn.
+ */
+export const SPEC_MODES = ["specs", "timeline"] as const;
+export type SpecMode = (typeof SPEC_MODES)[number];
+export function isSpecMode(v: View): v is SpecMode {
+  return (SPEC_MODES as readonly string[]).includes(v);
+}
+/** What the Specs switcher calls each mode. `specs` is "List" here — the
+ *  destination is already named "Specs" by the tab, and repeating it inside
+ *  would offer "Specs / Timeline" under a lit Specs tab. */
+export const SPEC_MODE_LABEL: Record<SpecMode, string> = {
+  specs: "List",
   timeline: "Timeline",
 };
 
