@@ -39,7 +39,7 @@ import {
   useGrants,
   useProjectBaselines,
   useProjectBoard,
-  usePlanGeometry,
+  useGeometry,
   useProjectSpecs,
   useProjectViewerStore,
   useSpecObservations,
@@ -1790,7 +1790,7 @@ function SpecReader({
     ? history.find((entry) => entry.revision === viewing)
     : undefined;
   const geometryBody = selectedRevision?.body ?? view?.body;
-  const geometry = usePlanGeometry(
+  const geometry = useGeometry(
     spaceId,
     view?.kind === "plan" ? view.project : null,
     geometryBody?.plan?.roots ?? [],
@@ -1967,6 +1967,10 @@ function SpecReader({
                 {progress.blocked > 0 && ` · ${progress.blocked} blocked`}
                 {(progress.cyclic + progress.stalled) > 0
                   && ` · ${progress.cyclic + progress.stalled} structurally unresolved`}
+                {/* The counts are the only derived reading left on the page, so
+                    they have to say which World they were taken from. A pinned
+                    revision reports its own generation; the head reports now. */}
+                {past && shown.generation && " · as of this revision"}
               </p>
             ) : null;
           })()}
@@ -2081,15 +2085,13 @@ function SpecReader({
               <>
                 {past && !shown.generation && (
                   <p className="text-mute mt-4 text-xs">
-                    This revision predates generation coordinates; its Issue morphology is live.
+                    This revision predates generation coordinates; its closure counts are live.
                   </p>
                 )}
                 <PlanSurface
                   plan={shown.plan}
                   rows={rows}
-                  geometry={geometry.data}
                   readOnly
-                  historical={Boolean(past && shown.generation)}
                   onSave={() => undefined}
                 />
               </>
@@ -2118,7 +2120,6 @@ function SpecReader({
               <PlanSurface
                 plan={view.body.plan}
                 rows={rows}
-                geometry={geometry.data}
                 readOnly={false}
                 onSave={(plan) => revise({ plan })}
               />

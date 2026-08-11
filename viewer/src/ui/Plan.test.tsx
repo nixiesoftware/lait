@@ -2,9 +2,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { upgradeMarkdown } from "../core/document";
-import type { GeometryNode, GeometryView, PlanData, Row } from "../types";
-import { PlanDocument, PlanSeedEditor, layoutGeometry, planCounts } from "./Plan";
+import type { GeometryView, PlanData, Row } from "../types";
+import { PlanSeedEditor, PlanSurface, planCounts } from "./Plan";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -25,43 +24,16 @@ function row(reff: string): Row {
   };
 }
 
-function node(reff: string, layer: number, ordinal: number): GeometryNode {
-  return {
-    row: row(reff),
-    component: "component-1",
-    layer,
-    ordinal,
-    hierarchy_depth: 0,
-    children: [],
-    blocked_by: [],
-    blocks: [],
-    closure: reff === "one" ? "closed" : "ready",
-    facets: [],
-  };
-}
-
-const GEOMETRY: GeometryView = {
-  schema_version: 1,
-  generation: "ab".repeat(32),
-  project: "prj_plan",
-  roots: ["one"],
-  nodes: [node("one", 0, 0), node("two", 1, 1), node("three", 1, 2)],
-  edges: [
-    { from: "one", relation: "blocks", role: "constraint", to: "two" },
-    { from: "one", relation: "blocks", role: "constraint", to: "three" },
-  ],
-  components: [{
-    id: "component-1",
-    nodes: ["one", "two", "three"],
-    roots: ["one"],
-    terminals: ["two", "three"],
-    loops: [],
-  }],
-  residuals: [{ kind: "closure_frontier", component: "component-1", layer: 1, at: ["two", "three"], requires: [] }],
-  closure: { total: 3, closed: 1, ready: 2, blocked: 0, cyclic: 0, stalled: 0 },
+const CLOSURE: GeometryView["closure"] = {
+  total: 3,
+  closed: 1,
+  ready: 2,
+  blocked: 0,
+  cyclic: 0,
+  stalled: 0,
 };
 
-describe("Plan morphology", () => {
+describe("Plan surface", () => {
   let host: HTMLDivElement;
   let root: Root;
 
@@ -76,24 +48,36 @@ describe("Plan morphology", () => {
     host.remove();
   });
 
-  it("uses compiled closure and lays the same topology out identically", () => {
-    expect(planCounts(GEOMETRY)).toEqual(GEOMETRY.closure);
-    const first = layoutGeometry(GEOMETRY);
-    const second = layoutGeometry(GEOMETRY);
-    expect([...first.points].map(([id, point]) => [id, point.x, point.y]))
-      .toEqual([...second.points].map(([id, point]) => [id, point.x, point.y]));
-    expect(first.points.get("two")?.x).toBeGreaterThan(first.points.get("one")?.x ?? 0);
+  it("reads closure from the compiled geometry and zero from nothing", () => {
+    expect(planCounts({ closure: CLOSURE } as GeometryView)).toEqual(CLOSURE);
+    expect(planCounts(null).total).toBe(0);
   });
 
-  it("keeps prose ordinary and projects morphology after the document", () => {
-    const source = upgradeMarkdown("Before.\n\nAfter.").source;
+  // The seed is the whole surface: a Plan names roots, and the Issue surfaces
+  // own membership, order and completion. A regression here would be a second
+  // picture of the work growing back under the document.
+  it("names its roots and draws nothing else", () => {
     act(() => root.render(
-      <PlanDocument source={source} plan={{ roots: ["one"] }} rows={GEOMETRY.nodes.map((item) => item.row)} geometry={GEOMETRY} />,
+      <PlanSurface
+        plan={{ roots: ["one"] }}
+        rows={[row("one"), row("two")]}
+        readOnly
+        onSave={() => undefined}
+      />,
     ));
     const text = host.textContent ?? "";
-    expect(text.indexOf("Before.")).toBeLessThan(text.indexOf("After."));
-    expect(text.indexOf("After.")).toBeLessThan(text.indexOf("Morphology"));
-    expect(text).toContain("Closure frontier");
+    expect(text).toContain("ONE");
+    expect(text).toContain("Issue one");
+    expect(text).not.toContain("Morphology");
+    expect(text).not.toContain("Open loci");
+    expect(host.querySelector("svg")).toBeNull();
+  });
+
+  it("says so when the seed is the whole project", () => {
+    act(() => root.render(
+      <PlanSurface plan={{ roots: [] }} rows={[row("one")]} readOnly onSave={() => undefined} />,
+    ));
+    expect(host.textContent).toContain("Whole project");
   });
 
   it("writes only a canonical root set", () => {
