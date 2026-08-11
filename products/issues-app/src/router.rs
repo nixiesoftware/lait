@@ -598,6 +598,9 @@ impl<'a> IssueRouter<'a> {
             SessionFailure::GenerationUnavailable => {
                 Response::not_found("that World generation is not available on this node")
             }
+            SessionFailure::PersistenceCause { operation, reason } => {
+                Response::err(format!("persistence failed while {operation}: {reason}"))
+            }
             SessionFailure::Persistence | SessionFailure::CallbackPanicked => {
                 Response::err("internal error")
             }

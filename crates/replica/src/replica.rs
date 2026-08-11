@@ -121,6 +121,13 @@ pub enum Failure {
     /// The durable store failed integrity validation on open — never repaired
     /// heuristically; recreation guidance is the caller's.
     Integrity(Defect),
+    /// A derived-generation operation failed integrity validation, retaining
+    /// both the failed operation and the concrete lower-layer cause.
+    IntegrityCause {
+        defect: Defect,
+        operation: &'static str,
+        reason: String,
+    },
     /// The Engine engine failed to apply the transaction.
     Engine(fabric::commit::Failure),
     /// No authorized key material is held for sealing new local material.
@@ -194,6 +201,18 @@ impl std::fmt::Display for Failure {
     }
 }
 impl std::error::Error for Failure {}
+
+fn integrity_cause(
+    defect: Defect,
+    operation: &'static str,
+    error: impl std::fmt::Debug,
+) -> Failure {
+    Failure::IntegrityCause {
+        defect,
+        operation,
+        reason: format!("{error:?}"),
+    }
+}
 
 /// The outcome of committing a request through the persistent-idempotency
 /// scope: either a fresh commit or a replay of the original receipt.
@@ -522,8 +541,13 @@ fn decode_store_meta(bytes: &[u8]) -> Result<StoreMeta, Failure> {
             return Ok(meta);
         }
     }
-    let prior: PriorIndexedStoreMeta =
-        postcard::from_bytes(bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    let prior: PriorIndexedStoreMeta = postcard::from_bytes(bytes).map_err(|error| {
+        integrity_cause(
+            Defect::Encoding,
+            "decode prior indexed store metadata",
+            error,
+        )
+    })?;
     if prior.format_version != READABLE_STORE_META_FORMAT_VERSION {
         return Err(Failure::Integrity(Defect::Encoding));
     }
@@ -1206,15 +1230,17 @@ impl Replica {
             descriptors,
             removed_descriptors: Vec::new(),
         };
-        let delta_bytes =
-            postcard::to_stdvec(&delta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let delta_bytes = postcard::to_stdvec(&delta).map_err(|error| {
+            integrity_cause(Defect::Encoding, "encode generation baseline", error)
+        })?;
         let delta_ref = object_ref(&delta_bytes);
         let indexed = IndexedGeneration {
             root,
             object: delta_ref,
         };
-        let indexed_bytes =
-            postcard::to_stdvec(&indexed).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let indexed_bytes = postcard::to_stdvec(&indexed).map_err(|error| {
+            integrity_cause(Defect::Encoding, "encode generation baseline index", error)
+        })?;
         let mut sink = NodeSink::default();
         let generation_index_root = {
             let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
@@ -1227,7 +1253,9 @@ impl Replica {
                 }],
                 &mut sink,
             )
-            .map_err(|_| Failure::Integrity(Defect::Index))?
+            .map_err(|error| {
+                integrity_cause(Defect::Index, "apply generation baseline index", error)
+            })?
         };
         let meta = StoreMeta {
             format_version: STORE_META_FORMAT_VERSION,
@@ -1241,8 +1269,13 @@ impl Replica {
             generation_index_root,
             manifest_root: self.manifest_root_object,
         };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let meta_bytes = postcard::to_stdvec(&meta).map_err(|error| {
+            integrity_cause(
+                Defect::Encoding,
+                "encode generation baseline store metadata",
+                error,
+            )
+        })?;
         let roots: Vec<([u8; 32], u64)> = self
             .body_index_root
             .into_iter()
@@ -1552,16 +1585,18 @@ impl Replica {
                     descriptors: descriptors.to_vec(),
                     removed_descriptors: Vec::new(),
                 };
-                let bytes = postcard::to_stdvec(&delta)
-                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                let bytes = postcard::to_stdvec(&delta).map_err(|error| {
+                    integrity_cause(Defect::Encoding, "encode committed generation delta", error)
+                })?;
                 let reference = object_ref(&bytes);
                 new_objects.push(bytes);
                 let indexed = IndexedGeneration {
                     root: root_object.hash,
                     object: reference,
                 };
-                let value = postcard::to_stdvec(&indexed)
-                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                let value = postcard::to_stdvec(&indexed).map_err(|error| {
+                    integrity_cause(Defect::Encoding, "encode committed generation index", error)
+                })?;
                 let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
                 generation_index_root = index::apply(
                     &StoreNodes(store),
@@ -1572,7 +1607,9 @@ impl Replica {
                     }],
                     &mut sink,
                 )
-                .map_err(|_| Failure::Integrity(Defect::Index))?;
+                .map_err(|error| {
+                    integrity_cause(Defect::Index, "apply committed generation index", error)
+                })?;
             }
         }
 
@@ -2006,15 +2043,25 @@ impl Replica {
                 .map(|descriptor| descriptor.content_ref().content_id)
                 .collect(),
         };
-        let delta_bytes =
-            postcard::to_stdvec(&delta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let delta_bytes = postcard::to_stdvec(&delta).map_err(|error| {
+            integrity_cause(
+                Defect::Encoding,
+                "encode content-sweep generation delta",
+                error,
+            )
+        })?;
         let delta_ref = object_ref(&delta_bytes);
         let indexed = IndexedGeneration {
             root: root_ref.hash,
             object: delta_ref,
         };
-        let indexed_bytes =
-            postcard::to_stdvec(&indexed).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let indexed_bytes = postcard::to_stdvec(&indexed).map_err(|error| {
+            integrity_cause(
+                Defect::Encoding,
+                "encode content-sweep generation index",
+                error,
+            )
+        })?;
         let generation_index_root = {
             let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
             index::apply(
@@ -2026,7 +2073,9 @@ impl Replica {
                 }],
                 &mut sink,
             )
-            .map_err(|_| Failure::Integrity(Defect::Index))?
+            .map_err(|error| {
+                integrity_cause(Defect::Index, "apply content-sweep generation index", error)
+            })?
         };
 
         let meta = StoreMeta {
@@ -2235,20 +2284,22 @@ impl Replica {
             self.generation_index_root,
             &generation_index_key(root),
         )
-        .map_err(|_| Failure::Integrity(Defect::Index))?
+        .map_err(|error| integrity_cause(Defect::Index, "look up durable generation", error))?
         else {
             return Ok(None);
         };
-        let indexed: IndexedGeneration =
-            postcard::from_bytes(&value).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let indexed: IndexedGeneration = postcard::from_bytes(&value).map_err(|error| {
+            integrity_cause(Defect::Encoding, "decode durable generation index", error)
+        })?;
         if &indexed.root != root {
             return Err(Failure::Integrity(Defect::Encoding));
         }
-        let bytes = store
-            .read_object(&indexed.object)
-            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
-        let delta: GenerationDelta =
-            postcard::from_bytes(&bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let bytes = store.read_object(&indexed.object).map_err(|error| {
+            integrity_cause(Defect::Encoding, "read durable generation delta", error)
+        })?;
+        let delta: GenerationDelta = postcard::from_bytes(&bytes).map_err(|error| {
+            integrity_cause(Defect::Encoding, "decode durable generation delta", error)
+        })?;
         if delta.format_version != GENERATION_DELTA_FORMAT_VERSION || &delta.root != root {
             return Err(Failure::Integrity(Defect::Encoding));
         }
@@ -2297,7 +2348,13 @@ impl Replica {
                     (Some(binding), Some(export)) => {
                         let body =
                             fabric::BodySnapshot::from_export(&fabric_key(&archived.key), export)
-                                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                                .map_err(|error| {
+                                integrity_cause(
+                                    Defect::Encoding,
+                                    "restore body from durable generation",
+                                    error,
+                                )
+                            })?;
                         bodies.insert(
                             archived.key,
                             Arc::new(SnapshotBody {
@@ -2342,18 +2399,24 @@ impl Replica {
             }]);
         };
         let mut indexed = Vec::new();
-        let mut decode_failed = false;
+        let mut decode_failure = None;
         crate::index::stream(
             &StoreNodes(store),
             self.generation_index_root,
             &mut |entry| match postcard::from_bytes::<IndexedGeneration>(&entry.value) {
                 Ok(value) => indexed.push(value),
-                Err(_) => decode_failed = true,
+                Err(error) => decode_failure = Some(format!("{error:?}")),
             },
         )
-        .map_err(|_| Failure::Integrity(Defect::Index))?;
-        if decode_failed {
-            return Err(Failure::Integrity(Defect::Encoding));
+        .map_err(|error| {
+            integrity_cause(Defect::Index, "stream durable generation index", error)
+        })?;
+        if let Some(reason) = decode_failure {
+            return Err(Failure::IntegrityCause {
+                defect: Defect::Encoding,
+                operation: "decode durable generation catalog",
+                reason,
+            });
         }
         let mut result = Vec::with_capacity(indexed.len());
         for generation in indexed {

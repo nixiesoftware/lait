@@ -61,6 +61,11 @@ pub enum Failure {
     Conflict(Conflict),
     Interrupted,
     Persistence,
+    /// Durable derived state failed with a concrete operation and cause.
+    PersistenceCause {
+        operation: &'static str,
+        reason: String,
+    },
     Reset,
     CallbackPanicked,
     /// The requested World generation is well-formed but this Station does not
@@ -1197,6 +1202,9 @@ impl Session {
                 replica::transaction::commit::Failure::ParentManifestUnavailable => {
                     Failure::Conflict(Conflict::Body)
                 }
+                replica::transaction::commit::Failure::IntegrityCause {
+                    operation, reason, ..
+                } => Failure::PersistenceCause { operation, reason },
                 // Illegitimate is an incorporation-path error; a local commit
                 // never produces it, but the match stays exhaustive.
                 replica::transaction::commit::Failure::Illegitimate(_)
