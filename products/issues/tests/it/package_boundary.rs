@@ -70,7 +70,7 @@ fn the_implementation_id_is_pinned_and_moving_it_is_deliberate() {
     let id = descriptor.id().expect("canonical descriptor");
     assert_eq!(
         id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "069e7ad1061fe2e864a31aa806060d953270b6a57d4d5d8c7e4c835e90c0cff0",
+        "3182716c0f0231410c594a1f1790d06c0d297cb31be47510b2093188746c2778",
         "the Issues implementation id moved — see COMPATIBILITY.md before updating this"
     );
 }

@@ -6,17 +6,17 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1375
-pr-platform    1036
-nightly        1402
-mutants        87
+pr             1410
+pr-platform    1065
+nightly        1437
+mutants        98
 
 [gates]
 orbital-boundaries           6
 orbital-clean-break          14
 orbital-authority            19
 orbital-formats              212
-core-fabric-foundations      52
+core-fabric-foundations      51
 core-plane-shapes            77
 orbital-faults               30
 orbital-contact-real         4
@@ -71,22 +71,28 @@ comms::it transport_capabilities::a_reset_stream_surfaces_its_code_rather_than_a
 comms::it transport_capabilities::record_transport_capabilities
 comms::it transport_capabilities::the_upgrade_posture_is_written_down
 fabric algebra_reservation_tests::a_body_without_a_future_type_still_projects
-fabric algebra_reservation_tests::a_reserved_tag_refuses_the_projection_rather_than_omitting_it
 fabric algebra_reservation_tests::an_unknown_tag_refuses_the_projection
 fabric algebra_reservation_tests::an_unprojectable_body_still_exports_and_converges
-fabric algebra_reservation_tests::tag_space_is_reserved_for_the_types_the_product_is_working_around
-fabric algebra_reservation_tests::the_implemented_algebra_is_exactly_six_types
+fabric algebra_reservation_tests::nothing_is_reserved_and_the_next_type_should_change_that
+fabric algebra_reservation_tests::the_implemented_algebra_is_exactly_eight_types
 fabric convergence_laws_tests::legacy_phantom_roots::a_body_written_after_the_fix_has_none
 fabric convergence_laws_tests::legacy_phantom_roots::an_old_body_still_projects_its_phantoms_and_that_is_tolerated
 fabric convergence_laws_tests::merge_order_does_not_change_the_result
 fabric convergence_laws_tests::redelivering_known_material_changes_nothing
 fabric convergence_laws_tests::replicas_converge_after_exchanging_all_material
 fabric fabric::tests::a_body_export_carries_exactly_one_body
+fabric fabric::tests::a_log_bounds_its_tail_and_keeps_an_exact_count
+fabric fabric::tests::a_log_path_conflicts_with_the_other_types
 fabric fabric::tests::a_model_mismatch_at_the_same_key_is_a_type_conflict
+fabric fabric::tests::a_tree_path_conflicts_with_the_other_types
+fabric fabric::tests::a_tree_projects_in_preorder_with_parents_values_and_entries
+fabric fabric::tests::an_anchored_placement_creates_both_ends_in_one_operation
+fabric fabric::tests::an_anchored_placement_refuses_a_cycle_and_refuses_itself
 fabric fabric::tests::atomic_bodies_commit_read_remove_and_advance_the_causal_token
 fabric fabric::tests::per_body_import_preserves_stable_element_identity
 fabric fabric::tests::reimporting_known_material_is_unchanged
 fabric fabric::tests::transaction_request_roundtrips_postcard
+fabric fabric::tests::tree_placement_cycles_and_the_reserved_entry_are_refused
 fabric op::fallback_tests::it_fills_every_length_its_callers_use
 fabric op::fallback_tests::the_fallback_never_yields_zero
 fabric op::fallback_tests::the_sequence_alone_separates_activations
@@ -122,10 +128,15 @@ fabric::it causal_evidence::shallow_snapshot_refuses_work_predating_its_root
 fabric::it causal_evidence::version_vector_grows_one_entry_per_activation
 fabric::it collaborative_convergence::a_concurrent_add_survives_a_remove_add_wins
 fabric::it collaborative_convergence::concurrent_counter_increments_sum
+fabric::it collaborative_convergence::concurrent_log_appends_all_survive_and_the_count_is_exact
 fabric::it collaborative_convergence::concurrent_map_entries_merge_disjoint_and_lww_same_key
 fabric::it collaborative_convergence::concurrent_register_sets_agree_on_one_winner
+fabric::it collaborative_convergence::concurrent_reparenting_converges_on_one_hierarchy
+fabric::it collaborative_convergence::concurrent_replies_to_one_comment_both_survive_under_it
 fabric::it collaborative_convergence::concurrent_text_splices_both_survive
 fabric::it collaborative_convergence::no_list_insert_is_lost
+fabric::it collaborative_convergence::placement_is_local_but_the_converged_order_is_agreed
+fabric::it collaborative_convergence::replicas_that_trimmed_differently_still_converge
 fabric::it collaborative_convergence::stable_element_identity_survives_sync
 fabric::it history_growth::a_checkpoint_reclaims_about_half_a_snapshot
 fabric::it history_growth::a_delta_is_orders_of_magnitude_smaller_than_a_snapshot
@@ -378,6 +389,10 @@ lait-issues dto::tests::default_workflow_has_one_done_column
 lait-issues dto::tests::priority_json_is_lowercase
 lait-issues dto::tests::priority_orders_low_to_high
 lait-issues dto::tests::priority_roundtrips
+lait-issues geometry::tests::a_seed_compiles_branching_order_and_closure_without_stored_layout
+lait-issues geometry::tests::client_one_plan_emerges_from_issue_facts_and_moves_its_open_locus
+lait-issues geometry::tests::cycles_are_loci_and_downstream_work_is_stalled_not_mislabeled
+lait-issues geometry::tests::fifty_thousand_issue_morphology_stays_bounded_and_linear_in_shape
 lait-issues ids::tests::docid_roundtrips_and_validates
 lait-issues ids::tests::short_handle_is_prefix_plus_n
 lait-issues ids::tests::ulids_sort_by_time
@@ -394,6 +409,8 @@ lait-issues implementation::milestone_order_tests::an_unranked_stray_sorts_last_
 lait-issues implementation::milestone_order_tests::equal_ranks_break_on_id_so_replicas_agree
 lait-issues implementation::milestone_order_tests::ranked_milestones_ignore_the_target_date
 lait-issues implementation::milestone_order_tests::unranked_milestones_keep_the_old_date_order
+lait-issues implementation::structure_migration_tests::migration_coordinates_a_plan_without_changing_issued_truth
+lait-issues implementation::structure_migration_tests::migration_is_a_no_op_once_the_head_is_native
 lait-issues rank::tests::appends_after_the_maximum_not_the_last_listed
 lait-issues rank::tests::first_rank_and_appending
 lait-issues rank::tests::inserts_before_the_first
@@ -410,8 +427,25 @@ lait-issues spec::tests::a_later_issue_supersedes_the_prior_issue
 lait-issues spec::tests::baseline_draft_preserves_issue_and_withdrawal_ends_it
 lait-issues spec::tests::canonical_links_make_equal_revisions
 lait-issues spec::tests::concurrent_issued_successors_are_a_visible_conflict
+lait-issues spec::tests::legacy_plan_phases_collapse_to_sorted_unique_roots
+lait-issues spec::tests::plan_roots_are_canonical_and_unique
+lait-issues spec::tests::structured_plan_changes_are_part_of_revision_identity
+lait-issues spec::tests::structured_plan_data_belongs_only_to_plan_specs
+lait-issues views::comment_thread_tests::a_thread_spanning_the_cutover_reads_in_clock_order
+lait-issues views::comment_thread_tests::a_thread_stored_as_a_flat_list_still_reads
+lait-issues views::comment_thread_tests::a_threaded_comment_carries_its_node_and_its_parent_edge
+lait-issues views::comment_thread_tests::same_millisecond_comments_break_the_tie_on_id
+lait-issues views::event_history_tests::a_trimmed_log_reports_more_recorded_than_it_retains
+lait-issues views::event_history_tests::events_in_the_same_second_keep_their_sequence_order
+lait-issues views::event_history_tests::history_merges_the_legacy_list_with_the_log_in_clock_order
+lait-issues views::hierarchy_tests::a_hierarchy_stored_as_a_map_still_reads
+lait-issues views::hierarchy_tests::a_node_without_an_anchor_names_no_issue
+lait-issues views::hierarchy_tests::the_tree_overrules_a_stale_map_entry_including_when_it_says_no_parent
+lait-issues views::reaction_tests::a_reaction_value_round_trips_and_a_malformed_one_is_dropped
+lait-issues views::reaction_tests::reactions_merge_across_the_cutover_without_double_counting
 lait-issues views::tests::completed_issue_keeps_alias_from_authoritative_project
 lait-issues views::tests::missing_document_schema_is_legacy_and_the_register_is_additive
+lait-issues views::tests::project_topology_overrides_legacy_edges_and_parentage
 lait-issues workflow::tests::frozen_canonical_json_tags
 lait-issues workflow::tests::invalid_bodies_reject
 lait-issues workflow::tests::the_default_workflow_is_valid_and_deterministic
@@ -510,6 +544,7 @@ lait::it issues_comment_anchor::emptying_the_field_drifts_the_caret_it_carried
 lait::it issues_comment_anchor::spans_are_counted_in_unicode_scalars_and_not_in_bytes
 lait::it issues_history_contract::an_event_written_before_history_carried_an_actor_reads_back_as_no_name
 lait::it issues_history_contract::history_is_attributed_to_an_actor_and_not_to_the_device_it_was_committed_on
+lait::it issues_history_contract::project_topology_changes_geometry_without_mutating_its_prior_generation
 lait::it issues_policy_designer::role_access_and_workflow_authoring_round_trip_over_the_daemon
 lait::it issues_reference_perf::corpus_spec_rejects_unknown_missing_and_mistyped_fields
 lait::it issues_reference_perf::issues_reference_performance_gate
@@ -966,6 +1001,7 @@ replica receipt::tests::scope_key_distinguishes_every_component
 replica receipt::tests::trailing_bytes_are_non_canonical
 replica receipt::tests::unknown_version_is_rejected_not_negotiated
 replica replica::generation::tests::an_empty_prior_replica_becomes_a_verified_current_store
+replica replica::generation_format_tests::version_two_store_meta_is_a_lossless_input_to_generation_journaling
 replica::it adversary_incorporation::change_a_a_mixed_bundle_lands_in_one_of_two_states_at_random
 replica::it adversary_incorporation::change_b_a_refusal_on_replayed_material_permanently_wedges_the_key
 replica::it adversary_incorporation::change_b_replay_makes_opaque_retention_cost_quadratic_verifications
@@ -1003,7 +1039,7 @@ replica::it quotas_and_bundle::operator_configuration_lowers_but_never_raises_pr
 replica::it quotas_and_bundle::space_byte_quota_has_exact_boundaries
 replica::it quotas_and_bundle::unknown_world_retention_subquota_evicts_nothing_and_stages_nothing
 replica::it store_growth::collecting_returns_the_store_to_live_state
-replica::it store_growth::editing_one_body_does_not_grow_the_required_set
+replica::it store_growth::editing_one_body_grows_only_by_the_history_it_retains
 replica::it transaction_marker_fixtures::a_tampered_receipt_binding_is_rejected
 replica::it transaction_marker_fixtures::empty_descriptor_set_is_rejected
 replica::it transaction_marker_fixtures::opaque_ciphertext_commitment_check_needs_no_key

@@ -69,6 +69,11 @@ const LISTS: [&str; 2] = ["list0", "list1"];
 const TEXTS: [&str; 1] = ["text0"];
 const SETS: [&str; 2] = ["set0", "set1"];
 const COUNTERS: [&str; 2] = ["ctr0", "ctr1"];
+const TREES: [&str; 1] = ["tree0"];
+const LOGS: [&str; 1] = ["log0"];
+/// Small on purpose: a retention nothing reaches never trims, and a law that
+/// only holds while the type is idle is not the law being claimed.
+const LOG_RETAIN: u64 = 4;
 
 /// A tiny value alphabet, so two replicas writing "a different value" collide
 /// on the same one often.
@@ -131,6 +136,35 @@ enum OpSpec {
     CounterAdd {
         path: usize,
         delta: i8,
+    },
+    /// Insert under the `nth` node this replica currently sees — or at the
+    /// root of the forest when `nth` names nothing — optionally after that
+    /// parent's `sibling`th child.
+    TreeInsertUnder {
+        nth: Option<u8>,
+        sibling: Option<u8>,
+        value: u8,
+    },
+    /// Re-parent the `nth` node under the `to`th, which is the interesting op:
+    /// concurrent re-parenting is exactly what a hand-encoded parent field has
+    /// no answer for.
+    TreeMoveNth {
+        nth: u8,
+        to: Option<u8>,
+    },
+    TreeRemoveNth {
+        nth: u8,
+    },
+    TreeSetNth {
+        nth: u8,
+        entry: u8,
+        value: u8,
+    },
+    /// Appends trim, so replicas that ran different numbers of them have
+    /// deleted different entries — which is exactly the state the convergence
+    /// law has to hold across.
+    LogAppend {
+        value: u8,
     },
 }
 
@@ -234,38 +268,172 @@ fn lower(spec: &OpSpec, view: &CollaborativeView) -> Option<Op> {
             path: pick(&COUNTERS, path).to_string(),
             delta: i64::from(delta),
         },
+        OpSpec::TreeInsertUnder {
+            nth,
+            sibling,
+            value,
+        } => {
+            let path = pick(&TREES, 0).to_string();
+            let nodes = view.trees.get(&path).map_or(&[][..], Vec::as_slice);
+            let parent = nth.and_then(|n| nth_node(nodes, n));
+            let after = sibling.and_then(|s| nth_child(nodes, parent.as_deref(), s));
+            Op::TreeInsert {
+                key,
+                path,
+                parent,
+                after,
+                value: val(value),
+            }
+        }
+        OpSpec::TreeMoveNth { nth, to } => {
+            let path = pick(&TREES, 0).to_string();
+            let nodes = view.trees.get(&path).map_or(&[][..], Vec::as_slice);
+            let node = nth_node(nodes, nth)?;
+            let parent = to.and_then(|t| nth_node(nodes, t));
+            // A move under one's own descendant is refused by the engine, and
+            // `run` treats a refused op as a finding. The generator is what
+            // must avoid asking — the refusal itself is pinned by a unit test.
+            if parent
+                .as_deref()
+                .is_some_and(|p| p == node || is_descendant_of(nodes, p, &node))
+            {
+                return None;
+            }
+            Op::TreeMove {
+                key,
+                path,
+                node,
+                parent,
+                after: None,
+            }
+        }
+        OpSpec::TreeRemoveNth { nth } => {
+            let path = pick(&TREES, 0).to_string();
+            let nodes = view.trees.get(&path).map_or(&[][..], Vec::as_slice);
+            Op::TreeRemove {
+                key,
+                path,
+                node: nth_node(nodes, nth)?,
+            }
+        }
+        OpSpec::LogAppend { value } => Op::LogAppend {
+            key,
+            path: pick(&LOGS, 0).to_string(),
+            value: val(value),
+            retain: LOG_RETAIN,
+        },
+        OpSpec::TreeSetNth {
+            nth,
+            entry: e,
+            value,
+        } => {
+            let path = pick(&TREES, 0).to_string();
+            let nodes = view.trees.get(&path).map_or(&[][..], Vec::as_slice);
+            Op::TreeSet {
+                key,
+                path,
+                node: nth_node(nodes, nth)?,
+                entry: entry(e),
+                value: val(value),
+            }
+        }
     })
+}
+
+/// The `nth` node of a projected hierarchy, or `None` when there is none — an
+/// empty forest has no third node, which is the generator being unlucky.
+fn nth_node(nodes: &[crate::TreeNode], nth: u8) -> Option<String> {
+    if nodes.is_empty() {
+        return None;
+    }
+    nodes
+        .get(nth as usize % nodes.len())
+        .map(|n| n.node.clone())
+}
+
+/// The `nth` child of a parent (`None` = a root of the forest), for `after`
+/// placement. Placement names a sibling, so the candidates are exactly the
+/// children of the parent the same op named.
+fn nth_child(nodes: &[crate::TreeNode], parent: Option<&str>, nth: u8) -> Option<String> {
+    let children: Vec<&crate::TreeNode> = nodes
+        .iter()
+        .filter(|n| n.parent.as_deref() == parent)
+        .collect();
+    if children.is_empty() {
+        return None;
+    }
+    children
+        .get(nth as usize % children.len())
+        .map(|n| n.node.clone())
+}
+
+/// Whether `node` sits somewhere under `ancestor`, by walking parents up. The
+/// projection is pre-order with parents named, so this is a lookup chain rather
+/// than a search.
+fn is_descendant_of(nodes: &[crate::TreeNode], node: &str, ancestor: &str) -> bool {
+    let mut current = Some(node);
+    // Bounded by the node count: a converged hierarchy has no cycles, and a
+    // bound is cheaper than trusting that here.
+    for _ in 0..nodes.len() {
+        let Some(here) = current else { return false };
+        if here == ancestor {
+            return true;
+        }
+        current = nodes
+            .iter()
+            .find(|n| n.node == here)
+            .and_then(|n| n.parent.as_deref());
+    }
+    false
 }
 
 fn op_spec() -> impl Strategy<Value = OpSpec> {
     prop_oneof![
-        (0usize..2, 0u8..6).prop_map(|(path, value)| OpSpec::RegisterSet { path, value }),
-        (0usize..2).prop_map(|path| OpSpec::RegisterClear { path }),
-        (0usize..2, 0u8..4, 0u8..6).prop_map(|(path, entry, value)| OpSpec::MapSet {
+        1 => (0usize..2, 0u8..6).prop_map(|(path, value)| OpSpec::RegisterSet { path, value }),
+        1 => (0usize..2).prop_map(|path| OpSpec::RegisterClear { path }),
+        1 => (0usize..2, 0u8..4, 0u8..6).prop_map(|(path, entry, value)| OpSpec::MapSet {
             path,
             entry,
             value
         }),
-        (0usize..2, 0u8..4).prop_map(|(path, entry)| OpSpec::MapRemove { path, entry }),
-        (0usize..2, 0u8..8, 0u8..6).prop_map(|(path, at, value)| OpSpec::ListInsert {
+        1 => (0usize..2, 0u8..4).prop_map(|(path, entry)| OpSpec::MapRemove { path, entry }),
+        1 => (0usize..2, 0u8..8, 0u8..6).prop_map(|(path, at, value)| OpSpec::ListInsert {
             path,
             at,
             value
         }),
-        (0usize..2, 0u8..8).prop_map(|(path, nth)| OpSpec::ListRemoveNth { path, nth }),
-        (0usize..2, 0u8..8, 0u8..8).prop_map(|(path, nth, to)| OpSpec::ListMoveNth {
+        1 => (0usize..2, 0u8..8).prop_map(|(path, nth)| OpSpec::ListRemoveNth { path, nth }),
+        1 => (0usize..2, 0u8..8, 0u8..8).prop_map(|(path, nth, to)| OpSpec::ListMoveNth {
             path,
             nth,
             to
         }),
-        (0u8..12, 0u8..4, 0u8..6).prop_map(|(at, delete, insert)| OpSpec::TextSplice {
+        1 => (0u8..12, 0u8..4, 0u8..6).prop_map(|(at, delete, insert)| OpSpec::TextSplice {
             at,
             delete,
             insert
         }),
-        (0usize..2, 0u8..6).prop_map(|(path, value)| OpSpec::SetAdd { path, value }),
-        (0usize..2, 0u8..6).prop_map(|(path, value)| OpSpec::SetRemove { path, value }),
-        (0usize..2, -4i8..5).prop_map(|(path, delta)| OpSpec::CounterAdd { path, delta }),
+        1 => (0usize..2, 0u8..6).prop_map(|(path, value)| OpSpec::SetAdd { path, value }),
+        1 => (0usize..2, 0u8..6).prop_map(|(path, value)| OpSpec::SetRemove { path, value }),
+        1 => (0usize..2, -4i8..5).prop_map(|(path, delta)| OpSpec::CounterAdd { path, delta }),
+        // Weighted up: a hierarchy only gets interesting once it has depth, and
+        // depth needs inserts to outnumber the ops that flatten it.
+        3 => (prop::option::of(0u8..8), prop::option::of(0u8..4), 0u8..6).prop_map(
+            |(nth, sibling, value)| OpSpec::TreeInsertUnder {
+                nth,
+                sibling,
+                value
+            }
+        ),
+        2 => (0u8..8, prop::option::of(0u8..8))
+            .prop_map(|(nth, to)| OpSpec::TreeMoveNth { nth, to }),
+        1 => (0u8..8).prop_map(|nth| OpSpec::TreeRemoveNth { nth }),
+        1 => (0u8..8, 0u8..4, 0u8..6).prop_map(|(nth, entry, value)| OpSpec::TreeSetNth {
+            nth,
+            entry,
+            value
+        }),
+        2 => (0u8..6).prop_map(|value| OpSpec::LogAppend { value }),
     ]
 }
 
@@ -330,6 +498,23 @@ fn ancestor() -> Engine {
             key: key(),
             path: path.into(),
             delta: 1,
+        });
+    }
+    for path in LOGS {
+        ops.push(Op::LogAppend {
+            key: key(),
+            path: path.into(),
+            value: val(0),
+            retain: LOG_RETAIN,
+        });
+    }
+    for path in TREES {
+        ops.push(Op::TreeInsert {
+            key: key(),
+            path: path.into(),
+            parent: None,
+            after: None,
+            value: val(0),
         });
     }
     let mut engine = Engine::new();

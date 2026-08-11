@@ -641,7 +641,11 @@ export default function LaitDocumentEditor({
 
   useLayoutEffect(() => {
     const view = editor.current;
-    if (!view || !acceptRemote || value === projection.current.source) return;
+    if (
+      !view
+      || !acceptRemote
+      || value === projection.current.source
+    ) return;
     const previous = projection.current;
     const incoming = projectSource(value);
     const scalarSplice = projectionSplice(previous.source, value);

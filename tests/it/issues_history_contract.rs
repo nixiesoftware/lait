@@ -17,6 +17,7 @@
 //! A name check cannot catch that: the field is called `actor` either way. Only
 //! driving a real Station and reading the value can.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use issues::ids::{ActorId, DeviceId, SystemUlidSource};
@@ -27,9 +28,14 @@ use replica::frontier::AuthorityFrontier;
 use runtime::{plane::Activation, world::Builder, world::LocalIdentity, Runtime, Session, Station};
 
 const WRITER_SEED: [u8; 32] = [73u8; 32];
+static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
 fn temp_root() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lait-history-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "lait-history-{}-{}",
+        std::process::id(),
+        NEXT_ROOT.fetch_add(1, Ordering::SeqCst)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -131,7 +137,7 @@ fn history_is_attributed_to_an_actor_and_not_to_the_device_it_was_committed_on()
         &facts(),
     );
 
-    let (activity, _) = router.route(Request::Activity { since: 0 }, &facts());
+    let (activity, _) = router.route(Request::Activity { since: None }, &facts());
     let Response::Activity { events: rows, .. } = activity else {
         panic!("expected activity, got {activity:?}");
     };
@@ -180,4 +186,91 @@ fn an_event_written_before_history_carried_an_actor_reads_back_as_no_name() {
     // older build is byte-neutral through this one.
     let re = serde_json::to_value(&decoded).expect("re-encode");
     assert!(re.get("a").is_none(), "an absent actor stays absent: {re}");
+}
+
+#[test]
+fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
+    let (_rt, station) = station();
+    let (session, identity) = dock(&station);
+    let clock = SystemUlidSource;
+    let router = IssueRouter::new(&session, &identity, &clock);
+
+    router.route(
+        Request::ProjectNew {
+            name: "Client".into(),
+            key: "client".into(),
+            color: None,
+        },
+        &facts(),
+    );
+    let create = |title: &str| {
+        let (reply, _) = router.route(
+            Request::IssueNew {
+                title: title.into(),
+                project: Some("CLIENT".into()),
+                project_hint: None,
+                priority: None,
+                assignees: vec![],
+                labels: vec![],
+                body: None,
+                due: None,
+                estimate: None,
+            },
+            &facts(),
+        );
+        let Response::Ref { reff } = reply else {
+            panic!("expected issue reference, got {reply:?}");
+        };
+        reff
+    };
+    let foundation = create("Connect to a served World");
+    let workspace = create("Operate the local workspace");
+    let before_link = session
+        .snapshot_id()
+        .expect("generation before topology edit");
+
+    let (linked, _) = router.route(
+        Request::IssueLink {
+            reff: foundation,
+            kind: "blocks".into(),
+            target: workspace,
+        },
+        &facts(),
+    );
+    assert!(
+        matches!(linked, Response::Ref { .. }),
+        "link reply: {linked:?}"
+    );
+
+    let (current, _) = router.route(
+        Request::Geometry {
+            project: "CLIENT".into(),
+            roots: vec![],
+            generation: None,
+        },
+        &facts(),
+    );
+    let Response::Geometry(current) = current else {
+        panic!("expected current geometry, got {current:?}");
+    };
+    assert_eq!(current.nodes.len(), 2);
+    assert_eq!(current.components.len(), 1);
+    assert_eq!(current.edges.len(), 1);
+    assert_eq!(current.edges[0].relation, "blocks");
+
+    let (historical, _) = router.route(
+        Request::Geometry {
+            project: "CLIENT".into(),
+            roots: vec![],
+            generation: Some(before_link.to_hex()),
+        },
+        &facts(),
+    );
+    let Response::Geometry(historical) = historical else {
+        panic!("expected historical geometry, got {historical:?}");
+    };
+    assert_eq!(historical.nodes.len(), 2);
+    assert_eq!(historical.components.len(), 2);
+    assert!(historical.edges.is_empty());
+    assert_eq!(historical.generation, before_link.to_hex());
 }

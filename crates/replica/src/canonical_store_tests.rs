@@ -276,7 +276,8 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
     // Inspect the raw store: the required set must name at least the
     // transaction record, one protected Body object, the receipt, and the
     // manifest root — and every required object must decode as one of those
-    // canonical forms or as an index node (no whole-engine snapshot object).
+    // canonical forms, an immutable generation delta, or an index node (no
+    // whole-engine snapshot object).
     let store = journal::Store::open(&dir).unwrap();
     let required = store.required_objects().unwrap();
     assert!(
@@ -291,9 +292,10 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
         let is_receipt = crate::receipt::RequestReceipt::decode_canonical(&bytes).is_ok();
         let is_root = crate::manifest::ManifestRoot::decode_canonical(&bytes).is_ok();
         let is_node = crate::index::IndexNode::decode_canonical(&bytes).is_ok();
+        let is_generation = crate::replica::is_canonical_generation_delta(&bytes);
         let is_protected = mechanics::authorization::body_epoch_id(&bytes) == Some(EPOCH);
         assert!(
-            is_tx || is_receipt || is_root || is_node || is_protected,
+            is_tx || is_receipt || is_root || is_node || is_generation || is_protected,
             "an object is none of the canonical forms"
         );
         classified += 1;

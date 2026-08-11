@@ -230,12 +230,16 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     let resp = issue_req(
         &client_rt,
         &home,
-        issues_app::IssuesRequest::Activity { since: 0 },
+        issues_app::IssuesRequest::Activity { since: None },
     );
     let IssueResponse::Activity { events, last } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
-    assert!(last >= 2, "created + comment rows expected, last={last}");
+    assert!(
+        !last.is_empty(),
+        "created + comment rows expected, last={last}"
+    );
+    assert!(events.len() >= 2, "created + comment rows expected");
     assert!(events.iter().any(|e| e.kind == "created"));
     assert!(events
         .iter()
@@ -243,13 +247,50 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     let resp = issue_req(
         &client_rt,
         &home,
-        issues_app::IssuesRequest::Activity { since: last },
+        issues_app::IssuesRequest::Activity {
+            since: Some(last.clone()),
+        },
     );
     let IssueResponse::Activity { events, last: l2 } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
     assert!(events.is_empty(), "cursor resume must yield no repeats");
-    assert_eq!(l2, last);
+    assert_eq!(
+        l2, last,
+        "an empty resume holds the caller's place rather than resetting it"
+    );
+
+    // Resuming from each row in turn must serve exactly the rows after it. This
+    // is the property the cursor exists for and the one that broke while it was
+    // being built: the feed was ordered one way and the token compared another,
+    // so a resume re-served rows whose entry id happened to sort high. Walking
+    // every position catches that where resuming from the tail alone does not.
+    let resp = issue_req(
+        &client_rt,
+        &home,
+        issues_app::IssuesRequest::Activity { since: None },
+    );
+    let IssueResponse::Activity { events: all, .. } = resp else {
+        panic!("expected Activity");
+    };
+    for (i, row) in all.iter().enumerate() {
+        let resp = issue_req(
+            &client_rt,
+            &home,
+            issues_app::IssuesRequest::Activity {
+                since: Some(row.cursor.clone()),
+            },
+        );
+        let IssueResponse::Activity { events: rest, .. } = resp else {
+            panic!("expected Activity");
+        };
+        let expected: Vec<&str> = all.iter().skip(i + 1).map(|e| e.cursor.as_str()).collect();
+        let got: Vec<&str> = rest.iter().map(|e| e.cursor.as_str()).collect();
+        assert_eq!(
+            got, expected,
+            "resuming from row {i} must serve exactly what follows it"
+        );
+    }
 
     // List reflects it.
     let resp = issue_req(

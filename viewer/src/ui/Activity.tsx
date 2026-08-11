@@ -86,7 +86,7 @@ export function Activity({
     let alive = true;
     void (async () => {
       try {
-        const r = await rpc(spaceId, { cmd: "activity", since: 0 });
+        const r = await rpc(spaceId, { cmd: "activity" });
         if (alive && r.kind === "activity") setEvents(r.events);
       } catch (e) {
         if (alive) onError(e instanceof Error ? e.message : String(e));

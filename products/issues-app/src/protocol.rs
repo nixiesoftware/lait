@@ -58,6 +58,13 @@ pub struct AccessAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum IssuesRequest {
+    /// Audit which current Blueprint records still depend on compatibility
+    /// readers instead of native relation, Plan, and generation structures.
+    StructureStatus,
+    /// Idempotently materialize current topology and Spec heads. Legacy issue
+    /// documents remain source-preserving, single-record upgrades because their
+    /// Markdown conversion belongs to the client adapter.
+    StructureMigrate,
     /// Project the acting identity's inbox using the caller-local read
     /// watermark. Advancing that watermark remains a client-host facility.
     Inbox {
@@ -211,6 +218,15 @@ pub enum IssuesRequest {
     /// A whole project's dependency graph in one reply — see `ProjectGraphView`.
     ProjectGraph {
         project: String,
+    },
+    /// Deterministic Issue morphology for a Plan seed. `generation` is an
+    /// optional 64-hex World snapshot root; absent means current.
+    Geometry {
+        project: String,
+        #[serde(default)]
+        roots: Vec<String>,
+        #[serde(default)]
+        generation: Option<String>,
     },
     IssueStart {
         reff: String,
@@ -431,8 +447,10 @@ pub enum IssuesRequest {
         description: String,
     },
     Activity {
+        /// Opaque resume token from a previous pull's `last`; absent for the
+        /// whole feed. Not a count — see `IssueQuery::Activity`.
         #[serde(default)]
-        since: u64,
+        since: Option<String>,
     },
     RoleList,
     RoleShow {
@@ -508,6 +526,9 @@ pub enum IssuesRequest {
         text: Option<String>,
         #[serde(default)]
         links: Option<Vec<issues::spec::Link>>,
+        /// Omitted preserves the Plan structure; `null` removes it.
+        #[serde(default)]
+        plan: Option<Option<issues::spec::PlanData>>,
     },
     /// Upgrade one legacy Spec body without exposing either document language
     /// in the user interface. The immutable successor keeps the same state.
@@ -594,6 +615,7 @@ pub enum IssuesResponse {
     Ok {
         message: Option<String>,
     },
+    Structure(Box<issues::contract::StructureReport>),
     Ref {
         reff: String,
     },
@@ -604,9 +626,13 @@ pub enum IssuesResponse {
     Board(Box<issues::dto::BoardView>),
     Graph(Box<issues::dto::GraphView>),
     ProjectGraph(Box<issues::dto::ProjectGraphView>),
+    Geometry(Box<issues::geometry::GeometryView>),
     Activity {
         events: Vec<issues::dto::ActivityEvent>,
-        last: u64,
+        /// The resume token for the next pull. A pull that returned nothing
+        /// hands back the token it was given, so a polling caller holds its
+        /// place instead of restarting the feed.
+        last: String,
     },
     Inbox {
         entries: Vec<issues::dto::InboxEntry>,
@@ -781,10 +807,12 @@ impl IssuesRequest {
     pub fn access(&self) -> Access {
         use IssuesRequest::*;
         match self {
-            Inbox { .. }
+            StructureStatus
+            | Inbox { .. }
             | AccessPlan { .. }
             | IssueGraph { .. }
             | ProjectGraph { .. }
+            | Geometry { .. }
             | IssueView { .. }
             | List { .. }
             | Board { .. }
@@ -812,7 +840,8 @@ impl IssuesRequest {
             | BaselineShow { .. }
             | BaselineHistory { .. }
             | Packet { .. } => Access::Query,
-            IssueNew { .. }
+            StructureMigrate
+            | IssueNew { .. }
             | IssueEdit { .. }
             | IssueTextSplice { .. }
             | IssueDocumentUpgrade { .. }
@@ -984,10 +1013,12 @@ mod tests {
             spec: "spc_01JV0IUE".into(),
             project: "prj_01JUM4INOC41PRQOF2B082EB87".into(),
             kind: issues::spec::Kind::Requirement,
+            generation: String::new(),
             title: "Login is race-free".into(),
             text: String::new(),
             state: issues::spec::State::Draft,
             links: vec![],
+            plan: None,
             author: "act_1".into(),
             ts: 1,
         };

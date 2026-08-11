@@ -107,4 +107,5 @@ describe("Lait document projection", () => {
     expect(safeDocumentHref("javascript:alert(1)")).toBeNull();
     expect(safeDocumentHref("file:///secret")).toBeNull();
   });
+
 });

@@ -87,4 +87,4 @@ pub use lifecycle::{
     Exit, ExitReason, Integrity, Interruption, Orbit, OrbitStatus, Persistence,
     RemovalConfirmation, Runtime, Station,
 };
-pub use session::Session;
+pub use session::{Session, WorldGeneration, WorldSnapshotId};

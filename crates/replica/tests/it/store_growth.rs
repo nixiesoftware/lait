@@ -128,7 +128,7 @@ fn object_count(dir: &Path) -> usize {
 }
 
 #[test]
-fn editing_one_body_does_not_grow_the_required_set() {
+fn editing_one_body_grows_only_by_the_history_it_retains() {
     // The required set is the promise the store can never withdraw, so it is
     // the number that must track live state. It needs no sweep to be correct:
     // an index node is kept by reachability, so superseding one removes it
@@ -145,13 +145,13 @@ fn editing_one_body_does_not_grow_the_required_set() {
     }
     let after_eighty = r.required_object_count().expect("durable");
 
-    // One required object per commit is the signed Body transaction, and that
-    // is the authenticated chain rather than overhead — it is what a peer
-    // validating a historical parent has to be able to read. Four per commit is
-    // the index spine, and the spine is not history.
+    // One required object per commit is the signed Body transaction, and one
+    // is the changed-Body generation delta that makes an exact historical read
+    // survive restart and sweep. Both are retained history. The index spine is
+    // not history and must not add another three to four objects per commit.
     let per_commit = (after_eighty as f64 - after_twenty as f64) / 60.0;
     assert!(
-        per_commit < 1.5,
+        per_commit < 2.5,
         "the required set grows {per_commit:.2} per commit \
          ({after_twenty} after 20, {after_eighty} after 80)"
     );

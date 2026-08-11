@@ -46,6 +46,6 @@ pub use causal::{
     ImportStatus, Invalid, Material, OpHead, Version, CAUSAL_FORMAT_VERSION, MAX_HEADS,
 };
 pub use fabric::{
-    commit, projection, BodyExport, CausalToken, CollaborativeView, Engine, Key, ListElement, Op,
-    Receipt, Transaction,
+    commit, projection, BodyExport, BodySnapshot, CausalToken, CollaborativeView, Engine, Key,
+    ListElement, LogView, Op, Receipt, Transaction, TreeNode, NODE_ANCHOR_KEY, NODE_VALUE_KEY,
 };

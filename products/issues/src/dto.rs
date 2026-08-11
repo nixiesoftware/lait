@@ -685,7 +685,16 @@ pub struct IssueView {
 /// change. Clients pull activity via `Activity { since }`; it is not streamed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityEvent {
+    /// This row's ordinal in the issue's whole history, trimmed rows counted.
+    /// A display number and a stable one — it does not restart when a busy
+    /// issue drops its oldest events — but not a cursor. To resume a feed,
+    /// send back [`Self::cursor`].
     pub seq: u64,
+    /// The opaque token that names this row for resumption: `(ts, doc, entry
+    /// id)`, comparable in the feed's own order. Empty for a row from a
+    /// pre-log Body, which has no entry id to name.
+    #[serde(default)]
+    pub cursor: String,
     pub doc_id: Option<DocId>,
     pub reff: String,
     pub kind: String,

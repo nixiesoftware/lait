@@ -29,6 +29,13 @@ other's markdown.
   set so two observers converge instead of colliding, and it is retractable on
   its own. **An Observation never reaches a Packet and never counts as
   verification coverage.**
+- `PlanData` is the seed of a Plan revision: zero or more same-project Issue
+  roots. An empty seed means the whole project. It stores no phases, membership,
+  position, completion, or drawing. Blueprint compiles those from canonical
+  Issue relations and metadata at one exact World generation.
+- `Geometry` is that deterministic projection: connected components,
+  dependency layers, hierarchy depth, closure states, facets, and positioned
+  residual loci. It is reproducible output, never replicated plan truth.
 
 A Link is what a document *says*; an Observation is what somebody *noticed*. The
 distinction exists because some truths — this requirement conflicts with that
@@ -50,7 +57,7 @@ The deterministic chain is:
 
 1. Goals establish intent.
 2. Requirements state outcomes and constraints.
-3. Plans sequence the work.
+3. Plans name the work whose order Blueprint should derive.
 4. Designs specify the solution.
 5. Orders amend or direct issued work.
 6. Guides remain explicitly non-enforcing.
@@ -71,6 +78,10 @@ POST /api/spaces/{id}/worlds/issues/rpc
 {"cmd":"spec_state","spec":"spc_…","expected":"<revision>","state":"review"}
 {"cmd":"spec_state","spec":"spc_…","expected":"<revision>","state":"issued"}
 
+{"cmd":"spec_revise","spec":"spc_…","expected":"<revision>",
+ "plan":{"roots":["iss_…","iss_…"]}}
+{"cmd":"geometry","project":"ENG","roots":["iss_…","iss_…"]}
+
 {"cmd":"spec_observe","spec":"spc_…","rel":"conflicts",
  "target":{"kind":"spec","spec":"spc_…","revision":"<revision>"},
  "note":"both claim the session limit and they disagree"}
@@ -85,6 +96,21 @@ POST /api/spaces/{id}/worlds/issues/rpc
 
 `expected` is a compare-and-swap on the document's current revision: a stale
 one is refused rather than silently overwritten.
+
+For `spec_revise`, omitting `plan` preserves the current seed, sending
+`plan: null` removes it, and sending a value replaces it. Structured Plan data
+is accepted only on `kind: "plan"`. Roots are canonical, sorted, unique,
+same-project Issue ids, with a maximum of 32. An empty root set deliberately
+selects the whole project. The read-only migration decoder accepts the retired
+phase-shaped Plan JSON and collapses its Issue membership into roots; every new
+write emits only the root shape.
+
+Every Spec revision records the Manifest root it was composed against. Current
+Plan readers query current Issue morphology, so changing a status or relation
+moves the open loci without revising the document. A historical revision asks
+Lait for that exact retained World generation and therefore reconstructs the
+Issue shape that author could see. Revisions written before generation
+coordinates remain readable and say plainly that their morphology is live.
 
 `spec_observe` and `spec_retract` carry no `expected`: a note is not a revision
 and does not compete for the head, so two observers never refuse each other.
@@ -114,6 +140,15 @@ affordance with it and takes it away again when it goes.
   *is* the transition, and the body. A second revision brings the rail; an issued
   predecessor under a draft head brings the line that says so; concurrent heads
   bring a banner and suppress every transition.
+- **Plans.** Every Plan is named by the shared `Plan` kind label and its Spec
+  title; it gains no second plan number. Prose remains an ordinary low-friction
+  document. Below it, the reader draws the Issue-derived morphology: branches,
+  convergence, containment, disconnected organic patches, cycles, blocked
+  frontiers, and terminal closure loci. Editing a Plan means editing only its
+  roots. Project, team, status, label, milestone, assignee, hierarchy, and
+  dependency facts stay on their canonical Issue-world primitives. Selecting a
+  node opens the canonical Issue. Dense views bound drawing work while the
+  server's closure and counts continue to cover the full graph.
 - **Relations.** Both directions, grouped by verb and read as sentences. Editing
   is staged and saved as *one* revision rather than one per link, and a save that
   meets a moved head replays the delta onto it — adds and removes are set

@@ -34,6 +34,13 @@ ignore = [
     "RUSTSEC-2026-0206", # rustybuzz: unmaintained (typst-layout, typst-library)
     "RUSTSEC-2026-0192", # ttf-parser: unmaintained (typst-library -> fontdb/rustybuzz)
     "RUSTSEC-2024-0320", # yaml-rust: unmaintained (typst-library -> syntect)
+    # im and its helper crates are pinned transitively by loro 1.13.6. Replica
+    # uses the maintained imbl fork directly; these exceptions can disappear
+    # once loro does the same. The OrdSet defect is not exercised by Replica.
+    "RUSTSEC-2023-0126", # im OrdSet aliasing violation (transitive via loro)
+    "RUSTSEC-2026-0247", # bitmaps: unmaintained (transitive via loro -> im)
+    "RUSTSEC-2026-0248", # im: unmaintained (transitive via loro)
+    "RUSTSEC-2026-0251", # sized-chunks: unmaintained (transitive via loro -> im)
 ]
 
 [bans]

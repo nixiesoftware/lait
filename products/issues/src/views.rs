@@ -250,6 +250,69 @@ pub struct CatalogState {
     pub triage: BTreeMap<String, TriageItem>,
 }
 
+/// Parsed state of one project-owned topology Body. Boolean edge values make
+/// removal override an edge inherited from the legacy Catalog representation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelationState {
+    pub edges: BTreeMap<(String, String, String), bool>,
+    pub parents: BTreeMap<String, Option<String>>,
+}
+
+impl RelationState {
+    pub fn from_view(view: &CollaborativeView) -> Self {
+        let mut state = Self::default();
+        if let Some(edges) = view.maps.get("edges") {
+            for (key, raw) in edges {
+                let mut parts = key.splitn(3, '|');
+                let (Some(from), Some(kind), Some(to)) = (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                state.edges.insert(
+                    (from.into(), kind.into(), to.into()),
+                    raw.as_slice() == b"1",
+                );
+            }
+        }
+        let Some(nodes) = view.trees.get(super::contract::HIERARCHY_PATH) else {
+            return state;
+        };
+        let by_node: BTreeMap<&str, &str> = nodes
+            .iter()
+            .filter_map(|node| Some((node.node.as_str(), node.anchor.as_deref()?)))
+            .collect();
+        for node in nodes {
+            let Some(child) = node.anchor.as_deref() else {
+                continue;
+            };
+            let parent = node
+                .parent
+                .as_deref()
+                .and_then(|parent| by_node.get(parent))
+                .map(|parent| (*parent).to_string());
+            state.parents.insert(child.into(), parent);
+        }
+        state
+    }
+
+    pub fn apply_to(&self, catalog: &mut CatalogState) {
+        for (edge, present) in &self.edges {
+            if *present {
+                catalog.edges.insert(edge.clone());
+            } else {
+                catalog.edges.remove(edge);
+            }
+        }
+        for (child, parent) in &self.parents {
+            if let Some(parent) = parent {
+                catalog.parents.insert(child.clone(), parent.clone());
+            } else {
+                catalog.parents.remove(child);
+            }
+        }
+    }
+}
+
 /// A role revision as stored in the catalog `roles` map: hex revision id,
 /// predecessors, and the canonical body.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -275,6 +338,203 @@ fn map_str(view: &CollaborativeView, path: &str) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// An issue's history, from both places it can live, and how much of it there
+/// has ever been.
+///
+/// Ordered by `(t, position in the converged sequence)`, which is what the
+/// activity feed already sorted by and is now the only ordering: an append
+/// lands at the end of the writing replica's own view, so a peer that is behind
+/// appends into the middle of the sequence, and only the clock each event
+/// carries puts the history back in the order it happened. The sequence
+/// position stays as the tie-break, because events inside one second are
+/// ordinarily one transaction's worth in the order they were staged, and the
+/// entry id is random — breaking that tie on identity would shuffle "created"
+/// after "assigned" for no reason.
+///
+/// The second return is the count of everything ever recorded, trimmed rows
+/// included. `list:events` — the pre-log home, read forever — contributes both
+/// its rows and its length, so an issue that spans the cutover reports one
+/// history and one honest total.
+fn read_events(view: &CollaborativeView) -> (Vec<IssueEvent>, u64) {
+    let mut events: Vec<(u64, usize, IssueEvent)> = Vec::new();
+    let mut recorded: u64 = 0;
+    if let Some(legacy) = view.lists.get("events") {
+        recorded = recorded.saturating_add(legacy.len() as u64);
+        for (position, element) in legacy.iter().enumerate() {
+            if let Ok(mut event) = serde_json::from_slice::<IssueEvent>(&element.value) {
+                event.entry = element.element.clone();
+                events.push((event.t, position, event));
+            }
+        }
+    }
+    if let Some(log) = view.logs.get(super::contract::EVENTS_PATH) {
+        recorded = recorded.saturating_add(log.appended);
+        // Legacy rows sort first within a tie because they are older than any
+        // logged one — nothing has written the list since the cutover — so the
+        // logged positions continue past the end of it.
+        let offset = view.lists.get("events").map_or(0, Vec::len);
+        for (position, element) in log.entries.iter().enumerate() {
+            if let Ok(mut event) = serde_json::from_slice::<IssueEvent>(&element.value) {
+                event.entry = element.element.clone();
+                events.push((event.t, offset.saturating_add(position), event));
+            }
+        }
+    }
+    events.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    let ordered: Vec<IssueEvent> = events.into_iter().map(|(_, _, e)| e).collect();
+    // A trimmed log reports more recorded than retained, which is the point.
+    // The reverse cannot happen, but clamping keeps a malformed Body from
+    // producing a count smaller than the rows it hands back.
+    let recorded = recorded.max(ordered.len() as u64);
+    (ordered, recorded)
+}
+
+/// The sub-issue hierarchy as child -> parent, from both places it can live.
+///
+/// The tree is authoritative and the legacy `map:parents` fills in only for
+/// children the tree says nothing about. That order matters and is not
+/// symmetric: an issue re-parented since the cutover has a stale entry in the
+/// map — the map was never rewritten — and letting it win would put the issue
+/// back under the parent it was moved out of.
+///
+/// A node with no anchor is skipped rather than guessed at. Anchors are how
+/// this hierarchy names issues; a node without one was not placed by this
+/// product.
+fn read_hierarchy(view: &CollaborativeView) -> BTreeMap<String, String> {
+    let mut parents = BTreeMap::new();
+    for (child, parent) in map_str(view, "parents") {
+        if !parent.is_empty() {
+            parents.insert(child, parent);
+        }
+    }
+    let Some(nodes) = view.trees.get(super::contract::HIERARCHY_PATH) else {
+        return parents;
+    };
+    let by_node: BTreeMap<&str, &str> = nodes
+        .iter()
+        .filter_map(|n| Some((n.node.as_str(), n.anchor.as_deref()?)))
+        .collect();
+    for node in nodes {
+        let Some(child) = node.anchor.as_deref() else {
+            continue;
+        };
+        match node.parent.as_deref().and_then(|p| by_node.get(p)) {
+            Some(parent) => {
+                parents.insert(child.to_string(), (*parent).to_string());
+            }
+            // A root of the forest is an issue with no parent, and it says so
+            // over any legacy entry: unparenting moves the node to a root and
+            // writes nothing to the map.
+            None => {
+                parents.remove(child);
+            }
+        }
+    }
+    parents
+}
+
+/// An issue's reactions, from both places they can live, keyed by comment.
+///
+/// Every reaction on the issue is one member of `set:reactions`, naming its
+/// comment in the value. Reactions written before that collapse each live in a
+/// `reactions/<comment>` set of their own and are read forever — they are in
+/// Bodies in the field, and nothing writes that shape any more.
+///
+/// The two merge per comment rather than one shadowing the other, because a
+/// comment reacted to on both sides of the cutover has members in both places
+/// and either alone would under-report it. `sort`/`dedup` is what makes that
+/// safe: the same `(emoji, actor)` pair recorded in both sets is one reaction,
+/// not two.
+fn read_reactions(view: &CollaborativeView) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut reactions: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (path, values) in &view.sets {
+        if path == super::contract::REACTIONS_PATH {
+            for value in values {
+                if let Some((comment, emoji, actor)) = super::contract::parse_reaction_value(value)
+                {
+                    reactions.entry(comment).or_default().push((emoji, actor));
+                }
+            }
+            continue;
+        }
+        let Some(comment) = path.strip_prefix("reactions/") else {
+            continue;
+        };
+        for value in values {
+            if let Some(pair) = super::contract::parse_legacy_reaction_value(value) {
+                reactions.entry(comment.to_string()).or_default().push(pair);
+            }
+        }
+    }
+    for pairs in reactions.values_mut() {
+        pairs.sort();
+        pairs.dedup();
+    }
+    reactions.retain(|_, pairs| !pairs.is_empty());
+    reactions
+}
+
+/// An issue's comments, from both places they can live, in one chronological
+/// order.
+///
+/// **The hierarchy is the tree; the order is the clock.** A thread is written
+/// as `tree:comments` — a reply is a child of what it answers, which is what
+/// gives concurrent replies and re-parenting a defined outcome. But sibling
+/// order in any sequence CRDT is *placement* order, and placement is a
+/// statement about the writing replica's own view: a peer that appends while
+/// fifty comments behind places its comment fifty back. So the order this
+/// returns is `(t, id)` from the records themselves, which every replica
+/// computes identically no matter what it had synced when it wrote.
+///
+/// `list:comments` is where comments lived before the tree. Nothing writes it
+/// any more and those records are read forever — they are in Bodies in the
+/// field, and a reader that dropped them would lose conversations rather than
+/// migrate them. They sort into the same order by the same clock, so a thread
+/// that spans the cutover reads as one thread.
+///
+/// A legacy record's `parent` field still names its reply target; a tree
+/// record's parent edge is authoritative and its `parent` field is written too,
+/// so a peer on an older build reads the same threading out of the same bytes.
+fn read_comments(view: &CollaborativeView) -> Vec<StoredComment> {
+    let legacy = view
+        .lists
+        .get("comments")
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            serde_json::from_slice::<StoredComment>(&e.value)
+                .ok()
+                .map(|record| (None, None, record))
+        });
+    // The node id is carried out of the projection so a later write — a reply
+    // filed under this comment, an entry set on it — can name it without
+    // re-deriving it from the record.
+    let threaded = view
+        .trees
+        .get("comments")
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            serde_json::from_slice::<StoredComment>(&node.value)
+                .ok()
+                .map(|record| (Some(node.node.clone()), node.parent.clone(), record))
+        });
+    let mut comments: Vec<StoredComment> = legacy
+        .chain(threaded)
+        .map(|(node, parent_node, mut record)| {
+            record.node = node;
+            record.parent_node = parent_node;
+            record
+        })
+        .collect();
+    // `id` breaks a tie between two comments written in the same millisecond;
+    // ULIDs are time-ordered, so the tiebreak is itself chronological. A
+    // pre-identity record has no id and sorts before one that has, which is
+    // where such records belong — nothing has written one since v0.6.
+    comments.sort_by(|a, b| a.t.cmp(&b.t).then_with(|| a.id.cmp(&b.id)));
+    comments
 }
 
 impl CatalogState {
@@ -414,11 +674,7 @@ impl CatalogState {
                 }
             }
         }
-        for (child, parent) in map_str(view, "parents") {
-            if !parent.is_empty() {
-                state.parents.insert(child, parent);
-            }
-        }
+        state.parents = read_hierarchy(view);
         for (path, list) in &view.lists {
             if let Some(project_lower) = path.strip_prefix("board/") {
                 // Board paths carry the lowercased project id; recover the
@@ -502,6 +758,11 @@ pub struct IssueState {
     /// derived-snapshot cache never holds file bytes (CREATE-5).
     pub attachments: Vec<AttachmentMeta>,
     pub events: Vec<IssueEvent>,
+    /// How many events this issue has ever recorded, including any the log has
+    /// trimmed out of state. Never `events.len()` — that is what survived, and
+    /// a reader that conflated the two would renumber the whole history the
+    /// first time an issue got busy enough to trim.
+    pub events_recorded: u64,
 }
 
 /// The metadata half of a stored attachment record — everything except
@@ -592,38 +853,9 @@ impl IssueState {
             })
             .unwrap_or_default();
         labels.sort();
-        let comments = view
-            .lists
-            .get("comments")
-            .map(|l| {
-                l.iter()
-                    .filter_map(|e| serde_json::from_slice::<StoredComment>(&e.value).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let events = view
-            .lists
-            .get("events")
-            .map(|l| {
-                l.iter()
-                    .filter_map(|e| serde_json::from_slice::<IssueEvent>(&e.value).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut reactions: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-        for (path, values) in &view.sets {
-            let Some(comment) = path.strip_prefix("reactions/") else {
-                continue;
-            };
-            let mut pairs: Vec<(String, String)> = values
-                .iter()
-                .filter_map(|v| super::contract::parse_reaction_value(v))
-                .collect();
-            pairs.sort();
-            if !pairs.is_empty() {
-                reactions.insert(comment.to_string(), pairs);
-            }
-        }
+        let comments = read_comments(view);
+        let (events, events_recorded) = read_events(view);
+        let reactions = read_reactions(view);
         Self {
             project: reg_str(view, "projectid").unwrap_or_default(),
             title: reg_str(view, "title").unwrap_or_default(),
@@ -650,6 +882,7 @@ impl IssueState {
             reactions,
             attachments,
             events,
+            events_recorded,
         }
     }
 }
@@ -1151,8 +1384,445 @@ impl CatalogState {
 }
 
 #[cfg(test)]
+mod event_history_tests {
+    use super::*;
+    use fabric::{ListElement, LogView};
+
+    fn event(kind: &str, t: u64) -> Vec<u8> {
+        serde_json::to_vec(&IssueEvent {
+            k: kind.into(),
+            d: "dev".into(),
+            a: String::new(),
+            t,
+            c: vec![],
+            x: String::new(),
+            entry: String::new(),
+        })
+        .expect("encode")
+    }
+
+    fn kinds(events: &[IssueEvent]) -> Vec<&str> {
+        events.iter().map(|e| e.k.as_str()).collect()
+    }
+
+    /// A history spanning the cutover is one history, in the order it happened,
+    /// and the total counts both homes.
+    #[test]
+    fn history_merges_the_legacy_list_with_the_log_in_clock_order() {
+        let mut view = CollaborativeView::default();
+        view.lists.insert(
+            "events".into(),
+            vec![
+                ListElement {
+                    element: "e0".into(),
+                    value: event("created", 10),
+                },
+                ListElement {
+                    element: "e1".into(),
+                    value: event("edited", 30),
+                },
+            ],
+        );
+        view.logs.insert(
+            super::super::contract::EVENTS_PATH.into(),
+            LogView {
+                entries: vec![
+                    ListElement {
+                        element: "aa".into(),
+                        value: event("assigned", 20),
+                    },
+                    ListElement {
+                        element: "bb".into(),
+                        value: event("commented", 40),
+                    },
+                ],
+                appended: 2,
+            },
+        );
+        let (events, recorded) = read_events(&view);
+        assert_eq!(
+            kinds(&events),
+            vec!["created", "assigned", "edited", "commented"]
+        );
+        assert_eq!(recorded, 4, "both homes counted");
+        assert_eq!(
+            events[1].entry, "aa",
+            "the entry id rides out for the cursor"
+        );
+    }
+
+    /// Events inside one second keep the order they were staged in rather than
+    /// being shuffled by an identity that means nothing chronologically.
+    #[test]
+    fn events_in_the_same_second_keep_their_sequence_order() {
+        let mut view = CollaborativeView::default();
+        view.logs.insert(
+            super::super::contract::EVENTS_PATH.into(),
+            LogView {
+                entries: vec![
+                    ListElement {
+                        element: "ff".into(),
+                        value: event("created", 7),
+                    },
+                    ListElement {
+                        element: "aa".into(),
+                        value: event("assigned", 7),
+                    },
+                ],
+                appended: 2,
+            },
+        );
+        assert_eq!(
+            kinds(&read_events(&view).0),
+            vec!["created", "assigned"],
+            "same second: sequence order, not entry-id order"
+        );
+    }
+
+    /// The count is of everything that ever happened, and the rows are what
+    /// survived. Conflating them is what would renumber a busy issue's history.
+    #[test]
+    fn a_trimmed_log_reports_more_recorded_than_it_retains() {
+        let mut view = CollaborativeView::default();
+        view.logs.insert(
+            super::super::contract::EVENTS_PATH.into(),
+            LogView {
+                entries: vec![ListElement {
+                    element: "zz".into(),
+                    value: event("edited", 99),
+                }],
+                appended: 900,
+            },
+        );
+        let (events, recorded) = read_events(&view);
+        assert_eq!(events.len(), 1);
+        assert_eq!(recorded, 900);
+    }
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+    use fabric::TreeNode;
+
+    fn node(id: &str, anchor: &str, parent: Option<&str>) -> TreeNode {
+        TreeNode {
+            node: id.into(),
+            parent: parent.map(str::to_string),
+            value: Vec::new(),
+            entries: BTreeMap::new(),
+            anchor: Some(anchor.into()),
+        }
+    }
+
+    /// A Catalog written before the hierarchy still reports its parentage.
+    #[test]
+    fn a_hierarchy_stored_as_a_map_still_reads() {
+        let mut view = CollaborativeView::default();
+        view.maps.insert(
+            "parents".into(),
+            [("iss_b".to_string(), b"iss_a".to_vec())]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            read_hierarchy(&view).get("iss_b").map(String::as_str),
+            Some("iss_a")
+        );
+    }
+
+    /// The tree overrules the map, in both directions. The map is never
+    /// rewritten after the cutover, so a stale entry left to win would put a
+    /// re-parented issue back where it was moved from — and an unparented one
+    /// back under a parent it no longer has.
+    #[test]
+    fn the_tree_overrules_a_stale_map_entry_including_when_it_says_no_parent() {
+        let mut view = CollaborativeView::default();
+        view.maps.insert(
+            "parents".into(),
+            [
+                ("iss_b".to_string(), b"iss_a".to_vec()),
+                ("iss_c".to_string(), b"iss_a".to_vec()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        view.trees.insert(
+            crate::contract::HIERARCHY_PATH.into(),
+            vec![
+                node("1@7", "iss_a", None),
+                node("2@7", "iss_d", None),
+                // b was re-parented under d since the cutover.
+                node("3@7", "iss_b", Some("2@7")),
+                // c was unparented: a root of the forest, and no entry.
+                node("4@7", "iss_c", None),
+            ],
+        );
+        let parents = read_hierarchy(&view);
+        assert_eq!(parents.get("iss_b").map(String::as_str), Some("iss_d"));
+        assert_eq!(parents.get("iss_c"), None, "unparenting is not forgotten");
+        assert_eq!(parents.get("iss_a"), None);
+    }
+
+    /// A node placed by something other than this product names no issue, and
+    /// is skipped rather than guessed at.
+    #[test]
+    fn a_node_without_an_anchor_names_no_issue() {
+        let mut view = CollaborativeView::default();
+        view.trees.insert(
+            super::super::contract::HIERARCHY_PATH.into(),
+            vec![
+                TreeNode {
+                    node: "1@7".into(),
+                    parent: None,
+                    value: Vec::new(),
+                    entries: BTreeMap::new(),
+                    anchor: None,
+                },
+                node("2@7", "iss_b", Some("1@7")),
+            ],
+        );
+        // The child's parent node carries no anchor, so there is no issue to
+        // name as its parent — it reads as a root, not as a child of nothing.
+        assert_eq!(read_hierarchy(&view).get("iss_b"), None);
+    }
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    use super::*;
+    use crate::contract::{reaction_value, reaction_value_legacy, REACTIONS_PATH};
+
+    /// A comment reacted to on both sides of the collapse. Either set alone
+    /// under-reports it, and the same pair recorded in both is one reaction.
+    #[test]
+    fn reactions_merge_across_the_cutover_without_double_counting() {
+        let mut view = CollaborativeView::default();
+        view.sets.insert(
+            REACTIONS_PATH.into(),
+            vec![
+                reaction_value("cmt_a", "👍", "act_1"),
+                reaction_value("cmt_a", "🎉", "act_2"),
+                reaction_value("cmt_b", "👍", "act_1"),
+            ],
+        );
+        view.sets.insert(
+            "reactions/cmt_a".into(),
+            vec![
+                // The same reaction, recorded before the collapse.
+                reaction_value_legacy("👍", "act_1"),
+                reaction_value_legacy("🚀", "act_3"),
+            ],
+        );
+        let reactions = read_reactions(&view);
+        assert_eq!(
+            reactions["cmt_a"],
+            vec![
+                ("🎉".to_string(), "act_2".to_string()),
+                ("👍".to_string(), "act_1".to_string()),
+                ("🚀".to_string(), "act_3".to_string()),
+            ],
+            "one reaction per distinct (emoji, actor), from both homes"
+        );
+        assert_eq!(reactions["cmt_b"].len(), 1);
+    }
+
+    /// The value grammar has to stay unambiguous now that the comment shares
+    /// the field with the emoji and the actor.
+    #[test]
+    fn a_reaction_value_round_trips_and_a_malformed_one_is_dropped() {
+        let raw = reaction_value("cmt_a", "👍", "act_1");
+        assert_eq!(
+            crate::contract::parse_reaction_value(&raw),
+            Some(("cmt_a".into(), "👍".into(), "act_1".into()))
+        );
+        // A legacy two-field value is not a new three-field one, and a
+        // four-field value is not either — neither may be read as the other.
+        assert_eq!(
+            crate::contract::parse_reaction_value(&reaction_value_legacy("👍", "act_1")),
+            None
+        );
+        assert_eq!(
+            crate::contract::parse_reaction_value(b"cmt_a\t\xf0\x9f\x91\x8d\tact_1\textra"),
+            None
+        );
+        assert_eq!(
+            crate::contract::parse_legacy_reaction_value(&raw),
+            None,
+            "a three-field value is not a legacy pair"
+        );
+    }
+}
+
+#[cfg(test)]
+mod comment_thread_tests {
+    use super::*;
+    use fabric::{ListElement, TreeNode};
+
+    fn record(id: &str, t: u64, parent: Option<&str>) -> Vec<u8> {
+        serde_json::to_vec(&StoredComment {
+            a: "act_1".into(),
+            t,
+            b: format!("body of {id}"),
+            id: Some(id.into()),
+            parent: parent.map(str::to_string),
+            at: None,
+            node: None,
+            parent_node: None,
+        })
+        .expect("encode")
+    }
+
+    fn ids(comments: &[StoredComment]) -> Vec<&str> {
+        comments
+            .iter()
+            .map(|c| c.id.as_deref().unwrap_or("?"))
+            .collect()
+    }
+
+    /// A Body written before the hierarchy still reads. Nothing writes this
+    /// shape any more, and it is in Bodies in the field.
+    #[test]
+    fn a_thread_stored_as_a_flat_list_still_reads() {
+        let mut view = CollaborativeView::default();
+        view.lists.insert(
+            "comments".into(),
+            vec![
+                ListElement {
+                    element: "e0".into(),
+                    value: record("cmt_a", 10, None),
+                },
+                ListElement {
+                    element: "e1".into(),
+                    value: record("cmt_b", 20, Some("cmt_a")),
+                },
+            ],
+        );
+        let comments = read_comments(&view);
+        assert_eq!(ids(&comments), vec!["cmt_a", "cmt_b"]);
+        assert_eq!(comments[1].parent.as_deref(), Some("cmt_a"));
+        assert!(
+            comments.iter().all(|c| c.node.is_none()),
+            "a legacy record has no node to name"
+        );
+    }
+
+    /// The hierarchy's parent edge is carried out alongside the record, so a
+    /// later write can file a reply under a comment without re-deriving where
+    /// it lives.
+    #[test]
+    fn a_threaded_comment_carries_its_node_and_its_parent_edge() {
+        let mut view = CollaborativeView::default();
+        view.trees.insert(
+            "comments".into(),
+            vec![
+                TreeNode {
+                    node: "3@7".into(),
+                    parent: None,
+                    value: record("cmt_a", 10, None),
+                    entries: BTreeMap::new(),
+                    anchor: None,
+                },
+                TreeNode {
+                    node: "5@7".into(),
+                    parent: Some("3@7".into()),
+                    value: record("cmt_b", 20, Some("cmt_a")),
+                    entries: BTreeMap::new(),
+                    anchor: None,
+                },
+            ],
+        );
+        let comments = read_comments(&view);
+        assert_eq!(ids(&comments), vec!["cmt_a", "cmt_b"]);
+        assert_eq!(comments[0].node.as_deref(), Some("3@7"));
+        assert_eq!(comments[0].parent_node, None);
+        assert_eq!(comments[1].parent_node.as_deref(), Some("3@7"));
+    }
+
+    /// The reason the order is the clock and not the sequence.
+    ///
+    /// The tree holds a comment written *before* the last list comment —
+    /// which is what a peer that was behind produces, and what placement order
+    /// cannot fix, since the two containers have no relative order at all.
+    /// Reading by `t` puts the thread back in the order it was written.
+    #[test]
+    fn a_thread_spanning_the_cutover_reads_in_clock_order() {
+        let mut view = CollaborativeView::default();
+        view.lists.insert(
+            "comments".into(),
+            vec![
+                ListElement {
+                    element: "e0".into(),
+                    value: record("cmt_a", 10, None),
+                },
+                ListElement {
+                    element: "e1".into(),
+                    value: record("cmt_c", 30, None),
+                },
+            ],
+        );
+        view.trees.insert(
+            "comments".into(),
+            vec![
+                TreeNode {
+                    node: "3@7".into(),
+                    parent: None,
+                    value: record("cmt_b", 20, None),
+                    entries: BTreeMap::new(),
+                    anchor: None,
+                },
+                TreeNode {
+                    node: "5@7".into(),
+                    parent: None,
+                    value: record("cmt_d", 40, None),
+                    entries: BTreeMap::new(),
+                    anchor: None,
+                },
+            ],
+        );
+        assert_eq!(
+            ids(&read_comments(&view)),
+            vec!["cmt_a", "cmt_b", "cmt_c", "cmt_d"],
+            "one thread, in the order it was written, across both containers"
+        );
+    }
+
+    /// Two comments in the same millisecond need a tiebreak every replica
+    /// computes the same way, or the thread reorders itself between peers.
+    #[test]
+    fn same_millisecond_comments_break_the_tie_on_id() {
+        let mut view = CollaborativeView::default();
+        view.trees.insert(
+            "comments".into(),
+            vec![
+                TreeNode {
+                    node: "5@7".into(),
+                    parent: None,
+                    value: record("cmt_z", 10, None),
+                    entries: BTreeMap::new(),
+                    anchor: None,
+                },
+                TreeNode {
+                    node: "3@7".into(),
+                    parent: None,
+                    value: record("cmt_a", 10, None),
+                    entries: BTreeMap::new(),
+                    anchor: None,
+                },
+            ],
+        );
+        assert_eq!(
+            ids(&read_comments(&view)),
+            vec!["cmt_a", "cmt_z"],
+            "the id decides, not the position the writer happened to place it at"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use fabric::TreeNode;
 
     #[test]
     fn missing_document_schema_is_legacy_and_the_register_is_additive() {
@@ -1191,5 +1861,53 @@ mod tests {
             aliases.by_alias.get("board-5").map(String::as_str),
             Some(doc)
         );
+    }
+
+    #[test]
+    fn project_topology_overrides_legacy_edges_and_parentage() {
+        let a = "iss_01JU6A5CHEI9UR3SGKEK05KIAR";
+        let b = "iss_01JU6A5CHEI9UR3SGKEK05KIAS";
+        let c = "iss_01JU6A5CHEI9UR3SGKEK05KIAT";
+        let mut catalog = CatalogState::default();
+        catalog.edges.insert((a.into(), "blocks".into(), b.into()));
+        catalog.parents.insert(c.into(), a.into());
+
+        let mut view = CollaborativeView::default();
+        view.maps
+            .entry("edges".into())
+            .or_default()
+            .insert(format!("{a}|blocks|{b}"), b"0".to_vec());
+        view.maps
+            .entry("edges".into())
+            .or_default()
+            .insert(format!("{b}|relates|{c}"), b"1".to_vec());
+        view.trees.insert(
+            super::super::contract::HIERARCHY_PATH.into(),
+            vec![
+                TreeNode {
+                    node: "node-b".into(),
+                    parent: None,
+                    value: Vec::new(),
+                    entries: BTreeMap::new(),
+                    anchor: Some(b.into()),
+                },
+                TreeNode {
+                    node: "node-c".into(),
+                    parent: Some("node-b".into()),
+                    value: Vec::new(),
+                    entries: BTreeMap::new(),
+                    anchor: Some(c.into()),
+                },
+            ],
+        );
+
+        RelationState::from_view(&view).apply_to(&mut catalog);
+        assert!(!catalog
+            .edges
+            .contains(&(a.into(), "blocks".into(), b.into())));
+        assert!(catalog
+            .edges
+            .contains(&(b.into(), "relates".into(), c.into())));
+        assert_eq!(catalog.parents.get(c).map(String::as_str), Some(b));
     }
 }

@@ -261,9 +261,15 @@ export type SpecTarget =
 export interface SpecLink { rel: SpecRel; target: SpecTarget }
 export interface SpecRef { spec: string; revision: string }
 export interface BaselineRef { baseline: string; revision: string }
+export interface PlanData {
+  /** Issue seeds only. Topology, order, closure, and gaps are derived. */
+  roots: string[];
+}
 export interface SpecBody {
   spec: string; project: string; kind: SpecKind; title: string; text: string;
-  state: SpecState; links: SpecLink[]; author: string; ts: number;
+  state: SpecState; links: SpecLink[]; plan?: PlanData | null; author: string; ts: number;
+  /** World generation against which this immutable revision was composed. */
+  generation?: string;
 }
 export interface SpecView {
   spec: string; project: string; kind: SpecKind; title: string; state: SpecState;
@@ -276,6 +282,63 @@ export interface BaselineBody {
 export interface BaselineView {
   baseline: string; project: string; name: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: BaselineBody;
+}
+
+export type GeometryRole = "constraint" | "containment" | "equivalence" | "association";
+export type GeometryClosureState = "closed" | "ready" | "blocked" | "cycle" | "stalled";
+export interface GeometryFacet { kind: string; id: string; label: string }
+export interface GeometryNode {
+  row: Row;
+  component: string;
+  layer?: number | null;
+  ordinal: number;
+  hierarchy_depth: number;
+  parent?: string | null;
+  children: string[];
+  blocked_by: string[];
+  blocks: string[];
+  closure: GeometryClosureState;
+  slack?: number | null;
+  facets: GeometryFacet[];
+}
+export interface GeometryEdge {
+  from: string;
+  relation: string;
+  role: GeometryRole;
+  to: string;
+}
+export interface GeometryComponent {
+  id: string;
+  nodes: string[];
+  roots: string[];
+  terminals: string[];
+  loops: string[][];
+}
+export interface GeometryResidual {
+  kind: "root_missing" | "dependency_cycle" | "blocked_frontier" | "due_order_conflict" | "unattached" | "closure_frontier";
+  component?: string | null;
+  layer?: number | null;
+  at: string[];
+  requires: string[];
+}
+export interface GeometryClosure {
+  total: number;
+  closed: number;
+  ready: number;
+  blocked: number;
+  cyclic: number;
+  stalled: number;
+}
+export interface GeometryView {
+  schema_version: number;
+  generation: string;
+  project: string;
+  roots: string[];
+  nodes: GeometryNode[];
+  edges: GeometryEdge[];
+  components: GeometryComponent[];
+  residuals: GeometryResidual[];
+  closure: GeometryClosure;
 }
 /**
  * One typed assertion seen from the far end — `spec.rs` `SpecReference`.
@@ -458,7 +521,12 @@ export interface GraphView {
 }
 
 export interface ActivityEvent {
+  /** Ordinal in the issue's whole history, trimmed rows counted. Display
+   * only — to resume a feed, send `cursor` back as `since`. */
   seq: number;
+  /** Opaque resume token naming this row. Empty for a row from a Body
+   * written before the history log. */
+  cursor?: string;
   doc_id: string | null;
   reff: string;
   kind: string;
@@ -892,6 +960,25 @@ export interface Filter {
   all?: boolean;
 }
 
+export interface StructureReport {
+  generation: string;
+  projects: number;
+  issues: number;
+  visible_edges: number;
+  visible_parents: number;
+  relation_bodies: number;
+  relation_projects_pending: number;
+  relation_edges_pending: number;
+  relation_parents_pending: number;
+  specs: number;
+  spec_heads_pending: number;
+  spec_conflicts: number;
+  plans_without_roots: number;
+  issue_documents_pending: number;
+  baselines: number;
+  complete: boolean;
+}
+
 /**
  * The installed Issues application protocol plus the browser-safe root control
  * requests, internally tagged by `cmd`.
@@ -909,6 +996,8 @@ export interface Filter {
  * have no browser surface yet — add them here when they grow one.
  */
 export type Request =
+  | { cmd: "structure_status" }
+  | { cmd: "structure_migrate" }
   | { cmd: "issue_new"; title: string; project?: string | null; project_hint?: string | null; assignees?: string[]; priority?: Priority | null; labels?: string[]; body?: string | null; due?: string | null; estimate?: number | null }
   /** `due`: `YYYY-MM-DD` (UTC), unix seconds, or `"none"` to clear; `estimate`:
    *  a number as a string, or `"none"` to clear. Absent = untouched. */
@@ -1006,7 +1095,7 @@ export type Request =
   | { cmd: "label_delete"; label: string }
   | { cmd: "space_rename"; name: string }
   | { cmd: "space_describe"; description: string }
-  | { cmd: "activity"; since?: number }
+  | { cmd: "activity"; since?: string }
   | { cmd: "inbox"; clear?: boolean }
   | { cmd: "member_add"; who: string; admin?: boolean; as_name?: string | null }
   | { cmd: "member_remove"; who: string }
@@ -1045,6 +1134,7 @@ export type Request =
   | { cmd: "workflow_show"; project: string }
   | { cmd: "workflow_set"; project: string; expect_heads: string[]; body_json: string }
   | { cmd: "spec_list"; project?: string | null }
+  | { cmd: "geometry"; project: string; roots?: string[]; generation?: string | null }
   | { cmd: "spec_show"; spec: string }
   /** Reply is `spec_revisions` — the whole DAG, oldest first. */
   | { cmd: "spec_history"; spec: string }
@@ -1052,7 +1142,7 @@ export type Request =
   | { cmd: "spec_references"; project?: string | null }
   | { cmd: "baseline_history"; baseline: string }
   | { cmd: "spec_new"; project: string; kind: SpecKind; title: string; text?: string; links?: SpecLink[] }
-  | { cmd: "spec_revise"; spec: string; expected: string; title?: string | null; text?: string | null; links?: SpecLink[] | null }
+  | { cmd: "spec_revise"; spec: string; expected: string; title?: string | null; text?: string | null; links?: SpecLink[] | null; plan?: PlanData | null }
   | { cmd: "spec_document_upgrade"; spec: string; expected: string; text: string }
   | { cmd: "spec_state"; spec: string; expected: string; state: SpecState }
   | { cmd: "spec_resolve"; spec: string; expected_heads: string[]; body_json: string }
@@ -1217,13 +1307,15 @@ export interface OrbitEntry {
 export type Response =
   | { kind: "hello"; protocol_version: number }
   | { kind: "ok"; message: string | null }
+  | ({ kind: "structure" } & StructureReport)
   | { kind: "ref"; reff: string }
   | ({ kind: "issue" } & IssueView)
   | { kind: "list"; rows: Row[] }
   | ({ kind: "board" } & BoardView)
   | ({ kind: "graph" } & GraphView)
   | ({ kind: "project_graph" } & ProjectGraphView)
-  | { kind: "activity"; events: ActivityEvent[]; last: number }
+  | ({ kind: "geometry" } & GeometryView)
+  | { kind: "activity"; events: ActivityEvent[]; last: string }
   | { kind: "inbox"; entries: InboxEntry[]; unread: number }
   | { kind: "projects"; projects: ProjectDto[] }
   | { kind: "teams"; teams: TeamDto[] }

@@ -30,7 +30,8 @@ pub use crate::implementation::Implementation;
 pub use crate::registry::{Builder, Catalog, Declaration, Refusal};
 pub use crate::session::{
     CommittedEffect, Conflict, Failure, Interruption, Observation, ObservationCursor,
-    ObservationStream, DEFAULT_OBSERVATION_CAPACITY, MAX_OBSERVATION_CAPACITY,
+    ObservationStream, WorldGeneration, WorldSnapshotId, DEFAULT_OBSERVATION_CAPACITY,
+    MAX_OBSERVATION_CAPACITY,
 };
 
 /// A World-owned semantic rejection. These values are deterministic decisions

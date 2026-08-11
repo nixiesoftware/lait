@@ -26,6 +26,50 @@ fn body_op_variant_tags_are_frozen() {
         .unwrap(),
         vec![11, 0, 0x01]
     );
+
+    // The tree operations were appended after the frozen twelve, so every tag
+    // above holds its original value. TreeInsert is tag 14: path, then two
+    // Options (0 = None), then a length-prefixed value.
+    assert_eq!(
+        postcard::to_stdvec(&Op::TreeInsert {
+            path: String::new(),
+            parent: None,
+            after: None,
+            value: vec![0xAB],
+        })
+        .unwrap(),
+        vec![14, 0, 0, 0, 1, 0xAB]
+    );
+    assert_eq!(
+        postcard::to_stdvec(&Op::TreeUnset {
+            path: String::new(),
+            node: String::new(),
+            key: String::new(),
+        })
+        .unwrap(),
+        vec![18, 0, 0, 0]
+    );
+    // TreeAnchor is tag 19: path, anchor, then an Option (0 = None).
+    assert_eq!(
+        postcard::to_stdvec(&Op::TreeAnchor {
+            path: String::new(),
+            anchor: String::new(),
+            parent: None,
+        })
+        .unwrap(),
+        vec![19, 0, 0, 0]
+    );
+    // LogAppend is tag 20: path, length-prefixed value, then a varint retain
+    // (512 -> 0x80 0x04).
+    assert_eq!(
+        postcard::to_stdvec(&Op::LogAppend {
+            path: String::new(),
+            value: vec![0xAB],
+            retain: 512,
+        })
+        .unwrap(),
+        vec![20, 0, 1, 0xAB, 0x80, 0x04]
+    );
 }
 
 #[test]
@@ -82,6 +126,43 @@ fn every_variant_roundtrips() {
         },
         Op::Create,
         Op::Tombstone,
+        Op::TreeInsert {
+            path: "comments".into(),
+            parent: Some("3@7".into()),
+            after: None,
+            value: vec![7],
+        },
+        Op::TreeMove {
+            path: "comments".into(),
+            node: "5@7".into(),
+            parent: None,
+            after: Some("3@7".into()),
+        },
+        Op::TreeRemove {
+            path: "comments".into(),
+            node: "5@7".into(),
+        },
+        Op::TreeSet {
+            path: "comments".into(),
+            node: "5@7".into(),
+            key: "pinned".into(),
+            value: vec![1],
+        },
+        Op::TreeUnset {
+            path: "comments".into(),
+            node: "5@7".into(),
+            key: "pinned".into(),
+        },
+        Op::TreeAnchor {
+            path: "hierarchy".into(),
+            anchor: "iss_child".into(),
+            parent: Some("iss_parent".into()),
+        },
+        Op::LogAppend {
+            path: "events".into(),
+            value: vec![3],
+            retain: 512,
+        },
     ];
     for op in ops {
         let bytes = postcard::to_stdvec(&op).unwrap();
@@ -92,7 +173,7 @@ fn every_variant_roundtrips() {
 
 #[test]
 fn unknown_variant_tag_is_rejected() {
-    // Tag 99 is out of range for the frozen 14-variant algebra.
+    // Tag 99 is out of range for the frozen 21-variant algebra.
     let bytes = vec![99u8];
     assert!(postcard::from_bytes::<Op>(&bytes).is_err());
 }

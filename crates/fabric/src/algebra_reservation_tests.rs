@@ -1,9 +1,12 @@
 //! Plan 13 F0 item 7 — reserved algebra space and the unknown-tag policy.
 //!
-//! The collaborative algebra stays at six types in this docket. What it must
-//! not do is make a seventh expensive: F3 freezes checkpoint and delta
-//! encodings on top of this algebra, and after that an unreserved tag is a
-//! migration rather than a version bump.
+//! The algebra was six types when this was written, with `tree` and `log`
+//! reserved against the day the product needed them. Both days came: it is
+//! eight now, and the reservation list is empty. What the list bought is
+//! recorded here rather than in a changelog — F3 froze checkpoint and delta
+//! encodings on top of this algebra, so those two types cost a version bump
+//! each instead of a format migration, which is the entire return on having
+//! named them years before writing them.
 //!
 //! The second half matters more. `read_collaborative` used to fall through an
 //! unknown root tag with `_ => {}`, silently omitting its data from the
@@ -56,8 +59,8 @@ fn engine_with_text() -> Engine {
 }
 
 #[test]
-fn the_implemented_algebra_is_exactly_six_types() {
-    for tag in ["reg", "map", "list", "text", "set", "cnt"] {
+fn the_implemented_algebra_is_exactly_eight_types() {
+    for tag in ["reg", "map", "list", "text", "set", "cnt", "tree", "log"] {
         assert!(is_implemented_type_tag(tag), "`{tag}` must be implemented");
         assert!(
             !is_reserved_type_tag(tag),
@@ -66,35 +69,26 @@ fn the_implemented_algebra_is_exactly_six_types() {
     }
 }
 
+/// Both reservations were spent, and on exactly what they were taken for:
+/// `tree` for the hierarchies the product hand-encoded through parent fields,
+/// `log` for the activity feeds it stored as unbounded Lists. An empty list is
+/// the honest state and not a lapse — but it is also the expensive state, so
+/// this test says so rather than quietly passing over nothing.
 #[test]
-fn tag_space_is_reserved_for_the_types_the_product_is_working_around() {
-    // `tree`: sub-issues, milestone nesting, and threaded comments are all
-    // hierarchies, and Issues hand-encodes threading over flat storage today.
-    // `log`: activity feeds are unbounded Lists re-checkpointed on every
-    // append. Reserving costs nothing; not reserving costs a migration.
-    for tag in ["tree", "log"] {
-        assert!(is_reserved_type_tag(tag), "`{tag}` must be reserved");
-        assert!(
-            !is_implemented_type_tag(tag),
-            "a reserved tag must not be projectable — reserving it is the \
-             promise that it is *not* implemented yet"
-        );
-    }
-}
-
-#[test]
-fn a_reserved_tag_refuses_the_projection_rather_than_omitting_it() {
-    // A peer on a later build writes a Body binding a reserved type. This
-    // replica stores and converges it, and must refuse to project it.
-    let mut fabric = Engine::new();
-    fabric
-        .import_body(&key(), &body_binding_type("tree"))
-        .expect("a Body we cannot project still imports");
-
-    assert_eq!(
-        fabric.read_collaborative(&key()),
-        Err(ProjectionFailure::SchemaAhead)
+fn nothing_is_reserved_and_the_next_type_should_change_that() {
+    let unspent: Vec<&str> = ["tree", "log"]
+        .into_iter()
+        .filter(|tag| is_reserved_type_tag(tag))
+        .collect();
+    assert!(
+        unspent.is_empty(),
+        "{unspent:?} are implemented and must no longer be reserved"
     );
+    // The reservation mechanism itself still has to work, because the next
+    // foreseen type belongs on the list before the encoding that would have to
+    // migrate around it ships.
+    assert!(!is_reserved_type_tag("quaternion"));
+    assert!(!is_implemented_type_tag("quaternion"));
 }
 
 #[test]
@@ -117,7 +111,7 @@ fn an_unprojectable_body_still_exports_and_converges() {
     // network partitions on version skew.
     let mut ahead = Engine::new();
     ahead
-        .import_body(&key(), &body_binding_type("tree"))
+        .import_body(&key(), &body_binding_type("quaternion"))
         .expect("import");
     let export = ahead
         .export_body(&key())

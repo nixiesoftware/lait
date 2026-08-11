@@ -43,13 +43,18 @@ export function MarkdownEditor(props: {
     markdown: string,
   ) => void;
 }) {
-  const { documentSchema = 0, ...editorProps } = props;
+  const {
+    documentSchema = 0,
+    ...editorProps
+  } = props;
   return (
     <Suspense
       fallback={
         <div className={props.className}>
           {props.value ? (
-            documentSchema ? <Document source={props.value} /> : <Markdown text={props.value} />
+            documentSchema
+              ? <Document source={props.value} />
+              : <Markdown text={props.value} />
           ) : (
             <span className="text-mute">{props.placeholder}</span>
           )}

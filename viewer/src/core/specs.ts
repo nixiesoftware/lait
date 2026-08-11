@@ -5,6 +5,7 @@ import type {
   SpecBody,
   SpecKind,
   SpecLink,
+  PlanData,
   SpecReference,
   SpecRel,
   SpecRevision,
@@ -465,6 +466,7 @@ export interface BodyDiff {
   state: { from: SpecState; to: SpecState } | null;
   text: LineOp[];
   links: { added: SpecLink[]; removed: SpecLink[] };
+  plan: { from: PlanData | null; to: PlanData | null } | null;
 }
 
 /** A key that identifies a Link by what it asserts about which exact target. */
@@ -498,6 +500,9 @@ export function diffBodies(from: SpecBody, to: SpecBody): BodyDiff {
       added: [...after].filter(([key]) => !before.has(key)).map(([, link]) => link),
       removed: [...before].filter(([key]) => !after.has(key)).map(([, link]) => link),
     },
+    plan: JSON.stringify(from.plan ?? null) === JSON.stringify(to.plan ?? null)
+      ? null
+      : { from: from.plan ?? null, to: to.plan ?? null },
   };
 }
 

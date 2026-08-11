@@ -61,14 +61,49 @@ pub enum Failure {
     Conflict(Conflict),
     Interrupted,
     Persistence,
+    /// Durable derived state failed with a concrete operation and cause.
+    PersistenceCause {
+        operation: &'static str,
+        reason: String,
+    },
     Reset,
     CallbackPanicked,
+    /// The requested World generation is well-formed but this Station does not
+    /// retain its material. Distinct from reset/interruption: callers may fall
+    /// back to a nearer ancestor or request the generation from another holder.
+    GenerationUnavailable,
     /// Authority state could not be evaluated at all — the ledger failed to
     /// materialize the pinned frontier (missing history, malformed frontier,
     /// or a durable failure). A local-state problem, never a standing denial:
     /// rendering it as "denied" once sent a fully-granted member to ask an
     /// admin for a grant they already held.
     AuthorityUnavailable(String),
+}
+
+/// A peer-neutral coordinate for one World's read generation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WorldSnapshotId {
+    pub world: WorldId,
+    pub root: [u8; 32],
+}
+
+impl WorldSnapshotId {
+    pub fn new(world: WorldId, root: [u8; 32]) -> Self {
+        Self { world, root }
+    }
+
+    pub fn to_hex(&self) -> String {
+        data_encoding::HEXLOWER.encode(&self.root)
+    }
+}
+
+/// One retained point in a World's generation lineage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldGeneration {
+    pub id: WorldSnapshotId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<WorldSnapshotId>,
+    pub frontier: ReplicaFrontier,
 }
 
 impl From<Rejection> for Failure {
@@ -155,7 +190,40 @@ pub struct CommittedEffect {
 /// window where a commit lands after the shutdown checkpoint.
 struct CoreInner {
     replica: replica::Replica,
+    snapshot: Arc<replica::ReadSnapshot>,
+    generations: std::collections::BTreeMap<[u8; 32], Arc<replica::ReadSnapshot>>,
+    parents: std::collections::BTreeMap<[u8; 32], Option<[u8; 32]>>,
+    generation_order: std::collections::VecDeque<[u8; 32]>,
     closed: bool,
+}
+
+/// Hot immutable generations retained by one active Station. Durable lineage
+/// is complete in Replica; this only bounds reconstructed snapshots in RAM.
+const CACHED_READ_GENERATIONS: usize = 64;
+
+impl CoreInner {
+    fn cache_generation(
+        &mut self,
+        root: [u8; 32],
+        snapshot: Arc<replica::ReadSnapshot>,
+        parent: Option<[u8; 32]>,
+    ) {
+        self.generation_order.retain(|candidate| candidate != &root);
+        self.generation_order.push_back(root);
+        self.generations.insert(root, snapshot);
+        self.parents.insert(root, parent);
+        while self.generations.len() > CACHED_READ_GENERATIONS {
+            let Some(expired) = self.generation_order.pop_front() else {
+                break;
+            };
+            if expired == self.snapshot.root() {
+                self.generation_order.push_back(expired);
+                continue;
+            }
+            self.generations.remove(&expired);
+            self.parents.remove(&expired);
+        }
+    }
 }
 
 /// The default Observation ring capacity, and its hard maximum.
@@ -381,9 +449,17 @@ impl StationCore {
         replica: replica::Replica,
     ) -> Self {
         let frontier = replica.frontier();
+        let snapshot = Arc::new(replica.read_snapshot());
+        let root = snapshot.root();
+        let generations = [(root, snapshot.clone())].into_iter().collect();
+        let parents = [(root, None)].into_iter().collect();
         Self {
             inner: std::sync::Mutex::new(CoreInner {
                 replica,
+                snapshot,
+                generations,
+                parents,
+                generation_order: std::collections::VecDeque::from([root]),
                 closed: false,
             }),
             broadcaster: Arc::new(Broadcaster::new(epoch, observation_capacity, frontier)),
@@ -446,7 +522,26 @@ impl StationCore {
                 "station dormant".into(),
             ));
         }
-        f(&mut inner.replica)
+        let before = inner.snapshot.root();
+        let result = f(&mut inner.replica);
+        if result.is_ok() {
+            // The Contact/maintenance entry does not report a changed Body set
+            // at this seam, so it takes the full activation path. This cannot
+            // be guarded only by Frontier movement: material retained opaquely
+            // can become readable after authority arrives while keeping the
+            // same signed Frontier. Local World commits use the changed-only
+            // path in `Session::submit`.
+            let snapshot = Arc::new(inner.replica.read_snapshot());
+            let root = snapshot.root();
+            inner.snapshot = snapshot.clone();
+            let parent = if root == before {
+                inner.parents.get(&root).copied().flatten()
+            } else {
+                Some(before)
+            };
+            inner.cache_generation(root, snapshot, parent);
+        }
+        result
     }
 
     /// Close the core to further commits, as one transition under the writer
@@ -501,20 +596,26 @@ impl replica::transaction::TransactionAuthorizer for SessionAuthorizer<'_> {
 /// away and the paragraph explaining why it is exclusive one line after that.
 impl crate::plane::live::AnchorSource for StationCore {
     fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
-        // A dormant core answers `None`, which is the same answer a position
-        // the algebra cannot bind gets. Both mean there is no anchor to send,
-        // and a caller has nothing different to do about them.
-        self.with_replica(|replica| Ok(replica.anchor(key, path, position)))
-            .ok()
-            .flatten()
+        let inner = self.lock();
+        if inner.closed {
+            return None;
+        }
+        let snapshot = inner.snapshot.clone();
+        drop(inner);
+        snapshot.anchor(key, path, position)
     }
 
     fn resolve_anchor(&self, key: &BodyKey, anchor: &fabric::Anchor) -> fabric::AnchorResolution {
         // Total, so a dormant core is `Drifted` rather than an error — the
         // renderer's contract is that this never fails and never lies, not that
         // it always knows.
-        self.with_replica(|replica| Ok(replica.resolve_anchor(key, anchor)))
-            .unwrap_or(fabric::AnchorResolution::Drifted)
+        let inner = self.lock();
+        if inner.closed {
+            return fabric::AnchorResolution::Drifted;
+        }
+        let snapshot = inner.snapshot.clone();
+        drop(inner);
+        snapshot.resolve_anchor(key, anchor)
     }
 }
 
@@ -561,6 +662,60 @@ impl crate::world::BodyReader for ReplicaReader<'_> {
             .body_keys()
             .into_iter()
             .filter(|k| &k.world == world && self.0.binding(k).is_some_and(|b| &b.schema == schema))
+            .collect()
+    }
+    fn body_stamp(&self, key: &BodyKey) -> Option<Vec<u8>> {
+        self.0.body_stamp(key)
+    }
+}
+
+/// A [`BodyReader`] over an immutable generation. Unlike [`ReplicaReader`],
+/// this owns no borrow of the Station writer and is safe to evaluate after the
+/// mutex has been released.
+struct SnapshotReader(Arc<replica::ReadSnapshot>);
+
+impl crate::world::BodyReader for SnapshotReader {
+    fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>> {
+        self.0.read(key)
+    }
+    fn read_collaborative_body(
+        &self,
+        key: &BodyKey,
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
+        self.0.read_collaborative(key)
+    }
+    fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
+        self.0.body_version(key)
+    }
+    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
+        self.0.anchor(key, path, position)
+    }
+    fn resolve_anchor(&self, key: &BodyKey, anchor: &fabric::Anchor) -> fabric::AnchorResolution {
+        self.0.resolve_anchor(key, anchor)
+    }
+    fn content_status(
+        &self,
+        content: &replica::content::ContentRef,
+    ) -> Option<crate::world::ContentStatus> {
+        self.0
+            .content_descriptor(content)
+            .map(|descriptor| crate::world::ContentStatus {
+                plaintext_len: descriptor.plaintext_len,
+                chunk_count: descriptor.chunk_count,
+                resident_chunks: 0,
+            })
+    }
+    fn bodies_with_schema(&self, world: &WorldId, schema: &SchemaId) -> Vec<BodyKey> {
+        self.0
+            .body_keys()
+            .into_iter()
+            .filter(|key| {
+                &key.world == world
+                    && self
+                        .0
+                        .binding(key)
+                        .is_some_and(|binding| &binding.schema == schema)
+            })
             .collect()
     }
     fn body_stamp(&self, key: &BodyKey) -> Option<Vec<u8>> {
@@ -697,7 +852,15 @@ impl Session {
                 .schemas
                 .iter()
                 .find(|s| s.id == schema_id && s.version == version)
-                .ok_or(Rejection::ContractViolation)?;
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        body = ?key,
+                        schema = %schema_id,
+                        version,
+                        "World effect targeted a Body whose exact schema binding is not writable"
+                    );
+                    Rejection::ContractViolation
+                })?;
             let collaborative = matches!(schema.mutation, MutationModel::Collaborative(_));
             let permitted = match op {
                 Op::ReplaceAtomic { .. } => !collaborative,
@@ -899,7 +1062,11 @@ impl Session {
         // Contain the staged effect inside this World's namespace and each
         // Body's exact schema binding, resolving the bindings the commit is
         // made under.
-        let bindings = self.contain_effect(&inner.replica, &effect, &intent_schema)?;
+        let bindings = self
+            .contain_effect(&inner.replica, &effect, &intent_schema)
+            .inspect_err(|rejection| {
+                tracing::warn!(?rejection, "World effect containment failed");
+            })?;
         // Authority-frontier compare-and-swap, still under the writer lock:
         // the frontier the request was authorized at must still be current at
         // commit. A change refuses the commit with AuthorityChanged and
@@ -969,8 +1136,12 @@ impl Session {
                 replica::transaction::commit::Failure::UnsupportedOp => {
                     Failure::Rejected(Rejection::ContractViolation)
                 }
-                replica::transaction::commit::Failure::PathInvalid
-                | replica::transaction::commit::Failure::InvalidOp(_) => {
+                replica::transaction::commit::Failure::PathInvalid => {
+                    tracing::warn!("World staged an invalid Body path");
+                    Failure::Rejected(Rejection::InvalidRequest)
+                }
+                replica::transaction::commit::Failure::InvalidOp(invalid) => {
+                    tracing::warn!(?invalid, "World staged an invalid Body operation");
                     Failure::Rejected(Rejection::InvalidRequest)
                 }
                 replica::transaction::commit::Failure::OpLimit => {
@@ -1031,6 +1202,9 @@ impl Session {
                 replica::transaction::commit::Failure::ParentManifestUnavailable => {
                     Failure::Conflict(Conflict::Body)
                 }
+                replica::transaction::commit::Failure::IntegrityCause {
+                    operation, reason, ..
+                } => Failure::PersistenceCause { operation, reason },
                 // Illegitimate is an incorporation-path error; a local commit
                 // never produces it, but the match stays exhaustive.
                 replica::transaction::commit::Failure::Illegitimate(_)
@@ -1048,6 +1222,12 @@ impl Session {
         // nothing is ever published before durability. A replay publishes
         // nothing (nothing committed).
         if let replica::transaction::ActionOutcome::Committed(receipt) = &outcome {
+            let prior = inner.snapshot.clone();
+            let snapshot = Arc::new(inner.replica.advance_read_snapshot(&prior, &receipt.bodies));
+            let root = snapshot.root();
+            let parent = prior.root();
+            inner.snapshot = snapshot.clone();
+            inner.cache_generation(root, snapshot, Some(parent));
             self.core
                 .broadcaster
                 .publish(receipt.bodies.clone(), receipt.frontier, false);
@@ -1069,18 +1249,115 @@ impl Session {
     /// duration of the call so the projection is derived from one consistent
     /// frontier.
     pub fn query(&self, query: Query) -> Result<Projection, Failure> {
+        let snapshot = {
+            let inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            inner.snapshot.clone()
+        };
+        self.query_snapshot(query, snapshot)
+    }
+
+    /// Query an exact retained generation. The authorization decision is still
+    /// made against the caller's current authority standing; only World Bodies
+    /// are historical.
+    pub fn query_at(
+        &self,
+        generation: &WorldSnapshotId,
+        query: Query,
+    ) -> Result<Projection, Failure> {
+        if generation.world != self.world_id {
+            return Err(Rejection::InvalidRequest.into());
+        }
+        let snapshot = {
+            let mut inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            if let Some(snapshot) = inner.generations.get(&generation.root).cloned() {
+                snapshot
+            } else {
+                let snapshot = inner
+                    .replica
+                    .read_generation(&generation.root)
+                    .map_err(|_| Failure::Persistence)?
+                    .map(Arc::new)
+                    .ok_or(Failure::GenerationUnavailable)?;
+                inner.cache_generation(generation.root, snapshot.clone(), None);
+                snapshot
+            }
+        };
+        self.query_snapshot(query, snapshot)
+    }
+
+    /// The current generation coordinate.
+    pub fn snapshot_id(&self) -> Result<WorldSnapshotId, Failure> {
+        self.ensure_live()?;
+        let inner = self.core.lock();
+        if inner.closed {
+            return Err(Failure::Interrupted);
+        }
+        Ok(WorldSnapshotId::new(
+            self.world_id.clone(),
+            inner.snapshot.root(),
+        ))
+    }
+
+    /// Retained ancestry, oldest first. A converged branch may later add more
+    /// than one parent; the public coordinate does not encode local sequence.
+    pub fn generations(&self) -> Result<Vec<WorldGeneration>, Failure> {
+        self.ensure_live()?;
+        let inner = self.core.lock();
+        if inner.closed {
+            return Err(Failure::Interrupted);
+        }
+        let durable = inner
+            .replica
+            .read_generations()
+            .map_err(|_| Failure::Persistence)?;
+        let mut rows: Vec<WorldGeneration> = durable
+            .into_iter()
+            .map(|generation| WorldGeneration {
+                id: WorldSnapshotId::new(self.world_id.clone(), generation.root),
+                parent: generation
+                    .parent
+                    .map(|parent| WorldSnapshotId::new(self.world_id.clone(), parent)),
+                frontier: generation.frontier,
+            })
+            .collect();
+        for (root, snapshot) in &inner.generations {
+            if rows.iter().any(|row| row.id.root == *root) {
+                continue;
+            }
+            rows.push(WorldGeneration {
+                id: WorldSnapshotId::new(self.world_id.clone(), *root),
+                parent: inner
+                    .parents
+                    .get(root)
+                    .copied()
+                    .flatten()
+                    .map(|parent| WorldSnapshotId::new(self.world_id.clone(), parent)),
+                frontier: snapshot.frontier(),
+            });
+        }
+        rows.sort_by_key(|row| row.frontier.transaction_count);
+        Ok(rows)
+    }
+
+    fn query_snapshot(
+        &self,
+        query: Query,
+        snapshot: Arc<replica::ReadSnapshot>,
+    ) -> Result<Projection, Failure> {
         self.ensure_live()?;
         self.ensure_within_limit(query.payload.len())?;
         self.ensure_readable_schema(&query.schema, query.schema_version)?;
         // Per-request authorization for reads as well.
         let principal = self.fresh_principal()?;
         let world = &self.world;
-        let inner = self.core.lock();
-        if inner.closed {
-            return Err(Failure::Interrupted);
-        }
-        let reader = ReplicaReader(&inner.replica);
-        let snapshot_root = inner.replica.manifest_root();
+        let reader = SnapshotReader(snapshot.clone());
+        let snapshot_root = snapshot.root();
         let mut projection = {
             let principal = &principal;
             let decision = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -1107,7 +1384,7 @@ impl Session {
         }
         // Runtime — not the World — stamps the projection's source frontier: the
         // snapshot it was derived from is the one held for this call.
-        projection.frontier = inner.replica.frontier();
+        projection.frontier = snapshot.frontier();
         Ok(projection)
     }
 

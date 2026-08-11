@@ -140,6 +140,105 @@ pub enum Op {
     },
     /// Commutative counter increment.
     CounterAdd { key: Key, path: String, delta: i64 },
+    /// Movable-hierarchy insert; Engine mints the stable node id.
+    ///
+    /// `parent` names the node this one hangs under — `None` makes it a root of
+    /// the forest. `after` places it directly after that sibling, which must be
+    /// a child of `parent`; `None` appends to the end of `parent`'s children.
+    ///
+    /// **Placement is local; parentage is not.** "The end of the children" is
+    /// the end of the children *this replica can see*, and no sequence type can
+    /// make it anything else — a replica fifty siblings behind appends fifty
+    /// positions back, in a tree exactly as in a list. What converges is that
+    /// every replica then agrees on the resulting order, that the node keeps
+    /// the parent it named, and that concurrent inserts under one parent all
+    /// survive. A caller that needs a chronology rather than a placement orders
+    /// siblings by something the record carries, not by the sequence.
+    TreeInsert {
+        key: Key,
+        path: String,
+        parent: Option<String>,
+        after: Option<String>,
+        value: Vec<u8>,
+    },
+    /// Re-parent and/or re-place a node **by stable node id**. Concurrent moves
+    /// converge on one hierarchy, and a move that would make a node its own
+    /// ancestor is refused rather than resolved into a detached cycle.
+    TreeMove {
+        key: Key,
+        path: String,
+        node: String,
+        parent: Option<String>,
+        after: Option<String>,
+    },
+    /// Remove a node and, with it, its whole subtree.
+    TreeRemove {
+        key: Key,
+        path: String,
+        node: String,
+    },
+    /// Set one entry of a node's data map (LWW per entry, as for `map:`).
+    TreeSet {
+        key: Key,
+        path: String,
+        node: String,
+        entry: String,
+        value: Vec<u8>,
+    },
+    /// Remove one entry of a node's data map.
+    TreeUnset {
+        key: Key,
+        path: String,
+        node: String,
+        entry: String,
+    },
+    /// Place the node carrying application anchor `anchor` under the one
+    /// carrying `parent`, creating either if it does not exist yet. `parent:
+    /// None` places it at a root of the forest.
+    ///
+    /// This exists because the other tree operations address a node by the id
+    /// Engine minted for it, and **a batch cannot name a node it is itself
+    /// creating** — the id does not exist until apply. That makes "file issue A
+    /// under issue B" inexpressible as one atomic change when neither has a
+    /// node yet, which is the ordinary case for a hierarchy over records that
+    /// already exist. Addressing by the application's own key removes the
+    /// ordering problem entirely: the operation is idempotent, needs no prior
+    /// read, and one of them expresses the whole intent.
+    ///
+    /// Two replicas anchoring the same key concurrently each create a node, and
+    /// the anchor then resolves to the lowest node id — the same one on every
+    /// replica. The loser is left as an empty node at a root rather than merged
+    /// away, because merging two nodes would have to merge their subtrees, and
+    /// nothing here knows whether that is what the application meant.
+    TreeAnchor {
+        key: Key,
+        path: String,
+        anchor: String,
+        parent: Option<String>,
+    },
+    /// Append to a log, keeping at most `retain` entries in state.
+    ///
+    /// The type exists because an append-only feed stored as a List makes every
+    /// checkpoint carry every entry ever written: state *is* the whole feed, so
+    /// a snapshot of an issue with ten thousand events is ten thousand events
+    /// long, forever. A log's state is the retained tail plus an exact count of
+    /// everything that ever arrived, so a checkpoint is bounded by `retain`
+    /// while the count still answers "how many".
+    ///
+    /// Trimming deletes from the front of the converged order, which every
+    /// replica sees identically, so replicas agree on what was dropped. Under
+    /// concurrency the retained window is approximate — a replica trimming
+    /// against a view that is missing another's appends drops entries that are
+    /// not a prefix of the final order — while the count stays exact. `retain`
+    /// is per-append rather than per-path because nothing here persists a
+    /// setting; two replicas passing different values still converge, on the
+    /// union of what either dropped.
+    LogAppend {
+        key: Key,
+        path: String,
+        value: Vec<u8>,
+        retain: u64,
+    },
 }
 
 /// A durable transaction request: an ordered batch of Engine operations to apply
@@ -194,6 +293,17 @@ pub mod commit {
         TextRange,
         CounterOverflow,
         Merge,
+        /// A tree move would have made a node its own ancestor. Refused, not
+        /// resolved: the alternative is a subtree that is reachable from
+        /// nothing, which converges perfectly and is invisible to every reader.
+        TreeCycle,
+        /// A tree placement named a sibling that is not a child of the parent
+        /// the same operation named. The two halves disagree about where the
+        /// node goes, and picking one silently would honour a placement its
+        /// writer did not ask for.
+        TreePlacement,
+        /// A tree data entry used a key Engine reserves for a node's own value.
+        TreeReservedEntry,
     }
 
     /// Why an Engine commit failed.
@@ -252,6 +362,25 @@ pub struct CollaborativeView {
     /// Distinct member values, sorted (set order is not meaningful).
     pub sets: BTreeMap<String, Vec<Vec<u8>>>,
     pub counters: BTreeMap<String, i64>,
+    /// Movable hierarchies, each flattened to pre-order: a node always appears
+    /// after its parent, and siblings appear in the converged order.
+    pub trees: BTreeMap<String, Vec<TreeNode>>,
+    /// Append-only feeds: the retained tail, plus how many entries have ever
+    /// been appended.
+    pub logs: BTreeMap<String, LogView>,
+}
+
+/// One append-only feed as it reads back: the entries still retained, and the
+/// exact total ever appended.
+///
+/// `appended` is not `entries.len()`. It counts everything that ever arrived,
+/// including what trimming has since dropped from state, which is the whole
+/// reason the type keeps a separate count — a reader that wants to say "1,247
+/// events, here are the last 512" cannot get the first number from the second.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogView {
+    pub entries: Vec<ListElement>,
+    pub appended: u64,
 }
 
 /// One ordered-list element: its stable Engine-minted id and its value.
@@ -259,6 +388,109 @@ pub struct CollaborativeView {
 pub struct ListElement {
     pub element: String,
     pub value: Vec<u8>,
+}
+
+/// One node of a movable hierarchy: the stable Engine-minted node id
+/// `TreeMove`/`TreeRemove`/`TreeSet` take, the parent it hangs under (`None`
+/// at a root of the forest), the value its insert carried, and the data
+/// entries set on it since.
+///
+/// Deleted nodes are absent, and so are their descendants: a subtree removal
+/// takes the subtree with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeNode {
+    pub node: String,
+    pub parent: Option<String>,
+    pub value: Vec<u8>,
+    pub entries: BTreeMap<String, Vec<u8>>,
+    /// The application key this node answers to, when it was placed by
+    /// [`Op::TreeAnchor`] rather than inserted directly.
+    pub anchor: Option<String>,
+}
+
+/// Decode the `element_id[16] || value` blobs a sequence root holds. Shared by
+/// `list:` and `log:`, which store entries identically — a log entry is a list
+/// element that the type has agreed to stop keeping.
+fn list_elements(items: &[loro::LoroValue]) -> Vec<ListElement> {
+    let mut elements = Vec::new();
+    for v in items {
+        let loro::LoroValue::Binary(bytes) = v else {
+            continue;
+        };
+        if bytes.len() < ELEMENT_ID_LEN {
+            continue;
+        }
+        let Some((identity, value)) = bytes.split_at_checked(ELEMENT_ID_LEN) else {
+            continue;
+        };
+        elements.push(ListElement {
+            element: data_encoding::HEXLOWER.encode(identity),
+            value: value.to_vec(),
+        });
+    }
+    elements
+}
+
+/// Flatten one level of a tree's projected value into pre-order, recursing into
+/// each node's children. `false` means a node was not shaped like a node, which
+/// the caller reports as a malformed Body rather than skipping — a hierarchy
+/// missing an interior node is missing everything below it, and a reader
+/// handed the remainder cannot tell.
+///
+/// Loro projects a tree as a nested array of `{id, parent, meta, index,
+/// fractional_index, children}`, already in sibling order, with `meta` resolved
+/// because the whole-doc read is a *deep* value. Parentage comes from the
+/// recursion rather than from the `parent` field: they agree, and the one that
+/// cannot disagree is the one the walk itself establishes.
+fn flatten_tree(nodes: &[loro::LoroValue], parent: Option<&str>, out: &mut Vec<TreeNode>) -> bool {
+    for node in nodes {
+        let loro::LoroValue::Map(fields) = node else {
+            return false;
+        };
+        let Some(loro::LoroValue::String(id)) = fields.get("id") else {
+            return false;
+        };
+        let mut value = Vec::new();
+        let mut anchor = None;
+        let mut entries = BTreeMap::new();
+        // A node whose meta has never been written projects as an empty map,
+        // and a node created by a peer that wrote no value is a node with no
+        // value — both are ordinary, neither is malformed.
+        if let Some(loro::LoroValue::Map(meta)) = fields.get("meta") {
+            for (k, v) in meta.iter() {
+                let loro::LoroValue::Binary(bytes) = v else {
+                    continue;
+                };
+                if k == NODE_VALUE_KEY {
+                    value = bytes.to_vec();
+                } else if k == NODE_ANCHOR_KEY {
+                    anchor = String::from_utf8(bytes.to_vec()).ok();
+                } else {
+                    entries.insert(k.clone(), bytes.to_vec());
+                }
+            }
+        }
+        let id = id.to_string();
+        out.push(TreeNode {
+            node: id.clone(),
+            parent: parent.map(str::to_string),
+            value,
+            entries,
+            anchor,
+        });
+        match fields.get("children") {
+            Some(loro::LoroValue::List(children)) => {
+                if !flatten_tree(children, Some(&id), out) {
+                    return false;
+                }
+            }
+            // A leaf may carry no `children` at all; anything else there is not
+            // a hierarchy.
+            None | Some(loro::LoroValue::Null) => {}
+            Some(_) => return false,
+        }
+    }
+    true
 }
 
 /// The Body identity an anchor carries. A digest rather than the key itself so
@@ -279,6 +511,91 @@ pub enum BodyExport {
     Collaborative(Vec<u8>),
 }
 
+/// An immutable, thread-safe read image of one Body.
+///
+/// A live [`Engine`] owns non-`Sync` collaborative documents and therefore
+/// cannot sit behind a shared reader lock. This value crosses that boundary as
+/// plain canonical data: the projected view and causal version are computed
+/// once when the writer publishes a generation. Rare anchor operations replay
+/// the retained one-Body export into a private temporary engine; ordinary
+/// queries never touch the writer and never import a document.
+#[derive(Debug, Clone)]
+pub struct BodySnapshot {
+    export: BodyExport,
+    view: Option<CollaborativeView>,
+    version: crate::causal::Version,
+}
+
+impl BodySnapshot {
+    /// Freeze one canonical Body export. The key is required because anchors
+    /// bind to a Body identity even though the export itself is per-Body.
+    pub fn from_export(key: &Key, export: BodyExport) -> Result<Self, Failure> {
+        match &export {
+            BodyExport::Atomic(_) => Ok(Self {
+                export,
+                view: None,
+                version: crate::causal::Version::empty(),
+            }),
+            BodyExport::Collaborative(_) => {
+                let mut engine = Engine::new();
+                engine.import_body(key, &export)?;
+                let view = engine
+                    .read_collaborative(key)
+                    .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
+                let version = engine
+                    .version(key)
+                    .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
+                Ok(Self {
+                    export,
+                    view: Some(view),
+                    version,
+                })
+            }
+        }
+    }
+
+    pub fn read(&self) -> Option<Vec<u8>> {
+        match &self.export {
+            BodyExport::Atomic(bytes) => Some(bytes.clone()),
+            BodyExport::Collaborative(_) => None,
+        }
+    }
+
+    pub fn read_collaborative(&self) -> Result<CollaborativeView, ProjectionFailure> {
+        self.view.clone().ok_or(ProjectionFailure::NotCollaborative)
+    }
+
+    pub fn version(&self) -> crate::causal::Version {
+        self.version.clone()
+    }
+
+    /// Mint an anchor without borrowing the live writer. Anchor traffic is
+    /// sparse; importing one retained Body here is preferable to making every
+    /// query serialize behind the writer merely because some queries can ask
+    /// for an anchor.
+    pub fn anchor(&self, key: &Key, path: &str, position: u64) -> Option<crate::causal::Anchor> {
+        let mut engine = Engine::new();
+        engine.import_body(key, &self.export).ok()?;
+        engine.anchor(key, path, position).ok()
+    }
+
+    pub fn resolve(
+        &self,
+        key: &Key,
+        anchor: &crate::causal::Anchor,
+    ) -> crate::causal::AnchorResolution {
+        let mut engine = Engine::new();
+        if engine.import_body(key, &self.export).is_err() {
+            return crate::causal::AnchorResolution::Drifted;
+        }
+        engine.resolve(key, anchor)
+    }
+
+    pub fn export(&self) -> BodyExport {
+        self.export.clone()
+    }
+}
+
 /// The Loro-backed engine: the canonical collaborative representation, and the
 /// reason this crate alone names Loro.
 ///
@@ -292,9 +609,11 @@ pub enum BodyExport {
 /// element identity**, LAIT-owned and sync-stable), `text:` child texts
 /// (Unicode-scalar splices), `set:` child maps implementing an observed-remove
 /// set (`"<value-hash>:<unique-tag>"` per add, so a remove only deletes the
-/// adds it observed — add-wins), and `cnt:` child maps implementing a
+/// adds it observed — add-wins), `cnt:` child maps implementing a
 /// PN-counter (each doc session sums into its own peer key; concurrent
-/// increments land in disjoint keys and always sum). An atomic Body is a plain
+/// increments land in disjoint keys and always sum), and `tree:` child movable
+/// trees whose nodes carry a data map each, the node's own value living at the
+/// reserved entry [`NODE_VALUE_KEY`]. An atomic Body is a plain
 /// canonical byte value — its export is the application bytes themselves, and
 /// replacement policy for concurrent atomic writes is decided by Replica, not
 /// here.
@@ -333,22 +652,45 @@ const BODY_MAP: &str = "body";
 const CAUSAL_DOMAIN: &[u8] = b"lait/fabric-causal/1";
 
 /// The collaborative type tags a path can be bound to.
-const TYPE_TAGS: [&str; 6] = ["reg", "map", "list", "text", "set", "cnt"];
+const TYPE_TAGS: [&str; 8] = ["reg", "map", "list", "text", "set", "cnt", "tree", "log"];
 
-/// Type tags reserved for collaborative types a later docket adds. Reserving
-/// them costs nothing now and keeps a seventh type a `CollaborativeSchema`
-/// version bump plus a fixture set, rather than a format migration — the
-/// checkpoint and delta encodings freeze on top of this algebra, and after that
-/// an unreserved tag is expensive.
+/// Type tags reserved for collaborative types a later docket adds. Empty, and
+/// that is a statement rather than an oversight: both reservations were spent
+/// on the types the product was working around, `tree` and `log`, and both are
+/// implemented. A ninth type is now a `CollaborativeSchema` version bump plus a
+/// fixture set for an *unreserved* tag, which is the expensive path this list
+/// existed to avoid — so the next type to be foreseen belongs here before the
+/// encoding that would have to migrate around it ships.
+const RESERVED_TYPE_TAGS: [&str; 0] = [];
+
+/// The companion root a `log:` path binds alongside its entries: the exact
+/// count of everything ever appended, as a PN-counter.
 ///
-/// The two named are the ones the product is already working around. `tree` is
-/// a movable hierarchy with stable node ids: sub-issues, milestone nesting, and
-/// threaded comments are all hierarchies, and Issues currently hand-encodes
-/// threading through a `reply_to` field over flat storage, which gives
-/// concurrent re-parenting no defined outcome. `log` is an append-only sequence
-/// whose state function is *last N plus a count* — activity feeds are unbounded
-/// Lists today, re-checkpointed in full on every append.
-const RESERVED_TYPE_TAGS: [&str; 2] = ["tree", "log"];
+/// The count cannot live in the entry list, because the whole point of the type
+/// is that the list does not keep everything. It cannot be derived from the
+/// list either, for the same reason. And it cannot be one number in a register,
+/// because two replicas appending concurrently would each write "mine plus
+/// what I saw" and one would win — the count would then under-report by
+/// exactly the concurrency the type exists to survive. Per-peer sums always
+/// add up.
+const LOG_COUNT_TAG: &str = "logn";
+
+/// The node data entry a node's own value occupies.
+///
+/// Reserved rather than conventional: `TreeInsert` carries a value because a
+/// writer cannot name the node id Engine is about to mint, so create-with-data
+/// has to be one operation. That value needs somewhere to live inside the
+/// node's data map, and a caller that could also write there would be able to
+/// overwrite a node's payload while believing it set a field of its own. The
+/// leading NUL keeps it outside the entry space any caller can name — `TreeSet`
+/// refuses it — and outside the projection's `entries`, which reports the
+/// caller's own keys only.
+pub const NODE_VALUE_KEY: &str = "\u{0}value";
+
+/// The node data entry an application anchor occupies, reserved for the same
+/// reason as [`NODE_VALUE_KEY`]: a caller that could write it could re-point
+/// another record's node at its own key.
+pub const NODE_ANCHOR_KEY: &str = "\u{0}anchor";
 
 /// Projection outcomes owned by the collaborative read boundary.
 pub mod projection {
@@ -548,8 +890,9 @@ impl Engine {
                 continue;
             }
             let bound = match other {
-                "list" => !doc.get_movable_list(name.as_str()).is_empty(),
+                "list" | "log" => !doc.get_movable_list(name.as_str()).is_empty(),
                 "text" => !doc.get_text(name.as_str()).is_empty(),
+                "tree" => !doc.get_tree(name.as_str()).is_empty(),
                 _ => !doc.get_map(name.as_str()).is_empty(),
             };
             if bound {
@@ -591,6 +934,121 @@ impl Engine {
             out.push((i, id, value.to_vec()));
         }
         out
+    }
+
+    /// The tree at a path, with the ordering guarantee this crate depends on
+    /// made explicit rather than inherited.
+    ///
+    /// Loro 1.13.6 generates fractional indices by default, and sibling order
+    /// is exactly that generation: a tree with it disabled gives every node the
+    /// same default position, so siblings order by an internal tiebreak and
+    /// `after` placement stops meaning anything. Asserting it on every write
+    /// costs a field assignment (the call is idempotent, and jitter 0 never
+    /// touches the generator's rng) and removes a silent dependency on a
+    /// library default.
+    fn tree_at(doc: &loro::LoroDoc, path: &str) -> loro::LoroTree {
+        let tree = doc.get_tree(typed_key("tree", path).as_str());
+        tree.enable_fractional_index(0);
+        tree
+    }
+
+    /// Resolve an opaque node id against a tree: it must parse, exist, and not
+    /// be deleted. A deleted node is `UnknownElement` rather than a silent
+    /// success — hanging a child off a removed parent would put the child in
+    /// the deleted subtree, where no reader would ever see it again.
+    fn tree_node(tree: &loro::LoroTree, node: &str) -> Result<loro::TreeID, Failure> {
+        let unknown = || Failure::Invalid(commit::Invalid::UnknownElement);
+        let id = loro::TreeID::try_from(node).map_err(|_| unknown())?;
+        if !tree.contains(id) || tree.is_node_deleted(&id).unwrap_or(true) {
+            return Err(unknown());
+        }
+        Ok(id)
+    }
+
+    /// The node carrying an application anchor, created at a root of the forest
+    /// if none does yet.
+    ///
+    /// Resolution is the lowest node id among the nodes carrying the anchor, so
+    /// two replicas that created one concurrently agree which one the anchor
+    /// means without either having to observe the other first.
+    fn tree_anchored(tree: &loro::LoroTree, anchor: &str) -> Result<loro::TreeID, Failure> {
+        let mut found: Option<loro::TreeID> = None;
+        for node in tree.get_nodes(false) {
+            let meta = tree.get_meta(node.id).map_err(Self::tree_err)?;
+            let carries = meta
+                .get(NODE_ANCHOR_KEY)
+                .and_then(|v| v.into_value().ok())
+                .and_then(|v| v.into_binary().ok())
+                .is_some_and(|bytes| bytes.as_slice() == anchor.as_bytes());
+            if !carries {
+                continue;
+            }
+            let lower = found
+                .is_none_or(|best| (node.id.peer, node.id.counter) < (best.peer, best.counter));
+            if lower {
+                found = Some(node.id);
+            }
+        }
+        if let Some(node) = found {
+            return Ok(node);
+        }
+        let node = tree
+            .create(loro::TreeParentId::Root)
+            .map_err(Self::tree_err)?;
+        tree.get_meta(node)
+            .map_err(Self::tree_err)?
+            .insert(NODE_ANCHOR_KEY, anchor.as_bytes())
+            .map_err(Self::loro_err)?;
+        Ok(node)
+    }
+
+    /// The parent a node hangs under, as this crate names parents: `None` at a
+    /// root of the forest.
+    fn tree_parent_of(tree: &loro::LoroTree, node: loro::TreeID) -> Option<loro::TreeID> {
+        match tree.parent(node) {
+            Some(loro::TreeParentId::Node(parent)) => Some(parent),
+            _ => None,
+        }
+    }
+
+    /// Resolve a placement into the parent it names and the sibling it is to
+    /// follow, refusing a sibling that is not a child of that parent.
+    ///
+    /// Shared by insert and move because the placement rules must not differ
+    /// between them, and cross-checked because Loro's `mov_after` takes the
+    /// sibling's parent as the destination — an unchecked `after` would
+    /// silently overrule the `parent` the same operation named.
+    fn tree_target(
+        tree: &loro::LoroTree,
+        parent: Option<&String>,
+        after: Option<&String>,
+    ) -> Result<(loro::TreeParentId, Option<loro::TreeID>), Failure> {
+        let parent_id = parent
+            .map(|p| Self::tree_node(tree, p))
+            .transpose()?
+            .map_or(loro::TreeParentId::Root, loro::TreeParentId::Node);
+        let sibling = after.map(|a| Self::tree_node(tree, a)).transpose()?;
+        if let Some(sibling) = sibling {
+            let sibling_parent = Self::tree_parent_of(tree, sibling)
+                .map_or(loro::TreeParentId::Root, loro::TreeParentId::Node);
+            if sibling_parent != parent_id {
+                return Err(Failure::Invalid(commit::Invalid::TreePlacement));
+            }
+        }
+        Ok((parent_id, sibling))
+    }
+
+    /// Loro tree errors, keeping the cycle refusal distinguishable from the
+    /// rest. A caller can act on a cycle — it asked for an impossible
+    /// hierarchy — and cannot act on anything else here.
+    fn tree_err(e: loro::LoroError) -> Failure {
+        if matches!(
+            e,
+            loro::LoroError::TreeError(loro::LoroTreeError::CyclicMoveError)
+        ) {
+            return Failure::Invalid(commit::Invalid::TreeCycle);
+        }
+        Self::loro_err(e)
     }
 
     /// The causal token digesting the touched Bodies' post-commit positions.
@@ -787,6 +1245,169 @@ impl Engine {
                     .ok_or(Failure::Invalid(commit::Invalid::CounterOverflow))?;
                 m.insert(&me, next).map_err(Self::loro_err)
             }
+            Op::TreeInsert {
+                key,
+                path,
+                parent,
+                after,
+                value,
+            } => {
+                let doc = self.doc_for(key, "tree", path)?;
+                let tree = Self::tree_at(doc, path);
+                // Resolved and cross-checked BEFORE the node exists. A refusal
+                // rolls the batch back either way, but a create that has
+                // already happened is history a compensating operation has to
+                // undo — and the common case, an append with no `after`, is
+                // then one Loro operation rather than a create plus a move.
+                let (parent_id, sibling) =
+                    Self::tree_target(&tree, parent.as_ref(), after.as_ref())?;
+                let node = tree.create(parent_id).map_err(Self::tree_err)?;
+                if let Some(sibling) = sibling {
+                    tree.mov_after(node, sibling).map_err(Self::tree_err)?;
+                }
+                tree.get_meta(node)
+                    .map_err(Self::tree_err)?
+                    .insert(NODE_VALUE_KEY, value.as_slice())
+                    .map_err(Self::loro_err)
+            }
+            Op::TreeMove {
+                key,
+                path,
+                node,
+                parent,
+                after,
+            } => {
+                let doc = self.doc_for(key, "tree", path)?;
+                let tree = Self::tree_at(doc, path);
+                let node = Self::tree_node(&tree, node)?;
+                let (parent_id, sibling) =
+                    Self::tree_target(&tree, parent.as_ref(), after.as_ref())?;
+                match sibling {
+                    // A node cannot follow itself, and Loro would answer that
+                    // request with a move to where it already is — a silent
+                    // success for an operation that named nothing coherent.
+                    Some(sibling) if sibling == node => {
+                        Err(Failure::Invalid(commit::Invalid::TreePlacement))
+                    }
+                    Some(sibling) => tree.mov_after(node, sibling).map_err(Self::tree_err),
+                    None => tree.mov(node, parent_id).map_err(Self::tree_err),
+                }
+            }
+            Op::TreeRemove { key, path, node } => {
+                let doc = self.doc_for(key, "tree", path)?;
+                let tree = Self::tree_at(doc, path);
+                let node = Self::tree_node(&tree, node)?;
+                tree.delete(node).map_err(Self::tree_err)
+            }
+            Op::TreeSet {
+                key,
+                path,
+                node,
+                entry,
+                value,
+            } => {
+                if entry == NODE_VALUE_KEY {
+                    return Err(Failure::Invalid(commit::Invalid::TreeReservedEntry));
+                }
+                let doc = self.doc_for(key, "tree", path)?;
+                let tree = Self::tree_at(doc, path);
+                let node = Self::tree_node(&tree, node)?;
+                tree.get_meta(node)
+                    .map_err(Self::tree_err)?
+                    .insert(entry, value.as_slice())
+                    .map_err(Self::loro_err)
+            }
+            Op::TreeUnset {
+                key,
+                path,
+                node,
+                entry,
+            } => {
+                if entry == NODE_VALUE_KEY {
+                    return Err(Failure::Invalid(commit::Invalid::TreeReservedEntry));
+                }
+                let doc = self.doc_for(key, "tree", path)?;
+                let tree = Self::tree_at(doc, path);
+                let node = Self::tree_node(&tree, node)?;
+                let meta = tree.get_meta(node).map_err(Self::tree_err)?;
+                if meta.get(entry).is_some() {
+                    meta.delete(entry).map_err(Self::loro_err)?;
+                }
+                Ok(())
+            }
+            Op::TreeAnchor {
+                key,
+                path,
+                anchor,
+                parent,
+            } => {
+                // A node cannot be filed under itself, and the anchor form is
+                // where that is easy to ask for by accident — the two fields
+                // are both application keys, so a caller looping over records
+                // can hand the same one to both.
+                if parent.as_deref() == Some(anchor.as_str()) {
+                    return Err(Failure::Invalid(commit::Invalid::TreePlacement));
+                }
+                let doc = self.doc_for(key, "tree", path)?;
+                let tree = Self::tree_at(doc, path);
+                let node = Self::tree_anchored(&tree, anchor)?;
+                let parent_id = match parent {
+                    None => loro::TreeParentId::Root,
+                    Some(parent) => loro::TreeParentId::Node(Self::tree_anchored(&tree, parent)?),
+                };
+                // Already where it was asked to be. Skipped rather than
+                // re-recorded: this operation is idempotent by design, and a
+                // move that changes nothing is still history every replica
+                // stores and syncs.
+                if tree.parent(node) == Some(parent_id) {
+                    return Ok(());
+                }
+                tree.mov(node, parent_id).map_err(Self::tree_err)
+            }
+            Op::LogAppend {
+                key,
+                path,
+                value,
+                retain,
+            } => {
+                let doc = self.doc_for(key, "log", path)?;
+                // Entries reuse the list encoding — `element_id[16] || value` in
+                // a movable list — so a log entry has the same stable identity a
+                // list element does. That identity is what a reader's cursor
+                // holds: a position cannot survive trimming, because trimming
+                // renumbers every entry behind it.
+                let entries = doc.get_movable_list(typed_key("log", path).as_str());
+                let id: [u8; ELEMENT_ID_LEN] = mint_bytes();
+                let capacity = ELEMENT_ID_LEN.saturating_add(value.len());
+                let mut blob = Vec::with_capacity(capacity);
+                blob.extend_from_slice(&id);
+                blob.extend_from_slice(value);
+                entries
+                    .insert(entries.len(), blob.as_slice())
+                    .map_err(Self::loro_err)?;
+
+                let peer = doc.peer_id();
+                let counts = doc.get_map(typed_key(LOG_COUNT_TAG, path).as_str());
+                let me = peer.to_string();
+                let current = crate::loro_ext::get_i64(&counts, &me).unwrap_or(0);
+                let next = current
+                    .checked_add(1)
+                    .ok_or(Failure::Invalid(commit::Invalid::CounterOverflow))?;
+                counts.insert(&me, next).map_err(Self::loro_err)?;
+
+                // `retain` of zero would empty the log on every append, which
+                // is a log that cannot be read — refused rather than obeyed.
+                let retain = usize::try_from(*retain)
+                    .map_err(|_| Failure::Invalid(commit::Invalid::Bounds))?;
+                if retain == 0 {
+                    return Err(Failure::Invalid(commit::Invalid::Bounds));
+                }
+                let over = entries.len().saturating_sub(retain);
+                if over > 0 {
+                    entries.delete(0, over).map_err(Self::loro_err)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -806,7 +1427,14 @@ impl Engine {
             | Op::TextSplice { key, .. }
             | Op::SetAdd { key, .. }
             | Op::SetRemove { key, .. }
-            | Op::CounterAdd { key, .. } => key,
+            | Op::CounterAdd { key, .. }
+            | Op::TreeInsert { key, .. }
+            | Op::TreeMove { key, .. }
+            | Op::TreeRemove { key, .. }
+            | Op::TreeSet { key, .. }
+            | Op::TreeUnset { key, .. }
+            | Op::TreeAnchor { key, .. }
+            | Op::LogAppend { key, .. } => key,
         }
     }
 }
@@ -946,6 +1574,24 @@ impl Engine {
                 tracing::warn!(tag = %name, "unrecognized collaborative root");
                 return Err(ProjectionFailure::SchemaAhead);
             };
+            // A log's count lives in a companion root rather than in the type
+            // tag space, so it is folded in here and never surfaces as a path
+            // of its own.
+            if tag == LOG_COUNT_TAG {
+                let loro::LoroValue::Map(counts) = value else {
+                    tracing::warn!(tag, "log count held an invalid value");
+                    return Err(ProjectionFailure::Malformed);
+                };
+                let total = counts
+                    .values()
+                    .filter_map(|v| match v {
+                        loro::LoroValue::I64(n) => u64::try_from(*n).ok(),
+                        _ => None,
+                    })
+                    .fold(0u64, u64::saturating_add);
+                view.logs.entry(path.to_string()).or_default().appended = total;
+                continue;
+            }
             if !is_implemented_type_tag(tag) {
                 tracing::warn!(tag, "unsupported collaborative type");
                 return Err(ProjectionFailure::SchemaAhead);
@@ -962,23 +1608,10 @@ impl Engine {
                     view.maps.insert(path, entries);
                 }
                 ("list", loro::LoroValue::List(items)) => {
-                    let mut elements = Vec::new();
-                    for v in items.iter() {
-                        let loro::LoroValue::Binary(bytes) = v else {
-                            continue;
-                        };
-                        if bytes.len() < ELEMENT_ID_LEN {
-                            continue;
-                        }
-                        let Some((identity, value)) = bytes.split_at_checked(ELEMENT_ID_LEN) else {
-                            continue;
-                        };
-                        elements.push(ListElement {
-                            element: data_encoding::HEXLOWER.encode(identity),
-                            value: value.to_vec(),
-                        });
-                    }
-                    view.lists.insert(path, elements);
+                    view.lists.insert(path, list_elements(items));
+                }
+                ("log", loro::LoroValue::List(items)) => {
+                    view.logs.entry(path).or_default().entries = list_elements(items);
                 }
                 ("text", loro::LoroValue::String(text)) => {
                     view.texts.insert(path, text.to_string());
@@ -994,6 +1627,14 @@ impl Engine {
                     members.sort();
                     members.dedup();
                     view.sets.insert(path, members);
+                }
+                ("tree", loro::LoroValue::List(roots)) => {
+                    let mut nodes = Vec::new();
+                    if !flatten_tree(roots, None, &mut nodes) {
+                        tracing::warn!(tag, "tree node held an invalid value");
+                        return Err(ProjectionFailure::Malformed);
+                    }
+                    view.trees.insert(path, nodes);
                 }
                 ("cnt", loro::LoroValue::Map(m)) => {
                     let total = m
@@ -1483,6 +2124,386 @@ mod tests {
             Failure::TypeConflict
         );
         assert_eq!(f.read(&k).as_deref(), Some(&b"atomic"[..]), "unchanged");
+    }
+
+    /// The shape the rest of the crate reads a hierarchy through: pre-order,
+    /// parents named, values and entries separated, deleted subtrees gone.
+    #[test]
+    fn a_tree_projects_in_preorder_with_parents_values_and_entries() {
+        let mut f = Engine::new();
+        let k = Key::from_bytes(b"body/tree".to_vec());
+        macro_rules! tree {
+            ($ops:expr) => {
+                f.commit(Transaction::new("threaded", $ops)).unwrap()
+            };
+        }
+
+        tree!(vec![Op::TreeInsert {
+            key: k.clone(),
+            path: "comments".into(),
+            parent: None,
+            after: None,
+            value: b"first".to_vec(),
+        }]);
+        let root = f.read_collaborative(&k).unwrap().trees["comments"][0]
+            .node
+            .clone();
+        tree!(vec![
+            Op::TreeInsert {
+                key: k.clone(),
+                path: "comments".into(),
+                parent: Some(root.clone()),
+                after: None,
+                value: b"reply".to_vec(),
+            },
+            Op::TreeInsert {
+                key: k.clone(),
+                path: "comments".into(),
+                parent: None,
+                after: None,
+                value: b"second".to_vec(),
+            },
+        ]);
+
+        let nodes = f.read_collaborative(&k).unwrap().trees["comments"].clone();
+        let payloads: Vec<&[u8]> = nodes.iter().map(|n| n.value.as_slice()).collect();
+        assert_eq!(
+            payloads,
+            vec![&b"first"[..], &b"reply"[..], &b"second"[..]],
+            "pre-order: a reply follows its parent, before the next root"
+        );
+        assert_eq!(nodes[0].parent, None);
+        assert_eq!(nodes[1].parent.as_deref(), Some(root.as_str()));
+        assert_eq!(nodes[2].parent, None);
+
+        // A data entry lands beside the value, never on top of it.
+        tree!(vec![Op::TreeSet {
+            key: k.clone(),
+            path: "comments".into(),
+            node: root.clone(),
+            entry: "pinned".into(),
+            value: b"1".to_vec(),
+        }]);
+        let nodes = f.read_collaborative(&k).unwrap().trees["comments"].clone();
+        assert_eq!(nodes[0].entries["pinned"], b"1".to_vec());
+        assert_eq!(nodes[0].value, b"first".to_vec(), "value untouched");
+
+        // Removing a node removes what hung under it.
+        tree!(vec![Op::TreeRemove {
+            key: k.clone(),
+            path: "comments".into(),
+            node: root,
+        }]);
+        let nodes = f.read_collaborative(&k).unwrap().trees["comments"].clone();
+        assert_eq!(
+            nodes.iter().map(|n| n.value.clone()).collect::<Vec<_>>(),
+            vec![b"second".to_vec()],
+            "the reply went with its parent"
+        );
+    }
+
+    /// The two placements a caller can get wrong, and the value key it cannot
+    /// have. Each refuses the whole batch rather than resolving into a
+    /// hierarchy nobody asked for.
+    #[test]
+    fn tree_placement_cycles_and_the_reserved_entry_are_refused() {
+        let mut f = Engine::new();
+        let k = Key::from_bytes(b"body/tree-refusals".to_vec());
+        let insert = |parent: Option<String>| Op::TreeInsert {
+            key: k.clone(),
+            path: "t".into(),
+            parent,
+            after: None,
+            value: b"x".to_vec(),
+        };
+        f.commit(Transaction::new("seed", vec![insert(None)]))
+            .unwrap();
+        let a = f.read_collaborative(&k).unwrap().trees["t"][0].node.clone();
+        f.commit(Transaction::new("seed", vec![insert(Some(a.clone()))]))
+            .unwrap();
+        let child = f.read_collaborative(&k).unwrap().trees["t"][1].node.clone();
+
+        // A node cannot become its own descendant's child.
+        assert_eq!(
+            f.commit(Transaction::new(
+                "cycle",
+                vec![Op::TreeMove {
+                    key: k.clone(),
+                    path: "t".into(),
+                    node: a.clone(),
+                    parent: Some(child.clone()),
+                    after: None,
+                }]
+            ))
+            .unwrap_err(),
+            Failure::Invalid(commit::Invalid::TreeCycle)
+        );
+
+        // `after` names a sibling; a node under a different parent is not one.
+        assert_eq!(
+            f.commit(Transaction::new(
+                "placement",
+                vec![
+                    insert(None),
+                    Op::TreeMove {
+                        key: k.clone(),
+                        path: "t".into(),
+                        node: child.clone(),
+                        parent: None,
+                        after: Some(child.clone()),
+                    }
+                ]
+            ))
+            .unwrap_err(),
+            Failure::Invalid(commit::Invalid::TreePlacement)
+        );
+
+        assert_eq!(
+            f.commit(Transaction::new(
+                "reserved",
+                vec![Op::TreeSet {
+                    key: k.clone(),
+                    path: "t".into(),
+                    node: a.clone(),
+                    entry: NODE_VALUE_KEY.into(),
+                    value: b"stolen".to_vec(),
+                }]
+            ))
+            .unwrap_err(),
+            Failure::Invalid(commit::Invalid::TreeReservedEntry)
+        );
+
+        // Every refusal rolled its whole batch back: two nodes, first value
+        // intact.
+        let nodes = f.read_collaborative(&k).unwrap().trees["t"].clone();
+        assert_eq!(
+            nodes.len(),
+            2,
+            "the failed insert rolled back with its batch"
+        );
+        assert_eq!(nodes[0].value, b"x".to_vec());
+    }
+
+    /// The whole reason the anchor form exists: one operation, no prior read,
+    /// and neither record needs a node yet.
+    #[test]
+    fn an_anchored_placement_creates_both_ends_in_one_operation() {
+        let mut f = Engine::new();
+        let k = Key::from_bytes(b"body/anchored".to_vec());
+        f.commit(Transaction::new(
+            "parented",
+            vec![Op::TreeAnchor {
+                key: k.clone(),
+                path: "hierarchy".into(),
+                anchor: "iss_child".into(),
+                parent: Some("iss_parent".into()),
+            }],
+        ))
+        .unwrap();
+
+        let nodes = f.read_collaborative(&k).unwrap().trees["hierarchy"].clone();
+        assert_eq!(nodes.len(), 2, "both ends exist after one operation");
+        assert_eq!(nodes[0].anchor.as_deref(), Some("iss_parent"));
+        assert_eq!(nodes[1].anchor.as_deref(), Some("iss_child"));
+        assert_eq!(nodes[1].parent.as_deref(), Some(nodes[0].node.as_str()));
+
+        // Idempotent: asking again neither duplicates a node nor re-records a
+        // move.
+        let before = f.version(&k).unwrap();
+        f.commit(Transaction::new(
+            "parented",
+            vec![Op::TreeAnchor {
+                key: k.clone(),
+                path: "hierarchy".into(),
+                anchor: "iss_child".into(),
+                parent: Some("iss_parent".into()),
+            }],
+        ))
+        .unwrap();
+        assert_eq!(
+            f.read_collaborative(&k).unwrap().trees["hierarchy"].len(),
+            2
+        );
+        assert_eq!(f.version(&k).unwrap(), before, "no history for a no-op");
+
+        // Unparenting returns it to a root without touching its own subtree.
+        f.commit(Transaction::new(
+            "unparented",
+            vec![Op::TreeAnchor {
+                key: k.clone(),
+                path: "hierarchy".into(),
+                anchor: "iss_child".into(),
+                parent: None,
+            }],
+        ))
+        .unwrap();
+        let nodes = f.read_collaborative(&k).unwrap().trees["hierarchy"].clone();
+        assert!(nodes.iter().all(|n| n.parent.is_none()), "both are roots");
+    }
+
+    /// The cycle the product used to check for against its own local view, now
+    /// refused by the engine on whichever replica asks.
+    #[test]
+    fn an_anchored_placement_refuses_a_cycle_and_refuses_itself() {
+        let mut f = Engine::new();
+        let k = Key::from_bytes(b"body/anchor-cycle".to_vec());
+        let place = |anchor: &str, parent: Option<&str>| Op::TreeAnchor {
+            key: k.clone(),
+            path: "h".into(),
+            anchor: anchor.into(),
+            parent: parent.map(str::to_string),
+        };
+        f.commit(Transaction::new("parented", vec![place("b", Some("a"))]))
+            .unwrap();
+        assert_eq!(
+            f.commit(Transaction::new("parented", vec![place("a", Some("b"))]))
+                .unwrap_err(),
+            Failure::Invalid(commit::Invalid::TreeCycle)
+        );
+        assert_eq!(
+            f.commit(Transaction::new("parented", vec![place("a", Some("a"))]))
+                .unwrap_err(),
+            Failure::Invalid(commit::Invalid::TreePlacement)
+        );
+    }
+
+    /// What the type is for: state stops growing, and the count does not lie
+    /// about it.
+    #[test]
+    fn a_log_bounds_its_tail_and_keeps_an_exact_count() {
+        let mut f = Engine::new();
+        let k = Key::from_bytes(b"body/log".to_vec());
+        for i in 0..50u8 {
+            f.commit(Transaction::new(
+                "appended",
+                vec![Op::LogAppend {
+                    key: k.clone(),
+                    path: "events".into(),
+                    value: vec![i],
+                    retain: 8,
+                }],
+            ))
+            .unwrap();
+        }
+        let log = f.read_collaborative(&k).unwrap().logs["events"].clone();
+        assert_eq!(log.entries.len(), 8, "state is bounded by the retention");
+        assert_eq!(log.appended, 50, "the count is of everything, not the tail");
+        assert_eq!(
+            log.entries.iter().map(|e| e.value[0]).collect::<Vec<_>>(),
+            (42..50).collect::<Vec<u8>>(),
+            "the tail is the newest entries, oldest trimmed first"
+        );
+        // Entry identity is stable and is what a cursor holds — a position
+        // cannot be, because trimming renumbers everything behind it.
+        let ids: std::collections::BTreeSet<&str> =
+            log.entries.iter().map(|e| e.element.as_str()).collect();
+        assert_eq!(ids.len(), 8, "every retained entry has its own identity");
+
+        // A retention of zero is a log that cannot be read; refused, and the
+        // batch changes nothing.
+        assert_eq!(
+            f.commit(Transaction::new(
+                "appended",
+                vec![Op::LogAppend {
+                    key: k.clone(),
+                    path: "events".into(),
+                    value: vec![99],
+                    retain: 0,
+                }]
+            ))
+            .unwrap_err(),
+            Failure::Invalid(commit::Invalid::Bounds)
+        );
+        let after = f.read_collaborative(&k).unwrap().logs["events"].clone();
+        assert_eq!(after.appended, 50, "the refused append did not count");
+        assert_eq!(after.entries.len(), 8);
+    }
+
+    /// A log is a type like any other at a path.
+    #[test]
+    fn a_log_path_conflicts_with_the_other_types() {
+        let mut f = Engine::new();
+        let k = Key::from_bytes(b"body/log-conflict".to_vec());
+        f.commit(Transaction::new(
+            "seed",
+            vec![Op::LogAppend {
+                key: k.clone(),
+                path: "feed".into(),
+                value: b"x".to_vec(),
+                retain: 4,
+            }],
+        ))
+        .unwrap();
+        assert_eq!(
+            f.commit(Transaction::new(
+                "conflict",
+                vec![Op::ListInsert {
+                    key: k.clone(),
+                    path: "feed".into(),
+                    index: 0,
+                    value: b"x".to_vec(),
+                }]
+            ))
+            .unwrap_err(),
+            Failure::TypeConflict
+        );
+    }
+
+    /// A hierarchy is a type like any other: a path bound to it refuses the
+    /// other six, and they refuse it.
+    #[test]
+    fn a_tree_path_conflicts_with_the_other_types() {
+        let mut f = Engine::new();
+        let k = Key::from_bytes(b"body/tree-conflict".to_vec());
+        f.commit(Transaction::new(
+            "seed",
+            vec![Op::TreeInsert {
+                key: k.clone(),
+                path: "threads".into(),
+                parent: None,
+                after: None,
+                value: b"x".to_vec(),
+            }],
+        ))
+        .unwrap();
+        assert_eq!(
+            f.commit(Transaction::new(
+                "conflict",
+                vec![Op::ListInsert {
+                    key: k.clone(),
+                    path: "threads".into(),
+                    index: 0,
+                    value: b"x".to_vec(),
+                }]
+            ))
+            .unwrap_err(),
+            Failure::TypeConflict
+        );
+        // And the reverse direction, at a path a list already holds.
+        f.commit(Transaction::new(
+            "seed",
+            vec![Op::ListInsert {
+                key: k.clone(),
+                path: "flat".into(),
+                index: 0,
+                value: b"x".to_vec(),
+            }],
+        ))
+        .unwrap();
+        assert_eq!(
+            f.commit(Transaction::new(
+                "conflict",
+                vec![Op::TreeInsert {
+                    key: k.clone(),
+                    path: "flat".into(),
+                    parent: None,
+                    after: None,
+                    value: b"x".to_vec(),
+                }]
+            ))
+            .unwrap_err(),
+            Failure::TypeConflict
+        );
     }
 
     #[test]

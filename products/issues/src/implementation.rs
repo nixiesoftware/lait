@@ -40,7 +40,7 @@ use super::contract::{
 use super::rank;
 use super::views::{
     board_view, canonical_for, derive_aliases, issue_view, label_dto, project_dto, project_row,
-    CatalogState, DerivedAliases, IssueState, Milestone,
+    CatalogState, DerivedAliases, IssueState, Milestone, RelationState,
 };
 
 /// The order milestones read in, and the only place that decides it.
@@ -122,6 +122,20 @@ struct RootKeyedCache {
     roots: Vec<([u8; 32], Arc<DerivedSnapshot>)>,
     /// Per-issue parsed state: `doc -> (stamp, state)`.
     issues: std::collections::HashMap<String, (Vec<u8>, Arc<IssueState>)>,
+    /// Project topology parses, reused across generations under Body stamps.
+    relations: std::collections::HashMap<String, (Vec<u8>, Arc<RelationState>)>,
+    /// Fully compiled Plan morphologies. Compilation is linear, but a warm
+    /// reader should pay only serialization; the exact generation is part of
+    /// the key, so historical and current phenotypes cannot contaminate one
+    /// another.
+    geometries: Vec<GeometryCacheEntry>,
+}
+
+struct GeometryCacheEntry {
+    root: [u8; 32],
+    project: String,
+    roots: Vec<String>,
+    view: Arc<crate::geometry::GeometryView>,
 }
 
 /// The immutable read model every query arm consumes: the integrity-checked
@@ -136,6 +150,7 @@ struct DerivedSnapshot {
 /// How many recent roots stay warm: the current root plus the previous one
 /// (a doorbell-raced query may still be pinned to the prior root).
 const CACHED_ROOTS: usize = 2;
+const CACHED_GEOMETRIES: usize = 16;
 
 impl IssuesWorld {
     /// The derived read model for THIS context's Manifest root: served from
@@ -152,8 +167,35 @@ impl IssuesWorld {
                 return Ok(snap.clone());
             }
         }
-        let catalog = Arc::new(catalog_state(ctx)?);
+        let mut catalog = catalog_state(ctx)?;
         let mut cache = self.cache.lock_recovering();
+        let relation_keys =
+            ctx.bodies_with_schema(&contract::world_id(), &contract::relation_schema());
+        let mut live_relations = std::collections::HashSet::new();
+        for key in relation_keys {
+            let rendered = key.body.render();
+            live_relations.insert(rendered.clone());
+            let stamp = ctx.body_stamp(&key);
+            let state = match (&stamp, cache.relations.get(&rendered)) {
+                (Some(stamp), Some((cached_stamp, state))) if stamp == cached_stamp => {
+                    state.clone()
+                }
+                _ => {
+                    let Ok(view) = ctx.read_collaborative(&key) else {
+                        continue;
+                    };
+                    Arc::new(RelationState::from_view(&view))
+                }
+            };
+            if let Some(stamp) = stamp {
+                cache.relations.insert(rendered, (stamp, state.clone()));
+            }
+            state.apply_to(&mut catalog);
+        }
+        cache
+            .relations
+            .retain(|body, _| live_relations.contains(body));
+        let catalog = Arc::new(catalog);
         let mut issues: BTreeMap<String, Arc<IssueState>> = BTreeMap::new();
         for doc in catalog.doc_ids() {
             let stamp = ctx.body_stamp(&issue_key(&doc));
@@ -191,6 +233,51 @@ impl IssuesWorld {
         }
         Ok(snap)
     }
+
+    fn geometry_view(
+        &self,
+        ctx: &Context<'_>,
+        snap: &DerivedSnapshot,
+        project: &str,
+        roots: &[String],
+    ) -> Arc<crate::geometry::GeometryView> {
+        let root = ctx.manifest_root();
+        let identified = root != [0u8; 32];
+        if identified {
+            let cache = self.cache.lock_recovering();
+            if let Some(entry) = cache.geometries.iter().rev().find(|entry| {
+                entry.root == root && entry.project == project && entry.roots == roots
+            }) {
+                return entry.view.clone();
+            }
+        }
+        let generation = data_encoding::HEXLOWER.encode(&root);
+        let view = Arc::new(crate::geometry::compile(
+            &snap.catalog,
+            &snap.aliases,
+            &snap.issues,
+            project,
+            roots,
+            generation,
+        ));
+        if identified {
+            let mut cache = self.cache.lock_recovering();
+            cache.geometries.retain(|entry| {
+                !(entry.root == root && entry.project == project && entry.roots == roots)
+            });
+            cache.geometries.push(GeometryCacheEntry {
+                root,
+                project: project.into(),
+                roots: roots.to_vec(),
+                view: view.clone(),
+            });
+            if cache.geometries.len() > CACHED_GEOMETRIES {
+                let drop_count = cache.geometries.len() - CACHED_GEOMETRIES;
+                cache.geometries.drain(..drop_count);
+            }
+        }
+        view
+    }
 }
 
 impl Default for IssuesWorld {
@@ -211,6 +298,30 @@ impl IssuesWorld {
                     version: contract::ISSUE_SCHEMA_VERSION,
                     encoding: contract::issue_encoding(),
                     mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+                    // Both predecessors are read by this version: v1 keeps its
+                    // comments in `list:comments` and its history in
+                    // `list:events`, v2 moved the comments, and the readers
+                    // take every home. Writing always uses this version's shape.
+                    readable_predecessors: vec![1, 2],
+                },
+                // Current intents may still update Bodies created under either
+                // readable predecessor. Runtime contains every operation
+                // against the Body's immutable *exact* binding, so readable
+                // predecessors also have to be registered here; otherwise the
+                // compatibility reader can open an old issue but no migration
+                // or ordinary edit can ever advance it.
+                Schema {
+                    id: contract::issue_schema(),
+                    version: 2,
+                    encoding: contract::issue_encoding(),
+                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+                    readable_predecessors: vec![1],
+                },
+                Schema {
+                    id: contract::issue_schema(),
+                    version: 1,
+                    encoding: contract::issue_encoding(),
+                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
                     readable_predecessors: vec![],
                 },
                 Schema {
@@ -228,8 +339,24 @@ impl IssuesWorld {
                     readable_predecessors: vec![],
                 },
                 Schema {
+                    id: contract::relation_schema(),
+                    version: contract::RELATION_SCHEMA_VERSION,
+                    encoding: contract::relation_encoding(),
+                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+                    readable_predecessors: vec![],
+                },
+                Schema {
                     id: contract::catalog_schema(),
                     version: contract::CATALOG_SCHEMA_VERSION,
+                    encoding: contract::catalog_encoding(),
+                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+                    // v1 Catalogs are read: their `map:parents` entries still
+                    // supply parentage for issues the tree says nothing about.
+                    readable_predecessors: vec![1],
+                },
+                Schema {
+                    id: contract::catalog_schema(),
+                    version: 1,
                     encoding: contract::catalog_encoding(),
                     mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
                     readable_predecessors: vec![],
@@ -351,6 +478,20 @@ impl Staging {
         }
     }
 
+    fn declare_relation(&mut self, key: &BodyKey) {
+        if !self
+            .declarations
+            .iter()
+            .any(|declaration| &declaration.key == key)
+        {
+            self.declarations.push(BodyDeclaration {
+                key: key.clone(),
+                schema: contract::relation_schema(),
+                schema_version: contract::RELATION_SCHEMA_VERSION,
+            });
+        }
+    }
+
     fn issue(&mut self, key: &BodyKey, op: Op) {
         if matches!(op, Op::Create) {
             self.declare_issue(key);
@@ -390,6 +531,18 @@ impl Staging {
             self.bodies.push(key.clone());
         }
         self.ops.push((key.clone(), op));
+    }
+
+    fn relation(&mut self, project: &str, create: bool, op: Op) {
+        let key = contract::relation_key(project);
+        if create && !self.bodies.contains(&key) {
+            self.declare_relation(&key);
+            self.bodies.push(key.clone());
+            self.ops.push((key.clone(), Op::Create));
+        } else if !self.bodies.contains(&key) {
+            self.bodies.push(key.clone());
+        }
+        self.ops.push((key, op));
     }
 
     /// Set the demand this mutation requires (an admin-only intent overrides
@@ -659,6 +812,147 @@ fn all_baselines(ctx: &Context<'_>) -> Vec<crate::spec::Baseline> {
     baselines
 }
 
+fn relation_state(ctx: &Context<'_>, project: &str) -> Option<RelationState> {
+    let key = contract::relation_key(project);
+    ctx.read_collaborative(&key)
+        .ok()
+        .map(|view| RelationState::from_view(&view))
+}
+
+fn count(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn migrated_spec_body(
+    head: &crate::spec::Revision,
+    generation: &str,
+    actor: &str,
+    ts: u64,
+) -> Option<crate::spec::Body> {
+    let plan_pending = head.body.kind == crate::spec::Kind::Plan && head.body.plan.is_none();
+    if !head.body.generation.is_empty() && !plan_pending {
+        return None;
+    }
+    let mut body = head.body.clone();
+    body.generation = generation.into();
+    if plan_pending {
+        body.plan = Some(crate::spec::PlanData { roots: Vec::new() });
+    }
+    body.author = actor.into();
+    body.ts = ts;
+    Some(body)
+}
+
+/// Audit the current representation without treating immutable history as work
+/// still to do. The derived catalog is the visible truth; relation Bodies are
+/// checked against it to find facts still supplied only by the compatibility
+/// overlay.
+fn structure_report(ctx: &Context<'_>, snap: &DerivedSnapshot) -> contract::StructureReport {
+    let catalog = &snap.catalog;
+    let mut relation_bodies = 0u64;
+    let mut relation_projects_pending = 0u64;
+    let mut relation_edges_pending = 0u64;
+    let mut relation_parents_pending = 0u64;
+
+    for project in catalog.projects.keys() {
+        let state = relation_state(ctx, project);
+        if state.is_some() {
+            relation_bodies = relation_bodies.saturating_add(1);
+        }
+        let mut project_pending = false;
+        for edge in &catalog.edges {
+            let belongs = snap
+                .issues
+                .get(&edge.0)
+                .is_some_and(|issue| &issue.project == project);
+            if belongs && state.as_ref().and_then(|state| state.edges.get(edge)) != Some(&true) {
+                relation_edges_pending = relation_edges_pending.saturating_add(1);
+                project_pending = true;
+            }
+        }
+        for (child, parent) in &catalog.parents {
+            let belongs = snap
+                .issues
+                .get(child)
+                .is_some_and(|issue| &issue.project == project);
+            if belongs
+                && state.as_ref().and_then(|state| state.parents.get(child))
+                    != Some(&Some(parent.clone()))
+            {
+                relation_parents_pending = relation_parents_pending.saturating_add(1);
+                project_pending = true;
+            }
+        }
+        if project_pending {
+            relation_projects_pending = relation_projects_pending.saturating_add(1);
+        }
+    }
+
+    let specs = all_specs(ctx);
+    let mut spec_heads_pending = 0u64;
+    let mut spec_conflicts = 0u64;
+    let mut plans_without_roots = 0u64;
+    for spec in &specs {
+        let heads = spec.heads();
+        if heads.len() != 1 {
+            spec_conflicts = spec_conflicts.saturating_add(1);
+            let pending = heads.iter().any(|head| {
+                head.body.generation.is_empty()
+                    || (head.body.kind == crate::spec::Kind::Plan && head.body.plan.is_none())
+            });
+            if pending {
+                spec_heads_pending = spec_heads_pending.saturating_add(1);
+            }
+            plans_without_roots = plans_without_roots.saturating_add(count(
+                heads
+                    .iter()
+                    .filter(|head| {
+                        head.body.kind == crate::spec::Kind::Plan && head.body.plan.is_none()
+                    })
+                    .count(),
+            ));
+            continue;
+        }
+        let body = &heads[0].body;
+        let plan_pending = body.kind == crate::spec::Kind::Plan && body.plan.is_none();
+        if plan_pending {
+            plans_without_roots = plans_without_roots.saturating_add(1);
+        }
+        if body.generation.is_empty() || plan_pending {
+            spec_heads_pending = spec_heads_pending.saturating_add(1);
+        }
+    }
+    let issue_documents_pending = count(
+        snap.issues
+            .values()
+            .filter(|issue| issue.document_schema != DOCUMENT_SCHEMA_VERSION)
+            .count(),
+    );
+    let complete = relation_edges_pending == 0
+        && relation_parents_pending == 0
+        && spec_heads_pending == 0
+        && issue_documents_pending == 0;
+
+    contract::StructureReport {
+        generation: data_encoding::HEXLOWER.encode(&ctx.manifest_root()),
+        projects: count(catalog.projects.len()),
+        issues: count(snap.issues.len()),
+        visible_edges: count(catalog.edges.len()),
+        visible_parents: count(catalog.parents.len()),
+        relation_bodies,
+        relation_projects_pending,
+        relation_edges_pending,
+        relation_parents_pending,
+        specs: count(specs.len()),
+        spec_heads_pending,
+        spec_conflicts,
+        plans_without_roots,
+        issue_documents_pending,
+        baselines: count(all_baselines(ctx).len()),
+        complete,
+    }
+}
+
 fn spec_view(spec: &crate::spec::Spec) -> Option<crate::spec::SpecView> {
     let heads = spec.heads();
     let selected = heads.first().copied()?;
@@ -747,6 +1041,23 @@ fn validate_spec_links(ctx: &Context<'_>, links: &[crate::spec::Link]) -> Result
                     return Err(Rejection::InvalidRequest);
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan(
+    ctx: &Context<'_>,
+    _catalog: &CatalogState,
+    project: &str,
+    plan: Option<&crate::spec::PlanData>,
+) -> Result<(), Rejection> {
+    let Some(plan) = plan else { return Ok(()) };
+    plan.validate().map_err(|_| Rejection::InvalidRequest)?;
+    for issue in &plan.roots {
+        let target = issue_state(ctx, issue).ok_or(Rejection::InvalidRequest)?;
+        if target.project != project {
+            return Err(Rejection::InvalidRequest);
         }
     }
     Ok(())
@@ -949,11 +1260,19 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
     })
 }
 
-/// The preconditions both comment verbs share, and the issue they hold for.
+/// The preconditions both comment verbs share, the issue they hold for, and
+/// the hierarchy node a reply hangs under.
 ///
 /// The daemon mints the id; the World re-validates it — including uniqueness,
 /// because a duplicated id would fuse two comments' reactions, replies and
 /// spans.
+///
+/// The returned node is `None` for a root comment *and* for a reply to a
+/// comment that predates the hierarchy: a legacy `list:comments` record has no
+/// node to hang under, so the reply is filed at the root and threads through
+/// its `parent` field alone, exactly as it did before. Refusing instead would
+/// make old comments unanswerable, which is a worse answer than the one the
+/// product already gives them.
 fn check_comment(
     ctx: &Context<'_>,
     doc: &str,
@@ -961,7 +1280,7 @@ fn check_comment(
     actor: &str,
     id: Option<&str>,
     parent: Option<&str>,
-) -> Result<IssueState, Rejection> {
+) -> Result<(IssueState, Option<String>), Rejection> {
     if body.is_empty() || ActorId::parse(actor).is_none() {
         return Err(Rejection::InvalidRequest);
     }
@@ -973,28 +1292,55 @@ fn check_comment(
             return Err(Rejection::InvalidRequest);
         }
     }
-    if let Some(parent) = parent {
-        // A reply needs an addressable target: an existing comment that carries
-        // an id (pre-identity comments cannot anchor threads) and is itself a
-        // root — one level, no ladders.
-        let target = issue
-            .comments
-            .iter()
-            .find(|c| c.id.as_deref() == Some(parent))
-            .ok_or(Rejection::InvalidRequest)?;
-        if id.is_none() || target.parent.is_some() {
-            return Err(Rejection::InvalidRequest);
-        }
+    let Some(parent) = parent else {
+        return Ok((issue, None));
+    };
+    // A reply needs an addressable target: an existing comment that carries
+    // an id (pre-identity comments cannot anchor threads) and is itself a
+    // root — one level, no ladders.
+    let target = issue
+        .comments
+        .iter()
+        .find(|c| c.id.as_deref() == Some(parent))
+        .ok_or(Rejection::InvalidRequest)?;
+    // A root is a comment that answers nothing by either account. Both are
+    // checked, not just the hierarchy, because they can legitimately disagree:
+    // a reply to a comment that predates the hierarchy has no parent edge to
+    // hang from and threads through its `parent` field alone. Trusting the
+    // edge there would read that reply as a root and let a reply hang off it —
+    // the ladder the one-level rule exists to refuse, rebuilt through the one
+    // case the cutover creates.
+    if id.is_none() || target.parent.is_some() || target.parent_node.is_some() {
+        return Err(Rejection::InvalidRequest);
     }
-    Ok(issue)
+    let node = target.node.clone();
+    Ok((issue, node))
 }
 
-/// Append a comment record and its history event.
+/// File a comment into the thread and record its history event.
+///
+/// The comment is a node of `tree:comments`, hanging under the comment it
+/// answers or at the root of the forest. That is two changes from the flat list
+/// it replaces, and both are about what a long thread does to a peer that is
+/// behind:
+///
+/// - **No index.** `ListInsert` took `index: issue.comments.len()` — the length
+///   of the thread *as this replica had synced it*. A peer fifty comments
+///   behind computed "the end" as position ten and wrote into the middle of a
+///   conversation it had not finished reading, and the error grew with the
+///   thread. A node names its parent, and a parent is not a position.
+/// - **The reply edge is real.** Threading was a `parent` field over flat
+///   storage, so two peers re-parenting concurrently had no defined outcome.
+///   The hierarchy resolves that in the engine.
+///
+/// The record still carries its `parent` field, and it is still the same bytes
+/// it always was, so a peer on an older build reads this comment and its
+/// threading exactly as before.
 fn stage_comment(
     staging: &mut Staging,
     ctx: &Context<'_>,
     doc: &str,
-    issue: &IssueState,
+    parent_node: Option<String>,
     record: StoredComment,
     device: &str,
     ts: u64,
@@ -1003,9 +1349,13 @@ fn stage_comment(
     ev.x = record.b.clone();
     staging.issue(
         &issue_key(doc),
-        Op::ListInsert {
+        Op::TreeInsert {
             path: "comments".into(),
-            index: issue.comments.len() as u64,
+            parent: parent_node,
+            // Placement is the writer's own view either way, so there is
+            // nothing to gain by naming a sibling — the read side orders the
+            // thread by each record's own clock. See `views::read_comments`.
+            after: None,
             value: serde_json::to_vec(&record).expect("comment json"),
         },
     );
@@ -1155,6 +1505,29 @@ fn resolve_comment_anchor(
     dto(state)
 }
 
+/// The resumable token for one activity row: `(ts, doc, ordinal, entry id)`.
+///
+/// **This is the feed's sort key, not a separate encoding of it.** Both queries
+/// order rows by comparing these strings, so "the next page" and "after this
+/// token" cannot drift apart. They did, in the first cut: the feed sorted by
+/// ordinal within a `(ts, doc)` group while the token ended in the entry id,
+/// which sorts differently, and a resume re-served rows whose id happened to
+/// sort above the last one's. The two orders are now one order because they are
+/// one string.
+///
+/// `ordinal` is the row's place in its issue's *whole* history, trimmed rows
+/// included, which is what makes the token survive trimming: dropping the
+/// oldest events raises the trimmed count by exactly what it removes, so every
+/// surviving row keeps the ordinal it had. The entry id rides along so the
+/// token names the row's identity as well as its place.
+///
+/// Both numbers are zero-padded to twenty digits — `u64::MAX` is twenty long —
+/// because the comparison is lexicographic and an unpadded `9` would sort after
+/// an unpadded `10`.
+fn activity_cursor(event: &IssueEvent, doc: &str, ordinal: u64) -> String {
+    format!("{:020}\t{doc}\t{ordinal:020}\t{}", event.t, event.entry)
+}
+
 /// Who a history row is attributed to.
 ///
 /// `None` rather than the device it was committed on. An event written before
@@ -1176,18 +1549,12 @@ fn push_event(staging: &mut Staging, ctx: &Context<'_>, doc: &str, event: &Issue
         a: ctx.principal().actor.as_str().to_string(),
         ..event.clone()
     };
-    let key = issue_key(doc);
-    let len = ctx
-        .read_collaborative(&key)
-        .ok()
-        .and_then(|v| v.lists.get("events").map(|l| l.len() as u64))
-        .unwrap_or(0);
     staging.issue(
-        &key,
-        Op::ListInsert {
-            path: "events".into(),
-            index: len,
+        &issue_key(doc),
+        Op::LogAppend {
+            path: contract::EVENTS_PATH.into(),
             value: serde_json::to_vec(event).expect("event json"),
+            retain: contract::EVENTS_RETAINED,
         },
     );
 }
@@ -1306,6 +1673,9 @@ fn event(kind: &str, device: &str, ts: u64) -> IssueEvent {
         t: ts,
         c: vec![],
         x: String::new(),
+        // Filled by the projection from the log entry this lands in — there is
+        // no entry until it is committed.
+        entry: String::new(),
     }
 }
 
@@ -1478,7 +1848,11 @@ impl World for IssuesWorld {
     fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let intent = IssueIntent::from_json(&intent.payload).ok_or(Rejection::InvalidRequest)?;
         let catalog_view = checked_catalog_view(ctx)?;
-        let catalog = CatalogState::from_view(catalog_view.as_ref());
+        // Writes validate against the same composed topology that reads expose.
+        // The Catalog remains the compatibility source for older Worlds, while
+        // project relation Bodies override its links and hierarchy.
+        let derived = self.derived_snapshot(ctx)?;
+        let catalog = derived.catalog.clone();
         let mut staging = Staging::for_space(ctx.principal().space.clone(), catalog_view.is_none());
         drop(catalog_view);
         match intent {
@@ -1589,6 +1963,92 @@ impl World for IssuesWorld {
                     ));
                 }
                 // Tracker initialization is a founder-composition admin action.
+                staging.require(contract::demand_admin());
+                Ok(staging.into_effect(None))
+            }
+            IssueIntent::StructureMigrate {
+                actor,
+                device: _,
+                ts,
+            } => {
+                if ActorId::parse(&actor).is_none() || ts == 0 {
+                    return Err(Rejection::InvalidRequest);
+                }
+
+                // Copy only facts that are visible after every existing
+                // relation overlay has been applied. Re-running therefore
+                // cannot resurrect a legacy edge that a newer Body removed.
+                for project in catalog.projects.keys() {
+                    let key = contract::relation_key(project);
+                    let create = ctx.body_version(&key).is_none();
+                    let state = relation_state(ctx, project).unwrap_or_default();
+                    for edge in &catalog.edges {
+                        let belongs = derived
+                            .issues
+                            .get(&edge.0)
+                            .is_some_and(|issue| issue.project == *project);
+                        if belongs && state.edges.get(edge) != Some(&true) {
+                            staging.relation(
+                                project,
+                                create,
+                                map_set("edges", format!("{}|{}|{}", edge.0, edge.1, edge.2), "1"),
+                            );
+                        }
+                    }
+                    for (child, parent) in &catalog.parents {
+                        let belongs = derived
+                            .issues
+                            .get(child)
+                            .is_some_and(|issue| issue.project == *project);
+                        if belongs
+                            && state.parents.get(child).and_then(Option::as_deref)
+                                != Some(parent.as_str())
+                        {
+                            staging.relation(
+                                project,
+                                create,
+                                Op::TreeAnchor {
+                                    path: contract::HIERARCHY_PATH.into(),
+                                    anchor: child.clone(),
+                                    parent: Some(parent.clone()),
+                                },
+                            );
+                        }
+                    }
+                }
+
+                // Current heads receive equivalent immutable successors. The
+                // predecessor remains exact history, lifecycle state is kept,
+                // and a Plan that predates structured seeds becomes the
+                // canonical empty-roots form (the whole project).
+                let generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
+                for spec in all_specs(ctx) {
+                    let heads = spec.heads();
+                    if heads.len() != 1 {
+                        continue;
+                    }
+                    let head = heads[0];
+                    let Some(body) = migrated_spec_body(head, &generation, &actor, ts) else {
+                        continue;
+                    };
+                    validate_plan(ctx, &catalog, &body.project, body.plan.as_ref())?;
+                    let predecessor = crate::spec::decode_revision(&head.revision)
+                        .ok_or(Rejection::StateCorrupt)?;
+                    let revision = crate::spec::build_revision(body, vec![predecessor])
+                        .map_err(|_| Rejection::StateCorrupt)?;
+                    staging.spec(
+                        &spec_key(&head.body.spec),
+                        map_set(
+                            "revisions",
+                            revision.revision.clone(),
+                            serde_json::to_vec(&revision).expect("Spec revision JSON"),
+                        ),
+                    );
+                }
+
+                if staging.ops.is_empty() {
+                    return Ok(unchanged_effect(None));
+                }
                 staging.require(contract::demand_admin());
                 Ok(staging.into_effect(None))
             }
@@ -2101,13 +2561,13 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue =
+                let (_issue, parent_node) =
                     check_comment(ctx, &doc, &body, &actor, id.as_deref(), parent.as_deref())?;
                 stage_comment(
                     &mut staging,
                     ctx,
                     &doc,
-                    &issue,
+                    parent_node,
                     StoredComment {
                         a: actor,
                         t: ts,
@@ -2115,6 +2575,8 @@ impl World for IssuesWorld {
                         id,
                         parent,
                         at: None,
+                        node: None,
+                        parent_node: None,
                     },
                     &device,
                     ts,
@@ -2133,13 +2595,14 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = check_comment(ctx, &doc, &body, &actor, Some(&id), parent.as_deref())?;
+                let (issue, parent_node) =
+                    check_comment(ctx, &doc, &body, &actor, Some(&id), parent.as_deref())?;
                 let at = mint_comment_anchor(ctx, &doc, &issue, &field, start, end)?;
                 stage_comment(
                     &mut staging,
                     ctx,
                     &doc,
-                    &issue,
+                    parent_node,
                     StoredComment {
                         a: actor,
                         t: ts,
@@ -2147,6 +2610,8 @@ impl World for IssuesWorld {
                         id: Some(id),
                         parent,
                         at: Some(at),
+                        node: None,
+                        parent_node: None,
                     },
                     &device,
                     ts,
@@ -2176,16 +2641,32 @@ impl World for IssuesWorld {
                 {
                     return Err(Rejection::InvalidRequest);
                 }
-                let value = contract::reaction_value(&emoji, &actor);
-                let path = contract::reaction_path(&comment);
-                staging.issue(
-                    &issue_key(&doc),
-                    if on {
-                        Op::SetAdd { path, value }
-                    } else {
-                        Op::SetRemove { path, value }
-                    },
-                );
+                let value = contract::reaction_value(&comment, &emoji, &actor);
+                let path = contract::REACTIONS_PATH.to_string();
+                // Un-reacting has to reach the old home too. A reaction added
+                // before the sets were collapsed lives in `reactions/<comment>`,
+                // and removing only from the new set would leave it standing —
+                // the button would report the reaction gone and the next read
+                // would bring it back. Both removes in one atomic batch; the
+                // one with nothing to remove is a no-op, not an error.
+                if on {
+                    staging.issue(&issue_key(&doc), Op::SetAdd { path, value });
+                } else {
+                    staging.issue(
+                        &issue_key(&doc),
+                        Op::SetRemove {
+                            path,
+                            value: value.clone(),
+                        },
+                    );
+                    staging.issue(
+                        &issue_key(&doc),
+                        Op::SetRemove {
+                            path: contract::reaction_path(&comment),
+                            value: contract::reaction_value_legacy(&emoji, &actor),
+                        },
+                    );
+                }
                 // No history event, deliberately — see the intent's contract
                 // note: a reaction is a social signal, not a change of record.
                 Ok(staging.into_effect(Some(doc)))
@@ -2227,8 +2708,8 @@ impl World for IssuesWorld {
                 if !LINK_KINDS.contains(&kind.as_str()) || doc == target {
                     return Err(Rejection::InvalidRequest);
                 }
-                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let _other = issue_state(ctx, &target).ok_or(Rejection::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let other = issue_state(ctx, &target).ok_or(Rejection::InvalidRequest)?;
                 // `relates` is symmetric: canonicalize by sorted endpoints.
                 let (from, to) = if kind == "relates" && target < doc {
                     (target.clone(), doc.clone())
@@ -2236,20 +2717,25 @@ impl World for IssuesWorld {
                     (doc.clone(), target.clone())
                 };
                 let edge = format!("{from}|{kind}|{to}");
-                if add {
-                    staging.catalog(map_set("edges", edge, "1"));
-                } else {
+                if !add {
                     if !catalog
                         .edges
                         .contains(&(from.clone(), kind.clone(), to.clone()))
                     {
                         return Err(Rejection::InvalidRequest);
                     }
-                    staging.catalog(Op::MapRemove {
-                        path: "edges".into(),
-                        key: edge,
-                    });
                 }
+                let relation_project = if from == doc {
+                    &issue.project
+                } else {
+                    &other.project
+                };
+                let relation_key = contract::relation_key(relation_project);
+                staging.relation(
+                    relation_project,
+                    ctx.body_version(&relation_key).is_none(),
+                    map_set("edges", edge, if add { "1" } else { "0" }),
+                );
                 let mut ev = event(if add { "linked" } else { "unlinked" }, &device, ts);
                 ev.x = format!("{kind} {target}");
                 push_event(&mut staging, ctx, &doc, &ev);
@@ -2261,21 +2747,37 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if let Some(parent) = &parent {
                     if parent == &doc {
                         return Err(Rejection::Conflict);
                     }
-                    let _p = issue_state(ctx, parent).ok_or(Rejection::InvalidRequest)?;
+                    let parent_issue = issue_state(ctx, parent).ok_or(Rejection::InvalidRequest)?;
+                    if parent_issue.project != issue.project {
+                        return Err(Rejection::InvalidRequest);
+                    }
+                    // Kept as a fast, local refusal so the caller gets
+                    // `Conflict` for the obvious case rather than a commit
+                    // failure. It is no longer the guarantee: this walks the
+                    // catalog as THIS replica has it, so two peers parenting
+                    // A under B and B under A concurrently both passed it and
+                    // the merge held a cycle. The hierarchy is now a tree, and
+                    // the engine refuses the cycle on whichever replica applies
+                    // the second move — including one that arrives by sync.
                     if is_ancestor(&catalog, parent, &doc) {
                         return Err(Rejection::Conflict);
                     }
                 }
-                staging.catalog(map_set(
-                    "parents",
-                    doc.clone(),
-                    parent.clone().unwrap_or_default(),
-                ));
+                let relation_key = contract::relation_key(&issue.project);
+                staging.relation(
+                    &issue.project,
+                    ctx.body_version(&relation_key).is_none(),
+                    Op::TreeAnchor {
+                        path: contract::HIERARCHY_PATH.into(),
+                        anchor: doc.clone(),
+                        parent: parent.clone(),
+                    },
+                );
                 let mut ev = event("parented", &device, ts);
                 ev.x = parent.unwrap_or_else(|| "unparented".into());
                 push_event(&mut staging, ctx, &doc, &ev);
@@ -2816,15 +3318,19 @@ impl World for IssuesWorld {
                     return Err(Rejection::InvalidRequest);
                 }
                 validate_spec_links(ctx, &links)?;
+                let plan = (kind == crate::spec::Kind::Plan)
+                    .then(|| crate::spec::PlanData { roots: Vec::new() });
                 let revision = crate::spec::build_revision(
                     crate::spec::Body {
                         spec: spec.clone(),
                         project: project.clone(),
                         kind,
+                        generation: data_encoding::HEXLOWER.encode(&ctx.manifest_root()),
                         title,
                         text,
                         state: crate::spec::State::Draft,
                         links,
+                        plan,
                         author: actor,
                         ts,
                     },
@@ -2850,6 +3356,7 @@ impl World for IssuesWorld {
                 title,
                 text,
                 links,
+                plan,
                 actor,
                 device: _,
                 ts,
@@ -2874,6 +3381,11 @@ impl World for IssuesWorld {
                     validate_spec_links(ctx, &links)?;
                     body.links = links;
                 }
+                if let Some(plan) = plan {
+                    body.plan = plan;
+                }
+                validate_plan(ctx, &catalog, &body.project, body.plan.as_ref())?;
+                body.generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
                 body.state = crate::spec::State::Draft;
                 body.author = actor;
                 body.ts = ts;
@@ -2919,6 +3431,7 @@ impl World for IssuesWorld {
                 }
                 let mut body = head.body.clone();
                 body.text = text;
+                body.generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
                 body.author = actor;
                 body.ts = ts;
                 let predecessor =
@@ -2978,6 +3491,7 @@ impl World for IssuesWorld {
                 }
                 let mut body = head.body.clone();
                 body.state = state;
+                body.generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
                 body.author = actor;
                 body.ts = ts;
                 let predecessor =
@@ -3040,6 +3554,8 @@ impl World for IssuesWorld {
                     return Err(Rejection::InvalidRequest);
                 }
                 validate_spec_links(ctx, &body.links)?;
+                validate_plan(ctx, &catalog, &body.project, body.plan.as_ref())?;
+                body.generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
                 body.state = crate::spec::State::Draft;
                 body.author = actor;
                 body.ts = ts;
@@ -4179,6 +4695,9 @@ impl World for IssuesWorld {
                 });
                 Ok(projection(serde_json::to_vec(&value).expect("snapshot")))
             }
+            IssueQuery::StructureStatus => Ok(projection(
+                serde_json::to_vec(&structure_report(ctx, &snap)).expect("structure report JSON"),
+            )),
             IssueQuery::View { doc, me } => {
                 let me = me.and_then(|m| ActorId::parse(&m));
                 let issue = snap.issues.get(&doc);
@@ -4285,12 +4804,20 @@ impl World for IssuesWorld {
             IssueQuery::History { doc } => {
                 let issue = snap.issues.get(&doc).ok_or(Rejection::InvalidRequest)?;
                 let reff = canonical_for(aliases, &doc);
+                // The ordinal counts from where the retained history begins, so
+                // a trimmed issue's rows keep the numbers they had rather than
+                // restarting at one. `events_recorded` is the total ever; the
+                // rows in hand are its tail.
+                let trimmed = issue
+                    .events_recorded
+                    .saturating_sub(issue.events.len() as u64);
                 let events: Vec<ActivityEvent> = issue
                     .events
                     .iter()
                     .enumerate()
                     .map(|(i, e)| ActivityEvent {
-                        seq: (i + 1) as u64,
+                        seq: trimmed.saturating_add(i as u64).saturating_add(1),
+                        cursor: activity_cursor(e, &doc, trimmed.saturating_add(i as u64)),
                         doc_id: DocId::parse(&doc),
                         reff: reff.clone(),
                         kind: e.k.clone(),
@@ -4310,7 +4837,7 @@ impl World for IssuesWorld {
                         collision: false,
                     })
                     .collect();
-                let last = events.len() as u64;
+                let last = events.last().map(|e| e.cursor.clone()).unwrap_or_default();
                 let value = serde_json::json!({ "events": events, "last": last });
                 Ok(projection(serde_json::to_vec(&value).expect("history")))
             }
@@ -4321,19 +4848,25 @@ impl World for IssuesWorld {
                 // every converged replica derives the identical sequence. The
                 // cursor is a position in that total order: `since = last`
                 // resumes exactly after the previously served tail.
-                let mut feed: Vec<(u64, &String, usize, &IssueEvent)> = Vec::new();
+                // Sorted by the cursor itself, so the order rows are served in
+                // and the order `since` compares in are the same order by
+                // construction rather than by two definitions agreeing.
+                let mut feed: Vec<(String, u64, &String, &IssueEvent)> = Vec::new();
                 for (doc, issue) in &snap.issues {
+                    let trimmed = issue
+                        .events_recorded
+                        .saturating_sub(issue.events.len() as u64);
                     for (i, e) in issue.events.iter().enumerate() {
-                        feed.push((e.t, doc, i, e));
+                        let ordinal = trimmed.saturating_add(i as u64);
+                        feed.push((activity_cursor(e, doc, ordinal), ordinal, doc, e));
                     }
                 }
-                feed.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-                let last = feed.len() as u64;
+                feed.sort_by(|a, b| a.0.cmp(&b.0));
                 let events: Vec<ActivityEvent> = feed
                     .into_iter()
-                    .enumerate()
-                    .map(|(pos, (_, doc, _, e))| ActivityEvent {
-                        seq: (pos + 1) as u64,
+                    .map(|(cursor, ordinal, doc, e)| ActivityEvent {
+                        seq: ordinal.saturating_add(1),
+                        cursor,
                         doc_id: DocId::parse(doc),
                         reff: canonical_for(aliases, doc),
                         kind: e.k.clone(),
@@ -4352,8 +4885,26 @@ impl World for IssuesWorld {
                         ts: e.t,
                         collision: false,
                     })
-                    .filter(|e| e.seq > since)
+                    // Strictly after the named row, in the feed's own order.
+                    // Comparing the token rather than a count is what makes a
+                    // resume safe across a trim: the row the caller names keeps
+                    // its identity even when the rows in front of it are gone.
+                    .filter(|e| {
+                        since
+                            .as_deref()
+                            .is_none_or(|since| e.cursor.as_str() > since)
+                    })
                     .collect();
+                // A pull that found nothing hands back the cursor it was given.
+                // Returning an empty token there would tell a polling caller it
+                // had reached the start of the feed, and its next pull would
+                // replay the entire history — the failure mode is silent, and
+                // it happens on the most common pull there is.
+                let last = events
+                    .last()
+                    .map(|e| e.cursor.clone())
+                    .or(since)
+                    .unwrap_or_default();
                 let value = serde_json::json!({ "events": events, "last": last });
                 Ok(projection(serde_json::to_vec(&value).expect("activity")))
             }
@@ -4736,6 +5287,21 @@ impl World for IssuesWorld {
                 };
                 Ok(projection(
                     serde_json::to_vec(&view).expect("project graph"),
+                ))
+            }
+            IssueQuery::Geometry { project, roots } => {
+                if !catalog.projects.contains_key(&project)
+                    || roots.len() > crate::spec::MAX_PLAN_ROOTS
+                    || roots.iter().any(|root| DocId::parse(root).is_none())
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let mut canonical_roots = roots;
+                canonical_roots.sort();
+                canonical_roots.dedup();
+                let view = self.geometry_view(ctx, &snap, &project, &canonical_roots);
+                Ok(projection(
+                    serde_json::to_vec(view.as_ref()).expect("Issue geometry"),
                 ))
             }
             IssueQuery::Cycles { project } => {
@@ -5134,6 +5700,54 @@ fn ring_digest(ctx: &Context<'_>, catalog: &CatalogState) -> contract::RingDiges
 }
 
 #[cfg(test)]
+mod structure_migration_tests {
+    use super::*;
+
+    fn legacy_plan(state: crate::spec::State) -> crate::spec::Revision {
+        crate::spec::Revision {
+            revision: "11".repeat(32),
+            predecessors: Vec::new(),
+            body: crate::spec::Body {
+                spec: "spc_01k1k8q6c6t0g0000000000000".into(),
+                project: "prj_01k1k8q6c6t0g0000000000000".into(),
+                kind: crate::spec::Kind::Plan,
+                generation: String::new(),
+                title: "Plan".into(),
+                text: format!("{}Plan", contract::DOCUMENT_PREFIX),
+                state,
+                links: Vec::new(),
+                plan: None,
+                author: "act_86a32a40c88b66b026bd7567542e228bd727e0488feaf4d8b528a7a79aa1ee30"
+                    .into(),
+                ts: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn migration_coordinates_a_plan_without_changing_issued_truth() {
+        let head = legacy_plan(crate::spec::State::Issued);
+        let actor = "act_12a03af5f8de402e33baffbe9a1dfd8321cdebb63af195bd94d7c169325f31fb";
+        let body = migrated_spec_body(&head, &"ab".repeat(32), actor, 9).unwrap();
+
+        assert_eq!(body.state, crate::spec::State::Issued);
+        assert_eq!(body.generation, "ab".repeat(32));
+        assert_eq!(body.plan.unwrap().roots, Vec::<String>::new());
+        assert_eq!(body.author, actor);
+        assert_eq!(body.ts, 9);
+    }
+
+    #[test]
+    fn migration_is_a_no_op_once_the_head_is_native() {
+        let mut head = legacy_plan(crate::spec::State::Draft);
+        head.body.generation = "cd".repeat(32);
+        head.body.plan = Some(crate::spec::PlanData { roots: Vec::new() });
+
+        assert!(migrated_spec_body(&head, &"ef".repeat(32), &head.body.author, 9).is_none());
+    }
+}
+
+#[cfg(test)]
 mod milestone_order_tests {
     use super::*;
 
@@ -5309,6 +5923,8 @@ mod comment_anchor_tests {
             id: Some("cmt_00000000000000000000000000".into()),
             parent: None,
             at,
+            node: None,
+            parent_node: None,
         }
     }
 

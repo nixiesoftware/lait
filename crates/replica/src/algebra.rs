@@ -20,6 +20,20 @@
 //! shift the target of a remove. `index` in `ListInsert`/`ListMove` is a
 //! placement coordinate resolved against the committed order at apply time.
 //!
+//! Tree nodes have the same stable identity: `TreeMove`/`TreeRemove`/`TreeSet`
+//! name a node by the id Engine minted at insert, and `parent`/`after` are
+//! themselves node ids rather than positions. A subtree removal removes the
+//! subtree.
+//!
+//! **Placement is a local statement.** `after: None` means "the end of the
+//! children this replica can see", and merging cannot retroactively make that
+//! the end of the converged sequence — a replica fifty siblings behind places
+//! its node fifty back, in a tree exactly as in a list. What is guaranteed is
+//! that every replica agrees on the result, the node keeps the parent it
+//! named, and concurrent inserts under one parent all survive. A World that
+//! needs a chronology orders by a field of its own records; it does not read
+//! one out of the sequence.
+//!
 //! # Concurrency winners
 //!
 //! - Registers and map entries are last-writer-wins by the semantic transaction
@@ -31,6 +45,10 @@
 //! - Counters sum all increments (commutative).
 //! - Text splices converge by the CRDT's per-character identity; overlapping
 //!   splices never corrupt, though they may interleave.
+//! - Trees converge on one hierarchy: concurrent inserts under one parent all
+//!   survive, concurrent moves of one node settle on a single parent that is
+//!   one of the parents named, and a move that would make a node its own
+//!   ancestor is refused at apply rather than resolved into a detached cycle.
 //!
 //! # Idempotence
 //!
@@ -40,9 +58,10 @@
 //!
 //! # Type conflicts
 //!
-//! A path bound to one collaborative type (register/map/list/text/set/counter)
-//! cannot be reused as another. An operation whose type disagrees with the
-//! established type at a path is a `TypeConflict` and commits nothing.
+//! A path bound to one collaborative type
+//! (register/map/list/text/set/counter/tree) cannot be reused as another. An
+//! operation whose type disagrees with the established type at a path is a
+//! `TypeConflict` and commits nothing.
 //!
 //! # Limits (frozen)
 //!

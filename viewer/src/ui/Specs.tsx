@@ -39,6 +39,7 @@ import {
   useGrants,
   useProjectBaselines,
   useProjectBoard,
+  usePlanGeometry,
   useProjectSpecs,
   useProjectViewerStore,
   useSpecObservations,
@@ -50,6 +51,7 @@ import type {
   AssignmentDto,
   BaselineView,
   MemberDto,
+  PlanData,
   Row,
   SpecBody,
   SpecKind,
@@ -69,6 +71,7 @@ import { GroupHeader } from "./layout";
 import { Document } from "./Document";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { PlanIdentity, PlanSurface, planCounts } from "./Plan";
 import { NewSpecDialog } from "./NewSpec";
 import { Button, DropdownMenu, DropdownMenuItem, IconButton, TextArea, TextInput } from "@astryxdesign/core";
 import { Combobox, type Option } from "./Picker";
@@ -395,7 +398,11 @@ function SpecRow({
       data-spec-id={spec.spec}
       tabIndex={0}
     >
-      <span className="min-w-0 flex-1 truncate font-medium">{spec.title}</span>
+      <span className="min-w-0 flex-1 truncate font-medium">
+        {spec.kind === "plan"
+          ? <PlanIdentity title={spec.title} compact />
+          : spec.title}
+      </span>
       {/* Not styled as a warning: nothing is broken, and a wall of amber over
           a project that has not written its proofs yet would be. It is a gap,
           said once, on the rows where it is actually a gap. */}
@@ -766,6 +773,10 @@ function Relations({
         : `${entry.source}@${short(entry.revision ?? "")}`;
     const added =
       direction === "out" && delta.added.some((link) => linkKey(link) === linkKey(entry.link));
+    const namedPlan = open ? titles.get(open) : undefined;
+    const identity = namedPlan?.kind === "plan"
+      ? <PlanIdentity title={namedPlan.title} compact />
+      : label;
     return (
       <li
         key={`${direction}-${linkPhrase(entry.link)}-${entry.source ?? ""}`}
@@ -773,10 +784,10 @@ function Relations({
       >
         {open ? (
           <button type="button" className="hover:text-accent text-left" onClick={() => onOpen(open)}>
-            {label}
+            {identity}
           </button>
         ) : (
-          <span>{label}</span>
+          <span>{identity}</span>
         )}
         <code className="text-mute text-2xs" title={coordinate}>
           {coordinate}
@@ -1397,12 +1408,18 @@ function Compare({
     { ...base.body, text: visibleText(base.body.text) },
     { ...to.body, text: visibleText(to.body.text) },
   );
+  const planLines = (plan: PlanData | null) => plan
+    ? plan.roots.length > 0
+      ? plan.roots.map((root) => `Root: ${root}`)
+      : ["Whole-project root"]
+    : ["No morphology"];
   const unchanged =
     !changes.title &&
     !changes.state &&
     changes.text.length === 0 &&
     changes.links.added.length === 0 &&
-    changes.links.removed.length === 0;
+    changes.links.removed.length === 0 &&
+    !changes.plan;
 
   return (
     <section className="border-line rounded-surface border">
@@ -1450,6 +1467,21 @@ function Compare({
               ))}
               {changes.links.added.map((link) => (
                 <li key={`+${linkPhrase(link)}`} className="text-success">+ {linkPhrase(link)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {changes.plan && (
+          <div>
+            <h3 className="text-mute mb-1 text-2xs font-semibold tracking-wider uppercase">
+              Plan roots
+            </h3>
+            <ul className="font-mono text-2xs leading-5">
+              {planLines(changes.plan.from).map((line, index) => (
+                <li key={`plan-from-${index}-${line}`} className="text-danger">− {line}</li>
+              ))}
+              {planLines(changes.plan.to).map((line, index) => (
+                <li key={`plan-to-${index}-${line}`} className="text-success">+ {line}</li>
               ))}
             </ul>
           </div>
@@ -1564,6 +1596,45 @@ function Rail({
           })}
         </ol>
       )}
+    </div>
+  );
+}
+
+/**
+ * The coordinate of the record being read, kept with the revision rail that
+ * selected it rather than promoted to a page banner.
+ *
+ * A historical revision is expected navigation, not a warning or degraded
+ * state. The quiet inline treatment preserves that distinction while the
+ * explicit read-only copy keeps the document from looking like an editable
+ * draft. Returning to the head is the one action this state needs.
+ */
+function RevisionNote({
+  revision,
+  written,
+  onCurrent,
+}: {
+  revision: string;
+  written: number;
+  onCurrent: () => void;
+}) {
+  return (
+    <div className="text-mute flex min-w-0 items-center gap-2 text-xs" role="status">
+      <History className="size-icon-sm shrink-0" />
+      <span className="min-w-0 flex-1">
+        Revision <code title={revision}>{short(revision)}</code>
+        <span aria-hidden="true"> · </span>
+        {when(written)}
+        <span aria-hidden="true"> · </span>
+        read-only
+      </span>
+      <Button
+        onClick={onCurrent}
+        label="Current"
+        aria-label="View current revision"
+        variant="ghost"
+        size="sm"
+      />
     </div>
   );
 }
@@ -1715,6 +1786,16 @@ function SpecReader({
   const [title, setTitle] = useState(view?.title ?? "");
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const body = useRef<string | null>(null);
+  const selectedRevision = viewing
+    ? history.find((entry) => entry.revision === viewing)
+    : undefined;
+  const geometryBody = selectedRevision?.body ?? view?.body;
+  const geometry = usePlanGeometry(
+    spaceId,
+    view?.kind === "plan" ? view.project : null,
+    geometryBody?.plan?.roots ?? [],
+    selectedRevision?.body.generation || null,
+  );
 
   // The authoritative title wins whenever it changes underneath — a doorbell
   // mid-typing is the one case this loses to, and it is the same trade the
@@ -1732,7 +1813,7 @@ function SpecReader({
     el.style.height = `${el.scrollHeight}px`;
   }, [title]);
 
-  const revise = (patch: { title?: string; text?: string }) => {
+  const revise = (patch: { title?: string; text?: string; plan?: PlanData | null }) => {
     if (!view) return;
     void store
       .reviseSpec(spaceId, view.spec, view.revision, patch)
@@ -1877,6 +1958,18 @@ function SpecReader({
           <p className="text-dim text-xs">
             {authorityPhrase(view.kind, past ? past.body.state : view.state)}
           </p>
+          {view.kind === "plan" && shown.plan && (() => {
+            const progress = planCounts(geometry.data);
+            return progress.total > 0 ? (
+              <p className="text-mute text-xs tabular-nums">
+                {progress.closed}/{progress.total} closed
+                {progress.ready > 0 && ` · ${progress.ready} ready`}
+                {progress.blocked > 0 && ` · ${progress.blocked} blocked`}
+                {(progress.cyclic + progress.stalled) > 0
+                  && ` · ${progress.cyclic + progress.stalled} structurally unresolved`}
+              </p>
+            ) : null;
+          })()}
           {/* Two simultaneous facts, said as two clauses. Drafting a successor
               does not revoke what was issued, and a page that showed only the
               head would quietly report that the governing truth had gone. */}
@@ -1893,27 +1986,14 @@ function SpecReader({
             onView={setViewing}
             onCompare={(revision) => setComparing({ from: revision, to: view.revision })}
           />
-        </header>
-
-        {past && (
-          <div
-            className="border-line bg-sunken text-dim flex items-center gap-2 rounded-surface border px-3 py-2 text-xs"
-            role="status"
-          >
-            <History className="text-mute size-icon-sm shrink-0" />
-            <span className="min-w-0 flex-1">
-              Reading revision <code title={past.revision}>{short(past.revision)}</code>, written{" "}
-              {when(past.body.ts)}. This is a record — the document is elsewhere.
-            </span>
-            <Button
-              onClick={() => setViewing(null)}
-              label="Back to current"
-              variant="secondary"
-              elevation="low"
-              size="md"
+          {past && (
+            <RevisionNote
+              revision={past.revision}
+              written={past.body.ts}
+              onCurrent={() => setViewing(null)}
             />
-          </div>
-        )}
+          )}
+        </header>
 
         {state.conflict && (
           <div
@@ -1995,27 +2075,55 @@ function SpecReader({
                 <Markdown text={shown.text} />
               )
             ) : (
-              <span className="text-mute">No content</span>
+              !shown.plan && <span className="text-mute">No content</span>
+            )}
+            {view.kind === "plan" && shown.plan && (
+              <>
+                {past && !shown.generation && (
+                  <p className="text-mute mt-4 text-xs">
+                    This revision predates generation coordinates; its Issue morphology is live.
+                  </p>
+                )}
+                <PlanSurface
+                  plan={shown.plan}
+                  rows={rows}
+                  geometry={geometry.data}
+                  readOnly
+                  historical={Boolean(past && shown.generation)}
+                  onSave={() => undefined}
+                />
+              </>
             )}
           </div>
         ) : (
-          <MarkdownEditor
-            // Remount on a new revision so the editor reloads the committed
-            // document; it reads `value` at mount and owns it from there.
-            key={view.revision}
-            value={view.body.text}
-            documentSchema={currentDocumentSchema}
-            placeholder="Write the spec…"
-            className="min-h-ctl-xl"
-            onChange={(markdown) => {
-              body.current = markdown;
-            }}
-            onCommit={() => {
-              const next = body.current;
-              body.current = null;
-              if (next !== null && next !== view.body.text) revise({ text: next });
-            }}
-          />
+          <>
+            <MarkdownEditor
+              // Remount on a new revision so the editor reloads the committed
+              // document; it reads `value` at mount and owns it from there.
+              key={view.revision}
+              value={view.body.text}
+              documentSchema={currentDocumentSchema}
+              placeholder="Write the spec…"
+              className="min-h-ctl-xl"
+              onChange={(markdown) => {
+                body.current = markdown;
+              }}
+              onCommit={() => {
+                const next = body.current;
+                body.current = null;
+                if (next !== null && next !== view.body.text) revise({ text: next });
+              }}
+            />
+            {view.kind === "plan" && view.body.plan && (
+              <PlanSurface
+                plan={view.body.plan}
+                rows={rows}
+                geometry={geometry.data}
+                readOnly={false}
+                onSave={(plan) => revise({ plan })}
+              />
+            )}
+          </>
         )}
 
         {/* After the document, not beside it: a relation is something you look

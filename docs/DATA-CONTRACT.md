@@ -269,10 +269,20 @@ The collaborative algebra includes:
 - stable-identity ordered lists;
 - Unicode-scalar text splices;
 - observed-remove, add-wins sets;
-- per-peer PN-counters.
+- per-peer PN-counters;
+- stable-identity movable trees, with per-node data entries;
+- append-only logs, whose state is a bounded retained tail plus an exact count
+  of everything ever appended.
 
 One path has one established type. Reusing it as another type is a transaction
 error and changes nothing. A multi-operation Engine batch is atomic.
+
+Sequence placement — a list index, a tree node's position among its siblings —
+is a statement about the writing replica's own view and stays one after merging.
+A replica fifty elements behind places its insert fifty back, and no sequence
+type makes that retroactively mean "the end". What converges is that every
+replica then agrees where it went. A World that needs a chronology orders by a
+field its own records carry; it does not read one out of the sequence.
 
 Engine convergence is mechanical, not semantic. A World selecting a register
 accepts that concurrent values collapse to one deterministic projection. If the
@@ -334,11 +344,52 @@ the meaning of each field. The canonical conflict contract is:
 - assignees and labels use membership sets;
 - semantic history uses immutable events, not the Loro oplog.
 
-The merged implementation still represents status as a register and comments as
-Issue-Body list/events. That is sufficient for deterministic scalar convergence
-and immutable flat comments, but it does not preserve concurrent transition
-branches or support addressable replies/reactions/revisions. Before those
-features are claimed, comments become first-class Comment Bodies:
+Comments are a hierarchy on the Issue Body: `tree:comments`, one node per
+comment, a reply a child of what it answers. That is what makes concurrent
+replies and concurrent re-parenting converge on one thread rather than on
+whichever `parent` field was projected last, and it removes the placement index
+a flat list required — an index the writer could only compute against its own
+view, so a peer behind by fifty comments wrote into the middle of a conversation
+it had not finished reading.
+
+Thread order is not the sequence. Siblings are ordered by `(created_at, comment
+id)` from the records themselves, which every replica computes identically
+whatever it had synced when it wrote. Comments written into `list:comments`
+before the cutover are read forever and sort into the same order, so a thread
+spanning it reads as one thread; `issue` schema version 2 declares version 1
+readable for exactly that reason.
+
+Sub-issue parentage is a tree anchored by issue id. New edits live in the
+project's relation Body; parent trees and maps written on the Catalog by earlier
+builds remain readable inputs. The map of child to parent let two peers create a
+cycle by parenting each under the other concurrently — each check passed against
+its own view, and nothing rejected the merge. A tree cannot hold one: the engine
+refuses the move that would close it, wherever that move is applied.
+
+Issue history is a log: the last 512 events in Body state plus an exact count of
+everything ever recorded. As a List, every event an issue ever had was carried
+by every checkpoint of it, without bound. Events older than the window leave
+state and cannot be read once a checkpoint compacts the history behind them —
+the count still reports them, so a reader can always say how much happened even
+where it can no longer say what. Ordering is by the clock each event carries,
+with sequence position breaking ties inside a second.
+
+An activity cursor names a row, not a count of rows. `seq` is an ordinal for
+display; resumption uses the opaque token in `cursor`, built from the event's
+stable log-entry identity, because a trimmed log renumbers every position behind
+what it dropped and a caller resuming from a count would skip exactly that many
+rows in silence. A pull that returns nothing returns the token it was given.
+
+Reactions are one add-wins set per issue, naming their comment in the value.
+One set per comment meant one root container per reacted-to comment, and the
+projection walks every root on every read of the issue — including the reads
+that only want a title.
+
+The merged implementation still represents status as a register. That is
+sufficient for deterministic scalar convergence, but it does not preserve
+concurrent transition branches, and comment revisions and moderation remain
+unaddressed. Before those features are claimed, comments become first-class
+Comment Bodies:
 
 ```text
 Comment
@@ -420,6 +471,56 @@ root is not cacheable. A root mismatch rebuilds or advances before serving.
 Activity, inbox, boards, graphs, aliases, and policy views must be reconstructable
 from canonical Bodies and Mechanics history. Observation frames are doorbells;
 after a reset or overrun, clients re-query the projection.
+
+Blueprint is the Issues World bundled in Lait, not another layer in the generic
+engine. Lait supplies immutable generation-addressed Body reads. Blueprint owns
+the meanings of Issue, relation, Plan, project, team, label, milestone, status,
+and closure.
+
+A Plan revision stores only a bounded set of Issue roots and the World
+generation against which the revision was composed. Empty roots mean the whole
+project. It never stores phases, issue membership, coordinates, progress, or a
+chosen global shape. Those emerge from Issue complexity at read time:
+
+```text
+Plan roots + project Issues at Manifest G
+  -> relation-connected components
+  -> dependency SCCs and longest-path layers
+  -> hierarchy depths and metadata facets
+  -> closed / ready / blocked / cycle / stalled state
+  -> positional residual loci
+```
+
+The compiler is deterministic and bounded by the Issue graph: ordered maps and
+stable ids break ties, strongly connected components and layering are linear in
+nodes plus edges, and no all-pairs closure is materialized. Disconnected patches
+are a valid forest. Branching, convergence, nested organisms, loops, and sparse
+unattached cells can coexist; the data model does not prescribe a crystalline
+template. Layout is a disposable projection of these coordinates.
+
+Issue links and sub-issue parentage write to one `issue_relations` Body per
+project. This prevents one global Catalog Body from becoming the write and parse
+hotspot for every topology edit. The parent relation is an engine tree, so a
+cycle is structurally unrepresentable. Boolean edge entries preserve explicit
+removal across the legacy Catalog representation. Existing Catalog relations
+remain readable and are deterministically overlaid by the project Bodies.
+
+`structure_status` audits current heads and visible topology that still rely on
+those compatibility reads. `structure_migrate` is the idempotent,
+administrator-authorized cutover: one bounded World transaction materializes
+the visible relations and writes equivalent immutable Spec successors with
+generation coordinates and root-only Plan data. It emits no Issue activity and
+never rewrites historical Spec or Baseline revisions. Legacy issue prose uses
+the separate source-preserving document upgrade so range anchors survive.
+
+Current geometry is keyed by `(Manifest root, project, canonical roots)` and may
+reuse per-Body parses by Body stamp. Historical geometry runs over the exact
+immutable read generation named by the revision. The Session holds no writer
+mutex while a World query executes; an in-memory generation clone is constant
+time because its Body maps are persistent, while the first cold historical read
+replays only the retained ancestry deltas and is then cached. A Station keeps at
+most 64 reconstructed generations hot; eviction drops only shared RAM roots,
+never durable lineage.
 
 Projection distinguishes valid, absent, unavailable, and corrupt data. It must
 not turn an unavailable query into false zero counts or silently coerce malformed

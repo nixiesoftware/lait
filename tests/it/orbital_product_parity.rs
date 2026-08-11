@@ -359,6 +359,7 @@ fn an_issue_packet_stays_pinned_while_the_next_spec_revision_is_drafted() {
             title: None,
             text: Some("A login creates exactly one active session.".into()),
             links: None,
+            plan: None,
             actor: my_actor().as_str().into(),
             device: my_device().as_str().into(),
             ts,
@@ -1025,6 +1026,69 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     });
     assert_eq!(view.comments.len(), 1);
     assert_eq!(view.comments[0].body, "from b");
+
+    // A long thread, written from both sides while B is behind — the case the
+    // hierarchy exists for. A carries the conversation on; B, which has synced
+    // none of it, adds a comment of its own. Under the flat list this was an
+    // insert at "the end" as B could see it, which was the middle of A's
+    // thread; and the further ahead A got, the further back B's comment
+    // landed. Neither station may lose or duplicate a comment, and both must
+    // agree on the order, which is the order they were written in.
+    let mut a_bodies = Vec::new();
+    for i in 0..12 {
+        driver_a.now = 1_700_200_000 + i;
+        let ts = driver_a.ts();
+        let body = format!("from a #{i}");
+        driver_a
+            .submit(&IssueIntent::Comment {
+                id: Some(issues::ids::mint_comment_id(&SystemUlidSource)),
+                parent: None,
+                doc: doc.clone(),
+                body: body.clone(),
+                actor: my_actor().as_str().to_string(),
+                device: mechanics::actor::device_from_seed(&STATION_A_SEED)
+                    .as_str()
+                    .to_string(),
+                ts,
+            })
+            .unwrap();
+        a_bodies.push(body);
+    }
+    // B is still at its own clock and has seen none of those twelve.
+    driver_b.now = 1_700_200_006;
+    let ts = driver_b.ts();
+    driver_b
+        .submit(&IssueIntent::Comment {
+            id: Some(issues::ids::mint_comment_id(&SystemUlidSource)),
+            parent: None,
+            doc: doc.clone(),
+            body: "from b, while behind".into(),
+            actor: my_actor().as_str().to_string(),
+            device: mechanics::actor::device_from_seed(&STATION_B_SEED)
+                .as_str()
+                .to_string(),
+            ts,
+        })
+        .unwrap();
+
+    station_a.contact(&b_station_id).unwrap();
+    station_b.contact(&a_station_id).unwrap();
+
+    let mut expected: Vec<String> = vec!["from b".to_string()];
+    expected.extend(a_bodies.iter().take(7).cloned());
+    expected.push("from b, while behind".into());
+    expected.extend(a_bodies.iter().skip(7).cloned());
+    for (station, driver) in [("a", &driver_a), ("b", &driver_b)] {
+        let view: IssueView = driver.query(&IssueQuery::View {
+            doc: doc.clone(),
+            me: None,
+        });
+        let bodies: Vec<String> = view.comments.iter().map(|c| c.body.clone()).collect();
+        assert_eq!(
+            bodies, expected,
+            "station {station} read the thread in a different order than it was written"
+        );
+    }
 
     // The board converged too.
     let board: BoardView = driver_a.query(&IssueQuery::Board {
