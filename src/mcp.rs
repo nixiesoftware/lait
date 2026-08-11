@@ -120,6 +120,8 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "issues_parent",
     "issues_graph",
     "issues_project_graph",
+    "issues_structure_status",
+    "issues_structure_migrate",
     "issues_view",
     "issues_list",
     "issues_board",

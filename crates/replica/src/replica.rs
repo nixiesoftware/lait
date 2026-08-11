@@ -685,8 +685,8 @@ struct SnapshotBody {
 pub struct ReadSnapshot {
     root: [u8; 32],
     frontier: ReplicaFrontier,
-    bodies: im::OrdMap<BodyKey, Arc<SnapshotBody>>,
-    content: im::OrdMap<[u8; 32], crate::content::ContentDescriptor>,
+    bodies: imbl::OrdMap<BodyKey, Arc<SnapshotBody>>,
+    content: imbl::OrdMap<[u8; 32], crate::content::ContentDescriptor>,
 }
 
 /// Durable ancestry metadata for one read generation.
@@ -2153,7 +2153,7 @@ impl Replica {
         }))
     }
 
-    fn snapshot_content(&self) -> im::OrdMap<[u8; 32], crate::content::ContentDescriptor> {
+    fn snapshot_content(&self) -> imbl::OrdMap<[u8; 32], crate::content::ContentDescriptor> {
         self.declared_content
             .values()
             .flatten()
@@ -2289,8 +2289,8 @@ impl Replica {
             .first()
             .map(|delta| delta.frontier)
             .ok_or(Failure::Integrity(Defect::Encoding))?;
-        let mut bodies = im::OrdMap::new();
-        let mut content = im::OrdMap::new();
+        let mut bodies = imbl::OrdMap::new();
+        let mut content = imbl::OrdMap::new();
         for delta in deltas.into_iter().rev() {
             for archived in delta.changed {
                 match (archived.binding, archived.export) {
