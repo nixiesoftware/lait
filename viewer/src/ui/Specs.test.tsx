@@ -380,11 +380,22 @@ describe("Specs", () => {
         .click();
     });
 
-    expect(el.textContent).toContain("This is a record");
+    expect(el.textContent).toContain("read-only");
     expect(el.textContent).toContain("Older wording.");
     // Editing the past would mean rewriting history or silently forking it.
     expect(el.querySelector<HTMLTextAreaElement>("textarea[aria-label='Title']")?.readOnly).toBe(true);
     expect(el.querySelector("[aria-label^='Lifecycle:']")).toBeNull();
+
+    const note = [...el.querySelectorAll<HTMLElement>("[role='status']")]
+      .find((candidate) => candidate.textContent?.includes("Revision rev_0"));
+    expect(note?.textContent).toContain("rev_0");
+    await act(async () => {
+      [...note!.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.getAttribute("aria-label") === "View current revision")!
+        .click();
+    });
+    expect(el.textContent).toContain("Current wording.");
+    expect(el.textContent).not.toContain("read-only");
   });
 
   it("resolves concurrent heads into a successor of every head", async () => {

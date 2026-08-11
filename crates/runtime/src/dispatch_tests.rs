@@ -920,9 +920,12 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
     };
 
     submit_as(&session, &writer(), intent("first comment")).unwrap();
+    let first_generation = session.snapshot_id().unwrap();
     submit_as(&session, &writer(), intent("second comment")).unwrap();
     let proj = session.query(query()).unwrap();
     assert_eq!(proj.bytes, b"2:first comment,second comment");
+    let historical = session.query_at(&first_generation, query()).unwrap();
+    assert_eq!(historical.bytes, b"1:first comment");
 
     // Collaborative Bodies survive dormancy + reactivation like atomic ones.
     let orbit = station.vacate().unwrap();
@@ -935,6 +938,8 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
     let session = station.dock(&id, &writer()).unwrap();
     let proj = session.query(query()).unwrap();
     assert_eq!(proj.bytes, b"2:first comment,second comment");
+    let historical = session.query_at(&first_generation, query()).unwrap();
+    assert_eq!(historical.bytes, b"1:first comment");
 }
 
 /// A World registering BOTH mutation models but staging collaborative ops from

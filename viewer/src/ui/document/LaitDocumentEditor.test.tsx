@@ -37,7 +37,10 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
 afterEach(async () => {
-  if (root) await act(() => root!.unmount());
+  if (root) await act(async () => {
+    root!.unmount();
+    await Promise.resolve();
+  });
   container?.remove();
   root = null;
   container = null;
@@ -240,6 +243,17 @@ describe("Lait document editor", () => {
 
     expect(types).toContain("issue_ref");
     expect(result.state.doc.textBetween(0, result.state.doc.content.size)).toContain("ENG-7");
+  });
+
+  it("commits prose without a hidden Plan position", () => {
+    const source = upgradeMarkdown("Before.\n\nAfter.").source;
+    const onCommit = vi.fn();
+    const shown = renderEditor(source, { onCommit }).container;
+
+    act(() => shown.querySelector<HTMLElement>(".ProseMirror")!.dispatchEvent(
+      new FocusEvent("blur", { bubbles: true }),
+    ));
+    expect(onCommit).toHaveBeenCalledWith();
   });
 
   /**

@@ -179,6 +179,7 @@ pub fn build_prior(
         manifest_body_root,
         content_index_root: None,
         receipt_index_root,
+        generation_index_root: None,
         manifest_root: Some(root_object),
     };
     let meta = postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?;

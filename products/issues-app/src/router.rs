@@ -422,6 +422,32 @@ impl<'a> IssueRouter<'a> {
             .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
     }
 
+    fn query_at<T: DeserializeOwned>(
+        &self,
+        query: &IssueQuery,
+        generation: &str,
+    ) -> Result<T, SessionFailure> {
+        let bytes = data_encoding::HEXLOWER
+            .decode(generation.as_bytes())
+            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))?;
+        let root = <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))?;
+        let id = runtime::WorldSnapshotId::new(contract::world_id(), root);
+        let bytes = self
+            .session
+            .query_at(
+                &id,
+                Query {
+                    schema: contract::issue_schema(),
+                    schema_version: contract::ISSUE_SCHEMA_VERSION,
+                    payload: query.to_json(),
+                },
+            )?
+            .bytes;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
+    }
+
     /// The canonical reff for a DocId (from the current snapshot).
     fn reff_for(&self, snapshot: &Snapshot, doc: &str) -> String {
         snapshot.value["aliases"]["by_alias"]
@@ -569,6 +595,9 @@ impl<'a> IssueRouter<'a> {
                 Response::retry("membership changed — retry")
             }
             SessionFailure::Interrupted => Response::err("the space is shutting down"),
+            SessionFailure::GenerationUnavailable => {
+                Response::not_found("that World generation is not available on this node")
+            }
             SessionFailure::Persistence | SessionFailure::CallbackPanicked => {
                 Response::err("internal error")
             }
@@ -585,7 +614,9 @@ impl<'a> IssueRouter<'a> {
     pub fn handles(req: &Request) -> bool {
         matches!(
             req,
-            Request::Inbox { .. }
+            Request::StructureStatus
+                | Request::StructureMigrate
+                | Request::Inbox { .. }
                 | Request::AccessPlan { .. }
                 | Request::IssueNew { .. }
                 | Request::IssueEdit { .. }
@@ -608,6 +639,7 @@ impl<'a> IssueRouter<'a> {
                 | Request::IssueStop { .. }
                 | Request::IssueGraph { .. }
                 | Request::ProjectGraph { .. }
+                | Request::Geometry { .. }
                 | Request::IssueView { .. }
                 | Request::List { .. }
                 | Request::Board { .. }
@@ -687,6 +719,25 @@ impl<'a> IssueRouter<'a> {
     fn route_inner(&self, req: Request, facts: &RouterFacts) -> Result<(Response, bool), Response> {
         let snapshot = self.snapshot();
         match req {
+            Request::StructureStatus => {
+                let report = self
+                    .query(&IssueQuery::StructureStatus)
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Structure(Box::new(report)), false))
+            }
+            Request::StructureMigrate => {
+                let effect = self
+                    .submit(&IssueIntent::StructureMigrate {
+                        actor: facts.actor.clone(),
+                        device: facts.device.clone(),
+                        ts: facts.now,
+                    })
+                    .map_err(Self::effect_err)?;
+                let report = self
+                    .query(&IssueQuery::StructureStatus)
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Structure(Box::new(report)), !effect.unchanged))
+            }
             Request::Inbox { watermark } => {
                 let projection =
                     crate::projections::inbox(self.session, &facts.actor, &facts.device, watermark);
@@ -1155,12 +1206,28 @@ impl<'a> IssueRouter<'a> {
                     .map_err(Self::effect_err)?;
                 Ok((Response::ProjectGraph(Box::new(view)), false))
             }
+            Request::Geometry {
+                project,
+                roots,
+                generation,
+            } => {
+                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+                    Response::not_found(format!("no project matches {project:?}"))
+                })?;
+                let query = IssueQuery::Geometry { project: id, roots };
+                let view: issues::geometry::GeometryView = match generation {
+                    Some(generation) => self.query_at(&query, &generation),
+                    None => self.query(&query),
+                }
+                .map_err(Self::effect_err)?;
+                Ok((Response::Geometry(Box::new(view)), false))
+            }
             Request::History { reff } => {
                 let doc = self.resolve(&snapshot, &reff)?;
                 #[derive(serde::Deserialize)]
                 struct Hist {
                     events: Vec<issues::dto::ActivityEvent>,
-                    last: u64,
+                    last: String,
                 }
                 let hist: Hist = self
                     .query(&IssueQuery::History { doc })
@@ -1177,7 +1244,7 @@ impl<'a> IssueRouter<'a> {
                 #[derive(serde::Deserialize)]
                 struct Feed {
                     events: Vec<issues::dto::ActivityEvent>,
-                    last: u64,
+                    last: String,
                 }
                 let feed: Feed = self
                     .query(&IssueQuery::Activity { since })
@@ -2167,6 +2234,7 @@ impl<'a> IssueRouter<'a> {
                 title,
                 text,
                 links,
+                plan,
             } => {
                 let text = text.map(|text| {
                     if text.starts_with(contract::DOCUMENT_PREFIX) {
@@ -2187,6 +2255,7 @@ impl<'a> IssueRouter<'a> {
                     title,
                     text,
                     links,
+                    plan,
                     actor: facts.actor.clone(),
                     device: facts.device.clone(),
                     ts: facts.now,

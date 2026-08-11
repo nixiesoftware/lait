@@ -26,6 +26,7 @@
 
 pub mod contract;
 pub mod dto;
+pub mod geometry;
 pub mod ids;
 mod implementation;
 mod rank;

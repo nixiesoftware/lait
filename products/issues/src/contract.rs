@@ -18,8 +18,25 @@ use serde::{Deserialize, Serialize};
 /// The product World id.
 pub const PRODUCT_WORLD: &str = "com.lait.issues";
 /// The issue Body schema.
+///
+/// Version 3 adds the history log ([`EVENTS_PATH`]) to version 2's comment
+/// hierarchy. Both are types an older algebra cannot project, so both are
+/// declared; version 3 reads 2 and 1, which is what makes a Body written at any
+/// of them one issue with one history.
+///
+/// Version 2 writes comment threads as a `tree:comments` hierarchy. The bump is
+/// not bookkeeping: a build whose algebra does not implement the tree type
+/// refuses to project the *whole* issue Body — that is the declared behavior
+/// for material a build cannot interpret, and it is right, but it means an
+/// older reader loses the title along with the thread. Declaring the version
+/// puts that refusal where it belongs, at schema gating, instead of leaving it
+/// to surface as an issue that mysteriously will not open.
+///
+/// This version reads its predecessor: comments written as `list:comments`
+/// before the cutover are read forever, and a thread spanning it reads as one
+/// thread. See [`crate::views`]' comment reader.
 pub const ISSUE_SCHEMA: &str = "issue";
-pub const ISSUE_SCHEMA_VERSION: u32 = 1;
+pub const ISSUE_SCHEMA_VERSION: u32 = 3;
 pub const ISSUE_ENCODING: &str = "lait.issue.v1";
 /// The specification Body schema (one Body per Spec).
 pub const SPEC_SCHEMA: &str = "spec";
@@ -29,9 +46,20 @@ pub const SPEC_ENCODING: &str = "lait.spec.v1";
 pub const BASELINE_SCHEMA: &str = "baseline";
 pub const BASELINE_SCHEMA_VERSION: u32 = 1;
 pub const BASELINE_ENCODING: &str = "lait.baseline.v1";
+/// Project-owned Issue topology (edges and hierarchy). New relation writes do
+/// not invalidate the Space-wide Catalog.
+pub const RELATION_SCHEMA: &str = "issue_relations";
+pub const RELATION_SCHEMA_VERSION: u32 = 1;
+pub const RELATION_ENCODING: &str = "lait.issue-relations.v1";
 /// The catalog Body schema (one Body per Space).
 pub const CATALOG_SCHEMA: &str = "catalog";
-pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+/// Version 2 holds the sub-issue hierarchy as a tree ([`HIERARCHY_PATH`]).
+/// Same reasoning as [`ISSUE_SCHEMA_VERSION`], and it bites harder here: a
+/// build that cannot project a tree cannot project the Catalog, and the Catalog
+/// is every project, alias and board in the Space. The version is what turns
+/// that into a refusal at schema gating rather than a Space that opens empty.
+/// Version 1 is readable — its `map:parents` entries are still read.
+pub const CATALOG_SCHEMA_VERSION: u32 = 2;
 pub const CATALOG_ENCODING: &str = "lait.catalog.v1";
 
 /// The legacy projection schema version carried by every view DTO.
@@ -383,6 +411,14 @@ pub fn baseline_encoding() -> EncodingId {
     EncodingId::parse(BASELINE_ENCODING).expect("baseline encoding id")
 }
 
+pub fn relation_schema() -> SchemaId {
+    SchemaId::parse(RELATION_SCHEMA).expect("relation schema id")
+}
+
+pub fn relation_encoding() -> EncodingId {
+    EncodingId::parse(RELATION_ENCODING).expect("relation encoding id")
+}
+
 /// The ONE deterministic catalog Body per Space: the first 16 bytes of the
 /// BLAKE3 derive-key digest, context `lait.issues.catalog.v1`, over the
 /// canonical `(SpaceId, WorldId)` bytes (each length-prefixed big-endian).
@@ -422,6 +458,12 @@ pub fn baseline_body_id(baseline: &str) -> BodyId {
     named_body_id(b"lait/baseline-body/1", baseline)
 }
 
+/// One topology Body per project. Its tree can enforce hierarchy acyclicity
+/// locally because parentage is project-local.
+pub fn relation_body_id(project: &str) -> BodyId {
+    named_body_id(b"lait/issue-relations/1", project)
+}
+
 fn named_body_id(domain: &[u8], id: &str) -> BodyId {
     let mut h = blake3::Hasher::new();
     h.update(domain);
@@ -447,6 +489,10 @@ pub fn baseline_key(baseline: &str) -> BodyKey {
     BodyKey::new(world_id(), baseline_body_id(baseline))
 }
 
+pub fn relation_key(project: &str) -> BodyKey {
+    BodyKey::new(world_id(), relation_body_id(project))
+}
+
 /// The catalog board list path for a project.
 pub fn board_path(project: &str) -> String {
     format!("board/{}", project.to_ascii_lowercase())
@@ -458,6 +504,59 @@ pub fn board_path(project: &str) -> String {
 pub fn reaction_path(comment_id: &str) -> String {
     format!("reactions/{comment_id}")
 }
+
+/// The one set every reaction on an issue lives in.
+///
+/// It used to be one set *per comment* — [`reaction_path`] — which is one root
+/// container per reacted-to comment. Root containers are what the projection
+/// walks, and it walks all of them on every read of the issue, including the
+/// reads that only want a title: a long thread with a lot of reactions made
+/// every unrelated read of that issue more expensive, without bound.
+///
+/// One set holds them all instead, with the comment named in the value rather
+/// than in the path. The type is unchanged and so are its semantics — still an
+/// observed-remove, add-wins set, so two actors reacting concurrently never
+/// clobber and a reaction that raced its own removal survives. A map keyed by
+/// `(emoji, actor)` would have collapsed the same containers and quietly turned
+/// that race into last-writer-wins.
+pub const REACTIONS_PATH: &str = "reactions";
+
+/// The catalog hierarchy: sub-issue parentage, one node per issue that takes
+/// part, anchored by doc id.
+///
+/// Not `parents` — that path is bound to a map in every catalog Body in the
+/// field, and a path holds one collaborative type for its Body's lifetime, so
+/// reusing the name would be a `TypeConflict` on every existing Space rather
+/// than a migration.
+///
+/// The map it replaces stored child -> parent as an entry per child. Two peers
+/// could then parent A under B and B under A concurrently, each passing its own
+/// ancestry check against its own view, and the merge held a cycle nothing
+/// afterwards rejected — `is_ancestor` still carries the loop guard that fact
+/// required. A tree cannot hold one: the engine refuses the move that would
+/// close it, wherever it is applied.
+pub const HIERARCHY_PATH: &str = "hierarchy";
+
+/// An issue's history feed. A log rather than the list it was, and not at the
+/// `events` path the list holds — a path keeps one collaborative type for its
+/// Body's lifetime, so the log needs a name of its own.
+pub const EVENTS_PATH: &str = "history";
+
+/// How many events an issue keeps in Body state.
+///
+/// The number is a trade with two sides and no free choice. Every retained
+/// event is carried by every checkpoint of that issue, forever: an unbounded
+/// feed made a busy issue's snapshot grow without limit, which is what sent
+/// this type into the algebra. Every trimmed event is one nobody can read
+/// again once a checkpoint compacts the history behind it.
+///
+/// 512 is chosen for what it makes impossible rather than for what it keeps: an
+/// issue would have to be edited, assigned, commented and transitioned five
+/// hundred times before it loses a row, which no issue in the corpus approaches
+/// — while the runaway case that motivated the type is bounded absolutely. The
+/// count survives trimming exactly, so a reader can always say how much
+/// happened even where it can no longer say what.
+pub const EVENTS_RETAINED: u64 = 512;
 
 /// Whether `s` is a canonical comment id: `cmt_` + a 26-character lowercased
 /// ULID in the kernel's base32 alphabet (`0-9` then `a-v`, the lowercase of
@@ -472,18 +571,42 @@ pub fn is_comment_id(s: &str) -> bool {
     })
 }
 
-/// One reaction as stored in a comment's reactions set: `emoji \t actor`.
-/// A set (not a map) so two actors reacting concurrently never clobber, and
-/// add-wins semantics keep a reaction that raced its own removal.
-pub fn reaction_value(emoji: &str, actor: &str) -> Vec<u8> {
+/// One reaction as stored in the issue's reactions set:
+/// `comment \t emoji \t actor`.
+///
+/// The comment moved from the path into the value when the per-comment sets
+/// were collapsed into one — see [`REACTIONS_PATH`]. Tab-separated as before,
+/// and still safe to split on: [`is_reaction_emoji`] refuses whitespace, and a
+/// comment id is `cmt_` plus base32.
+pub fn reaction_value(comment: &str, emoji: &str, actor: &str) -> Vec<u8> {
+    format!("{comment}\t{emoji}\t{actor}").into_bytes()
+}
+
+/// Parse a stored reaction value back into `(comment, emoji, actor)`.
+pub fn parse_reaction_value(raw: &[u8]) -> Option<(String, String, String)> {
+    let s = std::str::from_utf8(raw).ok()?;
+    let mut parts = s.split('\t');
+    let (comment, emoji, actor) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || comment.is_empty() || emoji.is_empty() || actor.is_empty() {
+        return None;
+    }
+    Some((comment.to_string(), emoji.to_string(), actor.to_string()))
+}
+
+/// The value a legacy per-comment reactions set holds. Written by no encoder
+/// any more; still constructed, because un-reacting has to be able to remove a
+/// reaction that was added before the sets were collapsed.
+pub fn reaction_value_legacy(emoji: &str, actor: &str) -> Vec<u8> {
     format!("{emoji}\t{actor}").into_bytes()
 }
 
-/// Parse a stored reaction value back into `(emoji, actor)`.
-pub fn parse_reaction_value(raw: &[u8]) -> Option<(String, String)> {
+/// Parse a value from a legacy per-comment reactions set, which named only
+/// `emoji \t actor` because the path carried the comment. Read forever: these
+/// are in Bodies in the field, and nothing writes the shape any more.
+pub fn parse_legacy_reaction_value(raw: &[u8]) -> Option<(String, String)> {
     let s = std::str::from_utf8(raw).ok()?;
     let (emoji, actor) = s.split_once('\t')?;
-    if emoji.is_empty() || actor.is_empty() {
+    if emoji.is_empty() || actor.is_empty() || actor.contains('\t') {
         return None;
     }
     Some((emoji.to_string(), actor.to_string()))
@@ -575,6 +698,21 @@ pub enum IssueIntent {
         capability_registry_commitment: String,
         /// Hex of the initial project's default workflow revision id.
         default_workflow_commitment: String,
+    },
+    /// Materialize every currently visible Issue relation and current Spec head
+    /// into the structures this implementation writes natively.
+    ///
+    /// Compatibility readers make a pre-cutover Space usable before this runs,
+    /// but they do not move truth: links and parentage can still live only in
+    /// the Catalog, and a current Spec head can still lack a generation
+    /// coordinate. This one administrative intent creates equivalent relation
+    /// Bodies and immutable Spec successors without emitting user activity or
+    /// changing lifecycle state. It is idempotent; once the visible state is
+    /// fully materialized it stages no operations.
+    StructureMigrate {
+        actor: String,
+        device: String,
+        ts: u64,
     },
     IssueNew {
         doc: String,
@@ -1076,6 +1214,8 @@ pub enum IssueIntent {
         title: Option<String>,
         text: Option<String>,
         links: Option<Vec<crate::spec::Link>>,
+        /// Outer `None` = preserve, `Some(None)` = remove, `Some(Some(_))` = replace.
+        plan: Option<Option<crate::spec::PlanData>>,
         actor: String,
         device: String,
         ts: u64,
@@ -1233,6 +1373,9 @@ pub enum IssueQuery {
     /// The full catalog snapshot the daemon derives refs/aliases and
     /// choose-project from.
     Snapshot,
+    /// Report which current Blueprint records still depend on compatibility
+    /// readers instead of the structures this implementation writes natively.
+    StructureStatus,
     View {
         doc: String,
         /// The viewer's actor (for `assignee_summary`), if known.
@@ -1265,6 +1408,14 @@ pub enum IssueQuery {
     ProjectGraph {
         project: String,
     },
+    /// Compile Plan morphology from canonical Issue facts at this query's one
+    /// pinned World generation. `roots` are canonical `iss_` document ids; an
+    /// empty vector compiles the whole project.
+    Geometry {
+        project: String,
+        #[serde(default)]
+        roots: Vec<String>,
+    },
     History {
         doc: String,
     },
@@ -1281,12 +1432,20 @@ pub enum IssueQuery {
         role: String,
     },
     /// The space-wide activity feed: every issue event across the tracker,
-    /// ordered by `(ts, doc, per-doc index)` with a monotone `seq` cursor over
-    /// the whole feed. `since` filters to rows the caller has not yet seen
-    /// (`Activity { since: last }` resumes exactly where the previous pull
-    /// stopped); `last` in the projection is the total feed length.
+    /// ordered by `(ts, doc, entry id)`. `since` filters to rows the caller has
+    /// not yet seen — pass back the `last` the previous pull returned, or
+    /// `None` for the whole feed.
+    ///
+    /// The cursor is an opaque token naming a row, not a count of rows. It was
+    /// a count: `seq` was a position in the feed and `since` was how far the
+    /// caller had got. That only works while the feed is append-only, and the
+    /// history log now trims — the moment an issue drops its oldest events,
+    /// every position behind them shifts down, and a caller resuming from a
+    /// remembered count silently skips exactly as many rows as were trimmed.
+    /// A token built from `(ts, doc, entry id)` names the row itself, and an
+    /// entry id survives trimming because it never described a position.
     Activity {
-        since: u64,
+        since: Option<String>,
     },
     /// The addressed-to-you inbox, derived in ONE pass over the committed
     /// snapshot: recent events on issues assigned to `actor`, excluding
@@ -1381,6 +1540,33 @@ pub enum IssueQuery {
     /// what any of them mean. Both halves come from one query so they cannot
     /// describe two different roots.
     RingDigest,
+}
+
+/// A bounded audit of Blueprint's current structural representation.
+///
+/// Historical Spec and Baseline revisions are deliberately absent. They are
+/// immutable evidence, not pending current state, and revisions written before
+/// generation coordinates remain readable under the documented live-morphology
+/// rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructureReport {
+    pub generation: String,
+    pub projects: u64,
+    pub issues: u64,
+    pub visible_edges: u64,
+    pub visible_parents: u64,
+    pub relation_bodies: u64,
+    pub relation_projects_pending: u64,
+    pub relation_edges_pending: u64,
+    pub relation_parents_pending: u64,
+    pub specs: u64,
+    pub spec_heads_pending: u64,
+    pub spec_conflicts: u64,
+    pub plans_without_roots: u64,
+    pub issue_documents_pending: u64,
+    pub baselines: u64,
+    pub complete: bool,
 }
 
 /// One catalog plane and the digest of its committed contents.
@@ -1480,6 +1666,12 @@ pub struct IssueEvent {
     /// Free text (comment body, link summary).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub x: String,
+    /// The engine's entry id for this event, filled in by the projection and
+    /// never stored — see [`StoredComment::node`] for why a `skip` and not a
+    /// skipped-if-none field. It is what an activity cursor names: a position
+    /// cannot be, because trimming the log renumbers every event behind it.
+    #[serde(skip)]
+    pub entry: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1515,6 +1707,22 @@ pub struct StoredComment {
     /// Absent on an ordinary comment, which is most of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<StoredAnchor>,
+    /// The engine's node id for this comment, filled in by the projection and
+    /// never stored. `None` for a comment still living in the legacy
+    /// `list:comments`, which has no node to name.
+    ///
+    /// `skip` rather than `skip_serializing_if`: this is not a field of the
+    /// record at all, it is where the record was found. Serializing it would
+    /// put an engine handle inside product bytes that outlive the engine
+    /// position it names, and every stored comment's bytes would change.
+    #[serde(skip)]
+    pub node: Option<String>,
+    /// The parent as the hierarchy actually holds it, filled in by the
+    /// projection. Authoritative over [`Self::parent`], which is written
+    /// alongside it so an older build reads the same thread out of the same
+    /// bytes.
+    #[serde(skip)]
+    pub parent_node: Option<String>,
 }
 
 /// A comment's durable attachment to a span of collaborative text.
@@ -1634,6 +1842,8 @@ mod stored_comment_tests {
                 start: "ab".into(),
                 end: None,
             }),
+            node: None,
+            parent_node: None,
         };
         let json = serde_json::to_string(&comment).expect("encode");
         assert_eq!(

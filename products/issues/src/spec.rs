@@ -15,6 +15,7 @@ pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 pub const MAX_LINKS: usize = 256;
 pub const MAX_MEMBERS: usize = 1024;
+pub const MAX_PLAN_ROOTS: usize = 32;
 pub const MAX_PREDECESSORS: usize = 8;
 
 const SPEC_REVISION_CONTEXT: &str = "lait.issues.spec-revision.v1";
@@ -206,6 +207,85 @@ pub struct Link {
     pub target: Target,
 }
 
+/// The seed of a Plan's derived Issue geometry.
+///
+/// A Plan does not serialize phases, membership, positions, or a drawing. Those
+/// facts already exist in the Issue graph and its metadata. `roots` names the
+/// few Issues from which the compiler discovers the connected morphology; an
+/// empty set means the Plan's whole project. This keeps authoring as light as a
+/// document plus an Issue reference while making every rendered position a
+/// reproducible consequence of canonical facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PlanData {
+    #[serde(default)]
+    pub roots: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanDataWire {
+    #[serde(default)]
+    roots: Vec<String>,
+    // Read-only decoder for the deterministic phase model shipped before Plan
+    // morphology. A successor serializes only `roots`; old phase membership is
+    // collapsed into seeds and the Issue graph supplies all ordering thereafter.
+    #[serde(default)]
+    phases: Vec<LegacyPlanPhase>,
+    #[serde(default)]
+    placement: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyPlanPhase {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    milestone: Option<String>,
+    #[serde(default)]
+    issues: Vec<String>,
+}
+
+impl From<PlanDataWire> for PlanData {
+    fn from(wire: PlanDataWire) -> Self {
+        let mut roots = wire.roots;
+        if roots.is_empty() {
+            roots.extend(wire.phases.into_iter().flat_map(|phase| phase.issues));
+        }
+        roots.sort();
+        roots.dedup();
+        let _ = wire.placement;
+        Self { roots }
+    }
+}
+
+impl<'de> Deserialize<'de> for PlanData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        PlanDataWire::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl PlanData {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.roots.len() > MAX_PLAN_ROOTS {
+            return Err("too many Plan roots".into());
+        }
+        let mut roots = BTreeSet::new();
+        for root in &self.roots {
+            if crate::ids::DocId::parse(root).is_none() || !roots.insert(root.as_str()) {
+                return Err("Plan roots are invalid or duplicated".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Canonical content of one Spec revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -213,12 +293,20 @@ pub struct Body {
     pub spec: String,
     pub project: String,
     pub kind: Kind,
+    /// World generation against which this revision was composed. This is the
+    /// coordinate for every Issue-derived projection of the revision; it is
+    /// deliberately part of the immutable revision identity.
+    #[serde(default)]
+    pub generation: String,
     pub title: String,
     #[serde(default)]
     pub text: String,
     pub state: State,
     #[serde(default)]
     pub links: Vec<Link>,
+    /// Present only for `Kind::Plan`. It is a seed, never stored layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanData>,
     pub author: String,
     pub ts: u64,
 }
@@ -235,6 +323,14 @@ impl Body {
         }
         if crate::ids::ProjectId::parse(&self.project).is_none() {
             return Err("invalid Project id".into());
+        }
+        if !self.generation.is_empty()
+            && (self.generation.len() != 64
+                || data_encoding::HEXLOWER
+                    .decode(self.generation.as_bytes())
+                    .is_err())
+        {
+            return Err("invalid World generation".into());
         }
         let title = self.title.trim();
         if title.is_empty() || self.title.len() > MAX_TITLE_BYTES {
@@ -257,6 +353,12 @@ impl Body {
         }
         for link in &self.links {
             validate_target(&link.target)?;
+        }
+        if self.plan.is_some() && self.kind != Kind::Plan {
+            return Err("structured Plan data belongs only on a Plan Spec".into());
+        }
+        if let Some(plan) = &self.plan {
+            plan.validate()?;
         }
         Ok(())
     }
@@ -939,10 +1041,12 @@ mod tests {
             spec: spec.into(),
             project: "prj_01k1k8q6c6t0g0000000000000".into(),
             kind: Kind::Requirement,
+            generation: String::new(),
             title: "A requirement".into(),
             text: "The system shall be deterministic.".into(),
             state,
             links: vec![],
+            plan: None,
             author: actor(),
             ts,
         }
@@ -958,6 +1062,82 @@ mod tests {
             author: actor(),
             ts,
         }
+    }
+
+    fn plan() -> PlanData {
+        PlanData {
+            roots: vec!["iss_01k1k8q6c6t0g0000000000000".into()],
+        }
+    }
+
+    #[test]
+    fn structured_plan_data_belongs_only_to_plan_specs() {
+        let mut revision = body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 1);
+        revision.plan = Some(plan());
+
+        assert_eq!(
+            revision.validate(),
+            Err("structured Plan data belongs only on a Plan Spec".into())
+        );
+        revision.kind = Kind::Plan;
+        assert_eq!(revision.validate(), Ok(()));
+    }
+
+    #[test]
+    fn plan_roots_are_canonical_and_unique() {
+        let mut value = plan();
+        value.roots.push("iss_01k1k8q6c6t0g0000000000000".into());
+
+        assert_eq!(
+            value.validate(),
+            Err("Plan roots are invalid or duplicated".into())
+        );
+    }
+
+    #[test]
+    fn legacy_plan_phases_collapse_to_sorted_unique_roots() {
+        let plan: PlanData = serde_json::from_value(serde_json::json!({
+            "placement": 3,
+            "phases": [
+                {"id": "b", "title": "Build", "issues": [
+                    "iss_01k1k8q6c6t0g0000000000001",
+                    "iss_01k1k8q6c6t0g0000000000000"
+                ]},
+                {"id": "s", "title": "Ship", "milestone": null, "issues": [
+                    "iss_01k1k8q6c6t0g0000000000001"
+                ]}
+            ]
+        }))
+        .expect("legacy Plan");
+        assert_eq!(
+            plan.roots,
+            [
+                "iss_01k1k8q6c6t0g0000000000000",
+                "iss_01k1k8q6c6t0g0000000000001",
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(plan).expect("new Plan"),
+            serde_json::json!({
+                "roots": [
+                    "iss_01k1k8q6c6t0g0000000000000",
+                    "iss_01k1k8q6c6t0g0000000000001"
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn structured_plan_changes_are_part_of_revision_identity() {
+        let mut left = body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 1);
+        left.kind = Kind::Plan;
+        left.plan = Some(plan());
+        let mut right = left.clone();
+        right.plan.as_mut().expect("Plan data").roots[0] = "iss_01k1k8q6c6t0g0000000000001".into();
+
+        let left = build_revision(left, vec![]).expect("left Plan revision");
+        let right = build_revision(right, vec![]).expect("right Plan revision");
+        assert_ne!(left.revision, right.revision);
     }
 
     #[test]

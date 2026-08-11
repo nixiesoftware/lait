@@ -98,10 +98,11 @@ function blockNode(block: Block): ProseMirrorNode {
 
 export function documentNodeFromSource(source: string): ProseMirrorNode {
   const blocks = parseDocument(source);
+  const nodes = blocks.map(blockNode);
   return laitDocumentSchema.nodes.doc!.create(
     null,
-    blocks.length > 0
-      ? blocks.map(blockNode)
+    nodes.length > 0
+      ? nodes
       : [laitDocumentSchema.nodes.paragraph!.create()],
   );
 }
@@ -480,9 +481,11 @@ export function projectDocument(doc: ProseMirrorNode, original?: string): Docume
   const out = new ProjectionWriter(doc.content.size);
   out.syntax(DOCUMENT_PREFIX, 0);
   out.boundary(0);
-  doc.forEach((node, offset, index) => {
-    if (index > 0) out.syntax("\n\n", offset);
+  let proseIndex = 0;
+  doc.forEach((node, offset) => {
+    if (proseIndex > 0) out.syntax("\n\n", offset);
     writeBlock(node, offset, out);
+    proseIndex += 1;
   });
   out.boundary(doc.content.size);
   const result = out.finish();
@@ -526,4 +529,3 @@ export function projectionSplice(before: string, after: string): DocumentSplice 
     insert: right.slice(prefix, right.length - suffix).join(""),
   };
 }
-

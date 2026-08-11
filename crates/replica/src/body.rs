@@ -161,6 +161,58 @@ pub enum Op {
     /// Body create / tombstone (when the schema allows it).
     Create,
     Tombstone,
+    /// Movable-hierarchy insert / move / remove with stable node identity, and
+    /// per-node data entries. `parent: None` names a root of the forest;
+    /// `after` names the sibling to follow and must be a child of `parent`.
+    ///
+    /// Appended after `Tombstone` rather than filed beside the other sequence
+    /// operations: the postcard encoding is a frozen S1a fixture keyed by
+    /// variant index, so where a variant sits is a wire fact, not a taste.
+    TreeInsert {
+        path: String,
+        parent: Option<String>,
+        after: Option<String>,
+        value: Vec<u8>,
+    },
+    TreeMove {
+        path: String,
+        node: String,
+        parent: Option<String>,
+        after: Option<String>,
+    },
+    TreeRemove {
+        path: String,
+        node: String,
+    },
+    TreeSet {
+        path: String,
+        node: String,
+        key: String,
+        value: Vec<u8>,
+    },
+    TreeUnset {
+        path: String,
+        node: String,
+        key: String,
+    },
+    /// Place the node carrying application anchor `anchor` under the one
+    /// carrying `parent`, creating either if absent. The addressing mode for a
+    /// hierarchy over records that have their own ids: idempotent, needs no
+    /// prior read, and expressible before either node exists — which the
+    /// node-id form is not, since a batch cannot name a node it is creating.
+    TreeAnchor {
+        path: String,
+        anchor: String,
+        parent: Option<String>,
+    },
+    /// Append to a log, keeping at most `retain` entries in state. The type for
+    /// a feed: an exact count of everything appended, plus a bounded tail, so a
+    /// checkpoint of a busy feed does not carry every entry it ever had.
+    LogAppend {
+        path: String,
+        value: Vec<u8>,
+        retain: u64,
+    },
 }
 
 #[cfg(test)]

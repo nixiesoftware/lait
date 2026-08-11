@@ -194,6 +194,7 @@ fn response_dtos_round_trip() {
         Response::Activity {
             events: vec![ActivityEvent {
                 seq: 1,
+                cursor: String::new(),
                 doc_id: Some(doc_id.clone()),
                 reff: "iss_3f9ab2c".into(),
                 kind: "edited".into(),
@@ -204,7 +205,7 @@ fn response_dtos_round_trip() {
                 ts: 1000,
                 collision: false,
             }],
-            last: 1,
+            last: String::new(),
         },
         Response::not_found("no issue matches 'ENG-9x'"),
     ];

@@ -39,7 +39,7 @@ kind of bump and the one that needs feature bits to avoid.
 | Store marker | `replica::marker::STORE_VERSION` | 1 | leading field |
 | Orbit generation pointer | `runtime::generation` | 1 | magic + canonical body + checksum |
 | Store manifest | `journal::STORE_FORMAT_VERSION` | 2 | leading field |
-| Replica store meta | `replica::STORE_META_FORMAT_VERSION` | 2 | leading field |
+| Replica store meta | `replica::STORE_META_FORMAT_VERSION` | 3 (reads 2) | leading field |
 | Manifest root | `replica::manifest::MANIFEST_FORMAT_VERSION` | 2 | leading field + `lait/manifest/2` |
 | Content descriptor | `replica::content::CONTENT_FORMAT_VERSION` | 1 | leading field + `lait/content-id/1` |
 | Causal artifacts | `fabric::causal::CAUSAL_FORMAT_VERSION` | 1 | leading field |
@@ -67,6 +67,13 @@ prior-to-current recipe. The daemon releases its own placement for that Orbit
 first — the rebuild requires the Orbit to be vacant, and running it from a
 separate client was a store-lock race against whatever the daemon had open.
 
+Replica store meta 3 adds a persistent root for immutable read-generation
+deltas. Version 2 is an exact readable predecessor: activation projects its
+current committed state once, records it as the baseline generation without
+changing the Manifest or World facts, and writes version 3 metadata. Thereafter
+one commit writes one delta proportional to the Bodies it changed. Unknown or
+older store-meta formats still fail closed.
+
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no
 sections and 2 when it declares any, so the set of implementation ids this bump
@@ -78,14 +85,47 @@ tuple would have done to every id in the system.
 **`com.lait.issues` is in that set, and its id moved.** The Spec lifecycle cutoff
 adds the `spec` and `baseline` collaborative schemas, extends the capability
 registry, and advances the World implementation to version 2. Its descriptor is
-version 2 because it also declares the `assigned` and `commented` signal schemas;
-its reviewed identity is
-`069e7ad1061fe2e864a31aa806060d953270b6a57d4d5d8c7e4c835e90c0cff0`, pinned by
-`products/issues/tests/it/package_boundary.rs`. There is deliberately no
-predecessor schema or migration adapter. A Space formed against an earlier build
-activated a different id and refuses this one until the new implementation is
-explicitly activated. That is the mechanism working: the reviewed surface
+version 2 because it also declares the `assigned` and `commented` signal schemas.
+It moved again when the product's hand-encoded structures became collaborative
+types. `issue` is schema version 3 — comment threads as `tree:comments`, history
+as a `log` — and `catalog` is version 2. Project topology now writes to
+`issue_relations` version 1, one Body per project; its tree prevents parent
+cycles and its edge map carries explicit presence values so removal overrides a
+legacy Catalog edge. The current implementation also registers the exact
+predecessor bindings for `issue` versions 1 and 2 and `catalog` version 1.
+Readability alone is not writability: Runtime contains each mutation against a
+Body's immutable exact binding. Registering the supported predecessors lets
+current intents upgrade and edit those Bodies without changing their binding or
+weakening containment. The reviewed identity is now
+`3182716c0f0231410c594a1f1790d06c0d297cb31be47510b2093188746c2778`, pinned by
+`products/issues/tests/it/package_boundary.rs`. A Space formed against an earlier
+build activated a different id and refuses this one until the new implementation
+is explicitly activated. That is the mechanism working: the reviewed surface
 changed, and the identity says so.
+
+Those are the first schema versions to declare predecessors, and they mean it.
+`issue` version 3 reads 2 and 1, `catalog` version 2 reads 1: comments in
+`list:comments`, history in `list:events`, parentage in `map:parents` and
+reactions in `reactions/<comment>` are all read forever, alongside the shapes
+that replaced them, so a Body written at any version reads as one issue with one
+history. New relation edits land in the project topology Body; legacy Catalog
+relations remain input until an explicit presence value or hierarchy anchor
+overrides them. What the new versions do *not* promise is the other direction. A build
+whose collaborative algebra predates the tree and log types refuses to project a
+Body containing one — the whole Body, not just the new part, because a partial
+projection of material a build cannot interpret is the one thing the projection
+layer will not produce. For the Catalog that is every project, alias and board
+in the Space. Declaring the schema versions is what turns that into a refusal at
+schema gating, where it can be understood, rather than a Space that silently
+opens empty.
+
+One behaviour changed rather than moved. An issue's history is now bounded at
+512 events in Body state; older events leave state and are gone once a
+checkpoint compacts the history behind them. The count survives exactly, so a
+reader can still say how much happened. This is the first place lait discards
+committed product data by policy, and it is the trade the `log` type exists to
+make: as a List, every event an issue ever had was in every checkpoint of it,
+forever.
 
 Worlds that declare nothing keep the ids they had, which the same test asserts by
 construction — a zero-section descriptor is byte-identical to what shipped before

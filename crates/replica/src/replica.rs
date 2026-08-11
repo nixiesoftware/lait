@@ -488,11 +488,58 @@ struct StoreMeta {
     content_index_root: Option<IndexRef>,
     /// Idempotency scope → the receipt object that answers a replay.
     receipt_index_root: Option<IndexRef>,
+    /// Generation id → immutable changed-Body delta object. The delta objects
+    /// themselves are retained requirements; this index makes ancestry and
+    /// exact historical reconstruction logarithmically addressable.
+    generation_index_root: Option<IndexRef>,
+    manifest_root: Option<Object>,
+}
+
+/// The immediately prior indexed-catalog format. Version 3 adds only the
+/// generation journal root, so a version-2 store is a lossless input: it opens
+/// by recording its current committed state as the first complete generation
+/// baseline while writing version 3 metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorIndexedStoreMeta {
+    format_version: u8,
+    space: Option<SpaceId>,
+    frontier: ReplicaFrontier,
+    quota: QuotaConfig,
+    body_index_root: Option<IndexRef>,
+    manifest_body_root: Option<IndexRef>,
+    content_index_root: Option<IndexRef>,
+    receipt_index_root: Option<IndexRef>,
     manifest_root: Option<Object>,
 }
 
 /// The store meta's encoded generation.
-const STORE_META_FORMAT_VERSION: u8 = 2;
+const STORE_META_FORMAT_VERSION: u8 = 3;
+const READABLE_STORE_META_FORMAT_VERSION: u8 = 2;
+
+fn decode_store_meta(bytes: &[u8]) -> Result<StoreMeta, Failure> {
+    if let Ok(meta) = postcard::from_bytes::<StoreMeta>(bytes) {
+        if meta.format_version == STORE_META_FORMAT_VERSION {
+            return Ok(meta);
+        }
+    }
+    let prior: PriorIndexedStoreMeta =
+        postcard::from_bytes(bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    if prior.format_version != READABLE_STORE_META_FORMAT_VERSION {
+        return Err(Failure::Integrity(Defect::Encoding));
+    }
+    Ok(StoreMeta {
+        format_version: STORE_META_FORMAT_VERSION,
+        space: prior.space,
+        frontier: prior.frontier,
+        quota: prior.quota,
+        body_index_root: prior.body_index_root,
+        manifest_body_root: prior.manifest_body_root,
+        content_index_root: prior.content_index_root,
+        receipt_index_root: prior.receipt_index_root,
+        generation_index_root: None,
+        manifest_root: prior.manifest_root,
+    })
+}
 
 type IndexRef = crate::index::ChildRef;
 
@@ -509,6 +556,52 @@ struct IndexedBody {
 struct IndexedReceipt {
     scope: Vec<u8>,
     object: Object,
+}
+
+/// One Body replacement in a durable generation delta. `export: None` means
+/// absent or opaque at that generation; neither is readable by a World.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ArchivedBody {
+    key: BodyKey,
+    binding: Option<BodyBinding>,
+    stamp: Vec<u8>,
+    export: Option<BodyExport>,
+}
+
+/// The immutable material needed to replay one read generation from its
+/// parent. Cost is proportional to the commit, never to the World.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GenerationDelta {
+    format_version: u8,
+    root: [u8; 32],
+    parent: Option<[u8; 32]>,
+    frontier: ReplicaFrontier,
+    changed: Vec<ArchivedBody>,
+    descriptors: Vec<crate::content::ContentDescriptor>,
+    removed_descriptors: Vec<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexedGeneration {
+    root: [u8; 32],
+    object: Object,
+}
+
+const GENERATION_DELTA_FORMAT_VERSION: u8 = 1;
+
+#[cfg(test)]
+pub(crate) fn is_canonical_generation_delta(bytes: &[u8]) -> bool {
+    postcard::from_bytes::<GenerationDelta>(bytes).is_ok_and(|delta| {
+        delta.format_version == GENERATION_DELTA_FORMAT_VERSION
+            && postcard::to_stdvec(&delta).is_ok_and(|canonical| canonical == bytes)
+    })
+}
+
+fn generation_index_key(root: &[u8; 32]) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"lait/replica/read-generation/1");
+    hash.update(root);
+    *hash.finalize().as_bytes()
 }
 
 /// The index key a receipt scope sits under.
@@ -557,6 +650,7 @@ pub struct Replica {
     /// durable hold would have had to reproduce with an expiry sweep anyway.
     pending_content: BTreeMap<[u8; 32], std::time::Instant>,
     receipt_index_root: Option<IndexRef>,
+    generation_index_root: Option<IndexRef>,
     manifest_root_object: Option<Object>,
     /// How many live references each stored object has.
     ///
@@ -571,6 +665,101 @@ pub struct Replica {
     /// durable store keeps it as objects; this map indexes the raw envelope
     /// bytes + transaction bytes for byte-identical forwarding either way).
     raw_material: BTreeMap<BodyKey, Vec<RetainedHead>>,
+}
+
+/// One interpreted Body in an immutable Replica generation.
+#[derive(Debug, Clone)]
+struct SnapshotBody {
+    binding: BodyBinding,
+    stamp: Vec<u8>,
+    body: fabric::BodySnapshot,
+}
+
+/// A shareable, writer-independent read generation.
+///
+/// The maps are persistent: publishing a commit replaces only the touched
+/// Body paths and shares every unchanged branch with the previous generation.
+/// Cloning a snapshot is O(1), and a query may hold it for arbitrarily long
+/// without holding the Replica's committing mutex.
+#[derive(Debug, Clone)]
+pub struct ReadSnapshot {
+    root: [u8; 32],
+    frontier: ReplicaFrontier,
+    bodies: im::OrdMap<BodyKey, Arc<SnapshotBody>>,
+    content: im::OrdMap<[u8; 32], crate::content::ContentDescriptor>,
+}
+
+/// Durable ancestry metadata for one read generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadGeneration {
+    pub root: [u8; 32],
+    pub parent: Option<[u8; 32]>,
+    pub frontier: ReplicaFrontier,
+}
+
+impl ReadSnapshot {
+    pub fn root(&self) -> [u8; 32] {
+        self.root
+    }
+
+    pub fn frontier(&self) -> ReplicaFrontier {
+        self.frontier
+    }
+
+    pub fn read(&self, key: &BodyKey) -> Option<Vec<u8>> {
+        self.bodies.get(key)?.body.read()
+    }
+
+    pub fn read_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
+        let Some(body) = self.bodies.get(key) else {
+            return Err(fabric::projection::Failure::NotCollaborative);
+        };
+        body.body.read_collaborative()
+    }
+
+    pub fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
+        self.bodies.get(key).map(|body| body.body.version())
+    }
+
+    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
+        self.bodies
+            .get(key)?
+            .body
+            .anchor(&fabric_key(key), path, position)
+    }
+
+    pub fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &fabric::Anchor,
+    ) -> fabric::AnchorResolution {
+        self.bodies
+            .get(key)
+            .map(|body| body.body.resolve(&fabric_key(key), anchor))
+            .unwrap_or(fabric::AnchorResolution::Drifted)
+    }
+
+    pub fn binding(&self, key: &BodyKey) -> Option<&BodyBinding> {
+        self.bodies.get(key).map(|body| &body.binding)
+    }
+
+    pub fn body_stamp(&self, key: &BodyKey) -> Option<Vec<u8>> {
+        self.bodies.get(key).map(|body| body.stamp.clone())
+    }
+
+    pub fn body_keys(&self) -> Vec<BodyKey> {
+        self.bodies.keys().cloned().collect()
+    }
+
+    pub fn content_descriptor(
+        &self,
+        content: &crate::content::ContentRef,
+    ) -> Option<crate::content::ContentDescriptor> {
+        self.content.get(&content.content_id).cloned()
+    }
 }
 
 /// One retained head's raw material: `(transaction id, envelope bytes,
@@ -677,6 +866,18 @@ fn tx_commitment(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
 
+fn record_stamp(record: &BodyRecord) -> Vec<u8> {
+    let mut stamp = record.chain.root.to_vec();
+    stamp.extend_from_slice(&record.chain.transaction_count.to_be_bytes());
+    let mut commitments: Vec<[u8; 32]> =
+        record.heads.iter().map(|head| head.tx_commitment).collect();
+    commitments.sort_unstable();
+    for commitment in commitments {
+        stamp.extend_from_slice(&commitment);
+    }
+    stamp
+}
+
 /// The canonical digest of a transaction's staged operation set — the value
 /// the authorization receipt binds as `effect_operations_digest`. Order-stable
 /// (operations sort by `(BodyKey, canonical op bytes)`).
@@ -721,6 +922,7 @@ impl Replica {
             declared_content: BTreeMap::new(),
             pending_content: BTreeMap::new(),
             receipt_index_root: None,
+            generation_index_root: None,
             manifest_root_object: None,
             object_refs: BTreeMap::new(),
             receipts: BTreeMap::new(),
@@ -815,11 +1017,7 @@ impl Replica {
             replica.durable = Some(store);
             return Ok(replica);
         };
-        let meta: StoreMeta =
-            postcard::from_bytes(&meta_bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
-        if meta.format_version != STORE_META_FORMAT_VERSION {
-            return Err(Failure::Integrity(Defect::Encoding));
-        }
+        let meta = decode_store_meta(&meta_bytes)?;
         replica.frontier = meta.frontier;
         replica.space = meta.space.clone();
         replica.quota = meta.quota.clamped();
@@ -827,6 +1025,7 @@ impl Replica {
         replica.manifest_body_root = meta.manifest_body_root;
         replica.content_index_root = meta.content_index_root;
         replica.receipt_index_root = meta.receipt_index_root;
+        replica.generation_index_root = meta.generation_index_root;
         replica.manifest_root_object = meta.manifest_root;
 
         // Stream the catalogs rather than decoding one giant vector. The engine
@@ -969,7 +1168,108 @@ impl Replica {
             *count = count.saturating_add(1);
         }
         replica.durable = Some(store);
+        // A version-2 indexed store has no ancestry index. Establish its
+        // current committed state as generation zero before returning it to a
+        // writer. That makes the pre-commit coordinate a Spec revision records
+        // immediately queryable, while changing no World fact or Manifest.
+        replica.persist_generation_baseline()?;
         Ok(replica)
+    }
+
+    fn persist_generation_baseline(&mut self) -> Result<(), Failure> {
+        use crate::index::{self, IndexChange, NodeSink};
+
+        if self.generation_index_root.is_some() || self.manifest_root_object.is_none() {
+            return Ok(());
+        }
+        let root = self.manifest_root();
+        let changed = self
+            .bodies
+            .iter()
+            .map(|(key, record)| ArchivedBody {
+                key: key.clone(),
+                binding: Some(record.binding.clone()),
+                stamp: record_stamp(record),
+                export: record
+                    .interpreted
+                    .then(|| self.fabric.export_body(&fabric_key(key)))
+                    .flatten(),
+            })
+            .collect();
+        let descriptors = self.snapshot_content().values().cloned().collect();
+        let delta = GenerationDelta {
+            format_version: GENERATION_DELTA_FORMAT_VERSION,
+            root,
+            parent: None,
+            frontier: self.frontier,
+            changed,
+            descriptors,
+            removed_descriptors: Vec::new(),
+        };
+        let delta_bytes =
+            postcard::to_stdvec(&delta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let delta_ref = object_ref(&delta_bytes);
+        let indexed = IndexedGeneration {
+            root,
+            object: delta_ref,
+        };
+        let indexed_bytes =
+            postcard::to_stdvec(&indexed).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let mut sink = NodeSink::default();
+        let generation_index_root = {
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+            index::apply(
+                &StoreNodes(store),
+                None,
+                vec![IndexChange {
+                    key: generation_index_key(&root),
+                    value: Some(indexed_bytes),
+                }],
+                &mut sink,
+            )
+            .map_err(|_| Failure::Integrity(Defect::Index))?
+        };
+        let meta = StoreMeta {
+            format_version: STORE_META_FORMAT_VERSION,
+            space: self.space.clone(),
+            frontier: self.frontier,
+            quota: self.quota,
+            body_index_root: self.body_index_root,
+            manifest_body_root: self.manifest_body_root,
+            content_index_root: self.content_index_root,
+            receipt_index_root: self.receipt_index_root,
+            generation_index_root,
+            manifest_root: self.manifest_root_object,
+        };
+        let meta_bytes =
+            postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let roots: Vec<([u8; 32], u64)> = self
+            .body_index_root
+            .into_iter()
+            .chain(self.manifest_body_root)
+            .chain(self.content_index_root)
+            .chain(self.receipt_index_root)
+            .chain(generation_index_root)
+            .map(|root| (root.hash, root.count))
+            .collect();
+        let store = self.durable.as_mut().ok_or(Failure::Poisoned)?;
+        store
+            .commit(
+                &[delta_bytes],
+                &[],
+                journal::Index {
+                    roots: &roots,
+                    nodes: &sink.written,
+                },
+                meta_bytes,
+            )
+            .map_err(|failure| match failure {
+                journal::Failure::OutcomeUnknown => Failure::OutcomeUnknown,
+                journal::Failure::Integrity(defect) => Failure::Integrity(Defect::Store(defect)),
+                other => Failure::Durability(other),
+            })?;
+        self.generation_index_root = generation_index_root;
+        Ok(())
     }
 
     /// Every object one Body record names, for reference counting.
@@ -1179,6 +1479,9 @@ impl Replica {
 
         // 3. The signed root over the catalogs. A commit with no attribution
         //    context is a receipt-only replay and republishes nothing.
+        let parent_generation = self
+            .generation_index_root
+            .and(self.manifest_root_object.map(|object| object.hash));
         let manifest_root_object = match ctx {
             None => self.manifest_root_object,
             Some(ctx) => {
@@ -1204,6 +1507,75 @@ impl Replica {
             }
         };
 
+        // 4. Durable read generation: one immutable delta object plus one
+        // index path. Delta size is O(changed Bodies), not O(World), and old
+        // delta objects remain required so an exact historical read survives
+        // ordinary journal sweeping and process restart.
+        let mut generation_index_root = self.generation_index_root;
+        if ctx.is_some() {
+            if let Some(root_object) = manifest_root_object {
+                let archive_keys: BTreeSet<BodyKey> = if self.generation_index_root.is_none() {
+                    self.bodies.keys().chain(changed.keys()).cloned().collect()
+                } else {
+                    changed.keys().cloned().collect()
+                };
+                let mut archived = Vec::with_capacity(archive_keys.len());
+                for key in archive_keys {
+                    let next = match changed.get(&key) {
+                        Some(Some(record)) => Some(record),
+                        Some(None) => None,
+                        None => self.bodies.get(&key),
+                    };
+                    let binding = next
+                        .map(|record| record.binding.clone())
+                        .or_else(|| self.bodies.get(&key).map(|record| record.binding.clone()));
+                    let stamp = next.map(record_stamp).unwrap_or_default();
+                    let export = next.and_then(|record| {
+                        record
+                            .interpreted
+                            .then(|| self.fabric.export_body(&fabric_key(&key)))
+                            .flatten()
+                    });
+                    archived.push(ArchivedBody {
+                        key,
+                        binding,
+                        stamp,
+                        export,
+                    });
+                }
+                let delta = GenerationDelta {
+                    format_version: GENERATION_DELTA_FORMAT_VERSION,
+                    root: root_object.hash,
+                    parent: parent_generation,
+                    frontier: next_frontier,
+                    changed: archived,
+                    descriptors: descriptors.to_vec(),
+                    removed_descriptors: Vec::new(),
+                };
+                let bytes = postcard::to_stdvec(&delta)
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                let reference = object_ref(&bytes);
+                new_objects.push(bytes);
+                let indexed = IndexedGeneration {
+                    root: root_object.hash,
+                    object: reference,
+                };
+                let value = postcard::to_stdvec(&indexed)
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+                generation_index_root = index::apply(
+                    &StoreNodes(store),
+                    generation_index_root,
+                    vec![IndexChange {
+                        key: generation_index_key(&root_object.hash),
+                        value: Some(value),
+                    }],
+                    &mut sink,
+                )
+                .map_err(|_| Failure::Integrity(Defect::Index))?;
+            }
+        }
+
         let meta = StoreMeta {
             format_version: STORE_META_FORMAT_VERSION,
             space: self.space.clone(),
@@ -1213,6 +1585,7 @@ impl Replica {
             manifest_body_root,
             content_index_root,
             receipt_index_root,
+            generation_index_root,
             manifest_root: manifest_root_object,
         };
         let meta_bytes =
@@ -1238,6 +1611,7 @@ impl Replica {
             .chain(manifest_body_root)
             .chain(content_index_root)
             .chain(receipt_index_root)
+            .chain(generation_index_root)
             .map(|root| (root.hash, root.count))
             .collect();
 
@@ -1261,6 +1635,7 @@ impl Replica {
         self.manifest_body_root = manifest_body_root;
         self.content_index_root = content_index_root;
         self.receipt_index_root = receipt_index_root;
+        self.generation_index_root = generation_index_root;
         self.manifest_root_object = manifest_root_object;
         Ok(())
     }
@@ -1592,6 +1967,9 @@ impl Replica {
         .ok_or_else(|| Failure::Illegitimate("sign manifest root".into()))?;
         let root_bytes = root.encode();
         let root_ref = object_ref(&root_bytes);
+        let parent_generation = self
+            .generation_index_root
+            .and(self.manifest_root_object.map(|object| object.hash));
         self.retain_object(root_ref.hash);
         let mut removed = Vec::new();
         if let Some(prior) = self.manifest_root_object {
@@ -1599,6 +1977,57 @@ impl Replica {
                 removed.push(prior.hash);
             }
         }
+
+        let archived = if self.generation_index_root.is_none() {
+            self.bodies
+                .iter()
+                .map(|(key, record)| ArchivedBody {
+                    key: key.clone(),
+                    binding: Some(record.binding.clone()),
+                    stamp: record_stamp(record),
+                    export: record
+                        .interpreted
+                        .then(|| self.fabric.export_body(&fabric_key(key)))
+                        .flatten(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let delta = GenerationDelta {
+            format_version: GENERATION_DELTA_FORMAT_VERSION,
+            root: root_ref.hash,
+            parent: parent_generation,
+            frontier,
+            changed: archived,
+            descriptors: Vec::new(),
+            removed_descriptors: unreferenced
+                .iter()
+                .map(|descriptor| descriptor.content_ref().content_id)
+                .collect(),
+        };
+        let delta_bytes =
+            postcard::to_stdvec(&delta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let delta_ref = object_ref(&delta_bytes);
+        let indexed = IndexedGeneration {
+            root: root_ref.hash,
+            object: delta_ref,
+        };
+        let indexed_bytes =
+            postcard::to_stdvec(&indexed).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let generation_index_root = {
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+            index::apply(
+                &StoreNodes(store),
+                self.generation_index_root,
+                vec![IndexChange {
+                    key: generation_index_key(&root_ref.hash),
+                    value: Some(indexed_bytes),
+                }],
+                &mut sink,
+            )
+            .map_err(|_| Failure::Integrity(Defect::Index))?
+        };
 
         let meta = StoreMeta {
             format_version: STORE_META_FORMAT_VERSION,
@@ -1609,11 +2038,12 @@ impl Replica {
             manifest_body_root: self.manifest_body_root,
             content_index_root,
             receipt_index_root: self.receipt_index_root,
+            generation_index_root,
             manifest_root: Some(root_ref),
         };
         let meta_bytes =
             postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
-        let added = vec![root_bytes];
+        let added = vec![root_bytes, delta_bytes];
         let index_nodes = sink.written;
         let roots: Vec<([u8; 32], u64)> = self
             .body_index_root
@@ -1621,6 +2051,7 @@ impl Replica {
             .chain(self.manifest_body_root)
             .chain(content_index_root)
             .chain(self.receipt_index_root)
+            .chain(generation_index_root)
             .map(|root| (root.hash, root.count))
             .collect();
 
@@ -1641,6 +2072,7 @@ impl Replica {
             }
         }
         self.content_index_root = content_index_root;
+        self.generation_index_root = generation_index_root;
         self.manifest_root_object = Some(root_ref);
         self.frontier = frontier;
 
@@ -1699,19 +2131,248 @@ impl Replica {
     /// the constituent material exactly).
     pub fn body_stamp(&self, key: &BodyKey) -> Option<Vec<u8>> {
         let record = self.bodies.get(key)?;
-        let mut stamp = record.chain.root.to_vec();
-        stamp.extend_from_slice(&record.chain.transaction_count.to_be_bytes());
-        let mut commitments: Vec<[u8; 32]> = record.heads.iter().map(|h| h.tx_commitment).collect();
-        commitments.sort_unstable();
-        for c in commitments {
-            stamp.extend_from_slice(&c);
-        }
-        Some(stamp)
+        Some(record_stamp(record))
     }
 
     /// Every Body currently present (interpreted or opaque).
     pub fn body_keys(&self) -> Vec<BodyKey> {
         self.bodies.keys().cloned().collect()
+    }
+
+    fn freeze_body(&self, key: &BodyKey) -> Option<Arc<SnapshotBody>> {
+        let record = self.bodies.get(key)?;
+        if !record.interpreted {
+            return None;
+        }
+        let export = self.fabric.export_body(&fabric_key(key))?;
+        let body = fabric::BodySnapshot::from_export(&fabric_key(key), export).ok()?;
+        Some(Arc::new(SnapshotBody {
+            binding: record.binding.clone(),
+            stamp: self.body_stamp(key)?,
+            body,
+        }))
+    }
+
+    fn snapshot_content(&self) -> im::OrdMap<[u8; 32], crate::content::ContentDescriptor> {
+        self.declared_content
+            .values()
+            .flatten()
+            .filter_map(|content_id| {
+                let reference = crate::content::ContentRef {
+                    content_id: *content_id,
+                };
+                self.content_descriptor(&reference)
+                    .map(|descriptor| (*content_id, descriptor))
+            })
+            .collect()
+    }
+
+    /// Freeze the current committed state into a thread-safe read generation.
+    /// This full form is used at activation and after an incorporation whose
+    /// changed set is not locally known.
+    pub fn read_snapshot(&self) -> ReadSnapshot {
+        let bodies = self
+            .bodies
+            .keys()
+            .filter_map(|key| self.freeze_body(key).map(|body| (key.clone(), body)))
+            .collect();
+        let manifest = self.manifest_root();
+        let root = if manifest == crate::transaction::NO_PARENT_ROOT {
+            self.frontier.root
+        } else {
+            manifest
+        };
+        ReadSnapshot {
+            root,
+            frontier: self.frontier,
+            bodies,
+            content: self.snapshot_content(),
+        }
+    }
+
+    /// Publish the next read generation by replacing only touched Body paths.
+    /// Persistent-map structural sharing makes this O(changed log N), rather
+    /// than cloning the World or scanning every Issue after every edit.
+    pub fn advance_read_snapshot(&self, prior: &ReadSnapshot, changed: &[BodyKey]) -> ReadSnapshot {
+        let mut bodies = prior.bodies.clone();
+        let mut unique: BTreeSet<&BodyKey> = BTreeSet::new();
+        for key in changed {
+            if !unique.insert(key) {
+                continue;
+            }
+            match self.freeze_body(key) {
+                Some(body) => {
+                    bodies.insert(key.clone(), body);
+                }
+                None => {
+                    bodies.remove(key);
+                }
+            }
+        }
+        let manifest = self.manifest_root();
+        let root = if manifest == crate::transaction::NO_PARENT_ROOT {
+            self.frontier.root
+        } else {
+            manifest
+        };
+        ReadSnapshot {
+            root,
+            frontier: self.frontier,
+            bodies,
+            // Content declarations are sparse and normally tiny; refreshing
+            // this index avoids coupling generic content changes to a World
+            // Body list while Body freezing remains strictly changed-only.
+            content: self.snapshot_content(),
+        }
+    }
+
+    fn generation_delta(&self, root: &[u8; 32]) -> Result<Option<GenerationDelta>, Failure> {
+        let Some(store) = self.durable.as_ref() else {
+            return Ok(None);
+        };
+        let Some(value) = crate::index::lookup(
+            &StoreNodes(store),
+            self.generation_index_root,
+            &generation_index_key(root),
+        )
+        .map_err(|_| Failure::Integrity(Defect::Index))?
+        else {
+            return Ok(None);
+        };
+        let indexed: IndexedGeneration =
+            postcard::from_bytes(&value).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        if &indexed.root != root {
+            return Err(Failure::Integrity(Defect::Encoding));
+        }
+        let bytes = store
+            .read_object(&indexed.object)
+            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let delta: GenerationDelta =
+            postcard::from_bytes(&bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        if delta.format_version != GENERATION_DELTA_FORMAT_VERSION || &delta.root != root {
+            return Err(Failure::Integrity(Defect::Encoding));
+        }
+        Ok(Some(delta))
+    }
+
+    /// Reconstruct an exact durable generation. The cold cost is proportional
+    /// to the deltas on its ancestry; Runtime caches the resulting immutable
+    /// snapshot, so every subsequent query is a normal shared read.
+    pub fn read_generation(&self, root: &[u8; 32]) -> Result<Option<ReadSnapshot>, Failure> {
+        let manifest = self.manifest_root();
+        let current_root = if manifest == crate::transaction::NO_PARENT_ROOT {
+            self.frontier.root
+        } else {
+            manifest
+        };
+        if current_root == *root {
+            return Ok(Some(self.read_snapshot()));
+        }
+        let mut cursor = *root;
+        let mut seen = BTreeSet::new();
+        let mut deltas = Vec::new();
+        loop {
+            if !seen.insert(cursor) {
+                return Err(Failure::Integrity(Defect::Encoding));
+            }
+            let Some(delta) = self.generation_delta(&cursor)? else {
+                return Ok(None);
+            };
+            let parent = delta.parent;
+            deltas.push(delta);
+            let Some(parent) = parent else {
+                break;
+            };
+            cursor = parent;
+        }
+        let frontier = deltas
+            .first()
+            .map(|delta| delta.frontier)
+            .ok_or(Failure::Integrity(Defect::Encoding))?;
+        let mut bodies = im::OrdMap::new();
+        let mut content = im::OrdMap::new();
+        for delta in deltas.into_iter().rev() {
+            for archived in delta.changed {
+                match (archived.binding, archived.export) {
+                    (Some(binding), Some(export)) => {
+                        let body =
+                            fabric::BodySnapshot::from_export(&fabric_key(&archived.key), export)
+                                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                        bodies.insert(
+                            archived.key,
+                            Arc::new(SnapshotBody {
+                                binding,
+                                stamp: archived.stamp,
+                                body,
+                            }),
+                        );
+                    }
+                    _ => {
+                        bodies.remove(&archived.key);
+                    }
+                }
+            }
+            for descriptor in delta.descriptors {
+                content.insert(descriptor.content_ref().content_id, descriptor);
+            }
+            for content_id in delta.removed_descriptors {
+                content.remove(&content_id);
+            }
+        }
+        Ok(Some(ReadSnapshot {
+            root: *root,
+            frontier,
+            bodies,
+            content,
+        }))
+    }
+
+    /// Every durable generation coordinate, deterministically ordered by
+    /// semantic frontier and then id.
+    pub fn read_generations(&self) -> Result<Vec<ReadGeneration>, Failure> {
+        let Some(store) = self.durable.as_ref() else {
+            return Ok(vec![ReadGeneration {
+                root: if self.manifest_root() == crate::transaction::NO_PARENT_ROOT {
+                    self.frontier.root
+                } else {
+                    self.manifest_root()
+                },
+                parent: None,
+                frontier: self.frontier,
+            }]);
+        };
+        let mut indexed = Vec::new();
+        let mut decode_failed = false;
+        crate::index::stream(
+            &StoreNodes(store),
+            self.generation_index_root,
+            &mut |entry| match postcard::from_bytes::<IndexedGeneration>(&entry.value) {
+                Ok(value) => indexed.push(value),
+                Err(_) => decode_failed = true,
+            },
+        )
+        .map_err(|_| Failure::Integrity(Defect::Index))?;
+        if decode_failed {
+            return Err(Failure::Integrity(Defect::Encoding));
+        }
+        let mut result = Vec::with_capacity(indexed.len());
+        for generation in indexed {
+            let Some(delta) = self.generation_delta(&generation.root)? else {
+                return Err(Failure::Integrity(Defect::MissingMaterial));
+            };
+            result.push(ReadGeneration {
+                root: delta.root,
+                parent: delta.parent,
+                frontier: delta.frontier,
+            });
+        }
+        result.sort_by(|left, right| {
+            left.frontier
+                .transaction_count
+                .cmp(&right.frontier.transaction_count)
+                .then_with(|| left.root.cmp(&right.root))
+        });
+        Ok(result)
     }
 
     /// Look up a request in the persistent-idempotency scope
@@ -4061,9 +4722,143 @@ fn translate(key: Key, op: &Op) -> Result<fabric::Op, Failure> {
                 delta: *delta,
             }
         }
+        Op::TreeInsert {
+            path,
+            parent,
+            after,
+            value,
+        } => {
+            path_ok(path)?;
+            value_ok(value)?;
+            fabric::Op::TreeInsert {
+                key,
+                path: path.clone(),
+                parent: parent.clone(),
+                after: after.clone(),
+                value: value.clone(),
+            }
+        }
+        Op::TreeMove {
+            path,
+            node,
+            parent,
+            after,
+        } => {
+            path_ok(path)?;
+            fabric::Op::TreeMove {
+                key,
+                path: path.clone(),
+                node: node.clone(),
+                parent: parent.clone(),
+                after: after.clone(),
+            }
+        }
+        Op::TreeRemove { path, node } => {
+            path_ok(path)?;
+            fabric::Op::TreeRemove {
+                key,
+                path: path.clone(),
+                node: node.clone(),
+            }
+        }
+        Op::TreeSet {
+            path,
+            node,
+            key: entry,
+            value,
+        } => {
+            path_ok(path)?;
+            value_ok(value)?;
+            if entry.len() > algebra::MAX_MAP_KEY_BYTES {
+                return Err(Failure::OpLimit);
+            }
+            fabric::Op::TreeSet {
+                key,
+                path: path.clone(),
+                node: node.clone(),
+                entry: entry.clone(),
+                value: value.clone(),
+            }
+        }
+        Op::TreeUnset {
+            path,
+            node,
+            key: entry,
+        } => {
+            path_ok(path)?;
+            fabric::Op::TreeUnset {
+                key,
+                path: path.clone(),
+                node: node.clone(),
+                entry: entry.clone(),
+            }
+        }
+        Op::TreeAnchor {
+            path,
+            anchor,
+            parent,
+        } => {
+            path_ok(path)?;
+            // An anchor is stored as a node data entry, so it is bounded by
+            // what a map key is bounded by — the same limit, because it is
+            // literally the same storage.
+            if anchor.len() > algebra::MAX_MAP_KEY_BYTES
+                || parent
+                    .as_ref()
+                    .is_some_and(|p| p.len() > algebra::MAX_MAP_KEY_BYTES)
+            {
+                return Err(Failure::OpLimit);
+            }
+            fabric::Op::TreeAnchor {
+                key,
+                path: path.clone(),
+                anchor: anchor.clone(),
+                parent: parent.clone(),
+            }
+        }
+        Op::LogAppend {
+            path,
+            value,
+            retain,
+        } => {
+            path_ok(path)?;
+            value_ok(value)?;
+            fabric::Op::LogAppend {
+                key,
+                path: path.clone(),
+                value: value.clone(),
+                retain: *retain,
+            }
+        }
     })
 }
 
 // A note on `BODY_EPOCH_ID_LEN`: referenced for the doc contract; the concrete
 // parsing lives in mechanics.
 const _: () = assert!(BODY_EPOCH_ID_LEN == 16);
+
+#[cfg(test)]
+mod generation_format_tests {
+    use super::*;
+
+    #[test]
+    fn version_two_store_meta_is_a_lossless_input_to_generation_journaling() {
+        let prior = PriorIndexedStoreMeta {
+            format_version: READABLE_STORE_META_FORMAT_VERSION,
+            space: None,
+            frontier: ReplicaFrontier::EMPTY,
+            quota: QuotaConfig::default(),
+            body_index_root: None,
+            manifest_body_root: None,
+            content_index_root: None,
+            receipt_index_root: None,
+            manifest_root: None,
+        };
+        let bytes = postcard::to_stdvec(&prior).expect("v2 meta");
+        let current = decode_store_meta(&bytes).expect("v2 remains readable");
+        assert_eq!(current.format_version, STORE_META_FORMAT_VERSION);
+        assert_eq!(current.frontier, prior.frontier);
+        assert_eq!(current.quota, prior.quota);
+        assert!(current.generation_index_root.is_none());
+    }
+}

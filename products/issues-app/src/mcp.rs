@@ -177,8 +177,10 @@ struct LabelNewArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ActivityArgs {
+    /// Opaque resume token from a previous call's `last`; omit for the whole
+    /// feed.
     #[serde(default)]
-    since: u64,
+    since: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -314,6 +316,8 @@ struct SpecReviseArgs {
     text: Option<String>,
     #[serde(default)]
     links: Option<Vec<issues::spec::Link>>,
+    #[serde(default)]
+    plan: Option<Option<issues::spec::PlanData>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -433,6 +437,16 @@ pub fn tools() -> Vec<McpTool> {
         tool::<ListArgs>("list", "List issue rows.", list),
         tool::<BoardArgs>("board", "Render a project board.", board),
         tool::<RefArgs>("history", "Read an issue's history.", history),
+        tool::<EmptyArgs>(
+            "structure_status",
+            "Audit current Blueprint records that still depend on compatibility readers.",
+            structure_status,
+        ),
+        tool::<EmptyArgs>(
+            "structure_migrate",
+            "Materialize current Blueprint topology and Spec heads into native structures.",
+            structure_migrate,
+        ),
         tool::<ProjectNewArgs>("project_new", "Create a project.", project_new),
         tool::<EmptyArgs>("project_list", "List projects.", project_list),
         tool::<LabelNewArgs>("label_new", "Create a label.", label_new),
@@ -784,6 +798,16 @@ fn history(input: Value) -> Result<ClientInvocation, Failure> {
     world(IssuesRequest::History { reff: a.reff })
 }
 
+fn structure_status(input: Value) -> Result<ClientInvocation, Failure> {
+    let _: EmptyArgs = args(input)?;
+    world(IssuesRequest::StructureStatus)
+}
+
+fn structure_migrate(input: Value) -> Result<ClientInvocation, Failure> {
+    let _: EmptyArgs = args(input)?;
+    world(IssuesRequest::StructureMigrate)
+}
+
 fn project_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ProjectNewArgs = args(input)?;
     world(IssuesRequest::ProjectNew {
@@ -973,6 +997,7 @@ fn spec_revise(input: Value) -> Result<ClientInvocation, Failure> {
         title: a.title,
         text: a.text,
         links: a.links,
+        plan: a.plan,
     })
 }
 
@@ -1211,6 +1236,7 @@ mod tests {
         "cycle_set",
         "detach",
         "follow",
+        "geometry",
         "inbox",
         "initiative_list",
         "initiative_set",
@@ -1272,7 +1298,7 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 62);
+        assert_eq!(tools.len(), 64);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()

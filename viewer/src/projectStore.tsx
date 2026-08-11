@@ -20,6 +20,7 @@ import type {
   DirtyPlane,
   DirtyScope,
   GraphView,
+  GeometryView,
   IssueView,
   LabelDto,
   MemberDto,
@@ -38,6 +39,7 @@ import type {
   SpecBody,
   SpecKind,
   SpecLink,
+  PlanData,
   SpecObservation,
   SpecRef,
   SpecReference,
@@ -66,6 +68,8 @@ export const projectKeys = {
   history: (space: string, reff: string) => `${prefix(space)}history:${part(reff)}`,
   milestones: (space: string, project: string) => `${prefix(space)}milestones:${part(project)}`,
   projectGraph: (space: string, project: string) => `${prefix(space)}projectgraph:${part(project)}`,
+  geometry: (space: string, project: string, roots: readonly string[], generation?: string | null) =>
+    `${prefix(space)}geometry:${part(project)}:${part([...roots].sort().join(","))}:${part(generation)}`,
   specs: (space: string, project: string | null) => `${prefix(space)}specs:${part(project)}`,
   spec: (space: string, spec: string) => `${prefix(space)}spec:${part(spec)}`,
   specHistory: (space: string, spec: string) => `${prefix(space)}spec-history:${part(spec)}`,
@@ -451,6 +455,31 @@ export class ProjectViewerStore {
     }, force);
   }
 
+  ensureGeometry(
+    space: string,
+    project: string,
+    roots: readonly string[],
+    generation?: string | null,
+    force = false,
+  ): Promise<GeometryView> {
+    const canonicalRoots = [...new Set(roots)].sort();
+    const key = projectKeys.geometry(space, project, canonicalRoots, generation);
+    return this.load(key, async () => {
+      const result = await this.rpc(space, {
+        cmd: "geometry",
+        project,
+        roots: canonicalRoots,
+        ...(generation ? { generation } : {}),
+      });
+      if (result.kind !== "geometry") throw new Error("Expected geometry response");
+      for (const node of result.nodes) this.ingestRow(space, node.row);
+      return result;
+    }, generation ? {} : {
+      catalog: ["projects", "teams", "workflow", "labels", "milestones", "cycles", "docs", "relations"],
+      issues: { scopeId: project },
+    }, force);
+  }
+
   ensureMilestones(space: string, project: string, force = false): Promise<MilestoneDto[]> {
     return this.load(projectKeys.milestones(space, project), async () => {
       const result = await this.rpc(space, { cmd: "milestone_list", project });
@@ -545,7 +574,7 @@ export class ProjectViewerStore {
     space: string,
     spec: string,
     expected: string,
-    patch: { title?: string; text?: string; links?: SpecLink[] },
+    patch: { title?: string; text?: string; links?: SpecLink[]; plan?: PlanData | null },
   ): Promise<SpecView> {
     const result = await this.rpc(space, { cmd: "spec_revise", spec, expected, ...patch });
     if (result.kind !== "spec") throw new Error("Expected spec response");
@@ -1318,6 +1347,36 @@ export function useProjectGraph(
           ? store.ensureProjectGraph(space, projectId)
           : Promise.resolve({ schema_version: 0, project: "", edges: [], parents: [] }),
       [projectId, space, store],
+    ),
+  );
+}
+
+export function usePlanGeometry(
+  space: string,
+  projectId: string | null | undefined,
+  roots: readonly string[],
+  generation?: string | null,
+): ResourceSnapshot<GeometryView> {
+  const store = useProjectViewerStore();
+  const signature = [...new Set(roots)].sort().join(",");
+  const canonicalRoots = useMemo(() => signature ? signature.split(",") : [], [signature]);
+  return useWorldResource<GeometryView>(
+    projectKeys.geometry(space, projectId ?? "_unknown", canonicalRoots, generation),
+    useCallback(
+      () => projectId
+        ? store.ensureGeometry(space, projectId, canonicalRoots, generation)
+        : Promise.resolve({
+            schema_version: 0,
+            generation: "",
+            project: "",
+            roots: [],
+            nodes: [],
+            edges: [],
+            components: [],
+            residuals: [],
+            closure: { total: 0, closed: 0, ready: 0, blocked: 0, cyclic: 0, stalled: 0 },
+          }),
+      [canonicalRoots, generation, projectId, space, store],
     ),
   );
 }
