@@ -7,14 +7,16 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use lait::serve::auth::{cookie_value, Guard, Refusal};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::contract::{
-    ApiError, BackendEvent, CreateDeviceRequest, DeviceAction, EventKind, HistoryQuery, LogQuery,
+    ApiError, ClientSignal, CreateDeviceRequest, DeviceAction, HistoryQuery, LogQuery,
+    RemoveDeviceRequest, UpdateDeviceRequest,
 };
 use crate::{Supervisor, SupervisorError};
 
@@ -41,6 +43,10 @@ pub fn router(supervisor: Supervisor, token: String, port: u16) -> Router {
             get(connection_history),
         )
         .route("/api/workbench/devices", post(create_device))
+        .route(
+            "/api/workbench/devices/{id}",
+            patch(update_device).delete(remove_device),
+        )
         .route("/api/workbench/devices/{id}/logs", get(device_logs))
         .route("/api/workbench/devices/{id}/actions", post(device_action))
         .layer(axum::middleware::from_fn_with_state(state.clone(), gate))
@@ -105,7 +111,7 @@ async fn create_device(
 ) -> Result<Json<crate::DeviceSnapshot>, ApiFailure> {
     let device = state
         .supervisor
-        .add_device(request.id.clone(), request.label)
+        .create_device(request.id.clone(), request.label)
         .await?;
     if request.start {
         return state
@@ -116,6 +122,32 @@ async fn create_device(
             .map_err(ApiFailure::from);
     }
     Ok(Json(device))
+}
+
+async fn update_device(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateDeviceRequest>,
+) -> Result<Json<crate::DeviceSnapshot>, ApiFailure> {
+    state
+        .supervisor
+        .update_device(&id, request)
+        .await
+        .map(Json)
+        .map_err(ApiFailure::from)
+}
+
+/// Deletion travels in a body rather than a query string on purpose: a
+/// destructive flag belongs somewhere a caller had to compose deliberately, not
+/// somewhere a link or a browser history entry can carry it.
+async fn remove_device(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<RemoveDeviceRequest>>,
+) -> Result<StatusCode, ApiFailure> {
+    let request = body.map(|Json(request)| request).unwrap_or_default();
+    state.supervisor.remove_device(&id, request).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn device_action(
@@ -132,28 +164,28 @@ async fn device_action(
     result.map(Json).map_err(ApiFailure::from)
 }
 
+/// The same ordered stream, relayed.
+///
+/// The adapter no longer manufactures a lag event of its own: lag is a
+/// [`ClientSignal::SnapshotRequired`] the library reports in sequence, so this
+/// end just serializes whatever it is handed. A second definition of "you fell
+/// behind" living out here is exactly the drift a single stream exists to
+/// prevent.
 async fn events(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let stream = BroadcastStream::new(state.supervisor.subscribe()).map(|received| {
-        let backend_event = match received {
-            Ok(event) => event,
-            Err(_) => BackendEvent {
-                revision: 0,
-                at_ms: 0,
-                kind: EventKind::SnapshotRequired,
-                device_id: None,
-                message: "event consumer lagged; fetch a fresh snapshot".into(),
-            },
+        let signal = match received {
+            Ok(signal) => signal,
+            // The same constructor the library's own `recv` uses, so there is
+            // exactly one definition of what a lag means.
+            Err(BroadcastStreamRecvError::Lagged(dropped)) => ClientSignal::lagged(dropped),
         };
-        let event = match Event::default()
-            .event("workbench")
-            .json_data(&backend_event)
-        {
+        let event = match Event::default().event("workbench").json_data(&signal) {
             Ok(event) => event,
             Err(error) => Event::default()
                 .event("workbench_error")
-                .data(format!("serialize event: {error}")),
+                .data(format!("serialize signal: {error}")),
         };
         Ok(event)
     });
@@ -330,7 +362,7 @@ mod tests {
         )
         .expect("supervisor");
         supervisor
-            .add_device("alice".into(), "Alice".into())
+            .create_device("alice".into(), "Alice".into())
             .await
             .expect("add device");
         let app = router(supervisor, "test-token".into(), 7717);

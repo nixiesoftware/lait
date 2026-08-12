@@ -57,7 +57,12 @@ async fn main() -> Result<()> {
         .context("bind workbench loopback server")?;
     let bound = listener.local_addr().context("read workbench address")?;
     let token = mint_token()?;
-    let supervisor = Supervisor::start(Config::new(state_root.clone(), executable)).await?;
+    // The stream this adapter does not itself consume: every SSE connection
+    // opens its own. Held so the channel has a receiver for the supervisor's
+    // whole life, which keeps `start`'s ordering guarantee true even when no
+    // browser is attached.
+    let (supervisor, _signals) =
+        Supervisor::start(Config::new(state_root.clone(), executable)).await?;
     let app = lait_workbench::api::router(supervisor.clone(), token.clone(), bound.port());
     let ready = Ready {
         url: format!("http://{bound}"),

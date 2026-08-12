@@ -8,9 +8,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::contract::{
-    BackendEvent, Capabilities, ConnectionEvent, ConnectionEventKind, ConnectionHistoryPage,
-    ConnectionSnapshot, DeviceSnapshot, EnvironmentSnapshot, EventHistoryPage, EventKind,
-    HistoryQuery, LifecycleState, LogPage, WorkbenchSnapshot, SCHEMA_VERSION,
+    BackendEvent, Capabilities, ClientSignal, ConnectionEvent, ConnectionEventKind,
+    ConnectionHistoryPage, ConnectionSnapshot, DeviceFacts, DeviceSnapshot, EnvironmentSnapshot,
+    EventHistoryPage, EventKind, HistoryQuery, LifecycleState, LogPage, ObservationHealth,
+    ObservationState, RemoveDeviceRequest, SnapshotReason, UpdateDeviceRequest, WorkbenchSnapshot,
+    SCHEMA_VERSION,
 };
 use crate::driver::{DaemonDriver, DaemonProbe, LaitDriver, OwnedDaemon};
 use crate::observability::{read_log_page, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
@@ -112,9 +114,10 @@ struct Inner {
     registry: Registry,
     devices: RwLock<BTreeMap<String, Arc<Device>>>,
     revision: AtomicU64,
-    events: broadcast::Sender<BackendEvent>,
+    signals: broadcast::Sender<ClientSignal>,
     history: StdMutex<HistoryState>,
     observed_connections: StdMutex<BTreeMap<ConnectionKey, ConnectionSnapshot>>,
+    observed_devices: StdMutex<BTreeMap<String, DeviceObservation>>,
     observed_log_sizes: StdMutex<BTreeMap<String, u64>>,
     observation: Mutex<()>,
     observer: StdMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -140,9 +143,35 @@ impl Drop for Inner {
 
 struct Device {
     id: String,
-    label: String,
+    /// Behind a lock because a rename changes it while the rest of the device —
+    /// its home, and above all the owned process handle in `runtime` — must
+    /// survive untouched. Rebuilding the `Arc` to change one string would strand
+    /// the handle that proves this supervisor spawned the daemon.
+    label: StdMutex<String>,
     home: PathBuf,
     runtime: Mutex<Runtime>,
+}
+
+impl Device {
+    fn label(&self) -> String {
+        lock_recovering(&self.label).clone()
+    }
+
+    fn registration(&self) -> RegisteredDevice {
+        RegisteredDevice {
+            id: self.id.clone(),
+            label: self.label(),
+        }
+    }
+}
+
+/// Every registration currently held, in id order — the exact bytes the registry
+/// is asked to persist.
+fn registrations(devices: &BTreeMap<String, Arc<Device>>) -> Vec<RegisteredDevice> {
+    devices
+        .values()
+        .map(|device| device.registration())
+        .collect()
 }
 
 struct Runtime {
@@ -150,6 +179,47 @@ struct Runtime {
     process: Option<Box<dyn OwnedDaemon>>,
     started_at_ms: Option<u64>,
     last_error: Option<String>,
+}
+
+/// One consumer's cursor into the supervisor's signal stream.
+///
+/// This is deliberately not a `Stream` implementation: the consumer is Rust
+/// calling a library directly, `recv` is the whole interface, and keeping it
+/// that way is what lets the core link no stream combinator crate at all.
+pub struct Signals {
+    receiver: broadcast::Receiver<ClientSignal>,
+}
+
+impl Signals {
+    /// The next signal, or `None` once the supervisor is gone and the stream
+    /// can produce nothing further.
+    ///
+    /// A lagged consumer is handed [`SnapshotReason::ConsumerLagged`] *here*,
+    /// in sequence, rather than having the loss reported out of band or not at
+    /// all. That placement is the whole reason this type exists: the consumer
+    /// learns it lost events at exactly the point in the stream where it lost
+    /// them, so it knows precisely what its snapshot has to cover.
+    pub async fn recv(&mut self) -> Option<ClientSignal> {
+        match self.receiver.recv().await {
+            Ok(signal) => Some(signal),
+            Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                Some(ClientSignal::lagged(dropped))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    }
+}
+
+/// What sampling last learned about a device, and whether it is current.
+///
+/// Kept beside `Runtime` rather than inside it because the two answer different
+/// questions: `Runtime` is what this supervisor *did* to a process and is
+/// authoritative by construction, while this is what a daemon *said* and can go
+/// stale without anything here changing.
+#[derive(Clone, Default)]
+struct DeviceObservation {
+    facts: Option<DeviceFacts>,
+    health: ObservationHealth,
 }
 
 #[derive(Default)]
@@ -174,11 +244,21 @@ impl Supervisor {
     /// correct reading of a consumer that crashed: those daemons come back as
     /// `External` to whoever supervises next, and no new supervisor claims an
     /// owned handle it cannot prove it created.
-    pub async fn start(config: Config) -> Result<Self, SupervisorError> {
+    ///
+    /// # Why this returns the stream too
+    ///
+    /// The signal stream must be established *before* the first observation, or
+    /// the window between them drops events silently — the consumer's snapshot
+    /// would be older than its first signal and nothing would say so. Returning
+    /// both together makes that ordering structural: there is no way to hold a
+    /// started supervisor and not already hold a stream that began before it
+    /// observed anything.
+    pub async fn start(config: Config) -> Result<(Self, Signals), SupervisorError> {
         let supervisor = Self::new(config.state_root, config.executable)?;
+        let signals = supervisor.signals();
         supervisor.observe().await;
         supervisor.observe_in_background(config.observation_interval);
-        Ok(supervisor)
+        Ok((supervisor, signals))
     }
 
     /// Sample on `interval` until the last handle to this supervisor is gone.
@@ -265,9 +345,9 @@ impl Supervisor {
                     "workbench registry contains duplicate device '{id}'"
                 )));
             }
-            devices.insert(id, create_device(&state_root, registration)?);
+            devices.insert(id, open_device(&state_root, registration)?);
         }
-        let (events, _) = broadcast::channel(256);
+        let (signals, _) = broadcast::channel(256);
         Ok(Self {
             inner: Arc::new(Inner {
                 state_root,
@@ -276,9 +356,10 @@ impl Supervisor {
                 registry,
                 devices: RwLock::new(devices),
                 revision: AtomicU64::new(0),
-                events,
+                signals,
                 history: StdMutex::new(HistoryState::default()),
                 observed_connections: StdMutex::new(BTreeMap::new()),
+                observed_devices: StdMutex::new(BTreeMap::new()),
                 observed_log_sizes: StdMutex::new(BTreeMap::new()),
                 observation: Mutex::new(()),
                 observer: StdMutex::new(None),
@@ -288,8 +369,23 @@ impl Supervisor {
         })
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<BackendEvent> {
-        self.inner.events.subscribe()
+    /// Attach to the one ordered signal stream.
+    ///
+    /// Every consumer gets its own cursor into the same sequence. A consumer
+    /// that falls behind is told so *at the point it fell behind*, rather than
+    /// silently skipping ahead.
+    pub fn signals(&self) -> Signals {
+        Signals {
+            receiver: self.subscribe(),
+        }
+    }
+
+    /// The raw receiver behind [`Supervisor::signals`], for an adapter that
+    /// already has its own stream machinery. Lag arrives as
+    /// `RecvError::Lagged`; map it with [`ClientSignal::lagged`] rather than
+    /// inventing a second spelling of it.
+    pub fn subscribe(&self) -> broadcast::Receiver<ClientSignal> {
+        self.inner.signals.subscribe()
     }
 
     /// Reconcile persisted definitions with the control sockets that exist now.
@@ -343,40 +439,144 @@ impl Supervisor {
         let _observation = self.inner.observation.lock().await;
         self.reconcile().await;
         let devices: Vec<Arc<Device>> = self.inner.devices.read().await.values().cloned().collect();
+        let at_ms = now_ms();
         let mut current_connections = BTreeMap::new();
         let mut current_log_sizes = BTreeMap::new();
+        // The devices whose peers this pass actually read. A device missing from
+        // this set keeps whatever was last seen for it rather than being
+        // rewritten to nothing.
+        let mut sampled: Vec<String> = Vec::new();
         for device in devices {
             let mut runtime = device.runtime.lock().await;
             self.refresh_owned_process(&device, &mut runtime);
-            let inspect_connections = matches!(
+            let inspect = matches!(
                 runtime.state,
                 LifecycleState::Running | LifecycleState::External
             );
             drop(runtime);
 
-            if inspect_connections {
-                for connection in self.inner.driver.connections(&device.home).await {
-                    let snapshot = ConnectionSnapshot {
-                        source_device_id: device.id.clone(),
-                        space_id: connection.space_id,
-                        peer_id: connection.peer_id,
-                        peer_nick: connection.peer_nick,
-                        state: connection.state,
-                        online: connection.online,
-                        dialable: connection.dialable,
-                        blocked_by: connection.blocked_by,
-                    };
-                    current_connections.insert(connection_key(&snapshot), snapshot);
+            if !inspect {
+                // A stopped device is not a failed observation. There is nothing
+                // to ask, the answer is genuinely nothing, and its health goes
+                // back to healthy-with-no-sample rather than staying degraded
+                // from whenever it was last up.
+                self.record_device_observation(&device.id, Ok(None), at_ms);
+                sampled.push(device.id.clone());
+                current_log_sizes.insert(device.id.clone(), log_size(&device));
+                continue;
+            }
+
+            let facts = self.inner.driver.facts(&device.home).await;
+            let peers = self.inner.driver.connections(&device.home).await;
+            match (facts, peers) {
+                (Ok(facts), Ok(peers)) => {
+                    self.record_device_observation(&device.id, Ok(Some(facts)), at_ms);
+                    sampled.push(device.id.clone());
+                    for peer in peers {
+                        let snapshot = ConnectionSnapshot {
+                            source_device_id: device.id.clone(),
+                            space_id: peer.space_id,
+                            peer_id: peer.peer_id,
+                            peer_nick: peer.peer_nick,
+                            state: peer.state,
+                            online: peer.online,
+                            dialable: peer.dialable,
+                            blocked_by: peer.blocked_by,
+                            target_device_id: None,
+                        };
+                        current_connections.insert(connection_key(&snapshot), snapshot);
+                    }
+                }
+                (facts, peers) => {
+                    // Either half failing degrades the device and leaves its
+                    // last good topology standing. Reporting half a sample as a
+                    // whole one is how a surface starts showing a peer count
+                    // that quietly stopped being true.
+                    let error = facts.err().or_else(|| peers.err()).map_or_else(
+                        || "observation failed".to_owned(),
+                        |error| format!("{error:#}"),
+                    );
+                    self.record_device_observation(&device.id, Err(error), at_ms);
                 }
             }
 
-            let log_size = std::fs::metadata(device_log_path(&device))
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            current_log_sizes.insert(device.id.clone(), log_size);
+            current_log_sizes.insert(device.id.clone(), log_size(&device));
         }
-        self.record_connection_observations(current_connections);
+        let current_connections = self.correlate_managed_peers(current_connections);
+        self.record_connection_observations(current_connections, &sampled);
         self.record_log_observations(current_log_sizes);
+    }
+
+    /// Fill in `target_device_id` wherever an observed peer is a device this
+    /// supervisor manages.
+    ///
+    /// Correlation is by Station id, which a daemon reports for itself, and
+    /// never by nickname — a nick is authored and not unique, so matching on it
+    /// would let one device's label name another device's row.
+    fn correlate_managed_peers(
+        &self,
+        mut connections: BTreeMap<ConnectionKey, ConnectionSnapshot>,
+    ) -> BTreeMap<ConnectionKey, ConnectionSnapshot> {
+        let stations: BTreeMap<String, String> = lock_recovering(&self.inner.observed_devices)
+            .iter()
+            .filter_map(|(device_id, observation)| {
+                let station = observation.facts.as_ref()?.station_id.clone()?;
+                Some((station, device_id.clone()))
+            })
+            .collect();
+        if stations.is_empty() {
+            return connections;
+        }
+        for connection in connections.values_mut() {
+            connection.target_device_id = stations.get(&connection.peer_id).cloned();
+        }
+        connections
+    }
+
+    /// Record one device's sampling outcome.
+    ///
+    /// `Ok(Some(facts))` is a successful read, `Ok(None)` is "there was nothing
+    /// to read and that is not a failure", and `Err` degrades the device while
+    /// leaving the last good facts in place.
+    fn record_device_observation(
+        &self,
+        device_id: &str,
+        outcome: Result<Option<DeviceFacts>, String>,
+        at_ms: u64,
+    ) {
+        let mut observed = lock_recovering(&self.inner.observed_devices);
+        let entry = observed.entry(device_id.to_owned()).or_default();
+        match outcome {
+            Ok(facts) => {
+                if let Some(facts) = facts {
+                    entry.facts = Some(facts);
+                }
+                entry.health = ObservationHealth {
+                    state: ObservationState::Healthy,
+                    sampled_at_ms: Some(at_ms),
+                    stale_since_ms: None,
+                    error: None,
+                };
+            }
+            Err(error) => {
+                entry.health = ObservationHealth {
+                    state: ObservationState::Degraded,
+                    // Preserved: it says how old the surviving figures are.
+                    sampled_at_ms: entry.health.sampled_at_ms,
+                    // The *start* of the degraded stretch, not this attempt, so
+                    // repeated failures do not keep resetting how stale it is.
+                    stale_since_ms: entry.health.stale_since_ms.or(Some(at_ms)),
+                    error: Some(error),
+                };
+            }
+        }
+    }
+
+    fn observation_of(&self, device_id: &str) -> DeviceObservation {
+        lock_recovering(&self.inner.observed_devices)
+            .get(device_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn event_history(&self, query: &HistoryQuery) -> Result<EventHistoryPage, SupervisorError> {
@@ -480,7 +680,7 @@ impl Supervisor {
             .map_err(SupervisorError::Internal)
     }
 
-    pub async fn add_device(
+    pub async fn create_device(
         &self,
         id: String,
         label: String,
@@ -492,7 +692,7 @@ impl Supervisor {
             id: id.clone(),
             label,
         };
-        let device = create_device(&self.inner.state_root, registration.clone())?;
+        let device = open_device(&self.inner.state_root, registration)?;
         {
             let mut devices = self.inner.devices.write().await;
             if devices.contains_key(&id) {
@@ -500,21 +700,180 @@ impl Supervisor {
                     "device '{id}' already exists"
                 )));
             }
-            let mut registrations: Vec<RegisteredDevice> = devices
-                .values()
-                .map(|device| RegisteredDevice {
-                    id: device.id.clone(),
-                    label: device.label.clone(),
-                })
-                .collect();
-            registrations.push(registration);
-            registrations.sort_by(|left, right| left.id.cmp(&right.id));
-            self.inner.registry.save(&registrations)?;
+            // Persisted before the map accepts it: a registry write that fails
+            // must not leave a device this run can drive and the next cannot see.
+            let mut pending = registrations(&devices);
+            pending.push(device.registration());
+            pending.sort_by(|left, right| left.id.cmp(&right.id));
+            self.inner.registry.save(&pending)?;
             devices.insert(id.clone(), device.clone());
         }
         self.publish(EventKind::DeviceAdded, Some(id), "device added");
         let runtime = device.runtime.lock().await;
-        Ok(snapshot_device(&device, &runtime))
+        Ok(snapshot_device(
+            &device,
+            &runtime,
+            self.observation_of(&device.id),
+        ))
+    }
+
+    /// Change a registration in place. Renaming is safe at any lifecycle state:
+    /// a label names the device to a person and nothing resolves by it.
+    pub async fn update_device(
+        &self,
+        id: &str,
+        request: UpdateDeviceRequest,
+    ) -> Result<DeviceSnapshot, SupervisorError> {
+        let device = self.device(id).await?;
+        let Some(label) = request.label else {
+            // Nothing asked for is not an error, and it is also not a write.
+            let runtime = device.runtime.lock().await;
+            return Ok(snapshot_device(
+                &device,
+                &runtime,
+                self.observation_of(&device.id),
+            ));
+        };
+        let label = label.trim().to_owned();
+        validate_label(&label)?;
+
+        let devices = self.inner.devices.write().await;
+        let previous = {
+            let mut held = lock_recovering(&device.label);
+            std::mem::replace(&mut *held, label)
+        };
+        if let Err(error) = self.inner.registry.save(&registrations(&devices)) {
+            // Put the name back: the caller is about to be told this failed, and
+            // an in-memory label the registry never accepted is a lie that
+            // survives until the next restart.
+            *lock_recovering(&device.label) = previous;
+            return Err(error.into());
+        }
+        drop(devices);
+
+        self.publish(
+            EventKind::DeviceUpdated,
+            Some(device.id.clone()),
+            "device renamed",
+        );
+        let runtime = device.runtime.lock().await;
+        Ok(snapshot_device(
+            &device,
+            &runtime,
+            self.observation_of(&device.id),
+        ))
+    }
+
+    /// Forget a device, and — only when explicitly asked, and only when it is
+    /// safe — destroy what it holds.
+    ///
+    /// Removal and deletion are separate operations wearing one call. Removal
+    /// needs the device stopped and unowned; deletion additionally needs the
+    /// home to canonicalize beneath the managed state root *now*, and the
+    /// caller to name the device they are destroying. A path that does not
+    /// canonicalize under the root is refused rather than deleted, because the
+    /// alternative is a symlink deciding what this process erases.
+    pub async fn remove_device(
+        &self,
+        id: &str,
+        request: RemoveDeviceRequest,
+    ) -> Result<(), SupervisorError> {
+        let device = self.device(id).await?;
+        if request.delete_data {
+            match request.confirm.as_deref() {
+                Some(confirmed) if confirmed == device.id => {}
+                _ => {
+                    return Err(SupervisorError::Invalid(format!(
+                        "deleting device data requires confirm: \"{id}\""
+                    )));
+                }
+            }
+        }
+
+        {
+            let mut runtime = device.runtime.lock().await;
+            self.refresh_owned_process(&device, &mut runtime);
+            if runtime.process.is_some() {
+                return Err(SupervisorError::Conflict(format!(
+                    "device '{id}' is running; stop it before removing it"
+                )));
+            }
+            match runtime.state {
+                LifecycleState::Stopped | LifecycleState::Failed => {}
+                LifecycleState::External => {
+                    return Err(SupervisorError::Conflict(format!(
+                        "device '{id}' has a daemon this supervisor does not own; \
+                         stop it where it was started"
+                    )));
+                }
+                state => {
+                    return Err(SupervisorError::Conflict(format!(
+                        "device '{id}' is {state:?} and cannot be removed"
+                    )));
+                }
+            }
+        }
+
+        // Refused before anything is written, so a containment failure cannot
+        // leave a forgotten registration behind pointing at surviving data.
+        let doomed = if request.delete_data {
+            Some(self.contained_home(&device)?)
+        } else {
+            None
+        };
+
+        {
+            let mut devices = self.inner.devices.write().await;
+            devices.remove(id);
+            if let Err(error) = self.inner.registry.save(&registrations(&devices)) {
+                devices.insert(id.to_owned(), device.clone());
+                return Err(error.into());
+            }
+        }
+
+        if let Some(home) = doomed {
+            std::fs::remove_dir_all(&home).map_err(|error| {
+                SupervisorError::Internal(anyhow::anyhow!(
+                    "delete device home {}: {error}",
+                    home.display()
+                ))
+            })?;
+        }
+
+        self.publish(
+            EventKind::DeviceRemoved,
+            Some(id.to_owned()),
+            if request.delete_data {
+                "device removed and its data deleted"
+            } else {
+                "device removed; its data was left in place"
+            },
+        );
+        Ok(())
+    }
+
+    /// The device's home, proven right now to sit beneath the managed root.
+    ///
+    /// Containment is re-established at the moment of use rather than trusted
+    /// from registration time: a directory can become a junction between the
+    /// two, and the check is only worth anything if it observes what the
+    /// delete will actually follow.
+    fn contained_home(&self, device: &Device) -> Result<PathBuf, SupervisorError> {
+        let home = std::fs::canonicalize(&device.home).map_err(|error| {
+            SupervisorError::Invalid(format!(
+                "device home {} cannot be resolved, so it will not be deleted: {error}",
+                device.home.display()
+            ))
+        })?;
+        let root = &self.inner.state_root;
+        if !home.starts_with(root) || &home == root {
+            return Err(SupervisorError::Invalid(format!(
+                "device home {} is not contained by the managed root {}, so it will not be deleted",
+                home.display(),
+                root.display()
+            )));
+        }
+        Ok(home)
     }
 
     // Keep this guard for the full transition so concurrent lifecycle requests cannot interleave.
@@ -624,7 +983,11 @@ impl Supervisor {
                     Some(id.to_owned()),
                     "daemon running",
                 );
-                return Ok(snapshot_device(&device, &runtime));
+                return Ok(snapshot_device(
+                    &device,
+                    &runtime,
+                    self.observation_of(&device.id),
+                ));
             }
             if tokio::time::Instant::now() >= deadline {
                 if let Some(process) = runtime.process.as_mut() {
@@ -667,7 +1030,11 @@ impl Supervisor {
             runtime.state = LifecycleState::Stopped;
             runtime.started_at_ms = None;
             runtime.last_error = None;
-            return Ok(snapshot_device(&device, &runtime));
+            return Ok(snapshot_device(
+                &device,
+                &runtime,
+                self.observation_of(&device.id),
+            ));
         }
         runtime.state = LifecycleState::Stopping;
         self.publish(
@@ -715,7 +1082,11 @@ impl Supervisor {
                     Some(id.to_owned()),
                     "daemon stopped",
                 );
-                return Ok(snapshot_device(&device, &runtime));
+                return Ok(snapshot_device(
+                    &device,
+                    &runtime,
+                    self.observation_of(&device.id),
+                ));
             }
             if tokio::time::Instant::now() >= deadline {
                 runtime.state = LifecycleState::Running;
@@ -768,12 +1139,31 @@ impl Supervisor {
             Some(id.to_owned()),
             "daemon force-stopped",
         );
-        Ok(snapshot_device(&device, &runtime))
+        Ok(snapshot_device(
+            &device,
+            &runtime,
+            self.observation_of(&device.id),
+        ))
     }
 
+    /// Stop and start one device, and tell every consumer to re-baseline.
+    ///
+    /// The lifecycle events alone describe the process coming down and going
+    /// back up. They do not describe what the *new* process knows: a restarted
+    /// daemon re-reads its store and re-dials its peers, so connection and fact
+    /// state on the other side of a restart is not derivable from the events
+    /// that crossed it. The `SnapshotRequired` goes out on the same stream, in
+    /// sequence, which is what makes "everything before this is accounted for"
+    /// a statement a consumer can act on.
     pub async fn restart_device(&self, id: &str) -> Result<DeviceSnapshot, SupervisorError> {
         self.stop_device(id).await?;
-        self.start_device(id).await
+        let started = self.start_device(id).await?;
+        self.publish_signal(ClientSignal::SnapshotRequired(
+            SnapshotReason::DeviceRestarted {
+                device_id: id.to_owned(),
+            },
+        ));
+        Ok(started)
     }
 
     pub async fn snapshot(&self) -> WorkbenchSnapshot {
@@ -783,7 +1173,7 @@ impl Supervisor {
         for device in devices {
             let mut runtime = device.runtime.lock().await;
             self.refresh_owned_process(&device, &mut runtime);
-            let snapshot = snapshot_device(&device, &runtime);
+            let snapshot = snapshot_device(&device, &runtime, self.observation_of(&device.id));
             drop(runtime);
             snapshots.push(snapshot);
         }
@@ -850,7 +1240,19 @@ impl Supervisor {
         }
     }
 
-    fn record_connection_observations(&self, current: BTreeMap<ConnectionKey, ConnectionSnapshot>) {
+    /// Fold this pass's peers into the observed topology.
+    ///
+    /// `sampled` names the devices this pass actually read. Only those devices'
+    /// rows may be retired: a peer belonging to a device nobody could ask is
+    /// *kept*, because the alternative is publishing a `Disconnected` for a
+    /// connection that was never observed to end. That is the defect this
+    /// signature exists to make impossible — a sampling failure must not be
+    /// reportable as a disconnection.
+    fn record_connection_observations(
+        &self,
+        current: BTreeMap<ConnectionKey, ConnectionSnapshot>,
+        sampled: &[String],
+    ) {
         let changes = {
             let mut previous = lock_recovering(&self.inner.observed_connections);
             let mut changes = Vec::new();
@@ -863,12 +1265,18 @@ impl Supervisor {
                     Some(_) => {}
                 }
             }
+            let mut merged = current;
             for (key, connection) in previous.iter() {
-                if !current.contains_key(key) {
+                if merged.contains_key(key) {
+                    continue;
+                }
+                if sampled.contains(&connection.source_device_id) {
                     changes.push((ConnectionEventKind::Disconnected, connection.clone()));
+                } else {
+                    merged.insert(key.clone(), connection.clone());
                 }
             }
-            *previous = current;
+            *previous = merged;
             changes
         };
         for (kind, connection) in changes {
@@ -936,7 +1344,7 @@ impl Supervisor {
             }
             event
         };
-        let _ = self.inner.events.send(backend_event);
+        let _ = self.inner.signals.send(ClientSignal::Event(backend_event));
     }
 
     fn publish(&self, kind: EventKind, device_id: Option<String>, message: impl Into<String>) {
@@ -956,7 +1364,15 @@ impl Supervisor {
             }
             event
         };
-        let _ = self.inner.events.send(event);
+        self.publish_signal(ClientSignal::Event(event));
+    }
+
+    /// Put one signal on the stream.
+    ///
+    /// A send with no receivers is not a failure — nobody is listening yet, or
+    /// the last consumer went away, and neither is the supervisor's problem.
+    fn publish_signal(&self, signal: ClientSignal) {
+        let _ = self.inner.signals.send(signal);
     }
 
     fn next_revision(&self) -> u64 {
@@ -967,10 +1383,14 @@ impl Supervisor {
     }
 }
 
-fn snapshot_device(device: &Device, runtime: &Runtime) -> DeviceSnapshot {
+fn snapshot_device(
+    device: &Device,
+    runtime: &Runtime,
+    observation: DeviceObservation,
+) -> DeviceSnapshot {
     DeviceSnapshot {
         id: device.id.clone(),
-        label: device.label.clone(),
+        label: device.label(),
         home: path_text(&device.home),
         log_path: path_text(&device_log_path(device)),
         state: runtime.state,
@@ -978,7 +1398,18 @@ fn snapshot_device(device: &Device, runtime: &Runtime) -> DeviceSnapshot {
         owned: runtime.process.is_some(),
         started_at_ms: runtime.started_at_ms,
         last_error: runtime.last_error.clone(),
+        facts: observation.facts,
+        observation: observation.health,
     }
+}
+
+/// A log that cannot be stat'd reads as zero rather than as an error: the log
+/// is a growth signal, not a fact anything depends on, and a device that has
+/// never written one is the ordinary case.
+fn log_size(device: &Device) -> u64 {
+    std::fs::metadata(device_log_path(device))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn device_log_path(device: &Device) -> PathBuf {
@@ -1023,7 +1454,7 @@ fn lock_recovering<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-fn create_device(
+fn open_device(
     state_root: &Path,
     registration: RegisteredDevice,
 ) -> Result<Arc<Device>, SupervisorError> {
@@ -1047,7 +1478,7 @@ fn create_device(
     }
     Ok(Arc::new(Device {
         id: registration.id,
-        label: registration.label,
+        label: StdMutex::new(registration.label),
         home,
         runtime: Mutex::new(Runtime {
             state: LifecycleState::Stopped,
@@ -1106,6 +1537,10 @@ mod tests {
     struct FakeDriver {
         alive: Arc<AtomicBool>,
         connections: Arc<StdMutex<Vec<crate::driver::ObservedConnection>>>,
+        /// When set, sampling fails — the daemon is up but cannot be asked,
+        /// which is the case the whole observation-health contract exists for.
+        sampling_fails: Arc<AtomicBool>,
+        station_id: Arc<StdMutex<Option<String>>>,
     }
 
     struct FakeChild {
@@ -1153,13 +1588,39 @@ mod tests {
             Ok(())
         }
 
-        async fn connections(&self, _home: &Path) -> Vec<crate::driver::ObservedConnection> {
-            lock_recovering(&self.connections).clone()
+        async fn facts(&self, _home: &Path) -> anyhow::Result<DeviceFacts> {
+            if self.sampling_fails.load(Ordering::SeqCst) {
+                return Err(anyhow::anyhow!("control channel refused"));
+            }
+            Ok(DeviceFacts {
+                version: Some("0.0.0-test".into()),
+                station_id: lock_recovering(&self.station_id).clone(),
+                ..DeviceFacts::default()
+            })
+        }
+
+        async fn connections(
+            &self,
+            _home: &Path,
+        ) -> anyhow::Result<Vec<crate::driver::ObservedConnection>> {
+            if self.sampling_fails.load(Ordering::SeqCst) {
+                return Err(anyhow::anyhow!("control channel refused"));
+            }
+            Ok(lock_recovering(&self.connections).clone())
         }
     }
 
+    /// The knobs a test reaches for, so a test that only cares about one of
+    /// them does not have to name the others.
+    #[derive(Clone, Default)]
+    struct Fake {
+        connections: Arc<StdMutex<Vec<crate::driver::ObservedConnection>>>,
+        sampling_fails: Arc<AtomicBool>,
+        station_id: Arc<StdMutex<Option<String>>>,
+    }
+
     fn fake_supervisor(alive: Arc<AtomicBool>, root: &Path) -> Supervisor {
-        fake_supervisor_with_connections(alive, Arc::new(StdMutex::new(Vec::new())), root)
+        fake_supervisor_with(alive, &Fake::default(), root)
     }
 
     fn fake_supervisor_with_connections(
@@ -1167,11 +1628,27 @@ mod tests {
         connections: Arc<StdMutex<Vec<crate::driver::ObservedConnection>>>,
         root: &Path,
     ) -> Supervisor {
+        fake_supervisor_with(
+            alive,
+            &Fake {
+                connections,
+                ..Fake::default()
+            },
+            root,
+        )
+    }
+
+    fn fake_supervisor_with(alive: Arc<AtomicBool>, fake: &Fake, root: &Path) -> Supervisor {
         let root = std::fs::canonicalize(root).expect("canonical test root");
         Supervisor::with_driver(
             root,
             PathBuf::from("fake-lait"),
-            Arc::new(FakeDriver { alive, connections }),
+            Arc::new(FakeDriver {
+                alive,
+                connections: fake.connections.clone(),
+                sampling_fails: fake.sampling_fails.clone(),
+                station_id: fake.station_id.clone(),
+            }),
             Duration::from_millis(100),
             Duration::from_millis(100),
         )
@@ -1195,7 +1672,7 @@ mod tests {
         let supervisor = fake_supervisor(alive.clone(), directory.path());
 
         let added = supervisor
-            .add_device("alice".into(), "Alice's laptop".into())
+            .create_device("alice".into(), "Alice's laptop".into())
             .await
             .expect("add device");
         assert_eq!(added.state, LifecycleState::Stopped);
@@ -1221,7 +1698,7 @@ mod tests {
         let supervisor = fake_supervisor(alive.clone(), directory.path());
         supervisor.observe_in_background(Duration::from_millis(5));
         supervisor
-            .add_device("alice".into(), "Alice".into())
+            .create_device("alice".into(), "Alice".into())
             .await
             .expect("add device");
         supervisor
@@ -1258,13 +1735,556 @@ mod tests {
         );
     }
 
+    /// Everything currently readable from a stream without blocking, so a test
+    /// can assert on a whole sequence rather than one signal at a time.
+    async fn drain(signals: &mut Signals) -> Vec<ClientSignal> {
+        let mut drained = Vec::new();
+        while let Ok(Some(signal)) =
+            tokio::time::timeout(Duration::from_millis(50), signals.recv()).await
+        {
+            drained.push(signal);
+        }
+        drained
+    }
+
+    fn revisions(signals: &[ClientSignal]) -> Vec<u64> {
+        signals
+            .iter()
+            .filter_map(|signal| match signal {
+                ClientSignal::Event(event) => Some(event.revision),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The stream must exist before the first observation, or the window
+    /// between them drops events with nothing to say so. `start` returning both
+    /// together is what makes that unmissable.
+    #[tokio::test]
+    async fn the_stream_is_established_before_the_first_snapshot() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(directory.path()).expect("canonical root");
+        let (supervisor, mut signals) = Supervisor::start(Config {
+            state_root: root,
+            executable: PathBuf::from("fake-lait"),
+            observation_interval: Duration::from_secs(3_600),
+        })
+        .await
+        .expect("start");
+
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+
+        let drained = drain(&mut signals).await;
+        assert!(
+            matches!(
+                drained.first(),
+                Some(ClientSignal::Event(event)) if matches!(event.kind, EventKind::DeviceAdded)
+            ),
+            "the first signal after start was not the first thing that happened: {drained:?}"
+        );
+        supervisor.shutdown().await;
+    }
+
+    /// Revisions are monotonic across a supervised process restart, and the
+    /// re-baseline point is *on the same stream* rather than beside it.
+    #[tokio::test]
+    async fn signals_stay_ordered_across_a_supervised_restart() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+        let mut signals = supervisor.signals();
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+        supervisor
+            .restart_device("alice")
+            .await
+            .expect("restart device");
+
+        let drained = drain(&mut signals).await;
+        let seen = revisions(&drained);
+        assert!(
+            seen.windows(2).all(|pair| pair[0] < pair[1]),
+            "revisions went backwards across a restart: {seen:?}"
+        );
+
+        let restart_at = drained
+            .iter()
+            .position(|signal| {
+                matches!(
+                    signal,
+                    ClientSignal::SnapshotRequired(SnapshotReason::DeviceRestarted { device_id })
+                        if device_id == "alice"
+                )
+            })
+            .expect("a restart published no re-baseline point");
+        assert!(
+            restart_at > 0 && restart_at == drained.len() - 1,
+            "the re-baseline point is not where the restart finished: {restart_at} of {}",
+            drained.len()
+        );
+    }
+
+    /// A consumer that falls behind is told at the position it fell behind, not
+    /// silently skipped forward — and the history cursor covers what it missed.
+    #[tokio::test]
+    async fn a_lagged_consumer_is_told_in_sequence_and_can_recover_from_history() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+        let mut signals = supervisor.signals();
+
+        // The broadcast buffer is 256; overrun it without reading.
+        for index in 0..300 {
+            supervisor.publish(EventKind::LogChanged, None, format!("filler {index}"));
+        }
+
+        let first = signals.recv().await.expect("a signal");
+        assert!(
+            matches!(
+                first,
+                ClientSignal::SnapshotRequired(SnapshotReason::ConsumerLagged { dropped }) if dropped > 0
+            ),
+            "a lagged consumer was skipped forward instead of told: {first:?}"
+        );
+
+        // Recovery is snapshot plus history, and history is deliberately the
+        // deeper of the two: the broadcast buffer holds 256 signals and the
+        // event journal holds 1,024, so everything the stream dropped is still
+        // readable. A consumer told it lagged can therefore rebuild exactly,
+        // rather than being told to re-baseline and finding the gap unreadable.
+        let page = supervisor
+            .event_history(&HistoryQuery {
+                after_revision: Some(0),
+                limit: Some(MAX_PAGE_LIMIT),
+                ..HistoryQuery::default()
+            })
+            .expect("event history");
+        assert!(
+            !page.dropped_before,
+            "history lost what the stream dropped, so a lagged consumer cannot recover"
+        );
+        assert_eq!(
+            page.events.first().map(|event| event.revision),
+            Some(1),
+            "history does not reach back to the first event the consumer missed"
+        );
+    }
+
+    fn peer(space: &str, id: &str) -> crate::driver::ObservedConnection {
+        crate::driver::ObservedConnection {
+            space_id: space.into(),
+            peer_id: id.into(),
+            peer_nick: id.into(),
+            state: "connected".into(),
+            online: true,
+            dialable: true,
+            blocked_by: None,
+        }
+    }
+
+    /// The defect this exists to prevent: a daemon that is up but cannot be
+    /// asked must not read as a daemon with no peers.
+    #[tokio::test]
+    async fn a_sampling_failure_is_degraded_and_never_an_empty_topology() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let fake = Fake::default();
+        *lock_recovering(&fake.connections) =
+            vec![peer("ws_one", "peer-a"), peer("ws_one", "peer-b")];
+        let supervisor = fake_supervisor_with(alive, &fake, directory.path());
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+
+        let healthy = supervisor.snapshot().await;
+        assert_eq!(healthy.connections.len(), 2);
+        assert_eq!(
+            healthy.devices[0].observation.state,
+            ObservationState::Healthy
+        );
+        assert!(healthy.devices[0].observation.sampled_at_ms.is_some());
+        assert_eq!(
+            healthy.devices[0]
+                .facts
+                .as_ref()
+                .and_then(|facts| facts.version.as_deref()),
+            Some("0.0.0-test")
+        );
+
+        fake.sampling_fails.store(true, Ordering::SeqCst);
+        let degraded = supervisor.snapshot().await;
+
+        assert_eq!(
+            degraded.connections.len(),
+            2,
+            "a sampling failure emptied the topology"
+        );
+        let observation = &degraded.devices[0].observation;
+        assert_eq!(observation.state, ObservationState::Degraded);
+        assert!(
+            observation.stale_since_ms.is_some(),
+            "degraded without saying since when"
+        );
+        assert!(
+            observation.sampled_at_ms.is_some(),
+            "the last good sample time was thrown away, so nothing can say how old this is"
+        );
+        assert!(observation.error.is_some());
+        assert!(
+            degraded.devices[0].facts.is_some(),
+            "the last good facts were replaced by nothing"
+        );
+
+        // And no disconnection was ever published for a peer nobody watched
+        // leave.
+        let history = supervisor
+            .connection_history(&HistoryQuery::default())
+            .expect("connection history");
+        assert!(
+            !history
+                .events
+                .iter()
+                .any(|event| event.kind == ConnectionEventKind::Disconnected),
+            "a sampling failure published a disconnection"
+        );
+
+        // Recovery clears the staleness rather than leaving it stuck.
+        fake.sampling_fails.store(false, Ordering::SeqCst);
+        let recovered = supervisor.snapshot().await;
+        assert_eq!(
+            recovered.devices[0].observation.state,
+            ObservationState::Healthy
+        );
+        assert!(recovered.devices[0].observation.stale_since_ms.is_none());
+    }
+
+    /// Staleness measures the beginning of the degraded stretch. If each failed
+    /// attempt reset it, a surface could never say how old its figures are.
+    #[tokio::test]
+    async fn staleness_dates_from_the_first_failure_not_the_latest() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let fake = Fake::default();
+        let supervisor = fake_supervisor_with(alive, &fake, directory.path());
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+        supervisor.observe().await;
+
+        fake.sampling_fails.store(true, Ordering::SeqCst);
+        supervisor.observe().await;
+        let first = supervisor.observation_of("alice").health.stale_since_ms;
+        assert!(first.is_some());
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        supervisor.observe().await;
+        assert_eq!(
+            supervisor.observation_of("alice").health.stale_since_ms,
+            first,
+            "a second failure moved the staleness clock forward"
+        );
+    }
+
+    /// A stopped device genuinely has nothing to report, which is not the same
+    /// as a failure to read it.
+    #[tokio::test]
+    async fn a_stopped_device_is_not_a_degraded_observation() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let fake = Fake::default();
+        let supervisor = fake_supervisor_with(alive, &fake, directory.path());
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+
+        let snapshot = supervisor.snapshot().await;
+        assert_eq!(snapshot.devices[0].state, LifecycleState::Stopped);
+        assert_eq!(
+            snapshot.devices[0].observation.state,
+            ObservationState::Healthy
+        );
+        assert!(snapshot.devices[0].facts.is_none());
+    }
+
+    /// Correlation is by Station id, not by nickname — a nick is authored and
+    /// not unique, so matching on it would let one device's label claim another.
+    #[tokio::test]
+    async fn an_observed_peer_is_correlated_to_a_managed_device_by_station_id() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let fake = Fake::default();
+        *lock_recovering(&fake.station_id) = Some("stn_alice".into());
+        *lock_recovering(&fake.connections) = vec![
+            peer("ws_one", "stn_alice"),
+            peer("ws_one", "stn_somebody_else"),
+        ];
+        let supervisor = fake_supervisor_with(alive, &fake, directory.path());
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+
+        // Two passes: the first learns alice's Station id, the second can use
+        // it. Correlation reads facts already gathered and never asks for more.
+        supervisor.observe().await;
+        let snapshot = supervisor.snapshot().await;
+
+        let managed: Vec<&ConnectionSnapshot> = snapshot
+            .connections
+            .iter()
+            .filter(|connection| connection.target_device_id.is_some())
+            .collect();
+        assert_eq!(managed.len(), 1, "exactly one peer is a managed device");
+        assert_eq!(managed[0].peer_id, "stn_alice");
+        assert_eq!(managed[0].target_device_id.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn a_rename_survives_a_restart_and_keeps_the_running_process() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        {
+            let supervisor = fake_supervisor(alive.clone(), directory.path());
+            supervisor
+                .create_device("alice".into(), "Alice".into())
+                .await
+                .expect("create device");
+            let running = supervisor
+                .start_device("alice")
+                .await
+                .expect("start device");
+            assert_eq!(running.pid, Some(42));
+
+            let renamed = supervisor
+                .update_device(
+                    "alice",
+                    UpdateDeviceRequest {
+                        label: Some("  Alice's laptop  ".into()),
+                    },
+                )
+                .await
+                .expect("rename");
+            assert_eq!(renamed.label, "Alice's laptop", "label is trimmed");
+            assert!(
+                renamed.owned && renamed.pid == Some(42),
+                "renaming stranded the owned process handle"
+            );
+
+            assert!(
+                matches!(
+                    supervisor
+                        .update_device(
+                            "alice",
+                            UpdateDeviceRequest {
+                                label: Some(" ".into())
+                            }
+                        )
+                        .await,
+                    Err(SupervisorError::Invalid(_))
+                ),
+                "an empty label was accepted"
+            );
+            supervisor.stop_device("alice").await.expect("stop");
+        }
+
+        let reopened = fake_supervisor(alive, directory.path());
+        let snapshot = reopened.snapshot().await;
+        assert_eq!(snapshot.devices[0].label, "Alice's laptop");
+    }
+
+    #[tokio::test]
+    async fn removal_is_refused_while_a_device_is_running_or_external() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive.clone(), directory.path());
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+
+        assert!(
+            matches!(
+                supervisor
+                    .remove_device("alice", RemoveDeviceRequest::default())
+                    .await,
+                Err(SupervisorError::Conflict(_))
+            ),
+            "a running device was removed"
+        );
+        assert!(alive.load(Ordering::SeqCst), "removal stopped the daemon");
+
+        // A daemon this supervisor did not spawn is external, and external is a
+        // refusal for removal exactly as it is for force-stop.
+        supervisor.stop_device("alice").await.expect("stop");
+        alive.store(true, Ordering::SeqCst);
+        supervisor.observe().await;
+        assert!(matches!(
+            supervisor
+                .remove_device("alice", RemoveDeviceRequest::default())
+                .await,
+            Err(SupervisorError::Conflict(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn removal_and_deletion_are_separate_operations() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+        for id in ["alice", "bob"] {
+            supervisor
+                .create_device(id.into(), id.into())
+                .await
+                .expect("create device");
+        }
+        let homes = directory.path().join("devices");
+
+        // Forgetting a device leaves what it holds alone.
+        supervisor
+            .remove_device("alice", RemoveDeviceRequest::default())
+            .await
+            .expect("remove alice");
+        assert!(
+            homes.join("alice").is_dir(),
+            "an unregister deleted the device's data"
+        );
+        assert!(matches!(
+            supervisor.start_device("alice").await,
+            Err(SupervisorError::NotFound(_))
+        ));
+
+        // Deleting needs to be asked for by name. A bare flag is not consent.
+        assert!(matches!(
+            supervisor
+                .remove_device(
+                    "bob",
+                    RemoveDeviceRequest {
+                        delete_data: true,
+                        confirm: None,
+                    },
+                )
+                .await,
+            Err(SupervisorError::Invalid(_))
+        ));
+        assert!(matches!(
+            supervisor
+                .remove_device(
+                    "bob",
+                    RemoveDeviceRequest {
+                        delete_data: true,
+                        confirm: Some("alice".into()),
+                    },
+                )
+                .await,
+            Err(SupervisorError::Invalid(_))
+        ));
+        assert!(homes.join("bob").is_dir(), "a refused delete still deleted");
+
+        supervisor
+            .remove_device(
+                "bob",
+                RemoveDeviceRequest {
+                    delete_data: true,
+                    confirm: Some("bob".into()),
+                },
+            )
+            .await
+            .expect("delete bob");
+        assert!(!homes.join("bob").exists(), "confirmed delete left data");
+        assert!(
+            homes.join("alice").is_dir(),
+            "deleting one device took another's data with it"
+        );
+    }
+
+    /// The managed root is the containment boundary, and it is re-established at
+    /// the moment of deletion rather than trusted from registration time.
+    #[tokio::test]
+    async fn data_outside_the_managed_root_is_refused_rather_than_deleted() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+
+        let escaped = std::fs::canonicalize(elsewhere.path()).expect("canonical elsewhere");
+        let device = supervisor.device("alice").await.expect("device");
+        let contained = Arc::new(Device {
+            id: device.id.clone(),
+            label: StdMutex::new(device.label()),
+            home: escaped.clone(),
+            runtime: Mutex::new(Runtime {
+                state: LifecycleState::Stopped,
+                process: None,
+                started_at_ms: None,
+                last_error: None,
+            }),
+        });
+        assert!(
+            matches!(
+                supervisor.contained_home(&contained),
+                Err(SupervisorError::Invalid(_))
+            ),
+            "a home outside the managed root passed containment"
+        );
+        assert!(escaped.is_dir(), "the refused path was deleted anyway");
+
+        // The root itself is not a device home, whatever a registry claims.
+        let rooted = Arc::new(Device {
+            id: device.id.clone(),
+            label: StdMutex::new(device.label()),
+            home: supervisor.inner.state_root.clone(),
+            runtime: Mutex::new(Runtime {
+                state: LifecycleState::Stopped,
+                process: None,
+                started_at_ms: None,
+                last_error: None,
+            }),
+        });
+        assert!(matches!(
+            supervisor.contained_home(&rooted),
+            Err(SupervisorError::Invalid(_))
+        ));
+    }
+
     #[tokio::test]
     async fn never_force_stops_a_process_it_did_not_spawn() {
         let directory = tempfile::tempdir().expect("tempdir");
         let alive = Arc::new(AtomicBool::new(true));
         let supervisor = fake_supervisor(alive.clone(), directory.path());
         supervisor
-            .add_device("bob".into(), "Bob".into())
+            .create_device("bob".into(), "Bob".into())
             .await
             .expect("add device");
 
@@ -1288,7 +2308,7 @@ mod tests {
         {
             let supervisor = fake_supervisor(alive.clone(), directory.path());
             supervisor
-                .add_device("alice".into(), "Alice".into())
+                .create_device("alice".into(), "Alice".into())
                 .await
                 .expect("add device");
         }
@@ -1308,7 +2328,7 @@ mod tests {
         {
             let supervisor = fake_supervisor(alive.clone(), directory.path());
             supervisor
-                .add_device("alice".into(), "Alice".into())
+                .create_device("alice".into(), "Alice".into())
                 .await
                 .expect("add device");
         }
@@ -1362,7 +2382,7 @@ mod tests {
         let supervisor =
             fake_supervisor_with_connections(alive, connections.clone(), directory.path());
         supervisor
-            .add_device("alice".into(), "Alice".into())
+            .create_device("alice".into(), "Alice".into())
             .await
             .expect("add device");
 
@@ -1388,7 +2408,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let supervisor = fake_supervisor(Arc::new(AtomicBool::new(false)), directory.path());
         let device = supervisor
-            .add_device("alice".into(), "Alice".into())
+            .create_device("alice".into(), "Alice".into())
             .await
             .expect("add device");
         supervisor.observe().await;

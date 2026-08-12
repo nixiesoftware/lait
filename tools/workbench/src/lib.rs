@@ -45,6 +45,10 @@ pub use contract::{
     BackendEvent, Capabilities, ConnectionEvent, ConnectionEventKind, ConnectionHistoryPage,
     ConnectionSnapshot, CreateDeviceRequest, DeviceAction, DeviceSnapshot, EnvironmentSnapshot,
     EventHistoryPage, EventKind, HistoryQuery, LifecycleState, LogEntry, LogLevel, LogPage,
-    LogQuery, WorkbenchSnapshot, SCHEMA_VERSION,
+    LogQuery, RemoveDeviceRequest, UpdateDeviceRequest, WorkbenchSnapshot, SCHEMA_VERSION,
 };
-pub use supervisor::{Config, Supervisor, SupervisorError, OBSERVATION_INTERVAL};
+pub use contract::{
+    ClientSignal, DeviceFacts, ObservationHealth, ObservationState, SnapshotReason, WorldCall,
+    WorldCaller,
+};
+pub use supervisor::{Config, Signals, Supervisor, SupervisorError, OBSERVATION_INTERVAL};

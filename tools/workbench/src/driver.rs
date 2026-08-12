@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::contract::DeviceFacts;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use lait::control::{ControlRoute, HostReply, OrbitAddress, Request, Response};
@@ -38,8 +39,22 @@ pub(crate) trait DaemonDriver: Send + Sync {
     async fn spawn(&self, home: &Path) -> Result<Box<dyn OwnedDaemon>>;
     async fn request_stop(&self, home: &Path) -> Result<()>;
 
-    async fn connections(&self, _home: &Path) -> Vec<ObservedConnection> {
-        Vec::new()
+    /// What this daemon reports about itself.
+    ///
+    /// `Err` means the daemon could not be asked. It is never an empty answer:
+    /// the caller keeps the last good facts and marks them stale instead of
+    /// replacing them with nothing.
+    async fn facts(&self, _home: &Path) -> Result<DeviceFacts> {
+        Ok(DeviceFacts::default())
+    }
+
+    /// The peers this daemon can already see.
+    ///
+    /// `Ok(vec![])` is "no peers" and `Err` is "nobody could ask", and the whole
+    /// point of the `Result` is that those are different answers. Collapsing
+    /// them was the defect: a sampling failure rendered as a disconnection.
+    async fn connections(&self, _home: &Path) -> Result<Vec<ObservedConnection>> {
+        Ok(Vec::new())
     }
 }
 
@@ -119,27 +134,42 @@ impl DaemonDriver for LaitDriver {
         }
     }
 
-    async fn connections(&self, home: &Path) -> Vec<ObservedConnection> {
-        let Ok(client) = Self::client(home) else {
-            return Vec::new();
-        };
-        let Ok(Response::Host(HostReply::Context { orbits, .. })) = client
-            .request(ControlRoute::Daemon, &Request::HostContext, None)
-            .await
-        else {
-            return Vec::new();
-        };
+    async fn facts(&self, home: &Path) -> Result<DeviceFacts> {
+        let context = Self::host_context(home).await?;
+        Ok(DeviceFacts {
+            version: Some(context.version),
+            build: None,
+            station_id: None,
+            local_client_url: None,
+            spaces: context
+                .orbits
+                .into_iter()
+                .map(|orbit| orbit.space)
+                .collect(),
+        })
+    }
+
+    async fn connections(&self, home: &Path) -> Result<Vec<ObservedConnection>> {
+        let client = Self::client(home)?;
+        let context = Self::host_context(home).await?;
         let mut connections = Vec::new();
-        for orbit in orbits {
+        for orbit in context.orbits {
             let Some(space) = mechanics::ids::SpaceId::parse(&orbit.space) else {
                 continue;
             };
             let route = ControlRoute::Orbit {
                 address: OrbitAddress::for_store(Path::new(&orbit.path), space),
             };
-            let Ok(Response::Who { peers }) = client.request_if_running(route, &Request::Who).await
-            else {
-                continue;
+            // `request_if_running` is the passive half of the contract: a
+            // vacant Orbit answers "not running" rather than being placed to
+            // produce a peer list. An Orbit that is not up contributes no
+            // connections and is not an error — listing must not cost placement.
+            let peers = match client.request_if_running(route, &Request::Who).await {
+                Ok(Response::Who { peers }) => peers,
+                Ok(_) => continue,
+                Err(error) => {
+                    return Err(anyhow!("read peers for space {}: {error:#}", orbit.space));
+                }
             };
             connections.extend(peers.into_iter().map(|peer| ObservedConnection {
                 space_id: orbit.space.clone(),
@@ -151,6 +181,26 @@ impl DaemonDriver for LaitDriver {
                 blocked_by: peer.blocked_by,
             }));
         }
-        connections
+        Ok(connections)
+    }
+}
+
+struct HostContextFacts {
+    version: String,
+    orbits: Vec<lait::orbits::Entry>,
+}
+
+impl LaitDriver {
+    async fn host_context(home: &Path) -> Result<HostContextFacts> {
+        match Self::client(home)?
+            .request(ControlRoute::Daemon, &Request::HostContext, None)
+            .await?
+        {
+            Response::Host(HostReply::Context {
+                version, orbits, ..
+            }) => Ok(HostContextFacts { version, orbits }),
+            Response::Error { message, .. } => Err(anyhow!(message)),
+            other => Err(anyhow!("unexpected host context reply: {other:?}")),
+        }
     }
 }
