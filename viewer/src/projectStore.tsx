@@ -1327,7 +1327,7 @@ export function useProjectRegistry<T>(
  * asking the daemon about a project that isn't there.
  */
 /**
- * The open project's dependency graph, for the timeline.
+ * The open project's dependency graph.
  *
  * Fetched by the same rule as milestones — only when a project is actually
  * open, and keyed on its id so switching projects does not read the last one's
@@ -1351,7 +1351,17 @@ export function useProjectGraph(
   );
 }
 
-export function usePlanGeometry(
+/**
+ * A project's compiled morphology.
+ *
+ * Two surfaces read this and they differ only in the seed. A Plan passes its
+ * roots and, on a historical revision, the generation it was composed against;
+ * the project's dependency view passes no roots at all, which the engine reads
+ * as the whole project at the head. It was called `usePlanGeometry` while the
+ * Plan was its only caller — the name was about who asked rather than what it
+ * answers, and it stopped being true the moment a second surface asked.
+ */
+export function useGeometry(
   space: string,
   projectId: string | null | undefined,
   roots: readonly string[],

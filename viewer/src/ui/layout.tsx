@@ -8,7 +8,6 @@ import {
   Bot,
   ChevronRight,
   Folder,
-  GanttChart,
   Inbox,
   UserRound,
 } from "lucide-react";
@@ -419,7 +418,6 @@ export const DESTINATION_ICON = {
   inbox: <Inbox />,
   "my-issues": <UserRound />,
   projects: <ProjectIcon />,
-  timeline: <GanttChart />,
   workspace: <Folder />,
 } as const;
 

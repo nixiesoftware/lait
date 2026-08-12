@@ -341,10 +341,9 @@ describe("team scope", () => {
     expect(parseRoute(loc("/spaces/ws_1/teams/PLAT")).view).toBe("list");
   });
 
-  it("carries the roadmap and the project list, and nothing that is about one project", () => {
+  it("carries the project list and the row views, and nothing that is about one project", () => {
     for (const [segment, view] of [
       ["board", "board"],
-      ["timeline", "timeline"],
       ["projects", "projects"],
     ] as const) {
       const route = parseRoute(loc(`/spaces/ws_1/teams/PLAT/${segment}`));

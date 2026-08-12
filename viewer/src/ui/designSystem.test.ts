@@ -155,11 +155,15 @@ describe("mark axis is pinned, not scalar-derived", () => {
  */
 const CONTROL_RANGE = /\b(min-)?h-(5|6|7|8|9|10|11)\b/;
 /**
- * Geometry that is not a control height. The timeline is a chart — its bars and
- * rulers are plotted, not laid out on a control ladder — and the switch's track
- * and thumb are sub-control parts below the smallest rung.
+ * Geometry that is not a control height: a chart's bars and rulers are plotted
+ * rather than laid out on a control ladder, and the switch's track and thumb are
+ * sub-control parts below the smallest rung.
+ *
+ * Empty since the dependency morphology was withdrawn — it was the only chart
+ * here. Kept because the exemption is a standing rule about charts, not about
+ * that one file.
  */
-const NOT_A_CONTROL = new Set(["Timeline.tsx"]);
+const NOT_A_CONTROL = new Set<string>([]);
 
 describe("control heights speak one vocabulary", () => {
   it("no numeric h-* in the control range outside charts", () => {
@@ -193,9 +197,8 @@ describe("control heights speak one vocabulary", () => {
 
   it("the ladder is the only control-height vocabulary in use", () => {
     expect(rungsUsed("ctl")).toEqual(["lg", "md", "sm", "xl", "xs"]);
-    // `lg` (44) is the header and sidebar; `md` (36) the toolbar and the
-    // timeline's scale. `bar-sm` (32) is declared in `styles.css` and read by
-    // nothing today.
+    // `lg` (44) is the header and sidebar; `md` (36) the toolbar. `bar-sm`
+    // (32) is declared in `styles.css` and read by nothing today.
     //
     // That is a normal state for a rung, not a defect, but it has a consequence
     // worth writing down once: Tailwind emits an `@theme` variable only where

@@ -8,9 +8,16 @@
 //!
 //! Nothing in this module is replicated truth. It compiles the Issue graph and
 //! ordinary metadata at one World generation into a phenotype: components,
-//! dependency layers, hierarchy depth, facets, closure state, and typed
-//! residual loci. Layout engines may bend this phenotype into an organic view,
-//! but may not invent a node, edge, position, or gap.
+//! dependency layers, contracted containment regions and their layers, which
+//! constraints a longer path already implies, hierarchy depth, facets, closure
+//! state, and typed residual loci. Layout engines may bend this phenotype into
+//! an organic view, but may not invent a node, edge, position, or gap.
+//!
+//! The rule that decides what belongs here: a fact about the *graph* is this
+//! module's, a fact about the *picture* is a layout engine's. Both the region
+//! contraction and the transitive reduction are longest-path and reachability
+//! questions over canonical relations — the same class as `layer` — so both are
+//! settled once, here, rather than recomputed by every head that draws them.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -32,6 +39,10 @@ pub struct GeometryView {
     pub nodes: Vec<GeometryNode>,
     pub edges: Vec<GeometryEdge>,
     pub components: Vec<GeometryComponent>,
+    /// The containment partition, contracted and layered. Empty when nothing in
+    /// the selection is a sub-issue of anything else.
+    #[serde(default)]
+    pub regions: Vec<GeometryRegion>,
     pub residuals: Vec<ResidualLocus>,
     pub closure: GeometryClosure,
 }
@@ -47,6 +58,11 @@ pub struct GeometryNode {
     /// Stable order inside the layer, for initial placement before relaxation.
     pub ordinal: u32,
     pub hierarchy_depth: u32,
+    /// The containment block this Issue belongs to, by [`GeometryRegion::id`].
+    /// `None` when it has no selected parent and no selected children, which is
+    /// every Issue in a project that does not use sub-issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
     pub children: Vec<String>,
@@ -67,6 +83,39 @@ pub struct GeometryEdge {
     pub relation: String,
     pub role: String,
     pub to: String,
+    /// This constraint is already asserted by a longer path, so drawing it adds
+    /// a line and no information. Only ever true of a `constraint` edge.
+    ///
+    /// Declared last so the derived `Ord` still keys on `(from, relation, role,
+    /// to)` and the edge order is unchanged by its arrival.
+    #[serde(default)]
+    pub implied: bool,
+}
+
+/// One block of the containment partition, contracted to a single vertex.
+///
+/// A region is a sub-issue tree — the top-level ancestor and everything under
+/// it — and `layer` is that tree's position in the *quotient* graph, where an
+/// edge exists whenever any member of one region blocks any member of another.
+/// It is the same longest-path pass the nodes get, run on the contracted graph,
+/// and it is here rather than in a layout engine for the same reason `layer` is:
+/// it is a fact about the graph, it is identical on every replica, and a second
+/// implementation of Kahn is the thing this module exists to prevent.
+///
+/// Only groupings of two or more appear. A node with no containment relation is
+/// not a region of one — it carries `region: None` and this list stays empty for
+/// a project that has never used sub-issues.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeometryRegion {
+    /// The containment root's canonical id, which names the region.
+    pub id: String,
+    pub nodes: Vec<String>,
+    /// Longest dependency distance from an unconstrained region. `None` when the
+    /// contraction is cyclic — two regions can block each other through
+    /// different members even though the Issue graph itself is acyclic.
+    pub layer: Option<u32>,
+    /// Stable order inside the region layer, biggest first.
+    pub ordinal: u32,
 }
 
 /// A connected patch of the morphology. Several patches are a forest, not a
@@ -282,6 +331,76 @@ fn hierarchy_depth(doc: &str, parents: &BTreeMap<String, String>) -> u32 {
     depth
 }
 
+/// The top of this Issue's containment tree, within the selection.
+///
+/// Stops at the selection boundary: a parent nobody asked for is not a region
+/// anybody can draw, so the walk ends and the highest selected ancestor names
+/// the block. `seen` guards the walk the same way [`hierarchy_depth`] does — the
+/// sub-issue tree has a CRDT forbidding cycles, and this does not rely on it.
+fn region_root<'a>(
+    doc: &'a str,
+    parents: &'a BTreeMap<String, String>,
+    selected: &BTreeSet<String>,
+) -> &'a str {
+    let mut cursor = doc;
+    let mut seen = BTreeSet::new();
+    while seen.insert(cursor) {
+        let Some(parent) = parents.get(cursor) else {
+            break;
+        };
+        if !selected.contains(parent) {
+            break;
+        }
+        cursor = parent;
+    }
+    cursor
+}
+
+/// Is this constraint already asserted by a longer path?
+///
+/// Walks forward from `from`'s *other* dependents, so any path it finds is one
+/// that does not use the edge under test. Two prunes keep it cheap and both are
+/// exact rather than budgets: the walk never revisits a node, and it abandons
+/// any node at or past `to`'s layer, because `layer` is a longest-path depth and
+/// nothing at or beyond that depth can still reach `to`.
+///
+/// Callers must only ask about edges spanning two or more layers — see the
+/// candidate filter in [`compile`], which is what keeps this off the hot path.
+fn implied_by_longer_path(
+    from: &str,
+    to: &str,
+    blocks: &BTreeMap<String, Vec<String>>,
+    layer: &BTreeMap<String, u32>,
+) -> bool {
+    let Some(&arrival) = layer.get(to) else {
+        return false;
+    };
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut stack: Vec<&str> = Vec::new();
+    for next in blocks.get(from).into_iter().flatten() {
+        if next.as_str() != to && seen.insert(next.as_str()) {
+            stack.push(next.as_str());
+        }
+    }
+    while let Some(doc) = stack.pop() {
+        if doc == to {
+            return true;
+        }
+        let Some(&at) = layer.get(doc) else {
+            continue;
+        };
+        if at >= arrival {
+            continue;
+        }
+        for next in blocks.get(doc).into_iter().flatten() {
+            if seen.insert(next.as_str()) {
+                stack.push(next.as_str());
+            }
+        }
+    }
+    false
+}
+
 fn facets(catalog: &CatalogState, issue: &IssueState) -> Vec<GeometryFacet> {
     let mut result = Vec::new();
     if let Some(project) = catalog.projects.get(&issue.project) {
@@ -401,6 +520,9 @@ pub fn compile(
             relation: relation.clone(),
             role: relation_role(relation).into(),
             to: to.clone(),
+            // Settled below, once the layer pass has run: the reduction is
+            // defined against depths this loop has not computed yet.
+            implied: false,
         });
         if relation == "blocks" {
             blocked_by.entry(to.clone()).or_default().push(from.clone());
@@ -414,6 +536,9 @@ pub fn compile(
                 relation: "contains".into(),
                 role: "containment".into(),
                 to: child.clone(),
+                // Containment carries no order, so nothing about it can be
+                // implied by a dependency path.
+                implied: false,
             });
         }
     }
@@ -524,6 +649,134 @@ pub fn compile(
     }
     for values in children.values_mut() {
         values.sort();
+    }
+
+    // Transitive reduction of the constraint graph.
+    //
+    // An edge is implied when a longer dependency path already asserts it, so
+    // drawing it adds a line and no information. Recording it here rather than
+    // letting a layout engine work it out is the same call `layer` makes: it is
+    // a property of the graph, it is identical on every replica, and two
+    // replicas that disagreed about it would draw different charts from one
+    // generation.
+    //
+    // The candidate filter is what makes this affordable, and it is exact
+    // rather than a budget. An edge landing in the very next layer can never be
+    // implied — `layer` is a longest-path depth, so any detour of two or more
+    // hops would put its target at least two layers on. Only edges that skip a
+    // layer are ever asked about, which is why a 50,000-issue chain, where every
+    // edge spans exactly one layer, produces no candidates at all instead of a
+    // quadratic reachability sweep.
+    let mut implied: BTreeSet<(String, String)> = BTreeSet::new();
+    for (from, tos) in &blocks {
+        let Some(&depart) = layer.get(from) else {
+            continue;
+        };
+        for to in tos {
+            let Some(&arrival) = layer.get(to) else {
+                continue;
+            };
+            if arrival <= depart.saturating_add(1) {
+                continue;
+            }
+            if implied_by_longer_path(from, to, &blocks, &layer) {
+                implied.insert((from.clone(), to.clone()));
+            }
+        }
+    }
+
+    // The containment partition, contracted to one vertex per sub-issue tree and
+    // layered by the same longest-path pass the Issues get.
+    let mut region_of: BTreeMap<String, String> = BTreeMap::new();
+    let mut members: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for doc in &selected {
+        let root = region_root(doc, &catalog.parents, &selected).to_string();
+        members.entry(root.clone()).or_default().push(doc.clone());
+        region_of.insert(doc.clone(), root);
+    }
+    // A grouping of one is a node, not a region. Dropping them is what keeps
+    // this empty for a project that has never made a sub-issue, rather than
+    // emitting one block per Issue and calling it a partition.
+    members.retain(|_, docs| docs.len() > 1);
+    region_of.retain(|_, root| members.contains_key(root));
+
+    let mut region_blocks: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (from, tos) in &blocks {
+        let Some(source) = region_of.get(from) else {
+            continue;
+        };
+        for to in tos {
+            let Some(target) = region_of.get(to) else {
+                continue;
+            };
+            if source != target {
+                region_blocks
+                    .entry(source.clone())
+                    .or_default()
+                    .insert(target.clone());
+            }
+        }
+    }
+    let mut region_indegree: BTreeMap<String, usize> =
+        members.keys().map(|id| (id.clone(), 0usize)).collect();
+    for targets in region_blocks.values() {
+        for target in targets {
+            if let Some(count) = region_indegree.get_mut(target) {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+    let mut region_layer = BTreeMap::<String, u32>::new();
+    let mut settling: BTreeSet<String> = region_indegree
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+    while let Some(id) = settling.pop_first() {
+        let at = region_layer.get(&id).copied().unwrap_or(0);
+        region_layer.insert(id.clone(), at);
+        for next in region_blocks.get(&id).into_iter().flatten() {
+            let deeper = at.saturating_add(1);
+            region_layer
+                .entry(next.clone())
+                .and_modify(|current| *current = (*current).max(deeper))
+                .or_insert(deeper);
+            if let Some(count) = region_indegree.get_mut(next) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    settling.insert(next.clone());
+                }
+            }
+        }
+    }
+
+    // Biggest first inside a layer: the main body of the plan is what a reader
+    // should meet first, and a two-Issue offshoot must not displace it. Ties by
+    // id, so one generation orders the same way twice.
+    let mut regions: Vec<GeometryRegion> = members
+        .into_iter()
+        .map(|(id, mut docs)| {
+            docs.sort();
+            let at = region_layer.get(&id).copied();
+            GeometryRegion {
+                id,
+                nodes: docs,
+                layer: at,
+                ordinal: 0,
+            }
+        })
+        .collect();
+    regions.sort_by(|left, right| {
+        left.layer
+            .cmp(&right.layer)
+            .then_with(|| right.nodes.len().cmp(&left.nodes.len()))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut filled: BTreeMap<Option<u32>, u32> = BTreeMap::new();
+    for region in &mut regions {
+        let taken = filled.entry(region.layer).or_insert(0);
+        region.ordinal = *taken;
+        *taken = taken.saturating_add(1);
     }
 
     let mut ordinal = BTreeMap::new();
@@ -669,6 +922,7 @@ pub fn compile(
             layer: layer.get(doc).copied(),
             ordinal: ordinal.get(doc).copied().unwrap_or(0),
             hierarchy_depth: hierarchy_depth(doc, &catalog.parents),
+            region: region_of.get(doc).cloned(),
             parent: catalog
                 .parents
                 .get(doc)
@@ -747,8 +1001,21 @@ pub fn compile(
         project: project.into(),
         roots: roots.to_vec(),
         nodes,
-        edges: edges.into_iter().collect(),
+        // The reduction lands here rather than at insertion because it is
+        // defined against layers the edge loop had not computed yet. Guarded on
+        // the set being non-empty so a graph with no skipping edges — the 50k
+        // chain, and most real projects — pays nothing for the lookup.
+        edges: edges
+            .into_iter()
+            .map(|mut edge| {
+                if !implied.is_empty() && edge.role == "constraint" {
+                    edge.implied = implied.contains(&(edge.from.clone(), edge.to.clone()));
+                }
+                edge
+            })
+            .collect(),
         components,
+        regions,
         residuals,
         closure,
     }
@@ -1031,6 +1298,158 @@ mod tests {
         }));
     }
 
+    /// `count` Issues in one project, named `iss_{n:026}` and otherwise bare —
+    /// the shape tests build their own relations on top.
+    fn bare(
+        project: &str,
+        count: usize,
+    ) -> (
+        CatalogState,
+        BTreeMap<String, std::sync::Arc<IssueState>>,
+        Vec<String>,
+    ) {
+        let mut catalog = CatalogState::default();
+        catalog.workflow = crate::dto::default_workflow();
+        catalog.projects.insert(
+            project.into(),
+            ProjectMeta {
+                name: "Shape".into(),
+                key: "SHAPE".into(),
+                ..ProjectMeta::default()
+            },
+        );
+        let docs: Vec<String> = (0..count).map(|index| format!("iss_{index:026}")).collect();
+        let issues = docs
+            .iter()
+            .map(|doc| (doc.clone(), issue(project, "backlog")))
+            .collect();
+        (catalog, issues, docs)
+    }
+
+    fn compiled(
+        catalog: &CatalogState,
+        issues: &BTreeMap<String, std::sync::Arc<IssueState>>,
+        project: &str,
+    ) -> GeometryView {
+        let aliases = crate::views::derive_aliases(catalog, |doc| {
+            issues
+                .get(doc)
+                .map(|value: &std::sync::Arc<IssueState>| value.project.as_str())
+        });
+        compile(catalog, &aliases, issues, project, &[], "04".repeat(32))
+    }
+
+    fn blocks_edge(catalog: &mut CatalogState, from: &str, to: &str) {
+        catalog
+            .edges
+            .insert((from.into(), "blocks".into(), to.into()));
+    }
+
+    #[test]
+    fn a_constraint_a_longer_path_asserts_is_implied_and_a_single_hop_never_is() {
+        let project = "prj_01k1k8q6c6t0g0000000000000";
+        let (mut catalog, issues, docs) = bare(project, 3);
+        // a → b → c, plus the shortcut a → c that the chain already asserts.
+        blocks_edge(&mut catalog, &docs[0], &docs[1]);
+        blocks_edge(&mut catalog, &docs[1], &docs[2]);
+        blocks_edge(&mut catalog, &docs[0], &docs[2]);
+        let view = compiled(&catalog, &issues, project);
+
+        let implied: Vec<(String, String)> = view
+            .edges
+            .iter()
+            .filter(|edge| edge.implied)
+            .map(|edge| (edge.from.clone(), edge.to.clone()))
+            .collect();
+        assert_eq!(implied, vec![(docs[0].clone(), docs[2].clone())]);
+
+        // The reduction changes what a drawing should ink, never what the graph
+        // says. The shortcut is still an edge and still constrains `c`.
+        assert_eq!(
+            view.edges
+                .iter()
+                .filter(|edge| edge.role == "constraint")
+                .count(),
+            3
+        );
+        let c = view
+            .nodes
+            .iter()
+            .find(|node| node.row.doc_id.to_string() == docs[2])
+            .expect("c is compiled");
+        assert_eq!(c.blocked_by.len(), 2);
+        assert_eq!(c.layer, Some(2));
+    }
+
+    /// The candidate filter, stated as a test because it is the whole reason the
+    /// reduction is affordable: a chain has no skipping edges, so it asks no
+    /// reachability questions at all.
+    #[test]
+    fn an_unbranched_chain_offers_the_reduction_no_candidates() {
+        let project = "prj_01k1k8q6c6t0g0000000000000";
+        let (mut catalog, issues, docs) = bare(project, 40);
+        for pair in docs.windows(2) {
+            blocks_edge(&mut catalog, &pair[0], &pair[1]);
+        }
+        let view = compiled(&catalog, &issues, project);
+        assert_eq!(view.edges.len(), 39);
+        assert!(view.edges.iter().all(|edge| !edge.implied));
+    }
+
+    #[test]
+    fn regions_contract_the_containment_partition_and_take_their_own_layer() {
+        let project = "prj_01k1k8q6c6t0g0000000000000";
+        let (mut catalog, issues, docs) = bare(project, 6);
+        // Two sub-issue trees: docs[0] over 1 and 2, docs[3] over 4 and 5.
+        for child in [&docs[1], &docs[2]] {
+            catalog.parents.insert(child.clone(), docs[0].clone());
+        }
+        for child in [&docs[4], &docs[5]] {
+            catalog.parents.insert(child.clone(), docs[3].clone());
+        }
+        // One constraint crosses the two trees, and it is a member-to-member
+        // edge rather than root-to-root — the contraction is what turns it into
+        // an order over the trees themselves.
+        blocks_edge(&mut catalog, &docs[2], &docs[4]);
+        let view = compiled(&catalog, &issues, project);
+
+        assert_eq!(view.regions.len(), 2);
+        let first = &view.regions[0];
+        let second = &view.regions[1];
+        assert_eq!(first.id, docs[0]);
+        assert_eq!(first.layer, Some(0));
+        assert_eq!(first.ordinal, 0);
+        assert_eq!(first.nodes.len(), 3);
+        assert_eq!(second.id, docs[3]);
+        assert_eq!(second.layer, Some(1));
+        assert_eq!(second.nodes.len(), 3);
+
+        // Every member carries its block, including the roots themselves.
+        for doc in [&docs[0], &docs[1], &docs[2]] {
+            let node = view
+                .nodes
+                .iter()
+                .find(|node| node.row.doc_id.to_string() == **doc)
+                .expect("member is compiled");
+            assert_eq!(node.region.as_deref(), Some(docs[0].as_str()));
+        }
+    }
+
+    /// The degenerate case, and the one most projects are in: no sub-issues, so
+    /// there is no partition to report. Emitting one block per Issue instead
+    /// would be a partition in name only, and would put 50,000 of them on the
+    /// wire for the fixture below.
+    #[test]
+    fn a_project_without_sub_issues_reports_no_regions() {
+        let project = "prj_01k1k8q6c6t0g0000000000000";
+        let (mut catalog, issues, docs) = bare(project, 5);
+        blocks_edge(&mut catalog, &docs[0], &docs[1]);
+        blocks_edge(&mut catalog, &docs[1], &docs[2]);
+        let view = compiled(&catalog, &issues, project);
+        assert!(view.regions.is_empty());
+        assert!(view.nodes.iter().all(|node| node.region.is_none()));
+    }
+
     /// A release-mode gate for the largest ordinary project shape. Ignored in
     /// the default suite because it is a performance fixture, not a functional
     /// assertion; run it explicitly before changing the compiler.
@@ -1072,6 +1491,13 @@ mod tests {
         assert_eq!(view.closure.total, 50_000);
         assert_eq!(view.closure.ready, 1);
         assert_eq!(view.closure.blocked, 49_999);
+        // The reduction's candidate filter, exercised at the scale it exists
+        // for: every edge in a chain lands one layer on, so none is a candidate
+        // and the reachability walk never runs once. Regions stay empty for a
+        // related reason — nothing here is a sub-issue of anything, so there is
+        // no partition, rather than fifty thousand blocks of one.
+        assert!(view.edges.iter().all(|edge| !edge.implied));
+        assert!(view.regions.is_empty());
         if !cfg!(debug_assertions) {
             assert!(
                 elapsed < std::time::Duration::from_secs(2),

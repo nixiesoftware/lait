@@ -114,7 +114,7 @@ export function Welcome({
      * The whole window, not a panel inside it.
      *
      * This used to render in the work area with the shell still around it — a
-     * sidebar offering Inbox, My issues, Projects and Roadmap, and a tree
+     * sidebar offering Inbox, My issues and Projects, and a tree
      * headed "PROJECTS 0 · No projects yet". Every one of those is a
      * destination that cannot exist yet: the surface whose entire job is "there
      * is no space here" was framed by a navigation tree for a space. It read as

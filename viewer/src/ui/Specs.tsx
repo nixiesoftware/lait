@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowUp, Ban, ChevronDown, Eye, History, MoreHorizontal, PencilLine, Plus, Stamp, X } from "lucide-react";
 
 import {
@@ -39,7 +39,7 @@ import {
   useGrants,
   useProjectBaselines,
   useProjectBoard,
-  usePlanGeometry,
+  useGeometry,
   useProjectSpecs,
   useProjectViewerStore,
   useSpecObservations,
@@ -73,10 +73,33 @@ import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { PlanIdentity, PlanSurface, planCounts } from "./Plan";
 import { NewSpecDialog } from "./NewSpec";
-import { Button, DropdownMenu, DropdownMenuItem, IconButton, TextArea, TextInput } from "@astryxdesign/core";
+import { Button, CheckboxInput, DropdownMenu, DropdownMenuItem, IconButton, TextArea, TextInput } from "@astryxdesign/core";
 import { Combobox, type Option } from "./Picker";
+import { fromRowControl } from "./fields";
 import { cn, interactiveRow } from "./primitives";
 import { short, when } from "./time";
+
+/**
+ * The register's rhythm, borrowed wholesale from the issue list rather than
+ * invented. Two lists in one product that scroll the same way, inset the same
+ * way and separate their piles the same way are one list the reader has learned
+ * once; two that nearly agree are two.
+ *
+ * No rules anywhere. A row is separated from its neighbour by a hover fill and
+ * a rounded corner, and a pile is separated from the next by a quiet raised
+ * band — which is why the header cancels the border its sticky variant would
+ * otherwise draw. A rule under a filled header states the same boundary twice,
+ * and the register's whole job is to let titles be the thing you read.
+ */
+const SPEC_LIST_INSET = "px-4";
+const SPEC_GROUP_HEADER = cn(
+  "mx-2 mt-1 rounded-row border-b-0 bg-raised",
+  SPEC_LIST_INSET,
+);
+const SPEC_ROW_LAYOUT = cn("group/row flex items-center gap-2 py-2", SPEC_LIST_INSET);
+/** The 16px column the checkbox lives in, shared with the group header above it
+ *  so the index and title keep the same geometry whether or not it is showing. */
+const SPEC_LEADING_SLOT = "flex size-icon-md shrink-0 items-center justify-center";
 
 /**
  * The project's Specs — an Issue says what work is happening, a Spec says what
@@ -149,25 +172,6 @@ export function Specs({
       .catch((reason: unknown) => onError(reason instanceof Error ? reason.message : String(reason)));
   };
 
-  const createBaseline = () => {
-    if (!project) return;
-    void (async () => {
-      const name = await ask.prompt({
-        title: "New baseline",
-        body: "A named set of exact issued revisions. It starts empty; you pin members next.",
-        label: "Name",
-        confirmText: "Create",
-      });
-      if (!name) return;
-      try {
-        const created = await store.createBaseline(spaceId, project, name, []);
-        onOpenBaseline(created.baseline);
-      } catch (reason) {
-        onError(reason instanceof Error ? reason.message : String(reason));
-      }
-    })();
-  };
-
   return (
     <>
       {baseline ? (
@@ -186,6 +190,7 @@ export function Specs({
           members={members}
           readOnly={readOnly}
           onOpen={onOpen}
+          onOpenBaseline={onOpenBaseline}
           onError={onError}
         />
       ) : (
@@ -194,9 +199,7 @@ export function Specs({
           project={project}
           readOnly={readOnly}
           onOpen={onOpen}
-          onOpenBaseline={onOpenBaseline}
           onCompose={onCompose}
-          onComposeBaseline={createBaseline}
         />
       )}
       {composing !== null && project && (
@@ -231,21 +234,59 @@ function Register({
   project,
   readOnly,
   onOpen,
-  onOpenBaseline,
   onCompose,
-  onComposeBaseline,
 }: {
   spaceId: string;
   project: string | null;
   readOnly: boolean;
   onOpen: (spec: string) => void;
-  onOpenBaseline: (baseline: string) => void;
   onCompose: (next: SpecKind | "any") => void;
-  onComposeBaseline: () => void;
 }) {
   const specs = useProjectSpecs(spaceId, project);
-  const baselines = useProjectBaselines(spaceId, project).data ?? [];
   const references = useSpecReferences(spaceId, project).data ?? [];
+  /**
+   * The checked set, by spec id.
+   *
+   * Held here rather than per-section: a selection that reset when you crossed
+   * from Requirements into Designs would be a selection *of a section*, and the
+   * register's whole shape is that these are one project's documents grouped,
+   * not separate lists stacked.
+   */
+  const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
+  /** The row a range extends from — the last one toggled without shift. */
+  const anchor = useRef<string | null>(null);
+  const ordered = useMemo(
+    () => groupByKind(specs.data ?? []).flatMap((group) => group.specs.map((row) => row.spec)),
+    [specs.data],
+  );
+  const toggle = useCallback(
+    (spec: string, extend: boolean) => {
+      setChecked((current) => {
+        const next = new Set(current);
+        const from = anchor.current;
+        // Shift extends from the anchor through the register's own reading
+        // order — across group boundaries, because that is the order on screen.
+        if (extend && from !== null && from !== spec) {
+          const a = ordered.indexOf(from);
+          const b = ordered.indexOf(spec);
+          if (a >= 0 && b >= 0) {
+            const span = ordered.slice(Math.min(a, b), Math.max(a, b) + 1);
+            const adding = !current.has(spec);
+            for (const id of span) {
+              if (adding) next.add(id);
+              else next.delete(id);
+            }
+            return next;
+          }
+        }
+        if (next.has(spec)) next.delete(spec);
+        else next.add(spec);
+        anchor.current = spec;
+        return next;
+      });
+    },
+    [ordered],
+  );
 
   if (specs.error) {
     return (
@@ -261,7 +302,7 @@ function Register({
   }
 
   const groups = groupByKind(specs.data);
-  if (groups.length === 0 && baselines.length === 0) {
+  if (groups.length === 0) {
     return (
       <ApplicationState
         kind="empty"
@@ -285,48 +326,11 @@ function Register({
 
   return (
     <div className="@container min-h-0 flex-1 overflow-y-auto">
-      {/* A different noun, so a different row shape and its own group — not a
-          kind alongside the others. A Baseline says which exact revisions were
-          agreed together; a Spec says one thing. */}
-      {baselines.length > 0 && (
-        <section>
-          <GroupHeader sticky title="Baselines" count={baselines.length} />
-          <ul aria-label="Baselines">
-            {baselines.map((row) => (
-              <li
-                key={row.baseline}
-                className={cn(interactiveRow({ size: "lg" }), "flex items-center gap-3 px-4")}
-                onClick={() => onOpenBaseline(row.baseline)}
-                onKeyDown={(event) => {
-                  if (event.target === event.currentTarget && event.key === "Enter") {
-                    event.preventDefault();
-                    onOpenBaseline(row.baseline);
-                  }
-                }}
-                data-baseline-id={row.baseline}
-                tabIndex={0}
-              >
-                <span className="min-w-0 flex-1 truncate font-medium">{row.body.name}</span>
-                <span className="text-mute shrink-0 text-2xs">
-                  {row.body.members.length} member{row.body.members.length === 1 ? "" : "s"}
-                </span>
-                {row.issued.length === 1 && (
-                  <span className="text-mute shrink-0 text-2xs">
-                    {row.issued[0] === row.revision ? "Issued" : "Issued · draft ahead"}
-                  </span>
-                )}
-                <span className="text-mute w-14 shrink-0 text-right text-2xs tabular-nums">
-                  {when(row.body.ts)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
       {groups.map(({ kind, specs: rows }) => (
         <section key={kind}>
           <GroupHeader
             sticky
+            className={SPEC_GROUP_HEADER}
             title={SPEC_KIND_PLURAL[kind]}
             count={rows.length}
             actions={
@@ -345,50 +349,63 @@ function Register({
             }
           />
           <ul aria-label={SPEC_KIND_PLURAL[kind]}>
-            {rows.map((row) => (
+            {rows.map((row, index) => (
               <SpecRow
                 key={row.spec}
                 spec={row}
+                index={index}
                 gap={verificationGap(row, references)}
+                readOnly={readOnly}
+                checked={checked.has(row.spec)}
+                anyChecked={checked.size > 0}
+                onToggleCheck={toggle}
                 onOpen={onOpen}
               />
             ))}
           </ul>
         </section>
       ))}
-      {/* Offered under the documents rather than beside "New spec": assembling a
-          set is something you do once there is something to put in it. */}
-      {!readOnly && project && specs.data.some((row) => row.issued.length === 1) && (
-        <div className="px-4 py-3">
-          <Button
-            onClick={onComposeBaseline}
-            icon={<Plus className="size-icon-sm" />}
-            label="New baseline"
-            variant="secondary"
-            elevation="low"
-            size="md"
-          />
-        </div>
-      )}
     </div>
   );
 }
 
 function SpecRow({
   spec,
+  index,
   gap,
+  readOnly,
+  checked,
+  anyChecked,
+  onToggleCheck,
   onOpen,
 }: {
   spec: SpecView;
+  /** Position within this kind's section, zero-based. */
+  index: number;
   /** In force, and nothing verifies it — the gap a coverage matrix looks for. */
   gap: boolean;
+  readOnly: boolean;
+  checked: boolean;
+  /** Any row checked anywhere, which is what keeps every box visible once one
+   *  is — a selection that hid itself between hovers is unreadable. */
+  anyChecked: boolean;
+  onToggleCheck: (spec: string, extend: boolean) => void;
   onOpen: (spec: string) => void;
 }) {
   const label = standingLabel(standing(spec));
   return (
     <li
-      className={cn(interactiveRow({ size: "lg" }), "flex items-center gap-3 px-4")}
-      onClick={() => onOpen(spec.spec)}
+      className={cn(
+        interactiveRow({ surface: "contained", selected: checked, size: "xl" }),
+        SPEC_ROW_LAYOUT,
+      )}
+      onClick={(event) => {
+        // A click that began on the checkbox is the checkbox's. Guarded here
+        // rather than stopped there — an intercepted click makes Radix cancel
+        // another popover's outside-dismissal, so nothing in a row swallows one.
+        if (fromRowControl(event)) return;
+        onOpen(spec.spec);
+      }}
       onKeyDown={(event) => {
         if (event.target === event.currentTarget && event.key === "Enter") {
           event.preventDefault();
@@ -396,13 +413,51 @@ function SpecRow({
         }
       }}
       data-spec-id={spec.spec}
+      aria-current={checked ? "true" : undefined}
       tabIndex={0}
     >
-      <span className="min-w-0 flex-1 truncate font-medium">
-        {spec.kind === "plan"
-          ? <PlanIdentity title={spec.title} compact />
-          : spec.title}
+      <span data-row-control="" className={SPEC_LEADING_SLOT}>
+        {!readOnly && (
+          <CheckboxInput
+            label={`Select ${spec.title}`}
+            isLabelHidden
+            size="sm"
+            value={checked}
+            onChange={(_value, event) =>
+              onToggleCheck(spec.spec, (event.nativeEvent as MouseEvent).shiftKey)
+            }
+            className={cn(
+              !anyChecked &&
+                !checked &&
+                "opacity-0 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100",
+            )}
+          />
+        )}
       </span>
+      {/* The section's own count, not the project's. It restarts at 00 under
+          every heading because it numbers a *pile* — "the third design" is a
+          thing somebody can say, where "the twenty-ninth document" is not.
+          Zero-padded so two digits never reflow the title edge, and tabular so
+          the column is a straight wall; it grows past two digits rather than
+          truncating, on the same reasoning as the issue list's key column.
+
+          No size of its own, so it inherits exactly what the title inherits and
+          the two sit on one baseline at one scale. The issue list's key is a
+          rung smaller than its title deliberately — a key is a handle you aim
+          at, not something you read — but this is a *count*, read along with
+          the name it numbers, and shrinking it would make the pile look like
+          metadata attached to the titles rather than the order of them. */}
+      <span className="text-dim shrink-0 font-mono tabular-nums">
+        {String(index).padStart(2, "0")}
+      </span>
+      {/* The title, and only the title. A Plan used to print the word "Plan"
+          before its own — which is right anywhere a Plan is named out of
+          context, and wrong here: the group header above it already says
+          "Plans", so the prefix was a column of the same word down the one
+          kind that had it, and the one row shape that did not match its
+          neighbours. `PlanIdentity` still earns its place on a relation row,
+          where there is no header to say what you are looking at. */}
+      <span className="min-w-0 flex-1 truncate font-medium">{spec.title}</span>
       {/* Not styled as a warning: nothing is broken, and a wall of amber over
           a project that has not written its proofs yet would be. It is a gap,
           said once, on the rows where it is actually a gap. */}
@@ -705,6 +760,7 @@ function Relations({
   references,
   readOnly,
   onOpen,
+  onOpenBaseline,
   onCommit,
 }: {
   view: SpecView;
@@ -716,6 +772,8 @@ function Relations({
   references: SpecReference[];
   readOnly: boolean;
   onOpen: (spec: string) => void;
+  /** A Baseline has no register, so the only way to one is a row that names it. */
+  onOpenBaseline: (baseline: string) => void;
   onCommit: (delta: LinkDelta) => void;
 }) {
   /** The assertions as this author has them, or `null` while they match the
@@ -757,6 +815,13 @@ function Relations({
     setStaged(links.filter((candidate) => linkKey(candidate) !== linkKey(link)));
 
   const row = (entry: LinkEntry, direction: "in" | "out") => {
+    // A Baseline is reachable *only* from a document that names it — it has no
+    // register of its own — so this row is its front door and has to open.
+    // Before, `open` was computed for Spec targets alone and a Baseline row
+    // rendered as inert text, which was survivable while the register listed
+    // them and is not now.
+    const target = direction === "out" ? entry.link.target : null;
+    const openBaselineId = target?.kind === "baseline" ? target.baseline : null;
     const open =
       direction === "out" && entry.link.target.kind === "spec"
         ? entry.link.target.spec
@@ -765,7 +830,9 @@ function Relations({
       direction === "out"
         ? (entry.link.target.kind === "spec"
             ? titles.get(entry.link.target.spec)?.title
-            : undefined) ?? targetLabel(entry.link.target)
+            : openBaselineId !== null
+              ? baselines.find((candidate) => candidate.baseline === openBaselineId)?.body.name
+              : undefined) ?? targetLabel(entry.link.target)
         : (entry.from?.title ?? entry.title ?? entry.source ?? "");
     const coordinate =
       direction === "out"
@@ -784,6 +851,14 @@ function Relations({
       >
         {open ? (
           <button type="button" className="hover:text-accent text-left" onClick={() => onOpen(open)}>
+            {identity}
+          </button>
+        ) : openBaselineId ? (
+          <button
+            type="button"
+            className="hover:text-accent text-left"
+            onClick={() => onOpenBaseline(openBaselineId)}
+          >
             {identity}
           </button>
         ) : (
@@ -1751,6 +1826,7 @@ function SpecReader({
   members,
   readOnly,
   onOpen,
+  onOpenBaseline,
   onError,
 }: {
   spaceId: string;
@@ -1760,6 +1836,8 @@ function SpecReader({
   members: MemberDto[];
   readOnly: boolean;
   onOpen: (spec: string | null) => void;
+  /** A Baseline is reachable only through a document that names it. */
+  onOpenBaseline: (baseline: string) => void;
   onError: (message: string) => void;
 }) {
   const store = useProjectViewerStore();
@@ -1790,7 +1868,7 @@ function SpecReader({
     ? history.find((entry) => entry.revision === viewing)
     : undefined;
   const geometryBody = selectedRevision?.body ?? view?.body;
-  const geometry = usePlanGeometry(
+  const geometry = useGeometry(
     spaceId,
     view?.kind === "plan" ? view.project : null,
     geometryBody?.plan?.roots ?? [],
@@ -1818,6 +1896,55 @@ function SpecReader({
     void store
       .reviseSpec(spaceId, view.spec, view.revision, patch)
       .catch((reason: unknown) => onError(reason instanceof Error ? reason.message : String(reason)));
+  };
+
+  /**
+   * Compose a Baseline from this Plan, and name it from this Plan in the same
+   * gesture.
+   *
+   * The link is not a convenience. A Baseline has no register of its own — it is
+   * reachable only through a document that names it — so a Baseline created
+   * without one is not merely unlinked, it is *unreachable*, and nothing on any
+   * surface would ever show it again. Creating and naming are therefore one act
+   * here, and a failure to link is reported rather than swallowed: a Baseline
+   * that exists with no way back to it is worse than one that was never made.
+   *
+   * `references` is the relation, deliberately the weakest one. A Plan is
+   * non-enforcing by kind, so it cannot govern the set it names, and choosing
+   * `incorporates` here would quietly pull the Baseline's members into the
+   * effective packet of everything the Plan touches. Anyone who means that can
+   * say so afterwards; nobody should say it by pressing "New baseline".
+   */
+  const createBaseline = () => {
+    if (!view || !view.project) return;
+    void (async () => {
+      const name = await ask.prompt({
+        title: "New baseline",
+        body: "A named set of exact issued revisions. It starts empty; you pin members next. This plan will reference it — that reference is the only way back to it.",
+        label: "Name",
+        confirmText: "Create",
+      });
+      if (!name) return;
+      try {
+        const created = await store.createBaseline(spaceId, view.project, name, []);
+        await store.relateSpec(spaceId, view.spec, view.revision, {
+          added: [
+            {
+              rel: "references",
+              target: {
+                kind: "baseline",
+                baseline: created.baseline,
+                revision: created.revision,
+              },
+            },
+          ],
+          removed: [],
+        });
+        onOpenBaseline(created.baseline);
+      } catch (reason) {
+        onError(reason instanceof Error ? reason.message : String(reason));
+      }
+    })();
   };
 
   const upgradeDocument = () => {
@@ -1967,6 +2094,10 @@ function SpecReader({
                 {progress.blocked > 0 && ` · ${progress.blocked} blocked`}
                 {(progress.cyclic + progress.stalled) > 0
                   && ` · ${progress.cyclic + progress.stalled} structurally unresolved`}
+                {/* The counts are the only derived reading left on the page, so
+                    they have to say which World they were taken from. A pinned
+                    revision reports its own generation; the head reports now. */}
+                {past && shown.generation && " · as of this revision"}
               </p>
             ) : null;
           })()}
@@ -2081,15 +2212,13 @@ function SpecReader({
               <>
                 {past && !shown.generation && (
                   <p className="text-mute mt-4 text-xs">
-                    This revision predates generation coordinates; its Issue morphology is live.
+                    This revision predates generation coordinates; its closure counts are live.
                   </p>
                 )}
                 <PlanSurface
                   plan={shown.plan}
                   rows={rows}
-                  geometry={geometry.data}
                   readOnly
-                  historical={Boolean(past && shown.generation)}
                   onSave={() => undefined}
                 />
               </>
@@ -2115,13 +2244,15 @@ function SpecReader({
               }}
             />
             {view.kind === "plan" && view.body.plan && (
-              <PlanSurface
-                plan={view.body.plan}
-                rows={rows}
-                geometry={geometry.data}
-                readOnly={false}
-                onSave={(plan) => revise({ plan })}
-              />
+              <>
+                <PlanSurface
+                  plan={view.body.plan}
+                  rows={rows}
+                  readOnly={false}
+                  onSave={(plan) => revise({ plan })}
+                />
+                {!locked && <NewBaseline onCreate={createBaseline} />}
+              </>
             )}
           </>
         )}
@@ -2140,6 +2271,7 @@ function SpecReader({
             // editor there would be a composer that exists to be refused.
             readOnly={locked || state.conflict !== null}
             onOpen={onOpen}
+            onOpenBaseline={onOpenBaseline}
             onCommit={(delta) => {
               void store
                 .relateSpec(spaceId, view.spec, view.revision, delta)
@@ -2183,6 +2315,29 @@ function SpecReader({
           />
         )}
       </article>
+    </div>
+  );
+}
+
+/**
+ * The only way a Baseline comes into existence.
+ *
+ * It sits under the Plan's seed rather than in the register, because the
+ * register no longer lists Baselines at all: a set of issued revisions is
+ * something a Plan assembles, and it is reached through the Plan that named it.
+ * Offering it anywhere else would create documents with no route back.
+ */
+function NewBaseline({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="mt-3">
+      <Button
+        onClick={onCreate}
+        icon={<Plus className="size-icon-sm" />}
+        label="New baseline"
+        variant="secondary"
+        elevation="low"
+        size="md"
+      />
     </div>
   );
 }

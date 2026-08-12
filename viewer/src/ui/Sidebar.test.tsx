@@ -58,10 +58,6 @@ describe("Sidebar navigation", () => {
 
     click("Projects");
     expect(onGo).toHaveBeenCalledWith("projects");
-    click("Roadmap");
-    // Explicitly project-less: Roadmap is the workspace chart, and `goto`
-    // would otherwise carry the open project into it.
-    expect(onGo).toHaveBeenCalledWith("timeline", null);
     click("My issues");
     expect(onMyIssues).toHaveBeenCalledOnce();
     click("Search issues");
@@ -74,7 +70,9 @@ describe("Sidebar navigation", () => {
     // the same three choices a pane away with two rows claiming to be current.
     // The nav answers "which project"; the strip answers "which face".
     const labels = [...host.querySelectorAll("button")].map((b) => b.textContent);
-    for (const face of ["Overview", "Activity", "Board", "Calendar"]) {
+    // Roadmap is in this list now: the workspace chart was withdrawn with the
+    // rest of the timeline views, so the nav must not still offer it.
+    for (const face of ["Overview", "Activity", "Board", "Calendar", "Roadmap"]) {
       expect(labels, `the tree must not offer ${face} — the project strip does`)
         .not.toContain(face);
     }

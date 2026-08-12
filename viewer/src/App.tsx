@@ -46,8 +46,6 @@ import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
 import { mergeBoards, projectsOf, teamAsProject } from "./core/teams";
-import { ProjectTimeline } from "./ui/ProjectTimeline";
-import { Roadmap } from "./ui/Roadmap";
 import { DisplayOptions } from "./ui/DisplayOptions";
 import { FilterMenu } from "./ui/FilterMenu";
 import type { IssueMutators } from "./ui/fields";
@@ -104,9 +102,7 @@ import {
   projectKeys,
   useProjectBoard,
   useProjectMilestones,
-  useProjectGraph,
   useSpaceBoards,
-  useSpaceMilestones,
   useProjectRegistry,
   useProjectViewerStore,
   useSpec,
@@ -787,19 +783,11 @@ export function App() {
    * `Special` CLI handler, not a `Request`, so no HTTP endpoint reaches it.)
    */
   //
-  // Timeline is the exception, and it is the reason the rule needed one. It is
-  // a project view *and* a workspace view — the same chart at two scales — so a
-  // project-less timeline route is a destination rather than an unresolved one,
-  // and defaulting a project into it made the workspace chart unreachable the
-  // moment a space had a project to default to. It also does not need the
-  // resolution: the workspace chart asks for every project's board by name.
-  //
-  // A team scope is the second exception, and the same one wearing a different
-  // hat: under a team `project` is null on purpose — the surfaces read every
+  // A team scope is the one exception, and it wears a different hat: under a team `project` is null on purpose — the surfaces read every
   // project the team owns — so defaulting one in would narrow a team's issues
   // to whichever project happened to sort first.
   useEffect(() => {
-    if (!isProjectView(view) || view === "timeline" || project !== null || team) return;
+    if (!isProjectView(view) || project !== null || team) return;
     if (projects.length === 0) return;
     setProject((projects.find((candidate) => !candidate.archived) ?? projects[0])!.key);
   }, [projects, project, team, view]);
@@ -1597,11 +1585,7 @@ export function App() {
     // `?issue=` while composing — and the two have to agree or a reload lands
     // somewhere the app was not.
     !composing?.page &&
-    // Timeline belongs here for the same reason the other three do: its rows
-    // are issues and its rail is a select target. Leaving it out meant a click
-    // on a timeline row wrote `?issue=` and set `detail`, and then nothing
-    // appeared — the one gesture every row advertises did nothing at all.
-    (view === "list" || view === "board" || view === "calendar" || view === "timeline"),
+    (view === "list" || view === "board" || view === "calendar"),
   );
   // Keep one panel topology for every view. The old two-id declaration mounted a
   // third panel only for issue-capable views, so the library rebalanced the
@@ -1799,36 +1783,6 @@ export function App() {
   // The open project's milestones, for the filter menu's Milestone facet. The
   // same resource the overview and the issue rail read — one fetch for all three.
   const milestones = useProjectMilestones(current ?? "", activeProject?.id).data ?? [];
-  // The project's edge set, for the timeline's sequence chart. Only that view
-  // reads it, but the hook has to be called unconditionally — and it costs
-  // nothing when no project is open, which is exactly when it resolves empty.
-  const projectGraph = useProjectGraph(current ?? "", activeProject?.id).data ?? null;
-  /**
-   * Every project's edge set, for the workspace sequence chart.
-   *
-   * Asked for only when the workspace timeline is what is on screen: it is N
-   * requests, and the other workspace surfaces have no use for them. Each one
-   * lands in its own resource, so opening a project afterwards reads the graph
-   * this already fetched rather than asking again.
-   */
-  /**
-   * The roadmap's data, fetched only while the roadmap is what is on screen.
-   *
-   * Two fan-outs of N requests each, so they are gated: every other workspace
-   * surface would be paying for rows and milestones it does not draw. Each
-   * project's answer lands in its own resource, so opening a project afterwards
-   * reads what this already fetched.
-   */
-  const atRoadmap = view === "timeline" && project === null;
-  const spaceBoards =
-    useSpaceBoards(current ?? "", atRoadmap ? liveProjects.map((p) => p.key) : []).data ?? {};
-  const spaceMilestones =
-    useSpaceMilestones(current ?? "", atRoadmap ? liveProjects.map((p) => p.id) : []).data ?? {};
-  const roadmapStates = useMemo(() => {
-    if (states.length > 0) return states;
-    const any = Object.values(spaceBoards)[0];
-    return any?.columns.map((c) => c.state) ?? [];
-  }, [spaceBoards, states]);
   const projectCounts = useMemo(() => {
     const counts = { backlog: 0, active: 0, done: 0, total: 0 };
     for (const column of board?.columns ?? []) {
@@ -1904,6 +1858,9 @@ export function App() {
   /** The layout showing, when one is — `null` on Overview, Activity and the
    *  workspace destinations. Narrowed once so every gate below reads the same. */
   const issueMode = isIssueMode(view) ? view : null;
+  /** Where the filter control belongs: the views that draw rows a filter can
+   *  narrow, which is exactly the issue layouts. */
+  const filterable = projectShell && Boolean(issueMode);
   /** The Spec being read, when one is. Its own resource, so a deep link resolves
    *  the title for the trail without the register having loaded. */
   const readingSpec = useSpec(current ?? "", view === "specs" ? openSpec : null).data ?? null;
@@ -2116,7 +2073,7 @@ export function App() {
    *
    * Rendered *instead of* the shell rather than inside it. The formation
    * surface used to sit in the work area with the sidebar still offering
-   * Inbox, My issues, Projects, Roadmap and a "PROJECTS 0" tree: a full
+   * Inbox, My issues, Projects and a "PROJECTS 0" tree: a full
    * navigation model for a workspace that does not exist yet, wrapped around
    * the one surface whose whole message is that it does not exist yet.
    *
@@ -2301,14 +2258,18 @@ export function App() {
                 // Re-entering Issues keeps the layout you were last drawing them
                 // in rather than snapping back to the list — the tree used to
                 // carry this rule and the strip inherits it.
-                onPick={(next) => api.goto(next === "list" ? issueLayout : next)}
+                onPick={(next) =>
+                  api.goto(
+                    next === "list" ? issueLayout : next,
+                  )
+                }
               />
               {/* The controls belong beside the slices they act on, not up in the
                   trail: filtering, display and "new issue" are all about THIS
                   list, while the bar above names where you are. One row, the
                   slices at its head and the tools at its tail. */}
               <span className="ml-auto flex items-center gap-1">
-              {projectShell && issueMode && (
+              {filterable && (
                 <FilterMenu
                   filter={filter}
                   labels={labels}
@@ -2328,7 +2289,7 @@ export function App() {
                   <DisplayOptions
                     display={display}
                     view={issueMode}
-                    onModeChange={(mode) => api.goto(mode)}
+                    onModeChange={(mode) => api.goto(mode as View)}
                     open={displayOpen}
                     onOpenChange={setDisplayOpen}
                     density={density}
@@ -2641,48 +2602,6 @@ export function App() {
               onSelect={api.openIssue}
               mutators={issueMutators}
               readOnly={readOnly}
-            />
-          ) : shown && view === "timeline" && activeProject ? (
-            /* One chart at two scales, and the scale is decided by whether a
-               project is open. Inside a project it is that project's sequence;
-               at the workspace it is every project's, grouped and read against
-               one ruler.
-
-               It used to be two different charts. The workspace one was a
-               roadmap — projects as bars on a month axis, from the start and
-               target dates a project carries — and it was the weaker half of
-               the pair by some distance: it could only draw the projects
-               somebody had typed two dates for, and it said nothing about what
-               was holding anything up. The dependency graph is data the tracker
-               keeps whether or not anyone fills a date in, so it is the thing
-               that can actually answer "what is happening in what order" at
-               both scales. */
-            <ProjectTimeline
-              board={shown}
-              // The whole project as well as the visible slice: the sequence is
-              // a fact about the project, so a filter scopes what is drawn and
-              // must not quietly restate how many rounds of work there are.
-              whole={board ?? shown}
-              graph={projectGraph}
-              milestones={milestones}
-              project={shown.project}
-              filtered={isActive(filter)}
-              selection={selection}
-              onSelect={api.openIssue}
-            />
-          ) : view === "timeline" ? (
-            <Roadmap
-              projects={teamProjects}
-              boards={spaceBoards}
-              milestones={spaceMilestones}
-              // The workflow is the space's, and at the workspace there is no
-              // open project to read it off. Any loaded board carries it, so
-              // the roadmap takes it from the first one that landed rather than
-              // from `states`, which is empty whenever no project is open —
-              // and an empty workflow makes every issue read as backlog.
-              states={roadmapStates}
-              members={members}
-              onOpenProject={(key) => api.goto("timeline", key)}
             />
           ) : shown && view === "list" ? (
             <IssueList
@@ -3093,7 +3012,6 @@ function workspaceTitle(view: View): string {
   if (view === "inbox") return "Inbox";
   if (view === "my-issues") return "My issues";
   if (view === "projects") return "Projects";
-  if (view === "timeline") return "Roadmap";
   if (view === "settings") return "Settings";
   return "Workspace";
 }

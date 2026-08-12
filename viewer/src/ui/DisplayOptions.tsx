@@ -1,4 +1,4 @@
-import { GanttChart, List, SlidersHorizontal, SquareKanban } from "lucide-react";
+import { List, SlidersHorizontal, SquareKanban } from "lucide-react";
 
 import type { DisplayState, GroupBy, OrderBy } from "../core/display";
 import { ISSUE_MODES, ISSUE_MODE_LABEL, type IssueMode } from "../core/registry";
@@ -7,21 +7,33 @@ import { cn, toolbarIconControl } from "./primitives";
 
 /** The layout switcher's glyphs. Same icons the sidebar gives the destination,
  *  so a board is drawn as a board wherever it is named. */
-const MODE_ICON = { list: List, board: SquareKanban, timeline: GanttChart } as const;
+const MODE_ICON = {
+  list: List,
+  board: SquareKanban,
+} as const;
 
 /**
  * The display-options popover — Linear's `Shift+V` surface, reduced to the axes
- * this client actually has: grouping, ordering, and whether deleted issues show.
+ * this client actually has.
  *
  * Controlled from the App so the keybinding can open it: an uncontrolled
  * popover would be the one overlay the registry couldn't reach.
  *
+ * **Issues only.** Specs briefly had layouts of its own — a register and a
+ * dependency morphology — and so this control took a `surface` telling it which
+ * set to offer. The morphology is withdrawn, which leaves the register as the
+ * only way to draw a Spec, and a switcher offering one choice is not a switcher.
+ * So the surface flag is gone with it.
+ *
+ * `display` stays optional even so. Its absence is what removes the grouping
+ * and ordering axes, rather than a flag naming the surface — the lesson from an
+ * earlier version that kept every layout in one switcher and grew a paragraph
+ * inside the popover explaining which axes did not apply to which. A switcher
+ * whose members need individual disclaimers is not offering one choice.
+ *
  * Grouping applies to the list (the board's columns *are* the status grouping);
- * ordering applies to both. Neither applies to the timeline, whose order is the
- * dependency graph's and not a preference — so it is told that rather than being
- * offered two controls that accept a click and change nothing. Deleted issues
- * are a dedicated list recovery mode; choosing it from the board moves to that
- * destination.
+ * ordering applies to both. Deleted issues are a dedicated list recovery mode;
+ * choosing it from the board moves to that destination.
  */
 export function DisplayOptions({
   display,
@@ -33,24 +45,25 @@ export function DisplayOptions({
   density,
   onDensityChange,
 }: {
-  display: DisplayState;
+  /** The issue axes. Absent where there are none — and its absence, not a
+   *  flag, is what keeps them off the panel. */
+  display?: DisplayState;
   /** Which layout is showing — grouping is disabled on the board. */
   view: IssueMode;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onChange: (d: DisplayState) => void;
+  onChange?: (d: DisplayState) => void;
   /** Switch layout. It is a route, so this navigates — but it belongs here,
-   *  with the other choices about how the same rows are drawn. */
+   *  with the other choices about how the same subject is drawn. */
   onModeChange: (mode: IssueMode) => void;
   density: "compact" | "comfortable";
   onDensityChange: (density: "compact" | "comfortable") => void;
 }) {
-  // Only count what this view actually spends. A timeline showing the "changed"
-  // dot because the *list* is grouped by assignee points at a panel where that
-  // choice is not even on screen.
-  const changed =
-    display.deleted ||
-    (view !== "timeline" && (display.group !== "status" || display.order !== "board"));
+  const modes = ISSUE_MODES;
+  const label = ISSUE_MODE_LABEL;
+  const changed = display
+    ? display.deleted || display.group !== "status" || display.order !== "board"
+    : false;
 
   return (
     <Popover
@@ -69,7 +82,7 @@ export function DisplayOptions({
             role="group"
             aria-label="Layout"
           >
-            {ISSUE_MODES.map((mode) => {
+            {modes.map((mode) => {
               const Glyph = MODE_ICON[mode];
               const active = view === mode;
               return (
@@ -83,68 +96,53 @@ export function DisplayOptions({
                   )}
                 >
                   <Glyph className="size-icon-sm" aria-hidden />
-                  {ISSUE_MODE_LABEL[mode]}
+                  {label[mode]}
                 </button>
               );
             })}
           </div>
 
-          {/* Neither axis exists on the timeline, and pretending otherwise was
-              worse than omitting them: both rendered live, both took a click,
-              both lit up as chosen, and neither moved a single row — the chart
-              is ordered by dependency depth and there is nothing for "group by
-              assignee" to mean. A control that accepts input and does nothing
-              is a lie about what the view can do, so the timeline gets the one
-              sentence that is true instead. */}
-          {view === "timeline" ? (
-            <p className="text-mute px-1 text-xs leading-5">
-              Rows are ordered by what blocks what — dependency depth first, then
-              the project's milestone order. Grouping and ordering belong to the
-              list and the board.
-            </p>
-          ) : (
+          {display && onChange && (
             <>
-              <Axis label="Group by">
-                {(
-                  [
-                    ["status", "Status"],
-                    ["assignee", "Assignee"],
-                    ["priority", "Priority"],
-                    ["none", "None"],
-                  ] as const
-                )
-                  // "None" is a list-only shape — a single-column board is just
-                  // the list; the board's other axes (status/assignee/priority)
-                  // become its columns.
-                  .filter(([id]) => !(view === "board" && id === "none"))
-                  .map(([id, label]) => (
-                    <Choice
-                      key={id}
-                      label={label}
-                      active={display.group === id}
-                      onClick={() => onChange({ ...display, group: id as GroupBy })}
-                    />
-                  ))}
-              </Axis>
+          <Axis label="Group by">
+            {(
+              [
+                ["status", "Status"],
+                ["assignee", "Assignee"],
+                ["priority", "Priority"],
+                ["none", "None"],
+              ] as const
+            )
+              // "None" is a list-only shape — a single-column board is just
+              // the list; the board's other axes (status/assignee/priority)
+              // become its columns.
+              .filter(([id]) => !(view === "board" && id === "none"))
+              .map(([id, label]) => (
+                <Choice
+                  key={id}
+                  label={label}
+                  active={display.group === id}
+                  onClick={() => onChange({ ...display, group: id as GroupBy })}
+                />
+              ))}
+          </Axis>
 
-              <Axis label="Order by">
-                {(
-                  [
-                    ["board", "Board order"],
-                    ["priority", "Priority"],
-                    ["title", "Title"],
-                  ] as const
-                ).map(([id, label]) => (
-                  <Choice
-                    key={id}
-                    label={label}
-                    active={display.order === id}
-                    onClick={() => onChange({ ...display, order: id as OrderBy })}
-                  />
-                ))}
-              </Axis>
-            </>
-          )}
+          <Axis label="Order by">
+            {(
+              [
+                ["board", "Board order"],
+                ["priority", "Priority"],
+                ["title", "Title"],
+              ] as const
+            ).map(([id, label]) => (
+              <Choice
+                key={id}
+                label={label}
+                active={display.order === id}
+                onClick={() => onChange({ ...display, order: id as OrderBy })}
+              />
+            ))}
+          </Axis>
 
           {/* TWO-VALUED AXES ARE SWITCHES, NOT PAIRS OF PILLS.
               A pill pair asks you to read both labels and work out which is lit;
@@ -161,7 +159,12 @@ export function DisplayOptions({
             value={display.deleted}
             onChange={(on) => onChange({ ...display, deleted: on })}
           />
+            </>
+          )}
 
+          {/* Density is every surface's, which is why it sits outside the
+              block above: it is a property of how this client draws, not of
+              what these particular rows are. */}
           <Toggle
             label="Comfortable density"
             hint="Looser rows and a larger type ladder"

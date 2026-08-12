@@ -33,7 +33,6 @@ export type View =
   | "list"
   | "board"
   | "calendar"
-  | "timeline"
   | "projects"
   | "inbox"
   | "my-issues"
@@ -43,35 +42,33 @@ export type View =
 
 /** The work-view render modes a saved view / the switcher toggles between —
  *  the same filtered query, drawn four ways. A strict subset of `View`. */
-export const WORK_VIEWS = ["list", "board", "calendar", "timeline"] as const;
+export const WORK_VIEWS = ["list", "board", "calendar"] as const;
 export type WorkView = (typeof WORK_VIEWS)[number];
 /** Surfaces owned by one project home. Workspace destinations must never retain
  * one of these routes without a canonical project key. */
-export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "timeline", "activity", "specs"] as const;
+export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "activity", "specs"] as const;
 export type ProjectView = (typeof PROJECT_VIEWS)[number];
 
 /**
  * The layouts of a project's issues the switcher offers — one query, drawn
- * three ways.
+ * two ways.
  *
  * They are still routes, because a board is a place you can send someone. They
  * are not *destinations*: the nav offers "Issues" once and the layout is chosen
  * beside grouping and ordering, with the other things that decide how the same
  * rows are drawn rather than which rows they are.
  *
- * `timeline` reads the same rows as the other two but also needs the project's
- * edge set, which neither of them asks for. That is a difference in what a
- * layout *fetches*, not in which rows it draws, so it is a mode rather than a
- * destination of its own.
+ * **`calendar`** is withdrawn from the picker but not deleted: it is a layout
+ * nobody chose. `/projects/:key/calendar` still works and still renders; it is
+ * simply no longer offered. `isIssueMode` carries the consequence — its URL no
+ * longer lights the Issues tab and is not remembered as the layout to return
+ * to.
  *
- * **`calendar` is deliberately absent.** It is withdrawn from the picker, not
- * deleted: `/projects/:key/calendar` still routes and still renders, so old
- * links and any saved view holding that mode keep working. What it no longer
- * is, is a layout `isIssueMode` recognises — so a calendar URL does not light
- * the Issues tab and is not remembered as the layout to return to, which is
- * the right behaviour for a mode you can no longer choose.
+ * `timeline` was once a third member here, then a layout of the *plan* under
+ * Specs, and finally the Roadmap. All three are withdrawn: the view id no
+ * longer exists.
  */
-export const ISSUE_MODES = ["list", "board", "timeline"] as const;
+export const ISSUE_MODES = ["list", "board"] as const;
 export type IssueMode = (typeof ISSUE_MODES)[number];
 export function isIssueMode(v: View): v is IssueMode {
   return (ISSUE_MODES as readonly string[]).includes(v);
@@ -82,7 +79,6 @@ export function isIssueMode(v: View): v is IssueMode {
 export const ISSUE_MODE_LABEL: Record<IssueMode, string> = {
   list: "List",
   board: "Board",
-  timeline: "Timeline",
 };
 
 /** The faces the sidebar tree lists, and the hops the trail can name. Board and
@@ -96,7 +92,6 @@ export const PROJECT_VIEW_LABEL: Record<ProjectView, string> = {
   list: "Issues",
   board: "Board",
   calendar: "Calendar",
-  timeline: "Timeline",
   activity: "Activity",
   specs: "Specs",
 };
