@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   applySourceSplices,
+  DOCUMENT_PREFIX,
   documentPlainText,
   escapeText,
   parseDocument,
@@ -45,6 +46,51 @@ describe("hidden Lait document model", () => {
       { kind: "heading", level: 2 },
       { kind: "callout", tone: "warning" },
       { kind: "table", align: ["left", "right"] },
+    ]);
+  });
+
+  it("projects compiler-valid callout and table spellings into semantic blocks", () => {
+    const source = `${DOCUMENT_PREFIX}#lait-callout("warning", [Keep *this* visible.])
+
+#lait-table(
+  header: (
+    [Name],
+    [State],
+  ),
+  rows: (
+    (
+      [editor],
+      [ready],
+    ),
+  ),
+  align: (
+    "left",
+    "right",
+  ),
+)`;
+
+    expect(parseDocument(source)).toMatchObject([
+      {
+        kind: "callout",
+        tone: "warning",
+        children: [
+          { kind: "text", text: "Keep " },
+          { kind: "strong", children: [{ kind: "text", text: "this" }] },
+          { kind: "text", text: " visible." },
+        ],
+      },
+      {
+        kind: "table",
+        align: ["left", "right"],
+        head: [
+          [{ kind: "text", text: "Name" }],
+          [{ kind: "text", text: "State" }],
+        ],
+        rows: [[
+          [{ kind: "text", text: "editor" }],
+          [{ kind: "text", text: "ready" }],
+        ]],
+      },
     ]);
   });
 

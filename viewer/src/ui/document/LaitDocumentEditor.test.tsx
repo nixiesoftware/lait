@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EditorState } from "prosemirror-state";
 import { EditorView as CodeMirror } from "@codemirror/view";
 
-import { upgradeMarkdown } from "../../core/document";
+import { DOCUMENT_PREFIX, upgradeMarkdown } from "../../core/document";
 import { escapeSelection } from "./CodeBlockView";
 import LaitDocumentEditor, { issueReferencePlugin } from "./LaitDocumentEditor";
 import { projectSource } from "./projection";
@@ -181,6 +181,27 @@ describe("Lait document editor", () => {
     expect(shown.textContent).not.toContain("lait-document");
     expect(shown.textContent).not.toContain("#raw");
     expect(shown.textContent).not.toContain("= Plan");
+  });
+
+  it("visualizes compiler-valid callouts and tables in an issue body", () => {
+    const source = `${DOCUMENT_PREFIX}#lait-callout("warning", [Keep this visible.])
+
+#lait-table(
+  header: ([Name], [State]),
+  rows: (
+    ([editor], [ready]),
+  ),
+  align: ("left", "right"),
+)`;
+    const shown = renderEditor(source).container;
+
+    expect(shown.querySelector(".lait-doc-callout-warning")?.textContent)
+      .toContain("Keep this visible.");
+    expect([...shown.querySelectorAll("table th")].map((cell) => cell.textContent))
+      .toEqual(["Name", "State"]);
+    expect([...shown.querySelectorAll("table td")].map((cell) => cell.textContent))
+      .toEqual(["editor", "ready"]);
+    expect(shown.textContent).not.toContain("#lait-");
   });
 
   it("projects durable collaborator positions into the rich document", () => {

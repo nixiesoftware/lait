@@ -1,4 +1,5 @@
 import {
+  CALLOUT_TONES,
   parseMarkdown,
   parseRefs,
   type Align,
@@ -132,10 +133,11 @@ export function parseDocument(source: string): Block[] {
       continue;
     }
 
-    const table = line === "#lait-table(" ? parseTable(lines, i) : null;
-    if (table) {
-      blocks.push(table.block);
-      i = table.next;
+    const tableCall = readStandaloneCall(lines, i, "lait-table");
+    const table = tableCall ? parseTable(tableCall.call) : null;
+    if (tableCall && table) {
+      blocks.push(table);
+      i = tableCall.next;
       continue;
     }
 
@@ -191,15 +193,15 @@ export function parseDocument(source: string): Block[] {
       continue;
     }
 
-    const callout = parseCall(line, "lait-callout");
-    if (callout && callout.content !== null) {
-      const tone = stringArguments(callout.args)[0] as CalloutTone | undefined;
+    const calloutCall = readStandaloneCall(lines, i, "lait-callout");
+    const callout = calloutCall ? parseCallout(calloutCall.call) : null;
+    if (calloutCall && callout) {
       blocks.push({
         kind: "callout",
-        tone: tone ?? "note",
+        tone: callout.tone,
         children: parseDocumentInline(callout.content),
       });
-      i += 1;
+      i = calloutCall.next;
       continue;
     }
 
@@ -274,36 +276,50 @@ export function documentPlainText(source: string): string {
   }).join("\n\n");
 }
 
-function parseTable(lines: readonly string[], start: number): { block: Block; next: number } | null {
-  let i = start + 1;
-  const alignLine = lines[i++]?.trim() ?? "";
-  const headerLine = lines[i++]?.trim() ?? "";
-  const rowsLine = lines[i++]?.trim() ?? "";
-  const alignBody = /^align:\s*\((.*)\),$/.exec(alignLine)?.[1];
-  const headerBody = /^header:\s*\((.*)\),$/.exec(headerLine)?.[1];
-  if (alignBody === undefined || headerBody === undefined || rowsLine !== "rows: (") return null;
+function parseTable(call: ParsedCall): Extract<Block, { kind: "table" }> | null {
+  const alignSource = namedArgument(call.args, "align");
+  const headerSource = namedArgument(call.args, "header");
+  const rowsSource = namedArgument(call.args, "rows");
+  const alignBody = alignSource === null ? "" : tupleBody(alignSource);
+  const headerBody = headerSource === null ? null : tupleBody(headerSource);
+  const rowsBody = rowsSource === null ? null : tupleBody(rowsSource);
+  if (alignBody === null || headerBody === null || rowsBody === null) return null;
+
   const align = stringArguments(alignBody).map((value) =>
     value === "center" || value === "right" ? value : "left",
   ) as Align[];
-  const head = bracketItems(headerBody).map(parseDocumentInline);
+  const head = parseContentTuple(headerBody);
+  if (head === null) return null;
+
   const rows: Inline[][][] = [];
-  while (i < lines.length) {
-    const line = lines[i]!.trim();
-    if (!line) {
-      i += 1;
-      continue;
-    }
-    if (line === "),") {
-      i += 1;
-      if (lines[i]?.trim() !== ")") return null;
-      return { block: { kind: "table", align, head, rows }, next: i + 1 };
-    }
-    const body = /^\((.*)\),$/.exec(line)?.[1];
-    if (body === undefined) return null;
-    rows.push(bracketItems(body).map(parseDocumentInline));
-    i += 1;
+  for (const rowSource of topLevelItems(rowsBody)) {
+    const body = tupleBody(rowSource);
+    if (body === null) return null;
+    const row = parseContentTuple(body);
+    if (row === null) return null;
+    rows.push(row);
   }
-  return null;
+  return { kind: "table", align, head, rows };
+}
+
+function parseContentTuple(source: string): Inline[][] | null {
+  const cells: Inline[][] = [];
+  for (const item of topLevelItems(source)) {
+    const body = contentBody(item);
+    if (body === null) return null;
+    cells.push(parseDocumentInline(body));
+  }
+  return cells;
+}
+
+function parseCallout(call: ParsedCall): { tone: CalloutTone; content: string } | null {
+  const args = topLevelItems(call.args);
+  const value = stringArguments(args[0] ?? "")[0];
+  const tone = typeof value === "string" && (CALLOUT_TONES as readonly string[]).includes(value)
+    ? value as CalloutTone
+    : "note";
+  const content = call.content ?? contentBody(args[1] ?? "");
+  return content === null ? null : { tone, content };
 }
 
 /** Parse canonical inline Typst without evaluating code or accepting HTML. */
@@ -370,7 +386,41 @@ export function parseDocumentInline(source: string): Inline[] {
   return out;
 }
 
-function parseCall(source: string, name: string): { args: string; content: string | null; length: number } | null {
+interface ParsedCall {
+  args: string;
+  content: string | null;
+  length: number;
+}
+
+/**
+ * Read one block-level function call without prescribing its line breaks.
+ *
+ * Typst treats parenthesized arguments and trailing content blocks as one call,
+ * even when either spans lines. The compiler accepts that grammar, so the safe
+ * browser projection must not make visualization depend on the serializer's
+ * preferred whitespace.
+ */
+function readStandaloneCall(
+  lines: readonly string[],
+  start: number,
+  name: string,
+): { call: ParsedCall; next: number } | null {
+  const remaining = lines.slice(start).join("\n");
+  const leading = /^[ \t]*/.exec(remaining)?.[0].length ?? 0;
+  const call = parseCall(remaining.slice(leading), name);
+  if (!call) return null;
+
+  const end = leading + call.length;
+  const lineEnd = remaining.indexOf("\n", end);
+  const tail = remaining.slice(end, lineEnd < 0 ? remaining.length : lineEnd);
+  if (tail.trim()) return null;
+  return {
+    call,
+    next: start + remaining.slice(0, end).split("\n").length,
+  };
+}
+
+function parseCall(source: string, name: string): ParsedCall | null {
   const prefix = `#${name}(`;
   if (!source.startsWith(prefix)) return null;
   const close = findClosing(source, prefix.length - 1, "(", ")");
@@ -384,6 +434,69 @@ function parseCall(source: string, name: string): { args: string; content: strin
     content: source.slice(close + 2, contentClose),
     length: contentClose + 1,
   };
+}
+
+/** Split a Typst argument/tuple body on commas outside nested values. */
+function topLevelItems(source: string): string[] {
+  const out: string[] = [];
+  const stack: string[] = [];
+  let start = 0;
+  let string = false;
+  const closeFor: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!;
+    if (char === "\\") {
+      i += 1;
+      continue;
+    }
+    if (char === '"') {
+      string = !string;
+      continue;
+    }
+    if (string) continue;
+    const close = closeFor[char];
+    if (close) {
+      stack.push(close);
+      continue;
+    }
+    if (stack.at(-1) === char) {
+      stack.pop();
+      continue;
+    }
+    if (char === "," && stack.length === 0) {
+      const item = source.slice(start, i).trim();
+      if (item) out.push(item);
+      start = i + 1;
+    }
+  }
+
+  const item = source.slice(start).trim();
+  if (item) out.push(item);
+  return out;
+}
+
+function namedArgument(source: string, name: string): string | null {
+  for (const item of topLevelItems(source)) {
+    const match = /^([\w-]+)\s*:\s*([\s\S]*)$/.exec(item);
+    if (match?.[1] === name) return match[2]!.trim();
+  }
+  return null;
+}
+
+function delimitedBody(source: string, open: "(" | "[", close: ")" | "]"): string | null {
+  const value = source.trim();
+  if (!value.startsWith(open)) return null;
+  const end = findClosing(value, 0, open, close);
+  return end === value.length - 1 ? value.slice(1, -1) : null;
+}
+
+function tupleBody(source: string): string | null {
+  return delimitedBody(source, "(", ")");
+}
+
+function contentBody(source: string): string | null {
+  return delimitedBody(source, "[", "]");
 }
 
 function findClosing(source: string, openAt: number, open: string, close: string): number {
@@ -420,21 +533,6 @@ function stringArguments(source: string): string[] {
     } catch {
       // Invalid canonical source stays visible through the plain-text fallback.
     }
-  }
-  return out;
-}
-
-function bracketItems(source: string): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < source.length;) {
-    if (source[i] !== "[") {
-      i += 1;
-      continue;
-    }
-    const close = findClosing(source, i, "[", "]");
-    if (close < 0) break;
-    out.push(source.slice(i + 1, close));
-    i = close + 1;
   }
   return out;
 }
