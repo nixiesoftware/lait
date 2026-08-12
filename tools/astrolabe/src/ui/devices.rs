@@ -34,6 +34,10 @@ pub struct Draft {
     /// rows would let the wrong one be destroyed by a click meant for another.
     pub deleting: Option<String>,
     pub confirmation: String,
+    /// The device being renamed, and the label typed so far. One at a time for
+    /// the same reason.
+    pub renaming: Option<String>,
+    pub label: String,
 }
 
 pub fn draw(ui: &mut Ui, app: &App, draft: &mut Draft, actions: &mut Vec<Action>) {
@@ -62,6 +66,22 @@ pub fn draw(ui: &mut Ui, app: &App, draft: &mut Draft, actions: &mut Vec<Action>
 
     ui.separator();
     draw_add(ui, app, draft, actions);
+
+    // Stops what this client spawned and leaves everything else running — the
+    // same boundary the exit policy draws, reachable without leaving. Offered
+    // only when there is something owned to stop, so it is never a control that
+    // does nothing.
+    let owned = app.devices().iter().filter(|device| device.owned).count();
+    if let Some(action) = act(
+        ui,
+        app,
+        "Stop everything this client started",
+        owned > 0,
+        "This client has not started anything.",
+        || Action::StopAllOwned,
+    ) {
+        actions.push(action);
+    }
 }
 
 fn draw_device(
@@ -151,6 +171,15 @@ fn draw_device(
             actions.push(candidate);
         }
 
+        if ui
+            .button("Rename…")
+            .on_hover_text("A label names this device to you; nothing resolves by it.")
+            .clicked()
+        {
+            draft.renaming = Some(device.id.clone());
+            draft.label.clone_from(&device.label);
+        }
+
         // Deletion is a separate control that opens a separate step. It is not
         // a checkbox beside Remove, because a checkbox left ticked from the
         // last row is exactly how the wrong store gets destroyed.
@@ -163,6 +192,33 @@ fn draw_device(
             draft.confirmation.clear();
         }
     });
+
+    if draft.renaming.as_deref() == Some(device.id.as_str()) {
+        ui.horizontal(|ui| {
+            ui.label("New label");
+            ui.text_edit_singleline(&mut draft.label);
+            let id = device.id.clone();
+            let label = draft.label.trim().to_owned();
+            let renamed = act(
+                ui,
+                app,
+                "Rename",
+                !label.is_empty() && label != device.label,
+                "A device needs a label, and this one already has this one.",
+                || Action::RenameDevice {
+                    id: id.clone(),
+                    label: label.clone(),
+                },
+            );
+            if let Some(action) = renamed {
+                actions.push(action);
+                draft.renaming = None;
+            }
+            if ui.button("Cancel").clicked() {
+                draft.renaming = None;
+            }
+        });
+    }
 
     if draft.deleting.as_deref() == Some(device.id.as_str()) {
         draw_deletion(ui, app, device, draft, actions);

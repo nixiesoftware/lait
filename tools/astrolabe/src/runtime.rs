@@ -27,7 +27,10 @@ use tokio::sync::mpsc::{
     error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender,
 };
 
-use lait_workbench::{ClientSignal, HeadFacts, RemoveDeviceRequest, Signals, WorkbenchSnapshot};
+use lait_workbench::{
+    ClientSignal, ConnectionHistoryPage, EventHistoryPage, HeadFacts, HistoryQuery, LogPage,
+    RemoveDeviceRequest, Signals, UpdateDeviceRequest, WorkbenchSnapshot,
+};
 
 use crate::client::heads::{McpBinding, McpBindingOutcome};
 use crate::client::host::HostContext;
@@ -66,6 +69,31 @@ pub enum Action {
     CreateDevice {
         id: String,
         label: String,
+    },
+    /// Rename a device. Safe at any lifecycle state: a label names the device
+    /// to a person and nothing resolves by it.
+    RenameDevice {
+        id: String,
+        label: String,
+    },
+    /// Stop everything this client owns, and nothing it does not.
+    StopAllOwned,
+    /// One page of a device's log, from `cursor`.
+    ///
+    /// Paged through the bounded cursor rather than tailed: a renderer in the
+    /// same process as the supervisor makes an unbounded tail *easier* to write
+    /// and no less of a way to hold a log file's worth of lines in a frame loop.
+    ReadLogs {
+        device: String,
+        cursor: Option<u64>,
+    },
+    /// One page of the event timeline, after `revision`.
+    ReadEvents {
+        after: Option<u64>,
+    },
+    /// One page of connection transitions, after `revision`.
+    ReadTransitions {
+        after: Option<u64>,
     },
     /// Start the browser head this client opens Worlds through.
     StartHead,
@@ -110,6 +138,11 @@ impl Action {
             Self::ForceStopDevice(id) => format!("device.force-stop:{id}"),
             Self::RemoveDevice { id, .. } => format!("device.remove:{id}"),
             Self::CreateDevice { id, .. } => format!("device.create:{id}"),
+            Self::RenameDevice { id, .. } => format!("device.rename:{id}"),
+            Self::StopAllOwned => "device.stop-all".into(),
+            Self::ReadLogs { device, .. } => format!("logs:{device}"),
+            Self::ReadEvents { .. } => "history.events".into(),
+            Self::ReadTransitions { .. } => "history.connections".into(),
             Self::StartHead => "head.start".into(),
             Self::StopHead(id) => format!("head.stop:{id}"),
             Self::SpaceFound { home, .. } => format!("space.found:{home}"),
@@ -145,6 +178,11 @@ impl Action {
             } => format!("remove {id} and delete its data"),
             Self::RemoveDevice { id, .. } => format!("remove {id}"),
             Self::CreateDevice { id, .. } => format!("add device {id}"),
+            Self::RenameDevice { id, label } => format!("rename {id} to '{label}'"),
+            Self::StopAllOwned => "stop everything this client owns".into(),
+            Self::ReadLogs { device, .. } => format!("read {device}'s log"),
+            Self::ReadEvents { .. } => "read the timeline".into(),
+            Self::ReadTransitions { .. } => "read connection transitions".into(),
             Self::StartHead => "start a head".into(),
             Self::StopHead(id) => format!("stop head {id}"),
             Self::SpaceFound { name, .. } => format!("found the Space '{name}'"),
@@ -195,6 +233,19 @@ pub enum Outcome {
     Mcp(Box<McpBindingOutcome>),
     /// An exit happened, and this is what it did.
     Exited(Box<ExitReport>),
+    /// A page a surface asked for.
+    ///
+    /// An outcome rather than an update of its own, so one path clears what is
+    /// in flight and lands the value. A read produces no line in the record —
+    /// "read the timeline" happening is not news.
+    Read(Read),
+}
+
+/// A page of something bounded.
+pub enum Read {
+    Logs(Box<LogPage>),
+    Events(Box<EventHistoryPage>),
+    Transitions(Box<ConnectionHistoryPage>),
 }
 
 /// The background half of the client.
@@ -481,6 +532,55 @@ impl Worker {
                     .await?;
                 Ok(Outcome::Said(format!("added {id}")))
             }
+            Action::RenameDevice { id, label } => {
+                client
+                    .supervisor()
+                    .update_device(
+                        id,
+                        UpdateDeviceRequest {
+                            label: Some(label.clone()),
+                        },
+                    )
+                    .await?;
+                Ok(Outcome::Said(format!("{id} is now called '{label}'")))
+            }
+            Action::StopAllOwned => {
+                // Stops what this client spawned and leaves everything else
+                // running. The same boundary the exit policy draws, reachable
+                // without leaving.
+                client.supervisor().stop_all_owned().await;
+                Ok(Outcome::Said(
+                    "stopped every device this client owns".into(),
+                ))
+            }
+            Action::ReadLogs { device, cursor } => {
+                let page = client
+                    .supervisor()
+                    .logs(device, *cursor, None)
+                    .await
+                    .map_err(ClientError::from)?;
+                Ok(Outcome::Read(Read::Logs(Box::new(page))))
+            }
+            Action::ReadEvents { after } => {
+                let page = client
+                    .supervisor()
+                    .event_history(&HistoryQuery {
+                        after_revision: *after,
+                        ..HistoryQuery::default()
+                    })
+                    .map_err(ClientError::from)?;
+                Ok(Outcome::Read(Read::Events(Box::new(page))))
+            }
+            Action::ReadTransitions { after } => {
+                let page = client
+                    .supervisor()
+                    .connection_history(&HistoryQuery {
+                        after_revision: *after,
+                        ..HistoryQuery::default()
+                    })
+                    .map_err(ClientError::from)?;
+                Ok(Outcome::Read(Read::Transitions(Box::new(page))))
+            }
             Action::StartHead => {
                 let head = client.head().await?;
                 Ok(Outcome::Said(format!("a head is serving at {}", head.base)))
@@ -532,7 +632,14 @@ impl Action {
     /// A preview writes nothing and an exit is on the way out; re-reading after
     /// either would be a round trip for a model nobody is going to draw again.
     const fn rereads(&self) -> bool {
-        !matches!(self, Self::InstallMcp { preview: true, .. } | Self::Exit(_))
+        !matches!(
+            self,
+            Self::InstallMcp { preview: true, .. }
+                | Self::Exit(_)
+                | Self::ReadLogs { .. }
+                | Self::ReadEvents { .. }
+                | Self::ReadTransitions { .. }
+        )
     }
 }
 

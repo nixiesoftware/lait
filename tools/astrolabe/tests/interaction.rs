@@ -19,14 +19,14 @@ use astrolabe::client::heads::{McpBinding, McpBindingOutcome};
 use astrolabe::client::host::{HostContext, OrbitEntry};
 use astrolabe::client::library::{LibraryEntry, Placement};
 use astrolabe::model::App;
-use astrolabe::runtime::{Action, Outcome, Update};
+use astrolabe::runtime::{Action, Outcome, Read, Update};
 use astrolabe::ui::{Chrome, Surface};
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use lait_workbench::{
-    BackendEvent, Capabilities, ClientSignal, DeviceSnapshot, EnvironmentSnapshot, EventKind,
-    HeadFacts, HeadKind, LifecycleState, ObservationHealth, ObservationState, Ownership,
-    SnapshotReason, WorkbenchSnapshot,
+    BackendEvent, Capabilities, ClientSignal, ConnectionSnapshot, DeviceSnapshot,
+    EnvironmentSnapshot, EventKind, HeadFacts, HeadKind, LifecycleState, LogEntry, LogLevel,
+    LogPage, ObservationHealth, ObservationState, Ownership, SnapshotReason, WorkbenchSnapshot,
 };
 
 fn snapshot(devices: Vec<DeviceSnapshot>) -> WorkbenchSnapshot {
@@ -67,6 +67,11 @@ fn device(id: &str, state: LifecycleState, owned: bool) -> DeviceSnapshot {
 /// Actions accumulate rather than being replaced, because `Harness::run` draws
 /// until the frame settles: a click lands on one frame and the frames after it
 /// ask for nothing, so keeping only the last would keep the empty one.
+///
+/// Everything asked for is also recorded as in flight, exactly as the shell
+/// does it. A bench where a control stayed live after its own click would let a
+/// repeated frame produce a second action the real client never would — which
+/// is the difference between testing the interface and testing the harness.
 struct Bench {
     app: App,
     chrome: Chrome,
@@ -87,7 +92,10 @@ fn harness(app: App, surface: Surface) -> Harness<'static, Bench> {
                     chrome,
                     actions,
                 } = bench;
-                actions.extend(astrolabe::ui::draw(ui, app, chrome));
+                for action in astrolabe::ui::draw(ui, app, chrome) {
+                    app.dispatched(&action);
+                    actions.push(action);
+                }
             },
             Bench {
                 app,
@@ -850,4 +858,326 @@ fn a_registered_orbit_is_listed_with_a_way_to_forget_it() {
         )),
         "forgetting asked for something else"
     );
+}
+
+/// The environment page is real fields only. Nothing is inferred and nothing is
+/// synthesised to make it look populated — and a capability this build does not
+/// have is named, because it is the reason a control elsewhere is disabled.
+#[test]
+fn the_environment_page_draws_what_the_backend_answered_and_says_what_it_cannot_do() {
+    let mut app = App::new();
+    let mut reading = snapshot(vec![device("alice", LifecycleState::Running, true)]);
+    reading.environment = EnvironmentSnapshot {
+        state_root: "D:/state".into(),
+        executable: "D:/bin/lait.exe".into(),
+        server_pid: 4242,
+    };
+    reading.capabilities = Capabilities {
+        force_stop_owned_process: false,
+        ..Capabilities::default()
+    };
+    app.absorb(reading);
+
+    let mut harness = harness(app, Surface::Diagnostics);
+    harness.run();
+    assert!(announces(&harness, "D:/bin/lait.exe"));
+    assert!(announces(&harness, "D:/state"));
+    assert!(announces(&harness, "4242"));
+    assert!(
+        announces(&harness, "force-stop"),
+        "a capability this build does not have was not named"
+    );
+}
+
+/// A peer that cannot be reached says why. "Blocked" with no reason sends
+/// somebody to read a log to learn what was already known here.
+#[test]
+fn a_blocked_peer_names_what_is_blocking_it() {
+    let mut app = App::new();
+    let mut reading = snapshot(vec![device("alice", LifecycleState::Running, true)]);
+    reading.connections = vec![ConnectionSnapshot {
+        source_device_id: "alice".into(),
+        space_id: "ws_one".into(),
+        peer_id: "peer".into(),
+        peer_nick: "bob".into(),
+        state: "offering".into(),
+        online: false,
+        dialable: false,
+        blocked_by: Some("admission has not landed".into()),
+        target_device_id: None,
+    }];
+    app.absorb(reading);
+
+    let mut harness = harness(app, Surface::Diagnostics);
+    harness.run();
+    assert!(announces(&harness, "bob"));
+    assert!(
+        announces(&harness, "admission has not landed"),
+        "a blocked peer was drawn as blocked and not as why"
+    );
+    assert!(announces(&harness, "not dialable"));
+}
+
+/// Following a log asks once per reported change, not once per frame. The
+/// alternative is a request storm against a supervisor in the same process,
+/// which is exactly the mistake that being in the same process makes easy.
+#[test]
+fn following_a_log_asks_once_per_change_rather_than_once_per_frame() {
+    let mut app = App::new();
+    app.absorb(snapshot(vec![device(
+        "alice",
+        LifecycleState::Running,
+        true,
+    )]));
+
+    let mut harness = harness(app, Surface::Diagnostics);
+    harness.state_mut().chrome.diagnostics.device = Some("alice".into());
+    harness.state_mut().chrome.diagnostics.following = true;
+    harness.run();
+    harness.run();
+    harness.run();
+    let asked = |bench: &Bench| {
+        bench
+            .actions
+            .iter()
+            .filter(|action| matches!(action, Action::ReadLogs { .. }))
+            .count()
+    };
+    assert_eq!(
+        asked(harness.state()),
+        1,
+        "following a log asked once per frame: {:?}",
+        harness.state().actions
+    );
+
+    answer(&mut harness, 10);
+    harness.run();
+    harness.run();
+    assert_eq!(
+        asked(harness.state()),
+        1,
+        "an answered read was asked for again with nothing having changed"
+    );
+
+    // One more change, one more read.
+    grew(&mut harness, "alice", 2);
+    harness.run();
+    harness.run();
+    assert_eq!(
+        asked(harness.state()),
+        2,
+        "a change to the log was not followed"
+    );
+
+    // And a change to somebody else's log is not this device's business.
+    answer(&mut harness, 20);
+    grew(&mut harness, "bob", 3);
+    harness.run();
+    assert_eq!(
+        asked(harness.state()),
+        2,
+        "another device's log change triggered a read"
+    );
+}
+
+/// Land a page for `alice`, which is what clears the read from flight.
+fn answer(harness: &mut Harness<'_, Bench>, next_cursor: u64) {
+    harness.state_mut().app.apply(Update::Done {
+        key: "logs:alice".into(),
+        outcome: Outcome::Read(Read::Logs(Box::new(LogPage {
+            schema_version: 1,
+            device_id: "alice".into(),
+            file_size: next_cursor,
+            next_cursor,
+            reset: false,
+            has_more: false,
+            entries: Vec::new(),
+        }))),
+    });
+}
+
+fn grew(harness: &mut Harness<'_, Bench>, device: &str, revision: u64) {
+    harness
+        .state_mut()
+        .app
+        .consume(&ClientSignal::Event(BackendEvent {
+            revision,
+            at_ms: 0,
+            kind: EventKind::LogChanged,
+            device_id: Some(device.to_owned()),
+            message: "log grew".into(),
+        }));
+}
+
+/// Paused means paused. What is on screen stays exactly as it is, which is the
+/// whole point of being able to stop a log that is moving.
+#[test]
+fn a_paused_log_is_not_re_read_when_it_changes() {
+    let mut app = App::new();
+    app.absorb(snapshot(vec![device(
+        "alice",
+        LifecycleState::Running,
+        true,
+    )]));
+    app.consume(&ClientSignal::Event(BackendEvent {
+        revision: 2,
+        at_ms: 0,
+        kind: EventKind::LogChanged,
+        device_id: Some("alice".into()),
+        message: "log grew".into(),
+    }));
+
+    let mut harness = harness(app, Surface::Diagnostics);
+    harness.state_mut().chrome.diagnostics.device = Some("alice".into());
+    harness.state_mut().chrome.diagnostics.following = false;
+    harness.run();
+    harness.run();
+    assert!(
+        !harness
+            .state()
+            .actions
+            .iter()
+            .any(|action| matches!(action, Action::ReadLogs { .. })),
+        "a paused log was re-read anyway"
+    );
+}
+
+/// A log page that begins a new file says so. Otherwise what was on screen a
+/// moment ago silently stops being the start of what is on screen now.
+#[test]
+fn a_rotated_log_says_the_file_was_replaced() {
+    let mut app = App::new();
+    app.absorb(snapshot(vec![device(
+        "alice",
+        LifecycleState::Running,
+        true,
+    )]));
+    app.apply(Update::Done {
+        key: "logs:alice".into(),
+        outcome: Outcome::Read(Read::Logs(Box::new(LogPage {
+            schema_version: 1,
+            device_id: "alice".into(),
+            file_size: 10,
+            next_cursor: 10,
+            reset: true,
+            has_more: false,
+            entries: vec![LogEntry {
+                cursor: 0,
+                timestamp: Some("12:00:00".into()),
+                level: LogLevel::Error,
+                target: Some("lait".into()),
+                message: "the store lock was held".into(),
+                truncated: false,
+            }],
+        }))),
+    });
+
+    let mut harness = harness(app, Surface::Diagnostics);
+    harness.state_mut().chrome.diagnostics.device = Some("alice".into());
+    harness.run();
+    assert!(
+        announces(&harness, "log file was replaced"),
+        "a rotated log was drawn as a continuation"
+    );
+    assert!(announces(&harness, "the store lock was held"));
+}
+
+/// Storage says which kind of absent a missing figure is. A Space that is not
+/// running and one nobody could ask are different facts about the machine, and
+/// only one of them is worth acting on.
+#[test]
+fn storage_says_whether_anybody_could_have_measured() {
+    use astrolabe::client::storage::{Missing, StorageFacts};
+
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_storage(
+        vec![
+            StorageFacts::unmeasured("orb_one", Missing::NotPlaced),
+            StorageFacts::unmeasured("orb_two", Missing::Unreachable),
+        ],
+        Vec::new(),
+    );
+
+    let mut harness = harness(app, Surface::Storage);
+    harness.run();
+    assert!(announces(&harness, "not running"));
+    assert!(announces(&harness, "could not be asked"));
+    assert!(
+        announces(&harness, "SUB-3"),
+        "an empty transfer lane did not say why it is empty"
+    );
+}
+
+/// Renaming is safe at any lifecycle state — a label names the device to a
+/// person and nothing resolves by it — and it is still a deliberate step
+/// rather than an always-live text box beside a Force stop button.
+#[test]
+fn a_device_is_renamed_through_a_step_of_its_own() {
+    let mut app = App::new();
+    app.absorb(snapshot(vec![device(
+        "alice",
+        LifecycleState::Running,
+        true,
+    )]));
+    let mut harness = harness(app, Surface::Devices);
+    harness.run();
+
+    harness.get_by_label("Rename…").click();
+    harness.run();
+    assert!(
+        harness
+            .get_by_label("Rename")
+            .accesskit_node()
+            .is_disabled(),
+        "renaming to the name it already has was offered"
+    );
+
+    harness.state_mut().chrome.devices.label = "the spare box".into();
+    harness.run();
+    harness.get_by_label("Rename").click();
+    harness.run();
+    assert!(
+        harness.state().actions.contains(&Action::RenameDevice {
+            id: "alice".into(),
+            label: "the spare box".into(),
+        }),
+        "renaming asked for something else: {:?}",
+        harness.state().actions
+    );
+}
+
+/// Stopping everything this client owns is offered only when there is
+/// something owned to stop, so it is never a control that does nothing.
+#[test]
+fn stopping_everything_owned_is_offered_only_when_there_is_something_to_stop() {
+    let mut nothing_owned = App::new();
+    nothing_owned.absorb(snapshot(vec![device(
+        "bob",
+        LifecycleState::External,
+        false,
+    )]));
+    let mut external = harness(nothing_owned, Surface::Devices);
+    external.run();
+    assert!(
+        external
+            .get_by_label("Stop everything this client started")
+            .accesskit_node()
+            .is_disabled(),
+        "a client that started nothing offered to stop everything it started"
+    );
+
+    let mut app = App::new();
+    app.absorb(snapshot(vec![device(
+        "alice",
+        LifecycleState::Running,
+        true,
+    )]));
+    let mut harness = harness(app, Surface::Devices);
+    harness.run();
+    harness
+        .get_by_label("Stop everything this client started")
+        .click();
+    harness.run();
+    assert!(harness.state().actions.contains(&Action::StopAllOwned));
 }

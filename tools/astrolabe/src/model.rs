@@ -18,11 +18,11 @@
 //! else can contradict. It is what lets a control disable itself while its own
 //! action runs without any surface guessing at the result.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use lait_workbench::{
-    ClientSignal, ConnectionSnapshot, DeviceSnapshot, HeadFacts, ObservationState, SnapshotReason,
-    WorkbenchSnapshot,
+    ClientSignal, ConnectionHistoryPage, ConnectionSnapshot, DeviceSnapshot, EventHistoryPage,
+    EventKind, HeadFacts, LogPage, ObservationState, SnapshotReason, WorkbenchSnapshot,
 };
 
 use crate::client::heads::McpBindingOutcome;
@@ -31,7 +31,7 @@ use crate::client::library::{LaunchTicket, LibraryEntry};
 use crate::client::storage::{StorageFacts, TransferFacts};
 use crate::client::ClientError;
 use crate::lifecycle::ExitReport;
-use crate::runtime::{Action, Outcome, Update};
+use crate::runtime::{Action, Outcome, Read, Update};
 
 /// Everything the interface draws.
 #[derive(Debug, Default)]
@@ -52,6 +52,20 @@ pub struct App {
     /// The last MCP binding authored or previewed. Held because a preview is
     /// only useful if it stays on screen long enough to be read.
     mcp: Option<McpBindingOutcome>,
+    /// The last page of each bounded read, and only the last: these are pages
+    /// through something the supervisor owns, not a second copy of it.
+    logs: Option<LogPage>,
+    events: Option<EventHistoryPage>,
+    transitions: Option<ConnectionHistoryPage>,
+    /// How many times each device's log has been reported to have changed.
+    ///
+    /// A counter rather than a flag, and the *only* thing this model derives
+    /// from an event's body. It is invalidation bookkeeping of exactly the kind
+    /// `stale` already is: it says a read is due, never what the read would
+    /// say. A surface following a log compares it with what it last acted on,
+    /// which turns a stream of events into one read per change instead of one
+    /// read per frame.
+    log_changes: BTreeMap<String, u64>,
     /// What an exit did. Set once, on the way out, and read by the shell.
     exit: Option<ExitReport>,
     /// Set when a signal says this model can no longer be derived from what it
@@ -153,6 +167,20 @@ impl App {
                     launched: None,
                 }
             }
+            Outcome::Read(read) => {
+                match read {
+                    Read::Logs(page) => {
+                        // A reset means the file was rotated or truncated under
+                        // us, so what was on screen is not the beginning of this
+                        // one. Kept as the page's own flag rather than smoothed
+                        // over, and drawn.
+                        self.logs = Some(*page);
+                    }
+                    Read::Events(page) => self.events = Some(*page),
+                    Read::Transitions(page) => self.transitions = Some(*page),
+                }
+                return;
+            }
             Outcome::Exited(report) => {
                 let said = describe_exit(&report);
                 self.exit = Some(*report);
@@ -223,6 +251,27 @@ impl App {
         self.mcp.as_ref()
     }
 
+    pub fn logs(&self) -> Option<&LogPage> {
+        self.logs.as_ref()
+    }
+
+    pub fn events(&self) -> Option<&EventHistoryPage> {
+        self.events.as_ref()
+    }
+
+    pub fn transitions(&self) -> Option<&ConnectionHistoryPage> {
+        self.transitions.as_ref()
+    }
+
+    /// How many log changes this model has been told about for `device`.
+    ///
+    /// A surface that follows a log compares this with the value it last read
+    /// at. Equal means nothing has happened since; different means one read is
+    /// due, not a read per frame.
+    pub fn log_changes(&self, device: &str) -> u64 {
+        self.log_changes.get(device).copied().unwrap_or_default()
+    }
+
     /// What an exit did, once one has happened. The shell's cue to close.
     pub fn exit(&self) -> Option<&ExitReport> {
         self.exit.as_ref()
@@ -237,11 +286,21 @@ impl App {
     pub fn consume(&mut self, signal: &ClientSignal) {
         self.consumed = self.consumed.saturating_add(1);
         match signal {
-            ClientSignal::Event(_) => {
+            ClientSignal::Event(event) => {
                 // An ordinary event means the snapshot is behind, not unusable.
                 // It is still drawn — with the previous figures — until a fresh
                 // one lands, because blanking a surface on every event is a
                 // worse lie than a slightly old number.
+                //
+                // The one thing counted is that a log grew, and only so a
+                // surface following it knows a read is due. Nothing about the
+                // event's contents reaches state.
+                if let (EventKind::LogChanged, Some(device)) =
+                    (event.kind, event.device_id.as_ref())
+                {
+                    let seen = self.log_changes.entry(device.clone()).or_default();
+                    *seen = seen.saturating_add(1);
+                }
             }
             ClientSignal::SnapshotRequired(reason) => {
                 self.stale = Some(StaleReason::Signalled(describe(reason)));

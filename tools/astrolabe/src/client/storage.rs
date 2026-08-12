@@ -10,15 +10,33 @@
 
 /// What an Orbit is holding.
 ///
-/// Every figure is optional because none of them has a supplier yet. When SUB-5
-/// lands, these fill in; until then a surface draws "not measured" and a person
-/// is told the truth.
+/// Every figure is optional, and an absent one carries *why* it is absent. A
+/// surface that could only say "not measured" would be right and useless: an
+/// Orbit that is simply not up and an Orbit nobody could reach are different
+/// facts, and only one of them is worth doing something about.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StorageFacts {
     pub orbit: String,
+    /// What the registry calls this Orbit. Advisory — the display name is owned
+    /// by a World today (SUB-1) — and carried as what it is rather than as
+    /// truth.
+    pub name: Option<String>,
     pub bytes_on_disk: Option<u64>,
     pub object_count: Option<u64>,
     pub last_verified_ms: Option<u64>,
+    /// Why there are no figures, when there are none.
+    pub missing: Option<Missing>,
+}
+
+/// Why an Orbit contributed no figures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missing {
+    /// It is not up. Not an error, and not something a *listing* corrects —
+    /// measuring must not place what nobody asked to place.
+    NotPlaced,
+    /// It could not be asked. Distinct from the above for the same reason
+    /// `Placement::Unknown` is distinct from `Placement::Vacant`.
+    Unreachable,
 }
 
 /// A transfer in flight.
@@ -45,10 +63,11 @@ pub enum Direction {
 }
 
 impl StorageFacts {
-    /// Nothing measured. The honest state today.
-    pub fn unmeasured(orbit: impl Into<String>) -> Self {
+    /// Nothing measured, and why.
+    pub fn unmeasured(orbit: impl Into<String>, missing: Missing) -> Self {
         Self {
             orbit: orbit.into(),
+            missing: Some(missing),
             ..Self::default()
         }
     }
@@ -82,7 +101,8 @@ impl super::Client {
                     space,
                 ),
             };
-            let measured = match daemon
+            let name = (!orbit.name.trim().is_empty()).then(|| orbit.name.clone());
+            let mut measured = match daemon
                 .request_if_running(route, &lait::control::Request::Storage)
                 .await
             {
@@ -92,14 +112,20 @@ impl super::Client {
                     last_verified_ms,
                 }) => StorageFacts {
                     orbit: orbit.space.clone(),
+                    name: None,
                     bytes_on_disk,
                     object_count,
                     last_verified_ms,
+                    missing: None,
                 },
-                // Not running, or not reachable. Both are "nobody measured
-                // this", which is exactly what an unmeasured row says.
-                _ => StorageFacts::unmeasured(orbit.space.clone()),
+                // A real answer that is not a measurement: the Orbit is not up,
+                // and asking again would mean placing it to produce a number.
+                Ok(_) => StorageFacts::unmeasured(orbit.space.clone(), Missing::NotPlaced),
+                // Nobody could ask. A different fact, and the one worth acting
+                // on.
+                Err(_) => StorageFacts::unmeasured(orbit.space.clone(), Missing::Unreachable),
             };
+            measured.name = name;
             facts.push(measured);
         }
         Ok(facts)
@@ -113,7 +139,7 @@ mod tests {
     /// The one rule this module exists to hold: unmeasured is not zero.
     #[test]
     fn an_unmeasured_footprint_is_absent_rather_than_zero() {
-        let facts = StorageFacts::unmeasured("orb_one");
+        let facts = StorageFacts::unmeasured("orb_one", Missing::NotPlaced);
         assert!(!facts.is_measured());
         assert_eq!(
             facts.bytes_on_disk, None,
@@ -121,6 +147,18 @@ mod tests {
         );
         assert_eq!(facts.object_count, None);
         assert_eq!(facts.last_verified_ms, None);
+    }
+
+    /// And the rule it acquired: an absence carries why. "Not up" and "nobody
+    /// could ask" are different facts, and a surface that folds them together
+    /// reports a machine nobody could reach as one with nothing running.
+    #[test]
+    fn an_absent_figure_says_which_kind_of_absent_it_is() {
+        assert_ne!(Missing::NotPlaced, Missing::Unreachable);
+        assert_eq!(
+            StorageFacts::unmeasured("orb_one", Missing::Unreachable).missing,
+            Some(Missing::Unreachable)
+        );
     }
 
     /// A transfer with no known total must not be drawable as complete.

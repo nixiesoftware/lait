@@ -270,7 +270,7 @@ pub struct LogEntry {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LogLevel {
     Trace,
@@ -337,7 +337,7 @@ pub struct BackendEvent {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     DeviceAdded,

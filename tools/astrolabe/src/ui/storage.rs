@@ -4,10 +4,15 @@
 //! third option: an estimate that makes the surface look populated is the
 //! observation-failure defect wearing different clothes, and it is harder to
 //! spot because it looks like data.
+//!
+//! An absence carries its reason. "Not up" and "nobody could ask" are different
+//! facts about a Space, and only one of them is worth doing anything about — a
+//! surface that printed one sentence for both would be honest about the number
+//! and misleading about the machine.
 
 use egui::{ProgressBar, RichText, Ui};
 
-use crate::client::storage::{Direction, StorageFacts, TransferFacts};
+use crate::client::storage::{Direction, Missing, StorageFacts, TransferFacts};
 
 use super::theme;
 
@@ -24,7 +29,18 @@ pub fn draw(ui: &mut Ui, storage: &[StorageFacts], transfers: &[TransferFacts]) 
     }
     for facts in storage {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&facts.orbit).strong());
+            // The registry's name where there is one. Advisory — a Space's
+            // display name is owned by a World today (SUB-1) — so an unnamed
+            // row says so rather than wearing its id as a name.
+            match &facts.name {
+                Some(name) => ui.label(RichText::new(name).strong()),
+                None => ui.label(RichText::new("Unnamed Space").italics()),
+            };
+            ui.label(
+                RichText::new(&facts.orbit)
+                    .small()
+                    .color(theme::secondary(ui)),
+            );
             ui.label(
                 RichText::new(footprint(facts)).color(if facts.is_measured() {
                     theme::secondary(ui)
@@ -42,9 +58,20 @@ pub fn draw(ui: &mut Ui, storage: &[StorageFacts], transfers: &[TransferFacts]) 
     ui.separator();
     ui.heading("Transfers");
     if transfers.is_empty() {
-        // Hedged, like every other emptiness in this client: nothing here can
-        // tell "no transfers" from "no producer has ever fed this lane".
+        // Hedged twice over, because both hedges are true. Nothing here can
+        // tell "no transfers" from "no producer has ever fed this lane" — and
+        // today it is the second: the progress lane is plumbed end to end and
+        // nothing in the engine feeds it (SUB-3). Saying so beats an empty
+        // panel that reads as a quiet machine.
         ui.label("No transfers observed.");
+        ui.label(
+            RichText::new(
+                "Nothing in the engine reports transfer progress yet (SUB-3), so this \
+                 stays empty even while a Space is converging.",
+            )
+            .small()
+            .color(theme::secondary(ui)),
+        );
     }
     for transfer in transfers {
         draw_transfer(ui, transfer);
@@ -91,13 +118,20 @@ fn draw_transfer(ui: &mut Ui, transfer: &TransferFacts) {
     });
 }
 
-/// `None` is spelled, never defaulted.
+/// `None` is spelled, never defaulted — and it says which kind of `None`.
 fn footprint(facts: &StorageFacts) -> String {
     match (facts.bytes_on_disk, facts.object_count) {
         (Some(size), Some(count)) => format!("{} across {count} objects", bytes(size)),
         (Some(size), None) => format!("{}, object count not measured", bytes(size)),
         (None, Some(count)) => format!("{count} objects, footprint not measured"),
-        (None, None) => "not measured".to_owned(),
+        (None, None) => match facts.missing {
+            // Listing is passive: an Orbit that is not up was not woken to
+            // produce a number, and saying so is the difference between an
+            // empty row and a mysterious one.
+            Some(Missing::NotPlaced) => "not measured — this Space is not running".to_owned(),
+            Some(Missing::Unreachable) => "not measured — this Space could not be asked".to_owned(),
+            None => "not measured".to_owned(),
+        },
     }
 }
 
@@ -142,14 +176,25 @@ mod tests {
     /// borrows a zero to look like data.
     #[test]
     fn an_unmeasured_footprint_is_spelled_out_rather_than_shown_as_zero() {
-        let unmeasured = StorageFacts::unmeasured("orb_one");
+        let unmeasured = StorageFacts::unmeasured("orb_one", Missing::NotPlaced);
         let drawn = footprint(&unmeasured);
-        assert_eq!(drawn, "not measured");
+        assert!(drawn.starts_with("not measured"), "{drawn}");
         assert!(
             !drawn.contains('0'),
             "an unmeasured footprint borrowed a zero: {drawn}"
         );
         assert_eq!(verified(&unmeasured), "never verified");
+    }
+
+    /// And which kind of unmeasured. A Space that is simply not running and one
+    /// nobody could reach are different facts about the machine.
+    #[test]
+    fn an_absence_says_whether_anybody_could_have_asked() {
+        let vacant = footprint(&StorageFacts::unmeasured("orb_one", Missing::NotPlaced));
+        let unreachable = footprint(&StorageFacts::unmeasured("orb_one", Missing::Unreachable));
+        assert_ne!(vacant, unreachable);
+        assert!(vacant.contains("not running"), "{vacant}");
+        assert!(unreachable.contains("could not be asked"), "{unreachable}");
     }
 
     /// Half-measured is its own state. Reporting a known footprint as unknown
@@ -159,9 +204,11 @@ mod tests {
     fn a_partly_measured_footprint_reports_what_it_knows() {
         let partial = StorageFacts {
             orbit: "orb_one".into(),
+            name: Some("Work".into()),
             bytes_on_disk: Some(2_097_152),
             object_count: None,
             last_verified_ms: None,
+            missing: None,
         };
         let drawn = footprint(&partial);
         assert!(drawn.contains("2.0 MB"), "{drawn}");

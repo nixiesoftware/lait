@@ -21,6 +21,7 @@
 //! and several Spaces must never open onto a process inventory.
 
 pub mod devices;
+pub mod diagnostics;
 pub mod heads;
 pub mod library;
 pub mod spaces;
@@ -86,6 +87,7 @@ pub struct Chrome {
     pub spaces: spaces::Draft,
     pub devices: devices::Draft,
     pub heads: heads::Draft,
+    pub diagnostics: diagnostics::Draft,
 }
 
 impl Chrome {
@@ -136,7 +138,7 @@ pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
         // model carries nothing, and the surface says "not measured" rather
         // than drawing zeroes — which is the whole contract this surface has.
         Surface::Storage => storage::draw(ui, app.storage(), app.transfers()),
-        Surface::Diagnostics => draw_diagnostics(ui, app),
+        Surface::Diagnostics => diagnostics::draw(ui, app, &mut chrome.diagnostics, &mut actions),
     }
 
     draw_notices(ui, app);
@@ -190,64 +192,6 @@ fn draw_freshness(ui: &mut Ui, app: &App) {
             ui.label(
                 RichText::new(format!("Showing the last known state — {reason}"))
                     .color(theme::attention(ui)),
-            );
-        }
-    }
-}
-
-fn draw_diagnostics(ui: &mut Ui, app: &App) {
-    if let Some(context) = app.context() {
-        ui.heading("This build");
-        ui.label(RichText::new(&context.version).monospace());
-        ui.label(
-            RichText::new(format!("identity {}", context.identity_home))
-                .color(theme::secondary(ui)),
-        );
-        ui.label(
-            RichText::new(format!("this build hosts: {}", context.worlds.join(", ")))
-                .color(theme::secondary(ui)),
-        );
-        ui.separator();
-    }
-
-    ui.heading("Connections");
-    let connections = app.connections();
-    if connections.is_empty() {
-        // Deliberately hedged. This surface cannot tell "no peers" from "no
-        // device is up to have peers", and saying the stronger thing would be
-        // the false-disconnection defect wearing a different hat.
-        ui.label("No peers observed.");
-    }
-    for connection in connections {
-        ui.horizontal(|ui| {
-            ui.label(&connection.peer_nick);
-            ui.label(RichText::new(&connection.state).weak());
-            if let Some(device) = &connection.target_device_id {
-                ui.label(RichText::new(format!("↔ {device}")).weak());
-            }
-        });
-    }
-
-    let degraded: Vec<_> = app.degraded().collect();
-    if !degraded.is_empty() {
-        ui.separator();
-        ui.heading("Degraded observation");
-        for device in degraded {
-            let since = device
-                .observation
-                .stale_since_ms
-                .map_or_else(|| "unknown".to_owned(), |at| format!("{at} ms"));
-            ui.label(
-                RichText::new(format!(
-                    "{} — figures unchanged since {since}: {}",
-                    device.label,
-                    device
-                        .observation
-                        .error
-                        .as_deref()
-                        .unwrap_or("sampling failed")
-                ))
-                .color(theme::attention(ui)),
             );
         }
     }
