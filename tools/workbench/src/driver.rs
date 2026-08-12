@@ -48,6 +48,33 @@ pub(crate) trait DaemonDriver: Send + Sync {
         Ok(DeviceFacts::default())
     }
 
+    /// Prove which process is serving `home`, or fail saying why not.
+    ///
+    /// The pid comes from the home's own record; the executable and start time
+    /// come from the operating system. Together they are what makes a later
+    /// termination safe — a pid file outlives a crashed daemon, and pids are
+    /// reused, so the file alone proves nothing.
+    async fn identity(&self, _home: &Path) -> Result<lait::daemon_spawn::ProcessIdentity> {
+        Err(anyhow!(
+            "process identity is not available from this driver"
+        ))
+    }
+
+    /// Terminate a process this supervisor did not spawn, if and only if it is
+    /// still exactly `expected`.
+    async fn terminate_verified(
+        &self,
+        _expected: &lait::daemon_spawn::ProcessIdentity,
+    ) -> Result<()> {
+        Err(anyhow!("this driver cannot stop an unowned process"))
+    }
+
+    /// Point future spawns at a freshly staged image.
+    ///
+    /// Daemons already running are untouched: they hold the image they started
+    /// with, which is why each device reports its own.
+    async fn restage(&self, _executable: &Path) {}
+
     /// The peers this daemon can already see.
     ///
     /// `Ok(vec![])` is "no peers" and `Err` is "nobody could ask", and the whole
@@ -132,6 +159,38 @@ impl DaemonDriver for LaitDriver {
             Response::Error { message, .. } => Err(anyhow!(message)),
             other => Err(anyhow!("unexpected daemon stop reply: {other:?}")),
         }
+    }
+
+    async fn identity(&self, home: &Path) -> Result<lait::daemon_spawn::ProcessIdentity> {
+        let selection = lait::config::Selection::for_identity(home);
+        let daemon_home = selection.daemon_home()?;
+        let pid = lait::config::daemon_pid(&daemon_home).ok_or_else(|| {
+            anyhow!(
+                "no daemon pid recorded for {} — a daemon that predates the stamp cannot be proven",
+                daemon_home.display()
+            )
+        })?;
+        let identity = lait::daemon_spawn::identify(pid)
+            .with_context(|| format!("identify daemon process {pid}"))?;
+        // The image must be one this supervisor would itself have spawned.
+        // Without this, any process that inherited the pid and happens to be
+        // running *something* would satisfy the other three facts.
+        if identity.executable != self.executable {
+            return Err(anyhow!(
+                "process {pid} runs {}, not the managed image {}",
+                identity.executable.display(),
+                self.executable.display()
+            ));
+        }
+        Ok(identity)
+    }
+
+    async fn terminate_verified(
+        &self,
+        expected: &lait::daemon_spawn::ProcessIdentity,
+    ) -> Result<()> {
+        lait::daemon_spawn::terminate_verified(expected)
+            .with_context(|| format!("stop unowned daemon {}", expected.pid))
     }
 
     async fn facts(&self, home: &Path) -> Result<DeviceFacts> {

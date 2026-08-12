@@ -38,6 +38,7 @@ mod contract;
 mod driver;
 mod observability;
 mod registry;
+mod staging;
 mod supervisor;
 
 pub use contract::schema_bundle;
@@ -48,7 +49,8 @@ pub use contract::{
     LogQuery, RemoveDeviceRequest, UpdateDeviceRequest, WorkbenchSnapshot, SCHEMA_VERSION,
 };
 pub use contract::{
-    ClientSignal, DeviceFacts, ObservationHealth, ObservationState, SnapshotReason, WorldCall,
-    WorldCaller,
+    ClientSignal, DeviceFacts, ImageFacts, ObservationHealth, ObservationState, SnapshotReason,
+    WorldCall, WorldCaller,
 };
+pub use staging::{StagedImage, Staging};
 pub use supervisor::{Config, Signals, Supervisor, SupervisorError, OBSERVATION_INTERVAL};

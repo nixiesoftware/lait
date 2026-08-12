@@ -11,6 +11,7 @@ members = [
     "products/issues",
     "products/issues-app",
     "tools/workbench",
+    "tools/astrolabe",
 ]
 # Two packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.

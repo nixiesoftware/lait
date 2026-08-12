@@ -1,0 +1,58 @@
+[package]
+name = "astrolabe"
+version = "0.1.0"
+edition = "2021"
+# MSRV: the workspace figure. See the root manifest for what drives it.
+rust-version = "1.92"
+description = "The local client through which a person reaches the Worlds their device serves"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "astrolabe"
+path = "src/lib.rs"
+
+# `windows_subsystem = "windows"` lives in main.rs, so a packaged launch opens no
+# console. The library half carries everything testable, which is why the binary
+# is nearly empty.
+[[bin]]
+name = "astrolabe"
+path = "src/main.rs"
+
+[dependencies]
+lait = { path = "../.." }
+lait-workbench = { path = "../workbench" }
+mechanics = { path = "../../crates/mechanics" }
+anyhow = "1"
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+# The adopted UI substrate. All three are `MIT OR Apache-2.0`, which is what
+# keeps lait's own dual offer intact — see CLIENT-31.
+# `egui` depends on `accesskit` unconditionally and re-exports it, so the
+# semantic tree is always available; `eframe`'s `accesskit` feature is what
+# bridges that tree to the platform — Windows UI Automation, here.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }
+egui = "0.35"
+
+[target.'cfg(windows)'.dependencies]
+# The single-instance mutex. Scoped to Windows because that is where the shape
+# is a kernel object rather than an advisory file lock.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
+tempfile = "3"

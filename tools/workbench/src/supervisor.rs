@@ -10,13 +10,14 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use crate::contract::{
     BackendEvent, Capabilities, ClientSignal, ConnectionEvent, ConnectionEventKind,
     ConnectionHistoryPage, ConnectionSnapshot, DeviceFacts, DeviceSnapshot, EnvironmentSnapshot,
-    EventHistoryPage, EventKind, HistoryQuery, LifecycleState, LogPage, ObservationHealth,
-    ObservationState, RemoveDeviceRequest, SnapshotReason, UpdateDeviceRequest, WorkbenchSnapshot,
-    SCHEMA_VERSION,
+    EventHistoryPage, EventKind, HistoryQuery, ImageFacts, LifecycleState, LogPage,
+    ObservationHealth, ObservationState, RemoveDeviceRequest, SnapshotReason, UpdateDeviceRequest,
+    WorkbenchSnapshot, SCHEMA_VERSION,
 };
 use crate::driver::{DaemonDriver, DaemonProbe, LaitDriver, OwnedDaemon};
 use crate::observability::{read_log_page, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use crate::registry::{RegisteredDevice, Registry};
+use crate::staging::{StagedImage, Staging};
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,6 +49,11 @@ pub struct Config {
     /// How often to sample. [`OBSERVATION_INTERVAL`] unless a caller has a
     /// reason — a test wanting a tighter loop, most likely.
     pub observation_interval: Duration,
+    /// Whether daemons run from the executable in place or from a staged copy.
+    /// A packaged client wants [`Staging::Direct`]; a development run wants a
+    /// per-run [`Staging::Staged`] root, so a rebuild never contends with a
+    /// process holding the image.
+    pub staging: Staging,
 }
 
 impl Config {
@@ -57,7 +63,14 @@ impl Config {
             state_root,
             executable,
             observation_interval: OBSERVATION_INTERVAL,
+            staging: Staging::Direct,
         }
+    }
+
+    /// Run daemons from a staged copy beneath `root`.
+    pub fn staged_in(mut self, root: PathBuf) -> Self {
+        self.staging = Staging::Staged { root };
+        self
     }
 }
 
@@ -110,6 +123,10 @@ pub struct Supervisor {
 struct Inner {
     state_root: PathBuf,
     executable: PathBuf,
+    /// The image devices are actually spawned from, which is the staged copy
+    /// when staging is on. `None` when nothing has been staged — a fake driver
+    /// in a test, where there is no real executable to copy.
+    image: StdMutex<Option<ImageFacts>>,
     driver: Arc<dyn DaemonDriver>,
     registry: Registry,
     devices: RwLock<BTreeMap<String, Arc<Device>>>,
@@ -181,6 +198,21 @@ struct Runtime {
     last_error: Option<String>,
 }
 
+/// What a reload did, said plainly enough to show a person.
+///
+/// `left_running` carries a reason per device rather than a count: "two daemons
+/// were left running" is not something anybody can act on, and the reason is
+/// always the same shape — the evidence to stop it was not there.
+#[derive(Clone, Debug, Default)]
+pub struct Reload {
+    pub was_running: Vec<String>,
+    pub was_external: Vec<String>,
+    pub stopped: Vec<String>,
+    pub left_running: Vec<(String, String)>,
+    pub restarted: Vec<String>,
+    pub image: Option<ImageFacts>,
+}
+
 /// One consumer's cursor into the supervisor's signal stream.
 ///
 /// This is deliberately not a `Stream` implementation: the consumer is Rust
@@ -220,6 +252,10 @@ impl Signals {
 struct DeviceObservation {
     facts: Option<DeviceFacts>,
     health: ObservationHealth,
+    /// The proven identity of an external daemon serving this device, recorded
+    /// while it could be observed. `stop_external` requires it and re-proves it;
+    /// nothing is ever stopped on a pid alone.
+    identity: Option<lait::daemon_spawn::ProcessIdentity>,
 }
 
 #[derive(Default)]
@@ -254,7 +290,13 @@ impl Supervisor {
     /// started supervisor and not already hold a stream that began before it
     /// observed anything.
     pub async fn start(config: Config) -> Result<(Self, Signals), SupervisorError> {
-        let supervisor = Self::new(config.state_root, config.executable)?;
+        let image = StagedImage::prepare(&config.executable, &config.staging, now_ms())
+            .map_err(SupervisorError::Internal)?;
+        // The staged copy is what devices are spawned from, so it is what the
+        // driver is built with. `ImageFacts` keeps the source path, which is
+        // the only reason the two can be told apart later.
+        let supervisor = Self::new(config.state_root, image.executable().to_owned())?;
+        *lock_recovering(&supervisor.inner.image) = Some(image.facts().clone());
         let signals = supervisor.signals();
         supervisor.observe().await;
         supervisor.observe_in_background(config.observation_interval);
@@ -352,6 +394,7 @@ impl Supervisor {
             inner: Arc::new(Inner {
                 state_root,
                 executable,
+                image: StdMutex::new(None),
                 driver,
                 registry,
                 devices: RwLock::new(devices),
@@ -453,6 +496,7 @@ impl Supervisor {
                 runtime.state,
                 LifecycleState::Running | LifecycleState::External
             );
+            let owned = runtime.process.is_some();
             drop(runtime);
 
             if !inspect {
@@ -464,6 +508,19 @@ impl Supervisor {
                 sampled.push(device.id.clone());
                 current_log_sizes.insert(device.id.clone(), log_size(&device));
                 continue;
+            }
+
+            // Only an unowned daemon needs a proven identity: an owned one is
+            // held by a handle, which is stronger evidence than anything that
+            // can be read back about it. Recorded while it can be observed,
+            // because the moment somebody wants to stop it may be the moment it
+            // has stopped answering.
+            if !owned {
+                let identity = self.inner.driver.identity(&device.home).await.ok();
+                lock_recovering(&self.inner.observed_devices)
+                    .entry(device.id.clone())
+                    .or_default()
+                    .identity = identity;
             }
 
             let facts = self.inner.driver.facts(&device.home).await;
@@ -714,6 +771,7 @@ impl Supervisor {
             &device,
             &runtime,
             self.observation_of(&device.id),
+            self.image(),
         ))
     }
 
@@ -732,6 +790,7 @@ impl Supervisor {
                 &device,
                 &runtime,
                 self.observation_of(&device.id),
+                self.image(),
             ));
         };
         let label = label.trim().to_owned();
@@ -761,6 +820,7 @@ impl Supervisor {
             &device,
             &runtime,
             self.observation_of(&device.id),
+            self.image(),
         ))
     }
 
@@ -987,6 +1047,7 @@ impl Supervisor {
                     &device,
                     &runtime,
                     self.observation_of(&device.id),
+                    self.image(),
                 ));
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1034,6 +1095,7 @@ impl Supervisor {
                 &device,
                 &runtime,
                 self.observation_of(&device.id),
+                self.image(),
             ));
         }
         runtime.state = LifecycleState::Stopping;
@@ -1086,6 +1148,7 @@ impl Supervisor {
                     &device,
                     &runtime,
                     self.observation_of(&device.id),
+                    self.image(),
                 ));
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1143,6 +1206,7 @@ impl Supervisor {
             &device,
             &runtime,
             self.observation_of(&device.id),
+            self.image(),
         ))
     }
 
@@ -1173,7 +1237,12 @@ impl Supervisor {
         for device in devices {
             let mut runtime = device.runtime.lock().await;
             self.refresh_owned_process(&device, &mut runtime);
-            let snapshot = snapshot_device(&device, &runtime, self.observation_of(&device.id));
+            let snapshot = snapshot_device(
+                &device,
+                &runtime,
+                self.observation_of(&device.id),
+                self.image(),
+            );
             drop(runtime);
             snapshots.push(snapshot);
         }
@@ -1193,6 +1262,135 @@ impl Supervisor {
             devices: snapshots,
             connections,
         }
+    }
+
+    /// Stop, rebuild, restage, restart — one operation.
+    ///
+    /// This is the whole reason staging exists. Today's remedy for "a running
+    /// `lait.exe` holds its own image" is to terminate every daemon by hand,
+    /// rebuild, restart them, and let every agent rediscover a tool surface that
+    /// died underneath it. Reload does that in order, and `rebuild` never has to
+    /// wait for a file to be released because nothing was holding the source.
+    ///
+    /// The build itself is the caller's: a supervisor library has no business
+    /// knowing what a workspace is built with, and hard-coding one would be the
+    /// UI-neutral core reaching for a development tool.
+    ///
+    /// Devices this supervisor does not own are stopped only if their identity
+    /// can be proven, and are otherwise reported as left running. A reload that
+    /// silently killed them would be the ownership boundary quietly lifted for
+    /// convenience.
+    pub async fn reload(
+        &self,
+        config: &Config,
+        rebuild: impl std::future::Future<Output = Result<(), anyhow::Error>>,
+    ) -> Result<Reload, SupervisorError> {
+        let mut report = Reload::default();
+
+        // Which devices were up, so the same set comes back.
+        let devices: Vec<Arc<Device>> = self.inner.devices.read().await.values().cloned().collect();
+        for device in &devices {
+            let runtime = device.runtime.lock().await;
+            match runtime.state {
+                LifecycleState::Running if runtime.process.is_some() => {
+                    report.was_running.push(device.id.clone());
+                }
+                LifecycleState::External => report.was_external.push(device.id.clone()),
+                _ => {}
+            }
+        }
+
+        for id in &report.was_running {
+            if self.stop_device(id).await.is_err() {
+                let _ = self.force_stop_device(id).await;
+            }
+            report.stopped.push(id.clone());
+        }
+        for id in &report.was_external {
+            match self.stop_external(id).await {
+                Ok(_) => report.stopped.push(id.clone()),
+                Err(refusal) => report.left_running.push((id.clone(), refusal.to_string())),
+            }
+        }
+
+        rebuild.await.map_err(SupervisorError::Internal)?;
+
+        let image = StagedImage::prepare(&config.executable, &config.staging, now_ms())
+            .map_err(SupervisorError::Internal)?;
+        report.image = Some(image.facts().clone());
+        *lock_recovering(&self.inner.image) = Some(image.facts().clone());
+        self.inner.driver.restage(image.executable()).await;
+
+        for id in &report.stopped {
+            // A device left running was never stopped, so it is not restarted
+            // either — it is still serving the image it came up with, which is
+            // exactly what its `ImageFacts` will keep saying.
+            if self.start_device(id).await.is_ok() {
+                report.restarted.push(id.clone());
+            }
+        }
+
+        self.publish_signal(ClientSignal::SnapshotRequired(SnapshotReason::Reloaded));
+        Ok(report)
+    }
+
+    /// The image devices are spawned from, once one has been staged.
+    pub fn image(&self) -> Option<ImageFacts> {
+        lock_recovering(&self.inner.image).clone()
+    }
+
+    /// Stop a daemon this supervisor did not spawn, on evidence.
+    ///
+    /// Ownership is still the safety boundary and this does not weaken it: an
+    /// external daemon is stopped only when its identity can be *proven* to be
+    /// the one recorded, and an unprovable identity is a refusal. The proof is
+    /// four facts agreeing — the pid the home records, the executable that pid
+    /// is running, when it started, and that the home is one this supervisor
+    /// manages — and the last two are what a stale pid file cannot forge.
+    ///
+    /// The verification happens inside `terminate_verified`, on the handle that
+    /// does the terminating, so nothing can be raced between checking and
+    /// killing.
+    pub async fn stop_external(&self, id: &str) -> Result<DeviceSnapshot, SupervisorError> {
+        let device = self.device(id).await?;
+        {
+            let runtime = device.runtime.lock().await;
+            if runtime.process.is_some() {
+                return Err(SupervisorError::Conflict(format!(
+                    "device '{id}' is owned by this supervisor; stop it normally"
+                )));
+            }
+            if runtime.state != LifecycleState::External {
+                return Err(SupervisorError::Conflict(format!(
+                    "device '{id}' has no external daemon to stop"
+                )));
+            }
+        }
+
+        let recorded = self.observation_of(id).identity.ok_or_else(|| {
+            SupervisorError::Conflict(format!(
+                "device '{id}' has no proven process identity, so nothing may be stopped"
+            ))
+        })?;
+        self.inner
+            .driver
+            .terminate_verified(&recorded)
+            .await
+            .map_err(|error| SupervisorError::Conflict(format!("{error:#}")))?;
+
+        self.publish(
+            EventKind::LifecycleChanged,
+            Some(id.to_owned()),
+            "external daemon stopped on verified identity",
+        );
+        self.observe().await;
+        let runtime = device.runtime.lock().await;
+        Ok(snapshot_device(
+            &device,
+            &runtime,
+            self.observation_of(id),
+            self.image(),
+        ))
     }
 
     /// Stop every daemon this supervisor owns, leaving externally discovered
@@ -1387,6 +1585,7 @@ fn snapshot_device(
     device: &Device,
     runtime: &Runtime,
     observation: DeviceObservation,
+    image: Option<ImageFacts>,
 ) -> DeviceSnapshot {
     DeviceSnapshot {
         id: device.id.clone(),
@@ -1400,6 +1599,7 @@ fn snapshot_device(
         last_error: runtime.last_error.clone(),
         facts: observation.facts,
         observation: observation.health,
+        image,
     }
 }
 
@@ -1541,6 +1741,10 @@ mod tests {
         /// which is the case the whole observation-health contract exists for.
         sampling_fails: Arc<AtomicBool>,
         station_id: Arc<StdMutex<Option<String>>>,
+        identity: Arc<StdMutex<Option<lait::daemon_spawn::ProcessIdentity>>>,
+        /// When set, terminating refuses — the process is no longer the one
+        /// that was recorded.
+        terminate_refusal: Arc<StdMutex<Option<String>>>,
     }
 
     struct FakeChild {
@@ -1588,6 +1792,26 @@ mod tests {
             Ok(())
         }
 
+        async fn identity(
+            &self,
+            _home: &Path,
+        ) -> anyhow::Result<lait::daemon_spawn::ProcessIdentity> {
+            lock_recovering(&self.identity)
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no pid recorded for this home"))
+        }
+
+        async fn terminate_verified(
+            &self,
+            _expected: &lait::daemon_spawn::ProcessIdentity,
+        ) -> anyhow::Result<()> {
+            if let Some(refusal) = lock_recovering(&self.terminate_refusal).clone() {
+                return Err(anyhow::anyhow!(refusal));
+            }
+            self.alive.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn facts(&self, _home: &Path) -> anyhow::Result<DeviceFacts> {
             if self.sampling_fails.load(Ordering::SeqCst) {
                 return Err(anyhow::anyhow!("control channel refused"));
@@ -1617,6 +1841,8 @@ mod tests {
         connections: Arc<StdMutex<Vec<crate::driver::ObservedConnection>>>,
         sampling_fails: Arc<AtomicBool>,
         station_id: Arc<StdMutex<Option<String>>>,
+        identity: Arc<StdMutex<Option<lait::daemon_spawn::ProcessIdentity>>>,
+        terminate_refusal: Arc<StdMutex<Option<String>>>,
     }
 
     fn fake_supervisor(alive: Arc<AtomicBool>, root: &Path) -> Supervisor {
@@ -1648,6 +1874,8 @@ mod tests {
                 connections: fake.connections.clone(),
                 sampling_fails: fake.sampling_fails.clone(),
                 station_id: fake.station_id.clone(),
+                identity: fake.identity.clone(),
+                terminate_refusal: fake.terminate_refusal.clone(),
             }),
             Duration::from_millis(100),
             Duration::from_millis(100),
@@ -1735,6 +1963,153 @@ mod tests {
         );
     }
 
+    fn identity(pid: u32, exe: &str, started_at_ms: u64) -> lait::daemon_spawn::ProcessIdentity {
+        lait::daemon_spawn::ProcessIdentity {
+            pid,
+            executable: PathBuf::from(exe),
+            started_at_ms,
+        }
+    }
+
+    /// Ownership stays the safety boundary. An external daemon whose identity
+    /// cannot be proven is refused, and refusing is the *default* — the proof
+    /// has to arrive, not the doubt.
+    #[tokio::test]
+    async fn an_unproven_external_daemon_is_never_stopped() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(true));
+        let fake = Fake::default();
+        let supervisor = fake_supervisor_with(alive.clone(), &fake, directory.path());
+        supervisor
+            .create_device("bob".into(), "Bob".into())
+            .await
+            .expect("create device");
+        supervisor.observe().await;
+        assert_eq!(
+            supervisor.snapshot().await.devices[0].state,
+            LifecycleState::External
+        );
+
+        // No identity was provable, so there is nothing to stop on.
+        assert!(matches!(
+            supervisor.stop_external("bob").await,
+            Err(SupervisorError::Conflict(_))
+        ));
+        assert!(
+            alive.load(Ordering::SeqCst),
+            "an unproven daemon was killed"
+        );
+
+        // With an identity recorded, the driver is asked — and this one refuses,
+        // standing in for the process having changed underneath the record.
+        *lock_recovering(&fake.identity) = Some(identity(4242, "lait.exe", 1_000));
+        *lock_recovering(&fake.terminate_refusal) =
+            Some("process 4242 is not the one recorded".into());
+        supervisor.observe().await;
+        assert!(matches!(
+            supervisor.stop_external("bob").await,
+            Err(SupervisorError::Conflict(_))
+        ));
+        assert!(
+            alive.load(Ordering::SeqCst),
+            "a daemon whose identity no longer matched was killed anyway"
+        );
+
+        // Only when the evidence holds does it stop.
+        *lock_recovering(&fake.terminate_refusal) = None;
+        supervisor
+            .stop_external("bob")
+            .await
+            .expect("stop external");
+        assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    /// An owned device is never routed through the unowned path: a handle is
+    /// stronger evidence than anything that can be read back about a pid.
+    #[tokio::test]
+    async fn an_owned_device_is_refused_by_the_unowned_stop() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let fake = Fake::default();
+        *lock_recovering(&fake.identity) = Some(identity(4242, "lait.exe", 1_000));
+        let supervisor = fake_supervisor_with(alive.clone(), &fake, directory.path());
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+
+        assert!(matches!(
+            supervisor.stop_external("alice").await,
+            Err(SupervisorError::Conflict(_))
+        ));
+        assert!(alive.load(Ordering::SeqCst));
+    }
+
+    /// Reload stops what it owns, rebuilds, restages, and brings the same set
+    /// back — and reports what it could not stop rather than stopping it.
+    #[tokio::test]
+    async fn reload_restarts_what_it_owned_and_reports_what_it_left() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let source = directory.path().join("lait.exe");
+        std::fs::write(&source, b"build one").expect("write executable");
+        let config =
+            Config::new(source.clone(), source.clone()).staged_in(directory.path().join("staging"));
+
+        let alive = Arc::new(AtomicBool::new(false));
+        let fake = Fake::default();
+        let supervisor = fake_supervisor_with(alive, &fake, directory.path());
+        supervisor
+            .create_device("alice".into(), "Alice".into())
+            .await
+            .expect("create device");
+        supervisor
+            .start_device("alice")
+            .await
+            .expect("start device");
+
+        let rebuilt = Arc::new(AtomicBool::new(false));
+        let flag = rebuilt.clone();
+        let report = supervisor
+            .reload(&config, async move {
+                // The build runs with nothing holding the source, which is the
+                // whole point of staging.
+                std::fs::write(&source, b"build two")?;
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .expect("reload");
+
+        assert!(rebuilt.load(Ordering::SeqCst), "the rebuild never ran");
+        assert_eq!(report.was_running, vec!["alice".to_owned()]);
+        assert_eq!(report.stopped, vec!["alice".to_owned()]);
+        assert_eq!(report.restarted, vec!["alice".to_owned()]);
+        assert!(report.left_running.is_empty());
+
+        let image = report.image.expect("reload staged an image");
+        assert_ne!(
+            image.source_path, image.staged_path,
+            "a staged reload ran from the source anyway"
+        );
+        assert_eq!(
+            std::fs::read(&image.staged_path).expect("read staged"),
+            b"build two",
+            "the restaged image is not the rebuilt one"
+        );
+        assert_eq!(
+            supervisor.snapshot().await.devices[0]
+                .image
+                .as_ref()
+                .map(|facts| facts.fingerprint.clone()),
+            Some(image.fingerprint),
+            "the device does not report the image it is actually running"
+        );
+    }
+
     /// Everything currently readable from a stream without blocking, so a test
     /// can assert on a whole sequence rather than one signal at a time.
     async fn drain(signals: &mut Signals) -> Vec<ClientSignal> {
@@ -1764,10 +2139,14 @@ mod tests {
     async fn the_stream_is_established_before_the_first_snapshot() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(directory.path()).expect("canonical root");
+        // A real file: `start` stages the image, and staging reads it.
+        let executable = root.join("lait.exe");
+        std::fs::write(&executable, b"build one").expect("write executable");
         let (supervisor, mut signals) = Supervisor::start(Config {
             state_root: root,
-            executable: PathBuf::from("fake-lait"),
+            executable,
             observation_interval: Duration::from_secs(3_600),
+            staging: Staging::Direct,
         })
         .await
         .expect("start");

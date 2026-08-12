@@ -49,6 +49,91 @@ pub fn mint_token() -> anyhow::Result<String> {
     Ok(data_encoding::HEXLOWER.encode(&buf))
 }
 
+/// How long a launch credential is good for.
+///
+/// Long enough that a browser cold-starting on a slow machine still arrives in
+/// time, short enough that a URL sitting in shell history is worthless by the
+/// time anybody reads it.
+pub const LAUNCH_TICKET_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A credential minted for exactly one launch.
+///
+/// The run token authorises everything this head serves, for as long as it
+/// serves it. That is the right shape for a head a person opened themselves,
+/// and the wrong shape entirely for a URL handed to a browser: a launch URL
+/// lands in browser history, in a synchronised profile, and in the shell's
+/// recent-documents list. What travels there must be worth nothing shortly
+/// after it is used, and must name only the Orbit it was minted for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchTicket {
+    /// The secret itself, carried in the launch URL.
+    pub secret: String,
+    /// The Orbit this ticket admits to, and only this one.
+    pub orbit: String,
+    pub expires_at_ms: u64,
+}
+
+/// The tickets one head has minted and not yet seen spent.
+///
+/// Redemption *consumes*: a ticket answers once. Replay from a browser's
+/// history therefore fails closed, which is the property that makes putting a
+/// credential in a URL defensible at all.
+#[derive(Debug, Default)]
+pub struct LaunchTickets {
+    live: std::sync::Mutex<std::collections::HashMap<String, LaunchTicket>>,
+}
+
+impl LaunchTickets {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mint a ticket admitting to `orbit`, expiring `lifetime` from `now_ms`.
+    pub fn mint(
+        &self,
+        orbit: impl Into<String>,
+        lifetime: std::time::Duration,
+        now_ms: u64,
+    ) -> anyhow::Result<LaunchTicket> {
+        let ticket = LaunchTicket {
+            secret: mint_token()?,
+            orbit: orbit.into(),
+            expires_at_ms: now_ms
+                .saturating_add(u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX)),
+        };
+        let mut live = lock_recovering(&self.live);
+        // Expired tickets are swept on mint rather than by a timer: the map only
+        // grows when somebody launches, so the moment of growth is the only
+        // moment sweeping is worth doing.
+        live.retain(|_, held| held.expires_at_ms > now_ms);
+        live.insert(ticket.secret.clone(), ticket.clone());
+        Ok(ticket)
+    }
+
+    /// Spend `presented`, returning what it admits to.
+    ///
+    /// `None` when it is unknown, already spent, or expired — deliberately one
+    /// answer for all three, because telling them apart tells a caller which
+    /// guess was closer.
+    pub fn redeem(&self, presented: &str, now_ms: u64) -> Option<LaunchTicket> {
+        let mut live = lock_recovering(&self.live);
+        let ticket = live.remove(presented)?;
+        (ticket.expires_at_ms > now_ms).then_some(ticket)
+    }
+
+    /// How many tickets are minted and unspent. For tests and diagnostics.
+    pub fn outstanding(&self) -> usize {
+        lock_recovering(&self.live).len()
+    }
+}
+
+fn lock_recovering<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// The loopback origins we answer to, rendered for a given port.
 ///
 /// A browser sends whichever spelling appears in the URL bar, so all three
@@ -390,6 +475,78 @@ mod upgrade_origin {
         assert_eq!(
             guard().check_upgrade_origin(Some("127.0.0.1:7717"), Some("https://127.0.0.1:7717")),
             Err(Refusal::ForeignOrigin),
+        );
+    }
+
+    /// Replay is what putting a credential in a URL invites, so redemption
+    /// consumes. A launch URL in browser history must be worth nothing.
+    #[test]
+    fn a_launch_ticket_answers_exactly_once() {
+        let tickets = LaunchTickets::new();
+        let ticket = tickets
+            .mint("orb_one", LAUNCH_TICKET_LIFETIME, 1_000)
+            .expect("mint");
+
+        let redeemed = tickets.redeem(&ticket.secret, 1_100).expect("first use");
+        assert_eq!(redeemed.orbit, "orb_one");
+        assert!(
+            tickets.redeem(&ticket.secret, 1_100).is_none(),
+            "a spent ticket was accepted a second time"
+        );
+    }
+
+    #[test]
+    fn an_expired_ticket_is_refused_and_an_unknown_one_is_indistinguishable() {
+        let tickets = LaunchTickets::new();
+        let ticket = tickets
+            .mint("orb_one", std::time::Duration::from_secs(30), 1_000)
+            .expect("mint");
+        assert!(
+            tickets.redeem(&ticket.secret, 1_000 + 30_001).is_none(),
+            "an expired ticket was accepted"
+        );
+        assert!(tickets.redeem("not-a-ticket", 1_000).is_none());
+    }
+
+    /// A ticket admits to the Orbit it was minted for. Scope is the whole
+    /// difference between this and the run-wide token.
+    #[test]
+    fn a_ticket_names_one_orbit() {
+        let tickets = LaunchTickets::new();
+        let one = tickets
+            .mint("orb_one", LAUNCH_TICKET_LIFETIME, 0)
+            .expect("one");
+        let two = tickets
+            .mint("orb_two", LAUNCH_TICKET_LIFETIME, 0)
+            .expect("two");
+        assert_ne!(one.secret, two.secret);
+        assert_eq!(
+            tickets.redeem(&one.secret, 1).expect("redeem one").orbit,
+            "orb_one"
+        );
+        assert_eq!(
+            tickets.redeem(&two.secret, 1).expect("redeem two").orbit,
+            "orb_two"
+        );
+    }
+
+    /// Unspent tickets would otherwise accumulate for the life of the head.
+    #[test]
+    fn minting_sweeps_what_has_expired() {
+        let tickets = LaunchTickets::new();
+        for _ in 0..4 {
+            tickets
+                .mint("orb_one", std::time::Duration::from_secs(30), 0)
+                .expect("mint");
+        }
+        assert_eq!(tickets.outstanding(), 4);
+        tickets
+            .mint("orb_one", std::time::Duration::from_secs(30), 60_000)
+            .expect("mint later");
+        assert_eq!(
+            tickets.outstanding(),
+            1,
+            "expired tickets were kept alive by a later mint"
         );
     }
 }

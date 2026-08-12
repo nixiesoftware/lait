@@ -36,6 +36,7 @@ lait = { path = "../.." }
 mechanics = { path = "../../crates/mechanics" }
 anyhow = "1"
 async-trait = "0.1"
+blake3 = "1"
 axum = { version = "0.8", optional = true }
 fs2 = "0.4"
 schemars = "1"

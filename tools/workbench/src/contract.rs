@@ -69,6 +69,31 @@ pub struct DeviceSnapshot {
     pub facts: Option<DeviceFacts>,
     /// Whether the figures above are current, and since when they were not.
     pub observation: ObservationHealth,
+    /// The image this device was spawned from. A staged run may outlive the
+    /// tree that produced it, so this is reported rather than inferred from the
+    /// workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageFacts>,
+}
+
+/// Which image a device is actually running.
+///
+/// Reported rather than assumed, because a staged run may outlive the tree that
+/// produced it: the workspace can be rebuilt, moved or deleted while a daemon
+/// started from a copy of an older binary keeps serving. A client that shows the
+/// source path in that situation is lying about what is under test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFacts {
+    /// Where the image was copied from.
+    pub source_path: String,
+    /// The copy actually executed. Equal to `source_path` when staging is off,
+    /// which is the packaged client's case.
+    pub staged_path: String,
+    /// Content hash of the staged bytes. Two devices reporting the same
+    /// fingerprint are running the same code, whatever their paths say.
+    pub fingerprint: String,
+    pub staged_at_ms: u64,
 }
 
 /// What a running daemon reports about itself.
@@ -370,6 +395,9 @@ pub enum SnapshotReason {
     /// A supervised daemon came back, so device-derived state may have moved in
     /// ways individual events do not describe.
     DeviceRestarted { device_id: String },
+    /// The fleet was stopped, rebuilt, restaged and restarted. Every device's
+    /// image may have changed underneath whatever a consumer last read.
+    Reloaded,
 }
 
 /// A World's request for an ambient service.
