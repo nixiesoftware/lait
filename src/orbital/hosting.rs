@@ -1277,6 +1277,15 @@ impl StationHost {
                     Err(e) => Response::err(format!("{e}")),
                 }
             }
+            // Which Worlds this Space activated — the read counterpart
+            // `WorldActivate` never had. A read of a record the ACL already
+            // holds, so answering costs nothing beyond what placement already
+            // paid; and it is Orbit-routed, so a caller reaches it through
+            // `request_if_running` and a vacant Orbit is never placed to
+            // produce a listing.
+            Request::WorldsActive => Response::Worlds {
+                worlds: self.mechanics.activated_worlds(),
+            },
             Request::Id => {
                 // First line: the device id (the stable, parseable form).
                 // Second line, when the actor plane resolves this device (a

@@ -78,27 +78,75 @@ impl Client {
                 )));
             }
         };
-        let HostReply::Context { orbits, worlds, .. } = context else {
+        let HostReply::Context { orbits, .. } = context else {
             return Err(ClientError::internal(
                 "host context reply carried no context",
             ));
         };
 
+        // This build's own declarations, read once. The Space says *which*
+        // Worlds it serves; this says how to draw and open one, and joining
+        // them here is what keeps the daemon from answering for a package it
+        // does not hold.
+        let packages = lait::composition::bundled_client_packages();
+
         let mut entries = Vec::new();
         for orbit in orbits {
-            // `HostContext` answers which Worlds this *build* hosts, not which
-            // are active in this Orbit, and `WorldClientPackage` declares no
-            // human name and no entry path. That is SUB-2, and until it lands
-            // the honest row carries the mount and leaves the rest absent
-            // rather than inventing a label out of an id.
-            for mount in &worlds {
+            let Some(space) = mechanics::ids::SpaceId::parse(&orbit.space) else {
+                continue;
+            };
+            let route = lait::control::ControlRoute::Orbit {
+                address: lait::control::OrbitAddress::for_store(
+                    std::path::Path::new(&orbit.path),
+                    space,
+                ),
+            };
+            // `request_if_running` is what makes listing passive: a vacant
+            // Orbit answers "not running" rather than being placed to produce a
+            // row. Placement is what `Open` causes, not what listing costs.
+            let (activated, placement) = match daemon
+                .request_if_running(route, &Request::WorldsActive)
+                .await
+            {
+                Ok(Response::Worlds { worlds }) => (worlds, Placement::Placed),
+                // Not up. A real answer, and not an error — but it means the
+                // activation record cannot be read, so nothing is listed for
+                // it rather than a guess being listed.
+                Ok(_) => (Vec::new(), Placement::Vacant),
+                Err(_) => (Vec::new(), Placement::Unknown),
+            };
+
+            if activated.is_empty() {
+                // The Orbit is real and openable-in-principle; nothing can be
+                // said about its Worlds right now. One row for the Space, with
+                // no World and no entry path, beats silently dropping it.
                 entries.push(LibraryEntry {
                     orbit: orbit.space.clone(),
                     space: orbit.space.clone(),
-                    world_mount: mount.clone(),
+                    world_mount: String::new(),
                     display_name: (!orbit.name.trim().is_empty()).then(|| orbit.name.clone()),
                     entry_path: None,
-                    placement: Placement::Unknown,
+                    placement,
+                });
+                continue;
+            }
+
+            for world in activated {
+                let package = packages
+                    .packages()
+                    .find(|package| package.world().as_str() == world);
+                entries.push(LibraryEntry {
+                    orbit: orbit.space.clone(),
+                    space: orbit.space.clone(),
+                    // A World this build does not host is still a row: the
+                    // Orbit serves something this program cannot open, and
+                    // saying so beats pretending it is not there.
+                    world_mount: package.map_or_else(|| world.clone(), |p| p.mount().to_owned()),
+                    display_name: package
+                        .map(|p| p.display().name().to_owned())
+                        .or_else(|| (!orbit.name.trim().is_empty()).then(|| orbit.name.clone())),
+                    entry_path: package.and_then(|p| p.display().entry_path().map(str::to_owned)),
+                    placement,
                 });
             }
         }

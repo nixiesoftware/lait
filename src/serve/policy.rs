@@ -22,6 +22,9 @@ pub fn is_read(req: &Request) -> bool {
         | Request::MemberLog
         | Request::DeviceInvite
         | Request::DeviceList
+        // Which Worlds this Orbit activated. A read of the ACL's own record,
+        // and one a Library needs before a person has done anything at all.
+        | Request::WorldsActive
         | Request::Status
         | Request::Diagnose { .. }
         | Request::Id
@@ -200,6 +203,9 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::MemberAlias { .. }
         | Request::Members
         | Request::MemberLog
+        // Orbit-routed, not host-routed: it reads one Space's activation record
+        // and therefore needs a Space to read.
+        | Request::WorldsActive
         | Request::AgentAdd { .. }
         | Request::AgentProvision { .. }
         | Request::KeyRotate

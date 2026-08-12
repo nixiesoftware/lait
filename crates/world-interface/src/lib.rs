@@ -360,6 +360,56 @@ pub struct WorldClientPackage {
     local_handler: Option<LocalInvocationHandler>,
     web_parser: Option<WebParser>,
     confirmation: Option<ConfirmationResolver>,
+    display: Display,
+}
+
+/// What a client needs to draw a World as a row somebody can open.
+///
+/// Separate from the mount, and deliberately. A mount is a namespace key that
+/// prefixes tool names and route segments — it is published, it is machine
+/// input, and it must never change. A display name is for a person to read, and
+/// changing it breaks nothing. A seam that made one do both work would have to
+/// treat every rename as a compatibility event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Display {
+    /// What to call this World in a list. Falls back to the mount, which is at
+    /// least a real name rather than an id, but a World that means to be listed
+    /// should say what it is called.
+    name: &'static str,
+    /// A short glyph a row can draw without loading anything. Deliberately not
+    /// an image path: a Library that fetched an asset per row to draw itself
+    /// would make listing cost what opening costs, which is the same defect as
+    /// mounting a Station to list it.
+    icon: Option<&'static str>,
+    /// The path `Open` lands on, relative to the head's root for this World.
+    /// `None` means this World is not openable in a browser, which is a real
+    /// answer and not a missing one.
+    entry_path: Option<&'static str>,
+}
+
+impl Display {
+    /// The honest default for a World that has not said: named by its mount,
+    /// no icon, and *not openable* — because guessing an entry path produces a
+    /// row whose button leads somewhere nobody chose.
+    pub const fn unstated(mount: &'static str) -> Self {
+        Self {
+            name: mount,
+            icon: None,
+            entry_path: None,
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn icon(&self) -> Option<&'static str> {
+        self.icon
+    }
+
+    pub const fn entry_path(&self) -> Option<&'static str> {
+        self.entry_path
+    }
 }
 
 impl WorldClientPackage {
@@ -399,7 +449,49 @@ impl WorldClientPackage {
             local_handler: None,
             web_parser: None,
             confirmation: None,
+            display: Display::unstated(mount),
         })
+    }
+
+    /// Say how this World should be drawn and where `Open` lands.
+    ///
+    /// A World that does not call this is listed by its mount and is *not*
+    /// openable — see [`Display::unstated`]. That is the honest default: an
+    /// entry path invented on a World's behalf is a button that leads somewhere
+    /// nobody chose.
+    pub fn with_display(
+        mut self,
+        name: &'static str,
+        icon: Option<&'static str>,
+        entry_path: Option<&'static str>,
+    ) -> Result<Self, Failure> {
+        if name.trim().is_empty() {
+            return Err(Failure::new(format!(
+                "World '{}' declares an empty display name",
+                self.world
+            )));
+        }
+        // An entry path is joined onto a head's root, so a relative or
+        // traversing one would resolve somewhere the World does not own.
+        if let Some(path) = entry_path {
+            if !path.starts_with('/') || path.contains("..") {
+                return Err(Failure::new(format!(
+                    "World '{}' declares entry path '{path}', which must be absolute                      and must not traverse",
+                    self.world
+                )));
+            }
+        }
+        self.display = Display {
+            name,
+            icon,
+            entry_path,
+        };
+        Ok(self)
+    }
+
+    /// How a client should draw this World.
+    pub const fn display(&self) -> &Display {
+        &self.display
     }
 
     pub fn with_failure_classifier(mut self, classifier: FailureClassifier) -> Self {
@@ -642,6 +734,22 @@ fn validate_name(kind: &str, name: &str) -> Result<(), Failure> {
 
 #[cfg(test)]
 mod tests {
+    /// A World that says nothing is named by its mount and is *not* openable.
+    /// The alternative — defaulting the entry path to `/` — produces a row
+    /// whose button leads somewhere nobody chose, and nothing downstream can
+    /// tell that apart from a declared route.
+    #[test]
+    fn a_world_that_declares_no_display_is_named_by_its_mount_and_is_not_openable() {
+        let display = super::Display::unstated("issues");
+        assert_eq!(display.name(), "issues");
+        assert_eq!(display.icon(), None);
+        assert_eq!(
+            display.entry_path(),
+            None,
+            "an entry path was invented for a World that declared none"
+        );
+    }
+
     use super::*;
 
     fn empty_schema() -> Value {

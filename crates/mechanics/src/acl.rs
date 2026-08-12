@@ -776,6 +776,17 @@ impl AclState {
             .map(|active| active.id)
     }
 
+    /// Every World this Space has activated, in id order.
+    ///
+    /// This is the read counterpart `WorldActivate` never had. Without it, a
+    /// client wanting the openable things in an Orbit could only take the
+    /// Worlds *this build* hosts and cross them with the Orbits on disk — a
+    /// product of two sets that answers a question nobody asked, and lists
+    /// Worlds an Orbit never activated.
+    pub fn activated_worlds(&self) -> Vec<String> {
+        self.policy.implementations.keys().cloned().collect()
+    }
+
     /// The active implementation's id *and* declared version.
     ///
     /// The id alone answers "does this build match?"; only the pair answers

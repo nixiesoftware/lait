@@ -56,14 +56,26 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
         "Work with issues, projects, planning, roles, and workflows in the selected Orbit.",
         decode_client_reply,
     )
-    .map(|package| {
+    .and_then(|package| {
         package
             .with_failure_classifier(classify_failure)
             .with_local_handler(host::execute)
             .with_web_parser(host::parse_web)
             .with_confirmation(host::confirmation)
+            // What a client draws, and where `Open` lands. The display name is
+            // the product's name, not the mount: `issues` is a namespace key
+            // that prefixes tool names and route segments, and a person reading
+            // a list should see what the thing is called.
+            .with_display(DISPLAY_NAME, Some("📋"), Some("/"))
     })
 }
+
+/// What this World is called when a person sees it in a list.
+///
+/// Distinct from [`MOUNT`], and deliberately: the mount is published machine
+/// input that must never change, while this may change freely because nothing
+/// resolves by it.
+pub const DISPLAY_NAME: &str = "Issues";
 
 fn decode_client_reply(
     call: &runtime::world::call::Call,
@@ -75,6 +87,27 @@ fn decode_client_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mount and the display name are different things, and the seam only
+    /// earns its keep if they stay different: the mount is published machine
+    /// input that renames every tool an agent learned, and the name is for a
+    /// person to read.
+    #[test]
+    fn the_world_declares_a_display_name_distinct_from_its_mount() {
+        let package = package().expect("the package declares");
+        let display = package.display();
+        assert_eq!(display.name(), DISPLAY_NAME);
+        assert_ne!(
+            display.name(),
+            MOUNT,
+            "the display name is the mount, so nothing was actually declared"
+        );
+        assert_eq!(
+            display.entry_path(),
+            Some("/"),
+            "the World declares no entry path, so a Library cannot open it"
+        );
+    }
 
     /// The mount is published API. Every agent that has ever called this server
     /// learned tools named `issues_*`; a mount rename silently renames all of

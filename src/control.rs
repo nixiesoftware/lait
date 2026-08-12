@@ -447,6 +447,15 @@ pub enum Request {
     WorldActivate {
         world: String,
     },
+    /// Which Worlds this Orbit has activated, with what a client needs to draw
+    /// and open each one.
+    ///
+    /// The read counterpart [`Request::WorldActivate`] never had. It is routed
+    /// to an Orbit and answered only by one that is *already placed* — see
+    /// `request_if_running`. That is the whole design: listing what a device
+    /// serves must never place a Station, or a Library that draws ten rows
+    /// mounts ten stores to do it, and listing costs what opening costs.
+    WorldsActive,
     /// Streaming dirty notifications for live clients. Turns the one-shot handler into a
     /// stream of [`Doorbell`] frames until the client disconnects.
     Subscribe {
@@ -1197,6 +1206,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::AssignmentGrant { .. }
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
+        | Request::WorldsActive
         | Request::Id
         | Request::Whoami => Mechanics,
 
@@ -1468,6 +1478,16 @@ pub enum Response {
     },
     Who {
         peers: Vec<PresenceEntry>,
+    },
+    /// Reply to [`Request::WorldsActive`]: the World ids this Space activated.
+    ///
+    /// Ids and nothing else, deliberately. *Which* Worlds an Orbit serves is
+    /// the Space's authority and is what the daemon can answer; how to draw and
+    /// open one is a declaration of whichever build is asking, and that build
+    /// has its own client registry to join in. A daemon that answered display
+    /// metadata would be answering for a package it does not hold.
+    Worlds {
+        worlds: Vec<String>,
     },
     /// The Live plane's transient table (reply to [`Request::Live`]).
     Live {
