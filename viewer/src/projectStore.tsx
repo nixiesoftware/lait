@@ -1327,7 +1327,7 @@ export function useProjectRegistry<T>(
  * asking the daemon about a project that isn't there.
  */
 /**
- * The open project's dependency graph, for the timeline.
+ * The open project's dependency graph.
  *
  * Fetched by the same rule as milestones — only when a project is actually
  * open, and keyed on its id so switching projects does not read the last one's

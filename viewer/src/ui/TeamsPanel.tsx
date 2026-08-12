@@ -166,7 +166,7 @@ function TeamList({
       {teams.length === 0 ? (
         <p className="text-mute text-sm">
           No teams yet. A team owns projects, and the sidebar navigates by them — Issues, Projects
-          and Roadmap, each scoped to what that team owns.
+          and Projects, each scoped to what that team owns.
         </p>
       ) : (
         <div className="overflow-hidden">
@@ -257,7 +257,7 @@ function CreateTeam({
       </button>
       <SettingsPageHeader
         title="Create a new team"
-        description="A team owns projects. Its Issues, Projects, and Roadmap views are scoped to that ownership."
+        description="A team owns projects. Its Issues and Projects views are scoped to that ownership."
         className="mb-4"
       />
       <div className="border-line flex flex-col gap-4 rounded-surface border p-4">

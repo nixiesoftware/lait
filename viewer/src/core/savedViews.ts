@@ -9,7 +9,7 @@ export interface SavedView {
   name: string;
   filter: FilterState;
   display: DisplayState;
-  /** The render mode to restore (list/board/calendar/timeline). Absent on views
+  /** The render mode to restore (list/board/calendar). Absent on views
    *  saved before the switcher existed — those just keep the current view. */
   view?: WorkView;
 }

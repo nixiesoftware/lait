@@ -89,7 +89,6 @@ const VIEWS = new Set<View>([
   "list",
   "board",
   "calendar",
-  "timeline",
   "projects",
   "inbox",
   "my-issues",
@@ -276,16 +275,16 @@ function decode(value: string): string {
 /** Project-home destinations carry structural project identity; workspace
  * destinations must never inherit stale project state. */
 function isProjectDestination(view: View): boolean {
-  return view === "overview" || view === "list" || view === "board" || view === "calendar" || view === "timeline" || view === "activity" || view === "specs";
+  return view === "overview" || view === "list" || view === "board" || view === "calendar" || view === "activity" || view === "specs";
 }
 
 /** Whether this view draws rows a filter can narrow. */
 export function carriesFilter(view: View): boolean {
-  return view === "list" || view === "board" || view === "calendar" || view === "timeline";
+  return view === "list" || view === "board" || view === "calendar";
 }
 
 function displaysIssue(view: View): boolean {
-  return view === "list" || view === "board" || view === "calendar" || view === "timeline";
+  return view === "list" || view === "board" || view === "calendar";
 }
 
 /**
@@ -296,7 +295,7 @@ function displaysIssue(view: View): boolean {
  * ones left out are the ones that are about a *single* project (Overview,
  * Activity, Specs) or about the whole space (Settings, Inbox).
  */
-export const TEAM_VIEWS: readonly View[] = ["list", "board", "timeline", "projects"];
+export const TEAM_VIEWS: readonly View[] = ["list", "board", "projects"];
 
 export function isTeamDestination(view: View): boolean {
   return TEAM_VIEWS.includes(view);
@@ -305,7 +304,7 @@ export function isTeamDestination(view: View): boolean {
 function teamView(segment: string | undefined): View | null {
   if (!segment) return "list";
   if (segment === "issues" || segment === "list") return "list";
-  return segment === "board" || segment === "timeline" || segment === "projects" ? segment : null;
+  return segment === "board" || segment === "projects" ? segment : null;
 }
 
 function projectSegment(view: View): string {
@@ -318,7 +317,6 @@ function projectView(segment: string | undefined): View | null {
   return segment === "overview" ||
     segment === "board" ||
     segment === "calendar" ||
-    segment === "timeline" ||
     segment === "activity" ||
     segment === "specs"
     ? segment

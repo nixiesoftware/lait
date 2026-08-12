@@ -17,11 +17,9 @@ import {
   type Ctx,
   isIssueMode,
   isProjectView,
-  isSpecMode,
   PROJECT_VIEW_LABEL,
   type IssueMode,
   type IssueField,
-  type SpecMode,
   type View,
 } from "./core/registry";
 import {
@@ -48,8 +46,6 @@ import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
 import { mergeBoards, projectsOf, teamAsProject } from "./core/teams";
-import { ProjectTimeline } from "./ui/ProjectTimeline";
-import { Roadmap } from "./ui/Roadmap";
 import { DisplayOptions } from "./ui/DisplayOptions";
 import { FilterMenu } from "./ui/FilterMenu";
 import type { IssueMutators } from "./ui/fields";
@@ -106,9 +102,7 @@ import {
   projectKeys,
   useProjectBoard,
   useProjectMilestones,
-  useGeometry,
   useSpaceBoards,
-  useSpaceMilestones,
   useProjectRegistry,
   useProjectViewerStore,
   useSpec,
@@ -165,10 +159,6 @@ const LAYOUT_PANEL_IDS = ["sidebar", "main", "detail"];
  * The console has no twin at all: it is gated in JS alone, because the control
  * that toggles it has to disappear with it.
  */
-/** No seed. The engine reads an empty root set as "the whole project" — a Plan
- *  narrows the same query by naming roots. Module-level so the geometry
- *  resource key is stable across renders. */
-const WHOLE_PROJECT: readonly string[] = [];
 const CONSOLE_QUERY = "(max-width: 960px)";
 const RAIL_DRAWER_QUERY = "(max-width: 768px)";
 
@@ -348,13 +338,6 @@ export function App() {
   const [issueLayout, setIssueLayout] = useState<IssueMode>("list");
   useEffect(() => {
     if (isIssueMode(view)) setIssueLayout(view);
-  }, [view]);
-  /** The same rule for the plan: the layout Specs were last drawn in, so
-   *  leaving for Overview and coming back returns you to the timeline if that
-   *  is where you were. */
-  const [specLayout, setSpecLayout] = useState<SpecMode>("specs");
-  useEffect(() => {
-    if (isSpecMode(view)) setSpecLayout(view);
   }, [view]);
   const projectStore = useProjectViewerStore();
   // Not while a team is in scope: `project` is null there, and a null project
@@ -800,19 +783,11 @@ export function App() {
    * `Special` CLI handler, not a `Request`, so no HTTP endpoint reaches it.)
    */
   //
-  // Timeline is the exception, and it is the reason the rule needed one. It is
-  // a project view *and* a workspace view — the same chart at two scales — so a
-  // project-less timeline route is a destination rather than an unresolved one,
-  // and defaulting a project into it made the workspace chart unreachable the
-  // moment a space had a project to default to. It also does not need the
-  // resolution: the workspace chart asks for every project's board by name.
-  //
-  // A team scope is the second exception, and the same one wearing a different
-  // hat: under a team `project` is null on purpose — the surfaces read every
+  // A team scope is the one exception, and it wears a different hat: under a team `project` is null on purpose — the surfaces read every
   // project the team owns — so defaulting one in would narrow a team's issues
   // to whichever project happened to sort first.
   useEffect(() => {
-    if (!isProjectView(view) || view === "timeline" || project !== null || team) return;
+    if (!isProjectView(view) || project !== null || team) return;
     if (projects.length === 0) return;
     setProject((projects.find((candidate) => !candidate.archived) ?? projects[0])!.key);
   }, [projects, project, team, view]);
@@ -1610,11 +1585,7 @@ export function App() {
     // `?issue=` while composing — and the two have to agree or a reload lands
     // somewhere the app was not.
     !composing?.page &&
-    // Timeline belongs here for the same reason the other three do: its rows
-    // are issues and its rail is a select target. Leaving it out meant a click
-    // on a timeline row wrote `?issue=` and set `detail`, and then nothing
-    // appeared — the one gesture every row advertises did nothing at all.
-    (view === "list" || view === "board" || view === "calendar" || view === "timeline"),
+    (view === "list" || view === "board" || view === "calendar"),
   );
   // Keep one panel topology for every view. The old two-id declaration mounted a
   // third panel only for issue-capable views, so the library rebalanced the
@@ -1812,48 +1783,6 @@ export function App() {
   // The open project's milestones, for the filter menu's Milestone facet. The
   // same resource the overview and the issue rail read — one fetch for all three.
   const milestones = useProjectMilestones(current ?? "", activeProject?.id).data ?? [];
-  /**
-   * The open project's compiled morphology, for the dependency view.
-   *
-   * Asked for only while that view is on screen — it is one request per project
-   * and no other surface draws it. Empty roots is the engine's own spelling of
-   * "the whole project"; a Plan passes its seed to the same hook.
-   *
-   * This replaced `useProjectGraph` here. The graph answered edges and left the
-   * viewer to run Kahn and Tarjan over them; geometry answers the solved
-   * layering, the connected components and the slack, which is the same request
-   * count for a great deal less arithmetic — and it is the same resource a Plan
-   * reads, so the two surfaces cannot drift.
-   */
-  const projectMorphology =
-    useGeometry(current ?? "", view === "timeline" ? activeProject?.id : null, WHOLE_PROJECT)
-      .data ?? null;
-  /**
-   * Every project's edge set, for the workspace sequence chart.
-   *
-   * Asked for only when the workspace timeline is what is on screen: it is N
-   * requests, and the other workspace surfaces have no use for them. Each one
-   * lands in its own resource, so opening a project afterwards reads the graph
-   * this already fetched rather than asking again.
-   */
-  /**
-   * The roadmap's data, fetched only while the roadmap is what is on screen.
-   *
-   * Two fan-outs of N requests each, so they are gated: every other workspace
-   * surface would be paying for rows and milestones it does not draw. Each
-   * project's answer lands in its own resource, so opening a project afterwards
-   * reads what this already fetched.
-   */
-  const atRoadmap = view === "timeline" && project === null;
-  const spaceBoards =
-    useSpaceBoards(current ?? "", atRoadmap ? liveProjects.map((p) => p.key) : []).data ?? {};
-  const spaceMilestones =
-    useSpaceMilestones(current ?? "", atRoadmap ? liveProjects.map((p) => p.id) : []).data ?? {};
-  const roadmapStates = useMemo(() => {
-    if (states.length > 0) return states;
-    const any = Object.values(spaceBoards)[0];
-    return any?.columns.map((c) => c.state) ?? [];
-  }, [spaceBoards, states]);
   const projectCounts = useMemo(() => {
     const counts = { backlog: 0, active: 0, done: 0, total: 0 };
     for (const column of board?.columns ?? []) {
@@ -1929,20 +1858,9 @@ export function App() {
   /** The layout showing, when one is — `null` on Overview, Activity and the
    *  workspace destinations. Narrowed once so every gate below reads the same. */
   const issueMode = isIssueMode(view) ? view : null;
-  /** The plan's layout showing, when one is — the register or the morphology. */
-  const specMode = isSpecMode(view) ? view : null;
-  /**
-   * Where the filter control belongs.
-   *
-   * Wider than `issueMode` by exactly one view. The timeline stopped being a
-   * layout of Issues, but it did not stop drawing the project's issues or
-   * narrowing to a filter — it takes both the filtered slice and the whole
-   * project precisely so a filter can scope what is drawn without restating how
-   * many rounds of work there are. Gating the control on `issueMode` would have
-   * left a filter that a route can still carry and a reader can no longer
-   * reach.
-   */
-  const filterable = projectShell && (Boolean(issueMode) || view === "timeline");
+  /** Where the filter control belongs: the views that draw rows a filter can
+   *  narrow, which is exactly the issue layouts. */
+  const filterable = projectShell && Boolean(issueMode);
   /** The Spec being read, when one is. Its own resource, so a deep link resolves
    *  the title for the trail without the register having loaded. */
   const readingSpec = useSpec(current ?? "", view === "specs" ? openSpec : null).data ?? null;
@@ -2155,7 +2073,7 @@ export function App() {
    *
    * Rendered *instead of* the shell rather than inside it. The formation
    * surface used to sit in the work area with the sidebar still offering
-   * Inbox, My issues, Projects, Roadmap and a "PROJECTS 0" tree: a full
+   * Inbox, My issues, Projects and a "PROJECTS 0" tree: a full
    * navigation model for a workspace that does not exist yet, wrapped around
    * the one surface whose whole message is that it does not exist yet.
    *
@@ -2342,7 +2260,7 @@ export function App() {
                 // carry this rule and the strip inherits it.
                 onPick={(next) =>
                   api.goto(
-                    next === "list" ? issueLayout : next === "specs" ? specLayout : next,
+                    next === "list" ? issueLayout : next,
                   )
                 }
               />
@@ -2365,27 +2283,6 @@ export function App() {
                   totalCount={totalCount}
                   onChange={setFilter}
                 />
-              )}
-              {/* Specs has layouts too now, so it gets the same control. Only
-                  the switcher and density are on it — a register of documents
-                  has no "group by assignee", and the timeline is placed by the
-                  dependency graph rather than by a preference. Withholding
-                  `display` is what states that; there is no surface flag. */}
-              {projectShell && specMode && (
-                <span className="@max-[420px]:hidden">
-                  <DisplayOptions
-                    surface="specs"
-                    view={specMode}
-                    onModeChange={(mode) => api.goto(mode as View)}
-                    open={displayOpen}
-                    onOpenChange={setDisplayOpen}
-                    density={density}
-                    onDensityChange={(nextDensity) => {
-                      setDensity(nextDensity);
-                      applyDensity(nextDensity);
-                    }}
-                  />
-                </span>
               )}
               {projectShell && issueMode && (
                 <span className="@max-[420px]:hidden">
@@ -2705,45 +2602,6 @@ export function App() {
               onSelect={api.openIssue}
               mutators={issueMutators}
               readOnly={readOnly}
-            />
-          ) : shown && view === "timeline" && activeProject ? (
-            /* Two charts sharing one view id, and the branch below is where
-               they part: with a project open this is that project's dependency
-               morphology; without one it is `Roadmap`, which measures every
-               project on a single axis of work.
-
-               They are not the same drawing at two scales, whatever the id
-               suggests — one is a graph of issues and the other is a bar per
-               project. The morphology needs a project because a dependency
-               graph is a thing a project has; the roadmap needs there not to be
-               one. Worth splitting the ids at some point; the tangle is
-               historical, not intended. */
-            <ProjectTimeline
-              board={shown}
-              // Geometry is always the whole project; `board` says which of it
-              // survived the filter. The morphology is a fact about the
-              // project, so a filter scopes what is drawn and must not quietly
-              // restate how many rounds of work there are.
-              geometry={projectMorphology}
-              milestones={milestones}
-              project={shown.project}
-              filtered={isActive(filter)}
-              selection={selection}
-              onSelect={api.openIssue}
-            />
-          ) : view === "timeline" ? (
-            <Roadmap
-              projects={teamProjects}
-              boards={spaceBoards}
-              milestones={spaceMilestones}
-              // The workflow is the space's, and at the workspace there is no
-              // open project to read it off. Any loaded board carries it, so
-              // the roadmap takes it from the first one that landed rather than
-              // from `states`, which is empty whenever no project is open —
-              // and an empty workflow makes every issue read as backlog.
-              states={roadmapStates}
-              members={members}
-              onOpenProject={(key) => api.goto("timeline", key)}
             />
           ) : shown && view === "list" ? (
             <IssueList
@@ -3154,7 +3012,6 @@ function workspaceTitle(view: View): string {
   if (view === "inbox") return "Inbox";
   if (view === "my-issues") return "My issues";
   if (view === "projects") return "Projects";
-  if (view === "timeline") return "Roadmap";
   if (view === "settings") return "Settings";
   return "Workspace";
 }

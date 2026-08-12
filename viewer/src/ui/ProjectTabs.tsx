@@ -1,4 +1,4 @@
-import { isIssueMode, isSpecMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
+import { isIssueMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
 import { Button } from "@astryxdesign/core";
 import { cn, toolbarControl } from "./primitives";
 
@@ -57,13 +57,10 @@ export function ProjectTabs({
   return (
     <nav aria-label="Project views" className="flex shrink-0 items-center gap-1">
       {TABS.map((tab) => {
-        // A board is Issues wearing a different layout and a timeline is the
-        // plan wearing one, so each tab stays lit under all of its own layouts.
-        // Letting Issues go dark on a board would say you had left the issues
-        // when you are looking at them, and the same is true of the timeline
-        // and the plan it draws.
-        const current =
-          tab === "list" ? isIssueMode(view) : tab === "specs" ? isSpecMode(view) : view === tab;
+        // A board is Issues wearing a different layout, so the tab stays lit
+        // under all of its own layouts. Letting Issues go dark on a board would
+        // say you had left the issues when you are looking at them.
+        const current = tab === "list" ? isIssueMode(view) : view === tab;
         return (
           <Button
             key={tab}

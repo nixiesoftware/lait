@@ -33,7 +33,6 @@ export type View =
   | "list"
   | "board"
   | "calendar"
-  | "timeline"
   | "projects"
   | "inbox"
   | "my-issues"
@@ -43,11 +42,11 @@ export type View =
 
 /** The work-view render modes a saved view / the switcher toggles between —
  *  the same filtered query, drawn four ways. A strict subset of `View`. */
-export const WORK_VIEWS = ["list", "board", "calendar", "timeline"] as const;
+export const WORK_VIEWS = ["list", "board", "calendar"] as const;
 export type WorkView = (typeof WORK_VIEWS)[number];
 /** Surfaces owned by one project home. Workspace destinations must never retain
  * one of these routes without a canonical project key. */
-export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "timeline", "activity", "specs"] as const;
+export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "activity", "specs"] as const;
 export type ProjectView = (typeof PROJECT_VIEWS)[number];
 
 /**
@@ -59,22 +58,15 @@ export type ProjectView = (typeof PROJECT_VIEWS)[number];
  * beside grouping and ordering, with the other things that decide how the same
  * rows are drawn rather than which rows they are.
  *
- * Two views are withdrawn from the picker, for different reasons. Neither is
- * deleted — both still route and still render, so old links and any saved view
- * holding one keep working.
+ * **`calendar`** is withdrawn from the picker but not deleted: it is a layout
+ * nobody chose. `/projects/:key/calendar` still works and still renders; it is
+ * simply no longer offered. `isIssueMode` carries the consequence — its URL no
+ * longer lights the Issues tab and is not remembered as the layout to return
+ * to.
  *
- * **`calendar`** is a layout nobody chose. `/projects/:key/calendar` still
- * works; it is simply no longer offered.
- *
- * **`timeline`** is withdrawn because it is not a layout *of the issues*. The
- * switcher's promise is that its buttons show the same rows rearranged, and the
- * timeline breaks it: nodes are placed by what blocks what, grouping and
- * ordering mean nothing there, and the question it answers is "in what order
- * does this project happen" rather than "which issues are there". It is a
- * layout of the *plan* instead — see `SPEC_MODES`.
- *
- * `isIssueMode` carries the consequence for both: their URLs no longer light
- * the Issues tab and are no longer remembered as the layout to return to.
+ * `timeline` was once a third member here, then a layout of the *plan* under
+ * Specs, and finally the Roadmap. All three are withdrawn: the view id no
+ * longer exists.
  */
 export const ISSUE_MODES = ["list", "board"] as const;
 export type IssueMode = (typeof ISSUE_MODES)[number];
@@ -89,38 +81,6 @@ export const ISSUE_MODE_LABEL: Record<IssueMode, string> = {
   board: "Board",
 };
 
-/**
- * The layouts of a project's *plan* the Specs switcher offers.
- *
- * `specs` is the register — the documents themselves, as a list. `timeline` is
- * the morphology those documents are about: the same work the Plans name,
- * placed by what blocks what.
- *
- * It sits here rather than beside Board because of what a Plan turned out to
- * be. A Plan stores no phases, no membership and no ordering — only roots — and
- * Blueprint compiles the shape from canonical Issue relations. So the timeline
- * is not a second drawing of the issue rows; it is the *rendered plan*, and the
- * register and the drawing are two views of one thing. That is exactly the test
- * `ISSUE_MODES` states and that Board passes: same subject, different drawing.
- *
- * It briefly had a tab of its own beside Overview and Specs. A tab claims a
- * face of the project coordinate with the other four, and this is not one — it
- * is how you look at the plan, which is a choice you make while reading the
- * plan, next to the other choices about how the same subject is drawn.
- */
-export const SPEC_MODES = ["specs", "timeline"] as const;
-export type SpecMode = (typeof SPEC_MODES)[number];
-export function isSpecMode(v: View): v is SpecMode {
-  return (SPEC_MODES as readonly string[]).includes(v);
-}
-/** What the Specs switcher calls each mode. `specs` is "List" here — the
- *  destination is already named "Specs" by the tab, and repeating it inside
- *  would offer "Specs / Timeline" under a lit Specs tab. */
-export const SPEC_MODE_LABEL: Record<SpecMode, string> = {
-  specs: "List",
-  timeline: "Timeline",
-};
-
 /** The faces the sidebar tree lists, and the hops the trail can name. Board and
  *  Calendar are layouts of Issues, so they collapse into it. */
 export const PROJECT_NAV_VIEWS = ["overview", "list", "specs", "activity"] as const;
@@ -132,7 +92,6 @@ export const PROJECT_VIEW_LABEL: Record<ProjectView, string> = {
   list: "Issues",
   board: "Board",
   calendar: "Calendar",
-  timeline: "Timeline",
   activity: "Activity",
   specs: "Specs",
 };

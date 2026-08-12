@@ -12,7 +12,6 @@ import {
   Folder,
   FolderPlus,
   Inbox,
-  GanttChart,
   Plus,
   Search,
   Star,
@@ -214,11 +213,6 @@ export function Sidebar({
             two places, and neither of them is wrong enough to be obviously
             wrong. */}
         <NavItem icon={<ProjectIcon />} label="Projects" active={view === "projects" && !currentTeam} onClick={() => onGo("projects")} />
-        {/* `null` and not the default. `goto` keeps the project you are in for
-            any project-capable view, and Timeline is one — so without this the
-            workspace Roadmap landed on whichever project you last had open, and
-            the space-wide chart was unreachable while any project existed. */}
-        <NavItem icon={<GanttChart />} label="Roadmap" active={view === "timeline" && !currentTeam} onClick={() => onGo("timeline", null)} />
         {savedViews.length > 0 && <MiniSection title="Saved views" />}
         {savedViews.map((saved) => (
           <NavItem key={saved.id} icon={<Bookmark />} label={saved.name} onClick={() => onApplySavedView(saved)} compact />
@@ -293,12 +287,6 @@ export function Sidebar({
                     label="Projects"
                     active={scoped && view === "projects"}
                     onClick={() => onGoTeam(candidate.key, "projects")}
-                  />
-                  <NavItem
-                    icon={<GanttChart />}
-                    label="Roadmap"
-                    active={scoped && view === "timeline"}
-                    onClick={() => onGoTeam(candidate.key, "timeline")}
                   />
                 </div>
               )}
