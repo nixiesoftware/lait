@@ -293,6 +293,9 @@ export interface GeometryNode {
   layer?: number | null;
   ordinal: number;
   hierarchy_depth: number;
+  /** The containment block this issue belongs to, by `GeometryRegion.id`.
+   *  Absent when it has no selected parent and no selected children. */
+  region?: string | null;
   parent?: string | null;
   children: string[];
   blocked_by: string[];
@@ -306,6 +309,28 @@ export interface GeometryEdge {
   relation: string;
   role: GeometryRole;
   to: string;
+  /** A longer dependency path already asserts this constraint, so drawing it
+   *  adds a line and no information. Only ever true of a `constraint` edge, and
+   *  absent from an engine that predates the reduction. */
+  implied?: boolean;
+}
+/**
+ * One block of the containment partition, contracted to a single vertex.
+ *
+ * `layer` is the block's place in the *quotient* graph — an edge exists wherever
+ * any member of one block blocks any member of another — so it is the plan's
+ * phase order, computed by the same longest-path pass the issues get. `null`
+ * when the contraction is cyclic, which is reachable even though the issue graph
+ * is not: two blocks can block each other through different members.
+ *
+ * Only groupings of two or more appear, so this is empty for a project that has
+ * never used sub-issues.
+ */
+export interface GeometryRegion {
+  id: string;
+  nodes: string[];
+  layer?: number | null;
+  ordinal: number;
 }
 export interface GeometryComponent {
   id: string;
@@ -337,6 +362,9 @@ export interface GeometryView {
   nodes: GeometryNode[];
   edges: GeometryEdge[];
   components: GeometryComponent[];
+  /** The containment partition, contracted and layered. Empty when nothing in
+   *  the selection is a sub-issue of anything else. */
+  regions?: GeometryRegion[];
   residuals: GeometryResidual[];
   closure: GeometryClosure;
 }

@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1410
-pr-platform    1065
-nightly        1437
+pr             1414
+pr-platform    1069
+nightly        1441
 mutants        98
 
 [gates]
@@ -389,10 +389,14 @@ lait-issues dto::tests::default_workflow_has_one_done_column
 lait-issues dto::tests::priority_json_is_lowercase
 lait-issues dto::tests::priority_orders_low_to_high
 lait-issues dto::tests::priority_roundtrips
+lait-issues geometry::tests::a_constraint_a_longer_path_asserts_is_implied_and_a_single_hop_never_is
+lait-issues geometry::tests::a_project_without_sub_issues_reports_no_regions
 lait-issues geometry::tests::a_seed_compiles_branching_order_and_closure_without_stored_layout
+lait-issues geometry::tests::an_unbranched_chain_offers_the_reduction_no_candidates
 lait-issues geometry::tests::client_one_plan_emerges_from_issue_facts_and_moves_its_open_locus
 lait-issues geometry::tests::cycles_are_loci_and_downstream_work_is_stalled_not_mislabeled
 lait-issues geometry::tests::fifty_thousand_issue_morphology_stays_bounded_and_linear_in_shape
+lait-issues geometry::tests::regions_contract_the_containment_partition_and_take_their_own_layer
 lait-issues ids::tests::docid_roundtrips_and_validates
 lait-issues ids::tests::short_handle_is_prefix_plus_n
 lait-issues ids::tests::ulids_sort_by_time
