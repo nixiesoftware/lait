@@ -46,11 +46,19 @@ eframe = { version = "0.35", default-features = false, features = [
 egui = "0.35"
 
 [target.'cfg(windows)'.dependencies]
-# The single-instance mutex. Scoped to Windows because that is where the shape
-# is a kernel object rather than an advisory file lock.
+# The single-instance mutex, the tray icon and the browser handoff. All three
+# are Windows shapes rather than portable ones — a kernel object rather than an
+# advisory file lock, a shell notification area, and `ShellExecuteW` rather than
+# a console-subsystem child that would flash a window. Reached directly because
+# a crate for each would be three more entries in a closure that a build-failing
+# licence audit and a generated notice file both have to carry.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

@@ -20,6 +20,7 @@
 //! binding and no serialization on the path between what is observed and what
 //! is drawn. They are Rust modules calling each other on native types.
 
+pub mod browser;
 pub mod client;
 pub mod lifecycle;
 pub mod link;
@@ -27,6 +28,7 @@ pub mod model;
 pub mod runtime;
 pub mod sidecar;
 pub mod single_instance;
+pub mod tray;
 pub mod ui;
 
 pub use client::{Client, ClientError, ClientResult, Config};

@@ -1356,7 +1356,48 @@ impl Supervisor {
     /// it on the one process a person is most likely to leave running.
     pub async fn start_head(&self, device_id: &str) -> Result<HeadFacts, SupervisorError> {
         let device = self.device(device_id).await?;
-        let id = format!("{device_id}-browser");
+        let home = device.home.clone();
+        self.spawn_head(
+            format!("{device_id}-browser"),
+            Some(device_id.to_owned()),
+            home,
+        )
+        .await
+    }
+
+    /// Start a browser head against an identity home this supervisor does not
+    /// manage — the person's own.
+    ///
+    /// Attach is the default relationship with that daemon: it is an
+    /// always-running local service that outlives every window, and this does
+    /// not change that. What it spawns is the *head*, which is ours and which
+    /// nothing else on the machine is holding — and which is the only way `Open`
+    /// has to reach a World, because the ticket it needs can only be minted by
+    /// the process that will later be presented with it.
+    ///
+    /// Keyed by the home, so asking twice for the same identity finds the head
+    /// that is already up instead of spending another port on a second one.
+    pub async fn start_identity_head(&self, home: &Path) -> Result<HeadFacts, SupervisorError> {
+        let id = identity_head_id(home);
+        // A head that is already up for this identity *is* the answer. Starting
+        // a second would work and would still be wrong: two heads mean two run
+        // credentials and two ports for one identity, and the second is the one
+        // nothing later can find.
+        let running = lock_recovering(&self.inner.heads)
+            .get(&id)
+            .map(|head| head.facts().clone());
+        if let Some(existing) = running {
+            return Ok(existing);
+        }
+        self.spawn_head(id, None, home.to_path_buf()).await
+    }
+
+    async fn spawn_head(
+        &self,
+        id: String,
+        device: Option<String>,
+        home: PathBuf,
+    ) -> Result<HeadFacts, SupervisorError> {
         {
             let heads = lock_recovering(&self.inner.heads);
             if heads.contains_key(&id) {
@@ -1367,26 +1408,22 @@ impl Supervisor {
         }
 
         let executable = self.inner.executable.clone();
-        let home = device.home.clone();
         let facts_id = id.clone();
-        let device_name = device_id.to_owned();
+        let owner = device.clone();
         // Spawning and waiting for a readiness line are blocking, and both must
         // stay off whatever runtime thread asked: a head that takes its full
         // startup budget would otherwise stall every other task on that thread.
-        let head = tokio::task::spawn_blocking(move || {
-            start_browser(&executable, facts_id, device_name, &home)
-        })
-        .await
-        .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head start: {error}")))?
-        .map_err(SupervisorError::Internal)?;
+        let head =
+            tokio::task::spawn_blocking(move || start_browser(&executable, facts_id, owner, &home))
+                .await
+                .map_err(|error| {
+                    SupervisorError::Internal(anyhow::anyhow!("join head start: {error}"))
+                })?
+                .map_err(SupervisorError::Internal)?;
 
         let facts = head.facts().clone();
         lock_recovering(&self.inner.heads).insert(id, head);
-        self.publish(
-            EventKind::LifecycleChanged,
-            Some(device_id.to_owned()),
-            "browser head started",
-        );
+        self.publish(EventKind::LifecycleChanged, device, "browser head started");
         Ok(facts)
     }
 
@@ -1420,11 +1457,7 @@ impl Supervisor {
             .await
             .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head stop: {error}")))?
             .map_err(SupervisorError::Internal)?;
-        self.publish(
-            EventKind::LifecycleChanged,
-            Some(device),
-            "browser head stopped",
-        );
+        self.publish(EventKind::LifecycleChanged, device, "browser head stopped");
         Ok(())
     }
 
@@ -1811,6 +1844,15 @@ fn validate_label(label: &str) -> Result<(), SupervisorError> {
 
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// The id a head for one identity home is filed under.
+///
+/// The home *is* the key. A generated id would let one identity accumulate
+/// heads nobody can find again, and a counter would make "is there already a
+/// head for this identity" a scan of every value instead of a lookup.
+fn identity_head_id(home: &Path) -> String {
+    format!("identity:{}", path_text(home))
 }
 
 fn now_ms() -> u64 {

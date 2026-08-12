@@ -10,7 +10,10 @@
 //! things it reaches, and the smallest.
 
 pub mod error;
+pub mod heads;
 pub mod host;
+pub mod http;
+pub mod launch;
 pub mod library;
 pub mod space;
 pub mod storage;

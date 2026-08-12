@@ -6,17 +6,27 @@
 //! reader asks, so a test that passes here is evidence the semantic layer is
 //! populated rather than evidence that some pixels were the expected colour.
 //!
+//! Because drawing returns [`Action`]s rather than calling anything, a click is
+//! also assertable: press the control, and read what the surface asked for.
+//! That is what makes "Open reaches the World's head" testable with no daemon,
+//! no browser and no window.
+//!
 //! The states covered are the ones that are easy to skip and expensive to get
 //! wrong — empty, loading, degraded, and the controls that guard destructive
 //! actions.
 
+use astrolabe::client::heads::{McpBinding, McpBindingOutcome};
+use astrolabe::client::host::{HostContext, OrbitEntry};
+use astrolabe::client::library::{LibraryEntry, Placement};
 use astrolabe::model::App;
-use astrolabe::ui::Surface;
+use astrolabe::runtime::{Action, Outcome, Update};
+use astrolabe::ui::{Chrome, Surface};
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use lait_workbench::{
     BackendEvent, Capabilities, ClientSignal, DeviceSnapshot, EnvironmentSnapshot, EventKind,
-    LifecycleState, ObservationHealth, ObservationState, SnapshotReason, WorkbenchSnapshot,
+    HeadFacts, HeadKind, LifecycleState, ObservationHealth, ObservationState, Ownership,
+    SnapshotReason, WorkbenchSnapshot,
 };
 
 fn snapshot(devices: Vec<DeviceSnapshot>) -> WorkbenchSnapshot {
@@ -38,7 +48,7 @@ fn device(id: &str, state: LifecycleState, owned: bool) -> DeviceSnapshot {
     DeviceSnapshot {
         id: id.into(),
         label: id.into(),
-        home: "home".into(),
+        home: format!("root/{id}"),
         log_path: "log".into(),
         state,
         pid: owned.then_some(1),
@@ -51,14 +61,40 @@ fn device(id: &str, state: LifecycleState, owned: bool) -> DeviceSnapshot {
     }
 }
 
-/// Draw one app state and hand back a harness to interrogate.
-fn harness(app: App, surface: Surface) -> Harness<'static, (App, Surface)> {
-    Harness::new_ui_state(
-        |ui, (app, surface)| {
-            astrolabe::ui::draw(ui, app, surface);
-        },
-        (app, surface),
-    )
+/// The model, the interface's own state, and everything the interface has asked
+/// for since the harness was built.
+///
+/// Actions accumulate rather than being replaced, because `Harness::run` draws
+/// until the frame settles: a click lands on one frame and the frames after it
+/// ask for nothing, so keeping only the last would keep the empty one.
+struct Bench {
+    app: App,
+    chrome: Chrome,
+    actions: Vec<Action>,
+}
+
+/// Deliberately taller than any surface draws, so a control near the bottom is
+/// still inside the clip rect. egui culls interaction outside it, and a click on
+/// a widget that fell off a too-small virtual screen registers as nothing at all
+/// — which reads exactly like the control being broken.
+fn harness(app: App, surface: Surface) -> Harness<'static, Bench> {
+    Harness::builder()
+        .with_size([1_200.0, 2_000.0])
+        .build_ui_state(
+            |ui, bench: &mut Bench| {
+                let Bench {
+                    app,
+                    chrome,
+                    actions,
+                } = bench;
+                actions.extend(astrolabe::ui::draw(ui, app, chrome));
+            },
+            Bench {
+                app,
+                chrome: Chrome::showing(surface),
+                actions: Vec::new(),
+            },
+        )
 }
 
 /// Whether any node in the accessibility tree carries `needle`.
@@ -66,7 +102,7 @@ fn harness(app: App, surface: Surface) -> Harness<'static, (App, Surface)> {
 /// Scans both the node label and its value, because egui puts a control's name
 /// in the label and a plain label's text in the value. A test that only looked
 /// at one of them would silently pass on a surface that had gone blank.
-fn announces(harness: &Harness<'_, (App, Surface)>, needle: &str) -> bool {
+fn announces(harness: &Harness<'_, Bench>, needle: &str) -> bool {
     harness.query_all_by_label_contains("").any(|node| {
         let node = node.accesskit_node();
         node.label().is_some_and(|label| label.contains(needle))
@@ -144,6 +180,58 @@ fn a_running_device_offers_no_removal() {
     assert!(
         !buttons[1].accesskit_node().is_disabled(),
         "a stopped device refused removal"
+    );
+}
+
+/// Deleting a device's data is confirmed by naming it, and the control stays
+/// disabled until the name matches. The supervisor refuses an unconfirmed
+/// deletion anyway; asking here is what stops the refusal from being the first
+/// time somebody hears about it.
+#[test]
+fn deleting_a_devices_data_takes_its_name_before_it_takes_anything_else() {
+    let mut app = App::new();
+    app.absorb(snapshot(vec![device(
+        "alice",
+        LifecycleState::Stopped,
+        true,
+    )]));
+    let mut harness = harness(app, Surface::Devices);
+    harness.run();
+
+    harness.get_by_label("Delete data…").click();
+    harness.run();
+    assert!(
+        announces(&harness, "destroys everything under"),
+        "the deletion step does not say what it would destroy"
+    );
+    assert!(
+        harness
+            .get_by_label("Delete permanently")
+            .accesskit_node()
+            .is_disabled(),
+        "deletion was offered before it was confirmed"
+    );
+
+    // Typed through the model's own draft, which is what the text box writes to.
+    harness.state_mut().chrome.devices.confirmation = "alice".into();
+    harness.run();
+    assert!(
+        !harness
+            .get_by_label("Delete permanently")
+            .accesskit_node()
+            .is_disabled(),
+        "a correctly named device still refused deletion"
+    );
+
+    harness.get_by_label("Delete permanently").click();
+    harness.run();
+    assert!(
+        harness.state().actions.contains(&Action::RemoveDevice {
+            id: "alice".into(),
+            delete_data: true,
+        }),
+        "confirming deletion asked for something other than a deletion: {:?}",
+        harness.state().actions
     );
 }
 
@@ -260,10 +348,17 @@ fn every_surface_is_reachable_and_the_current_one_is_announced() {
 
     assert_eq!(
         Surface::ALL.len(),
-        4,
+        6,
         "a surface was added without being covered here"
     );
-    for title in ["Library", "Devices", "Storage", "Diagnostics"] {
+    for title in [
+        "Library",
+        "Spaces",
+        "Devices",
+        "Heads",
+        "Storage",
+        "Diagnostics",
+    ] {
         assert!(
             harness
                 .query_by_role_and_label(egui::accesskit::Role::Button, title)
@@ -309,6 +404,37 @@ fn every_surface_is_reachable_and_the_current_one_is_announced() {
     );
 }
 
+/// Changing surface takes one keystroke, not a walk through the tab order.
+/// Somebody navigating by keyboard should reach any surface as directly as
+/// somebody with a mouse reaches any tab.
+#[test]
+fn a_surface_is_one_keystroke_away_from_any_other() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    let mut harness = harness(app, Surface::Library);
+    harness.run();
+
+    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Num3);
+    harness.run();
+    assert_eq!(
+        harness.state().chrome.surface,
+        Surface::Devices,
+        "Ctrl+3 did not reach the third surface"
+    );
+
+    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Num1);
+    harness.run();
+    assert_eq!(harness.state().chrome.surface, Surface::Library);
+
+    // And the one action worth a key of its own.
+    harness.key_press(egui::Key::F5);
+    harness.run();
+    assert!(
+        harness.state().actions.contains(&Action::Refresh),
+        "F5 asked for nothing"
+    );
+}
+
 /// The Library is the front page. A person with one identity and several Spaces
 /// must never open onto a process inventory.
 #[test]
@@ -321,8 +447,6 @@ fn the_front_page_is_the_library() {
 /// somebody's behalf.
 #[test]
 fn a_world_with_no_entry_path_cannot_be_opened() {
-    use astrolabe::client::library::{LibraryEntry, Placement};
-
     let mut app = App::new();
     app.absorb(snapshot(Vec::new()));
     app.absorb_library(vec![LibraryEntry {
@@ -347,5 +471,383 @@ fn a_world_with_no_entry_path_cannot_be_opened() {
     assert!(
         announces(&harness, "unknown"),
         "an unobserved placement was drawn as though it were known"
+    );
+}
+
+/// The click that has to work. `Open` asks for the Orbit on the row and the
+/// entry path that row's World declared — not a guess, and not the first row.
+#[test]
+fn open_asks_to_launch_the_row_it_was_pressed_on() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_library(vec![
+        LibraryEntry {
+            orbit: "orb_one".into(),
+            space: "ws_one".into(),
+            world_mount: "issues".into(),
+            display_name: Some("First".into()),
+            entry_path: Some("/".into()),
+            placement: Placement::Vacant,
+        },
+        LibraryEntry {
+            orbit: "orb_two".into(),
+            space: "ws_two".into(),
+            world_mount: "issues".into(),
+            display_name: Some("Second".into()),
+            entry_path: Some("/spaces/ws_two".into()),
+            placement: Placement::Placed,
+        },
+    ]);
+
+    let mut harness = harness(app, Surface::Library);
+    harness.run();
+
+    let opens: Vec<_> = harness.get_all_by_label("Open").collect();
+    assert_eq!(opens.len(), 2, "one Open per row");
+    assert!(
+        !opens[0].accesskit_node().is_disabled(),
+        "an Orbit that is not running refused to be opened — opening is what places it"
+    );
+    opens[1].click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().actions,
+        vec![Action::OpenWorld {
+            orbit: "orb_two".into(),
+            entry_path: "/spaces/ws_two".into(),
+        }],
+        "Open reached the wrong row, or asked for the wrong thing"
+    );
+}
+
+/// A control does not stay live during its own action. Four clicks on a Stop
+/// button would be one stop and three refusals, and the third refusal is the
+/// one a person sees.
+#[test]
+fn a_control_is_disabled_while_its_own_action_is_in_flight() {
+    let mut app = App::new();
+    app.absorb(snapshot(vec![
+        device("alice", LifecycleState::Running, true),
+        device("bob", LifecycleState::Running, true),
+    ]));
+    app.dispatched(&Action::StopDevice("alice".into()));
+
+    let mut harness = harness(app, Surface::Devices);
+    harness.run();
+    let stops: Vec<_> = harness.get_all_by_label("Stop").collect();
+    assert!(
+        stops[0].accesskit_node().is_disabled(),
+        "a device whose stop is already under way still offers to stop it again"
+    );
+    assert!(
+        !stops[1].accesskit_node().is_disabled(),
+        "one device's action disabled another device's control"
+    );
+}
+
+/// Founding a Space has to be possible with no World head reachable — which is
+/// every fresh install. The form is on screen, and the button is refused until
+/// it has what it needs rather than failing after the click.
+#[test]
+fn a_space_can_be_founded_from_the_client_with_nothing_running() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(HostContext {
+        version: "lait 0.0.0".into(),
+        identity_home: "home".into(),
+        spaces_root: "D:/lait".into(),
+        worlds: vec!["issues".into()],
+        identities: Vec::new(),
+        orbits: Vec::new(),
+    });
+
+    let mut harness = harness(app, Surface::Spaces);
+    harness.run();
+    assert!(
+        harness.get_by_label("Found").accesskit_node().is_disabled(),
+        "a Space with no name was offered a Found control"
+    );
+    // The store path is suggested from what the daemon said, so a person is not
+    // asked to invent one. Read off the draft the box is bound to: a text
+    // field's contents reach the semantic tree as a value on a node with no
+    // label, which the announcement scan above cannot see.
+    assert!(
+        harness
+            .state()
+            .chrome
+            .spaces
+            .found_home
+            .starts_with("D:/lait"),
+        "no store directory was suggested: {:?}",
+        harness.state().chrome.spaces.found_home
+    );
+
+    harness.state_mut().chrome.spaces.found_name = "Work".into();
+    harness.run();
+    harness.get_by_label("Found").click();
+    harness.run();
+
+    let asked = harness
+        .state()
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SpaceFound { home, name, .. } => Some((home.clone(), name.clone())),
+            _ => None,
+        })
+        .expect("founding asked for nothing");
+    assert_eq!(asked.1, "Work");
+    assert!(
+        asked.0.starts_with("D:/lait"),
+        "the store went somewhere other than where the daemon said: {}",
+        asked.0
+    );
+}
+
+/// The other half of the acceptance shape: an invite in hand reaches a
+/// converged Space without a browser.
+#[test]
+fn an_invite_is_entered_from_the_client() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(HostContext {
+        version: "lait 0.0.0".into(),
+        identity_home: "home".into(),
+        spaces_root: "D:/lait".into(),
+        worlds: Vec::new(),
+        identities: Vec::new(),
+        orbits: Vec::new(),
+    });
+
+    let mut harness = harness(app, Surface::Spaces);
+    harness.run();
+    assert!(
+        harness.get_by_label("Enter").accesskit_node().is_disabled(),
+        "entering was offered with no invite"
+    );
+
+    harness.state_mut().chrome.spaces.invite = "lait-invite-blob".into();
+    harness.run();
+    harness.get_by_label("Enter").click();
+    harness.run();
+
+    assert!(
+        harness.state().actions.iter().any(|action| matches!(
+            action,
+            Action::SpaceEnter { link, .. } if link == "lait-invite-blob"
+        )),
+        "entering asked for something other than the invite that was typed"
+    );
+}
+
+/// Signing this machine's consent is reachable with no membership anywhere,
+/// which is the whole point of enrolment.
+#[test]
+fn this_machine_can_sign_its_consent_before_it_is_a_member_of_anything() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    let mut harness = harness(app, Surface::Spaces);
+    harness.run();
+
+    assert!(
+        harness
+            .get_by_label("Sign consent")
+            .accesskit_node()
+            .is_disabled(),
+        "consent was offered with no invite token"
+    );
+    harness.state_mut().chrome.spaces.consent = "act_x ws_y".into();
+    harness.run();
+    harness.get_by_label("Sign consent").click();
+    harness.run();
+
+    assert!(
+        harness.state().actions.iter().any(|action| matches!(
+            action,
+            Action::DeviceConsent { token } if token == "act_x ws_y"
+        )),
+        "signing consent asked for something else"
+    );
+}
+
+/// A head this client did not start cannot be stopped through it. The same
+/// boundary daemons have, drawn the same way.
+#[test]
+fn a_head_this_client_did_not_start_offers_no_stop() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_heads(vec![
+        HeadFacts {
+            id: "identity:home".into(),
+            kind: HeadKind::Browser,
+            device: None,
+            orbit: None,
+            identity: "home".into(),
+            ownership: Ownership::Owned,
+            pid: Some(1),
+            url: Some("http://127.0.0.1:1/?token=secret".into()),
+        },
+        HeadFacts {
+            id: "alice-browser".into(),
+            kind: HeadKind::Browser,
+            device: Some("alice".into()),
+            orbit: None,
+            identity: "root/alice".into(),
+            ownership: Ownership::External,
+            pid: None,
+            url: None,
+        },
+    ]);
+
+    let mut harness = harness(app, Surface::Heads);
+    harness.run();
+    let stops: Vec<_> = harness.get_all_by_label("Stop").collect();
+    assert_eq!(stops.len(), 2, "one stop control per head");
+    assert!(!stops[0].accesskit_node().is_disabled());
+    assert!(
+        stops[1].accesskit_node().is_disabled(),
+        "a head this client did not start offered a stop control"
+    );
+
+    // The run credential is never drawn. A token on screen is a token in a
+    // screenshot, in a support ticket, and in whatever recorded the window.
+    assert!(
+        !announces(&harness, "secret"),
+        "a head's run credential was drawn on screen"
+    );
+}
+
+/// An MCP binding is previewed before it is written, and the preview says it
+/// is a preview. The file being edited is an agent's, not ours.
+#[test]
+fn an_mcp_binding_is_previewed_before_anything_is_written() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    let mut harness = harness(app, Surface::Heads);
+    harness.run();
+
+    assert!(
+        harness
+            .get_by_label("Preview")
+            .accesskit_node()
+            .is_disabled(),
+        "a binding with no project directory was offered a preview"
+    );
+    harness.state_mut().chrome.heads.project = "D:/work".into();
+    harness.run();
+    harness.get_by_label("Preview").click();
+    harness.run();
+
+    let previewed = harness
+        .state()
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            Action::InstallMcp { binding, preview } => Some((binding.clone(), *preview)),
+            _ => None,
+        })
+        .expect("preview asked for nothing");
+    assert!(previewed.1, "Preview asked for a write");
+    assert_eq!(previewed.0.project, "D:/work");
+
+    // And what comes back is drawn as a preview rather than as a change.
+    harness.state_mut().app.apply(Update::Done {
+        key: "mcp.preview".into(),
+        outcome: Outcome::Mcp(Box::new(McpBindingOutcome {
+            path: "D:/work/.mcp.json".into(),
+            detail: "{ \"mcpServers\": {} }".into(),
+            note: Some("this entry shadows the bundled plugin".into()),
+            replaced: false,
+            agent: Some("claude".into()),
+            written: false,
+        })),
+    });
+    harness.run();
+    assert!(
+        announces(&harness, "Would be written to"),
+        "a preview was drawn as though the file had changed"
+    );
+    assert!(
+        announces(&harness, "shadows the bundled plugin"),
+        "the client-specific caveat was dropped"
+    );
+}
+
+/// The record of what happened is on screen. An action that worked and left no
+/// trace is indistinguishable from one that was never dispatched.
+#[test]
+fn what_worked_is_drawn_and_not_only_what_failed() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.apply(Update::Done {
+        key: "device.stop:alice".into(),
+        outcome: Outcome::Said("alice stopped".into()),
+    });
+
+    let mut harness = harness(app, Surface::Devices);
+    harness.run();
+    assert!(
+        announces(&harness, "alice stopped"),
+        "an action that worked left no trace on screen"
+    );
+}
+
+/// A binding is a value the surface composes from what was typed, and the type
+/// is what keeps that honest. Kept here because it is the shape both the
+/// preview and the write travel as.
+#[test]
+fn a_binding_carries_what_the_surface_was_told_and_nothing_else() {
+    let binding = McpBinding {
+        client: lait::install::Client::Cursor,
+        scope: Some(lait::install::Scope::User),
+        name: "lait-dev".into(),
+        agent: Some("cursor".into()),
+        no_agent: false,
+        project: "D:/work".into(),
+    };
+    assert_eq!(binding.name, "lait-dev");
+    assert_eq!(binding.client, lait::install::Client::Cursor);
+}
+
+/// A registered Orbit is listed with the name the registry holds, and that name
+/// is drawn as advisory rather than as truth: a Space's display name is owned
+/// by a World today, so the registry's copy may lag a rename (SUB-1).
+#[test]
+fn a_registered_orbit_is_listed_with_a_way_to_forget_it() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(HostContext {
+        version: "lait 0.0.0".into(),
+        identity_home: "home".into(),
+        spaces_root: "D:/lait".into(),
+        worlds: Vec::new(),
+        identities: Vec::new(),
+        orbits: vec![OrbitEntry {
+            space: "ws_one".into(),
+            name: "Work".into(),
+            path: "D:/lait/work".into(),
+            last_opened: 0,
+        }],
+    });
+
+    let mut harness = harness(app, Surface::Spaces);
+    harness.run();
+    assert!(announces(&harness, "Work"));
+    harness.get_by_label("Forget…").click();
+    harness.run();
+    assert!(
+        announces(&harness, "Its store stays on disk"),
+        "forgetting did not say that it leaves the data alone"
+    );
+
+    harness.get_by_label("Forget").click();
+    harness.run();
+    assert!(
+        harness.state().actions.iter().any(|action| matches!(
+            action,
+            Action::OrbitForget { space } if space == "ws_one"
+        )),
+        "forgetting asked for something else"
     );
 }

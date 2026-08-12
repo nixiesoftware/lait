@@ -39,8 +39,16 @@ const READY_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct HeadFacts {
     pub id: String,
     pub kind: HeadKind,
-    /// The managed device whose daemon this head is attached to.
-    pub device: String,
+    /// The managed device whose daemon this head is attached to, when there is
+    /// one.
+    ///
+    /// `None` is the person's *own* identity daemon — the always-running local
+    /// service this supervisor attaches to rather than manages. Naming a device
+    /// there would claim a registration that does not exist, and the Library's
+    /// `Open` runs entirely through that case: the Orbits a person sees belong
+    /// to their identity, not to the development fleet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     /// The Orbit it is bound to, when it is bound to one. A browser head serves
     /// every Orbit the identity has; an MCP head is authored against one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,10 +120,16 @@ impl OwnedHead {
 }
 
 /// Start a browser head against `home`, and wait for it to say where it is.
+///
+/// `home` selects which identity the head serves, and it is passed as the
+/// launcher's `--home` — the same flag the daemon takes, because it selects the
+/// same thing. A head spawned without it would serve whatever identity the
+/// *supervisor's* environment happens to name, which for a fleet device is
+/// never the one asked for.
 pub(crate) fn start_browser(
     executable: &Path,
     id: String,
-    device: String,
+    device: Option<String>,
     home: &Path,
 ) -> Result<OwnedHead> {
     let mut command = Command::new(executable);
@@ -217,7 +231,12 @@ fn no_console(_command: &mut Command) {}
 /// orbit, which identity, which binary — and `HostInstallMcp` is what writes
 /// it. What the client offers is the choosing, and then an honest account of
 /// what it can and cannot do about the result.
-pub fn mcp_head(id: String, device: String, identity: PathBuf, orbit: Option<String>) -> HeadFacts {
+pub fn mcp_head(
+    id: String,
+    device: Option<String>,
+    identity: PathBuf,
+    orbit: Option<String>,
+) -> HeadFacts {
     HeadFacts {
         id,
         kind: HeadKind::Mcp,
@@ -244,7 +263,7 @@ mod tests {
     fn an_mcp_head_is_always_external() {
         let head = mcp_head(
             "agent-1".into(),
-            "alice".into(),
+            Some("alice".into()),
             PathBuf::from("/home/alice"),
             Some("orb_one".into()),
         );
@@ -273,7 +292,7 @@ mod tests {
         let started = start_browser(
             &executable,
             "head-1".into(),
-            "alice".into(),
+            Some("alice".into()),
             directory.path(),
         );
         assert!(

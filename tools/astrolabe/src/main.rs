@@ -11,8 +11,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use astrolabe::model::App;
-use astrolabe::runtime::Runtime;
-use astrolabe::ui::Surface;
+use astrolabe::runtime::{Action, Runtime};
+use astrolabe::tray::{Tray, TrayCommand};
+use astrolabe::ui::{Chrome, Surface};
 use astrolabe::Config;
 
 fn main() -> Result<()> {
@@ -28,6 +29,11 @@ fn main() -> Result<()> {
         }
     };
 
+    // A `lait:` link the shell handed us. Parsed here and carried in, because
+    // parsing is the only thing that may happen to it before a person confirms:
+    // opening the client is not accepting an invite.
+    let arrived = astrolabe::link::Link::from_args(std::env::args());
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Astrolabe")
@@ -39,23 +45,35 @@ fn main() -> Result<()> {
     eframe::run_native(
         "Astrolabe",
         options,
-        Box::new(|creation| Ok(Box::new(Shell::new(creation)?))),
+        Box::new(move |creation| Ok(Box::new(Shell::new(creation, arrived)?))),
     )
     .map_err(|error| anyhow::anyhow!("run the Astrolabe window: {error}"))
 }
 
 /// The window. It owns the model and draws it, and holds no state of its own
-/// beyond which surface is showing.
+/// beyond which surface is showing and what is half-typed on it.
 struct Shell {
     app: App,
-    surface: Surface,
+    chrome: Chrome,
     /// The background half. Everything slow happens there; the frame loop only
     /// ever drains what it has already produced.
     runtime: Runtime,
+    /// The tray, and what it has been asked for. `None` when the platform has
+    /// no tray or the shell refused one — in which case closing the window
+    /// closes the client, because minimising to something that is not there
+    /// would make the window unrecoverable.
+    tray: Option<(Tray, std::sync::mpsc::Receiver<TrayCommand>)>,
+    /// Whether the window is currently hidden in the tray.
+    minimised: bool,
+    /// Set once an exit has been carried out. The next frame closes.
+    leaving: bool,
 }
 
 impl Shell {
-    fn new(creation: &eframe::CreationContext<'_>) -> Result<Self> {
+    fn new(
+        creation: &eframe::CreationContext<'_>,
+        arrived: Option<astrolabe::link::Link>,
+    ) -> Result<Self> {
         let sidecar = astrolabe::sidecar::resolve()?;
         let state_root = state_root()?;
 
@@ -67,11 +85,87 @@ impl Shell {
             context.request_repaint();
         })?;
 
+        // A failure to place a tray is not a failure to start: the client still
+        // works, closing just means closing. Reported rather than fatal.
+        let tray = match Tray::place("Astrolabe") {
+            Ok(placed) => Some(placed),
+            Err(error) => {
+                tracing::warn!(%error, "no tray icon; closing the window will close the client");
+                None
+            }
+        };
+
+        let mut chrome = Chrome::default();
+        let mut app = App::new();
+        if let Some(astrolabe::link::Link::Invite { ticket }) = arrived {
+            // Filled in, not acted on. The person still presses Enter, which is
+            // the difference between opening a link and accepting an invite.
+            chrome.surface = Surface::Spaces;
+            chrome.spaces.invite = ticket;
+            app.fail(
+                "an invite link opened this window",
+                astrolabe::ClientError::invalid(
+                    "the invite is filled in below — nothing has been accepted yet",
+                ),
+            );
+        }
+
         Ok(Self {
-            app: App::new(),
-            surface: Surface::default(),
+            app,
+            chrome,
             runtime,
+            tray,
+            minimised: false,
+            leaving: false,
         })
+    }
+
+    /// Everything the tray asked for since the last frame.
+    fn drain_tray(&mut self, ui: &egui::Ui) {
+        let Some((_, commands)) = &self.tray else {
+            return;
+        };
+        let asked: Vec<TrayCommand> = commands.try_iter().collect();
+        for command in asked {
+            match command {
+                TrayCommand::Restore => {
+                    self.minimised = false;
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayCommand::Exit(request) => {
+                    self.app.dispatched(&Action::Exit(request));
+                    self.runtime.dispatch(Action::Exit(request));
+                }
+            }
+        }
+    }
+
+    /// Closing minimises; it does not stop a peer.
+    ///
+    /// A person who clicked the wrong X did not ask for their Spaces to stop
+    /// converging, and the daemon outlives every window by design. With no tray
+    /// to minimise *to*, the window would become unrecoverable — so that case
+    /// closes, which is the lesser wrong.
+    fn handle_close(&mut self, ui: &egui::Ui) {
+        if !ui.input(|input| input.viewport().close_requested()) {
+            return;
+        }
+        if self.tray.is_none() || self.leaving {
+            return;
+        }
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.minimised = true;
+        if let Some((tray, _)) = &self.tray {
+            tray.notify(
+                "Astrolabe is still serving",
+                "Your devices stay online. Open it again from here.",
+            );
+        }
     }
 }
 
@@ -81,7 +175,22 @@ impl eframe::App for Shell {
         // same state — a surface that drained mid-frame could show two
         // different readings of the same moment.
         self.runtime.drain_into(&mut self.app);
-        astrolabe::ui::draw(ui, &self.app, &mut self.surface);
+        self.drain_tray(ui);
+
+        if self.app.exit().is_some() && !self.leaving {
+            self.leaving = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        for action in astrolabe::ui::draw(ui, &self.app, &mut self.chrome) {
+            // Recorded as in flight on the frame the click happened, so the
+            // control that caused it is disabled now rather than on whichever
+            // later frame the background half gets round to answering.
+            self.app.dispatched(&action);
+            self.runtime.dispatch(action);
+        }
+
+        self.handle_close(ui);
     }
 }
 

@@ -9,17 +9,29 @@
 //! optimistic local mutation. A surface that wrote what it *expected* an action
 //! to do would be a second model of the same state, disagreeing with the first
 //! whenever the action was refused — which is the case that matters.
+//!
+//! ## What is in flight is not a third way
+//!
+//! The model records which actions this client has asked for and not yet heard
+//! back about. That is not a claim about the machine — it is a claim about this
+//! process's own outstanding requests, which nothing else can know and nothing
+//! else can contradict. It is what lets a control disable itself while its own
+//! action runs without any surface guessing at the result.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use lait_workbench::{
-    ClientSignal, ConnectionSnapshot, DeviceSnapshot, ObservationState, SnapshotReason,
+    ClientSignal, ConnectionSnapshot, DeviceSnapshot, HeadFacts, ObservationState, SnapshotReason,
     WorkbenchSnapshot,
 };
 
-use crate::client::library::LibraryEntry;
+use crate::client::heads::McpBindingOutcome;
+use crate::client::host::HostContext;
+use crate::client::library::{LaunchTicket, LibraryEntry};
 use crate::client::storage::{StorageFacts, TransferFacts};
 use crate::client::ClientError;
+use crate::lifecycle::ExitReport;
+use crate::runtime::{Action, Outcome, Update};
 
 /// Everything the interface draws.
 #[derive(Debug, Default)]
@@ -33,12 +45,27 @@ pub struct App {
     /// are different claims.
     storage: Vec<StorageFacts>,
     transfers: Vec<TransferFacts>,
+    heads: Vec<HeadFacts>,
+    /// Orientation: this build, this identity, and the Orbits it has. `None`
+    /// before the first read, for the same reason `snapshot` is.
+    context: Option<HostContext>,
+    /// The last MCP binding authored or previewed. Held because a preview is
+    /// only useful if it stays on screen long enough to be read.
+    mcp: Option<McpBindingOutcome>,
+    /// What an exit did. Set once, on the way out, and read by the shell.
+    exit: Option<ExitReport>,
     /// Set when a signal says this model can no longer be derived from what it
     /// has seen. Cleared only by taking a fresh snapshot.
     stale: Option<StaleReason>,
     /// The most recent failures, newest first, bounded. Errors are state a
     /// surface draws, not something logged and lost.
     failures: VecDeque<Failure>,
+    /// What happened, newest first, bounded. The counterpart of `failures`: an
+    /// action that worked and left no trace is indistinguishable from one that
+    /// was never dispatched.
+    notices: VecDeque<Notice>,
+    /// Actions asked for and not yet answered.
+    in_flight: BTreeSet<String>,
     /// How many signals this model has consumed. Lets a test assert that a
     /// stream was actually drained rather than merely opened.
     consumed: u64,
@@ -59,7 +86,19 @@ pub struct Failure {
     pub error: ClientError,
 }
 
+/// Something that worked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub said: String,
+    /// Where a browser was sent, when that is what happened. Carried so the
+    /// surface can show the address rather than only claim a window opened —
+    /// a browser that came up behind another window is otherwise a click with
+    /// no visible result.
+    pub launched: Option<LaunchTicket>,
+}
+
 const FAILURE_CAPACITY: usize = 16;
+const NOTICE_CAPACITY: usize = 16;
 
 impl App {
     pub fn new() -> Self {
@@ -67,6 +106,78 @@ impl App {
             stale: Some(StaleReason::NeverLoaded),
             ..Self::default()
         }
+    }
+
+    /// Take one update from the background half.
+    pub fn apply(&mut self, update: Update) {
+        match update {
+            Update::Snapshot(snapshot) => self.absorb(*snapshot),
+            Update::Library(entries) => self.absorb_library(entries),
+            Update::Storage(facts) => self.absorb_storage(facts, Vec::new()),
+            Update::Heads(heads) => self.heads = heads,
+            Update::Context(context) => self.context = Some(*context),
+            Update::Signal(signal) => self.consume(&signal),
+            Update::Done { key, outcome } => {
+                self.in_flight.remove(&key);
+                self.record(outcome);
+            }
+            Update::Failed { key, what, error } => {
+                if let Some(key) = key {
+                    self.in_flight.remove(&key);
+                }
+                self.fail(what, error);
+            }
+        }
+    }
+
+    fn record(&mut self, outcome: Outcome) {
+        let notice = match outcome {
+            Outcome::Silent => return,
+            Outcome::Said(said) => Notice {
+                said,
+                launched: None,
+            },
+            Outcome::Launched(launch) => Notice {
+                said: format!("opened {}", launch.url),
+                launched: Some(launch),
+            },
+            Outcome::Mcp(outcome) => {
+                let said = if outcome.written {
+                    format!("wrote {}", outcome.path)
+                } else {
+                    format!("this is what would be written to {}", outcome.path)
+                };
+                self.mcp = Some(*outcome);
+                Notice {
+                    said,
+                    launched: None,
+                }
+            }
+            Outcome::Exited(report) => {
+                let said = describe_exit(&report);
+                self.exit = Some(*report);
+                Notice {
+                    said,
+                    launched: None,
+                }
+            }
+        };
+        self.notices.push_front(notice);
+        self.notices.truncate(NOTICE_CAPACITY);
+    }
+
+    /// Record that this client has asked for something.
+    ///
+    /// Called by whoever dispatches, at the moment of dispatch, so a control is
+    /// disabled on the frame the click happened rather than on whichever later
+    /// frame the background half gets round to answering.
+    pub fn dispatched(&mut self, action: &Action) {
+        self.in_flight.insert(action.key());
+    }
+
+    /// Whether this client is waiting on the action a control would dispatch.
+    pub fn is_in_flight(&self, key: &str) -> bool {
+        self.in_flight.contains(key)
     }
 
     /// Replace the model with an authoritative reading.
@@ -84,12 +195,37 @@ impl App {
         self.transfers = transfers;
     }
 
+    pub fn absorb_heads(&mut self, heads: Vec<HeadFacts>) {
+        self.heads = heads;
+    }
+
+    pub fn absorb_context(&mut self, context: HostContext) {
+        self.context = Some(context);
+    }
+
     pub fn storage(&self) -> &[StorageFacts] {
         &self.storage
     }
 
     pub fn transfers(&self) -> &[TransferFacts] {
         &self.transfers
+    }
+
+    pub fn heads(&self) -> &[HeadFacts] {
+        &self.heads
+    }
+
+    pub fn context(&self) -> Option<&HostContext> {
+        self.context.as_ref()
+    }
+
+    pub fn mcp(&self) -> Option<&McpBindingOutcome> {
+        self.mcp.as_ref()
+    }
+
+    /// What an exit did, once one has happened. The shell's cue to close.
+    pub fn exit(&self) -> Option<&ExitReport> {
+        self.exit.as_ref()
     }
 
     /// Consume one signal.
@@ -150,6 +286,10 @@ impl App {
         self.failures.iter()
     }
 
+    pub fn notices(&self) -> impl Iterator<Item = &Notice> {
+        self.notices.iter()
+    }
+
     pub fn consumed(&self) -> u64 {
         self.consumed
     }
@@ -186,6 +326,27 @@ fn describe(reason: &SnapshotReason) -> String {
         }
         SnapshotReason::Reloaded => "the fleet was rebuilt and restarted".to_owned(),
     }
+}
+
+/// What an exit did, in one line.
+///
+/// Every device it left running is named. "Closed" with three daemons still up
+/// is true by omission and false as an account of what a person just did.
+fn describe_exit(report: &ExitReport) -> String {
+    let mut said = if report.stopped.is_empty() {
+        "closed; nothing was stopped".to_owned()
+    } else {
+        format!("stopped {}", report.stopped.join(", "))
+    };
+    if !report.left_running.is_empty() {
+        let left: Vec<&str> = report
+            .left_running
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        said = format!("{said} — still running: {}", left.join(", "));
+    }
+    said
 }
 
 #[cfg(test)]
@@ -328,5 +489,92 @@ mod tests {
             Some(format!("action {}", FAILURE_CAPACITY + 3)),
             "the newest failure is not the one a surface shows first"
         );
+    }
+
+    /// What is in flight is cleared by the answer, whichever answer it is. A
+    /// refusal that left a control disabled forever would make the safest
+    /// possible outcome — being told no — the one that breaks the interface.
+    #[test]
+    fn a_refusal_clears_what_it_was_answering_just_as_a_success_does() {
+        let mut app = App::new();
+        let stop = Action::StopDevice("alice".into());
+        app.dispatched(&stop);
+        assert!(app.is_in_flight(&stop.key()));
+
+        app.apply(Update::Failed {
+            key: Some(stop.key()),
+            what: stop.what(),
+            error: ClientError::refused("device is not running"),
+        });
+        assert!(
+            !app.is_in_flight(&stop.key()),
+            "a refused action stayed in flight forever"
+        );
+        assert_eq!(app.failures().count(), 1);
+
+        let start = Action::StartDevice("alice".into());
+        app.dispatched(&start);
+        app.apply(Update::Done {
+            key: start.key(),
+            outcome: Outcome::Said("alice is starting".into()),
+        });
+        assert!(!app.is_in_flight(&start.key()));
+        assert_eq!(
+            app.notices().next().map(|notice| notice.said.clone()),
+            Some("alice is starting".to_owned())
+        );
+    }
+
+    /// One device being busy must not disable another's controls.
+    #[test]
+    fn what_is_in_flight_is_per_control_rather_than_per_surface() {
+        let mut app = App::new();
+        app.dispatched(&Action::StopDevice("alice".into()));
+        assert!(app.is_in_flight("device.stop:alice"));
+        assert!(
+            !app.is_in_flight("device.stop:bob"),
+            "one device's action disabled another device's control"
+        );
+    }
+
+    /// A re-read is not an event worth reporting. A record that gained a line
+    /// every time a surface refreshed is a record nobody reads.
+    #[test]
+    fn a_silent_outcome_leaves_no_trace_but_still_clears_what_it_answered() {
+        let mut app = App::new();
+        app.dispatched(&Action::Refresh);
+        app.apply(Update::Done {
+            key: Action::Refresh.key(),
+            outcome: Outcome::Silent,
+        });
+        assert!(!app.is_in_flight("refresh"));
+        assert_eq!(app.notices().count(), 0);
+    }
+
+    /// An exit that left daemons running says so. "Closed" with three still up
+    /// is true by omission and false as an account of what just happened.
+    #[test]
+    fn an_exit_names_what_it_left_running() {
+        use crate::lifecycle::LeftRunning;
+
+        let mut app = App::new();
+        app.apply(Update::Done {
+            key: "exit".into(),
+            outcome: Outcome::Exited(Box::new(ExitReport {
+                stopped: vec!["alice".into()],
+                left_running: vec![("bob".into(), LeftRunning::NotOurs)],
+            })),
+        });
+        let said = app
+            .notices()
+            .next()
+            .map(|notice| notice.said.clone())
+            .expect("an exit was recorded");
+        assert!(said.contains("alice"), "{said}");
+        assert!(
+            said.contains("bob"),
+            "the exit did not say what it left running: {said}"
+        );
+        assert!(app.exit().is_some(), "the shell has no cue to close on");
     }
 }

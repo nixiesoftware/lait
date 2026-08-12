@@ -63,13 +63,20 @@ enum Mode {
         port: Option<String>,
         orbit: Option<String>,
         open: bool,
+        /// The self-contained identity directory this head serves, when it is
+        /// not the ordinary per-user one. A head is bound to one identity, and
+        /// a client that supervises several — Astrolabe's development fleet —
+        /// has no other way to say which. Spelled as it is for `daemon`,
+        /// because it selects the same thing: the daemon this head starts or
+        /// attaches to is the one at that home.
+        home: Option<String>,
     },
 }
 
 const USAGE: &str = "lait is not a command surface — it is three processes:\n\
      \x20 lait daemon [--home <dir>]      the identity-scoped host\n\
      \x20 lait mcp                        the stdio head for an agent\n\
-     \x20 lait [--json] [--port <n>] [--orbit <sel>] [--open]\n\
+     \x20 lait [--json] [--port <n>] [--orbit <sel>] [--open] [--home <dir>]\n\
      \x20                                 the local app, and the daemon under it\n\
      \x20 lait --version                  which build this is\n\
      everything else is a request one of those three carries.";
@@ -123,13 +130,14 @@ impl Mode {
             Some("--version" | "-V") => Mode::Version,
             _ => {
                 let (mut json, mut open) = (false, false);
-                let (mut port, mut orbit) = (None, None);
+                let (mut port, mut orbit, mut home) = (None, None, None);
                 while let Some(flag) = args.next() {
                     match flag {
                         "--json" => json = true,
                         "--open" => open = true,
                         "--port" => port = Some(next(&mut args, "--port")?),
                         "--orbit" => orbit = Some(next(&mut args, "--orbit")?),
+                        "--home" => home = Some(next(&mut args, "--home")?),
                         other => return Err(unknown(other)),
                     }
                 }
@@ -138,6 +146,7 @@ impl Mode {
                     port,
                     orbit,
                     open,
+                    home,
                 }
             }
         };
@@ -196,6 +205,7 @@ impl Mode {
                 port,
                 orbit,
                 open,
+                home,
             } => {
                 let port = match port {
                     Some(p) => p.parse::<u16>().map_err(|_| {
@@ -212,7 +222,7 @@ impl Mode {
                     None => None,
                 };
                 let selection = Selection {
-                    identity: None,
+                    identity: home.map(std::path::PathBuf::from),
                     store,
                 };
                 lait::serve::run(port, open, json, selection).await
@@ -230,4 +240,55 @@ fn next<'a>(args: &mut impl Iterator<Item = &'a str>, flag: &str) -> Result<Stri
 
 fn unknown(arg: &str) -> String {
     format!("unrecognized argument `{arg}`\n{USAGE}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Mode, String> {
+        Mode::parse(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    }
+
+    /// A head is bound to one identity, and a supervisor running several — the
+    /// development fleet — has no other way to say which. Without this the
+    /// spawn is rejected by the launcher and the head dies before it can
+    /// announce an address, which reads as "the head failed to come up" rather
+    /// than as "the flag does not exist".
+    #[test]
+    fn the_app_accepts_the_home_that_selects_which_identity_it_serves() {
+        let Ok(Mode::Serve { home, json, .. }) = parse(&["--json", "--port", "0", "--home", "d"])
+        else {
+            panic!("the app mode refused --home");
+        };
+        assert_eq!(home.as_deref(), Some("d"));
+        assert!(json);
+
+        let Ok(Mode::Serve { home, .. }) = parse(&["--json"]) else {
+            panic!("the ordinary app launch stopped parsing");
+        };
+        assert_eq!(
+            home, None,
+            "an unstated identity became a selection rather than the per-user one"
+        );
+    }
+
+    /// The three modes stay three. A flag that wanders between them is how a
+    /// spawn ends up silently rejected by the process it was aimed at.
+    #[test]
+    fn the_three_modes_keep_their_own_flags() {
+        assert!(
+            matches!(parse(&["daemon", "--home", "d"]), Ok(Mode::Daemon { .. })),
+            "the daemon lost its --home"
+        );
+        assert!(
+            parse(&["daemon", "--json"]).is_err(),
+            "the daemon accepted a flag that belongs to the app"
+        );
+        assert!(
+            parse(&["mcp", "--home", "d"]).is_err(),
+            "the MCP head accepted a flag it has no use for"
+        );
+        assert!(parse(&["--nonsense"]).is_err());
+    }
 }

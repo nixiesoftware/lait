@@ -4,10 +4,11 @@ use egui::{RichText, Ui};
 
 use crate::client::library::Placement;
 use crate::model::App;
+use crate::runtime::Action;
 
-use super::theme;
+use super::{act, theme};
 
-pub fn draw(ui: &mut Ui, app: &App) {
+pub fn draw(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     ui.heading("Library");
 
     let Some(entries) = app.library() else {
@@ -20,6 +21,13 @@ pub fn draw(ui: &mut Ui, app: &App) {
         // loading case above is what stops this line from being drawn at a
         // machine that has simply not been asked yet.
         ui.label("This device serves no Worlds yet.");
+        // And the way out is named rather than left to be found. A person with
+        // a fresh install and an invite in hand is exactly who is looking at
+        // this line, and the flow they need cannot live in a World's head.
+        ui.label(
+            RichText::new("Found a Space, or enter one from an invite, on the Spaces tab.")
+                .color(theme::secondary(ui)),
+        );
         return;
     }
 
@@ -43,9 +51,25 @@ pub fn draw(ui: &mut Ui, app: &App) {
             // A World that declares no entry path cannot be opened, and the
             // control says so instead of being enabled and failing. `/` is not
             // a guess worth making on somebody's behalf.
-            let openable = entry.entry_path.is_some();
-            ui.add_enabled(openable, egui::Button::new("Open"))
-                .on_disabled_hover_text("This World declares no entry path yet (SUB-2).");
+            //
+            // A *vacant* Orbit is still openable: opening is precisely what
+            // places one, and the head this starts is what wakes it. Listing
+            // stays passive; the click is what costs.
+            let entry_path = entry.entry_path.clone();
+            let opened = act(
+                ui,
+                app,
+                "Open",
+                entry_path.is_some(),
+                "This World declares no entry path yet (SUB-2).",
+                || Action::OpenWorld {
+                    orbit: entry.orbit.clone(),
+                    entry_path: entry_path.clone().unwrap_or_default(),
+                },
+            );
+            if let Some(action) = opened {
+                actions.push(action);
+            }
         });
     }
 }
