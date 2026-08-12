@@ -1,0 +1,53 @@
+[package]
+name = "lait-workbench"
+version = "0.1.0"
+edition = "2021"
+# MSRV: the workspace figure. See the root manifest for what drives it.
+rust-version = "1.92"
+description = "UI-neutral supervisor library for lait daemons"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "lait_workbench"
+path = "src/lib.rs"
+
+# Retired as the primary architecture. The supervisor is a library its consumer
+# links directly; this binary exists only to run the `http` adapter for
+# diagnostics and for tests that want a real socket, and it does not build
+# without that feature.
+[[bin]]
+name = "lait-workbench"
+path = "src/main.rs"
+required-features = ["http"]
+
+[features]
+default = []
+# The loopback HTTP adapter over the same DTOs and the same safety rules. It is
+# a diagnostics and testing surface: nothing that embeds the supervisor as a
+# library reaches it through this.
+http = ["dep:axum", "dep:tokio-stream", "dep:tracing-subscriber"]
+
+[dependencies]
+lait = { path = "../.." }
+mechanics = { path = "../../crates/mechanics" }
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", optional = true }
+fs2 = "0.4"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

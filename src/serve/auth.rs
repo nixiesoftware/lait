@@ -38,6 +38,17 @@
 //! unit-testable without binding a port — the same shape as
 //! [`crate::control::check_control_protocol`] and [`crate::sync`]'s version gate.
 
+/// Mint a 32-byte hexadecimal credential for one loopback-server run.
+///
+/// Kept beside [`Guard`] so every local HTTP surface uses the same credential
+/// strength and none persists it by accident.
+pub fn mint_token() -> anyhow::Result<String> {
+    let mut buf = [0u8; 32];
+    getrandom::fill(&mut buf)
+        .map_err(|error| anyhow::anyhow!("system entropy unavailable: {error}"))?;
+    Ok(data_encoding::HEXLOWER.encode(&buf))
+}
+
 /// The loopback origins we answer to, rendered for a given port.
 ///
 /// A browser sends whichever spelling appears in the URL bar, so all three

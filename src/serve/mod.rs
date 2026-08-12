@@ -51,7 +51,7 @@ use tokio::net::TcpListener;
 use crate::control::{ErrorKind, Request};
 use crate::daemon::{Client, OrbitDoorbell};
 use crate::orbits::{Catalog, ResolvedOrbit, StationIdentity};
-use auth::{Guard, Refusal};
+use auth::{mint_token, Guard, Refusal};
 
 /// The default port. Fixed rather than ephemeral so the URL is predictable and
 /// the `Origin` allowlist has something stable to name; a collision is reported
@@ -414,14 +414,6 @@ fn router(app: Arc<App>) -> Router {
         .fallback(get(static_asset))
         .layer(axum::middleware::from_fn_with_state(app.clone(), gate))
         .with_state(app)
-}
-
-/// A 32-byte hex token, minted per run and never persisted.
-fn mint_token() -> anyhow::Result<String> {
-    let mut buf = [0u8; 32];
-    getrandom::fill(&mut buf)
-        .map_err(|error| anyhow::anyhow!("system entropy unavailable: {error}"))?;
-    Ok(data_encoding::HEXLOWER.encode(&buf))
 }
 
 /// The gate every request passes: rebinding guard first, credential second.

@@ -30,6 +30,7 @@ use std::process::ExitStatus;
 
 /// A spawned daemon. Only what `ensure_daemon` needs: is it still alive?
 pub struct DaemonChild {
+    pid: u32,
     #[cfg(windows)]
     proc: std::os::windows::io::OwnedHandle,
     #[cfg(not(windows))]
@@ -56,6 +57,11 @@ pub fn spawn(
 }
 
 impl DaemonChild {
+    /// The process id returned by the spawn operation.
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
     /// `Some(status)` once the daemon has exited, `None` while it is running.
     ///
     /// A daemon that has already exited is never going to answer, so the spawn
@@ -63,6 +69,15 @@ impl DaemonChild {
     /// timeout.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         imp::try_wait(self)
+    }
+
+    /// Force this exact spawned child to exit and collect its status.
+    ///
+    /// This deliberately lives on the owned child handle rather than accepting
+    /// an arbitrary pid. Callers cannot race pid reuse and terminate a process
+    /// they did not spawn.
+    pub fn force_kill_and_wait(&mut self) -> io::Result<ExitStatus> {
+        imp::force_kill_and_wait(self)
     }
 
     /// Give up the handle to a reaper, so the daemon's *exit* is collected
@@ -110,11 +125,20 @@ mod imp {
             cmd.arg("--home").arg(identity);
         }
         let child = cmd.spawn()?;
-        Ok(DaemonChild { child })
+        let pid = child.id();
+        Ok(DaemonChild { pid, child })
     }
 
     pub fn try_wait(c: &mut DaemonChild) -> io::Result<Option<ExitStatus>> {
         c.child.try_wait()
+    }
+
+    pub fn force_kill_and_wait(c: &mut DaemonChild) -> io::Result<ExitStatus> {
+        if let Some(status) = c.child.try_wait()? {
+            return Ok(status);
+        }
+        c.child.kill()?;
+        c.child.wait()
     }
 
     /// A plain OS thread, not a runtime task: `wait` is a blocking syscall, and
@@ -147,9 +171,10 @@ mod imp {
     };
     use windows_sys::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-        InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
-        EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
+        WaitForSingleObject, CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
 
     fn wide(s: &OsStr) -> Vec<u16> {
@@ -261,6 +286,18 @@ mod imp {
         // SAFETY: every pointer is valid for the call. `bInheritHandles` must be
         // TRUE for the attribute list to be consulted at all — it is what the
         // list narrows.
+        //
+        // `CREATE_NO_WINDOW` because the daemon is a console-subsystem image
+        // with nowhere to write: its three handles are `NUL` and a log file, so
+        // a console is never read and never typed into. Without the flag
+        // Windows gives a console child one anyway — inherited from the spawner
+        // when there is one, and *freshly allocated* when there is not. The
+        // second case is the visible one: a GUI parent (Astrolabe) starting a
+        // daemon flashes a black window on screen for as long as the process
+        // lives. The first is quieter and worse — sharing the spawner's console
+        // puts the daemon in that console's process group, so a Ctrl-C or a
+        // closed terminal delivers a control event to a process whose whole
+        // contract is to outlive the command that started it.
         let ok = unsafe {
             CreateProcessW(
                 app.as_ptr(),
@@ -268,7 +305,7 @@ mod imp {
                 ptr::null(),
                 ptr::null(),
                 1,
-                EXTENDED_STARTUPINFO_PRESENT,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
                 ptr::null(),
                 ptr::null(),
                 &si.StartupInfo,
@@ -282,7 +319,10 @@ mod imp {
         // the thread; the process handle becomes ours to own.
         unsafe { CloseHandle(pi.hThread) };
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as RawHandle) };
-        Ok(DaemonChild { proc })
+        Ok(DaemonChild {
+            pid: pi.dwProcessId,
+            proc,
+        })
     }
 
     /// Nothing to reap: Windows has no zombie, and the process object goes when
@@ -307,5 +347,22 @@ mod imp {
             WAIT_TIMEOUT => Ok(None),
             _ => Err(io::Error::last_os_error()),
         }
+    }
+
+    pub fn force_kill_and_wait(c: &mut DaemonChild) -> io::Result<ExitStatus> {
+        if let Some(status) = try_wait(c)? {
+            return Ok(status);
+        }
+        let h = c.proc.as_raw_handle() as HANDLE;
+        // SAFETY: `h` is the live process handle owned by `c`.
+        if unsafe { TerminateProcess(h, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A terminated process must become signalled; waiting here also makes
+        // the returned exit code stable before the handle is reused.
+        if unsafe { WaitForSingleObject(h, u32::MAX) } != WAIT_OBJECT_0 {
+            return Err(io::Error::last_os_error());
+        }
+        try_wait(c)?.ok_or_else(|| io::Error::other("terminated process is still running"))
     }
 }

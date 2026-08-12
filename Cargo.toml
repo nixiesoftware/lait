@@ -10,6 +10,7 @@ members = [
     "crates/world-interface",
     "products/issues",
     "products/issues-app",
+    "tools/workbench",
 ]
 # Two packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.
@@ -61,6 +62,7 @@ exclude = [
     "ci/",
     "hooks/",
     "skills/",
+    "tools/",
     ".github/",
     ".githooks/",
     ".claude/",
