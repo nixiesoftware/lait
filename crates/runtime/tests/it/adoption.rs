@@ -317,3 +317,60 @@ fn an_unregistered_world_cannot_be_docked() {
     let unknown = WorldId::parse("dev.example.other").unwrap();
     assert!(station.dock(&unknown, &writer()).is_err());
 }
+
+/// A Station answers what its store holds, and every figure it reports is a
+/// measurement it actually took.
+///
+/// The rule this pins is the one a storage surface lives or dies by: an
+/// unmeasured figure is absent, never a zero. So each assertion here is about
+/// *presence* first — a placed Station can measure all three — and about the
+/// numbers moving the way the store moves second.
+#[test]
+fn a_station_measures_its_own_storage_rather_than_defaulting_it() {
+    let root = temp_root();
+    let rt = kv_runtime(&root);
+    let station = rt.create().unwrap().open(Activation::default()).unwrap();
+
+    let empty = station.storage();
+    assert_eq!(
+        empty.object_count,
+        Some(0),
+        "a Space with no commits holds no Bodies — and knows that it does not"
+    );
+    let baseline = empty
+        .bytes_on_disk
+        .expect("a placed Station can walk its own store");
+    assert!(
+        baseline > 0,
+        "an occupied store directory is not zero bytes"
+    );
+    assert!(
+        empty.last_verified_ms.is_some(),
+        "placement opened the store, and opening it is the verification"
+    );
+
+    // Committing a Body moves both figures. Neither is a constant.
+    let session = station.dock(&world_id(), &writer()).unwrap();
+    submit_as(
+        &session,
+        &writer(),
+        Intent {
+            schema: SchemaId::parse("entry").unwrap(),
+            schema_version: 1,
+            payload: b"greeting=hello".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let after = station.storage();
+    assert_eq!(after.object_count, Some(1));
+    assert!(
+        after.bytes_on_disk.unwrap_or(0) > baseline,
+        "a durable commit is bytes on disk: {:?} did not grow past {baseline}",
+        after.bytes_on_disk
+    );
+    assert_eq!(
+        after.last_verified_ms, empty.last_verified_ms,
+        "committing is not verifying — only opening the store moves that stamp"
+    );
+}

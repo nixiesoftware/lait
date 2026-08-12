@@ -12,6 +12,7 @@
 
 pub mod devices;
 pub mod library;
+pub mod storage;
 pub mod theme;
 
 use egui::{Align, Layout, RichText, Ui};
@@ -27,16 +28,23 @@ pub enum Surface {
     #[default]
     Library,
     Devices,
+    Storage,
     Diagnostics,
 }
 
 impl Surface {
-    pub const ALL: [Self; 3] = [Self::Library, Self::Devices, Self::Diagnostics];
+    pub const ALL: [Self; 4] = [
+        Self::Library,
+        Self::Devices,
+        Self::Storage,
+        Self::Diagnostics,
+    ];
 
     pub const fn title(self) -> &'static str {
         match self {
             Self::Library => "Library",
             Self::Devices => "Devices",
+            Self::Storage => "Storage",
             Self::Diagnostics => "Diagnostics",
         }
     }
@@ -59,6 +67,10 @@ pub fn draw(ui: &mut Ui, app: &App, surface: &mut Surface) {
     match surface {
         Surface::Library => library::draw(ui, app),
         Surface::Devices => devices::draw(ui, app),
+        // The engine read that supplies these is SUB-5. Until it lands the
+        // model carries nothing, and the surface says "not measured" rather
+        // than drawing zeroes — which is the whole contract this surface has.
+        Surface::Storage => storage::draw(ui, app.storage(), app.transfers()),
         Surface::Diagnostics => draw_diagnostics(ui, app),
     }
 

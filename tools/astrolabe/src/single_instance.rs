@@ -48,7 +48,13 @@ mod imp {
     use super::{Guard, Outcome, MUTEX_NAME};
     use anyhow::Result;
 
-    pub struct Handle(std::os::windows::io::OwnedHandle);
+    /// Held, never read. The handle *is* the guard: the mutex is released when
+    /// the last handle to it closes, so keeping this alive is the whole
+    /// mechanism and reading it would have nothing to say.
+    pub struct Handle(
+        #[allow(dead_code, reason = "held to keep the mutex, never read")]
+        std::os::windows::io::OwnedHandle,
+    );
 
     // SAFETY: a mutex HANDLE is not thread-affine; it is closed once, on drop.
     unsafe impl Send for Handle {}

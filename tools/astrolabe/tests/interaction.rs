@@ -258,7 +258,12 @@ fn every_surface_is_reachable_and_the_current_one_is_announced() {
     let mut harness = harness(app, Surface::Library);
     harness.run();
 
-    for title in ["Library", "Devices", "Diagnostics"] {
+    assert_eq!(
+        Surface::ALL.len(),
+        4,
+        "a surface was added without being covered here"
+    );
+    for title in ["Library", "Devices", "Storage", "Diagnostics"] {
         assert!(
             harness
                 .query_by_role_and_label(egui::accesskit::Role::Button, title)

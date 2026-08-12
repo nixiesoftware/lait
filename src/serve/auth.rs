@@ -69,7 +69,13 @@ pub struct LaunchTicket {
     /// The secret itself, carried in the launch URL.
     pub secret: String,
     /// The Orbit this ticket admits to, and only this one.
-    pub orbit: String,
+    ///
+    /// `None` is the head itself, which is what `--open` launches: a head a
+    /// person started serves every Orbit their identity has, and there is no
+    /// single one to name. Spelling that as an empty string would be a scope
+    /// claim that is not true, and the difference matters precisely because
+    /// this is the field the scoping rule rests on.
+    pub orbit: Option<String>,
     pub expires_at_ms: u64,
 }
 
@@ -91,13 +97,13 @@ impl LaunchTickets {
     /// Mint a ticket admitting to `orbit`, expiring `lifetime` from `now_ms`.
     pub fn mint(
         &self,
-        orbit: impl Into<String>,
+        orbit: Option<String>,
         lifetime: std::time::Duration,
         now_ms: u64,
     ) -> anyhow::Result<LaunchTicket> {
         let ticket = LaunchTicket {
             secret: mint_token()?,
-            orbit: orbit.into(),
+            orbit,
             expires_at_ms: now_ms
                 .saturating_add(u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX)),
         };
@@ -484,11 +490,11 @@ mod upgrade_origin {
     fn a_launch_ticket_answers_exactly_once() {
         let tickets = LaunchTickets::new();
         let ticket = tickets
-            .mint("orb_one", LAUNCH_TICKET_LIFETIME, 1_000)
+            .mint(Some("orb_one".into()), LAUNCH_TICKET_LIFETIME, 1_000)
             .expect("mint");
 
         let redeemed = tickets.redeem(&ticket.secret, 1_100).expect("first use");
-        assert_eq!(redeemed.orbit, "orb_one");
+        assert_eq!(redeemed.orbit.as_deref(), Some("orb_one"));
         assert!(
             tickets.redeem(&ticket.secret, 1_100).is_none(),
             "a spent ticket was accepted a second time"
@@ -499,7 +505,11 @@ mod upgrade_origin {
     fn an_expired_ticket_is_refused_and_an_unknown_one_is_indistinguishable() {
         let tickets = LaunchTickets::new();
         let ticket = tickets
-            .mint("orb_one", std::time::Duration::from_secs(30), 1_000)
+            .mint(
+                Some("orb_one".into()),
+                std::time::Duration::from_secs(30),
+                1_000,
+            )
             .expect("mint");
         assert!(
             tickets.redeem(&ticket.secret, 1_000 + 30_001).is_none(),
@@ -514,19 +524,19 @@ mod upgrade_origin {
     fn a_ticket_names_one_orbit() {
         let tickets = LaunchTickets::new();
         let one = tickets
-            .mint("orb_one", LAUNCH_TICKET_LIFETIME, 0)
+            .mint(Some("orb_one".into()), LAUNCH_TICKET_LIFETIME, 0)
             .expect("one");
         let two = tickets
-            .mint("orb_two", LAUNCH_TICKET_LIFETIME, 0)
+            .mint(Some("orb_two".into()), LAUNCH_TICKET_LIFETIME, 0)
             .expect("two");
         assert_ne!(one.secret, two.secret);
         assert_eq!(
             tickets.redeem(&one.secret, 1).expect("redeem one").orbit,
-            "orb_one"
+            Some("orb_one".to_owned())
         );
         assert_eq!(
             tickets.redeem(&two.secret, 1).expect("redeem two").orbit,
-            "orb_two"
+            Some("orb_two".to_owned())
         );
     }
 
@@ -536,17 +546,41 @@ mod upgrade_origin {
         let tickets = LaunchTickets::new();
         for _ in 0..4 {
             tickets
-                .mint("orb_one", std::time::Duration::from_secs(30), 0)
+                .mint(
+                    Some("orb_one".into()),
+                    std::time::Duration::from_secs(30),
+                    0,
+                )
                 .expect("mint");
         }
         assert_eq!(tickets.outstanding(), 4);
         tickets
-            .mint("orb_one", std::time::Duration::from_secs(30), 60_000)
+            .mint(
+                Some("orb_one".into()),
+                std::time::Duration::from_secs(30),
+                60_000,
+            )
             .expect("mint later");
         assert_eq!(
             tickets.outstanding(),
             1,
             "expired tickets were kept alive by a later mint"
+        );
+    }
+
+    /// A head a person opened themselves serves every Orbit their identity has,
+    /// so there is no single one to name. Saying so with `None` rather than an
+    /// empty string keeps the scoping rule meaningful: a ticket that claims to
+    /// be scoped to `""` is a claim nothing can check.
+    #[test]
+    fn a_ticket_for_the_head_itself_names_no_orbit() {
+        let tickets = LaunchTickets::new();
+        let whole = tickets
+            .mint(None, LAUNCH_TICKET_LIFETIME, 0)
+            .expect("mint for the head");
+        assert_eq!(
+            tickets.redeem(&whole.secret, 1).expect("redeem").orbit,
+            None
         );
     }
 }

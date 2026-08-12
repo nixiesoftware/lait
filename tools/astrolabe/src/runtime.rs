@@ -9,19 +9,26 @@
 //! authoritative value itself, moved, and the model on the other side takes
 //! ownership. There is still exactly one model of client state.
 
+#![allow(
+    clippy::future_not_send,
+    reason = "every future here is polled by `block_on` on this module's own               thread and is never handed to an executor that could move it"
+)]
+
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
 use lait_workbench::{ClientSignal, Signals, WorkbenchSnapshot};
 
 use crate::client::library::LibraryEntry;
-use crate::client::{Client, ClientError, Config};
+use crate::client::storage::StorageFacts;
+use crate::client::{Client, ClientError, ClientResult, Config};
 use crate::model::App;
 
 /// Something that happened, on its way to the model.
 pub enum Update {
     Snapshot(Box<WorkbenchSnapshot>),
     Library(Vec<LibraryEntry>),
+    Storage(Vec<StorageFacts>),
     Signal(ClientSignal),
     Failed { what: String, error: ClientError },
 }
@@ -44,7 +51,7 @@ impl Runtime {
     /// `wake` is called whenever an update is queued. In the real shell it is
     /// `egui::Context::request_repaint`; in a test it can be a no-op, which is
     /// the reason it is a parameter rather than a captured context.
-    pub fn start(config: Config, wake: impl Fn() + Send + 'static) -> Self {
+    pub fn start(config: Config, wake: impl Fn() + Send + 'static) -> ClientResult<Self> {
         let (sender, updates) = std::sync::mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("astrolabe-client".into())
@@ -68,12 +75,18 @@ impl Runtime {
                 };
                 runtime.block_on(serve(config, &sender, &wake));
             })
-            .expect("spawn the client thread");
+            .map_err(|error| {
+                // A machine that cannot spawn a thread at startup cannot run
+                // this program, and there is no channel to report it through
+                // yet — the reporting channel is what the thread would own. So
+                // it goes back to the caller, which still has a way to say so.
+                ClientError::internal(format!("start the client thread: {error}"))
+            })?;
 
-        Self {
+        Ok(Self {
             updates,
             _worker: worker,
-        }
+        })
     }
 
     /// Apply everything that has arrived since the last frame.
@@ -86,6 +99,7 @@ impl Runtime {
             match self.updates.try_recv() {
                 Ok(Update::Snapshot(snapshot)) => app.absorb(*snapshot),
                 Ok(Update::Library(entries)) => app.absorb_library(entries),
+                Ok(Update::Storage(facts)) => app.absorb_storage(facts, Vec::new()),
                 Ok(Update::Signal(signal)) => app.consume(&signal),
                 Ok(Update::Failed { what, error }) => app.fail(what, error),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
@@ -149,6 +163,17 @@ async fn refresh(client: &Client, sender: &Sender<Update>, wake: &(impl Fn() + S
             wake,
             Update::Failed {
                 what: "read the library".into(),
+                error,
+            },
+        ),
+    }
+    match client.get_storage().await {
+        Ok(facts) => send(sender, wake, Update::Storage(facts)),
+        Err(error) => send(
+            sender,
+            wake,
+            Update::Failed {
+                what: "read storage".into(),
                 error,
             },
         ),

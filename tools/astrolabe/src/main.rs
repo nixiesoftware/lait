@@ -65,7 +65,7 @@ impl Shell {
         let context = creation.egui_ctx.clone();
         let runtime = Runtime::start(Config::new(state_root, sidecar), move || {
             context.request_repaint();
-        });
+        })?;
 
         Ok(Self {
             app: App::new(),

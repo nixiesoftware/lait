@@ -18,6 +18,7 @@ use lait_workbench::{
 };
 
 use crate::client::library::LibraryEntry;
+use crate::client::storage::{StorageFacts, TransferFacts};
 use crate::client::ClientError;
 
 /// Everything the interface draws.
@@ -27,6 +28,11 @@ pub struct App {
     /// which is *loading*, and is not the same as a machine with nothing on it.
     snapshot: Option<WorkbenchSnapshot>,
     library: Option<Vec<LibraryEntry>>,
+    /// What each Space is holding. Empty until an engine read supplies it —
+    /// and empty is drawn as "no Spaces", not as "zero bytes", because those
+    /// are different claims.
+    storage: Vec<StorageFacts>,
+    transfers: Vec<TransferFacts>,
     /// Set when a signal says this model can no longer be derived from what it
     /// has seen. Cleared only by taking a fresh snapshot.
     stale: Option<StaleReason>,
@@ -71,6 +77,19 @@ impl App {
 
     pub fn absorb_library(&mut self, library: Vec<LibraryEntry>) {
         self.library = Some(library);
+    }
+
+    pub fn absorb_storage(&mut self, storage: Vec<StorageFacts>, transfers: Vec<TransferFacts>) {
+        self.storage = storage;
+        self.transfers = transfers;
+    }
+
+    pub fn storage(&self) -> &[StorageFacts] {
+        &self.storage
+    }
+
+    pub fn transfers(&self) -> &[TransferFacts] {
+        &self.transfers
     }
 
     /// Consume one signal.

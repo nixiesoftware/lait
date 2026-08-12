@@ -15,6 +15,75 @@ lait --version                                    # which build this is
 Anything else exits 1. Everything a verb used to do is now a request one of those
 three carries — see [`docs/SERVE.md`](docs/SERVE.md) for the three HTTP planes.
 
+## Astrolabe — the client above all of it
+
+`tools/astrolabe` is a second program, `astrolabe.exe`: the local client through
+which a person reaches the Worlds their device serves. Reference shape is the
+Steam client — a library, a launcher, an identity — that **never draws a World**.
+`Open` is a handoff to the person's browser; `products/issues` ships its own head
+and stays the authority on its own presentation.
+
+```sh
+cargo run -p astrolabe          # the client (needs lait.exe beside it when packaged)
+cargo test -p astrolabe         # unit + headless interaction + packaging tests
+```
+
+Three layers, and **no boundary between them** — no FFI, no local HTTP hop, no
+generated binding, no serialization on the path from what is observed to what is
+drawn:
+
+- `client/` is the reach: the supervisor library it embeds (`tools/workbench`)
+  and the host, Space and World planes it speaks. It draws nothing, which is why
+  its rules are testable without a window.
+- `model.rs` is the App-owned state — the *only* model of client state. It moves
+  in exactly two ways, snapshot and invalidation. There is no optimistic local
+  mutation, because that would be a second model disagreeing with the first
+  exactly when an action was refused.
+- `ui/` draws it and holds no logic.
+
+`runtime.rs` is the one channel: supervision and sampling run on a Tokio runtime
+on their own thread and reach the frame loop as `Update`s drained at the top of
+each frame.
+
+### The UI substrate is adopted, not built
+
+`egui` + `eframe` + `accesskit`, all `MIT OR Apache-2.0`, as ordinary pinned
+dependencies. The Plan's revision 5 called for deriving one from "WarpUI"; that
+is GPUI with the names changed, it is Apache-2.0 with **no MIT grant**, its
+platform crates are unpublished, and it has **no headless rendering on Windows**
+— which the release gate requires. Revision 6 (issued `89b00354`) reverses it;
+the finding is a `clarifies` observation on the Plan Spec.
+
+Interaction tests use `egui_kittest`, which renders offscreen and queries the
+**AccessKit tree** — so they assert what a screen reader reads, not what pixels
+looked like. Two gotchas found the hard way: a plain label's text lands in the
+node's `value`, not its `label`; and a selected tab is announced through the
+Toggle pattern, so assert `toggled()`, not `is_selected()`. Disambiguate with
+`get_by_role_and_label` — a surface heading carries the same text as its tab.
+
+### Rules that are tested, not documented
+
+Removal and data deletion are separate; deletion re-proves containment under the
+managed root *at deletion time*. A sampling failure degrades and preserves the
+last good topology — it never reads as "no peers". Unmeasured is absent, never
+zero. Ownership is a boundary: force-stop lives on an owned handle and there is
+no pid-based path to it. The overlay renders convenience and refuses authority.
+
+## The coverage manifest cannot be regenerated on Windows
+
+`ci/coverage-manifest.txt` records every test id. Adding or renaming a test fails
+the `coverage manifest` CI job until it is refreshed, and
+`bash ci/coverage-manifest.sh --update` **refuses to run on Windows** by design —
+`cfg(unix)` tests do not exist here and regenerating would record their absence
+as coverage loss. Push, let the job fail, and take the file it uploads:
+
+```sh
+gh run download <run-id> -n coverage-manifest -D <dir>   # coverage-manifest.txt.actual
+cp <dir>/coverage-manifest.txt.actual ci/coverage-manifest.txt
+```
+
+Budget one extra push per batch of test changes, and batch them.
+
 ## Driving the viewer in a headless browser
 
 The viewer is a React SPA. **Do not navigate it with synthetic clicks.** An eval'd

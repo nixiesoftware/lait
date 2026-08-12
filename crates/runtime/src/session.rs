@@ -491,6 +491,22 @@ impl StationCore {
         self.lock().replica.frontier()
     }
 
+    /// The two figures a storage read takes from the Replica: how many Bodies
+    /// it holds, and when its material was last verified end to end.
+    ///
+    /// Both under one lock acquisition, and deliberately **not** through
+    /// [`Self::with_replica`]: that entry republishes a read generation on
+    /// success, which freezes every Body — an O(all Bodies) cost to answer two
+    /// integers, on a request whose whole premise is that looking is cheap.
+    ///
+    /// Answered on a closed core too. `closed` forbids commits; it does not
+    /// make the Bodies stop being there, and the count of what a dormant store
+    /// holds is exactly the question a storage surface is asking.
+    pub(crate) fn storage(&self) -> (u64, Option<u64>) {
+        let inner = self.lock();
+        (inner.replica.body_count(), inner.replica.verified_at_ms())
+    }
+
     /// Run a closure against the exclusive Replica writer (the Contact plane's
     /// snapshot/incorporation entry). Refused once the core is closed.
     ///

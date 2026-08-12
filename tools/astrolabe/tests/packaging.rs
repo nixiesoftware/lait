@@ -163,7 +163,11 @@ fn no_retired_stack_artifacts_survive_anywhere_in_the_tree() {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
-            if name.ends_with(".dart")
+            // `name` is already lowercased above, so these comparisons are
+            // case-insensitive in effect.
+            if std::path::Path::new(&name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dart"))
                 || name == "pubspec.yaml"
                 || name == "pubspec.lock"
                 || name == "flutter_windows.dll"

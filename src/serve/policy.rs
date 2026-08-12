@@ -25,6 +25,11 @@ pub fn is_read(req: &Request) -> bool {
         // Which Worlds this Orbit activated. A read of the ACL's own record,
         // and one a Library needs before a person has done anything at all.
         | Request::WorldsActive
+        // What the store is holding. A read in the strictest sense: it counts
+        // Bodies already in memory and stats files already on disk, and the
+        // one thing it could have written — a verification timestamp — is
+        // recorded by the placement that verified, not by the asking.
+        | Request::Storage
         | Request::Status
         | Request::Diagnose { .. }
         | Request::Id
@@ -228,6 +233,11 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::WorldActivate { .. }
         | Request::Subscribe { .. }
         | Request::Status
+        // Orbit-routed, not host-routed, for the same reason `WorldsActive` is:
+        // it reads one Space's own store and therefore needs a Space to read.
+        // A daemon-scoped total across every Orbit on the machine would be a
+        // different question, and not one this answers.
+        | Request::Storage
         | Request::Diagnose { .. }
         | Request::Id
         | Request::Whoami
@@ -269,6 +279,14 @@ mod tests {
         assert!(is_read(&Request::Status));
         assert!(is_read(&Request::Members));
         assert!(is_read(&Request::AssignmentList { actor: None }));
+    }
+
+    /// Asking what a Space is storing reads one Space, so it takes the Space
+    /// route and not the daemon-scoped one.
+    #[test]
+    fn a_storage_read_is_a_read_and_belongs_to_a_space_not_to_the_host_plane() {
+        assert!(is_read(&Request::Storage));
+        assert!(!is_host_plane(&Request::Storage));
     }
 
     #[test]

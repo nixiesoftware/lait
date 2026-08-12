@@ -641,6 +641,15 @@ pub struct Replica {
     fabric: Engine,
     frontier: ReplicaFrontier,
     durable: Option<Store>,
+    /// When this Replica's durable material was last verified end to end, in
+    /// milliseconds since the unix epoch.
+    ///
+    /// `None` is not "verified long ago" — it is *nobody has ever checked*,
+    /// which is the truthful state of a Replica that was never opened from a
+    /// store. It stays `None` rather than becoming a zero: a figure nobody
+    /// measured, drawn as a number, is the same defect as a failed peer sample
+    /// drawn as "no peers", and harder to spot because it looks like data.
+    verified_at_ms: Option<u64>,
     poisoned: bool,
     keys: Option<Arc<dyn BodyKeySource>>,
     space: Option<SpaceId>,
@@ -934,6 +943,9 @@ impl Replica {
             fabric,
             frontier: ReplicaFrontier::EMPTY,
             durable: None,
+            // Nothing was read off a disk to build this, so nothing was
+            // verified. `Replica::open` is the only thing that sets this.
+            verified_at_ms: None,
             poisoned: false,
             keys: None,
             space: None,
@@ -1038,7 +1050,15 @@ impl Replica {
             .caller_meta()
             .map_err(|_| Failure::Integrity(Defect::Encoding))?
         else {
+            // A store with no commit point has no object graph, but the pass
+            // still ran: `Store::open` above drove `recover`, which validates
+            // the required index and re-hashes every object it names. Over an
+            // empty required set that succeeds trivially — and trivially
+            // succeeding is still the check having been made, so it is stamped
+            // like any other. Reporting a fresh store as never-verified would
+            // leave the surface saying "unknown" until the first commit.
             replica.durable = Some(store);
+            replica.verified_at_ms = Some(mechanics::wallclock::now_millis());
             return Ok(replica);
         };
         let meta = decode_store_meta(&meta_bytes)?;
@@ -1192,6 +1212,16 @@ impl Replica {
             *count = count.saturating_add(1);
         }
         replica.durable = Some(store);
+        // Everything above IS the verification pass, and this is the only
+        // place that can honestly stamp one. `Store::open` re-read every
+        // required object and re-derived its content address; this function
+        // then decoded and verified every signed transaction and opened every
+        // sealed envelope it holds a key for — with no heuristic repair, so
+        // arriving here means the store was whole at this instant. Nothing
+        // else in the system walks the whole store, so nothing else can move
+        // this forward: for a live Station it reads "when it was placed",
+        // which is the truth.
+        replica.verified_at_ms = Some(mechanics::wallclock::now_millis());
         // A version-2 indexed store has no ancestry index. Establish its
         // current committed state as generation zero before returning it to a
         // writer. That makes the pre-commit coordinate a Spec revision records
@@ -2186,6 +2216,39 @@ impl Replica {
     /// Every Body currently present (interpreted or opaque).
     pub fn body_keys(&self) -> Vec<BodyKey> {
         self.bodies.keys().cloned().collect()
+    }
+
+    /// How many Bodies this Replica holds, interpreted and opaque alike.
+    ///
+    /// The count on its own, because the two existing ways to get it both make
+    /// a caller pay for something else: [`Self::body_keys`] clones every key to
+    /// return a vector nobody reads, and [`Self::usage`] walks every head to
+    /// sum the quota ledger's bytes. This is the index's own length, which the
+    /// map already knows.
+    ///
+    /// Opaque Bodies are counted. They occupy the store exactly like the rest
+    /// — retained, sealed, unread — and a footprint that excluded them would
+    /// answer for less than the disk is actually holding.
+    pub fn body_count(&self) -> u64 {
+        u64::try_from(self.bodies.len()).unwrap_or(u64::MAX)
+    }
+
+    /// When this Replica's durable material was last verified end to end, in
+    /// milliseconds since the unix epoch.
+    ///
+    /// The verification is [`Replica::open`] itself: the journal re-reads every
+    /// required object and re-derives its content address, then this crate
+    /// verifies every signed transaction and opens every sealed envelope it
+    /// holds a key for, failing without heuristic repair. There is no other
+    /// whole-store pass and no public way to re-run one, so on a live Station
+    /// this reads as the moment the Orbit was placed.
+    ///
+    /// `None` means no verification has ever run against this Replica — true of
+    /// any non-durable one — and is reported as absent rather than as a zero or
+    /// an epoch timestamp. A surface that drew "never checked" as `1970` or as
+    /// `0` would be inventing an observation.
+    pub fn verified_at_ms(&self) -> Option<u64> {
+        self.verified_at_ms
     }
 
     fn freeze_body(&self, key: &BodyKey) -> Option<Arc<SnapshotBody>> {

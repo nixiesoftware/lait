@@ -307,6 +307,69 @@ impl OrbitStore {
         &self.dir
     }
 
+    /// Bytes on disk under this Orbit's store directory.
+    ///
+    /// Attributable to one Space by construction — the store is one directory
+    /// per Space — and deliberately the *whole* directory: the Replica's
+    /// journal, the mechanics ledger beside it, the content cache, every
+    /// superseded generation, and this module's own marker/epoch/lock. Those
+    /// are all bytes this Space is occupying on somebody's disk, and a figure
+    /// that quietly dropped the superseded generations would under-report the
+    /// thing a person opens a storage surface to find out.
+    ///
+    /// **It is a walk, and there is no cheaper honest answer.** The journal
+    /// keeps every object as its own file, so no component holds a total.
+    /// Summing the lengths the required-object index records is cheaper and is
+    /// a *different number wearing this one's name*: it omits the journal
+    /// itself, the cache, the mechanics ledger, prior generations, and every
+    /// object a sweep has not collected yet. Dressing that up as "bytes on
+    /// disk" is precisely the synthesised figure a storage surface must never
+    /// draw.
+    ///
+    /// One `stat` per file, so nothing on a commit, Contact or placement path
+    /// calls it — only an explicit storage read reaches this.
+    ///
+    /// A read failure fails the **whole** measurement rather than returning the
+    /// partial sum, so the caller reports the footprint absent. An undercount
+    /// presented as a measurement is worse than no measurement.
+    pub fn footprint_bytes(&self) -> Result<u64, Failure> {
+        let mut total: u64 = 0;
+        let mut pending = vec![self.dir.clone()];
+        // The root is the one directory that has to be there. If it is gone
+        // there is nothing to measure, and answering zero would draw a store
+        // that vanished as a store that is empty — so its read error
+        // propagates while a subdirectory disappearing mid-walk does not.
+        let mut root = true;
+        while let Some(dir) = pending.pop() {
+            let entries = match (std::fs::read_dir(&dir), root) {
+                (Ok(entries), _) => entries,
+                (Err(e), false) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                (Err(e), _) => return Err(io_err(e)),
+            };
+            root = false;
+            for entry in entries {
+                let entry = entry.map_err(io_err)?;
+                // `DirEntry::metadata` does not follow symlinks, so a link
+                // counts as the link: a store can neither be walked out of nor
+                // made to report bytes that live somewhere else.
+                let meta = match entry.metadata() {
+                    Ok(meta) => meta,
+                    // Collected between the listing and the stat. A file that
+                    // no longer exists occupies nothing, so skipping it is the
+                    // measurement rather than a hole in it.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(io_err(e)),
+                };
+                if meta.is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
+        Ok(total)
+    }
+
     /// The Replica component selected by the Orbit's one generation pointer.
     pub fn replica_dir(&self) -> Result<PathBuf, Failure> {
         crate::generation::Active::read(&self.dir)
@@ -538,6 +601,58 @@ mod tests {
             assert!(next > read, "the bump advances past whatever was durable");
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    #[test]
+    fn the_footprint_counts_every_byte_under_the_store_and_nothing_beside_it() {
+        let root = temp_root();
+        let space = SpaceId::from_digest([9u8; 16]);
+        let store = OrbitStore::create(&root, &space).unwrap();
+
+        // A formed store is already occupying disk — the marker and the epoch
+        // counter are files. Zero would be wrong here, which is why the
+        // baseline is asserted rather than assumed.
+        let baseline = store.footprint_bytes().unwrap();
+        assert!(baseline > 0, "marker + epoch are bytes on disk");
+
+        // Nested, because the journal keeps its objects in a subdirectory and a
+        // walk that stopped at the top level would silently report a fraction.
+        let nested = store.dir().join("objects").join("deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("object"), vec![7u8; 4_096]).unwrap();
+        assert_eq!(
+            store.footprint_bytes().unwrap(),
+            baseline + 4_096,
+            "the walk must reach every level of the store"
+        );
+
+        // Another Space's store is another Space's footprint. The figure is
+        // attributable to one Space or it is not worth drawing.
+        let other = OrbitStore::create(&root, &SpaceId::from_digest([10u8; 16])).unwrap();
+        std::fs::write(other.dir().join("bulk"), vec![1u8; 65_536]).unwrap();
+        assert_eq!(
+            store.footprint_bytes().unwrap(),
+            baseline + 4_096,
+            "a neighbouring store's bytes are not this one's"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_store_that_is_gone_reports_no_footprint_rather_than_a_zero() {
+        // The defect this forbids: a removed or unreadable store measuring as
+        // `0 B` and drawing as an empty Space. A failed measurement has to
+        // surface as a failure so the caller can report it absent.
+        let root = temp_root();
+        let space = SpaceId::from_digest([11u8; 16]);
+        let store = OrbitStore::create(&root, &space).unwrap();
+        store.remove().unwrap();
+        assert!(
+            store.footprint_bytes().is_err(),
+            "an absent store is not an empty one"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

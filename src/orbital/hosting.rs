@@ -1931,6 +1931,26 @@ impl StationHost {
     fn dispatch_observation(&self, req: Request) -> Response {
         match req {
             Request::Status => self.status(),
+            // What this Orbit's store holds. Read from the Replica this
+            // activation already opened and from the bytes already sitting in
+            // the store directory, so answering costs nothing beyond what
+            // placement already paid; and it is Orbit-routed, so a caller
+            // reaches it through `request_if_running` and a vacant Orbit
+            // answers "not running" instead of being placed to produce a row.
+            //
+            // The figures pass through unchanged, absences included. A `None`
+            // here means nobody measured it — the walk could not finish, or
+            // nothing has ever verified this store — and it is forwarded as an
+            // absence rather than filled in with a zero, which would make the
+            // surface look populated and be wrong.
+            Request::Storage => {
+                let reading = self.station.storage();
+                Response::Storage {
+                    bytes_on_disk: reading.bytes_on_disk,
+                    object_count: reading.object_count,
+                    last_verified_ms: reading.last_verified_ms,
+                }
+            }
             // Subscribe is handled by the streaming connection path before
             // dispatch; a one-shot Subscribe cannot be answered on this plane.
             Request::Subscribe { .. } => Response::err("subscribe is a streaming request"),

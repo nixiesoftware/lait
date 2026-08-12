@@ -456,6 +456,20 @@ pub enum Request {
     /// serves must never place a Station, or a Library that draws ten rows
     /// mounts ten stores to do it, and listing costs what opening costs.
     WorldsActive,
+    /// What this Orbit's store is holding: bytes on disk, how many Bodies, and
+    /// when its integrity was last verified.
+    ///
+    /// Routed to an Orbit and answered only by one that is *already placed* —
+    /// the same rule [`Request::WorldsActive`] follows, and for the same reason.
+    /// A caller reaches it through `request_if_running`, so a vacant Orbit
+    /// answers "not running" instead of being placed; otherwise a surface
+    /// showing storage for ten Spaces would mount ten stores to draw a column,
+    /// and looking would cost what opening costs.
+    ///
+    /// Per-Orbit, never machine-wide: the figures are attributable to one
+    /// Space, because a person deciding what to keep is deciding about one
+    /// Space at a time.
+    Storage,
     /// Streaming dirty notifications for live clients. Turns the one-shot handler into a
     /// stream of [`Doorbell`] frames until the client disconnects.
     Subscribe {
@@ -1223,7 +1237,10 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Signals => Station,
 
         // ---- Observation: generic status and subscription surfaces ----
-        Request::Status | Request::Subscribe { .. } => Observation,
+        // Storage belongs here and not with Mechanics: it projects what the
+        // durable store already holds and signs, admits and changes nothing —
+        // the same kind of answer `Status` gives, about a different plane.
+        Request::Status | Request::Storage | Request::Subscribe { .. } => Observation,
 
         // ---- Lifecycle/deployment: daemon process + node-local config ----
         Request::Diagnose { .. }
@@ -1331,6 +1348,7 @@ pub fn representative_requests() -> Vec<Request> {
         },
         Request::Subscribe { since: 0 },
         Request::Status,
+        Request::Storage,
         Request::Diagnose {
             expected_space: None,
         },
@@ -1488,6 +1506,30 @@ pub enum Response {
     /// metadata would be answering for a package it does not hold.
     Worlds {
         worlds: Vec<String>,
+    },
+    /// Reply to [`Request::Storage`]: what this Orbit's store is holding.
+    ///
+    /// **Every figure is optional, and absent is a real answer.** A number
+    /// nobody measured is reported missing, never estimated and never defaulted
+    /// to zero — a synthesised figure that makes a surface look populated is
+    /// the observation-failure defect wearing different clothes, and it is
+    /// harder to spot because it looks like data. `null` here means "not
+    /// measured"; it never means "measured, and it is nothing".
+    Storage {
+        /// Bytes on disk for this Space, or `null` when the measurement could
+        /// not be taken. The whole store directory — Bodies, ledger, content
+        /// cache, superseded generations — because those are all bytes this
+        /// Space is occupying.
+        #[serde(default)]
+        bytes_on_disk: Option<u64>,
+        /// How many Bodies the store holds, interpreted and opaque alike.
+        #[serde(default)]
+        object_count: Option<u64>,
+        /// When integrity was last verified, in milliseconds since the unix
+        /// epoch, or `null` when it never has been. A store that has never been
+        /// checked says so; it does not report the epoch.
+        #[serde(default)]
+        last_verified_ms: Option<u64>,
     },
     /// The Live plane's transient table (reply to [`Request::Live`]).
     Live {
@@ -3193,6 +3235,48 @@ mod tests {
                 "the flattened request must survive: {json}"
             );
         }
+    }
+
+    /// An unmeasured storage figure stays unmeasured on the wire.
+    ///
+    /// This is the release-gate rule in its smallest form. If `None` encoded as
+    /// `0` — or decoded back as one — a Storage surface would draw a confident
+    /// `0 B / 0 objects / verified at the epoch` for a Space nobody managed to
+    /// measure, and there would be nothing in the reply to distrust.
+    #[test]
+    fn an_unmeasured_storage_figure_is_absent_on_the_wire_and_never_a_zero() {
+        let unmeasured = Response::Storage {
+            bytes_on_disk: None,
+            object_count: None,
+            last_verified_ms: None,
+        };
+        let json = serde_json::to_value(&unmeasured).unwrap();
+        assert_eq!(json["bytes_on_disk"], serde_json::Value::Null, "{json}");
+        assert_eq!(json["object_count"], serde_json::Value::Null, "{json}");
+        assert_eq!(json["last_verified_ms"], serde_json::Value::Null, "{json}");
+
+        // And the two states stay distinguishable in both directions: a store
+        // measured at zero bytes is a different claim from one nobody measured.
+        let measured_empty = serde_json::to_value(Response::Storage {
+            bytes_on_disk: Some(0),
+            object_count: Some(0),
+            last_verified_ms: Some(0),
+        })
+        .unwrap();
+        assert_ne!(json, measured_empty);
+
+        let back: Response = serde_json::from_value(json).unwrap();
+        let Response::Storage {
+            bytes_on_disk,
+            object_count,
+            last_verified_ms,
+        } = back
+        else {
+            panic!("a storage reply must decode as one");
+        };
+        assert_eq!(bytes_on_disk, None);
+        assert_eq!(object_count, None);
+        assert_eq!(last_verified_ms, None);
     }
 
     #[test]

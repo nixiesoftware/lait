@@ -25,6 +25,9 @@ fn every_request_variant_has_a_terminal_owner() {
         RequestOwner::Station
     );
     assert_eq!(classify(&Request::Status), RequestOwner::Observation);
+    // Storage projects what the durable store holds and changes nothing, so it
+    // sits with Status rather than with the membership verbs.
+    assert_eq!(classify(&Request::Storage), RequestOwner::Observation);
     assert_eq!(classify(&Request::Stop), RequestOwner::Lifecycle);
 }
 

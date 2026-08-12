@@ -194,7 +194,26 @@ pub async fn run(
         println!("(loopback only; this link carries a one-time token for this run)");
     }
     if open {
-        open_browser(&url);
+        // A launch ticket rather than the run token, and for the reason the
+        // ticket exists: this URL is handed to a browser, so it lands in
+        // history, in a synchronised profile, and in the shell's recent list.
+        // The run token would still be current in every one of those places
+        // tomorrow; a ticket is spent by the time the page has finished
+        // loading.
+        //
+        // Falling back to the token URL if minting fails is deliberate — this
+        // is a courtesy launch whose contract is "the URL is already on
+        // stdout", and refusing to open a window because entropy was briefly
+        // unavailable would be a worse trade than the one it protects against.
+        let launch = app
+            .launch_tickets
+            .mint(None, auth::LAUNCH_TICKET_LIFETIME, now_ms())
+            .map(|ticket| format!("http://127.0.0.1:{}/?ticket={}", bound.port(), ticket.secret))
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "could not mint a launch ticket; opening with the run token");
+                url.clone()
+            });
+        open_browser(&launch);
     }
 
     let serve_result = axum::serve(listener, router(app))
@@ -615,7 +634,7 @@ async fn index(
             )
                 .into_response();
         };
-        tracing::debug!(orbit = %redeemed.orbit, "redeemed a launch ticket");
+        tracing::debug!(orbit = ?redeemed.orbit, "redeemed a launch ticket");
         let session = format!(
             "{}={}; Path=/; HttpOnly; SameSite=Strict",
             app.cookie,
@@ -685,10 +704,11 @@ async fn mint_launch(State(app): State<Arc<App>>, Json(request): Json<LaunchRequ
     if request.orbit.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "a launch needs an orbit").into_response();
     }
-    match app
-        .launch_tickets
-        .mint(request.orbit.trim(), auth::LAUNCH_TICKET_LIFETIME, now_ms())
-    {
+    match app.launch_tickets.mint(
+        Some(request.orbit.trim().to_owned()),
+        auth::LAUNCH_TICKET_LIFETIME,
+        now_ms(),
+    ) {
         Ok(ticket) => Json(serde_json::json!({
             "ticket": ticket.secret,
             "orbit": ticket.orbit,
@@ -1252,7 +1272,11 @@ mod tests {
         let (router, state) = app_with_tickets("run-token");
         let ticket = state
             .launch_tickets
-            .mint("orb_one", auth::LAUNCH_TICKET_LIFETIME, now_ms())
+            .mint(
+                Some("orb_one".into()),
+                auth::LAUNCH_TICKET_LIFETIME,
+                now_ms(),
+            )
             .expect("mint");
 
         let first = router

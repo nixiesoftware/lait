@@ -59,6 +59,53 @@ impl StorageFacts {
     }
 }
 
+impl super::Client {
+    /// What each Orbit this device serves is holding.
+    ///
+    /// Passive, like every other listing here: routed per Orbit through
+    /// `request_if_running`, so a vacant Orbit is never placed to be measured.
+    /// An Orbit that cannot be asked contributes an *unmeasured* row rather
+    /// than being dropped — the Space is real and on disk, and omitting it
+    /// would understate what this device is holding.
+    pub async fn get_storage(&self) -> super::ClientResult<Vec<StorageFacts>> {
+        let daemon = self.daemon()?;
+        let context = self.host_context().await?;
+
+        let mut facts = Vec::new();
+        for orbit in context.orbits {
+            let Some(space) = mechanics::ids::SpaceId::parse(&orbit.space) else {
+                continue;
+            };
+            let route = lait::control::ControlRoute::Orbit {
+                address: lait::control::OrbitAddress::for_store(
+                    std::path::Path::new(&orbit.path),
+                    space,
+                ),
+            };
+            let measured = match daemon
+                .request_if_running(route, &lait::control::Request::Storage)
+                .await
+            {
+                Ok(lait::control::Response::Storage {
+                    bytes_on_disk,
+                    object_count,
+                    last_verified_ms,
+                }) => StorageFacts {
+                    orbit: orbit.space.clone(),
+                    bytes_on_disk,
+                    object_count,
+                    last_verified_ms,
+                },
+                // Not running, or not reachable. Both are "nobody measured
+                // this", which is exactly what an unmeasured row says.
+                _ => StorageFacts::unmeasured(orbit.space.clone()),
+            };
+            facts.push(measured);
+        }
+        Ok(facts)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
