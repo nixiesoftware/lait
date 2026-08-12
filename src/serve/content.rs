@@ -773,6 +773,7 @@ mod end_to_end {
             daemon: Client::at(dir.clone()),
             doorbells: tokio::sync::broadcast::channel(4).0,
             cookie: cookie_name(7717),
+            launch_tickets: crate::serve::auth::LaunchTickets::new(),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: ContentStreamPermits::new(),
             socket: crate::serve::socket::Hub::new(),

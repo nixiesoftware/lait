@@ -22,6 +22,7 @@
 
 pub mod client;
 pub mod lifecycle;
+pub mod link;
 pub mod model;
 pub mod runtime;
 pub mod sidecar;

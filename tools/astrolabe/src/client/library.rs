@@ -3,8 +3,6 @@
 //! One row per openable thing — an Orbit, and a World mounted in it. `Open`
 //! hands off to that World's own head; the client never draws a World.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use lait::control::{ControlRoute, HostReply, Request, Response};
 
 use super::{Client, ClientError, ClientResult};
@@ -153,36 +151,39 @@ impl Client {
         Ok(entries)
     }
 
-    /// Mint a launch credential for one Orbit.
+    /// The URL `Open` sends the browser to, given a ticket the head minted.
     ///
-    /// The ticket is what travels in the URL handed to the browser. Nothing
-    /// here opens a browser: that is the caller's, because a library call that
-    /// launched a process as a side effect could not be tested without one.
-    pub fn mint_launch(&self, orbit: &str, base_url: &str) -> ClientResult<LaunchTicket> {
-        if orbit.trim().is_empty() {
-            return Err(ClientError::invalid("a launch needs an orbit to scope to"));
+    /// Minting is deliberately not here. A ticket must be *spent* by the
+    /// process that will be presented with it, so the store lives in the head
+    /// (`POST /api/launch`) and a client that minted its own would be issuing
+    /// credentials against a store nothing checks. This composes the URL and
+    /// nothing else.
+    ///
+    /// Nothing here opens a browser either: a library call that launched a
+    /// process as a side effect could not be tested without one.
+    pub fn launch_url(
+        head: &str,
+        entry_path: &str,
+        ticket: &str,
+        expires_at_ms: u64,
+    ) -> ClientResult<LaunchTicket> {
+        if ticket.trim().is_empty() {
+            return Err(ClientError::invalid("a launch needs a ticket"));
         }
-        let tickets = lait::serve::auth::LaunchTickets::new();
-        let ticket = tickets
-            .mint(orbit, lait::serve::auth::LAUNCH_TICKET_LIFETIME, now_ms())
-            .map_err(|error| ClientError::internal(format!("mint launch ticket: {error:#}")))?;
         Ok(LaunchTicket {
             url: format!(
-                "{}?ticket={}",
-                base_url.trim_end_matches('/'),
-                ticket.secret
+                "{}{}?ticket={}",
+                head.trim_end_matches('/'),
+                if entry_path.starts_with('/') {
+                    entry_path
+                } else {
+                    "/"
+                },
+                ticket.trim()
             ),
-            expires_at_ms: ticket.expires_at_ms,
+            expires_at_ms,
         })
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -206,6 +207,22 @@ mod tests {
         assert!(
             entry.entry_path.is_none(),
             "an entry path was guessed for a World that declares none"
+        );
+    }
+
+    /// The ticket travels in the query, and the entry path the World declared
+    /// is where it lands. A launch URL that dropped either would open the head
+    /// unauthenticated, at the wrong place.
+    #[test]
+    fn a_launch_url_carries_the_ticket_to_the_declared_entry() {
+        let ticket =
+            Client::launch_url("http://127.0.0.1:7717/", "/", "abc123", 42).expect("a launch url");
+        assert_eq!(ticket.url, "http://127.0.0.1:7717/?ticket=abc123");
+        assert_eq!(ticket.expires_at_ms, 42);
+
+        assert!(
+            Client::launch_url("http://127.0.0.1:7717", "/", "  ", 0).is_err(),
+            "a launch was composed with no credential in it"
         );
     }
 

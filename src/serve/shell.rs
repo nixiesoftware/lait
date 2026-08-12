@@ -128,24 +128,31 @@ fn content_type(path: &str) -> &'static str {
 ///
 /// Documents go through [`compose`]; everything else is handed back as the exact
 /// bytes that were embedded.
-pub fn asset(path: &str) -> Response {
+pub fn asset(path: &str, overlay: bool) -> Response {
     let path = path.trim_start_matches('/');
     if let Some(file) = ASSETS.get_file(path) {
         let mime = content_type(path);
-        let body = if mime == HTML {
+        let body = if mime == HTML && overlay {
             compose(file.contents())
         } else {
             Cow::Borrowed(file.contents())
         };
         return ([(header::CONTENT_TYPE, mime)], body).into_response();
     }
-    index()
+    index(overlay)
 }
 
 /// The SPA entry.
-pub fn index() -> Response {
+pub fn index(overlay: bool) -> Response {
     match ASSETS.get_file("index.html") {
-        Some(f) => ([(header::CONTENT_TYPE, HTML)], compose(f.contents())).into_response(),
+        Some(f) => {
+            let body = if overlay {
+                compose(f.contents())
+            } else {
+                Cow::Borrowed(f.contents())
+            };
+            ([(header::CONTENT_TYPE, HTML)], body).into_response()
+        }
         // Only reachable if someone ships a build with an empty assets dir.
         None => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -467,9 +474,10 @@ fn body_open_end(html: &str) -> Option<usize> {
     None
 }
 
-/// The element name of the start tag at the front of `rest`, lowercase-insensitive
-/// and borrowed. `None` for anything that is not a start tag: an end tag, a
-/// doctype, a stray `<` in text.
+/// The element name of the start tag at the front of `rest`, borrowed exactly as
+/// the document spells it — callers compare it case-insensitively, because HTML
+/// does. `None` for anything that is not a start tag: an end tag, a doctype, a
+/// stray `<` in text.
 fn tag_name(rest: &str) -> Option<&str> {
     let after = rest.strip_prefix('<')?;
     let len = after
@@ -504,7 +512,9 @@ fn tag_end(html: &str, from: usize) -> Option<usize> {
     None
 }
 
-/// The offset of `</name` at or after `from`, ignoring case.
+/// The offset of `</name` at or after `from`, ignoring case — `</SCRIPT>` closes
+/// a `<script>`, and a scanner that missed it would treat the whole rest of the
+/// document as script text and find no body at all.
 fn find_close_tag(html: &str, from: usize, name: &str) -> Option<usize> {
     let bytes = html.as_bytes();
     let needle = format!("</{name}");
@@ -578,7 +588,7 @@ mod composition {
         // browser refuses — both of them silent until something renders.
         for path in ["app.js", "index.css", "inter-latin-wght-normal.woff2"] {
             let embedded = ASSETS.get_file(path).expect(path).contents();
-            let served = body_of(asset(path)).await;
+            let served = body_of(asset(path, true)).await;
             assert_eq!(
                 served,
                 embedded,
@@ -589,12 +599,37 @@ mod composition {
         }
     }
 
+    /// The overlay is *client context*. A head somebody opened themselves has
+    /// none to draw, and an overlay offering a route back to a client that is
+    /// not running is a control that cannot work — worse than absent, because
+    /// it looks like a feature.
+    #[tokio::test]
+    async fn a_head_nobody_launched_from_the_client_serves_no_overlay() {
+        for served in [
+            body_of(index(false)).await,
+            body_of(asset("/index.html", false)).await,
+        ] {
+            assert!(
+                !contains(&served, OVERLAY_MARKER.as_bytes()),
+                "a head with no client behind it drew a client overlay",
+            );
+        }
+
+        // And what it serves is the embedded document, byte for byte — the
+        // ungated path is not a second, subtly different composition.
+        let embedded = ASSETS.get_file("index.html").expect("index").contents();
+        assert_eq!(body_of(index(false)).await, embedded);
+    }
+
     #[tokio::test]
     async fn the_documents_the_head_serves_are_composed() {
         // Both doors: the SPA entry and the same file reached as an asset. They
         // are separate functions, and a seam added to one of them is a seam a
         // person finds by opening the app the other way.
-        for served in [body_of(index()).await, body_of(asset("/index.html")).await] {
+        for served in [
+            body_of(index(true)).await,
+            body_of(asset("/index.html", true)).await,
+        ] {
             assert!(
                 contains(&served, OVERLAY_MARKER.as_bytes()),
                 "a document was served without the overlay",
