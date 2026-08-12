@@ -8,7 +8,7 @@ and a React viewer (`viewer/`) that the binary hosts over the engine on loopback
 ```sh
 lait daemon [--home <dir>]                        # the identity-scoped host
 lait mcp                                          # the stdio head for an agent
-lait [--json] [--port N] [--orbit SEL] [--open]   # the local app + the daemon under it
+lait [--json] [--port N] [--orbit SEL] [--open] [--home <dir>]   # the local app + the daemon under it
 lait --version                                    # which build this is
 ```
 

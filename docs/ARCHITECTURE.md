@@ -69,9 +69,12 @@ is pinned to its launch Orbit and inherits no catalog-wide visibility.
 grammar: `lait daemon` is the identity-scoped host, `lait mcp` is the stdio head
 an agent speaks, `lait --version` answers the one question that must be
 answerable with nothing running, and bare `lait [--json] [--port N]
-[--orbit SEL] [--open]` starts the daemon and serves the HTTP head over it.
-Anything else is refused. `--orbit` selects one durable local participation by
-name, id, or path; without it the head is a picker over every registered Orbit.
+[--orbit SEL] [--open] [--home <dir>]` starts the daemon and serves the HTTP head
+over it. Anything else is refused. `--orbit` selects one durable local
+participation by name, id, or path; without it the head is a picker over every
+registered Orbit. `--home` selects which *identity* the head serves — spelled as
+the daemon's because it selects the same thing — and is what lets Astrolabe run a
+head per supervised device instead of one per machine.
 Navigation that used to be typed — listing local participations, listing the
 installed World packages, reading the selected identity and Space — is
 orientation the head answers (`Request::HostContext`) rather than output a shell

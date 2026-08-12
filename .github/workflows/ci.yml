@@ -176,6 +176,24 @@ jobs:
         shell: bash
         run: bash ci/assert-portable-tls.sh
 
+      # `cargo deny check licenses` is the gate — it fails on a denied licence
+      # anywhere in the closure. This is the record a person who receives a lait
+      # binary is owed, and it is here because a notice file that is only
+      # generated at release time is one nobody reviews. Unlike the coverage
+      # manifest, it is platform-independent: `cargo metadata` resolves every
+      # target, so it can be regenerated anywhere.
+      - name: Third-party notices are current
+        shell: bash
+        run: bash ci/third-party-notices.sh --check
+
+      - name: Upload the corrected notices
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: third-party-notices
+          path: THIRD-PARTY-NOTICES.md.actual
+          if-no-files-found: ignore
+
   # Windows + macOS, every push: the OS seam.
   #
   # Two steps carry this job. `Typecheck` compiles every target in the
