@@ -21,7 +21,10 @@
 //! is drawn. They are Rust modules calling each other on native types.
 
 pub mod client;
+pub mod lifecycle;
 pub mod model;
+pub mod runtime;
+pub mod sidecar;
 pub mod single_instance;
 pub mod ui;
 
