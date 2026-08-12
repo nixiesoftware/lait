@@ -36,6 +36,7 @@
 pub mod api;
 mod contract;
 mod driver;
+pub mod heads;
 mod observability;
 mod registry;
 mod staging;
@@ -52,5 +53,6 @@ pub use contract::{
     ClientSignal, DeviceFacts, ImageFacts, ObservationHealth, ObservationState, SnapshotReason,
     WorldCall, WorldCaller,
 };
+pub use heads::{HeadFacts, HeadKind, Ownership};
 pub use staging::{StagedImage, Staging};
 pub use supervisor::{Config, Signals, Supervisor, SupervisorError, OBSERVATION_INTERVAL};

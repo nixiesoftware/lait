@@ -15,6 +15,7 @@ use crate::contract::{
     WorkbenchSnapshot, SCHEMA_VERSION,
 };
 use crate::driver::{DaemonDriver, DaemonProbe, LaitDriver, OwnedDaemon};
+use crate::heads::{start_browser, HeadFacts, OwnedHead};
 use crate::observability::{read_log_page, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use crate::registry::{RegisteredDevice, Registry};
 use crate::staging::{StagedImage, Staging};
@@ -138,6 +139,10 @@ struct Inner {
     observed_log_sizes: StdMutex<BTreeMap<String, u64>>,
     observation: Mutex<()>,
     observer: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The browser heads this run started, by id. External heads are not here
+    /// and never will be — an MCP head is spawned by an agent's harness, so
+    /// there is no handle for this map to hold.
+    heads: StdMutex<BTreeMap<String, OwnedHead>>,
     start_timeout: Duration,
     stop_timeout: Duration,
 }
@@ -344,6 +349,13 @@ impl Supervisor {
         if let Some(observer) = observer {
             observer.abort();
         }
+        // Heads first. A head outliving the supervisor that started it is an
+        // orphan holding a port and the image, answering to nobody — the exact
+        // shape this initiative exists to stop producing.
+        let heads: Vec<String> = lock_recovering(&self.inner.heads).keys().cloned().collect();
+        for id in heads {
+            let _ = self.stop_head(&id).await;
+        }
         self.stop_all_owned().await;
     }
 
@@ -406,6 +418,7 @@ impl Supervisor {
                 observed_log_sizes: StdMutex::new(BTreeMap::new()),
                 observation: Mutex::new(()),
                 observer: StdMutex::new(None),
+                heads: StdMutex::new(BTreeMap::new()),
                 start_timeout,
                 stop_timeout,
             }),
@@ -1334,6 +1347,87 @@ impl Supervisor {
         Ok(report)
     }
 
+    /// Start a browser head against one device's daemon.
+    ///
+    /// Started from the *staged* image, like everything else this supervisor
+    /// spawns, so a head is never the process holding the file a build is
+    /// trying to replace. That is the tax this whole initiative exists to
+    /// remove, and a head started from the workspace target would reintroduce
+    /// it on the one process a person is most likely to leave running.
+    pub async fn start_head(&self, device_id: &str) -> Result<HeadFacts, SupervisorError> {
+        let device = self.device(device_id).await?;
+        let id = format!("{device_id}-browser");
+        {
+            let heads = lock_recovering(&self.inner.heads);
+            if heads.contains_key(&id) {
+                return Err(SupervisorError::AlreadyExists(format!(
+                    "head '{id}' is already running"
+                )));
+            }
+        }
+
+        let executable = self.inner.executable.clone();
+        let home = device.home.clone();
+        let facts_id = id.clone();
+        let device_name = device_id.to_owned();
+        // Spawning and waiting for a readiness line are blocking, and both must
+        // stay off whatever runtime thread asked: a head that takes its full
+        // startup budget would otherwise stall every other task on that thread.
+        let head = tokio::task::spawn_blocking(move || {
+            start_browser(&executable, facts_id, device_name, &home)
+        })
+        .await
+        .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head start: {error}")))?
+        .map_err(SupervisorError::Internal)?;
+
+        let facts = head.facts().clone();
+        lock_recovering(&self.inner.heads).insert(id, head);
+        self.publish(
+            EventKind::LifecycleChanged,
+            Some(device_id.to_owned()),
+            "browser head started",
+        );
+        Ok(facts)
+    }
+
+    /// Every head this supervisor knows about.
+    ///
+    /// Owned browser heads only, for now: an MCP head is authored as a binding
+    /// rather than started, and listing one would mean reading an agent
+    /// harness's configuration — which is CLIENT-20's other half and belongs to
+    /// whoever owns that file, not here.
+    pub fn list_heads(&self) -> Vec<HeadFacts> {
+        lock_recovering(&self.inner.heads)
+            .values()
+            .map(|head| head.facts().clone())
+            .collect()
+    }
+
+    /// Stop a head this supervisor started.
+    ///
+    /// The handle is the proof, exactly as it is for a daemon. There is no
+    /// pid-based path here at all, which is what makes "no external process can
+    /// be stopped" true of heads by construction rather than by check.
+    pub async fn stop_head(&self, id: &str) -> Result<(), SupervisorError> {
+        let head = lock_recovering(&self.inner.heads).remove(id);
+        let head = head.ok_or_else(|| {
+            SupervisorError::NotFound(format!(
+                "no head '{id}' was started by this supervisor, so it cannot be stopped here"
+            ))
+        })?;
+        let device = head.facts().device.clone();
+        tokio::task::spawn_blocking(move || head.stop())
+            .await
+            .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head stop: {error}")))?
+            .map_err(SupervisorError::Internal)?;
+        self.publish(
+            EventKind::LifecycleChanged,
+            Some(device),
+            "browser head stopped",
+        );
+        Ok(())
+    }
+
     /// The image devices are spawned from, once one has been staged.
     pub fn image(&self) -> Option<ImageFacts> {
         lock_recovering(&self.inner.image).clone()
@@ -2022,6 +2116,23 @@ mod tests {
             .await
             .expect("stop external");
         assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    /// There is no pid-based path to stopping a head at all, which is what
+    /// makes "no external process can be stopped" true of heads by
+    /// construction. A head this supervisor did not start is simply not
+    /// something it can be asked about.
+    #[tokio::test]
+    async fn a_head_this_supervisor_did_not_start_cannot_be_stopped_through_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+
+        assert!(supervisor.list_heads().is_empty());
+        assert!(matches!(
+            supervisor.stop_head("somebody-elses-head").await,
+            Err(SupervisorError::NotFound(_))
+        ));
     }
 
     /// An owned device is never routed through the unowned path: a handle is
