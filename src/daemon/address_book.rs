@@ -61,7 +61,13 @@ impl AddressBookService {
 
     pub(crate) async fn handle(&self, request: Request, router: &Router) -> Response {
         match request {
-            Request::BookList => self.list(),
+            Request::BookList => {
+                // Import is demand-driven: listing is the first honest
+                // moment the identity asked for its book. It does not
+                // retire aliases.json.
+                let _ = self.migrate(router);
+                self.list()
+            }
             Request::BookGet { card } => self.get(&card),
             Request::BookPut { card, name, note } => self.put(card, name, note),
             Request::BookDelete { card } => self.delete(&card),
@@ -273,7 +279,25 @@ impl AddressBookService {
             if progress.finished {
                 continue;
             }
-            let map = read_aliases(&path);
+            if !path.exists() {
+                progress.finished = true;
+                continue;
+            }
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            let map: BTreeMap<String, String> = match serde_json::from_slice(&bytes) {
+                Ok(map) => map,
+                Err(_) => {
+                    // Fail closed: a corrupt aliases.json is not an empty book.
+                    continue;
+                }
+            };
+            if map.is_empty() {
+                progress.finished = true;
+                continue;
+            }
             let space = binding.entry.space.clone();
             for (selector, name) in map {
                 if let Some(actor) = ActorId::parse(&selector) {
@@ -290,12 +314,18 @@ impl AddressBookService {
                     }
                     continue;
                 }
+                if progress.pending.iter().any(|row| row.selector == selector) {
+                    continue;
+                }
                 let orbit = crate::daemon::LocalOrbitId::for_store(&home);
                 progress.pending.push(PendingSelector {
                     orbit: orbit.to_string(),
                     selector,
                     name,
                 });
+            }
+            if progress.pending.is_empty() {
+                progress.finished = true;
             }
         }
         let _ = imported;
@@ -492,13 +522,6 @@ fn card_view(card: &addressbook::Card) -> BookCardView {
         groups: card.groups.iter().map(|link| link.name.clone()).collect(),
         self_claim: card.self_claim.is_some(),
     }
-}
-
-fn read_aliases(path: &Path) -> BTreeMap<String, String> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
 }
 
 fn coverage_label(coverage: Coverage) -> &'static str {
