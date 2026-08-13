@@ -15,6 +15,34 @@ lait --version                                    # which build this is
 Anything else exits 1. Everything a verb used to do is now a request one of those
 three carries — see [`docs/SERVE.md`](docs/SERVE.md) for the three HTTP planes.
 
+## Plans live in lait, not in markdown
+
+`docs/plans/` is **gitignored and deprecated**. A plan that lives in a file on one
+machine is a plan that goes stale where nobody can see it happen — the
+address-book docket's callsite table drifted a whole minor version, and the head
+it named had been overtaken by a decision recorded in two other Plans. Neither
+was visible until somebody went looking.
+
+Author a plan as **Specs**, in the project that owns the work:
+
+| Kind | What goes in it |
+|---|---|
+| `requirement` | what may never happen. Constraints, invariants, bounds, non-goals. |
+| `design` | structure — the model, the placement, the seams. |
+| `plan` | the order of work and its exit criteria. |
+| `guide` | what an implementer has to find: callsites, traps, prior art. |
+| `record` | measured facts. |
+
+They are separated because **the order of work is the one part that is meant to
+become obsolete**, and burying invariants inside it makes them obsolete too.
+
+Link them onto the issues they govern (`links: [{rel: "governs", target: {kind:
+"issue", issue: "iss_…"}}]`) and `packet` on any issue returns the lot, sorted
+into buckets. The address book is the worked example: five Specs in the Substrate
+project, reachable from **SUB-4** and **CLIENT-22**.
+
+**Point a Guide at names, never at line numbers.** A name survives a refactor.
+
 ## Astrolabe — the client above all of it
 
 `tools/astrolabe` is a second program, `astrolabe.exe`: the local client through
