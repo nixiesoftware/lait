@@ -119,28 +119,32 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
 # a release interface over a debug core is a configuration nobody runs on
 # purpose and everybody eventually ships by accident.
 set(RUST_WORKSPACE "${CMAKE_CURRENT_SOURCE_DIR}/../../..")
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(RUST_PROFILE_FLAGS "")
-  set(RUST_PROFILE_DIR "debug")
-else()
-  set(RUST_PROFILE_FLAGS "--release")
-  set(RUST_PROFILE_DIR "release")
-endif()
-set(RUST_CORE_LIB "${RUST_WORKSPACE}/target/${RUST_PROFILE_DIR}/astrolabe.dll")
 
-# `lait` is built alongside the core because the client needs a *compatible*
-# sidecar beside it, resolved relative to the running executable and never
-# chosen by the user. A build that produced the interface without it produces a
-# client that comes up, draws, and cannot reach anything.
+# Generator expressions rather than `CMAKE_BUILD_TYPE`.
+#
+# Flutter drives Windows through Visual Studio, which is a *multi-config*
+# generator: `CMAKE_BUILD_TYPE` is empty at configure time and the configuration
+# is only known when MSBuild runs. Reading it produced a build that always took
+# the else branch — every Flutter Debug build compiled and installed the
+# *release* core, which is a configuration nobody runs on purpose and everybody
+# eventually ships by accident.
+set(RUST_PROFILE_FLAGS "$<$<NOT:$<CONFIG:Debug>>:--release>")
+set(RUST_PROFILE_DIR "$<IF:$<CONFIG:Debug>,debug,release>")
+set(RUST_TARGET_DIR "${RUST_WORKSPACE}/target/${RUST_PROFILE_DIR}")
+
 add_custom_target(astrolabe_core ALL
   COMMAND cargo build -p astrolabe -p lait ${RUST_PROFILE_FLAGS}
   WORKING_DIRECTORY "${RUST_WORKSPACE}"
-  COMMENT "Building the Rust core (cargo build -p astrolabe ${RUST_PROFILE_FLAGS})"
+  COMMENT "Building the Rust core and its sidecar for $<CONFIG>"
+  # Without this, the profile flag's generator expression expands to an *empty
+  # argument* in Debug rather than to no argument, and cargo refuses it.
+  COMMAND_EXPAND_LISTS
   VERBATIM)
 add_dependencies(${BINARY_NAME} astrolabe_core)
 
-install(FILES "${RUST_CORE_LIB}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+install(FILES "${RUST_TARGET_DIR}/astrolabe.dll"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
-install(PROGRAMS "${RUST_WORKSPACE}/target/${RUST_PROFILE_DIR}/lait.exe"
+install(PROGRAMS "${RUST_TARGET_DIR}/lait.exe"
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
