@@ -1,3 +1,5 @@
+#![cfg(feature = "egui-ui")]
+
 //! Theme, contrast and scaling — tested rather than asserted.
 //!
 //! Three of the release criteria are about a person being able to *see* the
@@ -16,6 +18,12 @@
 //! agreement with the first, and the interesting statement is not "this
 //! arithmetic is right" but "every scheme the client can be drawn in clears
 //! it".
+//!
+//! Behind the `egui-ui` feature that carries the interface these test, so a
+//! default build — the one the bridge and the Flutter client use — compiles
+//! with no egui in the graph at all. CI runs `--all-features`, so nothing is
+//! lost while the egui surfaces still carry flows the Dart pages have not
+//! taken over.
 
 use astrolabe::model::App;
 use astrolabe::ui::theme::{contrast, MINIMUM_CONTRAST};

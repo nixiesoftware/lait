@@ -1,3 +1,5 @@
+#![cfg(feature = "egui-ui")]
+
 //! Every surface, rendered.
 //!
 //! The interaction tests ask the accessibility tree what is *there*. This asks
@@ -25,6 +27,12 @@
 //! runs them as threads in one process — and two wgpu devices coming up
 //! concurrently there is an access violation, not a test failure. One test is
 //! the cheapest way to make both runners behave the same.
+//!
+//! Behind the `egui-ui` feature that carries the interface these test, so a
+//! default build — the one the bridge and the Flutter client use — compiles
+//! with no egui in the graph at all. CI runs `--all-features`, so nothing is
+//! lost while the egui surfaces still carry flows the Dart pages have not
+//! taken over.
 
 use astrolabe::client::heads::McpBindingOutcome;
 use astrolabe::client::host::{HostContext, OrbitEntry};

@@ -1,3 +1,5 @@
+#![cfg(feature = "egui-ui")]
+
 //! Headless interaction tests, over the same substrate the shell draws with.
 //!
 //! These run with no display, in CI, on every platform. They assert on the
@@ -14,6 +16,12 @@
 //! The states covered are the ones that are easy to skip and expensive to get
 //! wrong — empty, loading, degraded, and the controls that guard destructive
 //! actions.
+//!
+//! Behind the `egui-ui` feature that carries the interface these test, so a
+//! default build — the one the bridge and the Flutter client use — compiles
+//! with no egui in the graph at all. CI runs `--all-features`, so nothing is
+//! lost while the egui surfaces still carry flows the Dart pages have not
+//! taken over.
 
 use astrolabe::client::heads::{McpBinding, McpBindingOutcome};
 use astrolabe::client::host::{HostContext, OrbitEntry};
