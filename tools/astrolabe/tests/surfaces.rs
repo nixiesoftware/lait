@@ -321,6 +321,29 @@ fn render(name: &str, theme: egui::Theme, app: App, chrome: Chrome) -> Result<us
     image
         .save(gallery().join(format!("{name}.png")))
         .map_err(|error| error.to_string())?;
+    // The page's own colour has to belong to the theme it was drawn in. This
+    // does not catch a client that fails to paint a background at all — the
+    // harness paints its own panel in exactly the same fill, so the two are
+    // indistinguishable from here, and that bug needed the shell to show it —
+    // but it does catch the symptom a person actually sees: a surface whose
+    // background came from one theme and whose text came from the other.
+    let mut counts: std::collections::HashMap<[u8; 4], usize> = std::collections::HashMap::new();
+    for pixel in image.pixels() {
+        *counts.entry(pixel.0).or_default() += 1;
+    }
+    let dominant = counts
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .map(|(colour, _)| *colour)
+        .unwrap_or_default();
+    let light_page = u16::from(dominant[0]) + u16::from(dominant[1]) + u16::from(dominant[2]) > 384;
+    if light_page != (theme == egui::Theme::Light) {
+        return Err(format!(
+            "{name} drew a {} page in the {theme:?} theme",
+            if light_page { "light" } else { "dark" }
+        ));
+    }
+
     Ok(image
         .pixels()
         .map(|pixel| pixel.0)

@@ -137,6 +137,22 @@ pub fn install(ctx: &egui::Context) {
 /// something nobody ships.
 pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
     let mut actions = Vec::new();
+
+    // The client paints its own page, first, over everything it was given.
+    //
+    // `eframe::App::ui` hands over a `Ui` with *no background* — its own docs
+    // say so and tell you to wrap in a `CentralPanel` — and the window behind it
+    // is cleared to eframe's default, a near-black `rgba(12,12,12,180)`. On a
+    // dark system that looks deliberate. On a light one the interface renders
+    // dark text on near-black and cannot be read at all, which is what it had
+    // been doing.
+    //
+    // Painted here rather than in the shell so a rendered surface has it too:
+    // the shell is not the only thing that draws this interface, and a
+    // background that only exists in the shell is one no test can see.
+    ui.painter()
+        .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
+
     keyboard(ui, chrome, &mut actions);
 
     // Outside the page margin, because a header inset from the window edge

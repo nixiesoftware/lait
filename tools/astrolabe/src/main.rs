@@ -217,6 +217,18 @@ impl Shell {
 }
 
 impl eframe::App for Shell {
+    /// What the window is cleared to before anything is drawn.
+    ///
+    /// eframe's default is a near-black `rgba(12, 12, 12, 180)`, and its own
+    /// comment says `window_fill` "would also be a natural choice". It is more
+    /// than natural here: the clear colour is what shows during a resize and
+    /// behind anything the frame has not painted yet, and a light interface
+    /// that flashes near-black on every drag is a light interface with a fault
+    /// nobody can screenshot.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.window_fill.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Applied at the top of the frame, so everything drawn below sees the
         // same state — a surface that drained mid-frame could show two
