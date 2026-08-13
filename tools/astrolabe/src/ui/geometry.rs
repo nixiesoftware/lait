@@ -141,6 +141,63 @@ pub mod nav {
     pub const GAP: f32 = UNIT;
 }
 
+/// The window's own controls — the one place the platform outranks the ladder.
+///
+/// Minimise, maximise and close are drawn by this client rather than by the
+/// window manager, and a person aims at them with muscle memory built on every
+/// other window on the machine. So the width is the platform's figure, pinned,
+/// and the height is whatever bar they sit in: **full** height, so that the
+/// screen corner itself is the target when the window is maximised. A cluster
+/// inset from the corner by even a point is a cluster you have to aim at.
+pub mod caption {
+    /// One control's width. Windows' own caption metric.
+    pub const WIDTH: f32 = 46.0;
+    /// The mark inside it. A mark, so it is pinned like every other one — how
+    /// big a close cross reads is a claim about the cross.
+    pub const MARK: f32 = 10.0;
+    /// The mark is drawn as a hairline at every density, because it is a glyph
+    /// standing in for a system font's and that one does not thicken either.
+    pub const HAIRLINE: f32 = 1.0;
+
+    /// How wide the three of them are together.
+    pub fn span() -> f32 {
+        WIDTH * 3.0
+    }
+}
+
+/// The smallest window this client opens.
+///
+/// Named here rather than left as a literal in the shell, because it is the
+/// width every layout has to survive: a measurement that only works at the size
+/// the window happens to open at is one that breaks the first time somebody
+/// drags a corner, and there is nowhere else in this file to check it against.
+pub const NARROWEST: Vec2 = Vec2::new(640.0, 480.0);
+
+/// The Library's rail — the list column a detail pane sits beside.
+///
+/// Pinned rather than proportional, which is the reference's own choice and the
+/// right one: a rail is sized by the names in it, so a fifth of a 1040 window is
+/// a readable measure and a fifth of a maximised 2560 one is a wide column of
+/// short words with the pane squeezed behind it. The reference runs 390 of 1920
+/// at a 16px body; this is the same fifth of this client's window.
+pub mod rail {
+    /// The column's width, on the rhythm.
+    pub const WIDTH: f32 = 208.0;
+}
+
+/// Padding inside a thing that is not the page.
+pub mod pad {
+    /// A card: the raised block a section of a page sits in.
+    ///
+    /// The reference pads its cards 25 against a 16px body; this is the same
+    /// ratio landed on the rhythm, and it is deliberately the section gap — the
+    /// space around a block and the space between blocks being equal is what
+    /// makes a page read as one grid rather than as several.
+    pub const fn card() -> i8 {
+        20
+    }
+}
+
 /// The page's own breathing room.
 ///
 /// A surface flush against the window edge reads as unfinished whatever else is
@@ -341,6 +398,61 @@ mod tests {
         assert!(
             nav::PADDING > style.spacing.button_padding.x,
             "a nav pill is padded no wider than an ordinary button"
+        );
+    }
+
+    /// A caption control is the platform's target, and its mark sits inside it
+    /// with room to spare. The failure this guards is the tempting one: pulling
+    /// the cluster onto the control ladder, where it would be `lg` wide, look
+    /// tidier than the system's, and be missed by everybody who aims at the
+    /// corner without looking.
+    #[test]
+    fn a_caption_control_is_the_platforms_target_and_not_the_ladders() {
+        assert!(
+            caption::WIDTH > control::xl(),
+            "the caption cluster shrank onto the control ladder"
+        );
+        assert!(
+            gap::row().mul_add(2.0, caption::MARK) < caption::WIDTH,
+            "the mark leaves no room inside its control"
+        );
+        assert!(
+            caption::MARK < bar::lg(),
+            "the mark is taller than the bar that holds it"
+        );
+        assert!(caption::WIDTH.mul_add(-3.0, caption::span()).abs() < f32::EPSILON);
+    }
+
+    /// A card's padding is the section gap. Two names for one measurement is
+    /// how a grid stops being a grid: the moment they drift, the space inside a
+    /// block and the space between blocks disagree and the page reads as
+    /// several pages.
+    #[test]
+    fn a_card_is_padded_by_the_same_step_that_separates_sections() {
+        assert!(
+            (f32::from(pad::card()) - gap::section()).abs() < f32::EPSILON,
+            "a card's padding and the section rhythm have drifted apart"
+        );
+    }
+
+    /// The rail is a readable measure, not a fraction. Both bounds matter: too
+    /// narrow and every name is elided, too wide and the pane it exists to
+    /// introduce is the smaller half of the window.
+    #[test]
+    fn the_rail_is_a_measure_rather_than_a_fraction() {
+        assert!(
+            rail::WIDTH > control::xl() * 4.0,
+            "the rail is too narrow to hold a name"
+        );
+        const {
+            assert!(
+                rail::WIDTH < NARROWEST.x / 2.0,
+                "the rail takes more than half of the narrowest window this client opens"
+            );
+        }
+        assert!(
+            (rail::WIDTH / UNIT).fract() < f32::EPSILON,
+            "the rail is off the rhythm"
         );
     }
 

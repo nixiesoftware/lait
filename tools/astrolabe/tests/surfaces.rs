@@ -28,7 +28,7 @@
 
 use astrolabe::client::heads::McpBindingOutcome;
 use astrolabe::client::host::{HostContext, OrbitEntry};
-use astrolabe::client::library::{LibraryEntry, Placement};
+use astrolabe::client::library::{LibraryEntry, Opens, Placement};
 use astrolabe::client::space::{DeviceKey, SpaceRef, SpaceView};
 use astrolabe::client::storage::{Missing, StorageFacts};
 use astrolabe::model::App;
@@ -139,7 +139,7 @@ fn populated() -> App {
             space: "ws_38TLCQUD96NG9376CBELI5I5V2".into(),
             world_mount: "issues".into(),
             display_name: Some("Issues".into()),
-            entry_path: Some("/".into()),
+            opens: Opens::Declared("/".into()),
             placement: Placement::Placed,
         },
         LibraryEntry {
@@ -147,7 +147,7 @@ fn populated() -> App {
             space: "ws_7QK2M4RVJ8N3P5T6W9Y1Z0ABCD".into(),
             world_mount: String::new(),
             display_name: Some("Work".into()),
-            entry_path: None,
+            opens: Opens::Front,
             placement: Placement::Vacant,
         },
     ]);
@@ -303,8 +303,24 @@ fn chrome_for(surface: Surface) -> Chrome {
 /// catches that. The accessibility tree is perfectly happy about a control
 /// sized to nothing or clipped off the edge of its own panel.
 fn render(name: &str, theme: egui::Theme, app: App, chrome: Chrome) -> Result<usize, String> {
+    render_at(SIZE.into(), name, theme, app, chrome)
+}
+
+/// The same, at a size the caller chooses.
+///
+/// Worth having because the one size every layout has to survive is the one
+/// nobody develops at: a page laid out at the window's default width can put a
+/// row of facts off the right edge at the *narrowest* width the shell allows,
+/// and no assertion about the default size can see it.
+fn render_at(
+    size: egui::Vec2,
+    name: &str,
+    theme: egui::Theme,
+    app: App,
+    chrome: Chrome,
+) -> Result<usize, String> {
     let mut harness = Harness::builder()
-        .with_size(SIZE)
+        .with_size(size)
         .with_theme(theme)
         .build_ui_state(
             |ui, (app, chrome): &mut (App, Chrome)| {
@@ -411,6 +427,16 @@ fn every_surface_renders_something_in_both_themes() {
         egui::Theme::Dark,
         previewed,
         chrome_for(Surface::Heads),
+    );
+
+    // The narrowest window the shell will open. Every page has to survive it,
+    // and the Library is the one with two columns in it.
+    let _ = render_at(
+        astrolabe::ui::geometry::NARROWEST,
+        "library-narrow",
+        egui::Theme::Dark,
+        populated(),
+        chrome_for(Surface::Library),
     );
 
     assert!(thin.is_empty(), "{thin:#?}");

@@ -20,6 +20,7 @@
 //! mounted in them. Devices is a peer, not the entry: a person with one identity
 //! and several Spaces must never open onto a process inventory.
 
+pub mod caption;
 pub mod devices;
 pub mod diagnostics;
 pub mod geometry;
@@ -94,6 +95,7 @@ impl Surface {
 #[derive(Debug, Default)]
 pub struct Chrome {
     pub surface: Surface,
+    pub library: library::Draft,
     pub spaces: spaces::Draft,
     pub devices: devices::Draft,
     pub heads: heads::Draft,
@@ -106,6 +108,16 @@ pub struct Chrome {
     /// half-typed drafts above pass. It sits here so that muting stops an
     /// interruption without stopping the observation behind it.
     pub quiet: crate::notify::Quiet,
+    /// What the window was asked to do this frame — move, minimise, maximise,
+    /// close.
+    ///
+    /// Output rather than state, and the same shape as the [`Action`]s `draw`
+    /// returns: emptied at the top of every frame, filled by the caption, and
+    /// carried out by whoever owns the window. It travels here rather than in
+    /// the return value because it is not an `Action` — nothing in it reaches
+    /// the client, the daemon or the network, and folding it in would make
+    /// "everything drawing asked for" one list with two dispatchers.
+    pub window: Vec<caption::Ask>,
 }
 
 impl Chrome {
@@ -137,6 +149,11 @@ pub fn install(ctx: &egui::Context) {
 /// something nobody ships.
 pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
     let mut actions = Vec::new();
+
+    // Cleared here rather than by whoever drains it, so that a shell which
+    // forgets to look cannot accumulate a frame's worth of window commands and
+    // carry them all out at once, three seconds late.
+    chrome.window.clear();
 
     // The client paints its own page, first, over everything it was given.
     //
@@ -201,7 +218,7 @@ fn draw_page(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
 
 fn draw_surface(ui: &mut Ui, app: &App, chrome: &mut Chrome, actions: &mut Vec<Action>) {
     match chrome.surface {
-        Surface::Library => library::draw(ui, app, actions),
+        Surface::Library => library::draw(ui, app, &mut chrome.library, actions),
         Surface::Spaces => spaces::draw(ui, app, &mut chrome.spaces, &mut chrome.quiet, actions),
         Surface::Members => members::draw(ui, app, &mut chrome.members, actions),
         Surface::Devices => devices::draw(ui, app, &mut chrome.devices, actions),
@@ -314,10 +331,58 @@ pub(crate) fn act(
     disabled_because: &str,
     action: impl FnOnce() -> Action,
 ) -> Option<Action> {
-    let candidate = action();
+    dispatchable(
+        ui,
+        app,
+        egui::Button::new(label),
+        enabled,
+        disabled_because,
+        action(),
+    )
+}
+
+/// The one act on a page, given the weight of one.
+///
+/// A page with a single obvious thing to do says so with size and colour rather
+/// than with position alone — the reference's library page is built around
+/// exactly one such control, and this is that control. Everything about
+/// dispatch, including being disabled the instant it is clicked, is the same as
+/// [`act`]: a primary action that queued four of itself would be worse than a
+/// plain one, not better.
+pub(crate) fn act_primary(
+    ui: &mut Ui,
+    app: &App,
+    label: &str,
+    enabled: bool,
+    disabled_because: &str,
+    action: impl FnOnce() -> Action,
+) -> Option<Action> {
+    let fill = theme::accent(ui);
+    let button = egui::Button::new(
+        RichText::new(label)
+            .strong()
+            .color(theme::legible(ui.visuals().text_color(), fill)),
+    )
+    .fill(fill)
+    .min_size(egui::vec2(
+        geometry::control::xl() * 2.5,
+        geometry::control::xl(),
+    ));
+    dispatchable(ui, app, button, enabled, disabled_because, action())
+}
+
+/// What every dispatching control has in common, whatever it looks like.
+fn dispatchable(
+    ui: &mut Ui,
+    app: &App,
+    button: egui::Button<'_>,
+    enabled: bool,
+    disabled_because: &str,
+    candidate: Action,
+) -> Option<Action> {
     let waiting = app.is_in_flight(&candidate.key());
     let response = ui
-        .add_enabled(enabled && !waiting, egui::Button::new(label))
+        .add_enabled(enabled && !waiting, button)
         .on_disabled_hover_text(if waiting {
             "This is already under way."
         } else {

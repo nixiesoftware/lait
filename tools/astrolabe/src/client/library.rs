@@ -16,10 +16,49 @@ pub struct LibraryEntry {
     /// What to call this row. `None` means nothing authoritative names it —
     /// drawn as unnamed rather than as a path or an id dressed up as a name.
     pub display_name: Option<String>,
-    /// Where `Open` lands. `None` until a World declares one; a row without it
-    /// cannot be opened, and says so instead of guessing `/`.
-    pub entry_path: Option<String>,
+    /// Where `Open` lands, and when nowhere, why.
+    pub opens: Opens,
     pub placement: Placement,
+}
+
+/// Where `Open` sends the browser for one row — the distinction between the two
+/// kinds of row this list holds.
+///
+/// A **World** row opens at the path that World declared, and at nothing else:
+/// `/` is not a guess to make on a World's behalf, and this is the case the
+/// original rule was written for.
+///
+/// A **Space** row is not that case, and treating it as one is what made every
+/// row on a freshly started daemon unopenable. A Space row's destination is not
+/// a claim about any World: it is the Orbit's own front door — what `lait
+/// --orbit <sel>` serves — and what a person finds there is whatever placement
+/// activates. Listing stays passive; the click is what places.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opens {
+    /// A World, at the entry path it declared.
+    Declared(String),
+    /// The Orbit itself, at its head's root.
+    Front,
+    /// Nowhere: the Orbit serves this World and *this build* hosts no head for
+    /// it. A real state, and a different one from the next — the row exists
+    /// because the Orbit really does serve it.
+    Unhosted,
+    /// Nowhere: this build hosts the World and it declares no entry path.
+    Undeclared,
+}
+
+impl Opens {
+    /// The path `Open` lands on, or `None` when the row cannot be opened.
+    pub fn entry_path(&self) -> Option<&str> {
+        match self {
+            Self::Declared(path) => Some(path),
+            // Not a default standing in for a missing declaration — the root
+            // *is* the address of an Orbit's head. The two are spelled
+            // differently here so that nothing downstream can confuse them.
+            Self::Front => Some("/"),
+            Self::Unhosted | Self::Undeclared => None,
+        }
+    }
 }
 
 /// Whether an Orbit is currently up.
@@ -115,15 +154,17 @@ impl Client {
             };
 
             if activated.is_empty() {
-                // The Orbit is real and openable-in-principle; nothing can be
-                // said about its Worlds right now. One row for the Space, with
-                // no World and no entry path, beats silently dropping it.
+                // The Orbit is real and openable; nothing can be said about its
+                // Worlds right now, because a vacant Orbit has no activation
+                // record to read. That is precisely the row `Open` is for —
+                // opening places the Orbit, and what it activates is then
+                // whatever the Space actually serves.
                 entries.push(LibraryEntry {
                     orbit: orbit.space.clone(),
                     space: orbit.space.clone(),
                     world_mount: String::new(),
                     display_name: (!orbit.name.trim().is_empty()).then(|| orbit.name.clone()),
-                    entry_path: None,
+                    opens: Opens::Front,
                     placement,
                 });
                 continue;
@@ -143,7 +184,14 @@ impl Client {
                     display_name: package
                         .map(|p| p.display().name().to_owned())
                         .or_else(|| (!orbit.name.trim().is_empty()).then(|| orbit.name.clone())),
-                    entry_path: package.and_then(|p| p.display().entry_path().map(str::to_owned)),
+                    // Three outcomes, and the two failures are different facts:
+                    // a World this build cannot host at all, and one it hosts
+                    // that has not said where to land.
+                    opens: package.map_or(Opens::Unhosted, |p| {
+                        p.display()
+                            .entry_path()
+                            .map_or(Opens::Undeclared, |path| Opens::Declared(path.to_owned()))
+                    }),
                     placement,
                 });
             }
@@ -200,13 +248,50 @@ mod tests {
             space: "ws_one".into(),
             world_mount: "issues".into(),
             display_name: None,
-            entry_path: None,
+            opens: Opens::Undeclared,
             placement: Placement::Vacant,
         };
         assert!(entry.display_name.is_none());
         assert!(
-            entry.entry_path.is_none(),
+            entry.opens.entry_path().is_none(),
             "an entry path was guessed for a World that declares none"
+        );
+    }
+
+    /// The distinction the Library exists to make, and the one it was missing:
+    /// a World is opened where the World said, and a Space is opened at its
+    /// own front door.
+    ///
+    /// Folding them together is not a cosmetic bug. It made every row on a
+    /// freshly started daemon unopenable — a vacant Orbit lists no Worlds, so
+    /// every row was a Space row, and every Space row was treated as a World
+    /// that had failed to declare an entry path.
+    #[test]
+    fn a_space_opens_at_its_own_front_door_and_a_world_only_where_it_said() {
+        assert_eq!(
+            Opens::Front.entry_path(),
+            Some("/"),
+            "an Orbit with nothing activated cannot be opened, so nothing can \
+             ever place it"
+        );
+        assert_eq!(
+            Opens::Declared("/issues".into()).entry_path(),
+            Some("/issues")
+        );
+        assert_eq!(
+            Opens::Undeclared.entry_path(),
+            None,
+            "`/` was guessed on a World's behalf"
+        );
+        assert_eq!(
+            Opens::Unhosted.entry_path(),
+            None,
+            "a World this build hosts no head for was offered as openable"
+        );
+        assert_ne!(
+            Opens::Unhosted,
+            Opens::Undeclared,
+            "two different reasons a row cannot be opened collapsed into one"
         );
     }
 

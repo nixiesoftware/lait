@@ -17,10 +17,11 @@
 
 use astrolabe::client::heads::{McpBinding, McpBindingOutcome};
 use astrolabe::client::host::{HostContext, OrbitEntry};
-use astrolabe::client::library::{LibraryEntry, Placement};
+use astrolabe::client::library::{LibraryEntry, Opens, Placement};
 use astrolabe::client::space::{DeviceKey, SpaceOp, SpaceRef, SpaceView};
 use astrolabe::model::App;
 use astrolabe::runtime::{Action, Outcome, Read, Update};
+use astrolabe::ui::caption::Ask;
 use astrolabe::ui::{Chrome, Surface};
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
@@ -79,6 +80,11 @@ struct Bench {
     app: App,
     chrome: Chrome,
     actions: Vec<Action>,
+    /// What the window was asked to do, for the same reason and in the same
+    /// way. The interface clears these every frame — the shell carries them out
+    /// on the frame they were asked for — so a bench that read them afterwards
+    /// would always read an empty list.
+    window: Vec<Ask>,
 }
 
 /// Deliberately taller than any surface draws, so a control near the bottom is
@@ -94,16 +100,19 @@ fn harness(app: App, surface: Surface) -> Harness<'static, Bench> {
                     app,
                     chrome,
                     actions,
+                    window,
                 } = bench;
                 for action in astrolabe::ui::draw(ui, app, chrome) {
                     app.dispatched(&action);
                     actions.push(action);
                 }
+                window.extend(chrome.window.iter().copied());
             },
             Bench {
                 app,
                 chrome: Chrome::showing(surface),
                 actions: Vec::new(),
+                window: Vec::new(),
             },
         )
 }
@@ -447,6 +456,150 @@ fn a_surface_is_one_keystroke_away_from_any_other() {
     );
 }
 
+/// The window has no system title bar, so this client's own three controls are
+/// the only way to minimise or close it with a mouse. They are asserted the same
+/// way every other control is — press it, read what was asked for — which is
+/// what makes a window control testable with no window.
+#[test]
+fn the_window_is_minimised_and_closed_by_the_clients_own_controls() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    let mut harness = harness(app, Surface::Library);
+    harness.run();
+
+    for name in ["Minimise", "Maximise", "Close"] {
+        assert!(
+            harness
+                .query_by_role_and_label(egui::accesskit::Role::Button, name)
+                .is_some(),
+            "{name} is not a control in the accessibility tree, so a screen \
+             reader cannot reach it and the window cannot be {name}d"
+        );
+    }
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Minimise")
+        .click();
+    harness.run();
+    assert!(
+        harness.state().window.contains(&Ask::Minimise),
+        "the minimise control asked for nothing"
+    );
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Close")
+        .click();
+    harness.run();
+    assert!(
+        harness.state().window.contains(&Ask::Close),
+        "the close control asked for nothing"
+    );
+}
+
+/// The maximise control says which way it goes, and goes that way.
+///
+/// It reads the window rather than remembering what it last did, because the
+/// window can be maximised by routes this client never sees — `Win`+`↑`, a snap
+/// gesture, a double-click on the bar. A remembered flag draws the wrong mark
+/// the first time one of those happens and then does the wrong thing once.
+#[test]
+fn the_maximise_control_reads_the_window_rather_than_remembering() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    let mut harness = harness(app, Surface::Library);
+
+    let maximised = |harness: &mut Harness<'_, Bench>, state: bool| {
+        harness
+            .input_mut()
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .maximized = Some(state);
+        harness.run();
+    };
+
+    maximised(&mut harness, true);
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, "Restore")
+            .is_some(),
+        "a maximised window still offers to be maximised"
+    );
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Restore")
+        .click();
+    harness.run();
+    assert!(
+        harness.state().window.contains(&Ask::Maximise(false)),
+        "restoring a maximised window asked for {:?}",
+        harness.state().window
+    );
+
+    harness.state_mut().window.clear();
+    maximised(&mut harness, false);
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Maximise")
+        .click();
+    harness.run();
+    assert!(
+        harness.state().window.contains(&Ask::Maximise(true)),
+        "maximising a restored window asked for {:?}",
+        harness.state().window
+    );
+}
+
+/// The bar is the title bar: dragging it moves the window, and the pills on it
+/// still take their own clicks.
+///
+/// Those are one assertion rather than two. The bar's sense covers every control
+/// in it, and egui gives a point to whichever widget claimed it last — so
+/// claiming the bar in the wrong order produces a header where the tabs
+/// highlight, nothing navigates, and the cause is invisible.
+#[test]
+fn the_bar_moves_the_window_and_the_tabs_on_it_still_navigate() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    let mut harness = harness(app, Surface::Library);
+    harness.run();
+
+    // Inside the bar and inside the page margin, so it is bar and nothing else
+    // whatever the pills measure. Picking a gap between two controls instead
+    // would make this test a hostage to the width of the word "Diagnostics".
+    let handle = egui::pos2(6.0, astrolabe::ui::geometry::bar::lg() / 2.0);
+    harness.hover_at(handle);
+    harness.run();
+    harness.drag_at(handle);
+    harness.run();
+    // A move, not a press. Handing the platform its modal drag loop the instant
+    // a button went down would eat the second half of every double-click.
+    harness.hover_at(handle + egui::vec2(40.0, 0.0));
+    harness.run();
+    assert!(
+        harness.state().window.contains(&Ask::Move),
+        "dragging the bar asked for {:?}",
+        harness.state().window
+    );
+    harness.drop_at(handle + egui::vec2(40.0, 0.0));
+    harness.run();
+
+    harness.state_mut().window.clear();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Devices")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().chrome.surface,
+        Surface::Devices,
+        "a tab on the title bar stopped navigating, which is what happens when \
+         the bar claims the point after the pills do"
+    );
+    assert!(
+        harness.state().window.is_empty(),
+        "changing surface also moved the window: {:?}",
+        harness.state().window
+    );
+}
+
 /// The Library is the front page. A person with one identity and several Spaces
 /// must never open onto a process inventory.
 #[test]
@@ -466,7 +619,7 @@ fn a_world_with_no_entry_path_cannot_be_opened() {
         space: "ws_one".into(),
         world_mount: "issues".into(),
         display_name: None,
-        entry_path: None,
+        opens: Opens::Undeclared,
         placement: Placement::Unknown,
     }]);
 
@@ -481,15 +634,62 @@ fn a_world_with_no_entry_path_cannot_be_opened() {
         "an unnamed row borrowed an id for its name"
     );
     assert!(
-        announces(&harness, "unknown"),
+        announces(&harness, "could not ask"),
         "an unobserved placement was drawn as though it were known"
     );
 }
 
-/// The click that has to work. `Open` asks for the Orbit on the row and the
-/// entry path that row's World declared — not a guess, and not the first row.
+/// The defect this page shipped with: on a freshly started daemon every row was
+/// unopenable, and the disabled hover blamed a World for declaring no entry
+/// path.
+///
+/// A vacant Orbit activates nothing, so it lists no Worlds at all — every row
+/// is a *Space* row, and a Space row's destination was never a World's to
+/// declare. It opens at its Orbit's own front door, which is exactly what
+/// places it.
 #[test]
-fn open_asks_to_launch_the_row_it_was_pressed_on() {
+fn a_space_that_is_not_running_is_still_openable() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_library(vec![LibraryEntry {
+        orbit: "orb_one".into(),
+        space: "ws_one".into(),
+        world_mount: String::new(),
+        display_name: Some("Work".into()),
+        opens: Opens::Front,
+        placement: Placement::Vacant,
+    }]);
+
+    let mut harness = harness(app, Surface::Library);
+    harness.run();
+    assert!(
+        !harness.get_by_label("Open").accesskit_node().is_disabled(),
+        "a Space that is not running refused to be opened, so nothing can ever \
+         place it"
+    );
+
+    harness.get_by_label("Open").click();
+    harness.run();
+    assert_eq!(
+        harness.state().actions,
+        vec![Action::OpenWorld {
+            orbit: "orb_one".into(),
+            entry_path: "/".into(),
+        }],
+        "opening a Space asked for somewhere other than its head's root"
+    );
+}
+
+/// The click that has to work. `Open` asks for the Orbit the pane is *about*
+/// and the entry path that row's World declared — not a guess, and not the row
+/// the page happened to open on.
+///
+/// This is the assertion the master–detail layout has to earn: one primary
+/// control rather than one per row means the control has to follow the
+/// selection, and a page where it silently did not would open the wrong World
+/// while looking entirely correct.
+#[test]
+fn open_asks_to_launch_the_row_the_pane_is_about() {
     let mut app = App::new();
     app.absorb(snapshot(Vec::new()));
     app.absorb_library(vec![
@@ -498,7 +698,7 @@ fn open_asks_to_launch_the_row_it_was_pressed_on() {
             space: "ws_one".into(),
             world_mount: "issues".into(),
             display_name: Some("First".into()),
-            entry_path: Some("/".into()),
+            opens: Opens::Declared("/".into()),
             placement: Placement::Vacant,
         },
         LibraryEntry {
@@ -506,7 +706,7 @@ fn open_asks_to_launch_the_row_it_was_pressed_on() {
             space: "ws_two".into(),
             world_mount: "issues".into(),
             display_name: Some("Second".into()),
-            entry_path: Some("/spaces/ws_two".into()),
+            opens: Opens::Declared("/spaces/ws_two".into()),
             placement: Placement::Placed,
         },
     ]);
@@ -514,22 +714,35 @@ fn open_asks_to_launch_the_row_it_was_pressed_on() {
     let mut harness = harness(app, Surface::Library);
     harness.run();
 
-    let opens: Vec<_> = harness.get_all_by_label("Open").collect();
-    assert_eq!(opens.len(), 2, "one Open per row");
+    // Nothing has been chosen, so the pane is about the first row — and the one
+    // Open on the page is enabled, because an Orbit that is not running is
+    // still openable. Opening is what places it.
     assert!(
-        !opens[0].accesskit_node().is_disabled(),
-        "an Orbit that is not running refused to be opened — opening is what places it"
+        !harness.get_by_label("Open").accesskit_node().is_disabled(),
+        "an Orbit that is not running refused to be opened"
     );
-    opens[1].click();
-    harness.run();
 
+    // Choosing a row in the rail is a selection and nothing else: it reads
+    // nothing, places nothing, and asks for nothing.
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Second")
+        .click();
+    harness.run();
+    assert!(
+        harness.state().actions.is_empty(),
+        "choosing a row in the rail did something: {:?}",
+        harness.state().actions
+    );
+
+    harness.get_by_label("Open").click();
+    harness.run();
     assert_eq!(
         harness.state().actions,
         vec![Action::OpenWorld {
             orbit: "orb_two".into(),
             entry_path: "/spaces/ws_two".into(),
         }],
-        "Open reached the wrong row, or asked for the wrong thing"
+        "Open followed the page rather than the selection"
     );
 }
 

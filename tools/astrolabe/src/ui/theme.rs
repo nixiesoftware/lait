@@ -81,25 +81,66 @@ pub fn prose(ui: &Ui) -> Color32 {
 /// "in front" means in each; a fixed nudge would raise the header in one theme
 /// and sink it in the other.
 pub fn raised(ui: &Ui) -> Color32 {
-    let page = behind(ui);
-    let toward = if luminance(page) > 0.5 {
-        Color32::BLACK
-    } else {
-        Color32::WHITE
-    };
-    blend(page, toward, 0.08)
+    step(behind(ui), 0.08)
 }
 
 /// The line under the header. A hairline, not a divider: it marks where the
 /// chrome ends rather than separating two regions of equal weight.
 pub fn hairline(ui: &Ui) -> Color32 {
-    let page = behind(ui);
-    let toward = if luminance(page) > 0.5 {
+    step(behind(ui), 0.14)
+}
+
+/// A surface with the pointer on it.
+///
+/// Takes the surface rather than the `Ui` because the thing under the pointer is
+/// not always sitting on the page: a window control sits on the header, which is
+/// already a step in front of it, and deriving its hover from the page would put
+/// the two at the same colour in one theme and invert them in the other.
+pub fn hovered(surface: Color32) -> Color32 {
+    step(surface, 0.10)
+}
+
+/// A surface with the button down on it. Further than [`hovered`], in the same
+/// direction, so press reads as more of what hover already said.
+pub fn pressed(surface: Color32) -> Color32 {
+    step(surface, 0.18)
+}
+
+/// The one colour that means "this is the thing to press".
+///
+/// The scheme's own selection fill, which is already what marks the current
+/// surface in the header — so a page's primary control and the tab a person is
+/// on are the same colour by construction rather than by two constants that
+/// agree today. Whatever is drawn *on* it must still be put through
+/// [`legible`], because a fill is not a background this module has measured.
+pub fn accent(ui: &Ui) -> Color32 {
+    over(ui.visuals().selection.bg_fill, behind(ui))
+}
+
+/// The fill under a control whose click *ends* something — the window's close
+/// button, and so far nothing else.
+///
+/// The theme's own error colour rather than the platform's red, for the same
+/// reason nothing else here is a constant: a fixed `#C42B1C` is invisible in
+/// exactly the scheme somebody chose because they cannot see. Flattened before
+/// it leaves, because a translucent fill that measured as one colour and drew as
+/// another is the defect [`over`] exists to prevent.
+pub fn danger_fill(ui: &Ui) -> Color32 {
+    over(ui.visuals().error_fg_color, behind(ui))
+}
+
+/// `surface`, moved one step away from itself.
+///
+/// Lighter in a dark scheme and darker in a light one, which is the direction
+/// "in front" means in each; a fixed nudge would raise a surface in one theme
+/// and sink it in the other.
+fn step(surface: Color32, amount: f64) -> Color32 {
+    let toward = if luminance(surface) > 0.5 {
         Color32::BLACK
     } else {
         Color32::WHITE
     };
-    blend(page, toward, 0.14)
+    blend(surface, toward, amount)
 }
 
 /// What these are drawn on.
@@ -399,6 +440,33 @@ mod tests {
         let fixed = legible_to(translucent, white, MINIMUM_BODY_CONTRAST);
         assert_eq!(fixed.a(), 255, "a corrected colour is still translucent");
         assert!(contrast(fixed, white) >= MINIMUM_BODY_CONTRAST);
+    }
+
+    /// Hover and press are steps in one direction, and the direction is away
+    /// from the surface they are on. A press that landed *between* the surface
+    /// and its hover would read as the control coming back up.
+    #[test]
+    fn press_goes_further_than_hover_and_both_leave_the_surface() {
+        for surface in [
+            Color32::BLACK,
+            Color32::WHITE,
+            Color32::from_rgb(30, 30, 30),
+            Color32::from_rgb(200, 200, 200),
+        ] {
+            let (hover, press) = (hovered(surface), pressed(surface));
+            let (from_surface, from_hover) = (
+                (luminance(hover) - luminance(surface)).abs(),
+                (luminance(press) - luminance(surface)).abs(),
+            );
+            assert!(
+                from_surface > 0.0,
+                "the pointer landing on {surface:?} changed nothing"
+            );
+            assert!(
+                from_hover > from_surface,
+                "pressing {surface:?} came back nearer the surface than hovering it"
+            );
+        }
     }
 
     /// The ratio is the standard one, so the numbers in the comments mean what

@@ -59,7 +59,21 @@ fn main() -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Astrolabe")
             .with_inner_size([1_040.0, 720.0])
-            .with_min_inner_size([640.0, 480.0]),
+            // The floor the layouts are measured against, so the shell and the
+            // ladder cannot disagree about how narrow this window can get.
+            .with_min_inner_size(astrolabe::ui::geometry::NARROWEST)
+            // No system title bar: this client draws its own caption, in
+            // `ui::caption`. The window keeps its resize borders and its drop
+            // shadow — winit implements "undecorated" by taking over the
+            // non-client *area* rather than by dropping the frame, so the edges
+            // still grip and a maximised window still stops at the work area.
+            //
+            // What it buys is one surface at the top of the window instead of
+            // two. A native caption above a client bar is two bars, in two
+            // colours the theme never agreed on, and it is the one region of
+            // this interface that would have stayed light while everything
+            // under it went dark.
+            .with_decorations(false),
         ..Default::default()
     };
 
@@ -179,6 +193,14 @@ impl Shell {
                     self.minimised = false;
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    // A window can now be minimised to the taskbar by this
+                    // client's own caption as well as hidden into the tray, and
+                    // the tray's Restore means the same thing to a person in
+                    // both cases. Showing a still-minimised window puts its
+                    // button back on the taskbar and leaves the person looking
+                    // at whatever they were looking at before.
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 TrayCommand::Exit(request) => {
@@ -262,6 +284,12 @@ impl eframe::App for Shell {
             self.app.dispatched(&action);
             self.runtime.dispatch(action);
         }
+
+        // The other half of the same rule: the caption asks, and the window is
+        // moved, minimised, maximised or closed here. Closing arrives back as
+        // `close_requested` on the next frame, which is what keeps
+        // `handle_close` the only place that decides what closing means.
+        astrolabe::ui::caption::carry(ui.ctx(), &self.chrome.window);
 
         self.handle_close(ui);
     }

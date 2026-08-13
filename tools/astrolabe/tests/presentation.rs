@@ -103,6 +103,110 @@ fn attention_and_danger_stay_distinguishable_in_every_scheme() {
     }
 }
 
+/// The window's own chrome answers to the same scheme the pages do.
+///
+/// Three things have to hold at once, and each of them is a way the caption
+/// could look right on the machine it was written on and be unusable elsewhere:
+/// the bar has to be distinguishable from the page under it, a control under the
+/// pointer has to be distinguishable from the bar, and the close control's mark
+/// has to stay readable on the red that appears under it — which is not the bar
+/// at all, and is the one background in this client that a hover *replaces*
+/// rather than tints.
+#[test]
+fn the_windows_own_chrome_is_legible_in_every_scheme() {
+    for (name, visuals) in [
+        ("light", Visuals::light()),
+        ("dark", Visuals::dark()),
+        ("high contrast", high_contrast()),
+    ] {
+        let context = egui::Context::default();
+        context.set_visuals(visuals);
+        let mut captured = None;
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            let bar = astrolabe::ui::theme::raised(ui);
+            captured = Some((
+                ui.visuals().panel_fill,
+                bar,
+                astrolabe::ui::theme::hovered(bar),
+                astrolabe::ui::theme::danger_fill(ui),
+                ui.visuals().text_color(),
+            ));
+        });
+        let (page, bar, hovered, danger, ink) = captured.expect("a frame drew");
+
+        assert_ne!(bar, page, "the {name} title bar is the page it sits on");
+        assert_ne!(
+            hovered, bar,
+            "a {name} window control under the pointer looks exactly like the bar"
+        );
+        assert_ne!(
+            danger, bar,
+            "the {name} close control's hover looks exactly like the bar"
+        );
+
+        // The mark, on whatever is behind it. `legible` is what the caption
+        // itself asks for, so this measures the colour that is actually drawn
+        // rather than the one the theme happened to answer.
+        for (what, behind) in [("the bar", bar), ("a hover", hovered), ("close", danger)] {
+            let mark = astrolabe::ui::theme::legible(ink, behind);
+            let ratio = contrast(mark, behind);
+            assert!(
+                ratio >= MINIMUM_CONTRAST,
+                "a window control's mark is {ratio:.2}:1 on {what} in {name}"
+            );
+        }
+    }
+}
+
+/// The accent is a *fill*, and everything drawn on it has to survive that.
+///
+/// This is the trap the rest of the module is built to catch, one layer along:
+/// every quiet colour in the client is held to a floor against the **page**,
+/// which is the right background for almost everything and the wrong one for
+/// the two places a fill replaces it — a primary control's label, and the
+/// chosen row of a list. A grey that reads perfectly on the page is the grey
+/// that vanishes on the accent.
+#[test]
+fn what_is_drawn_on_the_accent_is_legible_on_the_accent() {
+    for (name, visuals) in [
+        ("light", Visuals::light()),
+        ("dark", Visuals::dark()),
+        ("high contrast", high_contrast()),
+    ] {
+        let context = egui::Context::default();
+        context.set_visuals(visuals);
+        let mut captured = None;
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            let accent = astrolabe::ui::theme::accent(ui);
+            captured = Some((
+                ui.visuals().panel_fill,
+                accent,
+                // The label of the one primary control on a page, and the two
+                // states a list row can be in while it is the chosen one.
+                [
+                    ui.visuals().text_color(),
+                    ui.visuals().weak_text_color(),
+                    ui.visuals().warn_fg_color,
+                ]
+                .map(|hue| astrolabe::ui::theme::legible(hue, accent)),
+            ));
+        });
+        let (page, accent, inks) = captured.expect("a frame drew");
+
+        assert_ne!(
+            accent, page,
+            "the {name} accent is the page, so nothing it fills reads as chosen"
+        );
+        for ink in inks {
+            let ratio = contrast(ink, accent);
+            assert!(
+                ratio >= MINIMUM_CONTRAST,
+                "text on the {name} accent is {ratio:.2}:1"
+            );
+        }
+    }
+}
+
 fn snapshot() -> WorkbenchSnapshot {
     WorkbenchSnapshot {
         schema_version: 1,
