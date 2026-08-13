@@ -435,6 +435,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "fs2",
+ "image",
  "lait",
  "lait-workbench",
  "mechanics",
