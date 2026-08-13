@@ -35,6 +35,7 @@ use lait_workbench::{
 use crate::client::heads::{McpBinding, McpBindingOutcome};
 use crate::client::host::HostContext;
 use crate::client::library::{LaunchTicket, LibraryEntry};
+use crate::client::space::{SpaceOp, SpaceRef, SpaceView};
 use crate::client::storage::StorageFacts;
 use crate::client::{Client, ClientError, ClientResult, Config};
 use crate::lifecycle::{ExitReport, ExitRequest};
@@ -95,6 +96,16 @@ pub enum Action {
     ReadTransitions {
         after: Option<u64>,
     },
+    /// Everything one Space says about itself.
+    ///
+    /// Placing, unlike every listing in this client: a person has chosen this
+    /// Space, and reading its membership means asking it.
+    ReadSpace(SpaceRef),
+    /// Ask a Space to do something.
+    Administer {
+        at: SpaceRef,
+        operation: Box<SpaceOp>,
+    },
     /// Start the browser head this client opens Worlds through.
     StartHead,
     StopHead(String),
@@ -143,6 +154,8 @@ impl Action {
             Self::ReadLogs { device, .. } => format!("logs:{device}"),
             Self::ReadEvents { .. } => "history.events".into(),
             Self::ReadTransitions { .. } => "history.connections".into(),
+            Self::ReadSpace(at) => format!("space.read:{}", at.space),
+            Self::Administer { at, operation } => format!("space:{}:{}", at.space, operation.key()),
             Self::StartHead => "head.start".into(),
             Self::StopHead(id) => format!("head.stop:{id}"),
             Self::SpaceFound { home, .. } => format!("space.found:{home}"),
@@ -183,6 +196,8 @@ impl Action {
             Self::ReadLogs { device, .. } => format!("read {device}'s log"),
             Self::ReadEvents { .. } => "read the timeline".into(),
             Self::ReadTransitions { .. } => "read connection transitions".into(),
+            Self::ReadSpace(at) => format!("read {}", at.space),
+            Self::Administer { operation, .. } => operation.what(),
             Self::StartHead => "start a head".into(),
             Self::StopHead(id) => format!("stop head {id}"),
             Self::SpaceFound { name, .. } => format!("found the Space '{name}'"),
@@ -246,6 +261,7 @@ pub enum Read {
     Logs(Box<LogPage>),
     Events(Box<EventHistoryPage>),
     Transitions(Box<ConnectionHistoryPage>),
+    Space(Box<SpaceView>),
 }
 
 /// The background half of the client.
@@ -581,6 +597,18 @@ impl Worker {
                     .map_err(ClientError::from)?;
                 Ok(Outcome::Read(Read::Transitions(Box::new(page))))
             }
+            Action::ReadSpace(at) => {
+                let view = client.space_view(at).await?;
+                Ok(Outcome::Read(Read::Space(Box::new(view))))
+            }
+            Action::Administer { at, operation } => {
+                // The reply is carried rather than swallowed: an invite link, a
+                // device-enrolment token and a consent blob *are* their reply,
+                // and a verb that answered "ok" would have produced the thing a
+                // person came for and thrown it away.
+                let said = client.space_do(at, (**operation).clone()).await?;
+                Ok(Outcome::Said(said))
+            }
             Action::StartHead => {
                 let head = client.head().await?;
                 Ok(Outcome::Said(format!("a head is serving at {}", head.base)))
@@ -639,6 +667,7 @@ impl Action {
                 | Self::ReadLogs { .. }
                 | Self::ReadEvents { .. }
                 | Self::ReadTransitions { .. }
+                | Self::ReadSpace(_)
         )
     }
 }

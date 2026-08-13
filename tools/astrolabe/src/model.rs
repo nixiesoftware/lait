@@ -28,9 +28,11 @@ use lait_workbench::{
 use crate::client::heads::McpBindingOutcome;
 use crate::client::host::HostContext;
 use crate::client::library::{LaunchTicket, LibraryEntry};
+use crate::client::space::SpaceView;
 use crate::client::storage::{StorageFacts, TransferFacts};
 use crate::client::ClientError;
 use crate::lifecycle::ExitReport;
+use crate::notify::{self, Interruption};
 use crate::runtime::{Action, Outcome, Read, Update};
 
 /// Everything the interface draws.
@@ -57,6 +59,8 @@ pub struct App {
     logs: Option<LogPage>,
     events: Option<EventHistoryPage>,
     transitions: Option<ConnectionHistoryPage>,
+    /// The Space somebody is administering, as it last answered.
+    space: Option<SpaceView>,
     /// How many times each device's log has been reported to have changed.
     ///
     /// A counter rather than a flag, and the *only* thing this model derives
@@ -80,6 +84,14 @@ pub struct App {
     notices: VecDeque<Notice>,
     /// Actions asked for and not yet answered.
     in_flight: BTreeSet<String>,
+    /// What changed that somebody who is not looking might be told, oldest
+    /// first.
+    ///
+    /// Recorded unfiltered. Muting is a policy about *interrupting*, not about
+    /// observing — a model that dropped what a mute covers would make "unmute"
+    /// mean "start noticing", which is not what a person who muted a Space for
+    /// an hour asked for.
+    unsaid: VecDeque<Interruption>,
     /// How many signals this model has consumed. Lets a test assert that a
     /// stream was actually drained rather than merely opened.
     consumed: u64,
@@ -178,6 +190,7 @@ impl App {
                     }
                     Read::Events(page) => self.events = Some(*page),
                     Read::Transitions(page) => self.transitions = Some(*page),
+                    Read::Space(view) => self.space = Some(*view),
                 }
                 return;
             }
@@ -209,9 +222,33 @@ impl App {
     }
 
     /// Replace the model with an authoritative reading.
+    ///
+    /// What changed between this reading and the last is worked out *before*
+    /// the replacement, because afterwards there is nothing to compare against.
+    /// That diff is the whole of what this client can notify about without
+    /// speaking a World's vocabulary — and it is a fact about two observations
+    /// rather than an inference about events.
     pub fn absorb(&mut self, snapshot: WorkbenchSnapshot) {
+        let changed = notify::between(
+            self.snapshot
+                .as_ref()
+                .map(|was| (was.devices.as_slice(), was.connections.as_slice())),
+            (snapshot.devices.as_slice(), snapshot.connections.as_slice()),
+        );
+        for notice in changed {
+            push_bounded(&mut self.unsaid, notice);
+        }
         self.snapshot = Some(snapshot);
         self.stale = None;
+    }
+
+    /// Take everything that has not been said, leaving nothing behind.
+    ///
+    /// A drain rather than a read: a notice is an event, not a state anybody
+    /// can re-read, and answering the same one twice would interrupt somebody
+    /// twice about one thing.
+    pub fn take_unsaid(&mut self) -> Vec<Interruption> {
+        self.unsaid.drain(..).collect()
     }
 
     pub fn absorb_library(&mut self, library: Vec<LibraryEntry>) {
@@ -261,6 +298,10 @@ impl App {
 
     pub fn transitions(&self) -> Option<&ConnectionHistoryPage> {
         self.transitions.as_ref()
+    }
+
+    pub fn space(&self) -> Option<&SpaceView> {
+        self.space.as_ref()
     }
 
     /// How many log changes this model has been told about for `device`.
@@ -372,6 +413,15 @@ impl App {
         self.devices()
             .iter()
             .filter(|device| device.observation.state == ObservationState::Degraded)
+    }
+}
+
+/// Keep the newest, drop the oldest. A queue that grew without bound would
+/// hold a night's worth of peer arrivals for a window nobody opened.
+fn push_bounded(queue: &mut VecDeque<Interruption>, notice: Interruption) {
+    queue.push_back(notice);
+    while queue.len() > NOTICE_CAPACITY {
+        queue.pop_front();
     }
 }
 

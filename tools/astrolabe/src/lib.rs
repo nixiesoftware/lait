@@ -25,6 +25,7 @@ pub mod client;
 pub mod lifecycle;
 pub mod link;
 pub mod model;
+pub mod notify;
 pub mod runtime;
 pub mod sidecar;
 pub mod single_instance;

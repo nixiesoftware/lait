@@ -18,11 +18,14 @@
 use astrolabe::client::heads::{McpBinding, McpBindingOutcome};
 use astrolabe::client::host::{HostContext, OrbitEntry};
 use astrolabe::client::library::{LibraryEntry, Placement};
+use astrolabe::client::space::{DeviceKey, SpaceOp, SpaceRef, SpaceView};
 use astrolabe::model::App;
 use astrolabe::runtime::{Action, Outcome, Read, Update};
 use astrolabe::ui::{Chrome, Surface};
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
+use lait::diagnose::DiagnosisView;
+use lait::dto::{MemberDto, WhoamiDto};
 use lait_workbench::{
     BackendEvent, Capabilities, ClientSignal, ConnectionSnapshot, DeviceSnapshot,
     EnvironmentSnapshot, EventKind, HeadFacts, HeadKind, LifecycleState, LogEntry, LogLevel,
@@ -356,12 +359,13 @@ fn every_surface_is_reachable_and_the_current_one_is_announced() {
 
     assert_eq!(
         Surface::ALL.len(),
-        6,
+        7,
         "a surface was added without being covered here"
     );
     for title in [
         "Library",
         "Spaces",
+        "Members",
         "Devices",
         "Heads",
         "Storage",
@@ -422,12 +426,12 @@ fn a_surface_is_one_keystroke_away_from_any_other() {
     let mut harness = harness(app, Surface::Library);
     harness.run();
 
-    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Num3);
+    harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Num4);
     harness.run();
     assert_eq!(
         harness.state().chrome.surface,
         Surface::Devices,
-        "Ctrl+3 did not reach the third surface"
+        "Ctrl+4 did not reach the fourth surface"
     );
 
     harness.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Num1);
@@ -1180,4 +1184,354 @@ fn stopping_everything_owned_is_offered_only_when_there_is_something_to_stop() {
         .click();
     harness.run();
     assert!(harness.state().actions.contains(&Action::StopAllOwned));
+}
+
+fn standing(role: &str, me: bool) -> WhoamiDto {
+    WhoamiDto {
+        actor: Some("act_me".into()),
+        device: "0".repeat(64),
+        did: None,
+        space: Some("ws_one".into()),
+        role: role.into(),
+        member: me,
+        can_write: me,
+        capabilities: Vec::new(),
+        policy_admin: role == "admin",
+        sponsor: None,
+        name: None,
+        partial_view: false,
+        divergence: Vec::new(),
+    }
+}
+
+fn member(key: &str, role: &str, me: bool) -> MemberDto {
+    MemberDto {
+        key: key.into(),
+        role: role.into(),
+        did: None,
+        me,
+        sponsor: None,
+        alias: String::new(),
+    }
+}
+
+fn space_view(devices: Vec<DeviceKey>, diagnosis: Option<DiagnosisView>) -> SpaceView {
+    SpaceView {
+        space: "ws_one".into(),
+        standing: standing("admin", true),
+        members: vec![
+            member("act_me", "admin", true),
+            member("act_them", "member", false),
+        ],
+        devices,
+        diagnosis,
+    }
+}
+
+fn one_orbit() -> HostContext {
+    HostContext {
+        version: "lait 0.0.0".into(),
+        identity_home: "home".into(),
+        spaces_root: "D:/lait".into(),
+        worlds: Vec::new(),
+        identities: Vec::new(),
+        orbits: vec![OrbitEntry {
+            space: "ws_one".into(),
+            name: "Work".into(),
+            path: "D:/lait/work".into(),
+            last_opened: 0,
+        }],
+    }
+}
+
+/// Listing Spaces is passive; choosing one is the act that asks. The read has
+/// to be caused by the click and not by the page being drawn — otherwise
+/// opening Members would place every Orbit this device serves.
+#[test]
+fn a_space_is_asked_only_once_somebody_chooses_it() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(one_orbit());
+
+    let mut harness = harness(app, Surface::Members);
+    harness.run();
+    harness.run();
+    assert!(
+        !harness
+            .state()
+            .actions
+            .iter()
+            .any(|action| matches!(action, Action::ReadSpace(_))),
+        "drawing the list of Spaces asked one of them a question"
+    );
+    assert!(announces(&harness, "Work"));
+
+    harness.get_by_label("Work").click();
+    harness.run();
+    assert!(
+        harness.state().actions.iter().any(|action| matches!(
+            action,
+            Action::ReadSpace(at) if at.space == "ws_one" && at.path == "D:/lait/work"
+        )),
+        "choosing a Space did not ask it: {:?}",
+        harness.state().actions
+    );
+}
+
+/// You cannot remove yourself from a Space, or change your own role, from here.
+/// Both are refused before the click rather than after it.
+#[test]
+fn a_person_cannot_fence_themselves_out_of_their_own_space() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(one_orbit());
+    app.apply(Update::Done {
+        key: "space.read:ws_one".into(),
+        outcome: Outcome::Read(Read::Space(Box::new(space_view(Vec::new(), None)))),
+    });
+
+    let mut harness = harness(app, Surface::Members);
+    harness.state_mut().chrome.members.selected = Some(SpaceRef {
+        space: "ws_one".into(),
+        path: "D:/lait/work".into(),
+    });
+    harness.run();
+
+    let removals: Vec<_> = harness.get_all_by_label("Remove…").collect();
+    assert_eq!(removals.len(), 2, "one removal control per member");
+    assert!(
+        removals[0].accesskit_node().is_disabled(),
+        "a person was offered a control that removes themselves"
+    );
+    assert!(!removals[1].accesskit_node().is_disabled());
+
+    let roles: Vec<_> = harness.get_all_by_label_contains("mote").collect();
+    assert!(
+        roles[0].accesskit_node().is_disabled(),
+        "a person was offered a control that changes their own role"
+    );
+}
+
+/// Removing a member is confirmed by their id. The engine will refuse an
+/// unauthorised removal anyway; asking here is what stops a click from being
+/// the first time somebody thinks about it.
+#[test]
+fn removing_a_member_takes_their_id_first() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(one_orbit());
+    app.apply(Update::Done {
+        key: "space.read:ws_one".into(),
+        outcome: Outcome::Read(Read::Space(Box::new(space_view(Vec::new(), None)))),
+    });
+
+    let mut harness = harness(app, Surface::Members);
+    harness.state_mut().chrome.members.selected = Some(SpaceRef {
+        space: "ws_one".into(),
+        path: "D:/lait/work".into(),
+    });
+    harness.run();
+
+    let removals: Vec<_> = harness.get_all_by_label("Remove…").collect();
+    removals[1].click();
+    harness.run();
+    assert!(announces(&harness, "fences them out"));
+    assert!(
+        harness
+            .get_by_label("Remove member")
+            .accesskit_node()
+            .is_disabled(),
+        "removal was offered before it was confirmed"
+    );
+
+    harness.state_mut().chrome.members.confirmation = "act_them".into();
+    harness.run();
+    harness.get_by_label("Remove member").click();
+    harness.run();
+    assert!(
+        harness.state().actions.iter().any(|action| matches!(
+            action,
+            Action::Administer { operation, .. }
+                if matches!(&**operation, SpaceOp::MemberRemove { who } if who == "act_them")
+        )),
+        "confirming a removal asked for something else"
+    );
+}
+
+/// The Space plane answers the device list as prose. A line that is not a
+/// device id offers nothing to revoke, and the machine answering is never
+/// offered its own revocation.
+#[test]
+fn a_device_line_offers_revocation_only_when_it_is_a_device_that_is_not_this_one() {
+    let id = "a".repeat(64);
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(one_orbit());
+    app.apply(Update::Done {
+        key: "space.read:ws_one".into(),
+        outcome: Outcome::Read(Read::Space(Box::new(space_view(
+            vec![
+                DeviceKey {
+                    id: Some(id.clone()),
+                    line: format!("{id} (this device)"),
+                    is_this_device: true,
+                },
+                DeviceKey {
+                    id: Some("b".repeat(64)),
+                    line: "b".repeat(64),
+                    is_this_device: false,
+                },
+                DeviceKey {
+                    id: None,
+                    line: "no devices".into(),
+                    is_this_device: false,
+                },
+            ],
+            None,
+        )))),
+    });
+
+    let mut harness = harness(app, Surface::Members);
+    harness.state_mut().chrome.members.selected = Some(SpaceRef {
+        space: "ws_one".into(),
+        path: "D:/lait/work".into(),
+    });
+    harness.run();
+
+    let revocations: Vec<_> = harness.get_all_by_label("Revoke").collect();
+    assert_eq!(revocations.len(), 3, "one revocation control per line");
+    assert!(
+        revocations[0].accesskit_node().is_disabled(),
+        "the machine in use offered to fence itself out"
+    );
+    assert!(!revocations[1].accesskit_node().is_disabled());
+    assert!(
+        revocations[2].accesskit_node().is_disabled(),
+        "a line that is not a device id offered a revocation"
+    );
+}
+
+/// A diagnosis that could not be taken is absent, and absent is not "every
+/// gate passes". Those are the two answers this client spends its effort
+/// keeping apart.
+#[test]
+fn a_space_that_could_not_be_diagnosed_does_not_read_as_healthy() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(one_orbit());
+    app.apply(Update::Done {
+        key: "space.read:ws_one".into(),
+        outcome: Outcome::Read(Read::Space(Box::new(space_view(Vec::new(), None)))),
+    });
+
+    let mut harness = harness(app, Surface::Members);
+    harness.state_mut().chrome.members.selected = Some(SpaceRef {
+        space: "ws_one".into(),
+        path: "D:/lait/work".into(),
+    });
+    harness.run();
+    assert!(
+        announces(&harness, "could not be diagnosed"),
+        "an undiagnosed Space was drawn as one with nothing wrong"
+    );
+}
+
+/// An invite lifetime that is not a number of hours is refused rather than
+/// silently defaulted. Somebody who typed something meant something, and a
+/// week is not a safe guess about what.
+#[test]
+fn an_invite_with_an_unreadable_lifetime_is_refused_rather_than_defaulted() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(one_orbit());
+    app.apply(Update::Done {
+        key: "space.read:ws_one".into(),
+        outcome: Outcome::Read(Read::Space(Box::new(space_view(Vec::new(), None)))),
+    });
+
+    let mut harness = harness(app, Surface::Members);
+    harness.state_mut().chrome.members.selected = Some(SpaceRef {
+        space: "ws_one".into(),
+        path: "D:/lait/work".into(),
+    });
+    harness.state_mut().chrome.members.invite_hours = "a week".into();
+    harness.run();
+    assert!(
+        harness
+            .get_by_label("Mint an invite")
+            .accesskit_node()
+            .is_disabled(),
+        "an invite with an unreadable lifetime was offered anyway"
+    );
+
+    harness.state_mut().chrome.members.invite_hours = "48".into();
+    harness.run();
+    harness.get_by_label("Mint an invite").click();
+    harness.run();
+    assert!(
+        harness.state().actions.iter().any(|action| matches!(
+            action,
+            Action::Administer { operation, .. }
+                if matches!(&**operation, SpaceOp::Invite { ttl_hours: 48, .. })
+        )),
+        "minting asked for a different lifetime than the one typed"
+    );
+}
+
+/// A node whose view of the Space is incomplete says so. A short roster and a
+/// wrong one look identical, and only one of them is a reason to wait.
+#[test]
+fn an_incomplete_view_is_drawn_as_incomplete_rather_than_as_a_short_roster() {
+    let mut view = space_view(Vec::new(), None);
+    view.standing.partial_view = true;
+    view.standing.divergence = vec!["epoch 3 has not arrived".into()];
+
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(one_orbit());
+    app.apply(Update::Done {
+        key: "space.read:ws_one".into(),
+        outcome: Outcome::Read(Read::Space(Box::new(view))),
+    });
+
+    let mut harness = harness(app, Surface::Members);
+    harness.state_mut().chrome.members.selected = Some(SpaceRef {
+        space: "ws_one".into(),
+        path: "D:/lait/work".into(),
+    });
+    harness.run();
+    assert!(announces(&harness, "view of the Space is incomplete"));
+    assert!(announces(&harness, "epoch 3 has not arrived"));
+}
+
+/// Quiet is honestly global: while it is on, a per-Space mute is not a control
+/// that does anything, and it says so rather than looking live.
+#[test]
+fn a_globally_quiet_client_offers_no_per_space_muting() {
+    let mut app = App::new();
+    app.absorb(snapshot(Vec::new()));
+    app.absorb_context(one_orbit());
+
+    let mut harness = harness(app, Surface::Spaces);
+    harness.run();
+    assert!(
+        !harness
+            .get_by_label("Mute Work")
+            .accesskit_node()
+            .is_disabled(),
+        "a Space could not be muted while the client was not quiet"
+    );
+
+    harness.state_mut().chrome.quiet.everything = true;
+    harness.run();
+    assert!(
+        harness
+            .get_by_label("Mute Work")
+            .accesskit_node()
+            .is_disabled(),
+        "a per-Space mute stayed live while the whole client was quiet"
+    );
+    // And the gap is named rather than left to be discovered by not hearing
+    // about a comment on your work.
+    assert!(announces(&harness, "SUB-6"));
 }

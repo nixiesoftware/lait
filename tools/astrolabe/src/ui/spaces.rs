@@ -14,6 +14,7 @@
 use egui::{RichText, Ui};
 
 use crate::model::App;
+use crate::notify::Quiet;
 use crate::runtime::Action;
 
 use super::{act, theme};
@@ -35,7 +36,13 @@ pub struct Draft {
     pub confirmation: String,
 }
 
-pub fn draw(ui: &mut Ui, app: &App, draft: &mut Draft, actions: &mut Vec<Action>) {
+pub fn draw(
+    ui: &mut Ui,
+    app: &App,
+    draft: &mut Draft,
+    quiet: &mut Quiet,
+    actions: &mut Vec<Action>,
+) {
     // Where to offer to put a new store. The daemon answers this because a
     // client has no working directory worth defaulting to — and without it
     // every founding form starts with an empty path box.
@@ -57,6 +64,64 @@ pub fn draw(ui: &mut Ui, app: &App, draft: &mut Draft, actions: &mut Vec<Action>
     draw_consent(ui, app, draft, actions);
     ui.separator();
     draw_registry(ui, app, draft, actions);
+    ui.separator();
+    draw_quiet(ui, app, quiet);
+}
+
+/// Who may interrupt, and when.
+///
+/// Here rather than buried in a settings dialog because this is the page that
+/// lists the Spaces a mute is about, and because a switch a person cannot find
+/// is a switch that does not exist.
+fn draw_quiet(ui: &mut Ui, app: &App, quiet: &mut Quiet) {
+    ui.heading("Notifications");
+    ui.label(
+        RichText::new(
+            "The client is the only thing still running when no window is open, so it is \
+             the only thing that can tell you anything then. It notifies while it is \
+             minimised and stays out of the way while you are looking at it.",
+        )
+        .color(theme::secondary(ui)),
+    );
+    // Global means global. There is no tier important enough to override it,
+    // because every implementation of that tier is somebody deciding on your
+    // behalf which of your evenings gets interrupted.
+    ui.checkbox(&mut quiet.everything, "Say nothing at all");
+
+    let Some(context) = app.context() else {
+        return;
+    };
+    for orbit in &context.orbits {
+        let label = if orbit.name.trim().is_empty() {
+            orbit.space.clone()
+        } else {
+            orbit.name.clone()
+        };
+        let mut muted = quiet.is_muted(&orbit.space);
+        if ui
+            .add_enabled(
+                !quiet.everything,
+                egui::Checkbox::new(&mut muted, format!("Mute {label}")),
+            )
+            .on_disabled_hover_text("Nothing notifies while the client is quiet.")
+            .changed()
+        {
+            quiet.mute(&orbit.space, muted);
+        }
+    }
+
+    // Said plainly, because the alternative is somebody muting a Space and
+    // then wondering why they never hear about a comment on their work.
+    ui.label(
+        RichText::new(
+            "What is notified is what this client can observe for itself: a device that \
+             failed, figures that went stale, a peer arriving or going quiet. Items \
+             inside a World — an assignment, a mention — need a signal channel more \
+             than one head can read (SUB-6).",
+        )
+        .small()
+        .color(theme::secondary(ui)),
+    );
 }
 
 fn draw_found(ui: &mut Ui, app: &App, draft: &mut Draft, actions: &mut Vec<Action>) {

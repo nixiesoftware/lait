@@ -24,6 +24,7 @@ pub mod devices;
 pub mod diagnostics;
 pub mod heads;
 pub mod library;
+pub mod members;
 pub mod spaces;
 pub mod storage;
 pub mod theme;
@@ -46,6 +47,11 @@ pub enum Surface {
     /// when *no* Space exists, which is precisely when no World head can draw a
     /// page to do it from.
     Spaces,
+    /// The Space plane: membership, invites, this actor's machines, custody and
+    /// the onboarding gates. Separate from Spaces because those are the things
+    /// reachable *before* a Space exists and these are what one says about
+    /// itself afterwards.
+    Members,
     Devices,
     Heads,
     Storage,
@@ -53,9 +59,10 @@ pub enum Surface {
 }
 
 impl Surface {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Library,
         Self::Spaces,
+        Self::Members,
         Self::Devices,
         Self::Heads,
         Self::Storage,
@@ -66,6 +73,7 @@ impl Surface {
         match self {
             Self::Library => "Library",
             Self::Spaces => "Spaces",
+            Self::Members => "Members",
             Self::Devices => "Devices",
             Self::Heads => "Heads",
             Self::Storage => "Storage",
@@ -88,6 +96,14 @@ pub struct Chrome {
     pub devices: devices::Draft,
     pub heads: heads::Draft,
     pub diagnostics: diagnostics::Draft,
+    pub members: members::Draft,
+    /// Who is allowed to interrupt.
+    ///
+    /// Interface policy rather than client state: nothing outside this process
+    /// can know it and nothing can contradict it, which is the same test the
+    /// half-typed drafts above pass. It sits here so that muting stops an
+    /// interruption without stopping the observation behind it.
+    pub quiet: crate::notify::Quiet,
 }
 
 impl Chrome {
@@ -131,7 +147,10 @@ pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
 
     match chrome.surface {
         Surface::Library => library::draw(ui, app, &mut actions),
-        Surface::Spaces => spaces::draw(ui, app, &mut chrome.spaces, &mut actions),
+        Surface::Spaces => {
+            spaces::draw(ui, app, &mut chrome.spaces, &mut chrome.quiet, &mut actions)
+        }
+        Surface::Members => members::draw(ui, app, &mut chrome.members, &mut actions),
         Surface::Devices => devices::draw(ui, app, &mut chrome.devices, &mut actions),
         Surface::Heads => heads::draw(ui, app, &mut chrome.heads, &mut actions),
         // The engine read that supplies these is SUB-5. Until it lands the
@@ -151,16 +170,17 @@ pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
 ///
 /// Full keyboard operation is a release criterion, and tabbing to a control is
 /// only half of it: a person who navigates by keyboard should not have to walk
-/// the tab order to change surface. `Ctrl+1` through `Ctrl+6` are the surfaces
+/// the tab order to change surface. `Ctrl+1` through `Ctrl+7` are the surfaces
 /// in the order they are drawn, which is the order the tabs are read out in.
 fn keyboard(ui: &Ui, chrome: &mut Chrome, actions: &mut Vec<Action>) {
-    const DIGITS: [Key; 6] = [
+    const DIGITS: [Key; 7] = [
         Key::Num1,
         Key::Num2,
         Key::Num3,
         Key::Num4,
         Key::Num5,
         Key::Num6,
+        Key::Num7,
     ];
 
     ui.input_mut(|input| {

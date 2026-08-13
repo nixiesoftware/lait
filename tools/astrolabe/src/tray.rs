@@ -13,6 +13,15 @@
 //! The shape here is the standard one: a message-only window on its own thread,
 //! `Shell_NotifyIconW` to place the icon, and a channel back to the frame loop.
 //!
+//! ## It is also the client's message window
+//!
+//! A second launch has to hand its work to the first and exit — a `lait:` link
+//! opens the client that is already running, not another one. That handover
+//! needs somewhere to arrive, and this window is the only window this process
+//! has that is guaranteed to exist and is reachable by name from a process that
+//! holds no handle to it. [`hand_over`] finds it; the procedure below turns what
+//! arrives into a [`TrayCommand`] like any other.
+//!
 //! ## What is testable without a window
 //!
 //! The *policy* — what each menu entry means — is a pure function, and it is
@@ -33,6 +42,14 @@ pub enum TrayCommand {
     /// Leave, having been asked which kind of leaving this is.
     Exit(ExitRequest),
 }
+
+/// Something a second launch handed to the one already running.
+///
+/// Separate from [`TrayCommand`] because it is not a command: it is an *input*
+/// that arrived, and what happens to it is the same thing that happens to a
+/// link on the command line — it reaches a form, and a person still confirms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arrived(pub String);
 
 /// Menu command ids. Fixed rather than generated, so the pure policy below can
 /// be tested against the same numbers the menu is built from.
@@ -77,6 +94,29 @@ pub struct Tray {
     inner: imp::Tray,
 }
 
+/// Hand `link` to the Astrolabe that is already running.
+///
+/// Returns whether it was delivered. A second launch that could not reach the
+/// first has nothing useful left to do — it cannot take the single-instance
+/// guard, and starting anyway would race the first for the daemon and the
+/// managed state root — so the caller reports and exits rather than falling
+/// back to a second window.
+///
+/// Retried briefly, because the two launches can be seconds apart: a person
+/// clicking a link the moment the client starts would otherwise be told it is
+/// not running by the client that is starting.
+pub fn hand_over(link: &str) -> bool {
+    #[cfg(windows)]
+    {
+        imp::hand_over(link)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = link;
+        false
+    }
+}
+
 impl Tray {
     /// Place the icon, and hand back the channel its menu talks through.
     ///
@@ -102,6 +142,21 @@ impl Tray {
         }
     }
 
+    /// What the tray has been handed by a second launch, if anything.
+    ///
+    /// Drained rather than subscribed to, because a link that arrives while the
+    /// window is hidden must still be there when it comes back.
+    pub fn arrived(&self) -> Vec<Arrived> {
+        #[cfg(windows)]
+        {
+            self.inner.arrived()
+        }
+        #[cfg(not(windows))]
+        {
+            Vec::new()
+        }
+    }
+
     /// Show a notification from the tray.
     ///
     /// Best effort by design: a notification that could fail the operation that
@@ -124,6 +179,7 @@ mod imp {
 
     use anyhow::{anyhow, Result};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Shell::{
         Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
@@ -131,10 +187,11 @@ mod imp {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-        DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW, PostMessageW, PostQuitMessage,
-        RegisterClassW, SetForegroundWindow, TrackPopupMenu, TranslateMessage, HMENU,
-        IDI_APPLICATION, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_RIGHTALIGN, WM_APP, WM_COMMAND,
-        WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+        DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, LoadIconW, PostMessageW,
+        PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, TrackPopupMenu,
+        TranslateMessage, HMENU, IDI_APPLICATION, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_RIGHTALIGN,
+        WM_APP, WM_COMMAND, WM_COPYDATA, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+        WS_OVERLAPPED,
     };
 
     /// The message the icon sends this window when it is clicked.
@@ -159,10 +216,20 @@ mod imp {
     // SAFETY: as above; the handle is never dereferenced here.
     unsafe impl Sync for Posting {}
 
+    /// The class this process registers, and the name a second launch finds it
+    /// by. Fixed, because the whole point is for two unrelated processes to
+    /// agree on it without sharing a handle.
+    const CLASS: &str = "AstrolabeTray";
+
+    /// What a `WM_COPYDATA` carrying a link is tagged with. Any other tag is
+    /// somebody else's message and is left alone.
+    const COPY_LINK: usize = 0x1A17;
+
     /// What the pump thread needs to reach, shared with whoever holds the tray.
     struct Shared {
         window: Mutex<Option<Posting>>,
         pending: Mutex<Vec<(String, String)>>,
+        arrived: Mutex<Vec<super::Arrived>>,
         commands: Sender<super::TrayCommand>,
     }
 
@@ -177,6 +244,7 @@ mod imp {
             let shared = Arc::new(Shared {
                 window: Mutex::new(None),
                 pending: Mutex::new(Vec::new()),
+                arrived: Mutex::new(Vec::new()),
                 commands: sender,
             });
             let (ready, started) = channel();
@@ -199,6 +267,14 @@ mod imp {
                 Ok(Err(message)) => Err(anyhow!(message)),
                 Err(_) => Err(anyhow!("the tray thread ended before it placed an icon")),
             }
+        }
+
+        pub(super) fn arrived(&self) -> Vec<super::Arrived> {
+            self.shared
+                .arrived
+                .lock()
+                .map(|mut held| std::mem::take(&mut *held))
+                .unwrap_or_default()
         }
 
         pub(super) fn notify(&self, title: &str, body: &str) {
@@ -248,8 +324,50 @@ mod imp {
         }
     }
 
+    /// How long a second launch keeps looking for the first.
+    ///
+    /// The two can be seconds apart — a person clicking a link the moment the
+    /// client starts would otherwise be told it is not running by the client
+    /// that is starting.
+    const HAND_OVER_TRIES: u32 = 15;
+    const HAND_OVER_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+    pub(super) fn hand_over(link: &str) -> bool {
+        let class = wide(CLASS);
+        let payload: Vec<u16> = link.encode_utf16().chain(Some(0)).collect();
+        for attempt in 0..HAND_OVER_TRIES {
+            // SAFETY: a class-name lookup over a null-terminated wide string
+            // that outlives the call. A null result is "nothing found".
+            let window = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+            if !window.is_null() {
+                let bytes = payload.len().saturating_mul(std::mem::size_of::<u16>());
+                let Ok(bytes) = u32::try_from(bytes) else {
+                    return false;
+                };
+                let data = COPYDATASTRUCT {
+                    dwData: COPY_LINK,
+                    cbData: bytes,
+                    lpData: payload.as_ptr().cast_mut().cast(),
+                };
+                let address = std::ptr::from_ref(&data).expose_provenance();
+                // SAFETY: `SendMessageW` rather than `PostMessageW` because the
+                // buffer must still exist while the receiver reads it, and only
+                // a synchronous send guarantees that. Both `data` and `payload`
+                // outlive the call. The API requires this message be sent.
+                unsafe {
+                    SendMessageW(window, WM_COPYDATA, 0, address.cast_signed());
+                }
+                return true;
+            }
+            if attempt.saturating_add(1) < HAND_OVER_TRIES {
+                std::thread::sleep(HAND_OVER_WAIT);
+            }
+        }
+        false
+    }
+
     fn pump(shared: &Arc<Shared>, tooltip: &str, ready: &Sender<Result<(), String>>) {
-        let class = wide("AstrolabeTray");
+        let class = wide(CLASS);
         // SAFETY: every pointer below is either null or a buffer that outlives
         // the call, and the window procedure is a plain `extern "system"` fn.
         let window = unsafe {
@@ -393,6 +511,12 @@ mod imp {
                 }
                 0
             }
+            WM_COPYDATA => {
+                receive(window, lparam);
+                // Non-zero: the documented "this was handled" answer, which is
+                // what tells the sending process the handover landed.
+                1
+            }
             WM_NOTIFY_PENDING => {
                 drain_notifications(window);
                 0
@@ -416,6 +540,42 @@ mod imp {
             // interpret.
             _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
         }
+    }
+
+    /// A link handed over by a second launch.
+    ///
+    /// Nothing is acted on here. It is stored, and the frame loop turns it into
+    /// exactly what a link on the command line becomes: a form with a ticket in
+    /// it, waiting for a person. Opening the client is not accepting an invite.
+    fn receive(window: HWND, lparam: LPARAM) {
+        let Some(shared) = context(window) else {
+            return;
+        };
+        let pointer = std::ptr::with_exposed_provenance::<COPYDATASTRUCT>(lparam.cast_unsigned());
+        if pointer.is_null() {
+            return;
+        }
+        // SAFETY: within a `WM_COPYDATA` handler the lparam is a pointer to a
+        // `COPYDATASTRUCT` the *sending* thread is blocked on, so it is valid
+        // for the duration of this call and no longer. Nothing here keeps it.
+        let data: COPYDATASTRUCT = unsafe { pointer.read() };
+        if data.dwData != COPY_LINK || data.lpData.is_null() {
+            return;
+        }
+        let units = (data.cbData as usize) / std::mem::size_of::<u16>();
+        // SAFETY: as above; `cbData` is the sender's own byte count for
+        // `lpData`, and the slice is copied out before this returns.
+        let encoded = unsafe { std::slice::from_raw_parts(data.lpData.cast::<u16>(), units) };
+        let link = String::from_utf16_lossy(encoded);
+        let link = link.trim_end_matches(char::from(0)).to_owned();
+        if link.is_empty() {
+            return;
+        }
+        if let Ok(mut arrived) = shared.arrived.lock() {
+            arrived.push(super::Arrived(link));
+        }
+        // Whatever arrived, the person meant to look at this client.
+        let _ = shared.commands.send(super::TrayCommand::Restore);
     }
 
     fn send(window: HWND, command: super::TrayCommand) {
