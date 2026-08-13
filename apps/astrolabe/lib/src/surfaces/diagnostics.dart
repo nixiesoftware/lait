@@ -22,6 +22,7 @@ class DiagnosticsSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
     final space = view.space;
@@ -60,7 +61,7 @@ class DiagnosticsSurface extends StatelessWidget {
                   children: [
                     Text(taken!.summary, style: context.bodyStyle),
                     if (taken.blockedOn != null) ...[
-                      const SizedBox(height: 4),
+                      t.gap.y(Space.xs),
                       Text(
                         'Blocked on: ${taken.blockedOn}',
                         style: context.labelStyle
@@ -70,10 +71,10 @@ class DiagnosticsSurface extends StatelessWidget {
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
+              t.gap.y(Space.xl3),
               for (final gate in taken.gates)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: t.padding.only(bottom: Space.md),
                   child: Card(
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -94,13 +95,13 @@ class DiagnosticsSurface extends StatelessWidget {
                             GateState.skip => BadgeVariant.muted,
                           },
                         ),
-                        const SizedBox(width: 12),
+                        t.gap.x(Space.xl),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(gate.label, style: context.bodyStyle),
-                              const SizedBox(height: 2),
+                              t.gap.y(Space.xxs),
                               // The current value, or what it is waiting on.
                               Text(gate.detail, style: context.labelStyle),
                             ],

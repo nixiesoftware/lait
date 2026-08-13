@@ -108,9 +108,10 @@ class _AstrolabeShellState extends State<AstrolabeShell> with WindowListener {
                 // What happened sits under the surface and never scrolls away
                 // with it: a refusal that fell off the bottom of a long page is
                 // a refusal nobody read.
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
-                  child: RecordStrip(),
+                Padding(
+                  padding: context.tokens.padding
+                      .fromLTRB(Space.xl3, Space.zero, Space.xl3, Space.xl),
+                  child: const RecordStrip(),
                 ),
               ],
             ),
@@ -155,12 +156,17 @@ class _Bar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
     final rereading = view.inFlight.contains(ActionKeys.refresh);
 
-    return SizedBox(
-      height: kBarHeight,
+    return t.box.height(
+      // reason: this is the window's own caption band, not a page app bar. It
+      // is deliberately tighter than `t.heights.appBar` (48) because it carries
+      // the close button — the chrome the OS would otherwise draw — and has to
+      // read as window furniture rather than as content.
+      TokenEscape.rawSize(kBarHeight),
       child: ColoredBox(
         color: context.surface.l100,
         // The whole bar drags the window, and the controls on it are laid over
@@ -173,7 +179,7 @@ class _Bar extends StatelessWidget {
           onDoubleTap: onToggleMaximise,
           child: Row(
             children: [
-              const SizedBox(width: 16),
+              t.gap.x(Space.xl3),
               for (final candidate in Surface.values) ...[
                 Button(
                   onPressed: () => onSurface(candidate),
@@ -185,7 +191,7 @@ class _Bar extends StatelessWidget {
                   variant: ButtonVariant.ghost,
                   size: ButtonSize.sm,
                 ),
-                const SizedBox(width: 4),
+                t.gap.x(Space.xs),
               ],
               const Spacer(),
               Button(
@@ -200,7 +206,7 @@ class _Bar extends StatelessWidget {
                 size: ButtonSize.sm,
                 tooltip: 'Read this machine again (F5)',
               ),
-              const SizedBox(width: 8),
+              t.gap.x(Space.md),
               CaptionControls(
                 height: kBarHeight,
                 maximised: maximised,

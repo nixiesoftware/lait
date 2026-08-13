@@ -20,6 +20,7 @@ class SpacesSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
 
@@ -42,7 +43,7 @@ class SpacesSurface extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 16),
+            t.gap.y(Space.xl3),
           ],
           Expanded(
             child: view.orbits.isEmpty
@@ -53,7 +54,7 @@ class SpacesSurface extends StatelessWidget {
                   )
                 : ListView.separated(
                     itemCount: view.orbits.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    separatorBuilder: (_, __) => t.gap.y(Space.md),
                     itemBuilder: (context, index) {
                       final orbit = view.orbits[index];
                       final chosen = view.space?.space == orbit.space;
@@ -72,9 +73,9 @@ class SpacesSurface extends StatelessWidget {
                                     orbit.name.isEmpty ? 'Unnamed Space' : orbit.name,
                                     style: context.headingStyle,
                                   ),
-                                  const SizedBox(height: 2),
+                                  t.gap.y(Space.xxs),
                                   Text(orbit.space, style: context.monoStyle),
-                                  const SizedBox(height: 2),
+                                  t.gap.y(Space.xxs),
                                   Text(orbit.path, style: context.labelStyle),
                                 ],
                               ),
@@ -133,12 +134,13 @@ class _Fact extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(label, style: context.factLabelStyle),
-        const SizedBox(height: 2),
+        t.gap.y(Space.xxs),
         Text(value, style: mono ? context.monoStyle : context.bodyStyle),
       ],
     );

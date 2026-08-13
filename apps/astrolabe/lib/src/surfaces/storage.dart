@@ -19,6 +19,7 @@ class StorageSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final view = ClientScope.watch(context);
 
     return SurfaceScaffold(
@@ -31,7 +32,7 @@ class StorageSurface extends StatelessWidget {
             )
           : ListView.separated(
               itemCount: view.storage.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              separatorBuilder: (_, __) => t.gap.y(Space.md),
               itemBuilder: (context, index) {
                 final row = view.storage[index];
                 return Card(
@@ -39,9 +40,9 @@ class StorageSurface extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(row.name ?? row.orbit, style: context.headingStyle),
-                      const SizedBox(height: 2),
+                      t.gap.y(Space.xxs),
                       Text(row.orbit, style: context.monoStyle),
-                      const SizedBox(height: 12),
+                      t.gap.y(Space.xl),
                       if (row.missing != null)
                         Text(
                           switch (row.missing!) {
@@ -92,12 +93,13 @@ class _Figure extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(label, style: context.factLabelStyle),
-        const SizedBox(height: 2),
+        t.gap.y(Space.xxs),
         Text(value, style: context.bodyStyle),
       ],
     );

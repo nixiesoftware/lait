@@ -163,7 +163,15 @@ class _CaptionButtonState extends State<_CaptionButton> {
               // window's own corner unpainted at exactly the pixel a maximised
               // window is aimed at.
               painter: _CaptionPainter(mark: widget.mark, fill: fill, ink: ink),
-              child: SizedBox(width: kCaptionWidth, height: widget.height),
+              child: context.tokens.box.sized(
+                // reason: a caption button is sized to the Windows shell's own
+                // metric rather than to this scale. It sits against the chrome
+                // the OS draws, so it has to match that, not our rhythm.
+                width: TokenEscape.rawSize(kCaptionWidth),
+                // reason: the caption height is the title bar's, measured at
+                // runtime by the window rather than chosen here.
+                height: TokenEscape.rawSize(widget.height),
+              ),
             ),
           ),
         ),

@@ -29,6 +29,7 @@ class DevicesSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
     final owned = view.devices.where((device) => device.owned).toList();
@@ -56,7 +57,7 @@ class DevicesSurface extends StatelessWidget {
             )
           : ListView.separated(
               itemCount: view.devices.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              separatorBuilder: (_, __) => t.gap.y(Space.md),
               itemBuilder: (context, index) =>
                   _DeviceCard(device: view.devices[index]),
             ),
@@ -71,6 +72,7 @@ class _DeviceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
     bool busy(String key) => view.inFlight.contains(key);
@@ -89,7 +91,7 @@ class _DeviceCard extends StatelessWidget {
                     Row(
                       children: [
                         Text(device.label, style: context.headingStyle),
-                        const SizedBox(width: 8),
+                        t.gap.x(Space.md),
                         Badge(
                           label: device.state,
                           variant: switch (device.state) {
@@ -99,7 +101,7 @@ class _DeviceCard extends StatelessWidget {
                           },
                         ),
                         if (!device.owned) ...[
-                          const SizedBox(width: 4),
+                          t.gap.x(Space.xs),
                           // Said plainly rather than implied by a missing
                           // button: this client did not start it and will not
                           // stop it.
@@ -107,7 +109,7 @@ class _DeviceCard extends StatelessWidget {
                         ],
                       ],
                     ),
-                    const SizedBox(height: 2),
+                    t.gap.y(Space.xxs),
                     Text(device.home, style: context.monoStyle),
                   ],
                 ),
@@ -166,7 +168,7 @@ class _DeviceCard extends StatelessWidget {
             ],
           ),
           if (device.degraded != null) ...[
-            const SizedBox(height: 8),
+            t.gap.y(Space.md),
             // A sampling failure degrades and preserves the last good reading.
             // It is never drawn as "nothing there", because those are different
             // facts and only one of them means the peer is gone.
@@ -178,7 +180,7 @@ class _DeviceCard extends StatelessWidget {
             ),
           ],
           if (device.lastError != null) ...[
-            const SizedBox(height: 4),
+            t.gap.y(Space.xs),
             Text(
               device.lastError!,
               style: context.labelStyle.copyWith(color: context.status.error.l800),

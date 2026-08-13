@@ -13,6 +13,7 @@ class HeadsSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
 
@@ -35,7 +36,7 @@ class HeadsSurface extends StatelessWidget {
             )
           : ListView.separated(
               itemCount: view.heads.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              separatorBuilder: (_, __) => t.gap.y(Space.md),
               itemBuilder: (context, index) {
                 final head = view.heads[index];
                 final stopping = view.inFlight.contains('head.stop:${head.id}');
@@ -50,10 +51,10 @@ class HeadsSurface extends StatelessWidget {
                             Row(
                               children: [
                                 Text(head.id, style: context.headingStyle),
-                                const SizedBox(width: 8),
+                                t.gap.x(Space.md),
                                 Badge(label: head.kind),
                                 if (!head.owned) ...[
-                                  const SizedBox(width: 4),
+                                  t.gap.x(Space.xs),
                                   const Badge(
                                     label: 'external',
                                     variant: BadgeVariant.outline,
@@ -61,7 +62,7 @@ class HeadsSurface extends StatelessWidget {
                                 ],
                               ],
                             ),
-                            const SizedBox(height: 4),
+                            t.gap.y(Space.xs),
                             // The address without its credential. A head URL
                             // carries a run token, and a page that printed it
                             // would put a credential in every screenshot.
@@ -69,7 +70,7 @@ class HeadsSurface extends StatelessWidget {
                               head.origin ?? 'no address announced',
                               style: context.monoStyle,
                             ),
-                            const SizedBox(height: 2),
+                            t.gap.y(Space.xxs),
                             Text(
                               // A browser head serves every Orbit its identity
                               // has; an MCP head is authored against one. The

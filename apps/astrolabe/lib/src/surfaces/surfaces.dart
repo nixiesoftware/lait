@@ -6,6 +6,7 @@
 /// alphabetical accident, and it is the order `Ctrl+1`–`Ctrl+7` follow.
 library;
 
+import 'package:covalence/covalence.dart';
 import 'package:flutter/widgets.dart';
 
 import 'devices.dart';
@@ -32,7 +33,12 @@ enum Surface {
 
 /// The page margin. A surface flush against the window edge reads as
 /// unfinished whatever else is right about it.
-const EdgeInsets kPageMargin = EdgeInsets.fromLTRB(16, 12, 16, 16);
+///
+/// A function of the theme rather than a constant: the margin is a spatial rung
+/// like every other measurement here, and a baked `16` would be the one that
+/// stopped answering when the scale was retuned.
+EdgeInsets pageMargin(Tokens t) =>
+    t.padding.fromLTRB(Space.xl3, Space.xl, Space.xl3, Space.xl3);
 
 class SurfacePage extends StatelessWidget {
   const SurfacePage({super.key, required this.surface});
@@ -42,7 +48,7 @@ class SurfacePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: kPageMargin,
+      padding: pageMargin(context.tokens),
       child: switch (surface) {
         Surface.library => const LibrarySurface(),
         Surface.spaces => const SpacesSurface(),

@@ -19,6 +19,7 @@ class MembersSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final view = ClientScope.watch(context);
     final space = view.space;
 
@@ -39,7 +40,7 @@ class MembersSurface extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(space.space, style: context.monoStyle),
-                      const SizedBox(height: 8),
+                      t.gap.y(Space.md),
                       Row(
                         children: [
                           Text(
@@ -49,7 +50,7 @@ class MembersSurface extends StatelessWidget {
                             space.whoami ?? 'no actor id yet',
                             style: context.bodyStyle,
                           ),
-                          const SizedBox(width: 8),
+                          t.gap.x(Space.md),
                           Badge(
                             label: space.admin ? 'admin' : 'member',
                             variant: space.admin
@@ -61,15 +62,15 @@ class MembersSurface extends StatelessWidget {
                     ],
                   ),
                 ),
-                const SizedBox(height: 16),
+                t.gap.y(Space.xl3),
                 Text('MEMBERS', style: context.factLabelStyle),
-                const SizedBox(height: 8),
+                t.gap.y(Space.md),
                 if (space.members.isEmpty)
                   const Empty(said: 'This Space lists no members.')
                 else
                   for (final member in space.members)
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
+                      padding: t.padding.only(bottom: Space.md),
                       child: Card(
                         child: Row(
                           children: [
@@ -82,7 +83,7 @@ class MembersSurface extends StatelessWidget {
                                     style: context.bodyStyle,
                                   ),
                                   if (member.nick != null) ...[
-                                    const SizedBox(height: 2),
+                                    t.gap.y(Space.xxs),
                                     Text(member.id, style: context.monoStyle),
                                   ],
                                 ],
@@ -97,15 +98,15 @@ class MembersSurface extends StatelessWidget {
                         ),
                       ),
                     ),
-                const SizedBox(height: 16),
+                t.gap.y(Space.xl3),
                 Text('THIS ACTOR\'S DEVICES', style: context.factLabelStyle),
-                const SizedBox(height: 8),
+                t.gap.y(Space.md),
                 if (space.devices.isEmpty)
                   const Empty(said: 'No devices are bound to this actor here.')
                 else
                   for (final device in space.devices)
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
+                      padding: t.padding.only(bottom: Space.xs),
                       // Kept verbatim: the plane answers these as human text,
                       // and a client that assumed every line was an id would
                       // offer to revoke a sentence.

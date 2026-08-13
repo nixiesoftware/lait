@@ -9,6 +9,35 @@
 # packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
+# covalence_lints — the analyzer tier that makes the design system's token
+# closure structural rather than advisory.
+#
+# The plugin has to be declared here or the rules below are inert: `dart run
+# custom_lint` still exits 0 and still prints "No issues found", because it
+# found no enabled rules — not because it found no violations. A check that
+# passes for the wrong reason is worse than one nobody runs, and this one read
+# as green from the day the app was created.
+analyzer:
+  plugins:
+    - custom_lint
+
+custom_lint:
+  rules:
+    # Colour, geometry, type, duration and shadow reach the surfaces only
+    # through tokens. Astrolabe is a *consumer* of covalence, so it holds no
+    # privileged `lib/src/styles/` — every one of these applies to every file
+    # here, which is the intent.
+    - forbid_raw_color
+    - forbid_raw_duration
+    - forbid_raw_boxshadow
+    - forbid_raw_flutter_primitives
+    - forbid_inline_token_literals
+    - forbid_appfonts_outside_styles
+    - forbid_internal_token_imports
+    # An escape is allowed, but it has to say why. See `surfaces/library.dart`
+    # for the one this app legitimately needs.
+    - token_escape_requires_reason
+
 linter:
   # The lint rules applied to this project can be customized in the
   # section below to disable rules from the `package:flutter_lints/flutter.yaml`

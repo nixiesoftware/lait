@@ -7,6 +7,7 @@
 /// and not a decision each page gets to make differently.
 library;
 
+import 'package:covalence/covalence.dart';
 import 'package:flutter/widgets.dart';
 
 import '../shell/type.dart';
@@ -34,6 +35,7 @@ class SurfaceScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -45,7 +47,7 @@ class SurfaceScaffold extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(title, style: context.titleStyle),
-                  const SizedBox(height: 4),
+                  t.gap.y(Space.xs),
                   Text(prose, style: context.proseStyle),
                 ],
               ),
@@ -53,7 +55,7 @@ class SurfaceScaffold extends StatelessWidget {
             if (trailing != null) trailing!,
           ],
         ),
-        const SizedBox(height: 20),
+        t.gap.y(Space.xl5),
         Expanded(child: child),
       ],
     );
@@ -73,12 +75,13 @@ class Empty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(said, style: context.bodyStyle),
         if (next != null) ...[
-          const SizedBox(height: 4),
+          t.gap.y(Space.xs),
           Text(next!, style: context.proseStyle),
         ],
       ],

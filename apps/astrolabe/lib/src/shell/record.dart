@@ -28,13 +28,14 @@ class RecordStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final view = ClientScope.watch(context);
     if (view.failures.isEmpty && view.notices.isEmpty) {
       return const SizedBox.shrink();
     }
 
     return Padding(
-      padding: const EdgeInsets.only(top: 12),
+      padding: t.padding.only(top: Space.xl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -81,13 +82,16 @@ class _Line extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Container(
-      margin: const EdgeInsets.only(top: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      margin: t.padding.only(top: Space.xs),
+      padding: t.padding.symmetric(h: Space.xl, v: Space.md),
       decoration: BoxDecoration(
         color: wash,
-        borderRadius: BorderRadius.circular(6),
-        border: Border(left: BorderSide(color: tone, width: 2)),
+        borderRadius: t.radius.all(Space.sm),
+        // The accent rule down the left edge — the whole reason this reads as
+        // a status line rather than a paragraph in a box.
+        border: t.stroke.edge(left: tone, width: t.stroke.sm),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -95,7 +99,7 @@ class _Line extends StatelessWidget {
         children: [
           Text(text, style: context.bodyStyle.copyWith(color: tone)),
           if (note != null) ...[
-            const SizedBox(height: 2),
+            t.gap.y(Space.xxs),
             Text(note!, style: context.labelStyle),
           ],
         ],
