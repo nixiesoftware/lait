@@ -11,6 +11,7 @@
 //!
 //! Add a file here and declare it below; nothing else changes.
 
+mod address_book;
 mod agent_experience;
 mod authority_history;
 mod beacon_convergence;
