@@ -233,9 +233,15 @@ impl AddressBookService {
                 continue;
             }
             for card in book.authored_cards_for(&handle) {
+                let name = book
+                    .cards
+                    .get(&card)
+                    .map(|card| card.name.value.clone())
+                    .unwrap_or_default();
                 hits.push(BookHitView {
                     card: card.to_string(),
                     handle: handle.to_wire(),
+                    name,
                 });
             }
         }

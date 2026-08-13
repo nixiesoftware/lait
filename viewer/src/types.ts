@@ -133,6 +133,8 @@ export interface Row {
   assignee_summary: string;
   /** The keys behind that summary, for clients that draw faces instead. */
   assignees: string[];
+  /** Authored Card names for assignees, when the book could name them. */
+  assignee_names?: Record<string, string>;
   tombstone: boolean;
   provisional: boolean;
   /** Due date, unix seconds. Absent = none. */
@@ -221,10 +223,14 @@ export interface IssueView {
   status: string;
   priority: Priority;
   assignees: string[];
+  /** Authored Card names for assignees, when the book could name them. */
+  assignee_names?: Record<string, string>;
   labels: string[];
   label_names: string[];
   comments: CommentDto[];
   created_by: string;
+  /** Authored Card name for the creator, when the book could name them. */
+  created_by_name?: string;
   /** Unix seconds. */
   created_at: number;
   /** Due date, unix seconds. Absent = none. */
@@ -561,6 +567,8 @@ export interface ActivityEvent {
   changes: FieldChange[];
   actor: string | null;
   actor_nick: string;
+  /** Authored Card name, when the book could name `actor`. Absent is not empty. */
+  authored_name?: string | null;
   text: string;
   /** Unix seconds. */
   ts: number;
@@ -587,6 +595,8 @@ export interface InboxEntry {
   /** Comments only — the one in-doc field with a real author. `null` = actor unknown. */
   actor?: string | null;
   actor_nick?: string | null;
+  /** Authored Card name, when the book could name `actor`. */
+  authored_name?: string | null;
 }
 
 export interface MemberDto {

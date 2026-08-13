@@ -277,6 +277,84 @@ pub struct HostAssignment {
 /// Boxed future used to keep the host interface dyn-compatible.
 pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> + Send + 'a>>;
 
+/// How many handles one decoration call may carry.
+///
+/// A board is one batch. Past this, the product is asking the identity plane
+/// to name a list it should have already scoped.
+pub const MAX_PRESENTATION_HANDLES: usize = 256;
+
+/// A handle a product already had in a decoded reply. Not a Card, not
+/// authority, and never a reason to place an Orbit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PresentationHandle {
+    Device(String),
+    Actor {
+        /// When absent, the host fills in the Orbit it already authorized.
+        space: Option<String>,
+        actor: String,
+    },
+}
+
+impl PresentationHandle {
+    pub fn device(id: impl Into<String>) -> Self {
+        Self::Device(id.into())
+    }
+
+    pub fn actor(actor: impl Into<String>) -> Self {
+        Self::Actor {
+            space: None,
+            actor: actor.into(),
+        }
+    }
+
+    /// Wire spelling the daemon's `BookResolve` accepts.
+    pub fn to_wire(&self, default_space: Option<&str>) -> String {
+        match self {
+            Self::Device(id) => id.clone(),
+            Self::Actor { space, actor } => {
+                let space = space.as_deref().or(default_space).unwrap_or("");
+                format!("actor:{space}:{actor}")
+            }
+        }
+    }
+}
+
+/// One authored label for an exact requested handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationLabel {
+    pub handle: PresentationHandle,
+    /// Absent is "no Card", not an empty name.
+    pub name: Option<String>,
+}
+
+/// Batched decoration. `coverage` is `Some("unavailable")` when the Orbit
+/// could not be asked — which is not the same as "these people have no names".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationResolution {
+    pub labels: Vec<PresentationLabel>,
+    pub coverage: Option<String>,
+}
+
+impl PresentationResolution {
+    pub fn unavailable() -> Self {
+        Self {
+            labels: Vec::new(),
+            coverage: Some("unavailable".into()),
+        }
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        self.coverage.as_deref() == Some("unavailable")
+    }
+
+    pub fn name_for_actor(&self, actor: &str) -> Option<&str> {
+        self.labels.iter().find_map(|label| match &label.handle {
+            PresentationHandle::Actor { actor: id, .. } if id == actor => label.name.as_deref(),
+            _ => None,
+        })
+    }
+}
+
 /// Facilities supplied by a trusted native client host to a World package.
 ///
 /// The package owns orchestration and product semantics. The implementation
@@ -293,6 +371,11 @@ pub trait ClientHost: Send + Sync {
     /// here — the package never holds an attachment in memory, whatever its
     /// size.
     fn call_content<'a>(&'a self, request: HostContentRequest) -> ClientFuture<'a, Value>;
+    /// Scoped, passive name decoration. Must never place an Orbit.
+    fn call_identity<'a>(
+        &'a self,
+        handles: Vec<PresentationHandle>,
+    ) -> ClientFuture<'a, PresentationResolution>;
 }
 
 pub type LocalInvocationHandler =
@@ -305,6 +388,14 @@ pub type LocalInvocationHandler =
 /// package read enough to name the thing itself before anyone is asked.
 pub type ConfirmationResolver =
     for<'a> fn(&'a dyn ClientHost, &'a ClientInvocation) -> ClientFuture<'a, Option<String>>;
+
+/// Decorate a decoded World reply with presentation labels.
+///
+/// Runs after decode, once, on the local HTTP/MCP response. It must not
+/// change authoritative ids, and its output is never committed or cached
+/// as World identity.
+pub type ReplyDecorator =
+    for<'a> fn(&'a dyn ClientHost, &'a Call, Value) -> ClientFuture<'a, Value>;
 
 /// One product-local MCP tool. The registry prefixes `name` with the package's
 /// mount, so independently developed Worlds cannot both publish a global `list`.
@@ -360,6 +451,7 @@ pub struct WorldClientPackage {
     local_handler: Option<LocalInvocationHandler>,
     web_parser: Option<WebParser>,
     confirmation: Option<ConfirmationResolver>,
+    decorator: Option<ReplyDecorator>,
     display: Display,
 }
 
@@ -521,6 +613,7 @@ impl WorldClientPackage {
             local_handler: None,
             web_parser: None,
             confirmation: None,
+            decorator: None,
             display: Display::unstated(mount),
         })
     }
@@ -678,6 +771,15 @@ impl WorldClientPackage {
         self
     }
 
+    /// Decorate decoded replies with identity-scoped presentation labels.
+    ///
+    /// Packages without a decorator keep byte-for-byte-equivalent decoded
+    /// JSON. The callback understands its own schema; this crate does not.
+    pub fn with_decorator(mut self, decorator: ReplyDecorator) -> Self {
+        self.decorator = Some(decorator);
+        self
+    }
+
     pub fn world(&self) -> &WorldId {
         &self.world
     }
@@ -742,7 +844,7 @@ impl WorldClientPackage {
     }
 
     /// Execute one invocation through its owning package and answer with the
-    /// decoded value — one decode per call, and nothing else.
+    /// decoded value — one decode per call, then optional presentation.
     ///
     /// It used to cost three. Every World call cloned the decoded value, handed
     /// the clone to a product presenter that parsed it back into a typed
@@ -765,7 +867,16 @@ impl WorldClientPackage {
             match invocation.into_kind() {
                 ClientInvocationKind::World(call) => {
                     let reply = host.call_world(call.clone()).await?;
-                    self.decode_reply(&call, reply)
+                    let decoded = self.decode_reply(&call, reply)?;
+                    let Some(decorate) = self.decorator else {
+                        return Ok(decoded);
+                    };
+                    // Presentation must not fail the product: a book that
+                    // could not be asked is an absence of names, not a
+                    // failed World call.
+                    Ok(decorate(host, &call, decoded.clone())
+                        .await
+                        .unwrap_or(decoded))
                 }
                 ClientInvocationKind::Local(local) => {
                     let handler = self.local_handler.ok_or_else(|| {
@@ -1045,5 +1156,125 @@ mod tests {
             None,
         );
         assert_eq!(local.access(), ClientAccess::Command);
+    }
+
+    fn block_on<T>(fut: impl Future<Output = T>) -> T {
+        let mut fut = std::pin::pin!(fut);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(&waker);
+        match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("test host must not pend"),
+        }
+    }
+
+    struct FakeHost {
+        payload: Value,
+        identity: PresentationResolution,
+        identity_calls: std::sync::Mutex<usize>,
+    }
+
+    impl ClientHost for FakeHost {
+        fn local_root(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply> {
+            let payload = self.payload.clone();
+            Box::pin(async move {
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|error| Failure::new(error.to_string()))?;
+                Ok(Reply::ok(&call, bytes))
+            })
+        }
+
+        fn call_control<'a>(&'a self, _request: HostControlRequest) -> ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_content<'a>(&'a self, _request: HostContentRequest) -> ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_identity<'a>(
+            &'a self,
+            _handles: Vec<PresentationHandle>,
+        ) -> ClientFuture<'a, PresentationResolution> {
+            *self.identity_calls.lock().expect("calls") += 1;
+            let identity = self.identity.clone();
+            Box::pin(async move { Ok(identity) })
+        }
+    }
+
+    fn decorate_actor<'a>(
+        host: &'a dyn ClientHost,
+        _call: &'a Call,
+        mut value: Value,
+    ) -> ClientFuture<'a, Value> {
+        Box::pin(async move {
+            let resolution = host
+                .call_identity(vec![PresentationHandle::actor("act_one")])
+                .await?;
+            if resolution.is_unavailable() {
+                return Ok(value);
+            }
+            if let Some(name) = resolution.name_for_actor("act_one") {
+                value["authored_name"] = Value::String(name.to_owned());
+            }
+            Ok(value)
+        })
+    }
+
+    #[test]
+    fn a_package_without_a_decorator_keeps_decoded_json() {
+        let host = FakeHost {
+            payload: serde_json::json!({"actor": "act_one"}),
+            identity: PresentationResolution::unavailable(),
+            identity_calls: std::sync::Mutex::new(0),
+        };
+        let package = package("com.example.files", "files");
+        let invocation = files_invocation(Value::Null).unwrap();
+        let value = block_on(package.execute(&host, invocation)).unwrap();
+        assert_eq!(value, serde_json::json!({"actor": "act_one"}));
+        assert_eq!(*host.identity_calls.lock().expect("calls"), 0);
+    }
+
+    #[test]
+    fn unavailable_resolution_does_not_write_empty_names() {
+        let host = FakeHost {
+            payload: serde_json::json!({"actor": "act_one", "actor_nick": ""}),
+            identity: PresentationResolution::unavailable(),
+            identity_calls: std::sync::Mutex::new(0),
+        };
+        let package = package("com.example.files", "files").with_decorator(decorate_actor);
+        let invocation = files_invocation(Value::Null).unwrap();
+        let value = block_on(package.execute(&host, invocation)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"actor": "act_one", "actor_nick": ""})
+        );
+        assert!(value.get("authored_name").is_none());
+        assert_eq!(*host.identity_calls.lock().expect("calls"), 1);
+    }
+
+    #[test]
+    fn a_live_hit_adds_only_a_presentation_field() {
+        let host = FakeHost {
+            payload: serde_json::json!({"actor": "act_one"}),
+            identity: PresentationResolution {
+                labels: vec![PresentationLabel {
+                    handle: PresentationHandle::actor("act_one"),
+                    name: Some("Ada".into()),
+                }],
+                coverage: None,
+            },
+            identity_calls: std::sync::Mutex::new(0),
+        };
+        let package = package("com.example.files", "files").with_decorator(decorate_actor);
+        let invocation = files_invocation(Value::Null).unwrap();
+        let value = block_on(package.execute(&host, invocation)).unwrap();
+        assert_eq!(value["actor"], "act_one");
+        assert_eq!(value["authored_name"], "Ada");
+        assert_eq!(*host.identity_calls.lock().expect("calls"), 1);
     }
 }

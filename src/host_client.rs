@@ -607,6 +607,44 @@ impl world_interface::ClientHost for PackageClientHost {
         })
     }
 
+    fn call_identity<'a>(
+        &'a self,
+        handles: Vec<world_interface::PresentationHandle>,
+    ) -> world_interface::ClientFuture<'a, world_interface::PresentationResolution> {
+        Box::pin(async move {
+            use world_interface::{PresentationResolution, MAX_PRESENTATION_HANDLES};
+
+            if handles.len() > MAX_PRESENTATION_HANDLES {
+                return Ok(PresentationResolution::unavailable());
+            }
+            if self.scope.authorize(&self.address).is_err() {
+                return Ok(PresentationResolution::unavailable());
+            }
+            let wires: Vec<String> = handles
+                .iter()
+                .map(|handle| handle.to_wire(Some(self.address.space.as_str())))
+                .collect();
+            let daemon = match crate::daemon::Client::for_selection(&self.selection) {
+                Ok(daemon) => daemon,
+                Err(_) => return Ok(PresentationResolution::unavailable()),
+            };
+            let response = match host_request(
+                &daemon,
+                &self.selection,
+                Request::BookResolve {
+                    orbit: self.address.orbit.to_string(),
+                    handles: wires,
+                },
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(_) => return Ok(PresentationResolution::unavailable()),
+            };
+            Ok(presentation_from_book(response))
+        })
+    }
+
     fn call_content<'a>(
         &'a self,
         request: world_interface::HostContentRequest,
@@ -669,6 +707,46 @@ impl PackageClientHost {
             }
         }
     }
+}
+
+/// Map a daemon book-resolution into presentation labels. Card ids stay
+/// behind this boundary — a product never sees one.
+fn presentation_from_book(response: Response) -> world_interface::PresentationResolution {
+    use world_interface::{PresentationLabel, PresentationResolution};
+
+    let Response::BookResolution(view) = response else {
+        return PresentationResolution::unavailable();
+    };
+    PresentationResolution {
+        coverage: view.coverage,
+        labels: view
+            .hits
+            .into_iter()
+            .filter_map(|hit| {
+                let handle = presentation_handle_from_wire(&hit.handle)?;
+                let name = (!hit.name.is_empty()).then_some(hit.name);
+                Some(PresentationLabel { handle, name })
+            })
+            .collect(),
+    }
+}
+
+fn presentation_handle_from_wire(raw: &str) -> Option<world_interface::PresentationHandle> {
+    use world_interface::PresentationHandle;
+    if let Some(rest) = raw.strip_prefix("actor:") {
+        let (space, actor) = rest.split_once(':')?;
+        if space.is_empty() || actor.is_empty() {
+            return None;
+        }
+        return Some(PresentationHandle::Actor {
+            space: Some(space.to_owned()),
+            actor: actor.to_owned(),
+        });
+    }
+    if raw.starts_with("dev_") {
+        return Some(PresentationHandle::device(raw));
+    }
+    None
 }
 
 /// Stream a local file onto the content plane.
@@ -946,5 +1024,47 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_book_resolution_crosses_as_labels_not_cards() {
+        let resolution = presentation_from_book(Response::BookResolution(Box::new(
+            crate::control::BookResolutionView {
+                hits: vec![crate::control::BookHitView {
+                    card: "crd_secret".into(),
+                    handle: "actor:ws_one:act_ada".into(),
+                    name: "Ada".into(),
+                }],
+                coverage: None,
+            },
+        )));
+        assert!(!resolution.is_unavailable());
+        assert_eq!(resolution.name_for_actor("act_ada"), Some("Ada"));
+        assert!(
+            !format!("{resolution:?}").contains("crd_secret"),
+            "a Card id leaked into presentation: {resolution:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_or_wrong_variant_is_unavailable_not_empty_names() {
+        let resolution = presentation_from_book(Response::err("no"));
+        assert!(resolution.is_unavailable());
+        assert!(resolution.labels.is_empty());
+    }
+
+    #[test]
+    fn an_empty_card_name_stays_absent() {
+        let resolution = presentation_from_book(Response::BookResolution(Box::new(
+            crate::control::BookResolutionView {
+                hits: vec![crate::control::BookHitView {
+                    card: "crd_one".into(),
+                    handle: "actor:ws_one:act_ada".into(),
+                    name: String::new(),
+                }],
+                coverage: None,
+            },
+        )));
+        assert_eq!(resolution.name_for_actor("act_ada"), None);
     }
 }

@@ -25,6 +25,7 @@
 //! no dependency on any particular head: it answers in values, and whoever
 //! composed it decides what a person sees.
 
+pub mod decorate;
 pub mod document;
 pub mod host;
 pub mod lifecycle;
@@ -62,6 +63,7 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
             .with_local_handler(host::execute)
             .with_web_parser(host::parse_web)
             .with_confirmation(host::confirmation)
+            .with_decorator(decorate::decorate_reply)
             // What a client draws, and where `Open` lands. The display name is
             // the product's name, not the mount: `issues` is a namespace key
             // that prefixes tool names and route segments, and a person reading

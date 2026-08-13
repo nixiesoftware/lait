@@ -79,6 +79,12 @@ export function describeEvent(
   // there is no honest author to name — the whole reason this special case exists.
   if (e.kind === "synced") return { actor: null, phrase };
 
+  // An authored Card name is identity-scoped presentation, not World fact.
+  // Prefer it over a Space nick or a resolver, and never invent one from
+  // an empty string — that would turn "could not ask" into "no name".
+  const authored = e.authored_name?.trim();
+  if (authored) return { actor: authored, phrase };
+
   // Otherwise `actor` is the real committer (history) or this node (its own ops).
   // Resolve the key to a name; the caller owns the fallback chain (alias → you →
   // short key), because it is the caller that holds the member list.

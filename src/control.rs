@@ -1553,6 +1553,10 @@ pub struct BookView {
 pub struct BookHitView {
     pub card: String,
     pub handle: String,
+    /// Authored Card name. Empty only if the card id no longer projects,
+    /// which is not a name and must not be drawn as one.
+    #[serde(default)]
+    pub name: String,
 }
 
 /// Scoped decoration. `coverage` is `unavailable` when the Orbit is vacant.

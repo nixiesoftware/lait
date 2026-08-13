@@ -64,6 +64,21 @@ describe("attribution", () => {
     expect(describeEvent(e, resolve).actor).toBe("alice");
   });
 
+  it("prefers an authored Card name over a resolver or nick", () => {
+    const e = ev({
+      actor: BOB,
+      actor_nick: "bobby",
+      authored_name: "Ada",
+    });
+    expect(describeEvent(e, resolve).actor).toBe("Ada");
+    expect(describeEvent(e).actor).toBe("Ada");
+  });
+
+  it("does not treat an empty authored name as a name", () => {
+    const e = ev({ actor: BOB, actor_nick: "", authored_name: "  " });
+    expect(describeEvent(e).actor).toBeNull();
+  });
+
   it("falls back to actor_nick when no resolver is supplied", () => {
     // The Activity feed's local ops still populate actor_nick; a caller without a
     // member list (or a defensive one) should still get a name.
