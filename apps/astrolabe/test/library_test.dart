@@ -66,7 +66,8 @@ Future<List<ActionRequest>> _pump(WidgetTester tester, ClientView view) async {
       theme: covalenceTheme(const ThemeConfig()),
       home: ClientScope(
         client: Client.canned(view, onDispatch: asked.add),
-        child: const Scaffold(body: Padding(
+        child: const Scaffold(
+            body: Padding(
           padding: EdgeInsets.all(16),
           child: LibrarySurface(),
         )),
@@ -141,7 +142,8 @@ void main() {
     );
   });
 
-  testWidgets('Open follows the selection rather than the page', (tester) async {
+  testWidgets('Open follows the selection rather than the page',
+      (tester) async {
     // The assertion master–detail has to earn: one primary control instead of
     // one per row means the control has to follow the selection, and a page
     // where it silently did not would open the wrong World while looking
@@ -182,7 +184,9 @@ void main() {
         _row(
           orbit: 'orb_one',
           name: 'Issues',
-          routes: const [RouteRow(label: 'Board', path: '/spaces/orb_one/board')],
+          routes: const [
+            RouteRow(label: 'Board', path: '/spaces/orb_one/board')
+          ],
         ),
       ]),
     );
@@ -253,5 +257,73 @@ void main() {
           'ask four times and read three refusals',
     );
     expect(asked, isEmpty);
+  });
+
+  testWidgets('a running World offers View through the same declared entry',
+      (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            orbit: 'orb_one',
+            name: 'Issues',
+            placement: PlacementView.placed,
+            opensAt: '/spaces/orb_one',
+          ),
+        ],
+      ),
+    );
+
+    expect(find.text('View'), findsOneWidget);
+    expect(find.text('Running'), findsWidgets);
+
+    await tester.tap(find.text('View'));
+    await tester.pump();
+    expect(
+      asked.single,
+      const ActionRequest.open(
+        orbit: 'orb_one',
+        entryPath: '/spaces/orb_one',
+      ),
+      reason: 'View bypassed the World-declared entry path',
+    );
+  });
+
+  testWidgets('an in-flight vacant World is visibly starting', (tester) async {
+    await _pump(
+      tester,
+      _view(
+        library: [_row(orbit: 'orb_one', name: 'Issues')],
+        inFlight: const ['open:orb_one/'],
+      ),
+    );
+
+    expect(find.text('Starting'), findsWidgets);
+    expect(find.text('Placing this Orbit and preparing its World head.'),
+        findsOneWidget);
+  });
+
+  testWidgets('Library search filters the passive rail', (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [
+          _row(orbit: 'orb_one', name: 'IssueWorld'),
+          _row(orbit: 'orb_two', name: 'Notes'),
+        ],
+      ),
+    );
+
+    await tester.enterText(find.byType(Input), 'notes');
+    await tester.pump();
+
+    expect(find.text('IssueWorld'), findsNothing);
+    expect(find.text('Notes'), findsWidgets);
+    expect(
+      asked,
+      isEmpty,
+      reason: 'filtering the Library placed or opened a World',
+    );
   });
 }

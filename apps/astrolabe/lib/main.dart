@@ -9,7 +9,7 @@ library;
 
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart'
-    show MaterialApp, Scaffold, ThemeMode;
+    show Brightness, MaterialApp, Scaffold, ThemeData, ThemeMode;
 import 'package:flutter/widgets.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -51,10 +51,27 @@ Future<void> main() async {
   runApp(Astrolabe(client: client));
 }
 
-class Astrolabe extends StatelessWidget {
+class Astrolabe extends StatefulWidget {
   const Astrolabe({super.key, required this.client});
 
   final Client client;
+
+  @override
+  State<Astrolabe> createState() => _AstrolabeState();
+}
+
+class _AstrolabeState extends State<Astrolabe> {
+  // Astrolabe is a desktop control room. It opens in the quieter dark register
+  // even when Windows is light; the explicit switch in the caption is the
+  // user's way back to the separately tuned light theme.
+  ThemeMode _themeMode = ThemeMode.dark;
+
+  void _toggleTheme() {
+    setState(() {
+      _themeMode =
+          _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -64,12 +81,32 @@ class Astrolabe extends StatelessWidget {
       // covalence is Material-free; `MaterialApp` is here for the navigator and
       // the theme-extension plumbing its tokens ride on, and for nothing that
       // draws.
-      theme: covalenceTheme(const ThemeConfig()),
-      themeMode: ThemeMode.system,
+      theme: _astrolabeTheme(Brightness.light),
+      darkTheme: _astrolabeTheme(Brightness.dark),
+      themeMode: _themeMode,
       home: ClientScope(
-        client: client,
-        child: const ToastRegion(child: Scaffold(body: AstrolabeShell())),
+        client: widget.client,
+        child: ToastRegion(
+          child: Scaffold(
+            body: AstrolabeShell(
+              themeMode: _themeMode,
+              onToggleTheme: _toggleTheme,
+            ),
+          ),
+        ),
       ),
     );
   }
 }
+
+ThemeData _astrolabeTheme(Brightness brightness) => covalenceTheme(
+      ThemeConfig(
+        brightness: brightness,
+        // reason: these are Astrolabe's two application-level seeds. Covalence
+        // derives every surface, text, border, focus and brand rung from them.
+        // The cool neutral keeps the dark shell blue-charcoal without pinning
+        // a raw colour at any component call site.
+        brandSeed: TokenEscape.rawColor(0xFF5B8DEF),
+        neutralSeed: TokenEscape.rawColor(0xFF53667D),
+      ),
+    );

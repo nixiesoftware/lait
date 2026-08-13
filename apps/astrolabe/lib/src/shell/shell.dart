@@ -12,6 +12,7 @@ library;
 import 'dart:async';
 
 import 'package:covalence/covalence.dart' hide Surface;
+import 'package:flutter/material.dart' show ThemeMode;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:window_manager/window_manager.dart';
@@ -20,14 +21,22 @@ import '../core/client.dart';
 import '../surfaces/surfaces.dart';
 import 'caption.dart';
 import 'record.dart';
+import 'type.dart';
 
-/// The bar's height. Named for what it holds rather than taken from the
-/// control ladder: a bar is sized by its contents, and this one carries seven
-/// names, a control and the window's own three.
-const double kBarHeight = 44;
+/// The title band's Windows-sized height and the compact contextual band used
+/// by Operations. Both are chrome measurements rather than page spacing.
+const double kBarHeight = 48;
+const double kOperationsBarHeight = 34;
 
 class AstrolabeShell extends StatefulWidget {
-  const AstrolabeShell({super.key});
+  const AstrolabeShell({
+    super.key,
+    required this.themeMode,
+    required this.onToggleTheme,
+  });
+
+  final ThemeMode themeMode;
+  final VoidCallback onToggleTheme;
 
   @override
   State<AstrolabeShell> createState() => _AstrolabeShellState();
@@ -87,8 +96,8 @@ class _AstrolabeShellState extends State<AstrolabeShell> with WindowListener {
             onInvoke: (intent) => setState(() => _surface = intent.surface),
           ),
           _Reread: CallbackAction<_Reread>(
-            onInvoke: (_) => ClientScope.of(context)
-                .dispatch(const ActionRequest.refresh()),
+            onInvoke: (_) =>
+                ClientScope.of(context).dispatch(const ActionRequest.refresh()),
           ),
         },
         child: Focus(
@@ -101,18 +110,21 @@ class _AstrolabeShellState extends State<AstrolabeShell> with WindowListener {
                 _Bar(
                   surface: _surface,
                   maximised: _maximised,
+                  themeMode: widget.themeMode,
+                  onToggleTheme: widget.onToggleTheme,
                   onSurface: (surface) => setState(() => _surface = surface),
                   onToggleMaximise: _toggleMaximise,
                 ),
+                if (_operationSurfaces.contains(_surface))
+                  _OperationsBar(
+                    surface: _surface,
+                    onSurface: (surface) => setState(() => _surface = surface),
+                  ),
                 Expanded(child: SurfacePage(surface: _surface)),
-                // What happened sits under the surface and never scrolls away
-                // with it: a refusal that fell off the bottom of a long page is
-                // a refusal nobody read.
-                Padding(
-                  padding: context.tokens.padding
-                      .fromLTRB(Space.xl3, Space.zero, Space.xl3, Space.xl),
-                  child: const RecordStrip(),
-                ),
+                // System truth stays visible in every surface. The bar carries
+                // the latest action or refusal without growing into a stack
+                // that steals height from the work above it.
+                const OperationalBar(),
               ],
             ),
           ),
@@ -145,12 +157,16 @@ class _Bar extends StatelessWidget {
   const _Bar({
     required this.surface,
     required this.maximised,
+    required this.themeMode,
+    required this.onToggleTheme,
     required this.onSurface,
     required this.onToggleMaximise,
   });
 
   final Surface surface;
   final bool maximised;
+  final ThemeMode themeMode;
+  final VoidCallback onToggleTheme;
   final ValueChanged<Surface> onSurface;
   final Future<void> Function() onToggleMaximise;
 
@@ -167,8 +183,11 @@ class _Bar extends StatelessWidget {
       // the close button — the chrome the OS would otherwise draw — and has to
       // read as window furniture rather than as content.
       TokenEscape.rawSize(kBarHeight),
-      child: ColoredBox(
-        color: context.surface.l100,
+      child: Container(
+        decoration: BoxDecoration(
+          color: context.surface.l100,
+          border: t.stroke.edge(bottom: context.border.l500),
+        ),
         // The whole bar drags the window, and the controls on it are laid over
         // that gesture. A drag is what moves the window rather than a press:
         // handing the platform its modal move loop the instant a button went
@@ -177,48 +196,156 @@ class _Bar extends StatelessWidget {
           behavior: HitTestBehavior.translucent,
           onPanStart: (_) => windowManager.startDragging(),
           onDoubleTap: onToggleMaximise,
-          child: Row(
-            children: [
-              t.gap.x(Space.xl3),
-              for (final candidate in Surface.values) ...[
-                Button(
-                  onPressed: () => onSurface(candidate),
-                  label: candidate.title,
-                  // The selected state travels into the semantic tree, which is
-                  // what a screen reader reads out. A pill that only looked
-                  // selected would announce nothing.
-                  active: candidate == surface,
-                  variant: ButtonVariant.ghost,
-                  size: ButtonSize.sm,
-                ),
-                t.gap.x(Space.xs),
-              ],
-              const Spacer(),
-              Button(
-                onPressed: rereading
-                    ? null
-                    : () => client.dispatch(const ActionRequest.refresh()),
-                label: 'Refresh',
-                // Live during its own action would let a person queue six
-                // re-reads by clicking a control that looked idle.
-                isLoading: rereading,
-                variant: ButtonVariant.ghost,
-                size: ButtonSize.sm,
-                tooltip: 'Read this machine again (F5)',
-              ),
-              t.gap.x(Space.md),
-              CaptionControls(
-                height: kBarHeight,
-                maximised: maximised,
-                onMinimise: windowManager.minimize,
-                onToggleMaximise: onToggleMaximise,
-                // Closing minimises to the tray: a person who clicked the wrong
-                // X did not ask their Spaces to stop converging, and the daemon
-                // outlives every window by design.
-                onClose: () async => windowManager.hide(),
-              ),
-            ],
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final showWordmark = constraints.maxWidth >= 820;
+              final showThemeLabel = constraints.maxWidth >= 760;
+              return Row(
+                children: [
+                  t.gap.x(Space.xl3),
+                  if (showWordmark) ...[
+                    Text(
+                      'ASTROLABE',
+                      style: context.factLabelStyle.copyWith(
+                        color: context.text.l950,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.4,
+                      ),
+                    ),
+                    t.gap.x(Space.xl5),
+                  ],
+                  _PrimaryDestination(
+                    label: 'Library',
+                    selected: surface == Surface.library,
+                    onPressed: () => onSurface(Surface.library),
+                  ),
+                  _PrimaryDestination(
+                    label: 'Spaces',
+                    selected: surface == Surface.spaces,
+                    onPressed: () => onSurface(Surface.spaces),
+                  ),
+                  _PrimaryDestination(
+                    label: 'Members',
+                    selected: surface == Surface.members,
+                    onPressed: () => onSurface(Surface.members),
+                  ),
+                  _PrimaryDestination(
+                    label: 'Operations',
+                    selected: _operationSurfaces.contains(surface),
+                    onPressed: () => onSurface(Surface.devices),
+                  ),
+                  const Spacer(),
+                  Button(
+                    onPressed: rereading
+                        ? null
+                        : () => client.dispatch(const ActionRequest.refresh()),
+                    icon: AppIcons.refresh,
+                    semanticLabel: 'Refresh',
+                    isLoading: rereading,
+                    variant: ButtonVariant.ghost,
+                    size: ButtonSize.iconSm,
+                    tooltip: 'Read this machine again (F5)',
+                  ),
+                  t.gap.x(Space.xs),
+                  Button(
+                    onPressed: onToggleTheme,
+                    icon: themeMode == ThemeMode.dark
+                        ? AppIcons.toggleOn
+                        : AppIcons.toggleOff,
+                    label: showThemeLabel
+                        ? (themeMode == ThemeMode.dark ? 'Light' : 'Dark')
+                        : null,
+                    semanticLabel: themeMode == ThemeMode.dark
+                        ? 'Use light theme'
+                        : 'Use dark theme',
+                    variant: ButtonVariant.ghost,
+                    size: showThemeLabel ? ButtonSize.sm : ButtonSize.iconSm,
+                    tooltip: themeMode == ThemeMode.dark
+                        ? 'Use light theme'
+                        : 'Use dark theme',
+                  ),
+                  t.gap.x(Space.md),
+                  CaptionControls(
+                    height: kBarHeight,
+                    maximised: maximised,
+                    onMinimise: windowManager.minimize,
+                    onToggleMaximise: onToggleMaximise,
+                    // Closing minimises to the tray: a person who clicked the
+                    // wrong X did not ask their Spaces to stop converging.
+                    onClose: () async => windowManager.hide(),
+                  ),
+                ],
+              );
+            },
           ),
+        ),
+      ),
+    );
+  }
+}
+
+const Set<Surface> _operationSurfaces = {
+  Surface.devices,
+  Surface.heads,
+  Surface.storage,
+  Surface.diagnostics,
+};
+
+class _PrimaryDestination extends StatelessWidget {
+  const _PrimaryDestination({
+    required this.label,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Button(
+      onPressed: onPressed,
+      label: label,
+      active: selected,
+      variant: ButtonVariant.ghost,
+      size: ButtonSize.sm,
+    );
+  }
+}
+
+class _OperationsBar extends StatelessWidget {
+  const _OperationsBar({required this.surface, required this.onSurface});
+
+  final Surface surface;
+  final ValueChanged<Surface> onSurface;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return t.box.height(
+      TokenEscape.rawSize(kOperationsBarHeight),
+      child: Container(
+        padding: t.padding.symmetric(h: Space.xl3),
+        decoration: BoxDecoration(
+          color: context.surface.l50,
+          border: t.stroke.edge(bottom: context.border.l500),
+        ),
+        child: Row(
+          children: [
+            Text('OPERATIONS', style: context.factLabelStyle),
+            t.gap.x(Space.xl3),
+            for (final candidate in _operationSurfaces) ...[
+              Button(
+                onPressed: () => onSurface(candidate),
+                label: candidate.title,
+                active: candidate == surface,
+                variant: ButtonVariant.ghost,
+                size: ButtonSize.xs,
+              ),
+              t.gap.x(Space.xs),
+            ],
+          ],
         ),
       ),
     );

@@ -1,53 +1,21 @@
-/// The front page: what this device serves, and what `Open` does about it.
+/// The front page: a passive Library rail and one selected World.
 ///
-/// ## Structured against the reference
-///
-/// The Spec names the Steam client as this client's reference shape, and its
-/// library is master–detail: a rail of everything you have, and a pane about
-/// the one you picked — a hero plate, then a row carrying the single primary
-/// action beside a strip of facts, then the places you can jump to, then
-/// whatever the thing itself has to say. That composition is what was taken.
-///
-/// ## The World fills the template; the client only draws it
-///
-/// Steam's hero is art the game shipped. A World has no art, and it must not
-/// have any: the display contract is deliberately a glyph and a colour rather
-/// than an image path, because a Library that fetched a banner per row to draw
-/// itself would make listing cost what opening costs. So a World declares a
-/// *seed* and this file derives a plate from it locally — no asset, no fetch,
-/// and a page that still has a face.
-///
-/// Everything else in the pane is the same bargain. The tagline, the accent and
-/// the route strip are the World's own declarations, carried verbatim. A row
-/// with none of them — a Space, or a World this build does not host — draws
-/// none of them, rather than the client inventing something to fill the space.
-///
-/// ## Selecting is not choosing
-///
-/// Picking a row reads nothing, places nothing and starts nothing — it moves
-/// which of the facts already in hand are drawn. Listing is passive; `Open` is
-/// the act, and so is jumping to a route, because both place the Orbit.
+/// Steam supplies the durable library spine; GOG supplies the selected-item
+/// hierarchy. Astrolabe keeps both honest: selection only changes what is
+/// drawn, while `Open` or a World-declared route is the act that can place an
+/// Orbit and hand it to the browser.
 library;
 
 import 'package:covalence/covalence.dart' hide Surface;
-// `ListTile` has its own entrypoint: its name collides with Material's, and
-// covalence keeps it out of the main barrel rather than shadowing a name every
-// Flutter app already has.
+import 'package:covalence/covalence.dart' as cv show Surface;
 import 'package:covalence/listtile.dart';
 import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
 import '../shell/type.dart';
 
-/// The rail's width. Pinned rather than proportional, which is the reference's
-/// own choice and the right one: a rail is sized by the names in it, so a fifth
-/// of a small window is a readable measure and a fifth of a maximised one is a
-/// wide column of short words with the pane squeezed behind it.
-const double kRailWidth = 208;
-
-/// The hero plate's height, against the reference's own proportion — its banner
-/// takes roughly a third of the window before the action row.
-const double kHeroHeight = 168;
+const double kRailWidth = 224;
+const double kHeroHeight = 196;
 
 class LibrarySurface extends StatefulWidget {
   const LibrarySurface({super.key});
@@ -57,56 +25,87 @@ class LibrarySurface extends StatefulWidget {
 }
 
 class _LibrarySurfaceState extends State<LibrarySurface> {
-  /// Which row the pane is about.
-  ///
-  /// A row key rather than an index: the library is re-read on every refresh,
-  /// and an index would silently follow whatever moved into that position.
   String? _selected;
+  String _query = '';
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final rows = ClientScope.watch(context).library_;
+    final view = ClientScope.watch(context);
+    final rows = view.library_;
 
-    if (rows == null) {
-      // Loading is not empty. A surface that drew the empty sentence while the
-      // first read was still in flight would be claiming a fact it does not
-      // have.
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Skeleton(width: kRailWidth, height: 28),
-          t.gap.x(Space.xl5),
-          const Expanded(child: Skeleton(height: kHeroHeight)),
-        ],
-      );
-    }
+    if (rows == null) return const _Loading();
     if (rows.isEmpty) return const _Empty();
 
-    // Resolved rather than written back. Recording the fallback would turn
-    // "nothing is selected yet" into "the first row was chosen", and the next
-    // refresh would keep a choice the person never made.
-    final showing = rows.firstWhere(
-      (row) => row.key == _selected,
-      orElse: () => rows.first,
-    );
+    final needle = _query.trim().toLowerCase();
+    final visible = needle.isEmpty
+        ? rows
+        : rows
+            .where((row) =>
+                _name(row).toLowerCase().contains(needle) ||
+                row.space.toLowerCase().contains(needle) ||
+                row.worldMount.toLowerCase().contains(needle))
+            .toList();
+
+    final showing = visible.isEmpty
+        ? null
+        : visible.firstWhere(
+            (row) => row.key == _selected,
+            orElse: () => visible.first,
+          );
 
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         t.box.width(
-          // reason: the rail is sized to hold a Space's name at the body size
-          // without wrapping, which is a measurement of the type rather than a
-          // rung on the spatial scale.
           TokenEscape.rawSize(kRailWidth),
           child: _Rail(
-            rows: rows,
+            rows: visible,
+            allCount: rows.length,
             showing: showing,
+            view: view,
+            onQuery: (query) => setState(() => _query = query),
             onSelect: (row) => setState(() => _selected = row.key),
           ),
         ),
         t.gap.x(Space.xl5),
-        Expanded(child: _Detail(showing: showing)),
+        Expanded(
+          child:
+              showing == null ? const _NoMatches() : _Detail(showing: showing),
+        ),
+      ],
+    );
+  }
+}
+
+class _Loading extends StatelessWidget {
+  const _Loading();
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        t.box.width(
+          TokenEscape.rawSize(kRailWidth),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Skeleton(height: 24),
+              t.gap.y(Space.xl),
+              const Skeleton(height: 32),
+              t.gap.y(Space.xl3),
+              const Skeleton(height: 28),
+              t.gap.y(Space.xs),
+              const Skeleton(height: 28),
+              t.gap.y(Space.xs),
+              const Skeleton(height: 28),
+            ],
+          ),
+        ),
+        t.gap.x(Space.xl5),
+        const Expanded(child: Skeleton(height: kHeroHeight)),
       ],
     );
   }
@@ -123,12 +122,8 @@ class _Empty extends StatelessWidget {
       children: [
         Text('Library', style: context.titleStyle),
         t.gap.y(Space.xl5),
-        // Only sayable because the read succeeded and answered nothing.
         Text('This device serves no Worlds yet.', style: context.bodyStyle),
         t.gap.y(Space.xs),
-        // And the way out is named rather than left to be found. A person with
-        // a fresh install and an invite in hand is exactly who is reading this,
-        // and the flow they need cannot live in a World's head.
         Text(
           'Found a Space, or enter one from an invite, on the Spaces tab.',
           style: context.proseStyle,
@@ -138,67 +133,181 @@ class _Empty extends StatelessWidget {
   }
 }
 
+class _NoMatches extends StatelessWidget {
+  const _NoMatches();
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(AppIcons.search, color: context.text.l700),
+          t.gap.y(Space.md),
+          Text('No Worlds match this search.', style: context.bodyStyle),
+        ],
+      ),
+    );
+  }
+}
+
 class _Rail extends StatelessWidget {
   const _Rail({
     required this.rows,
+    required this.allCount,
     required this.showing,
+    required this.view,
+    required this.onQuery,
     required this.onSelect,
   });
 
   final List<LibraryRow> rows;
-  final LibraryRow showing;
+  final int allCount;
+  final LibraryRow? showing;
+  final ClientView view;
+  final ValueChanged<String> onQuery;
   final ValueChanged<LibraryRow> onSelect;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: t.padding.only(left: Space.md, bottom: Space.md),
-          child: Text('LIBRARY', style: context.factLabelStyle),
-        ),
-        Expanded(
-          child: ListView.separated(
-            itemCount: rows.length,
-            separatorBuilder: (_, __) => t.gap.y(Space.xxs),
-            itemBuilder: (context, index) {
-              final row = rows[index];
-              return ListTile(
-                selected: row.key == showing.key,
-                onTap: () => onSelect(row),
-                // The mark a World declared, or the plate colour standing in
-                // for one. A row is a *thing* rather than a word, which is the
-                // reference's own device and the reason its rail scans.
-                leading: _Mark(row: row, size: 18),
-                title: Text(
-                  _name(row),
-                  overflow: TextOverflow.ellipsis,
-                  // Dimmed when the Orbit is not up — the reference's own way
-                  // of saying "you have this but it is not installed", and it
-                  // costs no colour the theme did not already answer.
-                  style: switch (row.placement) {
-                    PlacementView.placed => context.bodyStyle,
-                    PlacementView.vacant => context.proseStyle,
-                    PlacementView.unknown => context.bodyStyle
-                        .copyWith(color: context.status.warning.l800),
-                  },
+    final running = rows
+        .where((row) =>
+            _opening(view, row) || row.placement == PlacementView.placed)
+        .toList();
+    final ready = rows
+        .where((row) =>
+            !_opening(view, row) &&
+            row.placement == PlacementView.vacant &&
+            row.unopenable == null)
+        .toList();
+    final unavailable = rows
+        .where((row) => !running.contains(row) && !ready.contains(row))
+        .toList();
+
+    return Container(
+      decoration: BoxDecoration(
+        border: t.stroke.edge(right: context.border.l500),
+      ),
+      padding: t.padding.only(right: Space.xl3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'LIBRARY',
+                  style: context.factLabelStyle.copyWith(
+                    color: context.text.l900,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
-              );
-            },
+              ),
+              Text('$allCount', style: context.labelStyle),
+            ],
           ),
-        ),
-      ],
+          t.gap.y(Space.md),
+          Input(
+            hint: 'Search Worlds',
+            semanticLabel: 'Search Library',
+            size: InputSize.sm,
+            search: true,
+            onChanged: onQuery,
+          ),
+          t.gap.y(Space.xl3),
+          Expanded(
+            child: rows.isEmpty
+                ? Text('No matches', style: context.labelStyle)
+                : ListView(
+                    children: [
+                      if (running.isNotEmpty)
+                        _RailSection(
+                          label: 'RUNNING',
+                          rows: running,
+                          showing: showing,
+                          view: view,
+                          onSelect: onSelect,
+                        ),
+                      if (ready.isNotEmpty)
+                        _RailSection(
+                          label: 'READY',
+                          rows: ready,
+                          showing: showing,
+                          view: view,
+                          onSelect: onSelect,
+                        ),
+                      if (unavailable.isNotEmpty)
+                        _RailSection(
+                          label: 'UNAVAILABLE',
+                          rows: unavailable,
+                          showing: showing,
+                          view: view,
+                          onSelect: onSelect,
+                        ),
+                    ],
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// A World's mark: the glyph it declared, on the colour it declared.
-///
-/// Both are optional and neither is invented. With no declaration this is a
-/// plain neutral tile — which is what a Space row deserves, because no World
-/// has said anything about it.
+class _RailSection extends StatelessWidget {
+  const _RailSection({
+    required this.label,
+    required this.rows,
+    required this.showing,
+    required this.view,
+    required this.onSelect,
+  });
+
+  final String label;
+  final List<LibraryRow> rows;
+  final LibraryRow? showing;
+  final ClientView view;
+  final ValueChanged<LibraryRow> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Padding(
+      padding: t.padding.only(bottom: Space.xl3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: t.padding.only(left: Space.md, bottom: Space.sm),
+            child: Text(label, style: context.factLabelStyle),
+          ),
+          for (final row in rows)
+            Padding(
+              padding: t.padding.only(bottom: Space.xxs),
+              child: ListTile(
+                variant: ListTileVariant.dense,
+                selected: row.key == showing?.key,
+                onTap: () => onSelect(row),
+                leading: _Mark(row: row, size: 20),
+                title: Text(
+                  _name(row),
+                  overflow: TextOverflow.ellipsis,
+                  style: row.placement == PlacementView.unknown
+                      ? context.bodyStyle.copyWith(
+                          color: context.status.warning.l800,
+                        )
+                      : null,
+                ),
+                tooltip: '${_name(row)} — ${_lifecycleCopy(view, row).label}',
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _Mark extends StatelessWidget {
   const _Mark({required this.row, required this.size});
 
@@ -213,9 +322,6 @@ class _Mark extends StatelessWidget {
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: _accent(context, row),
-        // reason: the mark's corner is a proportion of the mark, not a rung —
-        // it is drawn at several sizes and has to keep the same silhouette at
-        // each, which a fixed radius from the scale would not.
         borderRadius: TokenEscape.rawRadius(all: size / 4),
       ),
       child: row.worldMount.isEmpty
@@ -223,7 +329,7 @@ class _Mark extends StatelessWidget {
           : Text(
               row.worldMount.substring(0, 1).toUpperCase(),
               style: context.labelStyle.copyWith(
-                color: context.surface.l50,
+                color: cv.Surface.onSolid.resolve(context),
                 fontWeight: FontWeight.w700,
                 fontSize: size * 0.55,
               ),
@@ -243,20 +349,20 @@ class _Detail extends StatelessWidget {
     return ListView(
       children: [
         _Hero(showing: showing),
-        t.gap.y(Space.xl3),
-        _ActionRow(showing: showing),
         if (showing.routes.isNotEmpty) ...[
-          t.gap.y(Space.xl5),
+          t.gap.y(Space.sm),
           _Routes(showing: showing),
         ],
-        t.gap.y(Space.xl5),
-        _Served(showing: showing),
+        t.gap.y(Space.xl3),
+        _ActionPanel(showing: showing),
+        t.gap.y(Space.xl3),
+        _Details(showing: showing),
+        t.gap.y(Space.xl3),
       ],
     );
   }
 }
 
-/// The plate, derived rather than fetched.
 class _Hero extends StatelessWidget {
   const _Hero({required this.showing});
 
@@ -265,40 +371,61 @@ class _Hero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final view = ClientScope.watch(context);
     final seed = _accent(context, showing);
+    final onHero = cv.Surface.onSolid.resolve(context);
+    final lifecycle = _lifecycleCopy(view, showing);
+
     return Container(
       height: kHeroHeight,
       padding: t.padding.all(Space.xl5),
-      alignment: Alignment.bottomLeft,
       decoration: BoxDecoration(
         borderRadius: t.radius.all(Space.lg),
-        // A gradient off the one declared number. Two stops from the same seed
-        // rather than a second colour nobody declared — the plate is derived,
-        // and derived is all it claims to be.
+        border: Border.all(color: seed.withValues(alpha: 0.55)),
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [seed, Color.lerp(seed, context.surface.l900, 0.55)!],
+          colors: [seed, Color.lerp(seed, context.surface.l950, 0.62)!],
         ),
       ),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Row(
+            children: [
+              Text(
+                showing.worldMount.isEmpty ? 'SPACE' : 'WORLD',
+                style: context.factLabelStyle.copyWith(
+                  color: onHero,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const Spacer(),
+              Badge(
+                label: lifecycle.label,
+                color: onHero,
+                radius: Space.xs,
+              ),
+            ],
+          ),
+          const Spacer(),
           Text(
             _name(showing),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: context.titleStyle.copyWith(
-              color: context.surface.l50,
-              fontSize: context.font.xl2,
+              color: onHero,
+              fontSize: context.font.xl3,
               fontWeight: FontWeight.w700,
             ),
           ),
           if (showing.tagline != null) ...[
             t.gap.y(Space.xs),
-            // The World's own line. Absent when it has not said one.
             Text(
               showing.tagline!,
-              style: context.bodyStyle.copyWith(color: context.surface.l100),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: context.bodyStyle.copyWith(color: onHero),
             ),
           ],
         ],
@@ -307,79 +434,6 @@ class _Hero extends StatelessWidget {
   }
 }
 
-/// The one act on this page, and the facts beside it — the reference's own
-/// arrangement, where the button and the stats share a line.
-class _ActionRow extends StatelessWidget {
-  const _ActionRow({required this.showing});
-
-  final LibraryRow showing;
-
-  @override
-  Widget build(BuildContext context) {
-    final client = ClientScope.of(context);
-    final view = ClientScope.watch(context);
-    final entryPath = showing.opensAt;
-    final opening = entryPath != null &&
-        view.inFlight.contains(ActionKeys.open(showing.orbit, entryPath));
-
-    return Wrap(
-      spacing: 32,
-      runSpacing: 16,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        Button(
-          onPressed: entryPath == null || opening
-              ? null
-              : () => client.dispatch(
-                    ActionRequest.open(
-                      orbit: showing.orbit,
-                      entryPath: entryPath,
-                    ),
-                  ),
-          label: 'Open',
-          isLoading: opening,
-          variant: ButtonVariant.primary,
-          size: ButtonSize.lg,
-          // A row that cannot be opened says which kind of cannot. `/` is not a
-          // guess to make on a World's behalf, and a Space that is not running
-          // is a different case entirely — it opens at its Orbit's own front
-          // door, which is what places it.
-          tooltip: switch (showing.unopenable) {
-            Unopenable.unhosted =>
-              'This build hosts no head for that World, so there is nothing '
-                  'to open.',
-            Unopenable.undeclared =>
-              'This World has not declared where to open it.',
-            null => 'Hand this World to your browser',
-          },
-        ),
-        _Fact(
-          label: 'STATE',
-          value: switch (showing.placement) {
-            PlacementView.placed => 'running',
-            PlacementView.vacant => 'not running',
-            // "Not running" and "could not be asked" are different facts, and
-            // only one of them is worth acting on.
-            PlacementView.unknown => 'could not ask',
-          },
-          tone: showing.placement == PlacementView.unknown
-              ? context.status.warning.l800
-              : null,
-        ),
-        _Fact(label: 'LAST OPENED', value: _ago(showing.lastOpened)),
-        _Fact(label: 'OPENS AT', value: showing.opensAt ?? 'nowhere'),
-        _Fact(label: 'STORE', value: showing.store ?? 'not read', mono: true),
-      ],
-    );
-  }
-}
-
-/// The places the World declared, as a strip.
-///
-/// The reference's tab row, and the same meaning: somewhere inside the thing,
-/// one click away. Each is an `Open` at a path the World named — so pressing
-/// one places the Orbit exactly as `Open` does, which is why they are drawn as
-/// controls rather than as links.
 class _Routes extends StatelessWidget {
   const _Routes({required this.showing});
 
@@ -391,131 +445,363 @@ class _Routes extends StatelessWidget {
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('GO STRAIGHT TO', style: context.factLabelStyle),
-        t.gap.y(Space.sm),
-        Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: [
-            for (final route in showing.routes)
-              Button(
-                onPressed: view.inFlight
-                        .contains(ActionKeys.open(showing.orbit, route.path))
-                    ? null
-                    : () => client.dispatch(
-                          ActionRequest.open(
-                            orbit: showing.orbit,
-                            entryPath: route.path,
-                          ),
-                        ),
-                label: route.label,
-                size: ButtonSize.sm,
-                variant: ButtonVariant.secondary,
-                tooltip: route.path,
-              ),
-          ],
-        ),
-      ],
+    return Container(
+      padding: t.padding.symmetric(h: Space.xl3, v: Space.sm),
+      decoration: BoxDecoration(
+        color: context.surface.l100,
+        border: Border.all(color: context.border.l500, width: t.stroke.xxs),
+        borderRadius: t.radius.all(Space.md),
+      ),
+      child: Row(
+        children: [
+          Text('WORLD', style: context.factLabelStyle),
+          t.gap.x(Space.xl3),
+          Expanded(
+            child: Wrap(
+              spacing: t.size.xs,
+              runSpacing: t.size.xs,
+              children: [
+                for (final route in showing.routes)
+                  Button(
+                    onPressed: view.inFlight.contains(
+                      ActionKeys.open(showing.orbit, route.path),
+                    )
+                        ? null
+                        : () => client.dispatch(
+                              ActionRequest.open(
+                                orbit: showing.orbit,
+                                entryPath: route.path,
+                              ),
+                            ),
+                    label: route.label,
+                    size: ButtonSize.xs,
+                    variant: ButtonVariant.ghost,
+                    tooltip: route.path,
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-class _Served extends StatelessWidget {
-  const _Served({required this.showing});
+class _ActionPanel extends StatelessWidget {
+  const _ActionPanel({required this.showing});
 
   final LibraryRow showing;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    // A browser head is bound to an identity and serves every Orbit that
-    // identity has; an MCP head is authored against one.
-    final serving = ClientScope.watch(context)
+    final client = ClientScope.of(context);
+    final view = ClientScope.watch(context);
+    final entryPath = showing.opensAt;
+    final opening = _opening(view, showing);
+    final running = showing.placement == PlacementView.placed;
+    final lifecycle = _lifecycleCopy(view, showing);
+
+    return Container(
+      padding: t.padding.all(Space.xl3),
+      decoration: BoxDecoration(
+        color: context.surface.l100,
+        border: Border.all(color: context.border.l500, width: t.stroke.xxs),
+        borderRadius: t.radius.all(Space.md),
+      ),
+      child: Wrap(
+        spacing: t.size.xl5,
+        runSpacing: t.size.xl3,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Button(
+            onPressed: entryPath == null || opening
+                ? null
+                : () => client.dispatch(
+                      ActionRequest.open(
+                        orbit: showing.orbit,
+                        entryPath: entryPath,
+                      ),
+                    ),
+            label: opening
+                ? (running ? 'Opening…' : 'Starting…')
+                : (running ? 'View' : 'Open'),
+            semanticLabel: opening
+                ? (running ? 'Opening World' : 'Starting World')
+                : (running ? 'View World' : 'Open World'),
+            icon: running ? AppIcons.openInNew : AppIcons.playArrow,
+            isLoading: opening,
+            variant: ButtonVariant.primary,
+            size: ButtonSize.lg,
+            tooltip: _openTooltip(showing, running: running),
+          ),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 280),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Badge(
+                  label: lifecycle.label,
+                  variant: lifecycle.variant,
+                  dot: lifecycle.dot,
+                  radius: Space.xs,
+                ),
+                t.gap.y(Space.xs),
+                Text(lifecycle.description, style: context.proseStyle),
+              ],
+            ),
+          ),
+          _Fact(label: 'LAST OPENED', value: _ago(showing.lastOpened)),
+        ],
+      ),
+    );
+  }
+}
+
+class _Details extends StatelessWidget {
+  const _Details({required this.showing});
+
+  final LibraryRow showing;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final heads = ClientScope.watch(context)
         .heads
         .where((head) => head.orbit == null || head.orbit == showing.orbit)
-        .map((head) => head.origin)
-        .nonNulls
         .toList();
-    if (serving.isEmpty) return const SizedBox.shrink();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('SERVED BY', style: context.factLabelStyle),
-        t.gap.y(Space.xs),
-        // Where, and not how to get in: a head's URL carries a run credential
-        // and the front page has no use for one. `Open` mints a single-use
-        // ticket of its own, which is what that ceremony is for.
-        for (final origin in serving) Text(origin, style: context.monoStyle),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final split = constraints.maxWidth >= 620;
+        final width = split
+            ? (constraints.maxWidth - t.size.xl3) / 2
+            : constraints.maxWidth;
+        return Wrap(
+          spacing: t.size.xl3,
+          runSpacing: t.size.xl3,
+          children: [
+            SizedBox(
+              width: width,
+              child: _InfoPanel(
+                title: 'WORLD DETAILS',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _Fact(
+                      label: 'OPENS AT',
+                      value: showing.opensAt ?? 'No entry path declared',
+                      mono: true,
+                    ),
+                    t.gap.y(Space.xl3),
+                    _Fact(
+                      label: 'STORE',
+                      value: showing.store ?? 'Not reported',
+                      mono: true,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: _InfoPanel(
+                title: 'SERVING NOW',
+                child: heads.isEmpty
+                    ? Text(
+                        'No matching head has reported an address.',
+                        style: context.proseStyle,
+                      )
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (final head in heads) ...[
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    head.origin ?? '${head.kind} head',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: context.monoStyle,
+                                  ),
+                                ),
+                                t.gap.x(Space.md),
+                                Badge(
+                                  label: head.owned ? 'local' : 'external',
+                                  variant: head.owned
+                                      ? BadgeVariant.success
+                                      : BadgeVariant.outline,
+                                  radius: Space.xs,
+                                ),
+                              ],
+                            ),
+                            t.gap.y(Space.sm),
+                          ],
+                        ],
+                      ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _InfoPanel extends StatelessWidget {
+  const _InfoPanel({required this.title, required this.child});
+
+  final String title;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Container(
+      padding: t.padding.all(Space.xl3),
+      decoration: BoxDecoration(
+        color: context.surface.l50,
+        border: Border.all(color: context.border.l500, width: t.stroke.xxs),
+        borderRadius: t.radius.all(Space.md),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: context.factLabelStyle),
+          t.gap.y(Space.xl3),
+          child,
+        ],
+      ),
     );
   }
 }
 
 class _Fact extends StatelessWidget {
-  const _Fact({
-    required this.label,
-    required this.value,
-    this.tone,
-    this.mono = false,
-  });
+  const _Fact({required this.label, required this.value, this.mono = false});
 
   final String label;
   final String value;
-  final Color? tone;
   final bool mono;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final style = mono ? context.monoStyle : context.bodyStyle;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(label, style: context.factLabelStyle),
         t.gap.y(Space.xxs),
-        Text(value, style: tone == null ? style : style.copyWith(color: tone)),
+        Text(
+          value,
+          maxLines: mono ? 2 : 1,
+          overflow: TextOverflow.ellipsis,
+          style: mono ? context.monoStyle : context.bodyStyle,
+        ),
       ],
     );
   }
 }
 
-/// The colour a row is drawn from.
-///
-/// The World's declared seed when it has one. When it has not — a Space row, or
-/// a World this build does not host — a neutral from the theme rather than a
-/// colour picked here: an accent nobody declared would be this client claiming
-/// a brand on somebody else's behalf.
+enum _Lifecycle { opening, running, ready, unreachable, unavailable }
+
+({
+  String label,
+  String description,
+  BadgeVariant variant,
+  BadgeDotTone dot,
+}) _lifecycleCopy(ClientView view, LibraryRow row) {
+  final lifecycle = _lifecycle(view, row);
+  return switch (lifecycle) {
+    _Lifecycle.opening => (
+        label: row.placement == PlacementView.placed ? 'Opening' : 'Starting',
+        description: row.placement == PlacementView.placed
+            ? 'Opening the running World in your browser.'
+            : 'Placing this Orbit and preparing its World head.',
+        variant: BadgeVariant.solid,
+        dot: BadgeDotTone.brand,
+      ),
+    _Lifecycle.running => (
+        label: 'Running',
+        description: 'This World is already placed and ready to view.',
+        variant: BadgeVariant.success,
+        dot: BadgeDotTone.success,
+      ),
+    _Lifecycle.ready => (
+        label: 'Ready',
+        description: 'Open starts the World and hands it to your browser.',
+        variant: BadgeVariant.outline,
+        dot: BadgeDotTone.neutral,
+      ),
+    _Lifecycle.unreachable => (
+        label: 'Could not ask',
+        description:
+            'The last good Library record is shown while the Space is unreachable.',
+        variant: BadgeVariant.warning,
+        dot: BadgeDotTone.warning,
+      ),
+    _Lifecycle.unavailable => (
+        label: 'Unavailable',
+        description: switch (row.unopenable) {
+          Unopenable.unhosted =>
+            'This build does not host a head for this World.',
+          Unopenable.undeclared => 'This World has not declared an entry path.',
+          null => 'This World cannot be opened from this device.',
+        },
+        variant: BadgeVariant.muted,
+        dot: BadgeDotTone.neutral,
+      ),
+  };
+}
+
+_Lifecycle _lifecycle(ClientView view, LibraryRow row) {
+  if (_opening(view, row)) return _Lifecycle.opening;
+  if (row.unopenable != null || row.opensAt == null) {
+    return _Lifecycle.unavailable;
+  }
+  return switch (row.placement) {
+    PlacementView.placed => _Lifecycle.running,
+    PlacementView.vacant => _Lifecycle.ready,
+    PlacementView.unknown => _Lifecycle.unreachable,
+  };
+}
+
+bool _opening(ClientView view, LibraryRow row) {
+  final path = row.opensAt;
+  return path != null &&
+      view.inFlight.contains(ActionKeys.open(row.orbit, path));
+}
+
+String _openTooltip(LibraryRow row, {required bool running}) {
+  return switch (row.unopenable) {
+    Unopenable.unhosted =>
+      'This build hosts no head for that World, so there is nothing to open.',
+    Unopenable.undeclared => 'This World has not declared where to open it.',
+    null => running
+        ? 'Take me to the running World'
+        : 'Start this World and hand it to my browser',
+  };
+}
+
 Color _accent(BuildContext context, LibraryRow row) => row.accent == null
-    ? context.surface.l400
-    // reason: this colour is the World's own declaration, carried verbatim. It
-    // is data arriving from another program, not a choice this client makes, so
-    // there is no palette token that could stand for it — snapping it to one
-    // would be the client overruling a brand it does not own.
+    ? context.surface.l500
+    // reason: the World owns this seed. Snapping it to Astrolabe's brand ramp
+    // would replace a declaration with the client's opinion.
     : TokenEscape.rawColor(0xFF000000 | row.accent!.toInt());
 
-/// A row nobody named is drawn as unnamed. Substituting the id would put
-/// something in the name column that is not a name, and a person cannot tell
-/// that apart from a World genuinely called that.
 String _name(LibraryRow row) => row.displayName ?? 'Unnamed Space';
 
-/// How long ago, at the scale a person reads.
-///
-/// `null` is *never opened* — the core sends an absence rather than a zero,
-/// precisely so this cannot render it as 1 January 1970.
 String _ago(BigInt? lastOpened) {
-  if (lastOpened == null) return 'never';
+  if (lastOpened == null) return 'Never';
   final then = DateTime.fromMillisecondsSinceEpoch(
     lastOpened.toInt() * 1000,
     isUtc: true,
   );
   final elapsed = DateTime.now().toUtc().difference(then);
-  if (elapsed.isNegative) return 'in the future';
-  if (elapsed.inMinutes < 1) return 'just now';
+  if (elapsed.isNegative) return 'In the future';
+  if (elapsed.inMinutes < 1) return 'Just now';
   if (elapsed.inHours < 1) return _plural(elapsed.inMinutes, 'minute');
   if (elapsed.inDays < 1) return _plural(elapsed.inHours, 'hour');
   return _plural(elapsed.inDays, 'day');
