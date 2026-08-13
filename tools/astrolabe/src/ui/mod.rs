@@ -23,6 +23,7 @@
 pub mod devices;
 pub mod diagnostics;
 pub mod geometry;
+pub mod header;
 pub mod heads;
 pub mod library;
 pub mod members;
@@ -135,39 +136,25 @@ pub fn install(ctx: &egui::Context) {
 /// rendered headlessly for a snapshot has to have it too, or the picture is of
 /// something nobody ships.
 pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
-    egui::Frame::NONE
+    let mut actions = Vec::new();
+    keyboard(ui, chrome, &mut actions);
+
+    // Outside the page margin, because a header inset from the window edge
+    // reads as a row of controls that happen to be at the top rather than as
+    // chrome. Its contents are inset to the same margin, so the first nav item
+    // lines up with the first word of every surface below it.
+    header::draw(ui, app, chrome, &mut actions);
+
+    let page = egui::Frame::NONE
         .inner_margin(geometry::page_margin())
         .show(ui, |ui| draw_page(ui, app, chrome))
-        .inner
+        .inner;
+    actions.extend(page);
+    actions
 }
 
 fn draw_page(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
     let mut actions = Vec::new();
-
-    keyboard(ui, chrome, &mut actions);
-
-    ui.horizontal(|ui| {
-        ui.set_min_height(geometry::bar::lg());
-        for candidate in Surface::ALL {
-            // `selectable_value` carries the selected state into the semantic
-            // tree, so a screen reader hears which surface is current rather
-            // than only that six buttons exist.
-            ui.selectable_value(&mut chrome.surface, candidate, candidate.title());
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // Enabled even while a re-read is in flight would let a person
-            // queue six of them by clicking a button that looked idle.
-            let waiting = app.is_in_flight(&Action::Refresh.key());
-            if ui
-                .add_enabled(!waiting, egui::Button::new("Refresh"))
-                .on_hover_text("Read this machine again (F5)")
-                .clicked()
-            {
-                actions.push(Action::Refresh);
-            }
-        });
-    });
-    ui.separator();
 
     draw_freshness(ui, app);
 

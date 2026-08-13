@@ -117,6 +117,30 @@ pub mod gap {
     }
 }
 
+/// The navigation bar's own measurements.
+///
+/// Its own module because a nav pill is not a button: the reference this client
+/// is proportioned against pads its nav items to 1.8× their text size, which on
+/// an ordinary button would be absurd. Applying these to `Style` would make
+/// every button in the client a navigation pill, so they are set for the header's
+/// scope and nowhere else.
+pub mod nav {
+    use super::{text, UNIT};
+
+    /// Horizontal padding inside a pill.
+    ///
+    /// 1.4× the body size — the reference runs 1.8× at a 16px body, and a dense
+    /// client wants some of that air but not all of it. This is the single
+    /// biggest difference between a row of tabs and a header.
+    pub const PADDING: f32 = text::BASE * 1.4;
+
+    /// Between one pill and the next.
+    ///
+    /// The reference's padding-to-gap ratio is about 4∶1, which is what keeps
+    /// the row reading as separate targets rather than as one striped block.
+    pub const GAP: f32 = UNIT;
+}
+
 /// The page's own breathing room.
 ///
 /// A surface flush against the window edge reads as unfinished whatever else is
@@ -298,6 +322,26 @@ mod tests {
                 "{gap} is not on the rhythm of {UNIT}"
             );
         }
+    }
+
+    /// A nav pill is padded far wider than it is gapped. Lose that ratio and
+    /// the row stops reading as separate targets and becomes one striped block.
+    #[test]
+    fn a_nav_pill_is_padded_wider_than_it_is_gapped() {
+        const {
+            assert!(
+                nav::PADDING > nav::GAP * 3.0,
+                "the nav's padding-to-gap ratio collapsed"
+            );
+        }
+        // And the pill is airier than an ordinary button, which is the whole
+        // reason it has its own measurements.
+        let mut style = Style::default();
+        apply(&mut style);
+        assert!(
+            nav::PADDING > style.spacing.button_padding.x,
+            "a nav pill is padded no wider than an ordinary button"
+        );
     }
 
     /// Gaps express relationships, and the relationships have an order: things

@@ -74,6 +74,34 @@ pub fn prose(ui: &Ui) -> Color32 {
     )
 }
 
+/// A surface one step in front of the page — the header's fill.
+///
+/// Derived from the page rather than named, so it is still the theme deciding.
+/// Lighter in a dark scheme and darker in a light one, which is the direction
+/// "in front" means in each; a fixed nudge would raise the header in one theme
+/// and sink it in the other.
+pub fn raised(ui: &Ui) -> Color32 {
+    let page = behind(ui);
+    let toward = if luminance(page) > 0.5 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    };
+    blend(page, toward, 0.08)
+}
+
+/// The line under the header. A hairline, not a divider: it marks where the
+/// chrome ends rather than separating two regions of equal weight.
+pub fn hairline(ui: &Ui) -> Color32 {
+    let page = behind(ui);
+    let toward = if luminance(page) > 0.5 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    };
+    blend(page, toward, 0.14)
+}
+
 /// What these are drawn on.
 fn behind(ui: &Ui) -> Color32 {
     ui.visuals().panel_fill
