@@ -14,6 +14,8 @@ import 'package:window_manager/window_manager.dart';
 
 import 'src/core/client.dart';
 import 'src/settings/window.dart';
+import 'src/shell/book.dart';
+import 'src/shell/host.dart';
 import 'src/shell/shell.dart';
 import 'src/shell/theme.dart';
 import 'src/shell/window.dart';
@@ -30,27 +32,46 @@ const Size _settingsNarrowest = Size(440, 520);
 
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
-  await windowManager.ensureInitialized();
 
+  // World settings is still a separate process — not this windowing
+  // mechanism. It never starts a second core.
   final settings = WorldSettingsSnapshot.fromArguments(arguments);
-  final options = settings == null
-      ? astrolabeWindowOptions(
-          size: _opening,
-          minimumSize: _narrowest,
-          title: 'Astrolabe',
-        )
-      : astrolabeWindowOptions(
-          size: _settingsOpening,
-          minimumSize: _settingsNarrowest,
-          title: '${settings.name} settings',
-        );
-
-  await showAstrolabeWindow(options);
-
   if (settings != null) {
+    await windowManager.ensureInitialized();
+    await showAstrolabeWindow(
+      astrolabeWindowOptions(
+        size: _settingsOpening,
+        minimumSize: _settingsNarrowest,
+        title: '${settings.name} settings',
+      ),
+    );
     runApp(WorldSettingsApp(snapshot: settings));
     return;
   }
+
+  // Sub-engines get argv from the plugin (`multi_window`, id, argument).
+  // `fromCurrentEngine` is not ready yet on that isolate, and
+  // `window_manager` is not registered there — asking either is how
+  // this window used to stay white.
+  if (isBookEngine(arguments)) {
+    final client = await Client.start();
+    runApp(BookApp(client: client));
+    return;
+  }
+
+  if (isSubEngine(arguments)) {
+    debugPrint('unknown sub-window arguments: $arguments');
+    return;
+  }
+
+  await windowManager.ensureInitialized();
+  await showAstrolabeWindow(
+    astrolabeWindowOptions(
+      size: _opening,
+      minimumSize: _narrowest,
+      title: 'Astrolabe',
+    ),
+  );
 
   // The core comes up before the first frame, so nothing is ever drawn against
   // a client that does not exist yet.

@@ -7,11 +7,85 @@
 library;
 
 import 'package:covalence/covalence.dart' hide Surface;
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'caption.dart';
 import 'type.dart';
+
+/// How a window is moved, sized, and closed.
+///
+/// The main engine uses [window_manager]. A sub-engine must not: that
+/// plugin is registered only on the main engine, and a second copy would
+/// fight it for the process. [NativeWindowChrome] talks to the runner
+/// instead — the alternative CLIENT-43 named for the book window.
+abstract class WindowChrome {
+  Future<void> minimize();
+  Future<void> toggleMaximize();
+  Future<bool> isMaximized();
+  Future<void> startDragging();
+  Future<void> hide();
+  Future<void> close();
+}
+
+/// The main engine, and the World-settings process.
+class ManagerWindowChrome implements WindowChrome {
+  const ManagerWindowChrome();
+
+  @override
+  Future<void> minimize() => windowManager.minimize();
+
+  @override
+  Future<void> toggleMaximize() async {
+    if (await windowManager.isMaximized()) {
+      await windowManager.unmaximize();
+    } else {
+      await windowManager.maximize();
+    }
+  }
+
+  @override
+  Future<bool> isMaximized() => windowManager.isMaximized();
+
+  @override
+  Future<void> startDragging() => windowManager.startDragging();
+
+  @override
+  Future<void> hide() => windowManager.hide();
+
+  @override
+  Future<void> close() => windowManager.close();
+}
+
+/// A sub-engine's chrome. The runner owns the HWND; this channel is
+/// registered only there.
+class NativeWindowChrome implements WindowChrome {
+  const NativeWindowChrome();
+
+  static const MethodChannel _channel =
+      MethodChannel('astrolabe/window_chrome');
+
+  @override
+  Future<void> minimize() => _channel.invokeMethod<void>('minimize');
+
+  @override
+  Future<void> toggleMaximize() =>
+      _channel.invokeMethod<void>('toggle_maximize');
+
+  @override
+  Future<bool> isMaximized() async =>
+      await _channel.invokeMethod<bool>('is_maximized') ?? false;
+
+  @override
+  Future<void> startDragging() => _channel.invokeMethod<void>('start_drag');
+
+  @override
+  Future<void> hide() => _channel.invokeMethod<void>('hide');
+
+  @override
+  Future<void> close() => _channel.invokeMethod<void>('close');
+}
 
 /// The title band's Windows-sized height. It is chrome, not page spacing.
 const double kBarHeight = 48;
@@ -72,6 +146,7 @@ class AstrolabeWindowFrame extends StatefulWidget {
     this.title,
     this.captionBuilder,
     this.wordmarkMinWidth,
+    this.chrome = const ManagerWindowChrome(),
   }) : assert(title != null || captionBuilder != null);
 
   final Widget body;
@@ -82,6 +157,10 @@ class AstrolabeWindowFrame extends StatefulWidget {
   /// When null, the wordmark is always shown. Primary chrome may hide it at a
   /// narrow breakpoint to preserve its navigation targets.
   final double? wordmarkMinWidth;
+
+  /// How this window is moved and closed. The main engine uses
+  /// [ManagerWindowChrome]; a book window uses [NativeWindowChrome].
+  final WindowChrome chrome;
 
   @override
   State<AstrolabeWindowFrame> createState() => _AstrolabeWindowFrameState();
@@ -94,12 +173,19 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
   @override
   void initState() {
     super.initState();
-    windowManager.addListener(this);
+    if (widget.chrome is ManagerWindowChrome) {
+      windowManager.addListener(this);
+    }
+    widget.chrome.isMaximized().then((maximised) {
+      if (mounted) setState(() => _maximised = maximised);
+    });
   }
 
   @override
   void dispose() {
-    windowManager.removeListener(this);
+    if (widget.chrome is ManagerWindowChrome) {
+      windowManager.removeListener(this);
+    }
     super.dispose();
   }
 
@@ -110,16 +196,14 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
   void onWindowUnmaximize() => setState(() => _maximised = false);
 
   Future<void> _toggleMaximise() async {
-    if (await windowManager.isMaximized()) {
-      await windowManager.unmaximize();
-    } else {
-      await windowManager.maximize();
-    }
+    await widget.chrome.toggleMaximize();
+    final maximised = await widget.chrome.isMaximized();
+    if (mounted) setState(() => _maximised = maximised);
   }
 
   Future<void> _close() => switch (widget.closePolicy) {
-        AstrolabeWindowClosePolicy.hide => windowManager.hide(),
-        AstrolabeWindowClosePolicy.close => windowManager.close(),
+        AstrolabeWindowClosePolicy.hide => widget.chrome.hide(),
+        AstrolabeWindowClosePolicy.close => widget.chrome.close(),
       };
 
   @override
@@ -134,6 +218,7 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
             builder: widget.captionBuilder,
             wordmarkMinWidth: widget.wordmarkMinWidth,
             maximised: _maximised,
+            chrome: widget.chrome,
             onToggleMaximise: _toggleMaximise,
             closePolicy: widget.closePolicy,
             onClose: _close,
@@ -151,6 +236,7 @@ class _Caption extends StatelessWidget {
     required this.builder,
     required this.wordmarkMinWidth,
     required this.maximised,
+    required this.chrome,
     required this.onToggleMaximise,
     required this.closePolicy,
     required this.onClose,
@@ -160,6 +246,7 @@ class _Caption extends StatelessWidget {
   final AstrolabeCaptionBuilder? builder;
   final double? wordmarkMinWidth;
   final bool maximised;
+  final WindowChrome chrome;
   final Future<void> Function() onToggleMaximise;
   final AstrolabeWindowClosePolicy closePolicy;
   final Future<void> Function() onClose;
@@ -178,7 +265,7 @@ class _Caption extends StatelessWidget {
         ),
         child: GestureDetector(
           behavior: HitTestBehavior.translucent,
-          onPanStart: (_) => windowManager.startDragging(),
+          onPanStart: (_) => chrome.startDragging(),
           onDoubleTap: onToggleMaximise,
           child: LayoutBuilder(
             builder: (context, constraints) {
@@ -219,7 +306,7 @@ class _Caption extends StatelessWidget {
                   CaptionControls(
                     height: kBarHeight,
                     maximised: maximised,
-                    onMinimise: windowManager.minimize,
+                    onMinimise: chrome.minimize,
                     onToggleMaximise: onToggleMaximise,
                     onClose: onClose,
                     closeTooltip: closePolicy == AstrolabeWindowClosePolicy.hide

@@ -28,6 +28,9 @@ dependencies:
   # Closing minimises rather than stopping a peer, so there has to be somewhere
   # to minimise to.
   tray_manager: ^0.3.2
+  # Engine-per-window, until Flutter's official windowing API is stable.
+  # The book is a second OS window; this is the seam CLIENT-43 named.
+  desktop_multi_window: 0.3.0
   freezed_annotation: ^3.1.0
 
 dev_dependencies:

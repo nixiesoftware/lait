@@ -16,6 +16,7 @@ import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
 import '../surfaces/surfaces.dart';
+import 'host.dart';
 import 'record.dart';
 import 'type.dart';
 import 'window.dart';
@@ -156,6 +157,15 @@ class _PrimaryCaption extends StatelessWidget {
           onPressed: () => onSurface(Surface.devices),
         ),
         const Spacer(),
+        Button(
+          onPressed: summonBook,
+          icon: AppIcons.person,
+          semanticLabel: 'Address book',
+          variant: ButtonVariant.ghost,
+          size: ButtonSize.iconSm,
+          tooltip: 'Open the address book',
+        ),
+        t.gap.x(Space.xs),
         Button(
           onPressed: rereading
               ? null
