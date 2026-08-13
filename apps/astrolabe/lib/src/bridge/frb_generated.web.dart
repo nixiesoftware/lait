@@ -123,6 +123,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<RouteRow> dco_decode_list_route_row(dynamic raw);
+
+  @protected
   List<StorageRow> dco_decode_list_storage_row(dynamic raw);
 
   @protected
@@ -169,6 +172,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PlacementView dco_decode_placement_view(dynamic raw);
+
+  @protected
+  RouteRow dco_decode_route_row(dynamic raw);
 
   @protected
   SpaceRow dco_decode_space_row(dynamic raw);
@@ -300,6 +306,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<RouteRow> sse_decode_list_route_row(SseDeserializer deserializer);
+
+  @protected
   List<StorageRow> sse_decode_list_storage_row(SseDeserializer deserializer);
 
   @protected
@@ -350,6 +359,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PlacementView sse_decode_placement_view(SseDeserializer deserializer);
+
+  @protected
+  RouteRow sse_decode_route_row(SseDeserializer deserializer);
 
   @protected
   SpaceRow sse_decode_space_row(SseDeserializer deserializer);
@@ -492,6 +504,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       Uint8List self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_route_row(List<RouteRow> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_storage_row(
       List<StorageRow> self, SseSerializer serializer);
 
@@ -546,6 +561,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_placement_view(PlacementView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_route_row(RouteRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_space_row(SpaceRow self, SseSerializer serializer);

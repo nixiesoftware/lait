@@ -19,6 +19,37 @@ pub struct LibraryEntry {
     /// Where `Open` lands, and when nowhere, why.
     pub opens: Opens,
     pub placement: Placement,
+    /// What this World says about how it should be drawn.
+    ///
+    /// Declared by the World, carried verbatim, and never invented here. A row
+    /// for a World this build does not host carries an empty template, which is
+    /// the honest answer: nothing has said anything about it.
+    pub template: Template,
+}
+
+/// A World's own presentation template.
+///
+/// Everything in it is declared statically by the World and resolved here —
+/// there is no asset to fetch and no call to make, which is what keeps listing
+/// as cheap as reading a registry. A client draws the slots that are filled and
+/// leaves the rest alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Template {
+    /// One line saying what this World is for.
+    pub tagline: Option<String>,
+    /// The colour it is drawn from, packed `0xRRGGBB`. A seed a client derives
+    /// a plate or an accent from, locally.
+    pub accent: Option<u32>,
+    /// Named places inside it, with `{space}` already resolved for this Orbit —
+    /// resolved here rather than on a surface, because the substitution is a
+    /// fact about this row and not a decision about how to draw it.
+    pub routes: Vec<Route>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub label: String,
+    pub path: String,
 }
 
 /// Where `Open` sends the browser for one row — the distinction between the two
@@ -110,9 +141,7 @@ impl Client {
                 )));
             }
             Err(error) => {
-                return Err(ClientError::unreachable(format!(
-                    "read host context: {error:#}"
-                )));
+                return Err(ClientError::unreachable(format!("{error:#}")));
             }
         };
         let HostReply::Context { orbits, .. } = context else {
@@ -165,6 +194,7 @@ impl Client {
                     world_mount: String::new(),
                     display_name: (!orbit.name.trim().is_empty()).then(|| orbit.name.clone()),
                     opens: Opens::Front,
+                    template: Template::default(),
                     placement,
                 });
                 continue;
@@ -191,6 +221,19 @@ impl Client {
                         p.display()
                             .entry_path()
                             .map_or(Opens::Undeclared, |path| Opens::Declared(path.to_owned()))
+                    }),
+                    template: package.map_or_else(Template::default, |p| Template {
+                        tagline: p.display().tagline().map(str::to_owned),
+                        accent: p.display().accent(),
+                        routes: p
+                            .display()
+                            .routes()
+                            .iter()
+                            .map(|route| Route {
+                                label: route.label().to_owned(),
+                                path: route.resolve(&orbit.space),
+                            })
+                            .collect(),
                     }),
                     placement,
                 });
@@ -249,6 +292,7 @@ mod tests {
             world_mount: "issues".into(),
             display_name: None,
             opens: Opens::Undeclared,
+            template: Template::default(),
             placement: Placement::Vacant,
         };
         assert!(entry.display_name.is_none());

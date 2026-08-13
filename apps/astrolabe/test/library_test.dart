@@ -43,6 +43,8 @@ LibraryRow _row({
   PlacementView placement = PlacementView.vacant,
   String? opensAt = '/',
   Unopenable? unopenable,
+  String? tagline,
+  List<RouteRow> routes = const [],
 }) =>
     LibraryRow(
       key: '$orbit/$mount',
@@ -53,6 +55,8 @@ LibraryRow _row({
       placement: placement,
       opensAt: opensAt,
       unopenable: unopenable,
+      tagline: tagline,
+      routes: routes,
     );
 
 Future<List<ActionRequest>> _pump(WidgetTester tester, ClientView view) async {
@@ -165,6 +169,43 @@ void main() {
       const ActionRequest.open(orbit: 'orb_two', entryPath: '/spaces/two'),
       reason: 'Open followed the page rather than the selection',
     );
+  });
+
+  testWidgets('a declared route opens at the path the World named',
+      (tester) async {
+    // The template is the World's, and the client only draws it. A route that
+    // resolved to a path this side invented would be the client holding a copy
+    // of a URL grammar it does not own.
+    final asked = await _pump(
+      tester,
+      _view(library: [
+        _row(
+          orbit: 'orb_one',
+          name: 'Issues',
+          routes: const [RouteRow(label: 'Board', path: '/spaces/orb_one/board')],
+        ),
+      ]),
+    );
+
+    await tester.tap(find.text('Board'));
+    await tester.pump();
+    expect(
+      asked.single,
+      const ActionRequest.open(
+        orbit: 'orb_one',
+        entryPath: '/spaces/orb_one/board',
+      ),
+    );
+  });
+
+  testWidgets('a row with no template draws none of it', (tester) async {
+    // A Space row, and a World this build does not host, both arrive with an
+    // empty template. Nothing is invented to fill the space.
+    await _pump(
+      tester,
+      _view(library: [_row(orbit: 'orb_one', mount: '', name: 'Work')]),
+    );
+    expect(find.text('GO STRAIGHT TO'), findsNothing);
   });
 
   testWidgets('a head address is drawn without its credential', (tester) async {

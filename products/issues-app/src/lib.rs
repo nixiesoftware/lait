@@ -66,9 +66,30 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
             // the product's name, not the mount: `issues` is a namespace key
             // that prefixes tool names and route segments, and a person reading
             // a list should see what the thing is called.
-            .with_display(DISPLAY_NAME, Some("📋"), Some("/"))
+            .with_display(DISPLAY_NAME, Some("📋"), Some("/"))?
+            .with_tagline("Plans, issues, and the Specs that govern them")?
+            // The tracker's own accent, as a seed rather than an asset. A
+            // client derives a plate, an accent or a mark from it locally,
+            // which is what keeps listing free.
+            .with_accent(0x004C_6EF5)?
+            .with_routes(ROUTES)
     })
 }
+
+/// The places inside this World somebody can go straight to.
+///
+/// Declared here because this World owns its URL grammar: the viewer addresses
+/// a top-level view as `/spaces/{space}/{view}`, and a client that built that
+/// shape itself would be holding a copy of a grammar it does not own — and
+/// would keep building it after the day it changed.
+const ROUTES: &[world_interface::Route] = &[
+    world_interface::Route::new("Board", "/spaces/{space}/board"),
+    world_interface::Route::new("Issues", "/spaces/{space}/list"),
+    world_interface::Route::new("Specs", "/spaces/{space}/specs"),
+    world_interface::Route::new("Projects", "/spaces/{space}/projects"),
+    world_interface::Route::new("Activity", "/spaces/{space}/activity"),
+    world_interface::Route::new("Settings", "/spaces/{space}/settings"),
+];
 
 /// What this World is called when a person sees it in a list.
 ///

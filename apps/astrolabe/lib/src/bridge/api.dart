@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `emit`, `empty`, `into_action`, `project`, `space_ref`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Start the core. Idempotent: a second call is a no-op rather than a second
 /// runtime, because two runtimes would be two supervisors of the same devices.
@@ -438,6 +438,18 @@ class LibraryRow {
   /// Where the Orbit's store lives, when the registry could be read.
   final String? store;
 
+  /// What the World says about how it should be drawn. Empty for a Space row
+  /// and for a World this build does not host — in both cases because nothing
+  /// has said anything, which is a fact rather than a blank.
+  final String? tagline;
+
+  /// Packed `0xRRGGBB`. A seed the interface derives a plate from locally;
+  /// there is no asset here and nothing to fetch.
+  final int? accent;
+
+  /// Named places inside the World, already resolved for this Orbit.
+  final List<RouteRow> routes;
+
   const LibraryRow({
     required this.key,
     required this.orbit,
@@ -449,6 +461,9 @@ class LibraryRow {
     this.unopenable,
     this.lastOpened,
     this.store,
+    this.tagline,
+    this.accent,
+    required this.routes,
   });
 
   @override
@@ -462,7 +477,10 @@ class LibraryRow {
       opensAt.hashCode ^
       unopenable.hashCode ^
       lastOpened.hashCode ^
-      store.hashCode;
+      store.hashCode ^
+      tagline.hashCode ^
+      accent.hashCode ^
+      routes.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -478,7 +496,10 @@ class LibraryRow {
           opensAt == other.opensAt &&
           unopenable == other.unopenable &&
           lastOpened == other.lastOpened &&
-          store == other.store;
+          store == other.store &&
+          tagline == other.tagline &&
+          accent == other.accent &&
+          routes == other.routes;
 }
 
 class MemberRow {
@@ -581,6 +602,30 @@ enum PlacementView {
   vacant,
   unknown,
   ;
+}
+
+/// One named place inside a World.
+class RouteRow {
+  final String label;
+
+  /// Absolute, and resolved: `Open` takes it as it stands.
+  final String path;
+
+  const RouteRow({
+    required this.label,
+    required this.path,
+  });
+
+  @override
+  int get hashCode => label.hashCode ^ path.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RouteRow &&
+          runtimeType == other.runtimeType &&
+          label == other.label &&
+          path == other.path;
 }
 
 /// The Space somebody is administering, as it last answered.

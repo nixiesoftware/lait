@@ -446,6 +446,9 @@ impl SseDecode for crate::api::LibraryRow {
         let mut var_unopenable = <Option<crate::api::Unopenable>>::sse_decode(deserializer);
         let mut var_lastOpened = <Option<u64>>::sse_decode(deserializer);
         let mut var_store = <Option<String>>::sse_decode(deserializer);
+        let mut var_tagline = <Option<String>>::sse_decode(deserializer);
+        let mut var_accent = <Option<u32>>::sse_decode(deserializer);
+        let mut var_routes = <Vec<crate::api::RouteRow>>::sse_decode(deserializer);
         return crate::api::LibraryRow {
             key: var_key,
             orbit: var_orbit,
@@ -457,6 +460,9 @@ impl SseDecode for crate::api::LibraryRow {
             unopenable: var_unopenable,
             last_opened: var_lastOpened,
             store: var_store,
+            tagline: var_tagline,
+            accent: var_accent,
+            routes: var_routes,
         };
     }
 }
@@ -576,6 +582,18 @@ impl SseDecode for Vec<u8> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<u8>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::RouteRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::RouteRow>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -766,6 +784,18 @@ impl SseDecode for crate::api::PlacementView {
             1 => crate::api::PlacementView::Vacant,
             2 => crate::api::PlacementView::Unknown,
             _ => unreachable!("Invalid variant for PlacementView: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::RouteRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_label = <String>::sse_decode(deserializer);
+        let mut var_path = <String>::sse_decode(deserializer);
+        return crate::api::RouteRow {
+            label: var_label,
+            path: var_path,
         };
     }
 }
@@ -1121,6 +1151,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::LibraryRow {
             self.unopenable.into_into_dart().into_dart(),
             self.last_opened.into_into_dart().into_dart(),
             self.store.into_into_dart().into_dart(),
+            self.tagline.into_into_dart().into_dart(),
+            self.accent.into_into_dart().into_dart(),
+            self.routes.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1212,6 +1245,22 @@ impl flutter_rust_bridge::IntoDart for crate::api::PlacementView {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::PlacementView {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::PlacementView> for crate::api::PlacementView {
     fn into_into_dart(self) -> crate::api::PlacementView {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::RouteRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.label.into_into_dart().into_dart(),
+            self.path.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::RouteRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::RouteRow> for crate::api::RouteRow {
+    fn into_into_dart(self) -> crate::api::RouteRow {
         self
     }
 }
@@ -1501,6 +1550,9 @@ impl SseEncode for crate::api::LibraryRow {
         <Option<crate::api::Unopenable>>::sse_encode(self.unopenable, serializer);
         <Option<u64>>::sse_encode(self.last_opened, serializer);
         <Option<String>>::sse_encode(self.store, serializer);
+        <Option<String>>::sse_encode(self.tagline, serializer);
+        <Option<u32>>::sse_encode(self.accent, serializer);
+        <Vec<crate::api::RouteRow>>::sse_encode(self.routes, serializer);
     }
 }
 
@@ -1600,6 +1652,16 @@ impl SseEncode for Vec<u8> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <u8>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::RouteRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::RouteRow>::sse_encode(item, serializer);
         }
     }
 }
@@ -1771,6 +1833,14 @@ impl SseEncode for crate::api::PlacementView {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::RouteRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.label, serializer);
+        <String>::sse_encode(self.path, serializer);
     }
 }
 

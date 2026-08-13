@@ -111,6 +111,23 @@ pub struct LibraryRow {
     pub last_opened: Option<u64>,
     /// Where the Orbit's store lives, when the registry could be read.
     pub store: Option<String>,
+    /// What the World says about how it should be drawn. Empty for a Space row
+    /// and for a World this build does not host — in both cases because nothing
+    /// has said anything, which is a fact rather than a blank.
+    pub tagline: Option<String>,
+    /// Packed `0xRRGGBB`. A seed the interface derives a plate from locally;
+    /// there is no asset here and nothing to fetch.
+    pub accent: Option<u32>,
+    /// Named places inside the World, already resolved for this Orbit.
+    pub routes: Vec<RouteRow>,
+}
+
+/// One named place inside a World.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteRow {
+    pub label: String,
+    /// Absolute, and resolved: `Open` takes it as it stands.
+    pub path: String,
 }
 
 /// Whether an Orbit is currently up. Three states, because "not running" and
@@ -573,6 +590,17 @@ fn project(app: &App) -> ClientView {
                             .map(|orbit| orbit.last_opened)
                             .filter(|seconds| *seconds > 0),
                         store: registered.map(|orbit| orbit.path.clone()),
+                        tagline: entry.template.tagline.clone(),
+                        accent: entry.template.accent,
+                        routes: entry
+                            .template
+                            .routes
+                            .iter()
+                            .map(|route| RouteRow {
+                                label: route.label.clone(),
+                                path: route.path.clone(),
+                            })
+                            .collect(),
                     }
                 })
                 .collect()
@@ -723,6 +751,7 @@ mod tests {
             world_mount: "issues".into(),
             display_name: Some("Issues".into()),
             opens: Opens::Declared("/".into()),
+            template: crate::client::library::Template::default(),
             placement: CorePlacement::Vacant,
         }]);
         app.absorb_context(crate::client::host::HostContext {
@@ -760,6 +789,7 @@ mod tests {
                 world_mount: "issues".into(),
                 display_name: None,
                 opens: Opens::Undeclared,
+                template: crate::client::library::Template::default(),
                 placement: CorePlacement::Placed,
             },
             LibraryEntry {
@@ -768,6 +798,7 @@ mod tests {
                 world_mount: "other".into(),
                 display_name: None,
                 opens: Opens::Unhosted,
+                template: crate::client::library::Template::default(),
                 placement: CorePlacement::Placed,
             },
             LibraryEntry {
@@ -776,6 +807,7 @@ mod tests {
                 world_mount: String::new(),
                 display_name: None,
                 opens: Opens::Front,
+                template: crate::client::library::Template::default(),
                 placement: CorePlacement::Vacant,
             },
         ]);

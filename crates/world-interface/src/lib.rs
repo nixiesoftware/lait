@@ -385,7 +385,64 @@ pub struct Display {
     /// `None` means this World is not openable in a browser, which is a real
     /// answer and not a missing one.
     entry_path: Option<&'static str>,
+    /// One line saying what this World is for, drawn under the name.
+    ///
+    /// A line, not a paragraph: it sits under a title in a list and in a detail
+    /// pane, and a World that needs three sentences to say what it is has a
+    /// naming problem rather than a space problem.
+    tagline: Option<&'static str>,
+    /// The colour this World is drawn from, packed `0xRRGGBB`.
+    ///
+    /// A *seed*, not an asset, for exactly the reason [`Display::icon`] is a
+    /// glyph rather than an image path: a Library that fetched a banner per row
+    /// to draw itself would make listing cost what opening costs. A client
+    /// derives whatever it needs from this one number, and derives it locally.
+    accent: Option<u32>,
+    /// Named places inside this World somebody can go straight to.
+    ///
+    /// The World declares them because the World owns its own URL grammar; the
+    /// client knows only which Orbit it is opening. A path may carry the single
+    /// placeholder [`SPACE_PLACEHOLDER`], which the client replaces with the
+    /// space it is opening. That is the whole of the coupling, and it runs in
+    /// the direction that keeps a World's routes the World's business.
+    routes: &'static [Route],
 }
+
+/// One named place inside a World.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route {
+    label: &'static str,
+    path: &'static str,
+}
+
+impl Route {
+    pub const fn new(label: &'static str, path: &'static str) -> Self {
+        Self { label, path }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        self.label
+    }
+
+    /// The declared path, with [`SPACE_PLACEHOLDER`] still in it.
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    /// The path for one space.
+    pub fn resolve(&self, space: &str) -> String {
+        self.path.replace(SPACE_PLACEHOLDER, space)
+    }
+}
+
+/// The one substitution a declared route may ask for.
+pub const SPACE_PLACEHOLDER: &str = "{space}";
+
+/// How many routes a World may declare.
+///
+/// A strip of places, not a menu. Past this, a client is drawing navigation the
+/// World should be drawing on its own page, where it has the room.
+pub const MAX_ROUTES: usize = 8;
 
 impl Display {
     /// The honest default for a World that has not said: named by its mount,
@@ -396,6 +453,9 @@ impl Display {
             name: mount,
             icon: None,
             entry_path: None,
+            tagline: None,
+            accent: None,
+            routes: &[],
         }
     }
 
@@ -409,6 +469,18 @@ impl Display {
 
     pub const fn entry_path(&self) -> Option<&'static str> {
         self.entry_path
+    }
+
+    pub const fn tagline(&self) -> Option<&'static str> {
+        self.tagline
+    }
+
+    pub const fn accent(&self) -> Option<u32> {
+        self.accent
+    }
+
+    pub const fn routes(&self) -> &'static [Route] {
+        self.routes
     }
 }
 
@@ -485,6 +557,98 @@ impl WorldClientPackage {
             name,
             icon,
             entry_path,
+            ..self.display
+        };
+        Ok(self)
+    }
+
+    /// Say, in one line, what this World is for.
+    pub fn with_tagline(mut self, tagline: &'static str) -> Result<Self, Failure> {
+        let trimmed = tagline.trim();
+        if trimmed.is_empty() {
+            return Err(Failure::new(format!(
+                "World '{}' declares an empty tagline",
+                self.world
+            )));
+        }
+        // The bound is here rather than in a client, because a client that had
+        // to elide would be deciding what a World meant to say.
+        const LONGEST: usize = 96;
+        if trimmed.chars().count() > LONGEST {
+            return Err(Failure::new(format!(
+                "World '{}' declares a tagline of {} characters; a tagline is one line and stops at {LONGEST}",
+                self.world,
+                trimmed.chars().count()
+            )));
+        }
+        self.display = Display {
+            tagline: Some(tagline),
+            ..self.display
+        };
+        Ok(self)
+    }
+
+    /// Say which colour this World is drawn from, packed `0xRRGGBB`.
+    pub fn with_accent(mut self, accent: u32) -> Result<Self, Failure> {
+        if accent > 0x00FF_FFFF {
+            return Err(Failure::new(format!(
+                "World '{}' declares accent {accent:#08x}, which is not a 24-bit colour",
+                self.world
+            )));
+        }
+        self.display = Display {
+            accent: Some(accent),
+            ..self.display
+        };
+        Ok(self)
+    }
+
+    /// Say which places inside this World somebody can go straight to.
+    pub fn with_routes(mut self, routes: &'static [Route]) -> Result<Self, Failure> {
+        if routes.len() > MAX_ROUTES {
+            return Err(Failure::new(format!(
+                "World '{}' declares {} routes; a strip of places stops at {MAX_ROUTES}",
+                self.world,
+                routes.len()
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        for route in routes {
+            if route.label.trim().is_empty() {
+                return Err(Failure::new(format!(
+                    "World '{}' declares a route with no label",
+                    self.world
+                )));
+            }
+            if !seen.insert(route.label) {
+                return Err(Failure::new(format!(
+                    "World '{}' declares two routes labelled '{}'",
+                    self.world, route.label
+                )));
+            }
+            // The rule an entry path is held to, for the same reason: a route
+            // is joined onto a head's root, so a relative or traversing one
+            // resolves somewhere the World does not own.
+            if !route.path.starts_with('/') || route.path.contains("..") {
+                return Err(Failure::new(format!(
+                    "World '{}' declares route path '{}', which must be absolute and must not traverse",
+                    self.world, route.path
+                )));
+            }
+            // One placeholder, spelled one way. A path carrying any other brace
+            // expression is a World expecting a substitution no client makes,
+            // which opens a URL with a literal brace in it.
+            let without = route.path.replace(SPACE_PLACEHOLDER, "");
+            if without.contains('{') || without.contains('}') {
+                return Err(Failure::new(format!(
+                    "World '{}' declares route path '{}' with a placeholder other than {SPACE_PLACEHOLDER}",
+                    self.world, route.path
+                )));
+            }
+        }
+        self.display = Display {
+            routes,
+            ..self.display
         };
         Ok(self)
     }
