@@ -449,8 +449,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   LibraryRow dco_decode_library_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 16)
+      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
     return LibraryRow(
       key: dco_decode_String(arr[0]),
       orbit: dco_decode_String(arr[1]),
@@ -462,9 +462,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       unopenable: dco_decode_opt_box_autoadd_unopenable(arr[7]),
       lastOpened: dco_decode_opt_box_autoadd_u_64(arr[8]),
       store: dco_decode_opt_String(arr[9]),
-      tagline: dco_decode_opt_String(arr[10]),
-      accent: dco_decode_opt_box_autoadd_u_32(arr[11]),
-      routes: dco_decode_list_route_row(arr[12]),
+      version: dco_decode_opt_box_autoadd_u_32(arr[10]),
+      syncState: dco_decode_opt_String(arr[11]),
+      syncDetail: dco_decode_opt_String(arr[12]),
+      tagline: dco_decode_opt_String(arr[13]),
+      accent: dco_decode_opt_box_autoadd_u_32(arr[14]),
+      routes: dco_decode_list_route_row(arr[15]),
     );
   }
 
@@ -1011,6 +1014,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_unopenable = sse_decode_opt_box_autoadd_unopenable(deserializer);
     var var_lastOpened = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_store = sse_decode_opt_String(deserializer);
+    var var_version = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_syncState = sse_decode_opt_String(deserializer);
+    var var_syncDetail = sse_decode_opt_String(deserializer);
     var var_tagline = sse_decode_opt_String(deserializer);
     var var_accent = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_routes = sse_decode_list_route_row(deserializer);
@@ -1025,6 +1031,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         unopenable: var_unopenable,
         lastOpened: var_lastOpened,
         store: var_store,
+        version: var_version,
+        syncState: var_syncState,
+        syncDetail: var_syncDetail,
         tagline: var_tagline,
         accent: var_accent,
         routes: var_routes);
@@ -1656,6 +1665,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_opt_box_autoadd_unopenable(self.unopenable, serializer);
     sse_encode_opt_box_autoadd_u_64(self.lastOpened, serializer);
     sse_encode_opt_String(self.store, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.version, serializer);
+    sse_encode_opt_String(self.syncState, serializer);
+    sse_encode_opt_String(self.syncDetail, serializer);
     sse_encode_opt_String(self.tagline, serializer);
     sse_encode_opt_box_autoadd_u_32(self.accent, serializer);
     sse_encode_list_route_row(self.routes, serializer);

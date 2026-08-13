@@ -438,6 +438,13 @@ class LibraryRow {
   /// Where the Orbit's store lives, when the registry could be read.
   final String? store;
 
+  /// Reviewed implementation version for the hosted World.
+  final int? version;
+
+  /// The running Orbit's sync gate, kept as transport facts for Dart wording.
+  final String? syncState;
+  final String? syncDetail;
+
   /// What the World says about how it should be drawn. Empty for a Space row
   /// and for a World this build does not host — in both cases because nothing
   /// has said anything, which is a fact rather than a blank.
@@ -461,6 +468,9 @@ class LibraryRow {
     this.unopenable,
     this.lastOpened,
     this.store,
+    this.version,
+    this.syncState,
+    this.syncDetail,
     this.tagline,
     this.accent,
     required this.routes,
@@ -478,6 +488,9 @@ class LibraryRow {
       unopenable.hashCode ^
       lastOpened.hashCode ^
       store.hashCode ^
+      version.hashCode ^
+      syncState.hashCode ^
+      syncDetail.hashCode ^
       tagline.hashCode ^
       accent.hashCode ^
       routes.hashCode;
@@ -497,6 +510,9 @@ class LibraryRow {
           unopenable == other.unopenable &&
           lastOpened == other.lastOpened &&
           store == other.store &&
+          version == other.version &&
+          syncState == other.syncState &&
+          syncDetail == other.syncDetail &&
           tagline == other.tagline &&
           accent == other.accent &&
           routes == other.routes;

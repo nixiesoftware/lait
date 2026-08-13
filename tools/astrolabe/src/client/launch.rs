@@ -18,6 +18,7 @@
 use super::http::{post_json, Head};
 use super::library::LaunchTicket;
 use super::{Client, ClientError, ClientResult};
+use lait::control::{ControlRoute, Request, Response};
 
 impl Client {
     /// The head this client opens Worlds through, started if it is not up.
@@ -66,9 +67,50 @@ impl Client {
                 "'{entry_path}' is not an entry path this client can open"
             )));
         }
+        // Opening is the active edge of the passive Library: place (or attach
+        // to) this Orbit before handing a browser a URL. Waiting for the web
+        // shell to make its first World call left Astrolabe saying Ready after
+        // a successful launch, and opening `/` for a Space row might never make
+        // that call at all.
+        self.place_orbit(orbit).await?;
         let head = self.head().await?;
         let ticket = self.mint(&head, orbit).await?;
         Self::launch_url(&head.base, entry_path, &ticket.secret, ticket.expires_at_ms)
+    }
+
+    async fn place_orbit(&self, orbit: &str) -> ClientResult<()> {
+        let context = self.host_context().await?;
+        let registered = context
+            .orbits
+            .iter()
+            .find(|entry| entry.space == orbit)
+            .ok_or_else(|| ClientError::invalid(format!("Orbit '{orbit}' is not registered")))?;
+        let space = mechanics::ids::SpaceId::parse(&registered.space).ok_or_else(|| {
+            ClientError::internal(format!(
+                "Orbit '{}' has an invalid Space id",
+                registered.space
+            ))
+        })?;
+        let route = ControlRoute::Orbit {
+            address: lait::control::OrbitAddress::for_store(
+                std::path::Path::new(&registered.path),
+                space,
+            ),
+        };
+        match self
+            .daemon()?
+            .request(route, &Request::WorldsActive, None)
+            .await
+        {
+            Ok(Response::Worlds { .. }) => Ok(()),
+            Ok(Response::Error { message, .. }) => Err(ClientError::refused(message)),
+            Ok(other) => Err(ClientError::internal(format!(
+                "unexpected Orbit placement reply: {other:?}"
+            ))),
+            Err(error) => Err(ClientError::unreachable(format!(
+                "place Orbit '{orbit}': {error:#}"
+            ))),
+        }
     }
 
     /// Ask the head for one launch credential, scoped to `orbit`.

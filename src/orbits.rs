@@ -3,7 +3,7 @@
 //! A small global index, `spaces.json` under [`crate::config::config_root`],
 //! mapping each **store path** to the space it holds. Written at every
 //! chokepoint a space becomes bound to a path — `HostSpaceFound` (founding),
-//! `HostSpaceEnter` (bootstrapping), and every successful daemon open — so
+//! `HostSpaceEnter` (bootstrapping), and every successful application open — so
 //! founders and joiners alike are listed by `GET /api/spaces` and addressable
 //! via `--orbit`. It carries **no secrets and no trust** (the signed ACL still gates
 //! every op); it is pure navigation state: the `name` and `projects` fields are
@@ -167,6 +167,21 @@ pub fn upsert(mut entry: Entry) -> Result<()> {
     entries.retain(|e| e.path != entry.path);
     entries.push(entry);
     save(&entries)
+}
+
+/// Record that an application successfully opened this Orbit.
+///
+/// This timestamp is navigation history, not a liveness sample: merely serving
+/// a World must not make it look freshly opened. A missing registry row is left
+/// missing rather than fabricating one without a known store path.
+pub fn touch(space: &str) -> Result<bool> {
+    let mut entries = list();
+    let Some(entry) = entries.iter_mut().find(|entry| entry.space == space) else {
+        return Ok(false);
+    };
+    entry.last_opened = mechanics::wallclock::now_secs();
+    save(&entries)?;
+    Ok(true)
 }
 
 /// Deregister entries matching `sel` (exact path, exact space id, or a
@@ -456,6 +471,17 @@ mod tests {
             "empty projects keeps the old value"
         );
         assert_eq!(got[0].last_opened, 20, "freshness does update");
+
+        assert!(touch("ws_A").unwrap(), "a known Orbit can be touched");
+        assert!(
+            list()[0].last_opened >= 20,
+            "an application open refreshes its history"
+        );
+        assert!(
+            !touch("ws_missing").unwrap(),
+            "history must not fabricate an unregistered Orbit"
+        );
+        assert_eq!(list().len(), 1);
     }
 
     #[test]

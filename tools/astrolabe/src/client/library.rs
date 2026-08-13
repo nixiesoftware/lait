@@ -40,10 +40,20 @@ pub struct Template {
     /// The colour it is drawn from, packed `0xRRGGBB`. A seed a client derives
     /// a plate or an accent from, locally.
     pub accent: Option<u32>,
+    /// The reviewed implementation version bundled for this World.
+    pub version: Option<u32>,
+    /// The running Orbit's own sync diagnosis. Absent when it was not asked.
+    pub sync: Option<SyncStatus>,
     /// Named places inside it, with `{space}` already resolved for this Orbit —
     /// resolved here rather than on a surface, because the substitution is a
     /// fact about this row and not a decision about how to draw it.
     pub routes: Vec<Route>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncStatus {
+    pub state: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +165,7 @@ impl Client {
         // them here is what keeps the daemon from answering for a package it
         // does not hold.
         let packages = lait::composition::bundled_client_packages();
+        let hosted = lait::composition::bundled_packages();
 
         let mut entries = Vec::new();
         for orbit in orbits {
@@ -171,15 +182,54 @@ impl Client {
             // Orbit answers "not running" rather than being placed to produce a
             // row. Placement is what `Open` causes, not what listing costs.
             let (activated, placement) = match daemon
-                .request_if_running(route, &Request::WorldsActive)
+                .request_if_running(route.clone(), &Request::WorldsActive)
                 .await
             {
                 Ok(Response::Worlds { worlds }) => (worlds, Placement::Placed),
-                // Not up. A real answer, and not an error — but it means the
-                // activation record cannot be read, so nothing is listed for
-                // it rather than a guess being listed.
-                Ok(_) => (Vec::new(), Placement::Vacant),
+                Ok(_) => {
+                    // Daemons from before passive World catalog probes were
+                    // admitted answer an Error even when this Orbit is already
+                    // placed. Status has been a passive probe throughout the
+                    // compatibility window, so use it only to recover the
+                    // lifecycle fact. We still leave the World list empty
+                    // rather than waking or asking the Orbit actively.
+                    match daemon
+                        .request_if_running(route.clone(), &Request::Status)
+                        .await
+                    {
+                        Ok(Response::Status(_)) => (Vec::new(), Placement::Placed),
+                        // Not up. A real answer, and not an error — but it
+                        // means the activation record cannot be read, so
+                        // nothing is listed for it rather than a guess.
+                        Ok(_) => (Vec::new(), Placement::Vacant),
+                        Err(_) => (Vec::new(), Placement::Unknown),
+                    }
+                }
                 Err(_) => (Vec::new(), Placement::Unknown),
+            };
+
+            let sync = if placement == Placement::Placed {
+                match daemon
+                    .request_if_running(
+                        route,
+                        &Request::Diagnose {
+                            expected_space: Some(orbit.space.clone()),
+                        },
+                    )
+                    .await
+                {
+                    Ok(Response::Diagnosis(view)) => view
+                        .gates
+                        .iter()
+                        .find(|gate| gate.id == "synced")
+                        .map(|gate| SyncStatus {
+                            state: format!("{:?}", gate.state).to_ascii_lowercase(),
+                            detail: gate.detail.clone(),
+                        }),
+                    _ => None,
+                }
+            } else {
+                None
             };
 
             if activated.is_empty() {
@@ -194,7 +244,10 @@ impl Client {
                     world_mount: String::new(),
                     display_name: (!orbit.name.trim().is_empty()).then(|| orbit.name.clone()),
                     opens: Opens::Front,
-                    template: Template::default(),
+                    template: Template {
+                        sync,
+                        ..Template::default()
+                    },
                     placement,
                 });
                 continue;
@@ -222,19 +275,27 @@ impl Client {
                             .entry_path()
                             .map_or(Opens::Undeclared, |path| Opens::Declared(path.to_owned()))
                     }),
-                    template: package.map_or_else(Template::default, |p| Template {
-                        tagline: p.display().tagline().map(str::to_owned),
-                        accent: p.display().accent(),
-                        routes: p
-                            .display()
-                            .routes()
-                            .iter()
-                            .map(|route| Route {
-                                label: route.label().to_owned(),
-                                path: route.resolve(&orbit.space),
-                            })
-                            .collect(),
-                    }),
+                    template: package.map_or_else(
+                        || Template {
+                            sync: sync.clone(),
+                            ..Template::default()
+                        },
+                        |p| Template {
+                            tagline: p.display().tagline().map(str::to_owned),
+                            accent: p.display().accent(),
+                            version: hosted.reviewed_state(p.world()).map(|(_, version)| version),
+                            sync: sync.clone(),
+                            routes: p
+                                .display()
+                                .routes()
+                                .iter()
+                                .map(|route| Route {
+                                    label: route.label().to_owned(),
+                                    path: route.resolve(&orbit.space),
+                                })
+                                .collect(),
+                        },
+                    ),
                     placement,
                 });
             }

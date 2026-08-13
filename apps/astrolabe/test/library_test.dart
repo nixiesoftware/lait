@@ -12,6 +12,7 @@
 library;
 
 import 'package:astrolabe/src/core/client.dart';
+import 'package:astrolabe/src/settings/window.dart';
 import 'package:astrolabe/src/surfaces/library.dart';
 import 'package:astrolabe/src/surfaces/surfaces.dart' as astrolabe;
 import 'package:covalence/covalence.dart' hide Surface;
@@ -45,6 +46,11 @@ LibraryRow _row({
   String? opensAt = '/',
   Unopenable? unopenable,
   String? tagline,
+  BigInt? lastOpened,
+  String? store,
+  int? version,
+  String? syncState,
+  String? syncDetail,
   List<RouteRow> routes = const [],
 }) =>
     LibraryRow(
@@ -56,22 +62,34 @@ LibraryRow _row({
       placement: placement,
       opensAt: opensAt,
       unopenable: unopenable,
+      lastOpened: lastOpened,
+      store: store,
+      version: version,
+      syncState: syncState,
+      syncDetail: syncDetail,
       tagline: tagline,
       routes: routes,
     );
 
-Future<List<ActionRequest>> _pump(WidgetTester tester, ClientView view) async {
+Future<List<ActionRequest>> _pump(
+  WidgetTester tester,
+  ClientView view, {
+  OpenWorldSettings? onSettings,
+}) async {
   final asked = <ActionRequest>[];
   await tester.pumpWidget(
     MaterialApp(
       theme: covalenceTheme(const ThemeConfig()),
       home: ClientScope(
         client: Client.canned(view, onDispatch: asked.add),
-        child: const Scaffold(
-            body: Padding(
-          padding: EdgeInsets.all(16),
-          child: LibrarySurface(),
-        )),
+        child: WorldSettingsScope(
+          onOpen: onSettings ?? (_) async {},
+          child: const Scaffold(
+              body: Padding(
+            padding: EdgeInsets.all(16),
+            child: LibrarySurface(),
+          )),
+        ),
       ),
     ),
   );
@@ -152,7 +170,7 @@ void main() {
       _view(library: [_row(orbit: 'orb_one', mount: '', name: 'Work')]),
     );
 
-    await tester.tap(find.text('Open'));
+    await tester.tap(find.text('Launch'));
     await tester.pump();
 
     expect(asked, hasLength(1));
@@ -177,8 +195,7 @@ void main() {
       ]),
     );
 
-    await tester.tap(find.text('Open'), warnIfMissed: false);
-    await tester.pump();
+    expect(find.text('Launch'), findsNothing);
     expect(
       asked,
       isEmpty,
@@ -208,7 +225,7 @@ void main() {
       reason: 'choosing a row in the rail did something — listing is passive',
     );
 
-    await tester.tap(find.text('Open'));
+    await tester.tap(find.text('Launch'));
     await tester.pump();
     expect(
       asked.single,
@@ -290,20 +307,12 @@ void main() {
       ),
     );
 
-    // The design system swaps a busy button's label for a spinner, so the
-    // control is found by type rather than by text — and what is asserted is
-    // the thing that matters: it cannot be pressed.
-    final open = tester.widget<Button>(find.byType(Button).last);
-    expect(
-      open.onPressed,
-      isNull,
-      reason: 'a control stayed live during its own action, so a person can '
-          'ask four times and read three refusals',
-    );
+    expect(find.text('Launching'), findsWidgets);
+    expect(find.text('Launch'), findsNothing);
     expect(asked, isEmpty);
   });
 
-  testWidgets('a running World offers View through the same declared entry',
+  testWidgets('a running World offers Go to through the same declared entry',
       (tester) async {
     final asked = await _pump(
       tester,
@@ -319,10 +328,12 @@ void main() {
       ),
     );
 
-    expect(find.text('View'), findsOneWidget);
+    expect(find.text('Go to'), findsOneWidget);
     expect(find.text('Running'), findsWidgets);
+    expect(find.text('Cancel'), findsNothing);
+    expect(find.text('Stop'), findsNothing);
 
-    await tester.tap(find.text('View'));
+    await tester.tap(find.text('Go to'));
     await tester.pump();
     expect(
       asked.single,
@@ -330,7 +341,7 @@ void main() {
         orbit: 'orb_one',
         entryPath: '/spaces/orb_one',
       ),
-      reason: 'View bypassed the World-declared entry path',
+      reason: 'Go to bypassed the World-declared entry path',
     );
   });
 
@@ -343,9 +354,133 @@ void main() {
       ),
     );
 
-    expect(find.text('Starting'), findsWidgets);
-    expect(find.text('Placing this Orbit and preparing its World head.'),
-        findsOneWidget);
+    expect(find.text('Launching'), findsWidgets);
+    expect(find.text('Cancel'), findsNothing);
+  });
+
+  testWidgets('the stable row reports runtime facts and settings',
+      (tester) async {
+    final opened = DateTime.now().toUtc().subtract(const Duration(minutes: 2));
+    final settings = <WorldSettingsSnapshot>[];
+    await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            orbit: 'orb_one',
+            name: 'Issues',
+            placement: PlacementView.placed,
+            lastOpened: BigInt.from(opened.millisecondsSinceEpoch ~/ 1000),
+            store: r'D:\Worlds\issues',
+            version: 7,
+            syncState: 'pass',
+            syncDetail: '4 scopes, 28 items',
+          ),
+        ],
+        heads: const [
+          HeadRow(
+            id: 'identity:default',
+            kind: 'browser',
+            origin: 'http://127.0.0.1:52713/',
+            owned: true,
+          ),
+        ],
+      ),
+      onSettings: (snapshot) async => settings.add(snapshot),
+    );
+
+    expect(find.text('Up to date'), findsOneWidget);
+    expect(find.text('v7'), findsOneWidget);
+    expect(find.text('2 minutes ago'), findsOneWidget);
+
+    await tester.tap(find.byIcon(AppIcons.settings));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Issues settings'), findsNothing);
+    expect(settings, hasLength(1));
+    expect(settings.single.name, 'Issues');
+    expect(settings.single.store, r'D:\Worlds\issues');
+    expect(settings.single.syncDetail, '4 scopes, 28 items');
+    expect(settings.single.activeOrigin, 'http://127.0.0.1:52713/');
+  });
+
+  testWidgets('World settings render as a standalone surface', (tester) async {
+    const snapshot = WorldSettingsSnapshot(
+      key: 'orb_one/issues',
+      name: 'Issues',
+      orbit: 'orb_one',
+      syncLabel: 'Up to date',
+      syncDetail: '4 scopes, 28 items',
+      store: r'D:\Worlds\issues',
+      worldMount: 'issues',
+      entryPath: '/spaces/orb_one',
+      version: 7,
+      activeOrigin: 'http://127.0.0.1:52713/',
+      dark: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: covalenceTheme(const ThemeConfig()),
+        home: const Scaffold(body: WorldSettingsPage(snapshot: snapshot)),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Issues settings'), findsOneWidget);
+    expect(find.text(r'D:\Worlds\issues'), findsOneWidget);
+    expect(find.text('4 scopes, 28 items'), findsOneWidget);
+    expect(find.text('http://127.0.0.1:52713/'), findsOneWidget);
+  });
+
+  testWidgets('World settings own an Astrolabe window shell', (tester) async {
+    const snapshot = WorldSettingsSnapshot(
+      key: 'orb_one/issues',
+      name: 'Issues',
+      orbit: 'orb_one',
+      syncLabel: 'Up to date',
+      syncDetail: '4 scopes, 28 items',
+      store: r'D:\Worlds\issues',
+      worldMount: 'issues',
+      entryPath: '/spaces/orb_one',
+      version: 7,
+      activeOrigin: 'http://127.0.0.1:52713/',
+      dark: true,
+    );
+    await tester.pumpWidget(const WorldSettingsApp(snapshot: snapshot));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('world-settings-window-shell')),
+      findsOneWidget,
+    );
+    expect(find.text('ASTROLABE'), findsOneWidget);
+    expect(find.text('Issues settings'), findsNWidgets(2));
+    expect(find.bySemanticsLabel('Close'), findsOneWidget);
+  });
+
+  test('World settings survive the child-process argument crossing', () {
+    const snapshot = WorldSettingsSnapshot(
+      key: 'orb_one/issues',
+      name: 'Issues',
+      orbit: 'orb_one',
+      syncLabel: 'Up to date',
+      syncDetail: '4 scopes, 28 items',
+      store: r'D:\Worlds\issues',
+      worldMount: 'issues',
+      entryPath: '/spaces/orb_one',
+      version: 7,
+      activeOrigin: 'http://127.0.0.1:52713/',
+      dark: true,
+    );
+
+    final decoded = WorldSettingsSnapshot.fromArguments([
+      '--unrelated',
+      snapshot.toArgument(),
+    ]);
+    expect(decoded?.key, snapshot.key);
+    expect(decoded?.store, snapshot.store);
+    expect(decoded?.activeOrigin, snapshot.activeOrigin);
+    expect(decoded?.dark, isTrue);
   });
 
   testWidgets('Library search filters the passive rail', (tester) async {

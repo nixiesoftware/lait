@@ -9,9 +9,11 @@ library;
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:covalence/covalence.dart' as cv show Surface;
 import 'package:covalence/listtile.dart';
+import 'package:flutter/material.dart' show Theme;
 import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
+import '../settings/window.dart';
 import '../shell/type.dart';
 
 const double kRailWidth = 224;
@@ -532,61 +534,273 @@ class _ActionPanel extends StatelessWidget {
     final opening = _opening(view, showing);
     final running = showing.placement == PlacementView.placed;
     final lifecycle = _lifecycleCopy(view, showing);
+    final sync = _syncCopy(context, showing);
+    final heads = _matchingHeads(view, showing);
+    final activeOrigin = heads.isEmpty ? null : heads.first.origin;
 
     return Container(
       key: const ValueKey('library-open-band'),
-      padding: t.padding.all(Space.xl5),
+      padding: t.padding.symmetric(h: Space.xl5, v: Space.xl3),
       decoration: BoxDecoration(
         color: context.surface.l100,
         border: t.stroke.edge(bottom: context.border.l500),
       ),
-      child: Wrap(
-        spacing: t.size.xl5,
-        runSpacing: t.size.xl3,
-        crossAxisAlignment: WrapCrossAlignment.center,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Button(
-            onPressed: entryPath == null || opening
-                ? null
-                : () => client.dispatch(
-                      ActionRequest.open(
-                        orbit: showing.orbit,
-                        entryPath: entryPath,
-                      ),
-                    ),
-            label: opening
-                ? (running ? 'Opening…' : 'Starting…')
-                : (running ? 'View' : 'Open'),
-            semanticLabel: opening
-                ? (running ? 'Opening World' : 'Starting World')
-                : (running ? 'View World' : 'Open World'),
-            icon: running ? AppIcons.openInNew : AppIcons.playArrow,
-            isLoading: opening,
-            variant: ButtonVariant.primary,
-            size: ButtonSize.lg,
-            tooltip: _openTooltip(showing, running: running),
-          ),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 280),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+          Expanded(
+            child: Wrap(
+              spacing: t.size.xl5,
+              runSpacing: t.size.xl3,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Badge(
-                  label: lifecycle.label,
-                  variant: lifecycle.variant,
-                  dot: lifecycle.dot,
-                  radius: Space.xs,
+                _WorldAction(
+                  showing: showing,
+                  running: running,
+                  opening: opening,
+                  lifecycle: lifecycle,
+                  onOpen: entryPath == null || opening
+                      ? null
+                      : () => client.dispatch(
+                            ActionRequest.open(
+                              orbit: showing.orbit,
+                              entryPath: entryPath,
+                            ),
+                          ),
                 ),
-                t.gap.y(Space.xs),
-                Text(lifecycle.description, style: context.proseStyle),
+                _StatusReadout(
+                  icon: AppIcons.accessTime,
+                  label: 'LAST OPENED',
+                  value: _ago(showing.lastOpened),
+                ),
+                _StatusReadout(
+                  icon: AppIcons.inventory2,
+                  label: 'VERSION',
+                  value: showing.version == null
+                      ? 'Not reported'
+                      : 'v${showing.version}',
+                ),
               ],
             ),
           ),
-          _Fact(label: 'LAST OPENED', value: _ago(showing.lastOpened)),
+          t.gap.x(Space.xl3),
+          _StatusReadout(
+            icon: sync.icon,
+            label: 'SYNC STATUS',
+            value: sync.label,
+            tone: sync.tone,
+            tooltip: sync.detail,
+          ),
+          t.gap.x(Space.md),
+          Button(
+            onPressed: () => WorldSettingsScope.open(
+              context,
+              WorldSettingsSnapshot(
+                key: showing.key,
+                name: _name(showing),
+                orbit: showing.orbit,
+                syncLabel: sync.label,
+                syncDetail: sync.detail,
+                store: showing.store,
+                worldMount: showing.worldMount,
+                entryPath: showing.opensAt,
+                version: showing.version,
+                activeOrigin: activeOrigin,
+                dark: Theme.of(context).brightness == Brightness.dark,
+              ),
+            ),
+            icon: AppIcons.settings,
+            semanticLabel: '${_name(showing)} settings',
+            tooltip: 'World settings',
+            variant: ButtonVariant.ghost,
+            size: ButtonSize.iconSm,
+          ),
         ],
       ),
     );
+  }
+}
+
+class _WorldAction extends StatelessWidget {
+  const _WorldAction({
+    required this.showing,
+    required this.running,
+    required this.opening,
+    required this.lifecycle,
+    required this.onOpen,
+  });
+
+  final LibraryRow showing;
+  final bool running;
+  final bool opening;
+  final ({
+    String label,
+    String description,
+    BadgeVariant variant,
+    BadgeDotTone dot,
+  }) lifecycle;
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    if (running) {
+      return Wrap(
+        spacing: t.size.md,
+        runSpacing: t.size.md,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _LifecycleState(
+            label: 'Running',
+            icon: AppIcons.checkCircle,
+            tone: context.status.success.l800,
+          ),
+          Button(
+            onPressed: onOpen,
+            label: 'Go to',
+            semanticLabel: 'Go to running World',
+            icon: AppIcons.openInNew,
+            variant: ButtonVariant.outline,
+            size: ButtonSize.lg,
+            tooltip: _openTooltip(showing, running: true),
+          ),
+        ],
+      );
+    }
+
+    if (opening) {
+      return _LifecycleState(
+        label: 'Launching',
+        loading: true,
+        tone: context.text.l950,
+      );
+    }
+
+    if (onOpen != null) {
+      return Button(
+        onPressed: onOpen,
+        label: 'Launch',
+        semanticLabel: 'Launch World',
+        icon: AppIcons.playArrow,
+        variant: ButtonVariant.primary,
+        size: ButtonSize.lg,
+        tooltip: _openTooltip(showing, running: false),
+      );
+    }
+
+    return _LifecycleState(
+      label: lifecycle.label,
+      icon: showing.placement == PlacementView.unknown
+          ? AppIcons.warningAmber
+          : AppIcons.info,
+      tone: showing.placement == PlacementView.unknown
+          ? context.status.warning.l800
+          : context.text.l700,
+    );
+  }
+}
+
+class _LifecycleState extends StatelessWidget {
+  const _LifecycleState({
+    required this.label,
+    required this.tone,
+    this.icon,
+    this.loading = false,
+  });
+
+  final String label;
+  final Color tone;
+  final IconData? icon;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Semantics(
+      label: label,
+      liveRegion: loading,
+      child: Container(
+        height: 40,
+        constraints: const BoxConstraints(minWidth: 124),
+        padding: t.padding.symmetric(h: Space.xl3),
+        decoration: BoxDecoration(
+          color: tone.withValues(alpha: 0.10),
+          border: Border.all(color: tone.withValues(alpha: 0.45)),
+          borderRadius: t.radius.all(Space.sm),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (loading)
+              Progress.spinner(
+                size: ProgressSize.xs,
+                color: tone,
+              )
+            else if (icon != null)
+              Icon(icon, size: 16, color: tone),
+            t.gap.x(Space.sm),
+            Text(
+              label,
+              style: context.bodyStyle.copyWith(
+                color: tone,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusReadout extends StatelessWidget {
+  const _StatusReadout({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.tone,
+    this.tooltip,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color? tone;
+  final String? tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final color = tone ?? context.text.l700;
+    final readout = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 18, color: color),
+        t.gap.x(Space.sm),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(label, style: context.factLabelStyle),
+            t.gap.y(Space.xxs),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: context.labelStyle.copyWith(
+                color: color,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+    return tooltip == null
+        ? readout
+        : Tooltip(message: tooltip, child: readout);
   }
 }
 
@@ -598,10 +812,7 @@ class _Details extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final heads = ClientScope.watch(context)
-        .heads
-        .where((head) => head.orbit == null || head.orbit == showing.orbit)
-        .toList();
+    final heads = _matchingHeads(ClientScope.watch(context), showing);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -710,7 +921,11 @@ class _InfoPanel extends StatelessWidget {
 }
 
 class _Fact extends StatelessWidget {
-  const _Fact({required this.label, required this.value, this.mono = false});
+  const _Fact({
+    required this.label,
+    required this.value,
+    this.mono = false,
+  });
 
   final String label;
   final String value;
@@ -736,6 +951,66 @@ class _Fact extends StatelessWidget {
   }
 }
 
+List<HeadRow> _matchingHeads(ClientView view, LibraryRow row) => view.heads
+    .where((head) => head.orbit == null || head.orbit == row.orbit)
+    .toList();
+
+({String label, String detail, IconData icon, Color tone}) _syncCopy(
+  BuildContext context,
+  LibraryRow row,
+) {
+  final detail = row.syncDetail ??
+      switch (row.placement) {
+        PlacementView.placed => 'The running World did not report a sync gate.',
+        PlacementView.vacant => 'Sync is checked after the World is launched.',
+        PlacementView.unknown =>
+          'The Orbit could not be asked for sync status.',
+      };
+  return switch (row.syncState) {
+    'pass' => (
+        label: 'Up to date',
+        detail: detail,
+        icon: AppIcons.cloudDownload,
+        tone: context.status.success.l800,
+      ),
+    'wait' => (
+        label: 'Syncing',
+        detail: detail,
+        icon: AppIcons.refresh,
+        tone: context.text.l900,
+      ),
+    'fail' => (
+        label: 'Needs attention',
+        detail: detail,
+        icon: AppIcons.error,
+        tone: context.status.warning.l800,
+      ),
+    'warn' => (
+        label: 'Check sync',
+        detail: detail,
+        icon: AppIcons.warningAmber,
+        tone: context.status.warning.l800,
+      ),
+    'skip' => (
+        label: 'Not applicable',
+        detail: detail,
+        icon: AppIcons.info,
+        tone: context.text.l700,
+      ),
+    _ => (
+        label:
+            row.placement == PlacementView.vacant ? 'Offline' : 'Not reported',
+        detail: detail,
+        icon: row.placement == PlacementView.unknown
+            ? AppIcons.warningAmber
+            : AppIcons.cloudDownload,
+        tone: row.placement == PlacementView.unknown
+            ? context.status.warning.l800
+            : context.text.l700,
+      ),
+  };
+}
+
 enum _Lifecycle { opening, running, ready, unreachable, unavailable }
 
 ({
@@ -747,10 +1022,8 @@ enum _Lifecycle { opening, running, ready, unreachable, unavailable }
   final lifecycle = _lifecycle(view, row);
   return switch (lifecycle) {
     _Lifecycle.opening => (
-        label: row.placement == PlacementView.placed ? 'Opening' : 'Starting',
-        description: row.placement == PlacementView.placed
-            ? 'Opening the running World in your browser.'
-            : 'Placing this Orbit and preparing its World head.',
+        label: 'Launching',
+        description: 'Placing this Orbit and preparing its World head.',
         variant: BadgeVariant.solid,
         dot: BadgeDotTone.brand,
       ),
@@ -762,7 +1035,7 @@ enum _Lifecycle { opening, running, ready, unreachable, unavailable }
       ),
     _Lifecycle.ready => (
         label: 'Ready',
-        description: 'Open starts the World and hands it to your browser.',
+        description: 'Launch starts the World and hands it to your browser.',
         variant: BadgeVariant.outline,
         dot: BadgeDotTone.neutral,
       ),
@@ -788,6 +1061,10 @@ enum _Lifecycle { opening, running, ready, unreachable, unavailable }
 }
 
 _Lifecycle _lifecycle(ClientView view, LibraryRow row) {
+  // Once placed, a browser handoff never changes the World-level state. One
+  // person can have several Worlds running, so there is no cancel/stop state
+  // at this layer.
+  if (row.placement == PlacementView.placed) return _Lifecycle.running;
   if (_opening(view, row)) return _Lifecycle.opening;
   if (row.unopenable != null || row.opensAt == null) {
     return _Lifecycle.unavailable;

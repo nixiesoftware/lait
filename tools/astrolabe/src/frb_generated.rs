@@ -446,6 +446,9 @@ impl SseDecode for crate::api::LibraryRow {
         let mut var_unopenable = <Option<crate::api::Unopenable>>::sse_decode(deserializer);
         let mut var_lastOpened = <Option<u64>>::sse_decode(deserializer);
         let mut var_store = <Option<String>>::sse_decode(deserializer);
+        let mut var_version = <Option<u32>>::sse_decode(deserializer);
+        let mut var_syncState = <Option<String>>::sse_decode(deserializer);
+        let mut var_syncDetail = <Option<String>>::sse_decode(deserializer);
         let mut var_tagline = <Option<String>>::sse_decode(deserializer);
         let mut var_accent = <Option<u32>>::sse_decode(deserializer);
         let mut var_routes = <Vec<crate::api::RouteRow>>::sse_decode(deserializer);
@@ -460,6 +463,9 @@ impl SseDecode for crate::api::LibraryRow {
             unopenable: var_unopenable,
             last_opened: var_lastOpened,
             store: var_store,
+            version: var_version,
+            sync_state: var_syncState,
+            sync_detail: var_syncDetail,
             tagline: var_tagline,
             accent: var_accent,
             routes: var_routes,
@@ -1151,6 +1157,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::LibraryRow {
             self.unopenable.into_into_dart().into_dart(),
             self.last_opened.into_into_dart().into_dart(),
             self.store.into_into_dart().into_dart(),
+            self.version.into_into_dart().into_dart(),
+            self.sync_state.into_into_dart().into_dart(),
+            self.sync_detail.into_into_dart().into_dart(),
             self.tagline.into_into_dart().into_dart(),
             self.accent.into_into_dart().into_dart(),
             self.routes.into_into_dart().into_dart(),
@@ -1550,6 +1559,9 @@ impl SseEncode for crate::api::LibraryRow {
         <Option<crate::api::Unopenable>>::sse_encode(self.unopenable, serializer);
         <Option<u64>>::sse_encode(self.last_opened, serializer);
         <Option<String>>::sse_encode(self.store, serializer);
+        <Option<u32>>::sse_encode(self.version, serializer);
+        <Option<String>>::sse_encode(self.sync_state, serializer);
+        <Option<String>>::sse_encode(self.sync_detail, serializer);
         <Option<String>>::sse_encode(self.tagline, serializer);
         <Option<u32>>::sse_encode(self.accent, serializer);
         <Vec<crate::api::RouteRow>>::sse_encode(self.routes, serializer);

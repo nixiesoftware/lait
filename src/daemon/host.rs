@@ -588,15 +588,21 @@ impl Listener {
             let response = match (&route, &request) {
                 (
                     ControlRoute::Orbit { .. },
-                    Request::Status | Request::Id | Request::ConfigReload,
+                    Request::Status
+                    | Request::Id
+                    | Request::ConfigReload
+                    | Request::Who
+                    | Request::Storage
+                    | Request::WorldsActive
+                    | Request::Diagnose { .. },
                 ) => self
                     .router
                     .request_running(route, &request)
                     .await
                     .unwrap_or_else(|error| Response::err(format!("{error:#}"))),
                 _ => Response::err(
-                    "passive dispatch is only available for status, id, or config reload through \
-                     an explicit Space route",
+                    "passive dispatch is only available for supported observation requests \
+                     through an explicit Space route",
                 ),
             };
             let _ = write_line(&mut write_half, &response).await;
@@ -1331,8 +1337,29 @@ mod tests {
                 .expect("a passive status probe must not activate the Orbit"),
         );
         assert!(matches!(
-            client.request(route, &Request::Status, None).await.unwrap(),
+            client
+                .request_if_running(route.clone(), &Request::WorldsActive)
+                .await
+                .unwrap(),
+            Response::Error { .. }
+        ));
+        drop(
+            acquire_daemon_lock(&orbit_home)
+                .expect("a passive World probe must not activate the Orbit"),
+        );
+        assert!(matches!(
+            client
+                .request(route.clone(), &Request::Status, None)
+                .await
+                .unwrap(),
             Response::Status(_)
+        ));
+        assert!(matches!(
+            client
+                .request_if_running(route, &Request::WorldsActive)
+                .await
+                .unwrap(),
+            Response::Worlds { .. }
         ));
         let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
         let world_route = ControlRoute::World {

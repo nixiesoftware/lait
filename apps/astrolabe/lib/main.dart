@@ -8,13 +8,15 @@
 library;
 
 import 'package:covalence/covalence.dart' hide Surface;
-import 'package:flutter/material.dart'
-    show Brightness, MaterialApp, Scaffold, ThemeData, ThemeMode;
+import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
 import 'package:flutter/widgets.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'src/core/client.dart';
+import 'src/settings/window.dart';
 import 'src/shell/shell.dart';
+import 'src/shell/theme.dart';
+import 'src/shell/window.dart';
 
 /// The window's own opening size, and the floor every layout has to survive.
 ///
@@ -23,27 +25,32 @@ import 'src/shell/shell.dart';
 /// corner.
 const Size _opening = Size(1040, 720);
 const Size _narrowest = Size(640, 480);
+const Size _settingsOpening = Size(560, 680);
+const Size _settingsNarrowest = Size(440, 520);
 
-Future<void> main() async {
+Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
 
-  await windowManager.waitUntilReadyToShow(
-    const WindowOptions(
-      size: _opening,
-      minimumSize: _narrowest,
-      center: true,
-      title: 'Astrolabe',
-      // No system title bar: this client draws its own caption. What that buys
-      // is one surface at the top of the window instead of two in colours the
-      // theme never agreed on.
-      titleBarStyle: TitleBarStyle.hidden,
-    ),
-    () async {
-      await windowManager.show();
-      await windowManager.focus();
-    },
-  );
+  final settings = WorldSettingsSnapshot.fromArguments(arguments);
+  final options = settings == null
+      ? astrolabeWindowOptions(
+          size: _opening,
+          minimumSize: _narrowest,
+          title: 'Astrolabe',
+        )
+      : astrolabeWindowOptions(
+          size: _settingsOpening,
+          minimumSize: _settingsNarrowest,
+          title: '${settings.name} settings',
+        );
+
+  await showAstrolabeWindow(options);
+
+  if (settings != null) {
+    runApp(WorldSettingsApp(snapshot: settings));
+    return;
+  }
 
   // The core comes up before the first frame, so nothing is ever drawn against
   // a client that does not exist yet.
@@ -81,16 +88,19 @@ class _AstrolabeState extends State<Astrolabe> {
       // covalence is Material-free; `MaterialApp` is here for the navigator and
       // the theme-extension plumbing its tokens ride on, and for nothing that
       // draws.
-      theme: _astrolabeTheme(Brightness.light),
-      darkTheme: _astrolabeTheme(Brightness.dark),
+      theme: astrolabeTheme(Brightness.light),
+      darkTheme: astrolabeTheme(Brightness.dark),
       themeMode: _themeMode,
-      home: ClientScope(
-        client: widget.client,
-        child: ToastRegion(
-          child: Scaffold(
-            body: AstrolabeShell(
-              themeMode: _themeMode,
-              onToggleTheme: _toggleTheme,
+      home: WorldSettingsScope(
+        onOpen: launchWorldSettings,
+        child: ClientScope(
+          client: widget.client,
+          child: ToastRegion(
+            child: Scaffold(
+              body: AstrolabeShell(
+                themeMode: _themeMode,
+                onToggleTheme: _toggleTheme,
+              ),
             ),
           ),
         ),
@@ -98,15 +108,3 @@ class _AstrolabeState extends State<Astrolabe> {
     );
   }
 }
-
-ThemeData _astrolabeTheme(Brightness brightness) => covalenceTheme(
-      ThemeConfig(
-        brightness: brightness,
-        // reason: these are Astrolabe's two application-level seeds. Covalence
-        // derives every surface, text, border, focus and brand rung from them.
-        // The cool neutral keeps the dark shell blue-charcoal without pinning
-        // a raw colour at any component call site.
-        brandSeed: TokenEscape.rawColor(0xFF5B8DEF),
-        neutralSeed: TokenEscape.rawColor(0xFF53667D),
-      ),
-    );

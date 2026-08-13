@@ -111,6 +111,11 @@ pub struct LibraryRow {
     pub last_opened: Option<u64>,
     /// Where the Orbit's store lives, when the registry could be read.
     pub store: Option<String>,
+    /// Reviewed implementation version for the hosted World.
+    pub version: Option<u32>,
+    /// The running Orbit's sync gate, kept as transport facts for Dart wording.
+    pub sync_state: Option<String>,
+    pub sync_detail: Option<String>,
     /// What the World says about how it should be drawn. Empty for a Space row
     /// and for a World this build does not host — in both cases because nothing
     /// has said anything, which is a fact rather than a blank.
@@ -590,6 +595,9 @@ fn project(app: &App) -> ClientView {
                             .map(|orbit| orbit.last_opened)
                             .filter(|seconds| *seconds > 0),
                         store: registered.map(|orbit| orbit.path.clone()),
+                        version: entry.template.version,
+                        sync_state: entry.template.sync.as_ref().map(|sync| sync.state.clone()),
+                        sync_detail: entry.template.sync.as_ref().map(|sync| sync.detail.clone()),
                         tagline: entry.template.tagline.clone(),
                         accent: entry.template.accent,
                         routes: entry
@@ -775,6 +783,9 @@ mod tests {
             "a never-opened Orbit crossed the bridge as a timestamp"
         );
         assert_eq!(row.store.as_deref(), Some("D:/store"));
+        assert_eq!(row.version, None);
+        assert_eq!(row.sync_state, None);
+        assert_eq!(row.sync_detail, None);
     }
 
     /// Facts cross; words do not. A row that cannot be opened says *which*

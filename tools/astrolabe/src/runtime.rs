@@ -502,6 +502,17 @@ impl Worker {
                 // last: a launch URL composed and never opened is recoverable,
                 // and a browser opened at a ticket that was never minted is not.
                 crate::browser::open(&launch.url)?;
+                // `last_opened` is application history, not Orbit uptime. Only
+                // advance it after the browser accepted the successful handoff.
+                match lait::orbits::touch(orbit) {
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!(orbit, "opened an Orbit absent from the registry"),
+                    Err(error) => tracing::warn!(
+                        orbit,
+                        error = %error,
+                        "could not update the Orbit's last-opened history"
+                    ),
+                }
                 Ok(Outcome::Launched(launch))
             }
             Action::StartDevice(id) => {

@@ -17,10 +17,9 @@
 ///
 /// ## Closing is not stopping
 ///
-/// The close control asks the shell to close, and the shell minimises to the
-/// tray, because a person who clicked the wrong X did not ask their Spaces to
-/// stop converging. That decision stays in one place: this file raises the
-/// intent and never acts on it.
+/// The close control raises an intent and never decides what closing means.
+/// The shared window frame applies the policy: the primary client hides to the
+/// tray so its Spaces keep converging, while disposable secondary windows exit.
 library;
 
 import 'package:covalence/covalence.dart';
@@ -53,6 +52,7 @@ class CaptionControls extends StatelessWidget {
     required this.onMinimise,
     required this.onToggleMaximise,
     required this.onClose,
+    this.closeTooltip = 'Close (it keeps serving in the tray)',
   });
 
   final double height;
@@ -60,6 +60,7 @@ class CaptionControls extends StatelessWidget {
   final VoidCallback onMinimise;
   final VoidCallback onToggleMaximise;
   final VoidCallback onClose;
+  final String closeTooltip;
 
   @override
   Widget build(BuildContext context) {
@@ -86,7 +87,7 @@ class CaptionControls extends StatelessWidget {
           height: height,
           mark: _Mark.close,
           semanticLabel: 'Close',
-          tooltip: 'Close (it keeps serving in the tray)',
+          tooltip: closeTooltip,
           danger: true,
           onPressed: onClose,
         ),
@@ -181,7 +182,8 @@ class _CaptionButtonState extends State<_CaptionButton> {
 }
 
 class _CaptionPainter extends CustomPainter {
-  const _CaptionPainter({required this.mark, required this.fill, required this.ink});
+  const _CaptionPainter(
+      {required this.mark, required this.fill, required this.ink});
 
   final _Mark mark;
   final Color? fill;
@@ -206,7 +208,8 @@ class _CaptionPainter extends CustomPainter {
       (size.height / 2).roundToDouble(),
     );
     final half = kCaptionMark / 2;
-    final box = Rect.fromCenter(center: centre, width: kCaptionMark, height: kCaptionMark);
+    final box = Rect.fromCenter(
+        center: centre, width: kCaptionMark, height: kCaptionMark);
 
     switch (mark) {
       case _Mark.minimise:
