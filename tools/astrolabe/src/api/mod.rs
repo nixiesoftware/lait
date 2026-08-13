@@ -33,6 +33,7 @@
 //! the runtime into it, and projects it. Dart receives the projection whole and
 //! keeps nothing of its own but drafts.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
 
@@ -405,25 +406,31 @@ fn space_ref(orbit: String) -> crate::client::space::SpaceRef {
     crate::client::space::SpaceRef { space: orbit, path }
 }
 
-/// The model, the background half, and nothing else.
+/// The model, the background half, and the identity they were booted for.
 struct Core {
     app: App,
     runtime: Runtime,
+    state_root: PathBuf,
+    sidecar: PathBuf,
 }
 
 static CORE: OnceLock<Mutex<Core>> = OnceLock::new();
+/// Serialises the first boot so two isolates cannot each start a runtime
+/// in the window between "not yet" and `CORE.set`.
+static BOOT: Mutex<()> = Mutex::new(());
 /// Told by the runtime's wake callback that something has arrived. A channel
 /// rather than the mutex, because waking must not be able to block on the lock
 /// the pump is holding while it drains.
 static WOKEN: OnceLock<Sender<()>> = OnceLock::new();
 
-/// Start the core. Idempotent: a second call is a no-op rather than a second
-/// runtime, because two runtimes would be two supervisors of the same devices.
+/// Start the core, or attach to the one that is already running.
+///
+/// The first isolate boots the runtime. Later ones attach: same App, same
+/// supervisor, a new view stream. A second *boot* — a start against a
+/// different identity — is refused rather than spawning a second supervisor
+/// of the same devices.
 #[frb(sync)]
 pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), String> {
-    if CORE.get().is_some() {
-        return Ok(());
-    }
     // Resolved here when the caller has no opinion, which is every real launch.
     // The interface must not compute either of these: a path worked out on the
     // far side of the bridge is a second opinion about where this installation
@@ -431,26 +438,42 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
     // it mattered. The arguments exist so a test can point the core somewhere
     // disposable, and for nothing else.
     let state_root = match state_root {
-        Some(given) => std::path::PathBuf::from(given),
+        Some(given) => PathBuf::from(given),
         None => crate::sidecar::state_root().map_err(|error| format!("{error:#}"))?,
     };
     let sidecar = match sidecar {
-        Some(given) => std::path::PathBuf::from(given),
+        Some(given) => PathBuf::from(given),
         None => crate::sidecar::resolve().map_err(|error| format!("{error:#}"))?,
     };
 
+    if let Some(core) = CORE.get() {
+        return attach_to(core, &state_root, &sidecar);
+    }
+
+    let _boot = BOOT
+        .lock()
+        .map_err(|_| "the core boot lock is poisoned".to_string())?;
+    if let Some(core) = CORE.get() {
+        return attach_to(core, &state_root, &sidecar);
+    }
+
     let (woken, wakeups) = channel();
     let wake = woken.clone();
-    let runtime = Runtime::start(Config::new(state_root, sidecar), move || {
-        // A failed send means the pump is gone, which happens only on the
-        // way out. Nothing to report and nobody to report it to.
-        let _ = wake.send(());
-    })
+    let runtime = Runtime::start(
+        Config::new(state_root.clone(), sidecar.clone()),
+        move || {
+            // A failed send means the pump is gone, which happens only on the
+            // way out. Nothing to report and nobody to report it to.
+            let _ = wake.send(());
+        },
+    )
     .map_err(|error| error.to_string())?;
 
     let _ = CORE.set(Mutex::new(Core {
         app: App::new(),
         runtime,
+        state_root,
+        sidecar,
     }));
     let _ = WOKEN.set(woken);
 
@@ -463,7 +486,7 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
                 let view = {
                     let Some(core) = CORE.get() else { return };
                     let Ok(mut core) = core.lock() else { return };
-                    let Core { app, runtime } = &mut *core;
+                    let Core { app, runtime, .. } = &mut *core;
                     runtime.drain_into(app);
                     project(app)
                 };
@@ -472,6 +495,25 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
         })
         .map_err(|error| format!("start the projection pump: {error}"))?;
     Ok(())
+}
+
+fn attach_to(core: &Mutex<Core>, state_root: &Path, sidecar: &Path) -> Result<(), String> {
+    let Ok(core) = core.lock() else {
+        return Err("the core is poisoned".into());
+    };
+    attach_paths((&core.state_root, &core.sidecar), (state_root, sidecar))
+}
+
+/// Same identity attaches; a different one is a second boot, and is refused.
+fn attach_paths(running: (&Path, &Path), asked: (&Path, &Path)) -> Result<(), String> {
+    if running.0 == asked.0 && running.1 == asked.1 {
+        Ok(())
+    } else {
+        Err(
+            "the core is already running for a different identity — a second boot is refused"
+                .into(),
+        )
+    }
 }
 
 /// Ask for something, and get back the view as it stands the instant it was
@@ -493,7 +535,7 @@ pub fn dispatch(action: ActionRequest) -> ClientView {
     let Ok(mut core) = core.lock() else {
         return empty();
     };
-    let Core { app, runtime } = &mut *core;
+    let Core { app, runtime, .. } = &mut *core;
     app.dispatched(&action);
     runtime.dispatch(action);
     project(app)
@@ -511,21 +553,64 @@ pub fn current() -> ClientView {
     project(&core.app)
 }
 
-/// Every view from now on.
+/// Every view from now on, on this isolate.
+///
+/// Each attached isolate opens its own stream. Every live sink receives the
+/// same [`ClientView`] on every pump; a sink that goes away is dropped and
+/// does not stall the rest.
 pub fn watch(sink: StreamSink<ClientView>) {
-    let _ = sink.add(current());
-    let _ = SINK.set(Mutex::new(Some(sink)));
+    let sinks = SINKS.get_or_init(|| Mutex::new(Watchers::new()));
+    let Ok(mut sinks) = sinks.lock() else {
+        return;
+    };
+    sinks.attach(sink, current());
 }
 
-static SINK: OnceLock<Mutex<Option<StreamSink<ClientView>>>> = OnceLock::new();
+static SINKS: OnceLock<Mutex<Watchers<StreamSink<ClientView>>>> = OnceLock::new();
 
 fn emit(view: ClientView) {
-    if let Some(sink) = SINK.get() {
-        if let Ok(sink) = sink.lock() {
-            if let Some(sink) = sink.as_ref() {
-                let _ = sink.add(view);
-            }
+    let Some(sinks) = SINKS.get() else {
+        return;
+    };
+    let Ok(mut sinks) = sinks.lock() else {
+        return;
+    };
+    sinks.emit(&view);
+}
+
+/// A sink that can take a view, or say it is gone.
+trait ViewPush {
+    fn push(&self, view: &ClientView) -> bool;
+}
+
+impl ViewPush for StreamSink<ClientView> {
+    fn push(&self, view: &ClientView) -> bool {
+        self.add(view.clone()).is_ok()
+    }
+}
+
+/// Every attached isolate's view stream.
+struct Watchers<S> {
+    sinks: Vec<S>,
+}
+
+impl<S: ViewPush> Watchers<S> {
+    fn new() -> Self {
+        Self { sinks: Vec::new() }
+    }
+
+    fn attach(&mut self, sink: S, current: ClientView) {
+        if sink.push(&current) {
+            self.sinks.push(sink);
         }
+    }
+
+    fn emit(&mut self, view: &ClientView) {
+        self.sinks.retain(|sink| sink.push(view));
+    }
+
+    fn len(&self) -> usize {
+        self.sinks.len()
     }
 }
 
@@ -851,5 +936,93 @@ mod tests {
             Some(Vec::new()),
             "a device that answered and serves nothing looks unread"
         );
+    }
+
+    /// A second isolate attaches; a second *boot* against a different
+    /// identity is refused. The paths are the whole identity: two
+    /// supervisors of one device set is the failure this exists to stop.
+    #[test]
+    fn a_second_boot_against_a_different_identity_is_refused() {
+        let home = Path::new("C:/ident");
+        let sidecar = Path::new("C:/lait.exe");
+        assert!(attach_paths((home, sidecar), (home, sidecar)).is_ok());
+        let err = attach_paths((home, sidecar), (Path::new("C:/other"), sidecar))
+            .expect_err("a different identity is a second boot");
+        assert!(
+            err.contains("second boot"),
+            "the refusal must name the second boot, got: {err}"
+        );
+    }
+
+    struct FakeSink {
+        views: std::sync::Arc<Mutex<Vec<ClientView>>>,
+        live: bool,
+    }
+
+    impl ViewPush for FakeSink {
+        fn push(&self, view: &ClientView) -> bool {
+            if !self.live {
+                return false;
+            }
+            self.views.lock().expect("views").push(view.clone());
+            true
+        }
+    }
+
+    fn fake(live: bool) -> (FakeSink, std::sync::Arc<Mutex<Vec<ClientView>>>) {
+        let views = std::sync::Arc::new(Mutex::new(Vec::new()));
+        (
+            FakeSink {
+                views: views.clone(),
+                live,
+            },
+            views,
+        )
+    }
+
+    /// Every attached isolate receives the same view on every pump.
+    #[test]
+    fn every_watcher_receives_the_same_view() {
+        let (a, a_views) = fake(true);
+        let (b, b_views) = fake(true);
+        let mut watchers = Watchers::new();
+        let first = empty();
+        watchers.attach(a, first.clone());
+        watchers.attach(b, first.clone());
+        let next = {
+            let mut view = empty();
+            view.loading = false;
+            view
+        };
+        watchers.emit(&next);
+        let a_views = a_views.lock().expect("a");
+        let b_views = b_views.lock().expect("b");
+        assert_eq!(a_views.as_slice(), &[first.clone(), next.clone()]);
+        assert_eq!(b_views.as_slice(), &[first, next]);
+    }
+
+    /// A sink that goes away is dropped and does not stall the rest.
+    #[test]
+    fn a_dead_watcher_is_dropped_and_the_rest_keep_pumping() {
+        let (dead, dead_views) = fake(false);
+        let (live, live_views) = fake(true);
+        let mut watchers = Watchers::new();
+        watchers.attach(dead, empty());
+        watchers.attach(live, empty());
+        assert_eq!(
+            dead_views.lock().expect("dead").len(),
+            0,
+            "a dead sink must not be kept"
+        );
+        assert_eq!(live_views.lock().expect("live").len(), 1);
+
+        let next = {
+            let mut view = empty();
+            view.loading = false;
+            view
+        };
+        watchers.emit(&next);
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(live_views.lock().expect("live").len(), 2);
     }
 }
