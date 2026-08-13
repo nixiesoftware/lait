@@ -312,7 +312,7 @@ void main() {
     expect(asked, isEmpty);
   });
 
-  testWidgets('a running World offers Go to through the same declared entry',
+  testWidgets('a running World offers icon-only Go to at its declared entry',
       (tester) async {
     final asked = await _pump(
       tester,
@@ -328,12 +328,20 @@ void main() {
       ),
     );
 
-    expect(find.text('Go to'), findsOneWidget);
+    expect(find.text('Go to'), findsNothing);
     expect(find.text('Running'), findsWidgets);
     expect(find.text('Cancel'), findsNothing);
     expect(find.text('Stop'), findsNothing);
 
-    await tester.tap(find.text('Go to'));
+    final goTo = find.widgetWithIcon(Button, AppIcons.openInNew);
+    expect(goTo, findsOneWidget);
+    final button = tester.widget<Button>(goTo);
+    expect(button.label, isNull);
+    expect(button.variant, ButtonVariant.ghost);
+    expect(button.size, ButtonSize.icon);
+    expect(button.semanticLabel, 'Go to running World');
+
+    await tester.tap(goTo);
     await tester.pump();
     expect(
       asked.single,

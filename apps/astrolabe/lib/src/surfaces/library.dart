@@ -646,23 +646,22 @@ class _WorldAction extends StatelessWidget {
     final t = context.tokens;
 
     if (running) {
-      return Wrap(
-        spacing: t.size.md,
-        runSpacing: t.size.md,
-        crossAxisAlignment: WrapCrossAlignment.center,
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           _LifecycleState(
             label: 'Running',
             icon: AppIcons.checkCircle,
             tone: context.status.success.l800,
           ),
+          t.gap.x(Space.md),
           Button(
             onPressed: onOpen,
-            label: 'Go to',
             semanticLabel: 'Go to running World',
             icon: AppIcons.openInNew,
-            variant: ButtonVariant.outline,
-            size: ButtonSize.lg,
+            variant: ButtonVariant.ghost,
+            size: ButtonSize.icon,
             tooltip: _openTooltip(showing, running: true),
           ),
         ],
