@@ -15,31 +15,33 @@
 //! 4. **The browser is the person's.** Nothing here draws a World, and nothing
 //!    here holds a handle to what it launched.
 
-use std::path::PathBuf;
-
 use super::http::{post_json, Head};
 use super::library::LaunchTicket;
 use super::{Client, ClientError, ClientResult};
 
 impl Client {
-    /// The identity home this client's Orbits belong to.
-    ///
-    /// Resolved through the daemon client rather than read from configuration,
-    /// so the head this starts serves the same identity the Library was read
-    /// from. Two different answers here would produce a Library listing one
-    /// person's Orbits and an `Open` that reached another's.
-    pub fn identity_home(&self) -> ClientResult<PathBuf> {
-        Ok(self.daemon()?.home().to_path_buf())
-    }
-
     /// The head this client opens Worlds through, started if it is not up.
+    ///
+    /// Started against the *identity* this client is bound to — the same one
+    /// the Library was read from — and against nothing at all when that is the
+    /// ordinary per-user identity, because there is no path that means "the
+    /// ordinary one".
+    ///
+    /// This was wrong once and the failure was silent in the worst way. Handing
+    /// the head `daemon::Client::home()` looks right — it is where this client
+    /// talks to its daemon — but that is the daemon's own directory beneath the
+    /// identity, so the head came up serving a self-contained identity nobody
+    /// had ever used. It started, it announced an address, it minted a ticket,
+    /// and it listed no Spaces. Every part worked.
     ///
     /// Idempotent by the supervisor's own key: asking twice for one identity
     /// finds the head that is already running. That matters because the
     /// alternative is a port and a run credential per click.
     pub async fn head(&self) -> ClientResult<Head> {
-        let home = self.identity_home()?;
-        let facts = self.supervisor().start_identity_head(&home).await?;
+        let facts = self
+            .supervisor()
+            .start_identity_head(self.identity())
+            .await?;
         let url = facts.url.as_deref().ok_or_else(|| {
             ClientError::internal("the head came up without announcing an address")
         })?;
@@ -70,7 +72,12 @@ impl Client {
     }
 
     /// Ask the head for one launch credential, scoped to `orbit`.
-    async fn mint(&self, head: &Head, orbit: &str) -> ClientResult<Minted> {
+    ///
+    /// Public because it is the half of `Open` that can be driven without
+    /// starting a browser, and therefore the half a test can prove end to end
+    /// against a real head. `open_world` is the same thing with the handoff on
+    /// the end.
+    pub async fn mint(&self, head: &Head, orbit: &str) -> ClientResult<Minted> {
         let reply = post_json(
             head,
             "/api/launch",
@@ -97,9 +104,11 @@ impl Client {
     }
 }
 
-struct Minted {
-    secret: String,
-    expires_at_ms: u64,
+/// A credential the head minted, before it is composed into a URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Minted {
+    pub secret: String,
+    pub expires_at_ms: u64,
 }
 
 #[cfg(test)]

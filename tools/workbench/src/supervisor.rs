@@ -1360,7 +1360,7 @@ impl Supervisor {
         self.spawn_head(
             format!("{device_id}-browser"),
             Some(device_id.to_owned()),
-            home,
+            Some(home),
         )
         .await
     }
@@ -1377,7 +1377,10 @@ impl Supervisor {
     ///
     /// Keyed by the home, so asking twice for the same identity finds the head
     /// that is already up instead of spending another port on a second one.
-    pub async fn start_identity_head(&self, home: &Path) -> Result<HeadFacts, SupervisorError> {
+    pub async fn start_identity_head(
+        &self,
+        home: Option<&Path>,
+    ) -> Result<HeadFacts, SupervisorError> {
         let id = identity_head_id(home);
         // A head that is already up for this identity *is* the answer. Starting
         // a second would work and would still be wrong: two heads mean two run
@@ -1389,14 +1392,14 @@ impl Supervisor {
         if let Some(existing) = running {
             return Ok(existing);
         }
-        self.spawn_head(id, None, home.to_path_buf()).await
+        self.spawn_head(id, None, home.map(Path::to_path_buf)).await
     }
 
     async fn spawn_head(
         &self,
         id: String,
         device: Option<String>,
-        home: PathBuf,
+        home: Option<PathBuf>,
     ) -> Result<HeadFacts, SupervisorError> {
         {
             let heads = lock_recovering(&self.inner.heads);
@@ -1413,13 +1416,12 @@ impl Supervisor {
         // Spawning and waiting for a readiness line are blocking, and both must
         // stay off whatever runtime thread asked: a head that takes its full
         // startup budget would otherwise stall every other task on that thread.
-        let head =
-            tokio::task::spawn_blocking(move || start_browser(&executable, facts_id, owner, &home))
-                .await
-                .map_err(|error| {
-                    SupervisorError::Internal(anyhow::anyhow!("join head start: {error}"))
-                })?
-                .map_err(SupervisorError::Internal)?;
+        let head = tokio::task::spawn_blocking(move || {
+            start_browser(&executable, facts_id, owner, home.as_deref())
+        })
+        .await
+        .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head start: {error}")))?
+        .map_err(SupervisorError::Internal)?;
 
         let facts = head.facts().clone();
         lock_recovering(&self.inner.heads).insert(id, head);
@@ -1846,13 +1848,18 @@ fn path_text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// The id a head for one identity home is filed under.
+/// The id a head for one identity is filed under.
 ///
-/// The home *is* the key. A generated id would let one identity accumulate
-/// heads nobody can find again, and a counter would make "is there already a
-/// head for this identity" a scan of every value instead of a lookup.
-fn identity_head_id(home: &Path) -> String {
-    format!("identity:{}", path_text(home))
+/// The home *is* the key, and its absence is a key too — the ordinary per-user
+/// identity is one identity like any other and gets one head like any other. A
+/// generated id would let an identity accumulate heads nobody can find again,
+/// and a counter would make "is there already a head for this identity" a scan
+/// of every value instead of a lookup.
+fn identity_head_id(home: Option<&Path>) -> String {
+    match home {
+        Some(home) => format!("identity:{}", path_text(home)),
+        None => "identity:default".to_owned(),
+    }
 }
 
 fn now_ms() -> u64 {

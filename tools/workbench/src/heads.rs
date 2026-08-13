@@ -119,18 +119,24 @@ impl OwnedHead {
     }
 }
 
-/// Start a browser head against `home`, and wait for it to say where it is.
+/// Start a browser head, and wait for it to say where it is.
 ///
-/// `home` selects which identity the head serves, and it is passed as the
-/// launcher's `--home` — the same flag the daemon takes, because it selects the
-/// same thing. A head spawned without it would serve whatever identity the
-/// *supervisor's* environment happens to name, which for a fleet device is
-/// never the one asked for.
+/// `home` selects which *self-contained identity* the head serves, passed as
+/// the launcher's `--home` — the same flag the daemon takes, because it selects
+/// the same thing. A fleet device has one and it must be given, or the head
+/// serves whatever identity the supervisor's own environment happens to name.
+///
+/// `None` is the ordinary per-user identity, and it is spelled as the absence
+/// of the flag rather than as a path. There is no path that means "the ordinary
+/// one": passing the config root would collapse the global catalog into a
+/// self-contained identity, and passing the daemon's own home would produce a
+/// head serving an identity nobody has ever used — which is a head that comes
+/// up perfectly and lists nothing.
 pub(crate) fn start_browser(
     executable: &Path,
     id: String,
     device: Option<String>,
-    home: &Path,
+    home: Option<&Path>,
 ) -> Result<OwnedHead> {
     let mut command = Command::new(executable);
     command
@@ -140,11 +146,12 @@ pub(crate) fn start_browser(
         // already holds it.
         .arg("--port")
         .arg("0")
-        .arg("--home")
-        .arg(home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if let Some(home) = home {
+        command.arg("--home").arg(home);
+    }
     no_console(&mut command);
 
     let mut child = command
@@ -162,7 +169,10 @@ pub(crate) fn start_browser(
                 kind: HeadKind::Browser,
                 device,
                 orbit: None,
-                identity: home.to_string_lossy().into_owned(),
+                identity: home.map_or_else(
+                    || "the ordinary identity".to_owned(),
+                    |home| home.to_string_lossy().into_owned(),
+                ),
                 ownership: Ownership::Owned,
                 pid: Some(child.id()),
                 url: Some(ready.url),
@@ -293,7 +303,7 @@ mod tests {
             &executable,
             "head-1".into(),
             Some("alice".into()),
-            directory.path(),
+            Some(directory.path()),
         );
         assert!(
             started.is_err(),
