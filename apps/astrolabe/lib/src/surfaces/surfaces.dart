@@ -47,17 +47,25 @@ class SurfacePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final page = switch (surface) {
+      Surface.library => const LibrarySurface(),
+      Surface.spaces => const SpacesSurface(),
+      Surface.members => const MembersSurface(),
+      Surface.devices => const DevicesSurface(),
+      Surface.heads => const HeadsSurface(),
+      Surface.storage => const StorageSurface(),
+      Surface.diagnostics => const DiagnosticsSurface(),
+    };
+
+    // Library is the client frame rather than a document inside it: its rail
+    // owns the left edge and its selected World's hero owns the top of the
+    // remaining pane. The operational surfaces below are still conventional
+    // pages and keep the shared page gutter.
+    if (surface == Surface.library) return page;
+
     return Padding(
       padding: pageMargin(context.tokens),
-      child: switch (surface) {
-        Surface.library => const LibrarySurface(),
-        Surface.spaces => const SpacesSurface(),
-        Surface.members => const MembersSurface(),
-        Surface.devices => const DevicesSurface(),
-        Surface.heads => const HeadsSurface(),
-        Surface.storage => const StorageSurface(),
-        Surface.diagnostics => const DiagnosticsSurface(),
-      },
+      child: page,
     );
   }
 }

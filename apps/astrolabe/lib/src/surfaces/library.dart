@@ -68,7 +68,6 @@ class _LibrarySurfaceState extends State<LibrarySurface> {
             onSelect: (row) => setState(() => _selected = row.key),
           ),
         ),
-        t.gap.x(Space.xl5),
         Expanded(
           child:
               showing == null ? const _NoMatches() : _Detail(showing: showing),
@@ -89,22 +88,32 @@ class _Loading extends StatelessWidget {
       children: [
         t.box.width(
           TokenEscape.rawSize(kRailWidth),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Skeleton(height: 24),
-              t.gap.y(Space.xl),
-              const Skeleton(height: 32),
-              t.gap.y(Space.xl3),
-              const Skeleton(height: 28),
-              t.gap.y(Space.xs),
-              const Skeleton(height: 28),
-              t.gap.y(Space.xs),
-              const Skeleton(height: 28),
-            ],
+          child: Container(
+            decoration: BoxDecoration(
+              border: t.stroke.edge(right: context.border.l500),
+            ),
+            padding: t.padding.fromLTRB(
+              Space.xl3,
+              Space.xl,
+              Space.xl3,
+              Space.xl3,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Skeleton(height: 24),
+                t.gap.y(Space.xl),
+                const Skeleton(height: 32),
+                t.gap.y(Space.xl3),
+                const Skeleton(height: 28),
+                t.gap.y(Space.xs),
+                const Skeleton(height: 28),
+                t.gap.y(Space.xs),
+                const Skeleton(height: 28),
+              ],
+            ),
           ),
         ),
-        t.gap.x(Space.xl5),
         const Expanded(child: Skeleton(height: kHeroHeight)),
       ],
     );
@@ -117,18 +126,26 @@ class _Empty extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('Library', style: context.titleStyle),
-        t.gap.y(Space.xl5),
-        Text('This device serves no Worlds yet.', style: context.bodyStyle),
-        t.gap.y(Space.xs),
-        Text(
-          'Found a Space, or enter one from an invite, on the Spaces tab.',
-          style: context.proseStyle,
-        ),
-      ],
+    return Padding(
+      padding: t.padding.fromLTRB(
+        Space.xl3,
+        Space.xl,
+        Space.xl3,
+        Space.xl3,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Library', style: context.titleStyle),
+          t.gap.y(Space.xl5),
+          Text('This device serves no Worlds yet.', style: context.bodyStyle),
+          t.gap.y(Space.xs),
+          Text(
+            'Found a Space, or enter one from an invite, on the Spaces tab.',
+            style: context.proseStyle,
+          ),
+        ],
+      ),
     );
   }
 }
@@ -187,10 +204,16 @@ class _Rail extends StatelessWidget {
         .toList();
 
     return Container(
+      key: const ValueKey('library-rail'),
       decoration: BoxDecoration(
         border: t.stroke.edge(right: context.border.l500),
       ),
-      padding: t.padding.only(right: Space.xl3),
+      padding: t.padding.fromLTRB(
+        Space.xl3,
+        Space.xl,
+        Space.xl3,
+        Space.xl3,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -221,6 +244,7 @@ class _Rail extends StatelessWidget {
             child: rows.isEmpty
                 ? Text('No matches', style: context.labelStyle)
                 : ListView(
+                    padding: EdgeInsets.zero,
                     children: [
                       if (running.isNotEmpty)
                         _RailSection(
@@ -347,17 +371,24 @@ class _Detail extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     return ListView(
+      padding: EdgeInsets.zero,
       children: [
         _Hero(showing: showing),
-        if (showing.routes.isNotEmpty) ...[
-          t.gap.y(Space.sm),
-          _Routes(showing: showing),
-        ],
-        t.gap.y(Space.xl3),
         _ActionPanel(showing: showing),
-        t.gap.y(Space.xl3),
-        _Details(showing: showing),
-        t.gap.y(Space.xl3),
+        Padding(
+          padding: t.padding.all(Space.xl5),
+          child: Column(
+            key: const ValueKey('library-detail-content'),
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (showing.routes.isNotEmpty) ...[
+                _Routes(showing: showing),
+                t.gap.y(Space.xl3),
+              ],
+              _Details(showing: showing),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -377,11 +408,11 @@ class _Hero extends StatelessWidget {
     final lifecycle = _lifecycleCopy(view, showing);
 
     return Container(
+      key: const ValueKey('library-hero'),
       height: kHeroHeight,
       padding: t.padding.all(Space.xl5),
       decoration: BoxDecoration(
-        borderRadius: t.radius.all(Space.lg),
-        border: Border.all(color: seed.withValues(alpha: 0.55)),
+        border: t.stroke.edge(bottom: seed.withValues(alpha: 0.55)),
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -503,11 +534,11 @@ class _ActionPanel extends StatelessWidget {
     final lifecycle = _lifecycleCopy(view, showing);
 
     return Container(
-      padding: t.padding.all(Space.xl3),
+      key: const ValueKey('library-open-band'),
+      padding: t.padding.all(Space.xl5),
       decoration: BoxDecoration(
         color: context.surface.l100,
-        border: Border.all(color: context.border.l500, width: t.stroke.xxs),
-        borderRadius: t.radius.all(Space.md),
+        border: t.stroke.edge(bottom: context.border.l500),
       ),
       child: Wrap(
         spacing: t.size.xl5,

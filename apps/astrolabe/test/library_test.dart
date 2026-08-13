@@ -13,6 +13,7 @@ library;
 
 import 'package:astrolabe/src/core/client.dart';
 import 'package:astrolabe/src/surfaces/library.dart';
+import 'package:astrolabe/src/surfaces/surfaces.dart' as astrolabe;
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold;
 import 'package:flutter/widgets.dart';
@@ -82,7 +83,50 @@ Future<List<ActionRequest>> _pump(WidgetTester tester, ClientView view) async {
   return asked;
 }
 
+Future<void> _pumpLibraryPage(WidgetTester tester, ClientView view) async {
+  tester.view.physicalSize = const Size(1040, 720);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: covalenceTheme(const ThemeConfig()),
+      home: ClientScope(
+        client: Client.canned(view),
+        child: const Scaffold(
+          body: astrolabe.SurfacePage(
+            surface: astrolabe.Surface.library,
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pump(const Duration(milliseconds: 300));
+}
+
 void main() {
+  testWidgets('Library rail and hero own the frame edges', (tester) async {
+    await _pumpLibraryPage(
+      tester,
+      _view(library: [_row(orbit: 'orb_one', name: 'IssueWorld')]),
+    );
+
+    final rail = find.byKey(const ValueKey('library-rail'));
+    final hero = find.byKey(const ValueKey('library-hero'));
+    final openBand = find.byKey(const ValueKey('library-open-band'));
+    final content = find.byKey(const ValueKey('library-detail-content'));
+
+    expect(tester.getTopLeft(rail), Offset.zero);
+    expect(tester.getSize(rail).width, kRailWidth);
+    expect(tester.getTopLeft(hero), const Offset(kRailWidth, 0));
+    expect(tester.getSize(hero).width, 1040 - kRailWidth);
+    expect(tester.getTopLeft(openBand), const Offset(kRailWidth, kHeroHeight));
+    expect(tester.getSize(openBand).width, 1040 - kRailWidth);
+    expect(tester.getTopLeft(content).dx, kRailWidth + 20);
+    expect(tester.getTopLeft(content).dy, greaterThan(kHeroHeight + 20));
+  });
+
   testWidgets('loading and empty are told apart on screen', (tester) async {
     await _pump(tester, _view());
     expect(
