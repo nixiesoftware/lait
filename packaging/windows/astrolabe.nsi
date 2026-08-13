@@ -67,6 +67,12 @@ Section "Astrolabe" SecMain
   File "${STAGE}\astrolabe.exe"
   File "${STAGE}\lait.exe"
 
+  ; What a person who receives these binaries is owed: every crate they are
+  ; built from, and the terms it is offered under. Generated from the lockfile
+  ; by `ci/third-party-notices.sh` and held current by CI, so shipping it is a
+  ; copy rather than something somebody has to remember to update.
+  File "${STAGE}\THIRD-PARTY-NOTICES.md"
+
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateShortcut "$SMPROGRAMS\Astrolabe.lnk" "$INSTDIR\astrolabe.exe"
@@ -101,6 +107,7 @@ Section "Uninstall"
   ; worst possible place to conflate them.
   Delete "$INSTDIR\astrolabe.exe"
   Delete "$INSTDIR\lait.exe"
+  Delete "$INSTDIR\THIRD-PARTY-NOTICES.md"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 

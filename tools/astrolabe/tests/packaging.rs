@@ -199,3 +199,52 @@ fn walk(directory: &Path, visit: &mut impl FnMut(&Path)) {
         }
     }
 }
+
+/// A person who receives these binaries is owed the list of what they are built
+/// from. It is generated from the lockfile and held current by CI, so the only
+/// way it fails to arrive is if the installer forgets to carry it.
+#[test]
+fn the_installer_ships_the_third_party_notices() {
+    let script = installer();
+    assert!(
+        script.contains(r#"File "${STAGE}\THIRD-PARTY-NOTICES.md""#),
+        "the installer places both binaries and no account of what is in them"
+    );
+    assert!(
+        repo_root().join("THIRD-PARTY-NOTICES.md").is_file(),
+        "there is nothing for the installer to carry"
+    );
+    // And it goes when the program goes. A notices file left behind names a
+    // program that is no longer there.
+    let uninstall = directives()
+        .split("Section \"Uninstall\"")
+        .nth(1)
+        .expect("an uninstall section")
+        .to_owned();
+    assert!(
+        uninstall.contains(r#"Delete "$INSTDIR\THIRD-PARTY-NOTICES.md""#),
+        "uninstalling leaves the notices behind"
+    );
+}
+
+/// The notices are generated, and the file says so where somebody about to edit
+/// it will read it. A hand-edited generated file is a file that silently stops
+/// matching the thing it describes.
+#[test]
+fn the_notices_say_they_are_generated_and_name_what_generates_them() {
+    let notices =
+        std::fs::read_to_string(repo_root().join("THIRD-PARTY-NOTICES.md")).expect("the notices");
+    assert!(
+        notices.contains("ci/third-party-notices.sh"),
+        "the notices do not name the generator that owns them"
+    );
+    assert!(
+        notices.contains("do not edit it"),
+        "the notices do not warn against being edited by hand"
+    );
+    // The claim the whole file exists to support.
+    assert!(
+        notices.contains("MIT OR Apache-2.0"),
+        "the notices do not state what lait itself is offered under"
+    );
+}
