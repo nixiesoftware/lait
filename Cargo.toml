@@ -3,6 +3,7 @@ members = [
     "crates/journal",
     "crates/mechanics",
     "crates/fabric",
+    "crates/addressbook",
     "crates/comms",
     "crates/relay",
     "crates/replica",
