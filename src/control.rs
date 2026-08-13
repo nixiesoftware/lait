@@ -424,6 +424,48 @@ pub enum Request {
         name: String,
     },
 
+    /// Identity-scoped address book. Daemon route only; never places an Orbit.
+    BookList,
+    BookGet {
+        card: String,
+    },
+    BookPut {
+        #[serde(default)]
+        card: Option<String>,
+        name: String,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    BookDelete {
+        card: String,
+    },
+    BookLink {
+        card: String,
+        handle: String,
+    },
+    BookUnlink {
+        card: String,
+        handle: String,
+    },
+    BookMerge {
+        from: String,
+        into: String,
+    },
+    BookClaimSelf {
+        card: String,
+    },
+    BookLookup {
+        handle: String,
+    },
+    /// Scoped decoration: an Orbit this head already authorized, plus handles
+    /// present in that answer. The daemon re-filters independently.
+    BookResolve {
+        orbit: String,
+        handles: Vec<String>,
+    },
+    BookMigrateStatus,
+    BookMigrate,
+
     // ---- generic Space authority capabilities ----
     /// Effective scoped assignments (Mechanics history, not Catalog state).
     AssignmentList {
@@ -1252,6 +1294,18 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Stop
         | Request::Hello { .. }
         | Request::MemberAlias { .. }
+        | Request::BookList
+        | Request::BookGet { .. }
+        | Request::BookPut { .. }
+        | Request::BookDelete { .. }
+        | Request::BookLink { .. }
+        | Request::BookUnlink { .. }
+        | Request::BookMerge { .. }
+        | Request::BookClaimSelf { .. }
+        | Request::BookLookup { .. }
+        | Request::BookResolve { .. }
+        | Request::BookMigrateStatus
+        | Request::BookMigrate
         // The host plane is lifecycle by definition: node-local state and the
         // two verbs that bring a Space into existence on this machine. None of
         // them has a Station to be owned by — most run before one could exist.
@@ -1346,6 +1400,34 @@ pub fn representative_requests() -> Vec<Request> {
             who: s(),
             name: s(),
         },
+        Request::BookList,
+        Request::BookGet { card: s() },
+        Request::BookPut {
+            card: None,
+            name: s(),
+            note: None,
+        },
+        Request::BookDelete { card: s() },
+        Request::BookLink {
+            card: s(),
+            handle: s(),
+        },
+        Request::BookUnlink {
+            card: s(),
+            handle: s(),
+        },
+        Request::BookMerge {
+            from: s(),
+            into: s(),
+        },
+        Request::BookClaimSelf { card: s() },
+        Request::BookLookup { handle: s() },
+        Request::BookResolve {
+            orbit: s(),
+            handles: vec![],
+        },
+        Request::BookMigrateStatus,
+        Request::BookMigrate,
         Request::Subscribe { since: 0 },
         Request::Status,
         Request::Storage,
@@ -1438,6 +1520,48 @@ pub fn routing_rows() -> Vec<(String, &'static str)> {
         .collect()
 }
 
+/// One live Card as the daemon reports it. Authored fields only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookCardView {
+    pub card: String,
+    pub name: String,
+    pub note: String,
+    pub handles: Vec<String>,
+    pub groups: Vec<String>,
+    pub self_claim: bool,
+}
+
+/// Alias-migration progress. `complete` is only true after every selector was
+/// resolved or discarded — not after the first pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BookMigrationView {
+    pub complete: bool,
+    pub pending: usize,
+    pub imported: usize,
+    pub files: usize,
+}
+
+/// The identity's book, plus how far legacy alias import has got.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookView {
+    pub cards: Vec<BookCardView>,
+    pub migration: BookMigrationView,
+}
+
+/// One authored hit that survived the daemon's independent Orbit filter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookHitView {
+    pub card: String,
+    pub handle: String,
+}
+
+/// Scoped decoration. `coverage` is `unavailable` when the Orbit is vacant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookResolutionView {
+    pub hits: Vec<BookHitView>,
+    pub coverage: Option<String>,
+}
+
 /// A response from the daemon or Space host. Internally tagged by `kind`;
 /// product response schemas are not members of this enum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1475,6 +1599,11 @@ pub enum Response {
     MemberLog {
         entries: Vec<MemberLogEntry>,
     },
+    /// Identity-scoped address book (reply to the `Book*` requests).
+    Book(Box<BookView>),
+    /// Scoped handle decoration. Never a Card-existence bit for a handle
+    /// outside the named Orbit's non-placing snapshot.
+    BookResolution(Box<BookResolutionView>),
     /// Pinned seeds ("remotes") and their reachability.
     Seeds {
         seeds: Vec<SeedDto>,

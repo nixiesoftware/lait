@@ -7,6 +7,7 @@
 //! [`Client`] is the one client entrance to the identity-scoped host;
 //! per-home IPC remains only as an internal compatibility adapter.
 
+pub(crate) mod address_book;
 pub(crate) mod host;
 pub(crate) mod scope;
 pub(crate) mod transport_hub;

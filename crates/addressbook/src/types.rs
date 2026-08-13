@@ -72,6 +72,53 @@ impl Handle {
     pub fn may_leave_device(&self) -> bool {
         !matches!(self, Self::LocalAgent { .. })
     }
+
+    /// Parse a wire spelling: HandleKey hex, a device id, `actor:<ws>:<act>`,
+    /// or `agent:<pathhash>:<name>`.
+    pub fn parse_wire(raw: &str) -> Result<Self, crate::Error> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err(crate::Error::Invalid("empty handle"));
+        }
+        if let Ok(handle) = HandleKey::from_encoded(raw.to_owned()).decode() {
+            return Ok(handle);
+        }
+        if let Some(id) = DeviceId::parse(raw) {
+            return Ok(Self::Device(id));
+        }
+        if let Some(rest) = raw.strip_prefix("actor:") {
+            let (space, actor) = rest
+                .split_once(':')
+                .ok_or(crate::Error::Invalid("actor handle"))?;
+            let space = SpaceId::parse(space).ok_or(crate::Error::Invalid("actor space"))?;
+            let actor = ActorId::parse(actor).ok_or(crate::Error::Invalid("actor id"))?;
+            return Ok(Self::Actor { space, actor });
+        }
+        if let Some(rest) = raw.strip_prefix("agent:") {
+            let (store, name) = rest
+                .split_once(':')
+                .ok_or(crate::Error::Invalid("agent handle"))?;
+            let store = PathHash::parse(store).ok_or(crate::Error::Invalid("agent store"))?;
+            if name.is_empty() {
+                return Err(crate::Error::Invalid("agent name"));
+            }
+            return Ok(Self::LocalAgent {
+                store,
+                name: name.to_owned(),
+            });
+        }
+        Err(crate::Error::Invalid("unrecognized handle"))
+    }
+
+    /// Stable wire spelling for a handle that may leave this device, or a
+    /// local-agent form that must not.
+    pub fn to_wire(&self) -> String {
+        match self {
+            Self::Device(id) => id.as_str().to_owned(),
+            Self::Actor { space, actor } => format!("actor:{}:{}", space.as_str(), actor.as_str()),
+            Self::LocalAgent { store, name } => format!("agent:{}:{name}", store.as_str()),
+        }
+    }
 }
 
 /// Version-tagged canonical encoding of a [`Handle`]. Persistence surface.

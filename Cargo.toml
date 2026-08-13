@@ -110,6 +110,7 @@ mechanics = { path = "crates/mechanics" }
 # manifest, so `loro::*` cannot be named in the app layer. The seal is the
 # dependency edge.
 fabric = { path = "crates/fabric" }
+addressbook = { path = "crates/addressbook" }
 # The orbital runtime + Replica semantics. The product adopts the orbital
 # lifecycle through these — hosting a World, docking Sessions, and committing
 # through the Replica/Fabric path — the same public API any consumer uses. This

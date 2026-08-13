@@ -363,6 +363,17 @@ fn empty_name_and_oversize_note_are_bounds() {
 }
 
 #[test]
+fn handle_wire_round_trips_device_and_actor() {
+    let device = Handle::Device(device(1));
+    assert_eq!(Handle::parse_wire(&device.to_wire()).unwrap(), device);
+    let actor = Handle::Actor {
+        space: space(1),
+        actor: actor(1),
+    };
+    assert_eq!(Handle::parse_wire(&actor.to_wire()).unwrap(), actor);
+}
+
+#[test]
 fn local_agent_handles_are_marked_as_device_local() {
     let handle = Handle::LocalAgent {
         store: PathHash::parse("0123456789abcdef").unwrap(),

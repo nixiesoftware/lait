@@ -48,7 +48,12 @@ pub fn is_read(req: &Request) -> bool {
         | Request::HostConfigList { .. }
         | Request::HostConfigGet { .. }
         | Request::HostContext
-        | Request::Hello { .. } => true,
+        | Request::Hello { .. }
+        | Request::BookList
+        | Request::BookGet { .. }
+        | Request::BookLookup { .. }
+        | Request::BookResolve { .. }
+        | Request::BookMigrateStatus => true,
 
         Request::AgentAdd { .. }
         | Request::AgentProvision { .. }
@@ -120,7 +125,14 @@ pub fn is_read(req: &Request) -> bool {
         | Request::HostRestart
         // …and node control.
         | Request::ConfigReload
-        | Request::Stop => false,
+        | Request::Stop
+        | Request::BookPut { .. }
+        | Request::BookDelete { .. }
+        | Request::BookLink { .. }
+        | Request::BookUnlink { .. }
+        | Request::BookMerge { .. }
+        | Request::BookClaimSelf { .. }
+        | Request::BookMigrate => false,
 
         // Not a one-shot at all — see `serve::rpc`, which refuses it with a
         // pointer to the endpoint that streams (`GET /api/events`).
@@ -200,7 +212,19 @@ pub fn is_host_plane(req: &Request) -> bool {
         // and not `Stop` is the whole distinction: this one names the daemon
         // *under* the server, which survives to stand a fresh one up.
         | Request::HostRestart
-        | Request::HostContext => true,
+        | Request::HostContext
+        | Request::BookList
+        | Request::BookGet { .. }
+        | Request::BookPut { .. }
+        | Request::BookDelete { .. }
+        | Request::BookLink { .. }
+        | Request::BookUnlink { .. }
+        | Request::BookMerge { .. }
+        | Request::BookClaimSelf { .. }
+        | Request::BookLookup { .. }
+        | Request::BookResolve { .. }
+        | Request::BookMigrateStatus
+        | Request::BookMigrate => true,
 
         Request::MemberAdd { .. }
         | Request::MemberRemove { .. }

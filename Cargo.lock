@@ -4644,6 +4644,7 @@ dependencies = [
 name = "lait"
 version = "0.7.11"
 dependencies = [
+ "addressbook",
  "anyhow",
  "async-trait",
  "axum",

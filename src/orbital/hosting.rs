@@ -1983,6 +1983,20 @@ impl StationHost {
             Request::SeedList => self.seed_list(),
             Request::SeedRemove { who } => self.seed_remove(who.trim()),
             Request::MemberAlias { who, name } => self.set_alias(&who, &name),
+            Request::BookList
+            | Request::BookGet { .. }
+            | Request::BookPut { .. }
+            | Request::BookDelete { .. }
+            | Request::BookLink { .. }
+            | Request::BookUnlink { .. }
+            | Request::BookMerge { .. }
+            | Request::BookClaimSelf { .. }
+            | Request::BookLookup { .. }
+            | Request::BookResolve { .. }
+            | Request::BookMigrateStatus
+            | Request::BookMigrate => {
+                Response::err("the address book is identity-scoped; send this on the daemon route")
+            }
             other => Response::err(format!("request is not a lifecycle operation: {other:?}")),
         }
     }
@@ -2030,6 +2044,20 @@ impl StationHost {
             degraded_recovery: self.mechanics.degraded_recovery(),
             recovery: Some(self.mechanics.recovery_status()),
         }))
+    }
+
+    pub(crate) fn handle_snapshot(&self) -> crate::daemon::address_book::HandleSnapshot {
+        use mechanics::ids::ActorId;
+        let actors = self
+            .mechanics
+            .members()
+            .into_iter()
+            .filter_map(|member| ActorId::parse(&member.key))
+            .collect();
+        crate::daemon::address_book::HandleSnapshot {
+            actors,
+            devices: self.mechanics.device_list(),
+        }
     }
 
     fn members(&self) -> Response {
