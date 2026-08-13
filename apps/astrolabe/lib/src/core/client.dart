@@ -10,12 +10,29 @@
 /// Both hold because nothing else imports `../bridge/`. A surface reaches state
 /// through [ClientScope] and asks for things through [Client.dispatch]; it has
 /// no way to construct a view, mutate one, or invent a request the core does
-/// not define. That is a stronger guarantee than a convention, and it is
-/// checkable by grep — which is what the lint in `covalence_lints` does.
+/// not define.
+///
+/// **That rule is held by review, not by a machine.** `covalence_lints` carries
+/// eight rules and every one of them is about the token closure — none of them
+/// knows what this bridge is. Until one does, the check is:
+///
+/// ```sh
+/// grep -rn "import.*bridge/" lib/ --include=*.dart | grep -v "^lib/src/bridge/"
+/// ```
+///
+/// which should answer with this file and nothing else.
 library;
+
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+// `_for_generated` rather than the main barrel because that is where
+// `ExternalLibrary` lives — and it is the type `Core.init` already takes, so
+// naming it here is reaching for the signature's own vocabulary rather than
+// into an internal.
+import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart'
+    show ExternalLibrary;
 
 import '../bridge/api.dart' as api;
 import '../bridge/frb_generated.dart';
@@ -37,12 +54,64 @@ export '../bridge/api.dart'
         NoticeRow,
         OrbitRow,
         PlacementView,
+        RouteRow,
         SpaceRow,
         Staleness,
         Staleness_NeverLoaded,
         Staleness_Signalled,
         StorageRow,
         Unopenable;
+
+/// The core library, resolved for the process that is about to load it.
+///
+/// Passed explicitly so the generated loader's own hint is never consulted. That
+/// hint is wrong twice over: it names `tools/astrolabe/target/`, a directory a
+/// cargo **workspace** never creates, and it hardcodes `release`. The first is
+/// merely dead; the second is the dangerous half, because it is the same
+/// mistake `windows/CMakeLists.txt` documents fixing — a debug interface over a
+/// release core, which is a configuration nobody runs on purpose. The bridge's
+/// config offers no way to set it, so the decision is made here instead.
+///
+/// Three candidates, first hit wins. Returning `null` means "no opinion", and
+/// the bridge falls back to its own search — which finds the core beside the
+/// executable on every platform this ships to.
+ExternalLibrary? _core() {
+  final name = switch (Platform.operatingSystem) {
+    'windows' => 'astrolabe.dll',
+    'macos' => 'libastrolabe.dylib',
+    _ => 'libastrolabe.so',
+  };
+
+  // 1. The bridge's own override. Honoured first so a harness can aim this at
+  //    any build it likes without touching the app.
+  final override =
+      Platform.environment['FRB_DART_LOAD_EXTERNAL_LIBRARY_NATIVE_LIB_DIR'];
+  if (override != null && override.isNotEmpty) {
+    final at = '$override/$name';
+    if (File(at).existsSync()) return ExternalLibrary.open(at);
+  }
+
+  // 2. Beside the running executable — a packaged install, and `flutter run`.
+  //    The only candidate that still holds once this ships.
+  final beside = '${File(Platform.resolvedExecutable).parent.path}/$name';
+  if (File(beside).existsSync()) return ExternalLibrary.open(beside);
+
+  // 3. The workspace's target directory, for THIS build's profile. The case a
+  //    test process is in: its executable is the Dart VM, somewhere else
+  //    entirely, so there is no core beside it. `kDebugMode` rather than a
+  //    literal, which is the whole point of replacing the generated hint.
+  final profile = kDebugMode ? 'debug' : 'release';
+  var dir = Directory.current.absolute;
+  for (var up = 0; up < 6; up++) {
+    final at = '${dir.path}/target/$profile/$name';
+    if (File(at).existsSync()) return ExternalLibrary.open(at);
+    final parent = dir.parent;
+    if (parent.path == dir.path) break;
+    dir = parent;
+  }
+
+  return null;
+}
 
 /// The core, and the last view it produced.
 ///
@@ -84,13 +153,13 @@ class Client {
   /// things — and the two would differ on exactly the machine where it
   /// mattered.
   static Future<Client> start() async {
-    await Core.init();
+    await Core.init(externalLibrary: _core());
     api.start(stateRoot: null, sidecar: null);
     final client = Client._(ValueNotifier(api.current()));
     api.watch().listen((next) => client._view.value = next);
-    // The first read has to be asked for. Nothing in the core polls on its own
-    // schedule before somebody is looking.
-    api.dispatch(action: const api.ActionRequest.refresh());
+    // The core establishes its signal stream and performs the first read. A
+    // second refresh here would give startup two owners and turn one genuine
+    // startup failure into two records.
     return client;
   }
 

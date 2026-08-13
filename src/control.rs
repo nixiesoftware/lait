@@ -2694,7 +2694,29 @@ async fn connect_bounded(home: &Path) -> Result<Stream> {
     let name = control_name(home)?;
     match tokio::time::timeout(PROBE_TIMEOUT, Stream::connect(name)).await {
         Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(error)) => Err(Undelivered(format!("connect to daemon: {error}")).into()),
+        Ok(Err(error)) => Err(Undelivered(match error.kind() {
+            // A control channel exists only while a daemon is listening on it:
+            // a Windows named pipe and a unix socket both answer a connect with
+            // `NotFound` (or `ConnectionRefused`, for a socket file nobody is
+            // accepting on) when there is nobody there.
+            //
+            // Said in the daemon's own words rather than the OS's, because "the
+            // system cannot find the file specified" sends somebody looking for
+            // a missing *file* — and the daemon home they will go and inspect is
+            // full of files, all present and all irrelevant. The channel is not
+            // one of them.
+            //
+            // The home is named because the channel's identity is derived from
+            // it: two processes that disagree about `LAIT_HOME` derive two
+            // different channels and never see each other, with exactly this
+            // error and nothing on screen to say which home either one meant.
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => format!(
+                "no Lait daemon is running for this identity ({}) — start one with `lait daemon`",
+                home.display()
+            ),
+            _ => format!("connect to daemon: {error}"),
+        })
+        .into()),
         Err(_) => Err(Undelivered(format!(
             "the Lait daemon is not answering (no connection within {}s) — it may be \
              wedged or shutting down",

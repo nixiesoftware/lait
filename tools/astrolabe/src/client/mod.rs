@@ -50,6 +50,20 @@ impl Client {
     /// supervisor does: a consumer that could hold a client without already
     /// holding its stream would have a window in which events vanish.
     pub async fn start(config: Config) -> ClientResult<(Self, Signals)> {
+        let selection = selection_for(config.identity.as_deref());
+        lait::host_client::ensure_lait_daemon_with_executable(&selection, &config.executable)
+            .await
+            .map_err(|error| {
+                let message = format!("start or attach to the identity daemon: {error:#}");
+                if error
+                    .downcast_ref::<lait::control::ForeignDaemon>()
+                    .is_some()
+                {
+                    ClientError::refused(message)
+                } else {
+                    ClientError::unreachable(message)
+                }
+            })?;
         let (supervisor, signals) = Supervisor::start(SupervisorConfig {
             state_root: config.state_root,
             executable: config.executable,
@@ -100,10 +114,7 @@ impl Client {
         // working directory already say — which is what the daemon itself comes
         // up with. Binding to the same one is what keeps a client and its daemon
         // talking about the same identity.
-        let selection = match &self.inner.identity {
-            Some(home) => lait::config::Selection::for_identity(home),
-            None => lait::config::Selection::default(),
-        };
+        let selection = selection_for(self.inner.identity.as_deref());
         lait::daemon::Client::for_selection(&selection)
             .map_err(|error| ClientError::unreachable(format!("reach the daemon: {error:#}")))
     }
@@ -111,6 +122,13 @@ impl Client {
     /// Stop observing and stop every daemon this client owns.
     pub async fn shutdown(&self) {
         self.inner.supervisor.shutdown().await;
+    }
+}
+
+fn selection_for(identity: Option<&std::path::Path>) -> lait::config::Selection {
+    match identity {
+        Some(home) => lait::config::Selection::for_identity(home),
+        None => lait::config::Selection::default(),
     }
 }
 

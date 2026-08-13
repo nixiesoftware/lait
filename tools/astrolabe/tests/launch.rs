@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use astrolabe::client::http::{post_json, Head};
 use astrolabe::client::Client;
+use astrolabe::Config;
 
 /// The `lait` this build produced, if it is there.
 ///
@@ -75,10 +76,35 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
 
-    let supervisor =
-        lait_workbench::Supervisor::new(managed.path().to_path_buf(), executable.clone())
-            .expect("a supervisor");
-    let client = Client::over(supervisor, Some(identity.path().to_path_buf()));
+    let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
+    config.identity = Some(identity.path().to_path_buf());
+    let (client, _signals) = Client::start(config)
+        .await
+        .expect("a client that starts its identity daemon");
+
+    let selection = lait::config::Selection::for_identity(identity.path());
+    let daemon = lait::daemon::Client::for_selection(&selection).expect("the identity daemon");
+    assert!(
+        matches!(daemon.probe().await, lait::control::Probe::Healthy),
+        "client startup returned before its identity daemon answered"
+    );
+    let first_pid = lait::config::daemon_pid(daemon.home()).expect("the started daemon's pid");
+
+    // A second client is the existing-daemon half of the startup contract. It
+    // attaches to the process already serving this identity rather than racing
+    // it with another sidecar spawn.
+    let second_managed = tempfile::tempdir().expect("another managed root");
+    let mut second_config = Config::new(second_managed.path().to_path_buf(), executable.clone());
+    second_config.identity = Some(identity.path().to_path_buf());
+    let (attached, _attached_signals) = Client::start(second_config)
+        .await
+        .expect("a second client that attaches to the running identity daemon");
+    assert_eq!(
+        lait::config::daemon_pid(daemon.home()),
+        Some(first_pid),
+        "attaching to a running identity started a competing daemon"
+    );
+    attached.shutdown().await;
 
     let head = client.head().await.expect("a head for this identity");
     assert!(

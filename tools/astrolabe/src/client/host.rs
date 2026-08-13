@@ -43,7 +43,7 @@ impl Client {
         let reply = daemon
             .request(ControlRoute::Daemon, &Request::HostContext, None)
             .await
-            .map_err(|error| ClientError::unreachable(format!("read host context: {error:#}")))?;
+            .map_err(|error| ClientError::unreachable(format!("{error:#}")))?;
         match reply {
             Response::Host(HostReply::Context {
                 version,

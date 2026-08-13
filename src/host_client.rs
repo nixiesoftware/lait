@@ -222,6 +222,22 @@ fn daemon_exited_error(status: std::process::ExitStatus, log_path: &Path) -> any
 /// returned: it used to license a re-send, and it is the wrong question — see
 /// [`control::Undelivered`], which answers the right one.
 pub async fn ensure_lait_daemon(selection: &crate::config::Selection) -> Result<()> {
+    let exe = std::env::current_exe().context("locate own executable")?;
+    ensure_lait_daemon_with_executable(selection, &exe).await
+}
+
+/// Ensure the selected identity's process-level Lait daemon is running, using
+/// `executable` when one has to be started.
+///
+/// This is the embedded-client counterpart to [`ensure_lait_daemon`]. A Lait
+/// head can self-exec, but a client such as Astrolabe is not the daemon binary:
+/// it resolves the fixed `lait` sidecar beside itself and hands that trusted
+/// path in here. Probing still comes first, so an already-running identity
+/// daemon is attached to without touching the sidecar or starting a competitor.
+pub async fn ensure_lait_daemon_with_executable(
+    selection: &crate::config::Selection,
+    executable: &Path,
+) -> Result<()> {
     let client = crate::daemon::Client::for_selection(selection)?;
     let daemon_home = client.home();
     match client.probe().await {
@@ -241,15 +257,14 @@ pub async fn ensure_lait_daemon(selection: &crate::config::Selection) -> Result<
         }
         control::Probe::Absent => {}
     }
-    let exe = std::env::current_exe().context("locate own executable")?;
     let log_path = daemon_log_path(daemon_home);
     let log = std::fs::File::create(&log_path).ok();
     // Passing the ordinary config root through `--home` would collapse the
     // global catalog into a self-contained identity, so pin only an explicitly
     // self-contained home — the one this invocation selected, or an ambient one.
     let identity = selection.self_contained_home();
-    let mut child =
-        crate::daemon_spawn::spawn(&exe, log, identity.as_deref()).context("spawn Lait daemon")?;
+    let mut child = crate::daemon_spawn::spawn(executable, log, identity.as_deref())
+        .context("spawn Lait daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if matches!(client.probe().await, control::Probe::Healthy) {
