@@ -296,5 +296,10 @@ link step fails (`taskkill //F //IM lait.exe` on Windows).
 - End to end against the real binary: `bash ci/smoke-p0.sh`. It starts the head
   and drives all three HTTP planes — the closest thing to "run the product".
 
+**Kill `astrolabe.exe` before running its suite.** A running client holds the
+single-instance mutex, so `a_second_acquire_is_told_somebody_else_holds_it`
+fails with "the first launch was refused" — which reads like the guard being
+broken and is actually the guard working.
+
 Pre-commit/pre-push hooks run `cargo fmt --all --check` — run `cargo fmt --all`
 before committing Rust.

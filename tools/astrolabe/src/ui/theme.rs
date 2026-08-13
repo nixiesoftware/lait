@@ -23,13 +23,22 @@
 
 use egui::{Color32, Ui};
 
-/// The contrast an accent must clear against what is behind it.
+/// The contrast a short coloured **label** must clear against what is behind
+/// it.
 ///
-/// WCAG's large-text and non-text floor. These are short coloured labels beside
-/// ordinary text, which is what that threshold is for; holding them to the 4.5∶1
-/// body-text ratio would push a scheme's own colours around for no gain a person
-/// would notice.
+/// WCAG's large-text and non-text floor. A word or two beside ordinary text is
+/// what that threshold is for.
 pub const MINIMUM_CONTRAST: f64 = 3.0;
+
+/// The contrast a **paragraph** must clear.
+///
+/// WCAG's body-text ratio, and the distinction is not pedantry. The client
+/// explains itself in full sentences — what an MCP binding pins, why a transfer
+/// lane is empty, what deleting a device destroys — and every one of them was
+/// drawn at the label floor, which is how a paragraph ends up technically
+/// compliant and actually unreadable. A floor that does not depend on the role
+/// is a floor set for the shortest thing that uses it.
+pub const MINIMUM_BODY_CONTRAST: f64 = 4.5;
 
 /// Something the person should notice but that is not an error — a degraded
 /// observation, a stale figure.
@@ -42,12 +51,27 @@ pub fn danger(ui: &Ui) -> Color32 {
     legible(ui.visuals().error_fg_color, behind(ui))
 }
 
-/// Text that is present but secondary. Asked for rather than dimmed by a fixed
-/// alpha, because "70% of the foreground" is illegible in exactly the scheme
-/// that needs it most — and then held to the same floor, because a weak colour
-/// that cannot be read is not weak, it is absent.
+/// A short supporting label — a state word, a count, a mount name.
+///
+/// Asked for rather than dimmed by a fixed alpha, because "70% of the
+/// foreground" is illegible in exactly the scheme that needs it most — and then
+/// held to the label floor, because a weak colour that cannot be read is not
+/// weak, it is absent.
 pub fn secondary(ui: &Ui) -> Color32 {
     legible(ui.visuals().weak_text_color(), behind(ui))
+}
+
+/// Supporting text a person reads as *prose* — a sentence explaining what a
+/// surface does or why something is empty.
+///
+/// Quieter than the body it sits under, and held to the body floor rather than
+/// the label one. Use this for anything with a verb in it.
+pub fn prose(ui: &Ui) -> Color32 {
+    legible_to(
+        ui.visuals().weak_text_color(),
+        behind(ui),
+        MINIMUM_BODY_CONTRAST,
+    )
 }
 
 /// What these are drawn on.
@@ -69,7 +93,17 @@ fn behind(ui: &Ui) -> Color32 {
 /// extreme that clears the floor, so choosing by measurement always terminates
 /// somewhere legible.
 pub fn legible(colour: Color32, background: Color32) -> Color32 {
-    if contrast(colour, background) >= MINIMUM_CONTRAST {
+    legible_to(colour, background, MINIMUM_CONTRAST)
+}
+
+/// `legible`, against a floor the caller chooses because the caller knows what
+/// the text is.
+pub fn legible_to(colour: Color32, background: Color32, floor: f64) -> Color32 {
+    // Flattened first. A translucent answer that measured correctly and was
+    // then drawn at its own alpha would be a different colour again, so what
+    // comes back here is always what was measured.
+    let colour = over(colour, background);
+    if contrast(colour, background) >= floor {
         return colour;
     }
     let toward = if contrast(Color32::BLACK, background) >= contrast(Color32::WHITE, background) {
@@ -80,18 +114,53 @@ pub fn legible(colour: Color32, background: Color32) -> Color32 {
     const STEPS: u8 = 20;
     for step in 1..=STEPS {
         let candidate = blend(colour, toward, f64::from(step) / f64::from(STEPS));
-        if contrast(candidate, background) >= MINIMUM_CONTRAST {
+        if contrast(candidate, background) >= floor {
             return candidate;
         }
     }
     toward
 }
 
-/// The WCAG contrast ratio: 1.0 for identical, 21.0 for black on white.
+/// The WCAG contrast ratio between a colour *as drawn* and what is behind it:
+/// 1.0 for identical, 21.0 for black on white.
+///
+/// The foreground is composited over the background first, and that is not a
+/// detail. egui's `weak_text_color()` is `#303030` at 60% alpha — opaque, it is
+/// 13∶1 against white and clears every threshold there is; drawn, it composites
+/// to roughly `#8f8f8f` and is about 3.9∶1. Measuring the stored colour rather
+/// than the drawn one made this whole module report a floor it was not holding.
 pub fn contrast(foreground: Color32, background: Color32) -> f64 {
+    let foreground = over(foreground, background);
     let (a, b) = (luminance(foreground), luminance(background));
     let (lighter, darker) = if a > b { (a, b) } else { (b, a) };
     (lighter + 0.05) / (darker + 0.05)
+}
+
+/// `foreground` composited over `background`, source-over.
+///
+/// The result is opaque, which is the point: it is what a person's eye receives,
+/// and it is therefore the only thing worth measuring or returning.
+pub fn over(foreground: Color32, background: Color32) -> Color32 {
+    let alpha = f64::from(foreground.a()) / 255.0;
+    if alpha >= 1.0 {
+        return foreground;
+    }
+    let mix = |front: u8, back: u8| -> u8 {
+        let value = (f64::from(front) - f64::from(back)).mul_add(alpha, f64::from(back));
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0..=255 immediately above"
+        )]
+        {
+            value.round().clamp(0.0, 255.0) as u8
+        }
+    };
+    Color32::from_rgb(
+        mix(foreground.r(), background.r()),
+        mix(foreground.g(), background.g()),
+        mix(foreground.b(), background.b()),
+    )
 }
 
 /// WCAG relative luminance.
@@ -190,6 +259,36 @@ mod tests {
         assert_ne!(fixed, raw);
     }
 
+    /// Prose is held to a higher floor than a label, and the difference is
+    /// visible rather than nominal — this is the case the screenshot exposed:
+    /// three lines of explanation in a grey that cleared the label floor and
+    /// could not be read.
+    #[test]
+    fn a_paragraph_is_held_to_a_higher_floor_than_a_word() {
+        const { assert!(MINIMUM_BODY_CONTRAST > MINIMUM_CONTRAST) };
+
+        let ctx = egui::Context::default();
+        for visuals in [egui::Visuals::light(), egui::Visuals::dark()] {
+            ctx.set_visuals(visuals);
+            let mut captured = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                captured = Some((secondary(ui), prose(ui), ui.visuals().panel_fill));
+            });
+            let (label, paragraph, background) = captured.expect("a frame drew");
+            assert!(contrast(label, background) >= MINIMUM_CONTRAST);
+            assert!(
+                contrast(paragraph, background) >= MINIMUM_BODY_CONTRAST,
+                "prose came back at {:.2}:1",
+                contrast(paragraph, background)
+            );
+            assert_ne!(
+                label, paragraph,
+                "a label and a paragraph resolved to the same colour, so the \
+                 distinction is nominal"
+            );
+        }
+    }
+
     /// A colour that is already readable is left exactly as the theme chose it.
     /// Adjusting one that did not need it would be this module overruling a
     /// scheme it has no opinion about.
@@ -245,6 +344,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Alpha is not a detail. This is the defect the role split exposed:
+    /// `weak_text_color()` is `#303030` at 60% alpha, which is 13∶1 against
+    /// white if you read the stored bytes and about 3.9∶1 once it is drawn.
+    /// Measuring the stored colour made the floor a number this module
+    /// reported rather than one it held.
+    #[test]
+    fn contrast_is_measured_on_the_colour_that_is_actually_drawn() {
+        let translucent = Color32::from_rgba_unmultiplied(0x30, 0x30, 0x30, 0x99);
+        let white = Color32::WHITE;
+
+        let opaque_reading = contrast(Color32::from_rgb(0x30, 0x30, 0x30), white);
+        let drawn_reading = contrast(translucent, white);
+        assert!(
+            opaque_reading > 12.0,
+            "the opaque colour is not the high-contrast one this test assumes"
+        );
+        assert!(
+            drawn_reading < 5.0,
+            "a 60%-alpha grey measured as though it were opaque: {drawn_reading:.2}:1"
+        );
+
+        // And what comes back is opaque, so drawing it cannot undo the fix.
+        let fixed = legible_to(translucent, white, MINIMUM_BODY_CONTRAST);
+        assert_eq!(fixed.a(), 255, "a corrected colour is still translucent");
+        assert!(contrast(fixed, white) >= MINIMUM_BODY_CONTRAST);
     }
 
     /// The ratio is the standard one, so the numbers in the comments mean what

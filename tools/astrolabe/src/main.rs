@@ -95,6 +95,9 @@ impl Shell {
         creation: &eframe::CreationContext<'_>,
         arrived: Option<astrolabe::link::Link>,
     ) -> Result<Self> {
+        // Before the first frame, so nothing is ever drawn at egui's defaults.
+        astrolabe::ui::install(&creation.egui_ctx);
+
         let sidecar = astrolabe::sidecar::resolve()?;
         let state_root = state_root()?;
 

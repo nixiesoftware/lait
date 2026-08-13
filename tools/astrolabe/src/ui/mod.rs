@@ -22,6 +22,7 @@
 
 pub mod devices;
 pub mod diagnostics;
+pub mod geometry;
 pub mod heads;
 pub mod library;
 pub mod members;
@@ -29,7 +30,7 @@ pub mod spaces;
 pub mod storage;
 pub mod theme;
 
-use egui::{Align, Key, Layout, Modifiers, RichText, Ui};
+use egui::{Align, Key, Layout, Modifiers, RichText, ScrollArea, Ui};
 
 use crate::model::{App, StaleReason};
 use crate::runtime::Action;
@@ -115,13 +116,38 @@ impl Chrome {
     }
 }
 
+/// Put the ladder into the context this interface will be drawn in.
+///
+/// Called by whoever owns the context — the shell at startup, and the snapshot
+/// harness before it renders — rather than from inside `draw`, so the seam is
+/// visible and a frame does not pay to rebuild a font table it already has.
+/// `all_styles_mut` because corner radii live in visuals, which is per-theme:
+/// applying to one style would give the light and dark interfaces different
+/// corners.
+pub fn install(ctx: &egui::Context) {
+    ctx.all_styles_mut(geometry::apply);
+}
+
 /// Draw the whole client for one frame, and collect what it was asked to do.
+///
+/// The page margin lives here rather than in the shell, because breathing room
+/// is part of the visual language and not a property of the window: a surface
+/// rendered headlessly for a snapshot has to have it too, or the picture is of
+/// something nobody ships.
 pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
+    egui::Frame::NONE
+        .inner_margin(geometry::page_margin())
+        .show(ui, |ui| draw_page(ui, app, chrome))
+        .inner
+}
+
+fn draw_page(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
     let mut actions = Vec::new();
 
     keyboard(ui, chrome, &mut actions);
 
     ui.horizontal(|ui| {
+        ui.set_min_height(geometry::bar::lg());
         for candidate in Surface::ALL {
             // `selectable_value` carries the selected state into the semantic
             // tree, so a screen reader hears which surface is current rather
@@ -145,24 +171,44 @@ pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action> {
 
     draw_freshness(ui, app);
 
+    // What happened sits at the bottom and the surface takes what is left.
+    //
+    // Laid out bottom-up *first*, which is the only ordering that works: a
+    // scroll area told to fill the space takes all of it, so anything added
+    // after it is pushed off the window. The record of what happened being the
+    // thing that falls off is the worst possible choice, because it is where a
+    // refusal appears.
+    ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+        draw_failures(ui, app);
+        draw_notices(ui, app);
+
+        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            // The surface scrolls; the bar above it does not. Without this a
+            // long surface simply runs off the bottom — and egui culls
+            // interaction outside the clip rect, so a control down there stops
+            // responding rather than merely being out of view, which reads
+            // exactly like it being broken.
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| draw_surface(ui, app, chrome, &mut actions));
+        });
+    });
+    actions
+}
+
+fn draw_surface(ui: &mut Ui, app: &App, chrome: &mut Chrome, actions: &mut Vec<Action>) {
     match chrome.surface {
-        Surface::Library => library::draw(ui, app, &mut actions),
-        Surface::Spaces => {
-            spaces::draw(ui, app, &mut chrome.spaces, &mut chrome.quiet, &mut actions)
-        }
-        Surface::Members => members::draw(ui, app, &mut chrome.members, &mut actions),
-        Surface::Devices => devices::draw(ui, app, &mut chrome.devices, &mut actions),
-        Surface::Heads => heads::draw(ui, app, &mut chrome.heads, &mut actions),
+        Surface::Library => library::draw(ui, app, actions),
+        Surface::Spaces => spaces::draw(ui, app, &mut chrome.spaces, &mut chrome.quiet, actions),
+        Surface::Members => members::draw(ui, app, &mut chrome.members, actions),
+        Surface::Devices => devices::draw(ui, app, &mut chrome.devices, actions),
+        Surface::Heads => heads::draw(ui, app, &mut chrome.heads, actions),
         // The engine read that supplies these is SUB-5. Until it lands the
         // model carries nothing, and the surface says "not measured" rather
         // than drawing zeroes — which is the whole contract this surface has.
         Surface::Storage => storage::draw(ui, app.storage(), app.transfers()),
-        Surface::Diagnostics => diagnostics::draw(ui, app, &mut chrome.diagnostics, &mut actions),
+        Surface::Diagnostics => diagnostics::draw(ui, app, &mut chrome.diagnostics, actions),
     }
-
-    draw_notices(ui, app);
-    draw_failures(ui, app);
-    actions
 }
 
 /// Every surface, and the one action worth a key of its own, from the keyboard
@@ -227,10 +273,14 @@ fn draw_notices(ui: &mut Ui, app: &App) {
     if notices.peek().is_none() {
         return;
     }
-    ui.separator();
-    for notice in notices.take(3) {
-        ui.label(RichText::new(&notice.said).color(theme::secondary(ui)));
+    // Built oldest-of-the-three first, because the strip is laid out bottom-up
+    // and would otherwise put the newest line furthest from the surface it is
+    // about.
+    let recent: Vec<&crate::model::Notice> = notices.take(3).collect();
+    for notice in recent.into_iter().rev() {
+        ui.label(RichText::new(&notice.said).color(theme::prose(ui)));
     }
+    ui.separator();
 }
 
 fn draw_failures(ui: &mut Ui, app: &App) {
@@ -238,15 +288,12 @@ fn draw_failures(ui: &mut Ui, app: &App) {
     if failures.peek().is_none() {
         return;
     }
+    for failure in failures {
+        ui.label(
+            RichText::new(format!("{}: {}", failure.what, failure.error)).color(theme::danger(ui)),
+        );
+    }
     ui.separator();
-    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-        for failure in failures {
-            ui.label(
-                RichText::new(format!("{}: {}", failure.what, failure.error))
-                    .color(theme::danger(ui)),
-            );
-        }
-    });
 }
 
 /// A control that dispatches one action, disabled while that action is in

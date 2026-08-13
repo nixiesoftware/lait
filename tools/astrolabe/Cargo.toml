@@ -64,4 +64,8 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
+# Saving what `Harness::render` produces. Already in the tree through
+# `egui_kittest`, and a dev-dependency, so it reaches neither a shipped binary
+# nor the generated third-party notices.
+image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
