@@ -75,24 +75,69 @@ fn the_installer_places_both_binaries_in_one_directory() {
     );
 }
 
-/// Nothing from the old stack survives in the installer. Each of these names a
-/// specific dead technology from a superseded revision, and finding any of them
-/// would mean a shell nobody meant to ship had come back.
+/// Nothing from a retired stack survives in the installer.
+///
+/// This list used to include Flutter and Dart, under revision 6, whose whole
+/// point was that the client was a single self-contained executable. **Revision
+/// 7 put the interface on Flutter over a Rust core**, so those two moved from
+/// forbidden to required and the assertion below them inverted — see
+/// [`the_installer_carries_the_whole_flutter_bundle`]. What remains here is the
+/// genuinely dead: the browser shells this design never went back to.
 #[test]
 fn the_installer_carries_nothing_from_the_retired_stacks() {
     let script = directives().to_ascii_lowercase();
-    for corpse in [
-        "flutter",
-        "flutter_windows.dll",
-        "webview2",
-        "dart",
-        "flutter_rust_bridge",
-        "tauri",
-        "\\data\\",
-    ] {
+    for corpse in ["webview2", "tauri", "warpui", "egui"] {
         assert!(
             !script.contains(corpse),
             "the installer references '{corpse}', which no longer exists in this design"
+        );
+    }
+}
+
+/// The inverse of the test above, and the reason it had to change.
+///
+/// `astrolabe.exe` is a 92 KB runner. Installing it alone — which is exactly
+/// what this script did for the whole of revision 7's first half — produces a
+/// machine where the client cannot reach its first frame: no engine, no AOT
+/// image, no ICU table. The failure arrives in the loader, before anything this
+/// project wrote gets to run, which is the least diagnosable place it could.
+#[test]
+fn the_installer_carries_the_whole_flutter_bundle() {
+    let script = directives();
+    for required in [
+        // The engine, and the Rust core reached across the bridge.
+        r#"File "${STAGE}\flutter_windows.dll""#,
+        r#"File "${STAGE}\astrolabe.dll""#,
+        // The undecorated window and the tray icon are plugins, not framework.
+        r#"File "${STAGE}\*_plugin.dll""#,
+        // `data\` is resolved by path relative to the executable, so it has to
+        // arrive under that name and no other.
+        r#"SetOutPath "$INSTDIR\data""#,
+        r#"File /r "${STAGE}\data\*.*""#,
+    ] {
+        assert!(
+            script.contains(required),
+            "the installer omits {required}, so the client cannot start"
+        );
+    }
+}
+
+/// The C runtime ships beside the client.
+///
+/// `astrolabe.exe` imports MSVCP140.dll and VCRUNTIME140*.dll. A development
+/// machine has them because Visual Studio installed them, which is precisely
+/// why leaving them out is invisible until somebody installs on a clean
+/// machine — the one test nothing in CI substitutes for.
+#[test]
+fn the_installer_carries_the_c_runtime() {
+    let script = directives();
+    for required in [
+        r#"File "${STAGE}\msvcp140*.dll""#,
+        r#"File "${STAGE}\vcruntime140*.dll""#,
+    ] {
+        assert!(
+            script.contains(required),
+            "the installer omits {required}; a clean machine cannot start the client"
         );
     }
 }
@@ -134,11 +179,30 @@ fn uninstalling_removes_the_program_and_never_the_persons_data() {
             "the uninstaller deletes {kept}, which holds the person's data"
         );
     }
-    assert!(
-        !uninstall.contains("RMDir /r"),
-        "the uninstaller removes a directory tree recursively, which is how a \
-         store gets destroyed by an uninstall nobody read"
-    );
+
+    // Recursive removal is allowed in exactly one place: the engine's own
+    // payload directory.
+    //
+    // Under revision 6 this test forbade `RMDir /r` outright, and that was the
+    // right rule for an installer that placed two files. Revision 7's bundle
+    // nests `data\flutter_assets\<package>\...`, which cannot be enumerated —
+    // so the rule becomes a bound rather than a ban. `$INSTDIR` itself still
+    // comes off with plain `RMDir`, which refuses a non-empty directory: an
+    // unknown file left behind fails the uninstall visibly instead of being
+    // swept away with everything around it.
+    for line in uninstall.lines() {
+        let line = line.trim();
+        let Some(target) = line.strip_prefix("RMDir /r ") else {
+            continue;
+        };
+        assert_eq!(
+            target.trim(),
+            r#""$INSTDIR\data""#,
+            "the uninstaller recursively removes {target}, which is wider than \
+             the engine payload — that is how a store gets destroyed by an \
+             uninstall nobody read"
+        );
+    }
 }
 
 /// A per-user install needs no elevation, and elevation is the one prompt
@@ -151,10 +215,16 @@ fn the_installer_asks_for_no_elevation() {
     );
 }
 
-/// The release gate says no Flutter, Dart or generated FFI artifacts exist
-/// anywhere in the tree. This walks the source directories and says so.
+/// The interface stays in `apps/astrolabe`, and the core stays out of it.
+///
+/// This test used to assert that no Flutter or Dart artifact existed *anywhere*
+/// in the tree, which was revision 6's rule and is now false — the interface is
+/// Dart. What survives is the boundary underneath it: `tools/astrolabe` is the
+/// Rust core, `packaging/` is the installer, and a `.dart` file or a pubspec
+/// appearing in either means the two halves have started to merge. The
+/// directory list below is the whole assertion; it is deliberately not `apps/`.
 #[test]
-fn no_retired_stack_artifacts_survive_anywhere_in_the_tree() {
+fn no_interface_artifacts_leak_into_the_core_or_the_packaging() {
     let root = repo_root();
     let mut found = Vec::new();
     for directory in ["tools", "packaging"] {
@@ -178,7 +248,7 @@ fn no_retired_stack_artifacts_survive_anywhere_in_the_tree() {
     }
     assert!(
         found.is_empty(),
-        "artifacts from a retired stack are still in the tree: {found:?}"
+        "interface artifacts have leaked out of apps/astrolabe: {found:?}"
     );
 }
 

@@ -72,6 +72,28 @@ endif()
 set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 
+# === The C runtime ==========================================================
+#
+# `astrolabe.exe` imports MSVCP140.dll, VCRUNTIME140.dll and VCRUNTIME140_1.dll.
+# A development machine has them because Visual Studio installed them, which is
+# exactly why their absence is invisible here and fatal on a clean one: the app
+# fails in the loader, before a frame, with a dialog naming a DLL rather than
+# this program.
+#
+# Deployed app-locally rather than by chaining the redistributable installer,
+# because a per-user install that has no machine-wide effect should not need
+# elevation — and the redist does. Microsoft permits local deployment of the
+# runtime for exactly this case.
+#
+# SKIP first, then install them ourselves: left to itself the module installs to
+# `bin/`, and the rule here is that everything the client loads sits beside the
+# executable.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+include(InstallRequiredSystemLibraries)
+install(FILES ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
+
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 
@@ -128,23 +150,46 @@ set(RUST_WORKSPACE "${CMAKE_CURRENT_SOURCE_DIR}/../../..")
 # the else branch — every Flutter Debug build compiled and installed the
 # *release* core, which is a configuration nobody runs on purpose and everybody
 # eventually ships by accident.
-set(RUST_PROFILE_FLAGS "$<$<NOT:$<CONFIG:Debug>>:--release>")
 set(RUST_PROFILE_DIR "$<IF:$<CONFIG:Debug>,debug,release>")
 set(RUST_TARGET_DIR "${RUST_WORKSPACE}/target/${RUST_PROFILE_DIR}")
 
+# The core and the sidecar are built by SEPARATE targets, because they are
+# invalidated by different things and only one of them is on the inner loop.
+#
+# `astrolabe.dll` is what a Dart change can require rebuilding; `lait.exe` is an
+# 85 MB link that no Dart change can invalidate. Building them under one cargo
+# invocation put that link on every single build of the interface, which is the
+# cost you pay most often and notice least.
+#
+# Both go through `rust_build.cmake` rather than calling cargo directly, so the
+# running-client check happens at build time. See that file for why.
 add_custom_target(astrolabe_core ALL
-  COMMAND cargo build -p astrolabe -p lait ${RUST_PROFILE_FLAGS}
-  WORKING_DIRECTORY "${RUST_WORKSPACE}"
-  COMMENT "Building the Rust core and its sidecar for $<CONFIG>"
-  # Without this, the profile flag's generator expression expands to an *empty
-  # argument* in Debug rather than to no argument, and cargo refuses it.
-  COMMAND_EXPAND_LISTS
+  COMMAND "${CMAKE_COMMAND}"
+    -DWHAT=core
+    -DWORKSPACE=${RUST_WORKSPACE}
+    -DPROFILE=${RUST_PROFILE_DIR}
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/rust_build.cmake"
+  COMMENT "Building the Rust core for $<CONFIG>"
   VERBATIM)
-add_dependencies(${BINARY_NAME} astrolabe_core)
+
+add_custom_target(astrolabe_sidecar ALL
+  COMMAND "${CMAKE_COMMAND}"
+    -DWHAT=sidecar
+    -DWORKSPACE=${RUST_WORKSPACE}
+    -DPROFILE=${RUST_PROFILE_DIR}
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/rust_build.cmake"
+  COMMENT "Building the lait.exe sidecar for $<CONFIG>"
+  VERBATIM)
+
+add_dependencies(${BINARY_NAME} astrolabe_core astrolabe_sidecar)
 
 install(FILES "${RUST_TARGET_DIR}/astrolabe.dll"
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
+# OPTIONAL, because `ASTROLABE_SKIP_SIDECAR` deliberately leaves whatever
+# `lait.exe` is already staged in place. Without it, the one flag that exists to
+# make the loop cheaper would fail the install step it was trying to skip.
 install(PROGRAMS "${RUST_TARGET_DIR}/lait.exe"
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
-  COMPONENT Runtime)
+  COMPONENT Runtime
+  OPTIONAL)

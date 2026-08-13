@@ -2,22 +2,35 @@
 ;
 ; Hand-authored and versioned in the repository, deliberately. A generated
 ; installer is a build artifact nobody reads; this one is reviewed like code,
-; because what it installs and what it registers is exactly the surface a
-; clean-machine test exercises.
+; because what it *registers* is exactly the surface a clean-machine test
+; exercises.
 ;
-; What it installs, and nothing else:
-;   astrolabe.exe   the client
-;   lait.exe        the fixed sidecar, beside it — see src/sidecar.rs
+; ---------------------------------------------------------------------------
+; What changed, and why the file list went away
 ;
-; What it deliberately does NOT install: no Flutter runtime, no
-; flutter_windows.dll, no data/ payload, no bridge cdylib, no WebView2
-; bootstrap. None of those exist in this design any more, and an installer that
-; still carried them would be the clearest possible sign the old stack had
-; survived somewhere.
+; Revision 7 of the Plan put the interface on Flutter over a Rust core. This
+; script previously installed three files and said so in a comment that ended
+; "no Flutter runtime, no flutter_windows.dll, no data/ payload, no bridge
+; cdylib. None of those exist in this design any more." Every one of them
+; exists now, and installing the old three produced a 92 KB runner stub with no
+; engine, no Dart and no ICU — an install that cannot reach its first frame.
+;
+; The payload is still enumerated rather than copied wholesale, because what an
+; installer places is the thing worth reading. The one exception is
+; `data\flutter_assets\`, which nests a tree per package and has no hand-kept
+; form that would survive a dependency shipping a font.
+;
+; The names below are what `flutter build windows --release` produces. If that
+; set changes, this file is where it is noticed — which is the intent. The
+; check that it stayed true lives in `tools/astrolabe/tests/packaging.rs`.
 ;
 ; Build:
+;   flutter build windows --release            (in apps/astrolabe)
 ;   makensis -DVERSION=<x.y.z> -DSTAGE=<dir> packaging\windows\astrolabe.nsi
-; where STAGE holds astrolabe.exe and lait.exe.
+;
+; where STAGE is the release bundle —
+;   apps\astrolabe\build\windows\x64\runner\Release
+; with THIRD-PARTY-NOTICES.md copied in beside it.
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
@@ -26,7 +39,7 @@
   !error "VERSION must be passed: makensis -DVERSION=x.y.z"
 !endif
 !ifndef STAGE
-  !error "STAGE must be passed: the directory holding astrolabe.exe and lait.exe"
+  !error "STAGE must be passed: the Flutter release bundle directory"
 !endif
 
 Name "Astrolabe"
@@ -61,6 +74,8 @@ Section "Astrolabe" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
 
+  ; --- The two programs -----------------------------------------------------
+  ;
   ; The pair ships together and is installed together. `lait.exe` lands *beside*
   ; astrolabe.exe because that is where `sidecar::resolve` looks — the rule is
   ; "relative to the running executable", and this is the other half of it.
@@ -72,6 +87,41 @@ Section "Astrolabe" SecMain
   ; by `ci/third-party-notices.sh` and held current by CI, so shipping it is a
   ; copy rather than something somebody has to remember to update.
   File "${STAGE}\THIRD-PARTY-NOTICES.md"
+
+  ; --- What the interface is made of ----------------------------------------
+  ;
+  ; `astrolabe.exe` is a 92 KB runner. Everything it actually is lives in these:
+  ; the Rust core it calls across the bridge, the Flutter engine that draws, and
+  ; the plugin DLLs behind the undecorated window and the tray icon.
+  File "${STAGE}\astrolabe.dll"
+  File "${STAGE}\flutter_windows.dll"
+  File "${STAGE}\dartjni.dll"
+  File "${STAGE}\native_assets.json"
+  File "${STAGE}\*_plugin.dll"
+
+  ; The Visual C++ runtime, staged into the bundle by CMake's
+  ; `InstallRequiredSystemLibraries`. astrolabe.exe imports MSVCP140.dll and
+  ; VCRUNTIME140*.dll; a development machine has them because Visual Studio
+  ; installed them, which is exactly why their absence is invisible right up
+  ; until a clean machine, where the app dies in the loader with a dialog naming
+  ; a DLL rather than this program. App-local rather than chaining the
+  ; redistributable, because a per-user install that needs no elevation should
+  ; not acquire a reason to ask for it.
+  File "${STAGE}\msvcp140*.dll"
+  File "${STAGE}\vcruntime140*.dll"
+  File "${STAGE}\concrt140.dll"
+
+  ; --- The payload the engine reads by path ---------------------------------
+  ;
+  ; `data\` must keep that name and that position: the engine resolves
+  ; `data\icudtl.dat` and `data\flutter_assets\` relative to the executable, so
+  ; an install that flattened or renamed them fails inside the loader rather
+  ; than anywhere a person could act on. Recursive because `flutter_assets`
+  ; nests per-package asset trees, which cannot be enumerated by hand and would
+  ; go stale the first time a dependency shipped a font.
+  SetOutPath "$INSTDIR\data"
+  File /r "${STAGE}\data\*.*"
+  SetOutPath "$INSTDIR"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -105,10 +155,29 @@ Section "Uninstall"
   ; deletion are separate operations here for the same reason they are separate
   ; for devices, and an uninstaller that quietly destroyed a store would be the
   ; worst possible place to conflate them.
+  ;
   Delete "$INSTDIR\astrolabe.exe"
   Delete "$INSTDIR\lait.exe"
   Delete "$INSTDIR\THIRD-PARTY-NOTICES.md"
+  Delete "$INSTDIR\astrolabe.dll"
+  Delete "$INSTDIR\flutter_windows.dll"
+  Delete "$INSTDIR\dartjni.dll"
+  Delete "$INSTDIR\native_assets.json"
+  Delete "$INSTDIR\*_plugin.dll"
+  Delete "$INSTDIR\msvcp140*.dll"
+  Delete "$INSTDIR\vcruntime140*.dll"
+  Delete "$INSTDIR\concrt140.dll"
   Delete "$INSTDIR\uninstall.exe"
+
+  ; The one recursive removal, and it is bounded to the engine's own payload
+  ; directory rather than to $INSTDIR. `data\flutter_assets\` nests a tree per
+  ; package, so it cannot be enumerated — but the scope stays narrow, and
+  ; nothing a person owns has ever been written under it. $INSTDIR itself comes
+  ; off only with `RMDir`, which refuses a directory that still has something in
+  ; it: if a future build adds a file this section does not know about, the
+  ; install directory survives and says so, rather than a recursive delete
+  ; carrying away whatever else happened to be there.
+  RMDir /r "$INSTDIR\data"
   RMDir "$INSTDIR"
 
   Delete "$SMPROGRAMS\Astrolabe.lnk"
