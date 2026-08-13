@@ -8,8 +8,13 @@ library;
 
 import 'package:flutter/widgets.dart';
 
-import '../shell/type.dart';
+import 'devices.dart';
+import 'diagnostics.dart';
+import 'heads.dart';
 import 'library.dart';
+import 'members.dart';
+import 'spaces.dart';
+import 'storage.dart';
 
 enum Surface {
   library('Library'),
@@ -40,36 +45,13 @@ class SurfacePage extends StatelessWidget {
       padding: kPageMargin,
       child: switch (surface) {
         Surface.library => const LibrarySurface(),
-        _ => _NotYetPorted(surface: surface),
+        Surface.spaces => const SpacesSurface(),
+        Surface.members => const MembersSurface(),
+        Surface.devices => const DevicesSurface(),
+        Surface.heads => const HeadsSurface(),
+        Surface.storage => const StorageSurface(),
+        Surface.diagnostics => const DiagnosticsSurface(),
       },
-    );
-  }
-}
-
-/// A surface whose Dart port has not landed.
-///
-/// Says which one and says why, rather than drawing an empty page: a blank
-/// surface during a migration is indistinguishable from a surface that read
-/// successfully and found nothing, and those are the two states this whole
-/// interface is written to keep apart.
-class _NotYetPorted extends StatelessWidget {
-  const _NotYetPorted({required this.surface});
-
-  final Surface surface;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(surface.title, style: context.titleStyle),
-        const SizedBox(height: 4),
-        Text(
-          'This surface has not been ported to the new interface yet. '
-          'Nothing about it has changed on this machine.',
-          style: context.proseStyle,
-        ),
-      ],
     );
   }
 }

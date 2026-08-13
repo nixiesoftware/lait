@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `emit`, `empty`, `into_action`, `project`
+// These functions are ignored because they are not marked as `pub`: `emit`, `empty`, `into_action`, `project`, `space_ref`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Start the core. Idempotent: a second call is a no-op rather than a second
 /// runtime, because two runtimes would be two supervisors of the same devices.
@@ -54,6 +54,37 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.restartDevice({
     required String id,
   }) = ActionRequest_RestartDevice;
+
+  /// Force-stop. Only ever offered for a daemon this client owns: ownership
+  /// is the safety boundary, and there is no pid-based path across it.
+  const factory ActionRequest.forceStopDevice({
+    required String id,
+  }) = ActionRequest_ForceStopDevice;
+  const factory ActionRequest.stopAllOwned() = ActionRequest_StopAllOwned;
+
+  /// Forget a device. `delete_data` additionally destroys what it holds, and
+  /// is the one flag here that cannot be undone.
+  const factory ActionRequest.removeDevice({
+    required String id,
+    required bool deleteData,
+  }) = ActionRequest_RemoveDevice;
+
+  /// Read one Space. Choosing a Space to administer is an act, not a
+  /// listing — it is the read that makes the Members surface answerable.
+  const factory ActionRequest.readSpace({
+    required String orbit,
+  }) = ActionRequest_ReadSpace;
+
+  /// Start a browser head for this identity.
+  const factory ActionRequest.startHead() = ActionRequest_StartHead;
+  const factory ActionRequest.stopHead({
+    required String id,
+  }) = ActionRequest_StopHead;
+
+  /// Forget an Orbit. The store is left alone; this is registry-only.
+  const factory ActionRequest.forgetOrbit({
+    required String space,
+  }) = ActionRequest_ForgetOrbit;
 }
 
 /// Everything a surface can draw, as of one moment.
@@ -75,6 +106,14 @@ class ClientView {
   final HostFacts? host;
   final List<HeadRow> heads;
   final List<DeviceRow> devices;
+  final List<StorageRow> storage;
+
+  /// This identity's Orbit registry, newest-opened first.
+  final List<OrbitRow> orbits;
+
+  /// The Space being administered, when one has been chosen. Choosing is an
+  /// act — it costs a read — so this is absent until somebody chooses.
+  final SpaceRow? space;
   final List<NoticeRow> notices;
   final List<FailureRow> failures;
 
@@ -90,6 +129,9 @@ class ClientView {
     this.host,
     required this.heads,
     required this.devices,
+    required this.storage,
+    required this.orbits,
+    this.space,
     required this.notices,
     required this.failures,
     required this.inFlight,
@@ -103,6 +145,9 @@ class ClientView {
       host.hashCode ^
       heads.hashCode ^
       devices.hashCode ^
+      storage.hashCode ^
+      orbits.hashCode ^
+      space.hashCode ^
       notices.hashCode ^
       failures.hashCode ^
       inFlight.hashCode;
@@ -118,6 +163,9 @@ class ClientView {
           host == other.host &&
           heads == other.heads &&
           devices == other.devices &&
+          storage == other.storage &&
+          orbits == other.orbits &&
+          space == other.space &&
           notices == other.notices &&
           failures == other.failures &&
           inFlight == other.inFlight;
@@ -133,6 +181,18 @@ class DeviceRow {
   /// A sampling failure preserves the last good reading and says so; it is
   /// never drawn as "nothing there".
   final String? degraded;
+  final String home;
+
+  /// `None` for a daemon this client did not spawn. Ownership is a boundary:
+  /// there is no pid-based path to stopping something we do not own, and the
+  /// absence of a pid here is that boundary crossing the bridge.
+  final int? pid;
+
+  /// Whether this client may force-stop it. Answered by the core's
+  /// capabilities rather than inferred from ownership on this side, because
+  /// the two can differ and only one of them is authoritative.
+  final bool canForceStop;
+  final String? lastError;
 
   const DeviceRow({
     required this.id,
@@ -140,6 +200,10 @@ class DeviceRow {
     required this.state,
     required this.owned,
     this.degraded,
+    required this.home,
+    this.pid,
+    required this.canForceStop,
+    this.lastError,
   });
 
   @override
@@ -148,7 +212,11 @@ class DeviceRow {
       label.hashCode ^
       state.hashCode ^
       owned.hashCode ^
-      degraded.hashCode;
+      degraded.hashCode ^
+      home.hashCode ^
+      pid.hashCode ^
+      canForceStop.hashCode ^
+      lastError.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -159,7 +227,42 @@ class DeviceRow {
           label == other.label &&
           state == other.state &&
           owned == other.owned &&
-          degraded == other.degraded;
+          degraded == other.degraded &&
+          home == other.home &&
+          pid == other.pid &&
+          canForceStop == other.canForceStop &&
+          lastError == other.lastError;
+}
+
+/// A diagnosis, when one was taken.
+///
+/// Absent when the Space could not be asked — which is *not* the same as every
+/// gate passing, and is the whole reason this is an `Option` rather than an
+/// empty list of gates.
+class DiagnosisRow {
+  final List<GateRow> gates;
+
+  /// The first non-passing gate: the one actionable blocker.
+  final String? blockedOn;
+  final String summary;
+
+  const DiagnosisRow({
+    required this.gates,
+    this.blockedOn,
+    required this.summary,
+  });
+
+  @override
+  int get hashCode => gates.hashCode ^ blockedOn.hashCode ^ summary.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DiagnosisRow &&
+          runtimeType == other.runtimeType &&
+          gates == other.gates &&
+          blockedOn == other.blockedOn &&
+          summary == other.summary;
 }
 
 class FailureRow {
@@ -186,6 +289,50 @@ class FailureRow {
           what == other.what &&
           error == other.error &&
           retryable == other.retryable;
+}
+
+/// What a gate answered, when a diagnosis was taken.
+class GateRow {
+  /// Stable machine id — `space`, `daemon`, `membership`, `peer`, `synced`.
+  final String id;
+  final String label;
+  final GateState state;
+  final String detail;
+
+  const GateRow({
+    required this.id,
+    required this.label,
+    required this.state,
+    required this.detail,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ label.hashCode ^ state.hashCode ^ detail.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GateRow &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          label == other.label &&
+          state == other.state &&
+          detail == other.detail;
+}
+
+/// Five states, not two.
+///
+/// `Warn` is deliberately not blocking: a key-custody problem is urgent to fix
+/// and irrelevant to whether somebody is onboarded, and a warning that hijacked
+/// the blocker would tell a joiner they are stuck when they are not.
+enum GateState {
+  pass,
+  wait,
+  fail,
+  warn,
+  skip,
+  ;
 }
 
 class HeadRow {
@@ -334,6 +481,40 @@ class LibraryRow {
           store == other.store;
 }
 
+class MemberRow {
+  final String id;
+  final String? nick;
+  final bool admin;
+
+  const MemberRow({
+    required this.id,
+    this.nick,
+    required this.admin,
+  });
+
+  @override
+  int get hashCode => id.hashCode ^ nick.hashCode ^ admin.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MemberRow &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          nick == other.nick &&
+          admin == other.admin;
+}
+
+enum Missing {
+  /// It is not up. Not an error, and not something a listing corrects —
+  /// measuring must not place what nobody asked to place.
+  notPlaced,
+
+  /// It could not be asked.
+  unreachable,
+  ;
+}
+
 class NoticeRow {
   final String said;
 
@@ -357,6 +538,37 @@ class NoticeRow {
           launched == other.launched;
 }
 
+/// One Orbit in this identity's registry.
+class OrbitRow {
+  final String space;
+  final String name;
+  final String path;
+
+  /// `None` is never opened, for the same reason it is on a library row.
+  final BigInt? lastOpened;
+
+  const OrbitRow({
+    required this.space,
+    required this.name,
+    required this.path,
+    this.lastOpened,
+  });
+
+  @override
+  int get hashCode =>
+      space.hashCode ^ name.hashCode ^ path.hashCode ^ lastOpened.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OrbitRow &&
+          runtimeType == other.runtimeType &&
+          space == other.space &&
+          name == other.name &&
+          path == other.path &&
+          lastOpened == other.lastOpened;
+}
+
 /// Whether an Orbit is currently up. Three states, because "not running" and
 /// "could not be asked" are different facts and only one is worth acting on.
 ///
@@ -371,6 +583,50 @@ enum PlacementView {
   ;
 }
 
+/// The Space somebody is administering, as it last answered.
+class SpaceRow {
+  final String space;
+
+  /// This actor's standing *here*. Per Orbit rather than per identity: one
+  /// identity may hold very different standing in two Spaces, and a single
+  /// answer would have to pick one and be wrong about the other.
+  final String? whoami;
+  final bool admin;
+  final List<MemberRow> members;
+  final List<String> devices;
+  final DiagnosisRow? diagnosis;
+
+  const SpaceRow({
+    required this.space,
+    this.whoami,
+    required this.admin,
+    required this.members,
+    required this.devices,
+    this.diagnosis,
+  });
+
+  @override
+  int get hashCode =>
+      space.hashCode ^
+      whoami.hashCode ^
+      admin.hashCode ^
+      members.hashCode ^
+      devices.hashCode ^
+      diagnosis.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SpaceRow &&
+          runtimeType == other.runtimeType &&
+          space == other.space &&
+          whoami == other.whoami &&
+          admin == other.admin &&
+          members == other.members &&
+          devices == other.devices &&
+          diagnosis == other.diagnosis;
+}
+
 @freezed
 sealed class Staleness with _$Staleness {
   const Staleness._();
@@ -382,6 +638,56 @@ sealed class Staleness with _$Staleness {
   const factory Staleness.signalled(
     String field0,
   ) = Staleness_Signalled;
+}
+
+/// What one Orbit is holding.
+class StorageRow {
+  final String orbit;
+
+  /// What the registry calls it. Advisory — a display name is owned by a
+  /// World today — and carried as what it is rather than as truth.
+  final String? name;
+
+  /// Every figure is optional, and that is the contract. A footprint nobody
+  /// could measure is *absent*, never zero: an Orbit reported as holding 0
+  /// bytes is a claim, and one nobody asked is not.
+  final BigInt? bytesOnDisk;
+  final BigInt? objectCount;
+  final BigInt? lastVerifiedMs;
+
+  /// Why there are no figures, when there are none. Two reasons, because
+  /// "not up" and "could not be asked" are different facts.
+  final Missing? missing;
+
+  const StorageRow({
+    required this.orbit,
+    this.name,
+    this.bytesOnDisk,
+    this.objectCount,
+    this.lastVerifiedMs,
+    this.missing,
+  });
+
+  @override
+  int get hashCode =>
+      orbit.hashCode ^
+      name.hashCode ^
+      bytesOnDisk.hashCode ^
+      objectCount.hashCode ^
+      lastVerifiedMs.hashCode ^
+      missing.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StorageRow &&
+          runtimeType == other.runtimeType &&
+          orbit == other.orbit &&
+          name == other.name &&
+          bytesOnDisk == other.bytesOnDisk &&
+          objectCount == other.objectCount &&
+          lastVerifiedMs == other.lastVerifiedMs &&
+          missing == other.missing;
 }
 
 /// Why a row cannot be opened. Two facts, not one.

@@ -231,6 +231,36 @@ impl SseDecode for crate::api::ActionRequest {
                 let mut var_id = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::RestartDevice { id: var_id };
             }
+            5 => {
+                let mut var_id = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::ForceStopDevice { id: var_id };
+            }
+            6 => {
+                return crate::api::ActionRequest::StopAllOwned;
+            }
+            7 => {
+                let mut var_id = <String>::sse_decode(deserializer);
+                let mut var_deleteData = <bool>::sse_decode(deserializer);
+                return crate::api::ActionRequest::RemoveDevice {
+                    id: var_id,
+                    delete_data: var_deleteData,
+                };
+            }
+            8 => {
+                let mut var_orbit = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::ReadSpace { orbit: var_orbit };
+            }
+            9 => {
+                return crate::api::ActionRequest::StartHead;
+            }
+            10 => {
+                let mut var_id = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::StopHead { id: var_id };
+            }
+            11 => {
+                let mut var_space = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::ForgetOrbit { space: var_space };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -254,6 +284,9 @@ impl SseDecode for crate::api::ClientView {
         let mut var_host = <Option<crate::api::HostFacts>>::sse_decode(deserializer);
         let mut var_heads = <Vec<crate::api::HeadRow>>::sse_decode(deserializer);
         let mut var_devices = <Vec<crate::api::DeviceRow>>::sse_decode(deserializer);
+        let mut var_storage = <Vec<crate::api::StorageRow>>::sse_decode(deserializer);
+        let mut var_orbits = <Vec<crate::api::OrbitRow>>::sse_decode(deserializer);
+        let mut var_space = <Option<crate::api::SpaceRow>>::sse_decode(deserializer);
         let mut var_notices = <Vec<crate::api::NoticeRow>>::sse_decode(deserializer);
         let mut var_failures = <Vec<crate::api::FailureRow>>::sse_decode(deserializer);
         let mut var_inFlight = <Vec<String>>::sse_decode(deserializer);
@@ -264,6 +297,9 @@ impl SseDecode for crate::api::ClientView {
             host: var_host,
             heads: var_heads,
             devices: var_devices,
+            storage: var_storage,
+            orbits: var_orbits,
+            space: var_space,
             notices: var_notices,
             failures: var_failures,
             in_flight: var_inFlight,
@@ -279,12 +315,34 @@ impl SseDecode for crate::api::DeviceRow {
         let mut var_state = <String>::sse_decode(deserializer);
         let mut var_owned = <bool>::sse_decode(deserializer);
         let mut var_degraded = <Option<String>>::sse_decode(deserializer);
+        let mut var_home = <String>::sse_decode(deserializer);
+        let mut var_pid = <Option<u32>>::sse_decode(deserializer);
+        let mut var_canForceStop = <bool>::sse_decode(deserializer);
+        let mut var_lastError = <Option<String>>::sse_decode(deserializer);
         return crate::api::DeviceRow {
             id: var_id,
             label: var_label,
             state: var_state,
             owned: var_owned,
             degraded: var_degraded,
+            home: var_home,
+            pid: var_pid,
+            can_force_stop: var_canForceStop,
+            last_error: var_lastError,
+        };
+    }
+}
+
+impl SseDecode for crate::api::DiagnosisRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_gates = <Vec<crate::api::GateRow>>::sse_decode(deserializer);
+        let mut var_blockedOn = <Option<String>>::sse_decode(deserializer);
+        let mut var_summary = <String>::sse_decode(deserializer);
+        return crate::api::DiagnosisRow {
+            gates: var_gates,
+            blocked_on: var_blockedOn,
+            summary: var_summary,
         };
     }
 }
@@ -299,6 +357,37 @@ impl SseDecode for crate::api::FailureRow {
             what: var_what,
             error: var_error,
             retryable: var_retryable,
+        };
+    }
+}
+
+impl SseDecode for crate::api::GateRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_label = <String>::sse_decode(deserializer);
+        let mut var_state = <crate::api::GateState>::sse_decode(deserializer);
+        let mut var_detail = <String>::sse_decode(deserializer);
+        return crate::api::GateRow {
+            id: var_id,
+            label: var_label,
+            state: var_state,
+            detail: var_detail,
+        };
+    }
+}
+
+impl SseDecode for crate::api::GateState {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::GateState::Pass,
+            1 => crate::api::GateState::Wait,
+            2 => crate::api::GateState::Fail,
+            3 => crate::api::GateState::Warn,
+            4 => crate::api::GateState::Skip,
+            _ => unreachable!("Invalid variant for GateState: {}", inner),
         };
     }
 }
@@ -408,6 +497,18 @@ impl SseDecode for Vec<crate::api::FailureRow> {
     }
 }
 
+impl SseDecode for Vec<crate::api::GateRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::GateRow>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::HeadRow> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -432,6 +533,18 @@ impl SseDecode for Vec<crate::api::LibraryRow> {
     }
 }
 
+impl SseDecode for Vec<crate::api::MemberRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::MemberRow>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::NoticeRow> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -439,6 +552,18 @@ impl SseDecode for Vec<crate::api::NoticeRow> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::NoticeRow>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::OrbitRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::OrbitRow>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -453,6 +578,44 @@ impl SseDecode for Vec<u8> {
             ans_.push(<u8>::sse_decode(deserializer));
         }
         return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::StorageRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::StorageRow>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for crate::api::MemberRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_nick = <Option<String>>::sse_decode(deserializer);
+        let mut var_admin = <bool>::sse_decode(deserializer);
+        return crate::api::MemberRow {
+            id: var_id,
+            nick: var_nick,
+            admin: var_admin,
+        };
+    }
+}
+
+impl SseDecode for crate::api::Missing {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::Missing::NotPlaced,
+            1 => crate::api::Missing::Unreachable,
+            _ => unreachable!("Invalid variant for Missing: {}", inner),
+        };
     }
 }
 
@@ -479,6 +642,17 @@ impl SseDecode for Option<String> {
     }
 }
 
+impl SseDecode for Option<crate::api::DiagnosisRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::DiagnosisRow>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::HostFacts> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -490,11 +664,44 @@ impl SseDecode for Option<crate::api::HostFacts> {
     }
 }
 
+impl SseDecode for Option<crate::api::Missing> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::Missing>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::SpaceRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::SpaceRow>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::Staleness> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::Staleness>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<u32>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -534,6 +741,22 @@ impl SseDecode for Option<Vec<crate::api::LibraryRow>> {
     }
 }
 
+impl SseDecode for crate::api::OrbitRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_space = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_path = <String>::sse_decode(deserializer);
+        let mut var_lastOpened = <Option<u64>>::sse_decode(deserializer);
+        return crate::api::OrbitRow {
+            space: var_space,
+            name: var_name,
+            path: var_path,
+            last_opened: var_lastOpened,
+        };
+    }
+}
+
 impl SseDecode for crate::api::PlacementView {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -543,6 +766,26 @@ impl SseDecode for crate::api::PlacementView {
             1 => crate::api::PlacementView::Vacant,
             2 => crate::api::PlacementView::Unknown,
             _ => unreachable!("Invalid variant for PlacementView: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::SpaceRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_space = <String>::sse_decode(deserializer);
+        let mut var_whoami = <Option<String>>::sse_decode(deserializer);
+        let mut var_admin = <bool>::sse_decode(deserializer);
+        let mut var_members = <Vec<crate::api::MemberRow>>::sse_decode(deserializer);
+        let mut var_devices = <Vec<String>>::sse_decode(deserializer);
+        let mut var_diagnosis = <Option<crate::api::DiagnosisRow>>::sse_decode(deserializer);
+        return crate::api::SpaceRow {
+            space: var_space,
+            whoami: var_whoami,
+            admin: var_admin,
+            members: var_members,
+            devices: var_devices,
+            diagnosis: var_diagnosis,
         };
     }
 }
@@ -563,6 +806,26 @@ impl SseDecode for crate::api::Staleness {
                 unimplemented!("");
             }
         }
+    }
+}
+
+impl SseDecode for crate::api::StorageRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_orbit = <String>::sse_decode(deserializer);
+        let mut var_name = <Option<String>>::sse_decode(deserializer);
+        let mut var_bytesOnDisk = <Option<u64>>::sse_decode(deserializer);
+        let mut var_objectCount = <Option<u64>>::sse_decode(deserializer);
+        let mut var_lastVerifiedMs = <Option<u64>>::sse_decode(deserializer);
+        let mut var_missing = <Option<crate::api::Missing>>::sse_decode(deserializer);
+        return crate::api::StorageRow {
+            orbit: var_orbit,
+            name: var_name,
+            bytes_on_disk: var_bytesOnDisk,
+            object_count: var_objectCount,
+            last_verified_ms: var_lastVerifiedMs,
+            missing: var_missing,
+        };
     }
 }
 
@@ -655,6 +918,26 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             crate::api::ActionRequest::RestartDevice { id } => {
                 [4.into_dart(), id.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::ActionRequest::ForceStopDevice { id } => {
+                [5.into_dart(), id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ActionRequest::StopAllOwned => [6.into_dart()].into_dart(),
+            crate::api::ActionRequest::RemoveDevice { id, delete_data } => [
+                7.into_dart(),
+                id.into_into_dart().into_dart(),
+                delete_data.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::ReadSpace { orbit } => {
+                [8.into_dart(), orbit.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ActionRequest::StartHead => [9.into_dart()].into_dart(),
+            crate::api::ActionRequest::StopHead { id } => {
+                [10.into_dart(), id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ActionRequest::ForgetOrbit { space } => {
+                [11.into_dart(), space.into_into_dart().into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -677,6 +960,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::ClientView {
             self.host.into_into_dart().into_dart(),
             self.heads.into_into_dart().into_dart(),
             self.devices.into_into_dart().into_dart(),
+            self.storage.into_into_dart().into_dart(),
+            self.orbits.into_into_dart().into_dart(),
+            self.space.into_into_dart().into_dart(),
             self.notices.into_into_dart().into_dart(),
             self.failures.into_into_dart().into_dart(),
             self.in_flight.into_into_dart().into_dart(),
@@ -699,6 +985,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::DeviceRow {
             self.state.into_into_dart().into_dart(),
             self.owned.into_into_dart().into_dart(),
             self.degraded.into_into_dart().into_dart(),
+            self.home.into_into_dart().into_dart(),
+            self.pid.into_into_dart().into_dart(),
+            self.can_force_stop.into_into_dart().into_dart(),
+            self.last_error.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -706,6 +996,23 @@ impl flutter_rust_bridge::IntoDart for crate::api::DeviceRow {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::DeviceRow {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::DeviceRow> for crate::api::DeviceRow {
     fn into_into_dart(self) -> crate::api::DeviceRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::DiagnosisRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.gates.into_into_dart().into_dart(),
+            self.blocked_on.into_into_dart().into_dart(),
+            self.summary.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::DiagnosisRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::DiagnosisRow> for crate::api::DiagnosisRow {
+    fn into_into_dart(self) -> crate::api::DiagnosisRow {
         self
     }
 }
@@ -723,6 +1030,43 @@ impl flutter_rust_bridge::IntoDart for crate::api::FailureRow {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::FailureRow {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::FailureRow> for crate::api::FailureRow {
     fn into_into_dart(self) -> crate::api::FailureRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::GateRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.label.into_into_dart().into_dart(),
+            self.state.into_into_dart().into_dart(),
+            self.detail.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::GateRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::GateRow> for crate::api::GateRow {
+    fn into_into_dart(self) -> crate::api::GateRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::GateState {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Pass => 0.into_dart(),
+            Self::Wait => 1.into_dart(),
+            Self::Fail => 2.into_dart(),
+            Self::Warn => 3.into_dart(),
+            Self::Skip => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::GateState {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::GateState> for crate::api::GateState {
+    fn into_into_dart(self) -> crate::api::GateState {
         self
     }
 }
@@ -788,6 +1132,39 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::LibraryRow> for crate::api::L
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::MemberRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.nick.into_into_dart().into_dart(),
+            self.admin.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::MemberRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::MemberRow> for crate::api::MemberRow {
+    fn into_into_dart(self) -> crate::api::MemberRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::Missing {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::NotPlaced => 0.into_dart(),
+            Self::Unreachable => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::Missing {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::Missing> for crate::api::Missing {
+    fn into_into_dart(self) -> crate::api::Missing {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::NoticeRow {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -800,6 +1177,24 @@ impl flutter_rust_bridge::IntoDart for crate::api::NoticeRow {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::NoticeRow {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::NoticeRow> for crate::api::NoticeRow {
     fn into_into_dart(self) -> crate::api::NoticeRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::OrbitRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.space.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.path.into_into_dart().into_dart(),
+            self.last_opened.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::OrbitRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::OrbitRow> for crate::api::OrbitRow {
+    fn into_into_dart(self) -> crate::api::OrbitRow {
         self
     }
 }
@@ -821,6 +1216,26 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::PlacementView> for crate::api
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::SpaceRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.space.into_into_dart().into_dart(),
+            self.whoami.into_into_dart().into_dart(),
+            self.admin.into_into_dart().into_dart(),
+            self.members.into_into_dart().into_dart(),
+            self.devices.into_into_dart().into_dart(),
+            self.diagnosis.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::SpaceRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::SpaceRow> for crate::api::SpaceRow {
+    fn into_into_dart(self) -> crate::api::SpaceRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::Staleness {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
@@ -837,6 +1252,26 @@ impl flutter_rust_bridge::IntoDart for crate::api::Staleness {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::Staleness {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::Staleness> for crate::api::Staleness {
     fn into_into_dart(self) -> crate::api::Staleness {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::StorageRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.orbit.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.bytes_on_disk.into_into_dart().into_dart(),
+            self.object_count.into_into_dart().into_dart(),
+            self.last_verified_ms.into_into_dart().into_dart(),
+            self.missing.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::StorageRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::StorageRow> for crate::api::StorageRow {
+    fn into_into_dart(self) -> crate::api::StorageRow {
         self
     }
 }
@@ -904,6 +1339,33 @@ impl SseEncode for crate::api::ActionRequest {
                 <i32>::sse_encode(4, serializer);
                 <String>::sse_encode(id, serializer);
             }
+            crate::api::ActionRequest::ForceStopDevice { id } => {
+                <i32>::sse_encode(5, serializer);
+                <String>::sse_encode(id, serializer);
+            }
+            crate::api::ActionRequest::StopAllOwned => {
+                <i32>::sse_encode(6, serializer);
+            }
+            crate::api::ActionRequest::RemoveDevice { id, delete_data } => {
+                <i32>::sse_encode(7, serializer);
+                <String>::sse_encode(id, serializer);
+                <bool>::sse_encode(delete_data, serializer);
+            }
+            crate::api::ActionRequest::ReadSpace { orbit } => {
+                <i32>::sse_encode(8, serializer);
+                <String>::sse_encode(orbit, serializer);
+            }
+            crate::api::ActionRequest::StartHead => {
+                <i32>::sse_encode(9, serializer);
+            }
+            crate::api::ActionRequest::StopHead { id } => {
+                <i32>::sse_encode(10, serializer);
+                <String>::sse_encode(id, serializer);
+            }
+            crate::api::ActionRequest::ForgetOrbit { space } => {
+                <i32>::sse_encode(11, serializer);
+                <String>::sse_encode(space, serializer);
+            }
             _ => {
                 unimplemented!("");
             }
@@ -927,6 +1389,9 @@ impl SseEncode for crate::api::ClientView {
         <Option<crate::api::HostFacts>>::sse_encode(self.host, serializer);
         <Vec<crate::api::HeadRow>>::sse_encode(self.heads, serializer);
         <Vec<crate::api::DeviceRow>>::sse_encode(self.devices, serializer);
+        <Vec<crate::api::StorageRow>>::sse_encode(self.storage, serializer);
+        <Vec<crate::api::OrbitRow>>::sse_encode(self.orbits, serializer);
+        <Option<crate::api::SpaceRow>>::sse_encode(self.space, serializer);
         <Vec<crate::api::NoticeRow>>::sse_encode(self.notices, serializer);
         <Vec<crate::api::FailureRow>>::sse_encode(self.failures, serializer);
         <Vec<String>>::sse_encode(self.in_flight, serializer);
@@ -941,6 +1406,19 @@ impl SseEncode for crate::api::DeviceRow {
         <String>::sse_encode(self.state, serializer);
         <bool>::sse_encode(self.owned, serializer);
         <Option<String>>::sse_encode(self.degraded, serializer);
+        <String>::sse_encode(self.home, serializer);
+        <Option<u32>>::sse_encode(self.pid, serializer);
+        <bool>::sse_encode(self.can_force_stop, serializer);
+        <Option<String>>::sse_encode(self.last_error, serializer);
+    }
+}
+
+impl SseEncode for crate::api::DiagnosisRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::GateRow>>::sse_encode(self.gates, serializer);
+        <Option<String>>::sse_encode(self.blocked_on, serializer);
+        <String>::sse_encode(self.summary, serializer);
     }
 }
 
@@ -950,6 +1428,35 @@ impl SseEncode for crate::api::FailureRow {
         <String>::sse_encode(self.what, serializer);
         <String>::sse_encode(self.error, serializer);
         <bool>::sse_encode(self.retryable, serializer);
+    }
+}
+
+impl SseEncode for crate::api::GateRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.label, serializer);
+        <crate::api::GateState>::sse_encode(self.state, serializer);
+        <String>::sse_encode(self.detail, serializer);
+    }
+}
+
+impl SseEncode for crate::api::GateState {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::GateState::Pass => 0,
+                crate::api::GateState::Wait => 1,
+                crate::api::GateState::Fail => 2,
+                crate::api::GateState::Warn => 3,
+                crate::api::GateState::Skip => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -1027,6 +1534,16 @@ impl SseEncode for Vec<crate::api::FailureRow> {
     }
 }
 
+impl SseEncode for Vec<crate::api::GateRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::GateRow>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::HeadRow> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1047,12 +1564,32 @@ impl SseEncode for Vec<crate::api::LibraryRow> {
     }
 }
 
+impl SseEncode for Vec<crate::api::MemberRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::MemberRow>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::NoticeRow> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::NoticeRow>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::OrbitRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::OrbitRow>::sse_encode(item, serializer);
         }
     }
 }
@@ -1064,6 +1601,41 @@ impl SseEncode for Vec<u8> {
         for item in self {
             <u8>::sse_encode(item, serializer);
         }
+    }
+}
+
+impl SseEncode for Vec<crate::api::StorageRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::StorageRow>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for crate::api::MemberRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <Option<String>>::sse_encode(self.nick, serializer);
+        <bool>::sse_encode(self.admin, serializer);
+    }
+}
+
+impl SseEncode for crate::api::Missing {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::Missing::NotPlaced => 0,
+                crate::api::Missing::Unreachable => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -1085,6 +1657,16 @@ impl SseEncode for Option<String> {
     }
 }
 
+impl SseEncode for Option<crate::api::DiagnosisRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::DiagnosisRow>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::HostFacts> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1095,12 +1677,42 @@ impl SseEncode for Option<crate::api::HostFacts> {
     }
 }
 
+impl SseEncode for Option<crate::api::Missing> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::Missing>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::SpaceRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::SpaceRow>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::Staleness> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::Staleness>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <u32>::sse_encode(value, serializer);
         }
     }
 }
@@ -1135,6 +1747,16 @@ impl SseEncode for Option<Vec<crate::api::LibraryRow>> {
     }
 }
 
+impl SseEncode for crate::api::OrbitRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.space, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.path, serializer);
+        <Option<u64>>::sse_encode(self.last_opened, serializer);
+    }
+}
+
 impl SseEncode for crate::api::PlacementView {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1149,6 +1771,18 @@ impl SseEncode for crate::api::PlacementView {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::SpaceRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.space, serializer);
+        <Option<String>>::sse_encode(self.whoami, serializer);
+        <bool>::sse_encode(self.admin, serializer);
+        <Vec<crate::api::MemberRow>>::sse_encode(self.members, serializer);
+        <Vec<String>>::sse_encode(self.devices, serializer);
+        <Option<crate::api::DiagnosisRow>>::sse_encode(self.diagnosis, serializer);
     }
 }
 
@@ -1167,6 +1801,18 @@ impl SseEncode for crate::api::Staleness {
                 unimplemented!("");
             }
         }
+    }
+}
+
+impl SseEncode for crate::api::StorageRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.orbit, serializer);
+        <Option<String>>::sse_encode(self.name, serializer);
+        <Option<u64>>::sse_encode(self.bytes_on_disk, serializer);
+        <Option<u64>>::sse_encode(self.object_count, serializer);
+        <Option<u64>>::sse_encode(self.last_verified_ms, serializer);
+        <Option<crate::api::Missing>>::sse_encode(self.missing, serializer);
     }
 }
 

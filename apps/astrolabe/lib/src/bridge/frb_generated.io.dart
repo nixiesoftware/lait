@@ -37,10 +37,22 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   ActionRequest dco_decode_box_autoadd_action_request(dynamic raw);
 
   @protected
+  DiagnosisRow dco_decode_box_autoadd_diagnosis_row(dynamic raw);
+
+  @protected
   HostFacts dco_decode_box_autoadd_host_facts(dynamic raw);
 
   @protected
+  Missing dco_decode_box_autoadd_missing(dynamic raw);
+
+  @protected
+  SpaceRow dco_decode_box_autoadd_space_row(dynamic raw);
+
+  @protected
   Staleness dco_decode_box_autoadd_staleness(dynamic raw);
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
   BigInt dco_decode_box_autoadd_u_64(dynamic raw);
@@ -55,7 +67,16 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DeviceRow dco_decode_device_row(dynamic raw);
 
   @protected
+  DiagnosisRow dco_decode_diagnosis_row(dynamic raw);
+
+  @protected
   FailureRow dco_decode_failure_row(dynamic raw);
+
+  @protected
+  GateRow dco_decode_gate_row(dynamic raw);
+
+  @protected
+  GateState dco_decode_gate_state(dynamic raw);
 
   @protected
   HeadRow dco_decode_head_row(dynamic raw);
@@ -79,16 +100,34 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<FailureRow> dco_decode_list_failure_row(dynamic raw);
 
   @protected
+  List<GateRow> dco_decode_list_gate_row(dynamic raw);
+
+  @protected
   List<HeadRow> dco_decode_list_head_row(dynamic raw);
 
   @protected
   List<LibraryRow> dco_decode_list_library_row(dynamic raw);
 
   @protected
+  List<MemberRow> dco_decode_list_member_row(dynamic raw);
+
+  @protected
   List<NoticeRow> dco_decode_list_notice_row(dynamic raw);
 
   @protected
+  List<OrbitRow> dco_decode_list_orbit_row(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<StorageRow> dco_decode_list_storage_row(dynamic raw);
+
+  @protected
+  MemberRow dco_decode_member_row(dynamic raw);
+
+  @protected
+  Missing dco_decode_missing(dynamic raw);
 
   @protected
   NoticeRow dco_decode_notice_row(dynamic raw);
@@ -97,10 +136,22 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  DiagnosisRow? dco_decode_opt_box_autoadd_diagnosis_row(dynamic raw);
+
+  @protected
   HostFacts? dco_decode_opt_box_autoadd_host_facts(dynamic raw);
 
   @protected
+  Missing? dco_decode_opt_box_autoadd_missing(dynamic raw);
+
+  @protected
+  SpaceRow? dco_decode_opt_box_autoadd_space_row(dynamic raw);
+
+  @protected
   Staleness? dco_decode_opt_box_autoadd_staleness(dynamic raw);
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
@@ -112,10 +163,19 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<LibraryRow>? dco_decode_opt_list_library_row(dynamic raw);
 
   @protected
+  OrbitRow dco_decode_orbit_row(dynamic raw);
+
+  @protected
   PlacementView dco_decode_placement_view(dynamic raw);
 
   @protected
+  SpaceRow dco_decode_space_row(dynamic raw);
+
+  @protected
   Staleness dco_decode_staleness(dynamic raw);
+
+  @protected
+  StorageRow dco_decode_storage_row(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -153,10 +213,23 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  DiagnosisRow sse_decode_box_autoadd_diagnosis_row(
+      SseDeserializer deserializer);
+
+  @protected
   HostFacts sse_decode_box_autoadd_host_facts(SseDeserializer deserializer);
 
   @protected
+  Missing sse_decode_box_autoadd_missing(SseDeserializer deserializer);
+
+  @protected
+  SpaceRow sse_decode_box_autoadd_space_row(SseDeserializer deserializer);
+
+  @protected
   Staleness sse_decode_box_autoadd_staleness(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
@@ -171,7 +244,16 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DeviceRow sse_decode_device_row(SseDeserializer deserializer);
 
   @protected
+  DiagnosisRow sse_decode_diagnosis_row(SseDeserializer deserializer);
+
+  @protected
   FailureRow sse_decode_failure_row(SseDeserializer deserializer);
+
+  @protected
+  GateRow sse_decode_gate_row(SseDeserializer deserializer);
+
+  @protected
+  GateState sse_decode_gate_state(SseDeserializer deserializer);
 
   @protected
   HeadRow sse_decode_head_row(SseDeserializer deserializer);
@@ -195,16 +277,34 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<FailureRow> sse_decode_list_failure_row(SseDeserializer deserializer);
 
   @protected
+  List<GateRow> sse_decode_list_gate_row(SseDeserializer deserializer);
+
+  @protected
   List<HeadRow> sse_decode_list_head_row(SseDeserializer deserializer);
 
   @protected
   List<LibraryRow> sse_decode_list_library_row(SseDeserializer deserializer);
 
   @protected
+  List<MemberRow> sse_decode_list_member_row(SseDeserializer deserializer);
+
+  @protected
   List<NoticeRow> sse_decode_list_notice_row(SseDeserializer deserializer);
 
   @protected
+  List<OrbitRow> sse_decode_list_orbit_row(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<StorageRow> sse_decode_list_storage_row(SseDeserializer deserializer);
+
+  @protected
+  MemberRow sse_decode_member_row(SseDeserializer deserializer);
+
+  @protected
+  Missing sse_decode_missing(SseDeserializer deserializer);
 
   @protected
   NoticeRow sse_decode_notice_row(SseDeserializer deserializer);
@@ -213,11 +313,24 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  DiagnosisRow? sse_decode_opt_box_autoadd_diagnosis_row(
+      SseDeserializer deserializer);
+
+  @protected
   HostFacts? sse_decode_opt_box_autoadd_host_facts(
       SseDeserializer deserializer);
 
   @protected
+  Missing? sse_decode_opt_box_autoadd_missing(SseDeserializer deserializer);
+
+  @protected
+  SpaceRow? sse_decode_opt_box_autoadd_space_row(SseDeserializer deserializer);
+
+  @protected
   Staleness? sse_decode_opt_box_autoadd_staleness(SseDeserializer deserializer);
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
@@ -231,10 +344,19 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  OrbitRow sse_decode_orbit_row(SseDeserializer deserializer);
+
+  @protected
   PlacementView sse_decode_placement_view(SseDeserializer deserializer);
 
   @protected
+  SpaceRow sse_decode_space_row(SseDeserializer deserializer);
+
+  @protected
   Staleness sse_decode_staleness(SseDeserializer deserializer);
+
+  @protected
+  StorageRow sse_decode_storage_row(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -273,12 +395,26 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       ActionRequest self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_diagnosis_row(
+      DiagnosisRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_host_facts(
       HostFacts self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_missing(Missing self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_space_row(
+      SpaceRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_staleness(
       Staleness self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
@@ -294,7 +430,16 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_device_row(DeviceRow self, SseSerializer serializer);
 
   @protected
+  void sse_encode_diagnosis_row(DiagnosisRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_failure_row(FailureRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_gate_row(GateRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_gate_state(GateState self, SseSerializer serializer);
 
   @protected
   void sse_encode_head_row(HeadRow self, SseSerializer serializer);
@@ -320,6 +465,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<FailureRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_gate_row(List<GateRow> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_head_row(List<HeadRow> self, SseSerializer serializer);
 
   @protected
@@ -327,12 +475,29 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<LibraryRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_member_row(
+      List<MemberRow> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_notice_row(
       List<NoticeRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_orbit_row(List<OrbitRow> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
       Uint8List self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_storage_row(
+      List<StorageRow> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_member_row(MemberRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_missing(Missing self, SseSerializer serializer);
 
   @protected
   void sse_encode_notice_row(NoticeRow self, SseSerializer serializer);
@@ -341,12 +506,27 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_diagnosis_row(
+      DiagnosisRow? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_host_facts(
       HostFacts? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_missing(
+      Missing? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_space_row(
+      SpaceRow? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_staleness(
       Staleness? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
@@ -360,10 +540,19 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<LibraryRow>? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_orbit_row(OrbitRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_placement_view(PlacementView self, SseSerializer serializer);
 
   @protected
+  void sse_encode_space_row(SpaceRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_staleness(Staleness self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_storage_row(StorageRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

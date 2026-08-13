@@ -7,7 +7,7 @@
 //! program.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use astrolabe::model::App;
 use astrolabe::runtime::{Action, Runtime};
 use astrolabe::tray::{Tray, TrayCommand};

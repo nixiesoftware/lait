@@ -55,6 +55,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_StartDevice value)? startDevice,
     TResult Function(ActionRequest_StopDevice value)? stopDevice,
     TResult Function(ActionRequest_RestartDevice value)? restartDevice,
+    TResult Function(ActionRequest_ForceStopDevice value)? forceStopDevice,
+    TResult Function(ActionRequest_StopAllOwned value)? stopAllOwned,
+    TResult Function(ActionRequest_RemoveDevice value)? removeDevice,
+    TResult Function(ActionRequest_ReadSpace value)? readSpace,
+    TResult Function(ActionRequest_StartHead value)? startHead,
+    TResult Function(ActionRequest_StopHead value)? stopHead,
+    TResult Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -69,6 +76,20 @@ extension ActionRequestPatterns on ActionRequest {
         return stopDevice(_that);
       case ActionRequest_RestartDevice() when restartDevice != null:
         return restartDevice(_that);
+      case ActionRequest_ForceStopDevice() when forceStopDevice != null:
+        return forceStopDevice(_that);
+      case ActionRequest_StopAllOwned() when stopAllOwned != null:
+        return stopAllOwned(_that);
+      case ActionRequest_RemoveDevice() when removeDevice != null:
+        return removeDevice(_that);
+      case ActionRequest_ReadSpace() when readSpace != null:
+        return readSpace(_that);
+      case ActionRequest_StartHead() when startHead != null:
+        return startHead(_that);
+      case ActionRequest_StopHead() when stopHead != null:
+        return stopHead(_that);
+      case ActionRequest_ForgetOrbit() when forgetOrbit != null:
+        return forgetOrbit(_that);
       case _:
         return orElse();
     }
@@ -94,6 +115,14 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_StartDevice value) startDevice,
     required TResult Function(ActionRequest_StopDevice value) stopDevice,
     required TResult Function(ActionRequest_RestartDevice value) restartDevice,
+    required TResult Function(ActionRequest_ForceStopDevice value)
+        forceStopDevice,
+    required TResult Function(ActionRequest_StopAllOwned value) stopAllOwned,
+    required TResult Function(ActionRequest_RemoveDevice value) removeDevice,
+    required TResult Function(ActionRequest_ReadSpace value) readSpace,
+    required TResult Function(ActionRequest_StartHead value) startHead,
+    required TResult Function(ActionRequest_StopHead value) stopHead,
+    required TResult Function(ActionRequest_ForgetOrbit value) forgetOrbit,
   }) {
     final _that = this;
     switch (_that) {
@@ -107,6 +136,20 @@ extension ActionRequestPatterns on ActionRequest {
         return stopDevice(_that);
       case ActionRequest_RestartDevice():
         return restartDevice(_that);
+      case ActionRequest_ForceStopDevice():
+        return forceStopDevice(_that);
+      case ActionRequest_StopAllOwned():
+        return stopAllOwned(_that);
+      case ActionRequest_RemoveDevice():
+        return removeDevice(_that);
+      case ActionRequest_ReadSpace():
+        return readSpace(_that);
+      case ActionRequest_StartHead():
+        return startHead(_that);
+      case ActionRequest_StopHead():
+        return stopHead(_that);
+      case ActionRequest_ForgetOrbit():
+        return forgetOrbit(_that);
     }
   }
 
@@ -129,6 +172,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_StartDevice value)? startDevice,
     TResult? Function(ActionRequest_StopDevice value)? stopDevice,
     TResult? Function(ActionRequest_RestartDevice value)? restartDevice,
+    TResult? Function(ActionRequest_ForceStopDevice value)? forceStopDevice,
+    TResult? Function(ActionRequest_StopAllOwned value)? stopAllOwned,
+    TResult? Function(ActionRequest_RemoveDevice value)? removeDevice,
+    TResult? Function(ActionRequest_ReadSpace value)? readSpace,
+    TResult? Function(ActionRequest_StartHead value)? startHead,
+    TResult? Function(ActionRequest_StopHead value)? stopHead,
+    TResult? Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
   }) {
     final _that = this;
     switch (_that) {
@@ -142,6 +192,20 @@ extension ActionRequestPatterns on ActionRequest {
         return stopDevice(_that);
       case ActionRequest_RestartDevice() when restartDevice != null:
         return restartDevice(_that);
+      case ActionRequest_ForceStopDevice() when forceStopDevice != null:
+        return forceStopDevice(_that);
+      case ActionRequest_StopAllOwned() when stopAllOwned != null:
+        return stopAllOwned(_that);
+      case ActionRequest_RemoveDevice() when removeDevice != null:
+        return removeDevice(_that);
+      case ActionRequest_ReadSpace() when readSpace != null:
+        return readSpace(_that);
+      case ActionRequest_StartHead() when startHead != null:
+        return startHead(_that);
+      case ActionRequest_StopHead() when stopHead != null:
+        return stopHead(_that);
+      case ActionRequest_ForgetOrbit() when forgetOrbit != null:
+        return forgetOrbit(_that);
       case _:
         return null;
     }
@@ -166,6 +230,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String id)? startDevice,
     TResult Function(String id)? stopDevice,
     TResult Function(String id)? restartDevice,
+    TResult Function(String id)? forceStopDevice,
+    TResult Function()? stopAllOwned,
+    TResult Function(String id, bool deleteData)? removeDevice,
+    TResult Function(String orbit)? readSpace,
+    TResult Function()? startHead,
+    TResult Function(String id)? stopHead,
+    TResult Function(String space)? forgetOrbit,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -180,6 +251,20 @@ extension ActionRequestPatterns on ActionRequest {
         return stopDevice(_that.id);
       case ActionRequest_RestartDevice() when restartDevice != null:
         return restartDevice(_that.id);
+      case ActionRequest_ForceStopDevice() when forceStopDevice != null:
+        return forceStopDevice(_that.id);
+      case ActionRequest_StopAllOwned() when stopAllOwned != null:
+        return stopAllOwned();
+      case ActionRequest_RemoveDevice() when removeDevice != null:
+        return removeDevice(_that.id, _that.deleteData);
+      case ActionRequest_ReadSpace() when readSpace != null:
+        return readSpace(_that.orbit);
+      case ActionRequest_StartHead() when startHead != null:
+        return startHead();
+      case ActionRequest_StopHead() when stopHead != null:
+        return stopHead(_that.id);
+      case ActionRequest_ForgetOrbit() when forgetOrbit != null:
+        return forgetOrbit(_that.space);
       case _:
         return orElse();
     }
@@ -205,6 +290,13 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(String id) startDevice,
     required TResult Function(String id) stopDevice,
     required TResult Function(String id) restartDevice,
+    required TResult Function(String id) forceStopDevice,
+    required TResult Function() stopAllOwned,
+    required TResult Function(String id, bool deleteData) removeDevice,
+    required TResult Function(String orbit) readSpace,
+    required TResult Function() startHead,
+    required TResult Function(String id) stopHead,
+    required TResult Function(String space) forgetOrbit,
   }) {
     final _that = this;
     switch (_that) {
@@ -218,6 +310,20 @@ extension ActionRequestPatterns on ActionRequest {
         return stopDevice(_that.id);
       case ActionRequest_RestartDevice():
         return restartDevice(_that.id);
+      case ActionRequest_ForceStopDevice():
+        return forceStopDevice(_that.id);
+      case ActionRequest_StopAllOwned():
+        return stopAllOwned();
+      case ActionRequest_RemoveDevice():
+        return removeDevice(_that.id, _that.deleteData);
+      case ActionRequest_ReadSpace():
+        return readSpace(_that.orbit);
+      case ActionRequest_StartHead():
+        return startHead();
+      case ActionRequest_StopHead():
+        return stopHead(_that.id);
+      case ActionRequest_ForgetOrbit():
+        return forgetOrbit(_that.space);
     }
   }
 
@@ -240,6 +346,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String id)? startDevice,
     TResult? Function(String id)? stopDevice,
     TResult? Function(String id)? restartDevice,
+    TResult? Function(String id)? forceStopDevice,
+    TResult? Function()? stopAllOwned,
+    TResult? Function(String id, bool deleteData)? removeDevice,
+    TResult? Function(String orbit)? readSpace,
+    TResult? Function()? startHead,
+    TResult? Function(String id)? stopHead,
+    TResult? Function(String space)? forgetOrbit,
   }) {
     final _that = this;
     switch (_that) {
@@ -253,6 +366,20 @@ extension ActionRequestPatterns on ActionRequest {
         return stopDevice(_that.id);
       case ActionRequest_RestartDevice() when restartDevice != null:
         return restartDevice(_that.id);
+      case ActionRequest_ForceStopDevice() when forceStopDevice != null:
+        return forceStopDevice(_that.id);
+      case ActionRequest_StopAllOwned() when stopAllOwned != null:
+        return stopAllOwned();
+      case ActionRequest_RemoveDevice() when removeDevice != null:
+        return removeDevice(_that.id, _that.deleteData);
+      case ActionRequest_ReadSpace() when readSpace != null:
+        return readSpace(_that.orbit);
+      case ActionRequest_StartHead() when startHead != null:
+        return startHead();
+      case ActionRequest_StopHead() when stopHead != null:
+        return stopHead(_that.id);
+      case ActionRequest_ForgetOrbit() when forgetOrbit != null:
+        return forgetOrbit(_that.space);
       case _:
         return null;
     }
@@ -543,6 +670,383 @@ class _$ActionRequest_RestartDeviceCopyWithImpl<$Res>
       id: null == id
           ? _self.id
           : id // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_ForceStopDevice extends ActionRequest {
+  const ActionRequest_ForceStopDevice({required this.id}) : super._();
+
+  final String id;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_ForceStopDeviceCopyWith<ActionRequest_ForceStopDevice>
+      get copyWith => _$ActionRequest_ForceStopDeviceCopyWithImpl<
+          ActionRequest_ForceStopDevice>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_ForceStopDevice &&
+            (identical(other.id, id) || other.id == id));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id);
+
+  @override
+  String toString() {
+    return 'ActionRequest.forceStopDevice(id: $id)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_ForceStopDeviceCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_ForceStopDeviceCopyWith(
+          ActionRequest_ForceStopDevice value,
+          $Res Function(ActionRequest_ForceStopDevice) _then) =
+      _$ActionRequest_ForceStopDeviceCopyWithImpl;
+  @useResult
+  $Res call({String id});
+}
+
+/// @nodoc
+class _$ActionRequest_ForceStopDeviceCopyWithImpl<$Res>
+    implements $ActionRequest_ForceStopDeviceCopyWith<$Res> {
+  _$ActionRequest_ForceStopDeviceCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_ForceStopDevice _self;
+  final $Res Function(ActionRequest_ForceStopDevice) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? id = null,
+  }) {
+    return _then(ActionRequest_ForceStopDevice(
+      id: null == id
+          ? _self.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_StopAllOwned extends ActionRequest {
+  const ActionRequest_StopAllOwned() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_StopAllOwned);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.stopAllOwned()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_RemoveDevice extends ActionRequest {
+  const ActionRequest_RemoveDevice({required this.id, required this.deleteData})
+      : super._();
+
+  final String id;
+  final bool deleteData;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_RemoveDeviceCopyWith<ActionRequest_RemoveDevice>
+      get copyWith =>
+          _$ActionRequest_RemoveDeviceCopyWithImpl<ActionRequest_RemoveDevice>(
+              this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_RemoveDevice &&
+            (identical(other.id, id) || other.id == id) &&
+            (identical(other.deleteData, deleteData) ||
+                other.deleteData == deleteData));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id, deleteData);
+
+  @override
+  String toString() {
+    return 'ActionRequest.removeDevice(id: $id, deleteData: $deleteData)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_RemoveDeviceCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_RemoveDeviceCopyWith(ActionRequest_RemoveDevice value,
+          $Res Function(ActionRequest_RemoveDevice) _then) =
+      _$ActionRequest_RemoveDeviceCopyWithImpl;
+  @useResult
+  $Res call({String id, bool deleteData});
+}
+
+/// @nodoc
+class _$ActionRequest_RemoveDeviceCopyWithImpl<$Res>
+    implements $ActionRequest_RemoveDeviceCopyWith<$Res> {
+  _$ActionRequest_RemoveDeviceCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_RemoveDevice _self;
+  final $Res Function(ActionRequest_RemoveDevice) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? id = null,
+    Object? deleteData = null,
+  }) {
+    return _then(ActionRequest_RemoveDevice(
+      id: null == id
+          ? _self.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      deleteData: null == deleteData
+          ? _self.deleteData
+          : deleteData // ignore: cast_nullable_to_non_nullable
+              as bool,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_ReadSpace extends ActionRequest {
+  const ActionRequest_ReadSpace({required this.orbit}) : super._();
+
+  final String orbit;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_ReadSpaceCopyWith<ActionRequest_ReadSpace> get copyWith =>
+      _$ActionRequest_ReadSpaceCopyWithImpl<ActionRequest_ReadSpace>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_ReadSpace &&
+            (identical(other.orbit, orbit) || other.orbit == orbit));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, orbit);
+
+  @override
+  String toString() {
+    return 'ActionRequest.readSpace(orbit: $orbit)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_ReadSpaceCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_ReadSpaceCopyWith(ActionRequest_ReadSpace value,
+          $Res Function(ActionRequest_ReadSpace) _then) =
+      _$ActionRequest_ReadSpaceCopyWithImpl;
+  @useResult
+  $Res call({String orbit});
+}
+
+/// @nodoc
+class _$ActionRequest_ReadSpaceCopyWithImpl<$Res>
+    implements $ActionRequest_ReadSpaceCopyWith<$Res> {
+  _$ActionRequest_ReadSpaceCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_ReadSpace _self;
+  final $Res Function(ActionRequest_ReadSpace) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? orbit = null,
+  }) {
+    return _then(ActionRequest_ReadSpace(
+      orbit: null == orbit
+          ? _self.orbit
+          : orbit // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_StartHead extends ActionRequest {
+  const ActionRequest_StartHead() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is ActionRequest_StartHead);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.startHead()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_StopHead extends ActionRequest {
+  const ActionRequest_StopHead({required this.id}) : super._();
+
+  final String id;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_StopHeadCopyWith<ActionRequest_StopHead> get copyWith =>
+      _$ActionRequest_StopHeadCopyWithImpl<ActionRequest_StopHead>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_StopHead &&
+            (identical(other.id, id) || other.id == id));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id);
+
+  @override
+  String toString() {
+    return 'ActionRequest.stopHead(id: $id)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_StopHeadCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_StopHeadCopyWith(ActionRequest_StopHead value,
+          $Res Function(ActionRequest_StopHead) _then) =
+      _$ActionRequest_StopHeadCopyWithImpl;
+  @useResult
+  $Res call({String id});
+}
+
+/// @nodoc
+class _$ActionRequest_StopHeadCopyWithImpl<$Res>
+    implements $ActionRequest_StopHeadCopyWith<$Res> {
+  _$ActionRequest_StopHeadCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_StopHead _self;
+  final $Res Function(ActionRequest_StopHead) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? id = null,
+  }) {
+    return _then(ActionRequest_StopHead(
+      id: null == id
+          ? _self.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_ForgetOrbit extends ActionRequest {
+  const ActionRequest_ForgetOrbit({required this.space}) : super._();
+
+  final String space;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_ForgetOrbitCopyWith<ActionRequest_ForgetOrbit> get copyWith =>
+      _$ActionRequest_ForgetOrbitCopyWithImpl<ActionRequest_ForgetOrbit>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_ForgetOrbit &&
+            (identical(other.space, space) || other.space == space));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, space);
+
+  @override
+  String toString() {
+    return 'ActionRequest.forgetOrbit(space: $space)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_ForgetOrbitCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_ForgetOrbitCopyWith(ActionRequest_ForgetOrbit value,
+          $Res Function(ActionRequest_ForgetOrbit) _then) =
+      _$ActionRequest_ForgetOrbitCopyWithImpl;
+  @useResult
+  $Res call({String space});
+}
+
+/// @nodoc
+class _$ActionRequest_ForgetOrbitCopyWithImpl<$Res>
+    implements $ActionRequest_ForgetOrbitCopyWith<$Res> {
+  _$ActionRequest_ForgetOrbitCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_ForgetOrbit _self;
+  final $Res Function(ActionRequest_ForgetOrbit) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? space = null,
+  }) {
+    return _then(ActionRequest_ForgetOrbit(
+      space: null == space
+          ? _self.space
+          : space // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

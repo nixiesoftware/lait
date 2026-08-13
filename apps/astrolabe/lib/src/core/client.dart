@@ -23,22 +23,25 @@ import '../bridge/frb_generated.dart';
 export '../bridge/api.dart'
     show
         ActionRequest,
-        ActionRequest_Open,
-        ActionRequest_Refresh,
-        ActionRequest_RestartDevice,
-        ActionRequest_StartDevice,
-        ActionRequest_StopDevice,
         ClientView,
         DeviceRow,
+        DiagnosisRow,
         FailureRow,
+        GateRow,
+        GateState,
         HeadRow,
         HostFacts,
         LibraryRow,
+        MemberRow,
+        Missing,
         NoticeRow,
+        OrbitRow,
         PlacementView,
+        SpaceRow,
         Staleness,
         Staleness_NeverLoaded,
         Staleness_Signalled,
+        StorageRow,
         Unopenable;
 
 /// The core, and the last view it produced.
@@ -48,9 +51,28 @@ export '../bridge/api.dart'
 /// own subscription could paint a frame out of step with its siblings. One
 /// listenable is one moment.
 class Client {
-  Client._(this._view);
+  Client._(this._view, [this._onDispatch]);
+
+  /// A client over a canned view, for tests.
+  ///
+  /// The generated view classes are ordinary Dart objects, so a surface can be
+  /// driven with no bridge, no core, no daemon and no window — which is the
+  /// property the interaction tests on the retiring interface had, and the one
+  /// worth keeping. `onDispatch` records what a control asked for, which is the
+  /// other half: press a real control, read what it asked for.
+  @visibleForTesting
+  factory Client.canned(
+    api.ClientView view, {
+    void Function(api.ActionRequest) onDispatch = _ignore,
+  }) =>
+      Client._(ValueNotifier(view), onDispatch);
+
+  static void _ignore(api.ActionRequest _) {}
 
   final ValueNotifier<api.ClientView> _view;
+
+  /// Set only by [Client.canned]. In production the bridge is the sink.
+  final void Function(api.ActionRequest)? _onDispatch;
 
   ValueListenable<api.ClientView> get view => _view;
 
@@ -80,6 +102,11 @@ class Client {
   /// stream would leave the control live for one round trip, which is long
   /// enough to press it four times and read three refusals.
   void dispatch(api.ActionRequest action) {
+    final record = _onDispatch;
+    if (record != null) {
+      record(action);
+      return;
+    }
     _view.value = api.dispatch(action: action);
   }
 
@@ -124,4 +151,10 @@ abstract final class ActionKeys {
   static String startDevice(String id) => 'device.start:$id';
   static String stopDevice(String id) => 'device.stop:$id';
   static String restartDevice(String id) => 'device.restart:$id';
+  static String forceStopDevice(String id) => 'device.force-stop:$id';
+  static const String stopAllOwned = 'device.stop-all';
+  static String readSpace(String orbit) => 'space.read:$orbit';
+  static const String startHead = 'head.start';
+  static String stopHead(String id) => 'head.stop:$id';
+  static String forgetOrbit(String space) => 'orbit.forget:$space';
 }

@@ -320,7 +320,13 @@ lto = "thin"
 # on RUSTFLAGS, so it reaches every crate in the graph, not just the one that
 # reads it — declaring it here rather than in `fabric` alone matches that. Its
 # only consumer is still `crates/fabric/src/op.rs`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lait_simulation)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(lait_simulation)',
+    # Set by `flutter_rust_bridge`'s `#[frb]` macro while it expands the bridge
+    # surface. Declared here rather than allowed at each call site: the flag is
+    # the generator's, and three local allows would be three copies of one fact.
+    'cfg(frb_expand)',
+] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

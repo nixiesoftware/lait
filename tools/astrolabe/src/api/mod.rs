@@ -66,6 +66,12 @@ pub struct ClientView {
     pub host: Option<HostFacts>,
     pub heads: Vec<HeadRow>,
     pub devices: Vec<DeviceRow>,
+    pub storage: Vec<StorageRow>,
+    /// This identity's Orbit registry, newest-opened first.
+    pub orbits: Vec<OrbitRow>,
+    /// The Space being administered, when one has been chosen. Choosing is an
+    /// act — it costs a read — so this is absent until somebody chooses.
+    pub space: Option<SpaceRow>,
     pub notices: Vec<NoticeRow>,
     pub failures: Vec<FailureRow>,
     /// The keys of actions asked for and not yet answered. A control whose key
@@ -163,6 +169,111 @@ pub struct DeviceRow {
     /// A sampling failure preserves the last good reading and says so; it is
     /// never drawn as "nothing there".
     pub degraded: Option<String>,
+    pub home: String,
+    /// `None` for a daemon this client did not spawn. Ownership is a boundary:
+    /// there is no pid-based path to stopping something we do not own, and the
+    /// absence of a pid here is that boundary crossing the bridge.
+    pub pid: Option<u32>,
+    /// Whether this client may force-stop it. Answered by the core's
+    /// capabilities rather than inferred from ownership on this side, because
+    /// the two can differ and only one of them is authoritative.
+    pub can_force_stop: bool,
+    pub last_error: Option<String>,
+}
+
+/// What one Orbit is holding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageRow {
+    pub orbit: String,
+    /// What the registry calls it. Advisory — a display name is owned by a
+    /// World today — and carried as what it is rather than as truth.
+    pub name: Option<String>,
+    /// Every figure is optional, and that is the contract. A footprint nobody
+    /// could measure is *absent*, never zero: an Orbit reported as holding 0
+    /// bytes is a claim, and one nobody asked is not.
+    pub bytes_on_disk: Option<u64>,
+    pub object_count: Option<u64>,
+    pub last_verified_ms: Option<u64>,
+    /// Why there are no figures, when there are none. Two reasons, because
+    /// "not up" and "could not be asked" are different facts.
+    pub missing: Option<Missing>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missing {
+    /// It is not up. Not an error, and not something a listing corrects —
+    /// measuring must not place what nobody asked to place.
+    NotPlaced,
+    /// It could not be asked.
+    Unreachable,
+}
+
+/// One Orbit in this identity's registry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrbitRow {
+    pub space: String,
+    pub name: String,
+    pub path: String,
+    /// `None` is never opened, for the same reason it is on a library row.
+    pub last_opened: Option<u64>,
+}
+
+/// What a gate answered, when a diagnosis was taken.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateRow {
+    /// Stable machine id — `space`, `daemon`, `membership`, `peer`, `synced`.
+    pub id: String,
+    pub label: String,
+    pub state: GateState,
+    pub detail: String,
+}
+
+/// Five states, not two.
+///
+/// `Warn` is deliberately not blocking: a key-custody problem is urgent to fix
+/// and irrelevant to whether somebody is onboarded, and a warning that hijacked
+/// the blocker would tell a joiner they are stuck when they are not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateState {
+    Pass,
+    Wait,
+    Fail,
+    Warn,
+    Skip,
+}
+
+/// A diagnosis, when one was taken.
+///
+/// Absent when the Space could not be asked — which is *not* the same as every
+/// gate passing, and is the whole reason this is an `Option` rather than an
+/// empty list of gates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiagnosisRow {
+    pub gates: Vec<GateRow>,
+    /// The first non-passing gate: the one actionable blocker.
+    pub blocked_on: Option<String>,
+    pub summary: String,
+}
+
+/// The Space somebody is administering, as it last answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpaceRow {
+    pub space: String,
+    /// This actor's standing *here*. Per Orbit rather than per identity: one
+    /// identity may hold very different standing in two Spaces, and a single
+    /// answer would have to pick one and be wrong about the other.
+    pub whoami: Option<String>,
+    pub admin: bool,
+    pub members: Vec<MemberRow>,
+    pub devices: Vec<String>,
+    pub diagnosis: Option<DiagnosisRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberRow {
+    pub id: String,
+    pub nick: Option<String>,
+    pub admin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +314,32 @@ pub enum ActionRequest {
     RestartDevice {
         id: String,
     },
+    /// Force-stop. Only ever offered for a daemon this client owns: ownership
+    /// is the safety boundary, and there is no pid-based path across it.
+    ForceStopDevice {
+        id: String,
+    },
+    StopAllOwned,
+    /// Forget a device. `delete_data` additionally destroys what it holds, and
+    /// is the one flag here that cannot be undone.
+    RemoveDevice {
+        id: String,
+        delete_data: bool,
+    },
+    /// Read one Space. Choosing a Space to administer is an act, not a
+    /// listing — it is the read that makes the Members surface answerable.
+    ReadSpace {
+        orbit: String,
+    },
+    /// Start a browser head for this identity.
+    StartHead,
+    StopHead {
+        id: String,
+    },
+    /// Forget an Orbit. The store is left alone; this is registry-only.
+    ForgetOrbit {
+        space: String,
+    },
 }
 
 impl ActionRequest {
@@ -213,8 +350,37 @@ impl ActionRequest {
             Self::StartDevice { id } => Action::StartDevice(id),
             Self::StopDevice { id } => Action::StopDevice(id),
             Self::RestartDevice { id } => Action::RestartDevice(id),
+            Self::ForceStopDevice { id } => Action::ForceStopDevice(id),
+            Self::StopAllOwned => Action::StopAllOwned,
+            Self::RemoveDevice { id, delete_data } => Action::RemoveDevice { id, delete_data },
+            Self::ReadSpace { orbit } => Action::ReadSpace(space_ref(orbit)),
+            Self::StartHead => Action::StartHead,
+            Self::StopHead { id } => Action::StopHead(id),
+            Self::ForgetOrbit { space } => Action::OrbitForget { space },
         }
     }
+}
+
+/// Resolve an Orbit id to the reference the Space plane needs.
+///
+/// The path comes from the registry the core already holds. An interface that
+/// carried a store path would be holding a fact it could not have checked, and
+/// would send a stale one the first time an Orbit moved.
+fn space_ref(orbit: String) -> crate::client::space::SpaceRef {
+    let path = CORE
+        .get()
+        .and_then(|core| core.lock().ok())
+        .and_then(|core| {
+            core.app.context().and_then(|context| {
+                context
+                    .orbits
+                    .iter()
+                    .find(|entry| entry.space == orbit)
+                    .map(|entry| entry.path.clone())
+            })
+        })
+        .unwrap_or_default();
+    crate::client::space::SpaceRef { space: orbit, path }
 }
 
 /// The model, the background half, and nothing else.
@@ -295,6 +461,9 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
 /// times and see three refusals.
 #[frb(sync)]
 pub fn dispatch(action: ActionRequest) -> ClientView {
+    // Translated *before* the lock is taken: resolving an Orbit reads the
+    // registry, which needs the same lock, and a translation done inside the
+    // guard would deadlock on exactly the actions that touch a Space.
     let action = action.into_action();
     let Some(core) = CORE.get() else {
         return empty();
@@ -346,6 +515,9 @@ fn empty() -> ClientView {
         host: None,
         heads: Vec::new(),
         devices: Vec::new(),
+        storage: Vec::new(),
+        orbits: Vec::new(),
+        space: None,
         notices: Vec::new(),
         failures: Vec::new(),
         in_flight: Vec::new(),
@@ -357,6 +529,14 @@ fn empty() -> ClientView {
 /// possibly know.
 fn project(app: &App) -> ClientView {
     let orbits = app.context().map(|context| context.orbits.as_slice());
+    // Asked of the snapshot rather than assumed. Whether this build can
+    // force-stop what it owns is a capability the supervisor answers, and an
+    // interface that inferred it from ownership would offer a control the core
+    // refuses.
+    let capabilities = app
+        .snapshot()
+        .map(|snapshot| snapshot.capabilities.clone())
+        .unwrap_or_default();
 
     ClientView {
         loading: app.is_loading(),
@@ -425,6 +605,10 @@ fn project(app: &App) -> ClientView {
                 label: device.label.clone(),
                 state: format!("{:?}", device.state).to_lowercase(),
                 owned: device.owned,
+                home: device.home.clone(),
+                pid: device.pid,
+                can_force_stop: device.owned && capabilities.force_stop_owned_process,
+                last_error: device.last_error.clone(),
                 degraded: match device.observation.state {
                     lait_workbench::ObservationState::Degraded => Some(
                         device
@@ -437,6 +621,72 @@ fn project(app: &App) -> ClientView {
                 },
             })
             .collect(),
+        storage: app
+            .storage()
+            .iter()
+            .map(|facts| StorageRow {
+                orbit: facts.orbit.clone(),
+                name: facts.name.clone(),
+                bytes_on_disk: facts.bytes_on_disk,
+                object_count: facts.object_count,
+                last_verified_ms: facts.last_verified_ms,
+                missing: facts.missing.map(|missing| match missing {
+                    crate::client::storage::Missing::NotPlaced => Missing::NotPlaced,
+                    crate::client::storage::Missing::Unreachable => Missing::Unreachable,
+                }),
+            })
+            .collect(),
+        orbits: orbits
+            .unwrap_or_default()
+            .iter()
+            .map(|orbit| OrbitRow {
+                space: orbit.space.clone(),
+                name: orbit.name.clone(),
+                path: orbit.path.clone(),
+                last_opened: (orbit.last_opened > 0).then_some(orbit.last_opened),
+            })
+            .collect(),
+        space: app.space().map(|view| SpaceRow {
+            space: view.space.clone(),
+            whoami: view.standing.actor.clone(),
+            admin: view.standing.role == "admin",
+            members: view
+                .members
+                .iter()
+                .map(|member| MemberRow {
+                    id: member.key.clone(),
+                    nick: Some(member.alias.clone()).filter(|alias| !alias.is_empty()),
+                    admin: member.role == "admin",
+                })
+                .collect(),
+            devices: view
+                .devices
+                .iter()
+                .map(|device| device.line.clone())
+                .collect(),
+            // Absent when the Space could not be diagnosed, which is not the
+            // same as every gate passing.
+            diagnosis: view.diagnosis.as_ref().map(|taken| DiagnosisRow {
+                gates: taken
+                    .gates
+                    .iter()
+                    .map(|gate| GateRow {
+                        id: gate.id.clone(),
+                        label: gate.label.clone(),
+                        state: match gate.state {
+                            lait::diagnose::GateState::Pass => GateState::Pass,
+                            lait::diagnose::GateState::Wait => GateState::Wait,
+                            lait::diagnose::GateState::Fail => GateState::Fail,
+                            lait::diagnose::GateState::Warn => GateState::Warn,
+                            lait::diagnose::GateState::Skip => GateState::Skip,
+                        },
+                        detail: gate.detail.clone(),
+                    })
+                    .collect(),
+                blocked_on: taken.blocked_on.clone(),
+                summary: taken.summary.clone(),
+            }),
+        }),
         notices: app
             .notices()
             .map(|notice| NoticeRow {
