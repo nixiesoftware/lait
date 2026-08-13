@@ -25,6 +25,7 @@ use lait_workbench::{
     EventKind, HeadFacts, LogPage, ObservationState, SnapshotReason, WorkbenchSnapshot,
 };
 
+use crate::client::book::BookSnapshot;
 use crate::client::heads::McpBindingOutcome;
 use crate::client::host::HostContext;
 use crate::client::library::{LaunchTicket, LibraryEntry};
@@ -61,6 +62,8 @@ pub struct App {
     transitions: Option<ConnectionHistoryPage>,
     /// The Space somebody is administering, as it last answered.
     space: Option<SpaceView>,
+    /// The identity's address book. `None` until the first successful read.
+    book: Option<BookSnapshot>,
     /// How many times each device's log has been reported to have changed.
     ///
     /// A counter rather than a flag, and the *only* thing this model derives
@@ -142,6 +145,7 @@ impl App {
             Update::Storage(facts) => self.absorb_storage(facts, Vec::new()),
             Update::Heads(heads) => self.heads = heads,
             Update::Context(context) => self.context = Some(*context),
+            Update::Book(book) => self.book = Some(book),
             Update::Signal(signal) => self.consume(&signal),
             Update::Done { key, outcome } => {
                 self.in_flight.remove(&key);
@@ -279,6 +283,10 @@ impl App {
         self.context = Some(context);
     }
 
+    pub fn absorb_book(&mut self, book: BookSnapshot) {
+        self.book = Some(book);
+    }
+
     pub fn storage(&self) -> &[StorageFacts] {
         &self.storage
     }
@@ -313,6 +321,10 @@ impl App {
 
     pub fn space(&self) -> Option<&SpaceView> {
         self.space.as_ref()
+    }
+
+    pub fn book(&self) -> Option<&BookSnapshot> {
+        self.book.as_ref()
     }
 
     /// How many log changes this model has been told about for `device`.

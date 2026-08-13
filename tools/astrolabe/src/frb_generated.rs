@@ -261,6 +261,48 @@ impl SseDecode for crate::api::ActionRequest {
                 let mut var_space = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::ForgetOrbit { space: var_space };
             }
+            12 => {
+                let mut var_card = <Option<String>>::sse_decode(deserializer);
+                let mut var_name = <String>::sse_decode(deserializer);
+                let mut var_note = <Option<String>>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookPut {
+                    card: var_card,
+                    name: var_name,
+                    note: var_note,
+                };
+            }
+            13 => {
+                let mut var_card = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookDelete { card: var_card };
+            }
+            14 => {
+                let mut var_from = <String>::sse_decode(deserializer);
+                let mut var_into = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookMerge {
+                    from: var_from,
+                    into: var_into,
+                };
+            }
+            15 => {
+                let mut var_card = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookClaimSelf { card: var_card };
+            }
+            16 => {
+                let mut var_card = <String>::sse_decode(deserializer);
+                let mut var_handle = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookLink {
+                    card: var_card,
+                    handle: var_handle,
+                };
+            }
+            17 => {
+                let mut var_card = <String>::sse_decode(deserializer);
+                let mut var_handle = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookUnlink {
+                    card: var_card,
+                    handle: var_handle,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -268,10 +310,46 @@ impl SseDecode for crate::api::ActionRequest {
     }
 }
 
+impl SseDecode for crate::api::BookFacts {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_cards = <Vec<crate::api::CardRow>>::sse_decode(deserializer);
+        let mut var_migrationComplete = <bool>::sse_decode(deserializer);
+        let mut var_migrationPending = <u32>::sse_decode(deserializer);
+        let mut var_migrationImported = <u32>::sse_decode(deserializer);
+        return crate::api::BookFacts {
+            cards: var_cards,
+            migration_complete: var_migrationComplete,
+            migration_pending: var_migrationPending,
+            migration_imported: var_migrationImported,
+        };
+    }
+}
+
 impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_u8().unwrap() != 0
+    }
+}
+
+impl SseDecode for crate::api::CardRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_card = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_note = <String>::sse_decode(deserializer);
+        let mut var_handles = <Vec<String>>::sse_decode(deserializer);
+        let mut var_groups = <Vec<String>>::sse_decode(deserializer);
+        let mut var_selfClaim = <bool>::sse_decode(deserializer);
+        return crate::api::CardRow {
+            card: var_card,
+            name: var_name,
+            note: var_note,
+            handles: var_handles,
+            groups: var_groups,
+            self_claim: var_selfClaim,
+        };
     }
 }
 
@@ -287,6 +365,7 @@ impl SseDecode for crate::api::ClientView {
         let mut var_storage = <Vec<crate::api::StorageRow>>::sse_decode(deserializer);
         let mut var_orbits = <Vec<crate::api::OrbitRow>>::sse_decode(deserializer);
         let mut var_space = <Option<crate::api::SpaceRow>>::sse_decode(deserializer);
+        let mut var_book = <Option<crate::api::BookFacts>>::sse_decode(deserializer);
         let mut var_notices = <Vec<crate::api::NoticeRow>>::sse_decode(deserializer);
         let mut var_failures = <Vec<crate::api::FailureRow>>::sse_decode(deserializer);
         let mut var_inFlight = <Vec<String>>::sse_decode(deserializer);
@@ -300,6 +379,7 @@ impl SseDecode for crate::api::ClientView {
             storage: var_storage,
             orbits: var_orbits,
             space: var_space,
+            book: var_book,
             notices: var_notices,
             failures: var_failures,
             in_flight: var_inFlight,
@@ -485,6 +565,18 @@ impl SseDecode for Vec<String> {
     }
 }
 
+impl SseDecode for Vec<crate::api::CardRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::CardRow>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::DeviceRow> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -622,10 +714,12 @@ impl SseDecode for crate::api::MemberRow {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_id = <String>::sse_decode(deserializer);
         let mut var_nick = <Option<String>>::sse_decode(deserializer);
+        let mut var_authoredName = <Option<String>>::sse_decode(deserializer);
         let mut var_admin = <bool>::sse_decode(deserializer);
         return crate::api::MemberRow {
             id: var_id,
             nick: var_nick,
+            authored_name: var_authoredName,
             admin: var_admin,
         };
     }
@@ -660,6 +754,17 @@ impl SseDecode for Option<String> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<String>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::BookFacts> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::BookFacts>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -912,7 +1017,7 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        4 => wire__crate__api__watch_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__watch_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -925,9 +1030,9 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__current_impl(ptr, rust_vec_len, data_len),
-        2 => wire__crate__api__dispatch_impl(ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__start_impl(ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__current_impl(ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__dispatch_impl(ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__start_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -974,6 +1079,37 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             crate::api::ActionRequest::ForgetOrbit { space } => {
                 [11.into_dart(), space.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::ActionRequest::BookPut { card, name, note } => [
+                12.into_dart(),
+                card.into_into_dart().into_dart(),
+                name.into_into_dart().into_dart(),
+                note.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::BookDelete { card } => {
+                [13.into_dart(), card.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ActionRequest::BookMerge { from, into } => [
+                14.into_dart(),
+                from.into_into_dart().into_dart(),
+                into.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::BookClaimSelf { card } => {
+                [15.into_dart(), card.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ActionRequest::BookLink { card, handle } => [
+                16.into_dart(),
+                card.into_into_dart().into_dart(),
+                handle.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::BookUnlink { card, handle } => [
+                17.into_dart(),
+                card.into_into_dart().into_dart(),
+                handle.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -983,6 +1119,44 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ActionRequest {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::ActionRequest> for crate::api::ActionRequest {
     fn into_into_dart(self) -> crate::api::ActionRequest {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::BookFacts {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.cards.into_into_dart().into_dart(),
+            self.migration_complete.into_into_dart().into_dart(),
+            self.migration_pending.into_into_dart().into_dart(),
+            self.migration_imported.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::BookFacts {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::BookFacts> for crate::api::BookFacts {
+    fn into_into_dart(self) -> crate::api::BookFacts {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::CardRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.card.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.note.into_into_dart().into_dart(),
+            self.handles.into_into_dart().into_dart(),
+            self.groups.into_into_dart().into_dart(),
+            self.self_claim.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::CardRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::CardRow> for crate::api::CardRow {
+    fn into_into_dart(self) -> crate::api::CardRow {
         self
     }
 }
@@ -999,6 +1173,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::ClientView {
             self.storage.into_into_dart().into_dart(),
             self.orbits.into_into_dart().into_dart(),
             self.space.into_into_dart().into_dart(),
+            self.book.into_into_dart().into_dart(),
             self.notices.into_into_dart().into_dart(),
             self.failures.into_into_dart().into_dart(),
             self.in_flight.into_into_dart().into_dart(),
@@ -1179,6 +1354,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::MemberRow {
         [
             self.id.into_into_dart().into_dart(),
             self.nick.into_into_dart().into_dart(),
+            self.authored_name.into_into_dart().into_dart(),
             self.admin.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -1424,6 +1600,35 @@ impl SseEncode for crate::api::ActionRequest {
                 <i32>::sse_encode(11, serializer);
                 <String>::sse_encode(space, serializer);
             }
+            crate::api::ActionRequest::BookPut { card, name, note } => {
+                <i32>::sse_encode(12, serializer);
+                <Option<String>>::sse_encode(card, serializer);
+                <String>::sse_encode(name, serializer);
+                <Option<String>>::sse_encode(note, serializer);
+            }
+            crate::api::ActionRequest::BookDelete { card } => {
+                <i32>::sse_encode(13, serializer);
+                <String>::sse_encode(card, serializer);
+            }
+            crate::api::ActionRequest::BookMerge { from, into } => {
+                <i32>::sse_encode(14, serializer);
+                <String>::sse_encode(from, serializer);
+                <String>::sse_encode(into, serializer);
+            }
+            crate::api::ActionRequest::BookClaimSelf { card } => {
+                <i32>::sse_encode(15, serializer);
+                <String>::sse_encode(card, serializer);
+            }
+            crate::api::ActionRequest::BookLink { card, handle } => {
+                <i32>::sse_encode(16, serializer);
+                <String>::sse_encode(card, serializer);
+                <String>::sse_encode(handle, serializer);
+            }
+            crate::api::ActionRequest::BookUnlink { card, handle } => {
+                <i32>::sse_encode(17, serializer);
+                <String>::sse_encode(card, serializer);
+                <String>::sse_encode(handle, serializer);
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1431,10 +1636,32 @@ impl SseEncode for crate::api::ActionRequest {
     }
 }
 
+impl SseEncode for crate::api::BookFacts {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::CardRow>>::sse_encode(self.cards, serializer);
+        <bool>::sse_encode(self.migration_complete, serializer);
+        <u32>::sse_encode(self.migration_pending, serializer);
+        <u32>::sse_encode(self.migration_imported, serializer);
+    }
+}
+
 impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::CardRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.card, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.note, serializer);
+        <Vec<String>>::sse_encode(self.handles, serializer);
+        <Vec<String>>::sse_encode(self.groups, serializer);
+        <bool>::sse_encode(self.self_claim, serializer);
     }
 }
 
@@ -1450,6 +1677,7 @@ impl SseEncode for crate::api::ClientView {
         <Vec<crate::api::StorageRow>>::sse_encode(self.storage, serializer);
         <Vec<crate::api::OrbitRow>>::sse_encode(self.orbits, serializer);
         <Option<crate::api::SpaceRow>>::sse_encode(self.space, serializer);
+        <Option<crate::api::BookFacts>>::sse_encode(self.book, serializer);
         <Vec<crate::api::NoticeRow>>::sse_encode(self.notices, serializer);
         <Vec<crate::api::FailureRow>>::sse_encode(self.failures, serializer);
         <Vec<String>>::sse_encode(self.in_flight, serializer);
@@ -1578,6 +1806,16 @@ impl SseEncode for Vec<String> {
     }
 }
 
+impl SseEncode for Vec<crate::api::CardRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::CardRow>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::DeviceRow> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1693,6 +1931,7 @@ impl SseEncode for crate::api::MemberRow {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.id, serializer);
         <Option<String>>::sse_encode(self.nick, serializer);
+        <Option<String>>::sse_encode(self.authored_name, serializer);
         <bool>::sse_encode(self.admin, serializer);
     }
 }
@@ -1727,6 +1966,16 @@ impl SseEncode for Option<String> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <String>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::BookFacts> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::BookFacts>::sse_encode(value, serializer);
         }
     }
 }

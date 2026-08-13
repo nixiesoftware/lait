@@ -30,13 +30,25 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  ViewPush dco_decode_TraitDef_ViewPush(dynamic raw);
+
+  @protected
   ActionRequest dco_decode_action_request(dynamic raw);
+
+  @protected
+  BookFacts dco_decode_book_facts(dynamic raw);
 
   @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
   ActionRequest dco_decode_box_autoadd_action_request(dynamic raw);
+
+  @protected
+  BookFacts dco_decode_box_autoadd_book_facts(dynamic raw);
+
+  @protected
+  ClientView dco_decode_box_autoadd_client_view(dynamic raw);
 
   @protected
   DiagnosisRow dco_decode_box_autoadd_diagnosis_row(dynamic raw);
@@ -61,6 +73,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   Unopenable dco_decode_box_autoadd_unopenable(dynamic raw);
+
+  @protected
+  CardRow dco_decode_card_row(dynamic raw);
 
   @protected
   ClientView dco_decode_client_view(dynamic raw);
@@ -94,6 +109,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<CardRow> dco_decode_list_card_row(dynamic raw);
 
   @protected
   List<DeviceRow> dco_decode_list_device_row(dynamic raw);
@@ -139,6 +157,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  BookFacts? dco_decode_opt_box_autoadd_book_facts(dynamic raw);
 
   @protected
   DiagnosisRow? dco_decode_opt_box_autoadd_diagnosis_row(dynamic raw);
@@ -214,11 +235,20 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   ActionRequest sse_decode_action_request(SseDeserializer deserializer);
 
   @protected
+  BookFacts sse_decode_book_facts(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
   ActionRequest sse_decode_box_autoadd_action_request(
       SseDeserializer deserializer);
+
+  @protected
+  BookFacts sse_decode_box_autoadd_book_facts(SseDeserializer deserializer);
+
+  @protected
+  ClientView sse_decode_box_autoadd_client_view(SseDeserializer deserializer);
 
   @protected
   DiagnosisRow sse_decode_box_autoadd_diagnosis_row(
@@ -244,6 +274,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   Unopenable sse_decode_box_autoadd_unopenable(SseDeserializer deserializer);
+
+  @protected
+  CardRow sse_decode_card_row(SseDeserializer deserializer);
 
   @protected
   ClientView sse_decode_client_view(SseDeserializer deserializer);
@@ -277,6 +310,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<CardRow> sse_decode_list_card_row(SseDeserializer deserializer);
 
   @protected
   List<DeviceRow> sse_decode_list_device_row(SseDeserializer deserializer);
@@ -322,6 +358,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  BookFacts? sse_decode_opt_box_autoadd_book_facts(
+      SseDeserializer deserializer);
 
   @protected
   DiagnosisRow? sse_decode_opt_box_autoadd_diagnosis_row(
@@ -402,11 +442,22 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_action_request(ActionRequest self, SseSerializer serializer);
 
   @protected
+  void sse_encode_book_facts(BookFacts self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_action_request(
       ActionRequest self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_book_facts(
+      BookFacts self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_client_view(
+      ClientView self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_diagnosis_row(
@@ -436,6 +487,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_box_autoadd_unopenable(
       Unopenable self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_card_row(CardRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_client_view(ClientView self, SseSerializer serializer);
@@ -469,6 +523,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_card_row(List<CardRow> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_device_row(
@@ -521,6 +578,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_book_facts(
+      BookFacts? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_diagnosis_row(

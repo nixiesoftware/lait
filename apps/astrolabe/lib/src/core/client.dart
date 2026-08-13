@@ -60,7 +60,9 @@ export '../bridge/api.dart'
         Staleness_NeverLoaded,
         Staleness_Signalled,
         StorageRow,
-        Unopenable;
+        Unopenable,
+        BookFacts,
+        CardRow;
 
 /// The core library, resolved for the process that is about to load it.
 ///
@@ -226,4 +228,11 @@ abstract final class ActionKeys {
   static const String startHead = 'head.start';
   static String stopHead(String id) => 'head.stop:$id';
   static String forgetOrbit(String space) => 'orbit.forget:$space';
+  static const String bookPutNew = 'book.put';
+  static String bookPut(String card) => 'book.put:$card';
+  static String bookDelete(String card) => 'book.delete:$card';
+  static String bookMerge(String from, String into) => 'book.merge:$from:$into';
+  static String bookClaim(String card) => 'book.claim:$card';
+  static String bookLink(String card) => 'book.link:$card';
+  static String bookUnlink(String card) => 'book.unlink:$card';
 }

@@ -101,7 +101,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     return handler.executeSync(SyncTask(
       callFfi: () {
         final serializer = SseSerializer(generalizedFrbRustBinding);
-        return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+        return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
       },
       codec: SseCodec(
         decodeSuccessData: sse_decode_client_view,
@@ -124,7 +124,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       callFfi: () {
         final serializer = SseSerializer(generalizedFrbRustBinding);
         sse_encode_box_autoadd_action_request(action, serializer);
-        return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+        return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
       },
       codec: SseCodec(
         decodeSuccessData: sse_decode_client_view,
@@ -148,7 +148,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         final serializer = SseSerializer(generalizedFrbRustBinding);
         sse_encode_opt_String(stateRoot, serializer);
         sse_encode_opt_String(sidecar, serializer);
-        return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+        return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
       },
       codec: SseCodec(
         decodeSuccessData: sse_decode_unit,
@@ -173,7 +173,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         final serializer = SseSerializer(generalizedFrbRustBinding);
         sse_encode_StreamSink_client_view_Sse(sink, serializer);
         pdeCallFfi(generalizedFrbRustBinding, serializer,
-            funcId: 4, port: port_);
+            funcId: 5, port: port_);
       },
       codec: SseCodec(
         decodeSuccessData: sse_decode_unit,
@@ -208,6 +208,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as String;
+  }
+
+  @protected
+  ViewPush dco_decode_TraitDef_ViewPush(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
   }
 
   @protected
@@ -258,9 +264,52 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         return ActionRequest_ForgetOrbit(
           space: dco_decode_String(raw[1]),
         );
+      case 12:
+        return ActionRequest_BookPut(
+          card: dco_decode_opt_String(raw[1]),
+          name: dco_decode_String(raw[2]),
+          note: dco_decode_opt_String(raw[3]),
+        );
+      case 13:
+        return ActionRequest_BookDelete(
+          card: dco_decode_String(raw[1]),
+        );
+      case 14:
+        return ActionRequest_BookMerge(
+          from: dco_decode_String(raw[1]),
+          into: dco_decode_String(raw[2]),
+        );
+      case 15:
+        return ActionRequest_BookClaimSelf(
+          card: dco_decode_String(raw[1]),
+        );
+      case 16:
+        return ActionRequest_BookLink(
+          card: dco_decode_String(raw[1]),
+          handle: dco_decode_String(raw[2]),
+        );
+      case 17:
+        return ActionRequest_BookUnlink(
+          card: dco_decode_String(raw[1]),
+          handle: dco_decode_String(raw[2]),
+        );
       default:
         throw Exception("unreachable");
     }
+  }
+
+  @protected
+  BookFacts dco_decode_book_facts(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return BookFacts(
+      cards: dco_decode_list_card_row(arr[0]),
+      migrationComplete: dco_decode_bool(arr[1]),
+      migrationPending: dco_decode_u_32(arr[2]),
+      migrationImported: dco_decode_u_32(arr[3]),
+    );
   }
 
   @protected
@@ -273,6 +322,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   ActionRequest dco_decode_box_autoadd_action_request(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_action_request(raw);
+  }
+
+  @protected
+  BookFacts dco_decode_box_autoadd_book_facts(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_book_facts(raw);
+  }
+
+  @protected
+  ClientView dco_decode_box_autoadd_client_view(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_client_view(raw);
   }
 
   @protected
@@ -324,11 +385,27 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  CardRow dco_decode_card_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return CardRow(
+      card: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      note: dco_decode_String(arr[2]),
+      handles: dco_decode_list_String(arr[3]),
+      groups: dco_decode_list_String(arr[4]),
+      selfClaim: dco_decode_bool(arr[5]),
+    );
+  }
+
+  @protected
   ClientView dco_decode_client_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 12)
-      throw Exception('unexpected arr length: expect 12 but see ${arr.length}');
+    if (arr.length != 13)
+      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
     return ClientView(
       loading: dco_decode_bool(arr[0]),
       stale: dco_decode_opt_box_autoadd_staleness(arr[1]),
@@ -339,9 +416,10 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       storage: dco_decode_list_storage_row(arr[6]),
       orbits: dco_decode_list_orbit_row(arr[7]),
       space: dco_decode_opt_box_autoadd_space_row(arr[8]),
-      notices: dco_decode_list_notice_row(arr[9]),
-      failures: dco_decode_list_failure_row(arr[10]),
-      inFlight: dco_decode_list_String(arr[11]),
+      book: dco_decode_opt_box_autoadd_book_facts(arr[9]),
+      notices: dco_decode_list_notice_row(arr[10]),
+      failures: dco_decode_list_failure_row(arr[11]),
+      inFlight: dco_decode_list_String(arr[12]),
     );
   }
 
@@ -478,6 +556,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  List<CardRow> dco_decode_list_card_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_card_row).toList();
+  }
+
+  @protected
   List<DeviceRow> dco_decode_list_device_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_device_row).toList();
@@ -547,12 +631,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   MemberRow dco_decode_member_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return MemberRow(
       id: dco_decode_String(arr[0]),
       nick: dco_decode_opt_String(arr[1]),
-      admin: dco_decode_bool(arr[2]),
+      authoredName: dco_decode_opt_String(arr[2]),
+      admin: dco_decode_bool(arr[3]),
     );
   }
 
@@ -578,6 +663,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   String? dco_decode_opt_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
+  BookFacts? dco_decode_opt_box_autoadd_book_facts(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_book_facts(raw);
   }
 
   @protected
@@ -806,9 +897,47 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case 11:
         var var_space = sse_decode_String(deserializer);
         return ActionRequest_ForgetOrbit(space: var_space);
+      case 12:
+        var var_card = sse_decode_opt_String(deserializer);
+        var var_name = sse_decode_String(deserializer);
+        var var_note = sse_decode_opt_String(deserializer);
+        return ActionRequest_BookPut(
+            card: var_card, name: var_name, note: var_note);
+      case 13:
+        var var_card = sse_decode_String(deserializer);
+        return ActionRequest_BookDelete(card: var_card);
+      case 14:
+        var var_from = sse_decode_String(deserializer);
+        var var_into = sse_decode_String(deserializer);
+        return ActionRequest_BookMerge(from: var_from, into: var_into);
+      case 15:
+        var var_card = sse_decode_String(deserializer);
+        return ActionRequest_BookClaimSelf(card: var_card);
+      case 16:
+        var var_card = sse_decode_String(deserializer);
+        var var_handle = sse_decode_String(deserializer);
+        return ActionRequest_BookLink(card: var_card, handle: var_handle);
+      case 17:
+        var var_card = sse_decode_String(deserializer);
+        var var_handle = sse_decode_String(deserializer);
+        return ActionRequest_BookUnlink(card: var_card, handle: var_handle);
       default:
         throw UnimplementedError('');
     }
+  }
+
+  @protected
+  BookFacts sse_decode_book_facts(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_cards = sse_decode_list_card_row(deserializer);
+    var var_migrationComplete = sse_decode_bool(deserializer);
+    var var_migrationPending = sse_decode_u_32(deserializer);
+    var var_migrationImported = sse_decode_u_32(deserializer);
+    return BookFacts(
+        cards: var_cards,
+        migrationComplete: var_migrationComplete,
+        migrationPending: var_migrationPending,
+        migrationImported: var_migrationImported);
   }
 
   @protected
@@ -822,6 +951,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_action_request(deserializer));
+  }
+
+  @protected
+  BookFacts sse_decode_box_autoadd_book_facts(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_book_facts(deserializer));
+  }
+
+  @protected
+  ClientView sse_decode_box_autoadd_client_view(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_client_view(deserializer));
   }
 
   @protected
@@ -874,6 +1015,24 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  CardRow sse_decode_card_row(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_card = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_note = sse_decode_String(deserializer);
+    var var_handles = sse_decode_list_String(deserializer);
+    var var_groups = sse_decode_list_String(deserializer);
+    var var_selfClaim = sse_decode_bool(deserializer);
+    return CardRow(
+        card: var_card,
+        name: var_name,
+        note: var_note,
+        handles: var_handles,
+        groups: var_groups,
+        selfClaim: var_selfClaim);
+  }
+
+  @protected
   ClientView sse_decode_client_view(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_loading = sse_decode_bool(deserializer);
@@ -885,6 +1044,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_storage = sse_decode_list_storage_row(deserializer);
     var var_orbits = sse_decode_list_orbit_row(deserializer);
     var var_space = sse_decode_opt_box_autoadd_space_row(deserializer);
+    var var_book = sse_decode_opt_box_autoadd_book_facts(deserializer);
     var var_notices = sse_decode_list_notice_row(deserializer);
     var var_failures = sse_decode_list_failure_row(deserializer);
     var var_inFlight = sse_decode_list_String(deserializer);
@@ -898,6 +1058,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         storage: var_storage,
         orbits: var_orbits,
         space: var_space,
+        book: var_book,
         notices: var_notices,
         failures: var_failures,
         inFlight: var_inFlight);
@@ -1052,6 +1213,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  List<CardRow> sse_decode_list_card_row(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <CardRow>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_card_row(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<DeviceRow> sse_decode_list_device_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1183,8 +1356,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_id = sse_decode_String(deserializer);
     var var_nick = sse_decode_opt_String(deserializer);
+    var var_authoredName = sse_decode_opt_String(deserializer);
     var var_admin = sse_decode_bool(deserializer);
-    return MemberRow(id: var_id, nick: var_nick, admin: var_admin);
+    return MemberRow(
+        id: var_id,
+        nick: var_nick,
+        authoredName: var_authoredName,
+        admin: var_admin);
   }
 
   @protected
@@ -1208,6 +1386,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  BookFacts? sse_decode_opt_box_autoadd_book_facts(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_book_facts(deserializer));
     } else {
       return null;
     }
@@ -1496,7 +1686,43 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case ActionRequest_ForgetOrbit(space: final space):
         sse_encode_i_32(11, serializer);
         sse_encode_String(space, serializer);
+      case ActionRequest_BookPut(
+          card: final card,
+          name: final name,
+          note: final note
+        ):
+        sse_encode_i_32(12, serializer);
+        sse_encode_opt_String(card, serializer);
+        sse_encode_String(name, serializer);
+        sse_encode_opt_String(note, serializer);
+      case ActionRequest_BookDelete(card: final card):
+        sse_encode_i_32(13, serializer);
+        sse_encode_String(card, serializer);
+      case ActionRequest_BookMerge(from: final from, into: final into):
+        sse_encode_i_32(14, serializer);
+        sse_encode_String(from, serializer);
+        sse_encode_String(into, serializer);
+      case ActionRequest_BookClaimSelf(card: final card):
+        sse_encode_i_32(15, serializer);
+        sse_encode_String(card, serializer);
+      case ActionRequest_BookLink(card: final card, handle: final handle):
+        sse_encode_i_32(16, serializer);
+        sse_encode_String(card, serializer);
+        sse_encode_String(handle, serializer);
+      case ActionRequest_BookUnlink(card: final card, handle: final handle):
+        sse_encode_i_32(17, serializer);
+        sse_encode_String(card, serializer);
+        sse_encode_String(handle, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_book_facts(BookFacts self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_card_row(self.cards, serializer);
+    sse_encode_bool(self.migrationComplete, serializer);
+    sse_encode_u_32(self.migrationPending, serializer);
+    sse_encode_u_32(self.migrationImported, serializer);
   }
 
   @protected
@@ -1510,6 +1736,20 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       ActionRequest self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_action_request(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_book_facts(
+      BookFacts self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_book_facts(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_client_view(
+      ClientView self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_client_view(self, serializer);
   }
 
   @protected
@@ -1566,6 +1806,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  void sse_encode_card_row(CardRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.card, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.note, serializer);
+    sse_encode_list_String(self.handles, serializer);
+    sse_encode_list_String(self.groups, serializer);
+    sse_encode_bool(self.selfClaim, serializer);
+  }
+
+  @protected
   void sse_encode_client_view(ClientView self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.loading, serializer);
@@ -1577,6 +1828,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_list_storage_row(self.storage, serializer);
     sse_encode_list_orbit_row(self.orbits, serializer);
     sse_encode_opt_box_autoadd_space_row(self.space, serializer);
+    sse_encode_opt_box_autoadd_book_facts(self.book, serializer);
     sse_encode_list_notice_row(self.notices, serializer);
     sse_encode_list_failure_row(self.failures, serializer);
     sse_encode_list_String(self.inFlight, serializer);
@@ -1679,6 +1931,15 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_String(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_card_row(List<CardRow> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_card_row(item, serializer);
     }
   }
 
@@ -1793,6 +2054,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
     sse_encode_opt_String(self.nick, serializer);
+    sse_encode_opt_String(self.authoredName, serializer);
     sse_encode_bool(self.admin, serializer);
   }
 
@@ -1816,6 +2078,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_book_facts(
+      BookFacts? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_book_facts(self, serializer);
     }
   }
 

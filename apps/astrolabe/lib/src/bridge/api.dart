@@ -8,12 +8,17 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `emit`, `empty`, `into_action`, `project`, `space_ref`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `project`, `space_ref`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
-/// Start the core. Idempotent: a second call is a no-op rather than a second
-/// runtime, because two runtimes would be two supervisors of the same devices.
+/// Start the core, or attach to the one that is already running.
+///
+/// The first isolate boots the runtime. Later ones attach: same App, same
+/// supervisor, a new view stream. A second *boot* — a start against a
+/// different identity — is refused rather than spawning a second supervisor
+/// of the same devices.
 void start({String? stateRoot, String? sidecar}) =>
     Core.instance.api.crateApiStart(stateRoot: stateRoot, sidecar: sidecar);
 
@@ -30,8 +35,16 @@ ClientView dispatch({required ActionRequest action}) =>
 /// The view as it stands, for a surface that has just been built.
 ClientView current() => Core.instance.api.crateApiCurrent();
 
-/// Every view from now on.
+/// Every view from now on, on this isolate.
+///
+/// Each attached isolate opens its own stream. Every live sink receives the
+/// same [`ClientView`] on every pump; a sink that goes away is dropped and
+/// does not stall the rest.
 Stream<ClientView> watch() => Core.instance.api.crateApiWatch();
+
+abstract class ViewPush {
+  Future<bool> push({required ClientView view});
+}
 
 @freezed
 sealed class ActionRequest with _$ActionRequest {
@@ -85,6 +98,101 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.forgetOrbit({
     required String space,
   }) = ActionRequest_ForgetOrbit;
+  const factory ActionRequest.bookPut({
+    String? card,
+    required String name,
+    String? note,
+  }) = ActionRequest_BookPut;
+  const factory ActionRequest.bookDelete({
+    required String card,
+  }) = ActionRequest_BookDelete;
+  const factory ActionRequest.bookMerge({
+    required String from,
+    required String into,
+  }) = ActionRequest_BookMerge;
+  const factory ActionRequest.bookClaimSelf({
+    required String card,
+  }) = ActionRequest_BookClaimSelf;
+  const factory ActionRequest.bookLink({
+    required String card,
+    required String handle,
+  }) = ActionRequest_BookLink;
+  const factory ActionRequest.bookUnlink({
+    required String card,
+    required String handle,
+  }) = ActionRequest_BookUnlink;
+}
+
+/// The identity's address book, as last read.
+class BookFacts {
+  final List<CardRow> cards;
+  final bool migrationComplete;
+  final int migrationPending;
+  final int migrationImported;
+
+  const BookFacts({
+    required this.cards,
+    required this.migrationComplete,
+    required this.migrationPending,
+    required this.migrationImported,
+  });
+
+  @override
+  int get hashCode =>
+      cards.hashCode ^
+      migrationComplete.hashCode ^
+      migrationPending.hashCode ^
+      migrationImported.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BookFacts &&
+          runtimeType == other.runtimeType &&
+          cards == other.cards &&
+          migrationComplete == other.migrationComplete &&
+          migrationPending == other.migrationPending &&
+          migrationImported == other.migrationImported;
+}
+
+/// One authored Card. Handles are wire spellings, never reachability.
+class CardRow {
+  final String card;
+  final String name;
+  final String note;
+  final List<String> handles;
+  final List<String> groups;
+  final bool selfClaim;
+
+  const CardRow({
+    required this.card,
+    required this.name,
+    required this.note,
+    required this.handles,
+    required this.groups,
+    required this.selfClaim,
+  });
+
+  @override
+  int get hashCode =>
+      card.hashCode ^
+      name.hashCode ^
+      note.hashCode ^
+      handles.hashCode ^
+      groups.hashCode ^
+      selfClaim.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CardRow &&
+          runtimeType == other.runtimeType &&
+          card == other.card &&
+          name == other.name &&
+          note == other.note &&
+          handles == other.handles &&
+          groups == other.groups &&
+          selfClaim == other.selfClaim;
 }
 
 /// Everything a surface can draw, as of one moment.
@@ -114,6 +222,10 @@ class ClientView {
   /// The Space being administered, when one has been chosen. Choosing is an
   /// act — it costs a read — so this is absent until somebody chooses.
   final SpaceRow? space;
+
+  /// `None` until the book has been read once. Empty cards is a book
+  /// that answered and holds nothing, not an unread book.
+  final BookFacts? book;
   final List<NoticeRow> notices;
   final List<FailureRow> failures;
 
@@ -132,6 +244,7 @@ class ClientView {
     required this.storage,
     required this.orbits,
     this.space,
+    this.book,
     required this.notices,
     required this.failures,
     required this.inFlight,
@@ -148,6 +261,7 @@ class ClientView {
       storage.hashCode ^
       orbits.hashCode ^
       space.hashCode ^
+      book.hashCode ^
       notices.hashCode ^
       failures.hashCode ^
       inFlight.hashCode;
@@ -166,6 +280,7 @@ class ClientView {
           storage == other.storage &&
           orbits == other.orbits &&
           space == other.space &&
+          book == other.book &&
           notices == other.notices &&
           failures == other.failures &&
           inFlight == other.inFlight;
@@ -521,16 +636,22 @@ class LibraryRow {
 class MemberRow {
   final String id;
   final String? nick;
+
+  /// Authored Card name that names this member, when one exists.
+  /// Distinct from [`Self::nick`], which is Space-local and derived.
+  final String? authoredName;
   final bool admin;
 
   const MemberRow({
     required this.id,
     this.nick,
+    this.authoredName,
     required this.admin,
   });
 
   @override
-  int get hashCode => id.hashCode ^ nick.hashCode ^ admin.hashCode;
+  int get hashCode =>
+      id.hashCode ^ nick.hashCode ^ authoredName.hashCode ^ admin.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -539,6 +660,7 @@ class MemberRow {
           runtimeType == other.runtimeType &&
           id == other.id &&
           nick == other.nick &&
+          authoredName == other.authoredName &&
           admin == other.admin;
 }
 

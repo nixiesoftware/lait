@@ -125,6 +125,29 @@ pub enum Action {
     OrbitForget {
         space: String,
     },
+    BookPut {
+        card: Option<String>,
+        name: String,
+        note: Option<String>,
+    },
+    BookDelete {
+        card: String,
+    },
+    BookMerge {
+        from: String,
+        into: String,
+    },
+    BookClaimSelf {
+        card: String,
+    },
+    BookLink {
+        card: String,
+        handle: String,
+    },
+    BookUnlink {
+        card: String,
+        handle: String,
+    },
     OrbitRebuild {
         orbit: String,
     },
@@ -163,6 +186,15 @@ impl Action {
             Self::DeviceConsent { .. } => "device.consent".into(),
             Self::OrbitForget { space } => format!("orbit.forget:{space}"),
             Self::OrbitRebuild { orbit } => format!("orbit.rebuild:{orbit}"),
+            Self::BookPut {
+                card: Some(card), ..
+            } => format!("book.put:{card}"),
+            Self::BookPut { .. } => "book.put".into(),
+            Self::BookDelete { card } => format!("book.delete:{card}"),
+            Self::BookMerge { from, into } => format!("book.merge:{from}:{into}"),
+            Self::BookClaimSelf { card } => format!("book.claim:{card}"),
+            Self::BookLink { card, .. } => format!("book.link:{card}"),
+            Self::BookUnlink { card, .. } => format!("book.unlink:{card}"),
             Self::InstallMcp { preview, .. } => {
                 if *preview {
                     "mcp.preview".into()
@@ -205,6 +237,12 @@ impl Action {
             Self::DeviceConsent { .. } => "sign this machine's consent".into(),
             Self::OrbitForget { space } => format!("forget {space}"),
             Self::OrbitRebuild { orbit } => format!("rebuild {orbit}"),
+            Self::BookPut { name, .. } => format!("save the card '{name}'"),
+            Self::BookDelete { card } => format!("delete card {card}"),
+            Self::BookMerge { from, into } => format!("merge {from} into {into}"),
+            Self::BookClaimSelf { card } => format!("claim {card} as My Card"),
+            Self::BookLink { card, handle } => format!("link {handle} to {card}"),
+            Self::BookUnlink { card, handle } => format!("unlink {handle} from {card}"),
             Self::InstallMcp { preview: true, .. } => "preview an MCP binding".into(),
             Self::InstallMcp { .. } => "write an MCP binding".into(),
             Self::Exit(ExitRequest::GoOffline) => "go offline and exit".into(),
@@ -220,6 +258,7 @@ pub enum Update {
     Storage(Vec<StorageFacts>),
     Heads(Vec<HeadFacts>),
     Context(Box<HostContext>),
+    Book(crate::client::book::BookSnapshot),
     Signal(ClientSignal),
     /// An action finished, and what it produced.
     Done {
@@ -461,6 +500,10 @@ impl Worker {
             Ok(context) => self.send(Update::Context(Box::new(context))),
             Err(error) => self.fail(None, "read host context", error),
         }
+        match self.client.book_list().await {
+            Ok(book) => self.send(Update::Book(book)),
+            Err(error) => self.fail(None, "read the address book", error),
+        }
     }
 
     fn fail(&self, key: Option<String>, what: &str, error: ClientError) {
@@ -652,6 +695,32 @@ impl Worker {
             Action::OrbitRebuild { orbit } => {
                 client.orbit_rebuild(orbit).await?;
                 Ok(Outcome::Said(format!("rebuilt {orbit}")))
+            }
+            Action::BookPut { card, name, note } => {
+                let _ = client
+                    .book_put(card.clone(), name.clone(), note.clone())
+                    .await?;
+                Ok(Outcome::Said(format!("saved '{name}'")))
+            }
+            Action::BookDelete { card } => {
+                let _ = client.book_delete(card.clone()).await?;
+                Ok(Outcome::Said(format!("deleted {card}")))
+            }
+            Action::BookMerge { from, into } => {
+                let _ = client.book_merge(from.clone(), into.clone()).await?;
+                Ok(Outcome::Said(format!("merged {from} into {into}")))
+            }
+            Action::BookClaimSelf { card } => {
+                let _ = client.book_claim_self(card.clone()).await?;
+                Ok(Outcome::Said(format!("{card} is My Card")))
+            }
+            Action::BookLink { card, handle } => {
+                let _ = client.book_link(card.clone(), handle.clone()).await?;
+                Ok(Outcome::Said(format!("linked {handle}")))
+            }
+            Action::BookUnlink { card, handle } => {
+                let _ = client.book_unlink(card.clone(), handle.clone()).await?;
+                Ok(Outcome::Said(format!("unlinked {handle}")))
             }
             Action::InstallMcp { binding, preview } => {
                 let outcome = client.install_mcp_head(binding, *preview).await?;
@@ -861,6 +930,12 @@ mod tests {
     #[test]
     fn only_the_actions_that_changed_something_ask_for_a_re_read() {
         assert!(Action::StopDevice("alice".into()).rereads());
+        assert!(Action::BookPut {
+            card: None,
+            name: "Ada".into(),
+            note: None,
+        }
+        .rereads());
         assert!(
             Action::Refresh.rereads(),
             "the one action that is nothing but a re-read does not re-read"

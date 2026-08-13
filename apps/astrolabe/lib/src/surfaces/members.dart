@@ -79,13 +79,18 @@ class MembersSurface extends StatelessWidget {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    member.nick ?? member.id,
+                                    member.authoredName ??
+                                        member.nick ??
+                                        member.id,
                                     style: context.bodyStyle,
                                   ),
-                                  if (member.nick != null) ...[
+                                  if (member.authoredName != null &&
+                                      member.nick != null) ...[
                                     t.gap.y(Space.xxs),
-                                    Text(member.id, style: context.monoStyle),
+                                    Text(member.nick!, style: context.labelStyle),
                                   ],
+                                  t.gap.y(Space.xxs),
+                                  Text(member.id, style: context.monoStyle),
                                 ],
                               ),
                             ),

@@ -1,9 +1,7 @@
 /// The address-book window.
 ///
-/// CLIENT-22 will draw the book here. This file is the host that window
-/// needs first: it attaches to the one Rust core, draws the same chrome,
-/// and closes a window rather than a peer. The live facts it shows are
-/// how both windows prove they share one model.
+/// Authored Cards for this identity. Drafts (search, dialog fields) live here.
+/// Facts come from [ClientView.book]. Dispatch is the only write.
 library;
 
 import 'package:covalence/covalence.dart' hide Surface;
@@ -11,6 +9,7 @@ import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
 import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
+import '../surfaces/page.dart';
 import 'theme.dart';
 import 'type.dart';
 import 'window.dart';
@@ -57,12 +56,10 @@ class _BookAppState extends State<BookApp> {
   }
 }
 
-/// The book's body until CLIENT-22 draws Cards here.
+/// List, search, create, edit, delete, merge, My Card.
 ///
-/// A canned-client test presses Refresh and reads the [ActionRequest].
-/// The live facts (loading, library count, in-flight) are how a person
-/// sees that this window is the same model as the main one.
-class BookPage extends StatelessWidget {
+/// Search and dialog fields are drafts. The book itself is the view.
+class BookPage extends StatefulWidget {
   const BookPage({
     super.key,
     required this.themeMode,
@@ -73,60 +70,484 @@ class BookPage extends StatelessWidget {
   final VoidCallback onToggleTheme;
 
   @override
+  State<BookPage> createState() => _BookPageState();
+}
+
+class _BookPageState extends State<BookPage> {
+  String _query = '';
+
+  @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
+    final book = view.book;
     final rereading = view.inFlight.contains(ActionKeys.refresh);
-    final library = view.library_;
+    final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
+    final shown = _filtered(book?.cards ?? const []);
 
-    return ListView(
-      padding: t.padding.all(Space.xl6),
+    return SurfaceScaffold(
+      title: 'Address book',
+      prose:
+          'Authored Cards for this identity. Names never select an authority target.',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Button(
+            onPressed: rereading
+                ? null
+                : () => client.dispatch(const ActionRequest.refresh()),
+            icon: AppIcons.refresh,
+            semanticLabel: 'Refresh',
+            isLoading: rereading,
+            variant: ButtonVariant.ghost,
+            size: ButtonSize.iconSm,
+            tooltip: 'Read this machine again',
+          ),
+          t.gap.x(Space.xs),
+          Button(
+            onPressed: widget.onToggleTheme,
+            icon: widget.themeMode == ThemeMode.dark
+                ? AppIcons.toggleOn
+                : AppIcons.toggleOff,
+            semanticLabel: widget.themeMode == ThemeMode.dark
+                ? 'Use light theme'
+                : 'Use dark theme',
+            variant: ButtonVariant.ghost,
+            size: ButtonSize.iconSm,
+          ),
+          t.gap.x(Space.sm),
+          Button(
+            onPressed: () => _edit(context, null),
+            icon: AppIcons.personAdd,
+            label: 'New card',
+            size: ButtonSize.sm,
+          ),
+        ],
+      ),
+      child: book == null
+          ? const Empty(
+              said: 'The book has not been read.',
+              next: 'Refresh to ask the daemon. Nothing is created on your behalf.',
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _MyCardBand(mine: mine),
+                if (book.migrationPending > 0) ...[
+                  t.gap.y(Space.md),
+                  Text(
+                    '${book.migrationPending} alias selector(s) still pending. '
+                    'They were not turned into Cards.',
+                    style: context.labelStyle,
+                  ),
+                ],
+                t.gap.y(Space.xl3),
+                Input(
+                  search: true,
+                  hint: 'Search cards',
+                  size: InputSize.sm,
+                  onChanged: (value) => setState(() => _query = value),
+                ),
+                t.gap.y(Space.xl3),
+                Expanded(
+                  child: shown.isEmpty
+                      ? Empty(
+                          said: book.cards.isEmpty
+                              ? 'No cards.'
+                              : 'No cards match that search.',
+                          next: book.cards.isEmpty
+                              ? 'Create one. The book is this identity\'s, even with no Space open.'
+                              : 'Clear the search to see every Card.',
+                        )
+                      : ListView.separated(
+                          itemCount: shown.length,
+                          separatorBuilder: (_, __) => t.gap.y(Space.md),
+                          itemBuilder: (context, index) =>
+                              _CardRow(card: shown[index], all: book.cards),
+                        ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  List<CardRow> _filtered(List<CardRow> cards) {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return cards;
+    return cards
+        .where(
+          (card) =>
+              card.name.toLowerCase().contains(q) ||
+              card.note.toLowerCase().contains(q) ||
+              card.card.toLowerCase().contains(q) ||
+              card.handles.any((handle) => handle.toLowerCase().contains(q)),
+        )
+        .toList();
+  }
+}
+
+class _MyCardBand extends StatelessWidget {
+  const _MyCardBand({required this.mine});
+
+  final List<CardRow> mine;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    if (mine.isEmpty) {
+      return const Empty(
+        said: 'No My Card.',
+        next: 'Claim one — nothing is implied from a name or a handle.',
+      );
+    }
+    final card = mine.first;
+    return Card(
+      variant: CardVariant.muted,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('MY CARD', style: context.factLabelStyle),
+          t.gap.y(Space.sm),
+          Text(card.name, style: context.headingStyle),
+          t.gap.y(Space.xxs),
+          Text(card.card, style: context.monoStyle),
+        ],
+      ),
+    );
+  }
+}
+
+class _CardRow extends StatelessWidget {
+  const _CardRow({required this.card, required this.all});
+
+  final CardRow card;
+  final List<CardRow> all;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final client = ClientScope.of(context);
+    final view = ClientScope.watch(context);
+    bool busy(String key) => view.inFlight.contains(key);
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(card.name, style: context.headingStyle),
+              ),
+              if (card.selfClaim)
+                const Badge(label: 'My Card', variant: BadgeVariant.solid),
+            ],
+          ),
+          t.gap.y(Space.xxs),
+          Text(card.card, style: context.monoStyle),
+          if (card.note.isNotEmpty) ...[
+            t.gap.y(Space.sm),
+            Text(card.note, style: context.bodyStyle),
+          ],
+          if (card.handles.isNotEmpty) ...[
+            t.gap.y(Space.sm),
+            for (final handle in card.handles)
+              Padding(
+                padding: t.padding.only(bottom: Space.xxs),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(handle, style: context.monoStyle),
+                    ),
+                    Button(
+                      onPressed: busy(ActionKeys.bookUnlink(card.card))
+                          ? null
+                          : () => client.dispatch(
+                                ActionRequest.bookUnlink(
+                                  card: card.card,
+                                  handle: handle,
+                                ),
+                              ),
+                      label: 'Unlink',
+                      semanticLabel: 'Unlink $handle',
+                      variant: ButtonVariant.ghost,
+                      size: ButtonSize.sm,
+                    ),
+                  ],
+                ),
+              ),
+          ],
+          t.gap.y(Space.md),
+          Wrap(
+            children: [
+              Button(
+                onPressed: busy(ActionKeys.bookPut(card.card))
+                    ? null
+                    : () => _edit(context, card),
+                label: 'Edit',
+                variant: ButtonVariant.ghost,
+                size: ButtonSize.sm,
+              ),
+              if (!card.selfClaim)
+                Button(
+                  onPressed: busy(ActionKeys.bookClaim(card.card))
+                      ? null
+                      : () => client.dispatch(
+                            ActionRequest.bookClaimSelf(card: card.card),
+                          ),
+                  label: 'Claim as My Card',
+                  variant: ButtonVariant.ghost,
+                  size: ButtonSize.sm,
+                ),
+              Button(
+                onPressed: () => _link(context, card),
+                label: 'Add handle',
+                variant: ButtonVariant.ghost,
+                size: ButtonSize.sm,
+              ),
+              if (all.length > 1)
+                Button(
+                  onPressed: () => _merge(context, card, all),
+                  label: 'Merge',
+                  variant: ButtonVariant.ghost,
+                  size: ButtonSize.sm,
+                ),
+              Button(
+                onPressed: busy(ActionKeys.bookDelete(card.card))
+                    ? null
+                    : () => _delete(context, card),
+                label: 'Delete',
+                variant: ButtonVariant.destructiveGhost,
+                size: ButtonSize.sm,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> _edit(BuildContext context, CardRow? existing) async {
+  final name = TextEditingController(text: existing?.name ?? '');
+  final note = TextEditingController(text: existing?.note ?? '');
+  final saved = await showAppDialog<bool>(
+    context: context,
+    builder: (ctx) => DialogContent(
       children: [
-        Text('Address book', style: context.titleStyle),
-        t.gap.y(Space.sm),
-        Text(
-          'This window attaches to the same core as the Library. '
-          'Cards will live here. Until they do, a refresh in either '
-          'window disables the control in both.',
-          style: context.proseStyle,
+        DialogHeader(
+          title: DialogTitle(existing == null ? 'New card' : 'Edit card'),
+          description: const DialogDescription(
+            'A name is an authored label. It never selects an authority target.',
+          ),
         ),
-        t.gap.y(Space.xl6),
-        Text(
-          view.loading
-              ? 'The core has not been read yet.'
-              : library == null
-                  ? 'No library has been read.'
-                  : library.isEmpty
-                      ? 'This identity serves no Worlds.'
-                      : '${library.length} World${library.length == 1 ? '' : 's'} in the Library.',
-          style: context.bodyStyle,
+        Input(
+          key: const ValueKey('book-name'),
+          controller: name,
+          label: 'Name',
+          autofocus: true,
         ),
-        t.gap.y(Space.xl3),
-        Row(
+        Input(
+          key: const ValueKey('book-note'),
+          controller: note,
+          label: 'Note',
+        ),
+        DialogFooter(
           children: [
             Button(
-              onPressed: rereading
-                  ? null
-                  : () => client.dispatch(const ActionRequest.refresh()),
-              icon: AppIcons.refresh,
-              label: 'Refresh',
-              semanticLabel: 'Refresh',
-              isLoading: rereading,
-              tooltip: 'Read this machine again',
+              label: 'Cancel',
+              variant: ButtonVariant.outline,
+              onPressed: () => Navigator.pop(ctx, false),
             ),
-            t.gap.x(Space.sm),
             Button(
-              onPressed: onToggleTheme,
-              icon: themeMode == ThemeMode.dark
-                  ? AppIcons.toggleOn
-                  : AppIcons.toggleOff,
-              label: themeMode == ThemeMode.dark ? 'Light' : 'Dark',
-              variant: ButtonVariant.ghost,
+              label: 'Save',
+              onPressed: () => Navigator.pop(ctx, true),
             ),
           ],
         ),
       ],
-    );
-  }
+    ),
+  );
+  final trimmed = name.text.trim();
+  name.dispose();
+  final noteText = note.text.trim();
+  note.dispose();
+  if (saved != true || trimmed.isEmpty || !context.mounted) return;
+  ClientScope.of(context).dispatch(
+    ActionRequest.bookPut(
+      card: existing?.card,
+      name: trimmed,
+      note: noteText.isEmpty ? null : noteText,
+    ),
+  );
+}
+
+Future<void> _link(BuildContext context, CardRow card) async {
+  final handle = TextEditingController();
+  final saved = await showAppDialog<bool>(
+    context: context,
+    builder: (ctx) => DialogContent(
+      children: [
+        DialogHeader(
+          title: DialogTitle('Add a handle to ${card.name}'),
+          description: const DialogDescription(
+            'Wire spelling: a device id, actor:space:actor, or agent:hash:name.',
+          ),
+        ),
+        Input(
+          controller: handle,
+          label: 'Handle',
+          mono: true,
+          autofocus: true,
+        ),
+        DialogFooter(
+          children: [
+            Button(
+              label: 'Cancel',
+              variant: ButtonVariant.outline,
+              onPressed: () => Navigator.pop(ctx, false),
+            ),
+            Button(
+              label: 'Link',
+              onPressed: () => Navigator.pop(ctx, true),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+  final raw = handle.text.trim();
+  handle.dispose();
+  if (saved != true || raw.isEmpty || !context.mounted) return;
+  ClientScope.of(context).dispatch(
+    ActionRequest.bookLink(card: card.card, handle: raw),
+  );
+}
+
+Future<void> _merge(
+  BuildContext context,
+  CardRow from,
+  List<CardRow> all,
+) async {
+  final others = all.where((card) => card.card != from.card).toList();
+  if (others.isEmpty) return;
+  var into = others.first.card;
+  final typed = TextEditingController();
+  final saved = await showAppDialog<bool>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setLocal) => DialogContent(
+        children: [
+          DialogHeader(
+            title: DialogTitle('Merge ${from.name}?'),
+            description: DialogDescription(
+              'This Card is absorbed into another. Type ${from.name} to confirm.',
+            ),
+          ),
+          Select<String>(
+            value: into,
+            onValueChange: (value) {
+              if (value != null) setLocal(() => into = value);
+            },
+            trigger: const SelectTrigger(
+              child: SelectValue(placeholder: 'Merge into…'),
+            ),
+            child: SelectContent(
+              children: [
+                for (final card in others)
+                  SelectItem(
+                    value: card.card,
+                    label: card.name,
+                    child: Text(card.name),
+                  ),
+              ],
+            ),
+          ),
+          Input(
+            key: const ValueKey('book-confirm-name'),
+            controller: typed,
+            hint: from.name,
+            semanticLabel: 'Type this card\'s name to confirm',
+            onChanged: (_) => setLocal(() {}),
+          ),
+          DialogFooter(
+            children: [
+              Button(
+                label: 'Cancel',
+                variant: ButtonVariant.outline,
+                onPressed: () => Navigator.pop(ctx, false),
+              ),
+              Button(
+                label: 'Merge',
+                variant: ButtonVariant.destructive,
+                onPressed: typed.text.trim() == from.name
+                    ? () => Navigator.pop(ctx, true)
+                    : null,
+                tooltip: typed.text.trim() == from.name
+                    ? null
+                    : 'Type this card\'s name to confirm.',
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+  typed.dispose();
+  if (saved != true || !context.mounted) return;
+  ClientScope.of(context).dispatch(
+    ActionRequest.bookMerge(from: from.card, into: into),
+  );
+}
+
+Future<void> _delete(BuildContext context, CardRow card) async {
+  final typed = TextEditingController();
+  final saved = await showAppDialog<bool>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setLocal) => DialogContent(
+        children: [
+          DialogHeader(
+            title: DialogTitle('Delete ${card.name}?'),
+            description: DialogDescription(
+              'This cannot be undone. Type ${card.name} to confirm.',
+            ),
+          ),
+          Input(
+            key: const ValueKey('book-confirm-name'),
+            controller: typed,
+            hint: card.name,
+            semanticLabel: 'Type this card\'s name to confirm',
+            onChanged: (_) => setLocal(() {}),
+          ),
+          DialogFooter(
+            children: [
+              Button(
+                label: 'Cancel',
+                variant: ButtonVariant.outline,
+                onPressed: () => Navigator.pop(ctx, false),
+              ),
+              Button(
+                label: 'Delete',
+                variant: ButtonVariant.destructive,
+                icon: AppIcons.trash,
+                onPressed: typed.text.trim() == card.name
+                    ? () => Navigator.pop(ctx, true)
+                    : null,
+                tooltip: typed.text.trim() == card.name
+                    ? null
+                    : 'Type this card\'s name to confirm.',
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+  typed.dispose();
+  if (saved != true || !context.mounted) return;
+  ClientScope.of(context).dispatch(
+    ActionRequest.bookDelete(card: card.card),
+  );
 }

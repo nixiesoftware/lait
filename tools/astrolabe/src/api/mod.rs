@@ -73,6 +73,9 @@ pub struct ClientView {
     /// The Space being administered, when one has been chosen. Choosing is an
     /// act — it costs a read — so this is absent until somebody chooses.
     pub space: Option<SpaceRow>,
+    /// `None` until the book has been read once. Empty cards is a book
+    /// that answered and holds nothing, not an unread book.
+    pub book: Option<BookFacts>,
     pub notices: Vec<NoticeRow>,
     pub failures: Vec<FailureRow>,
     /// The keys of actions asked for and not yet answered. A control whose key
@@ -296,7 +299,30 @@ pub struct SpaceRow {
 pub struct MemberRow {
     pub id: String,
     pub nick: Option<String>,
+    /// Authored Card name that names this member, when one exists.
+    /// Distinct from [`Self::nick`], which is Space-local and derived.
+    pub authored_name: Option<String>,
     pub admin: bool,
+}
+
+/// The identity's address book, as last read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BookFacts {
+    pub cards: Vec<CardRow>,
+    pub migration_complete: bool,
+    pub migration_pending: u32,
+    pub migration_imported: u32,
+}
+
+/// One authored Card. Handles are wire spellings, never reachability.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CardRow {
+    pub card: String,
+    pub name: String,
+    pub note: String,
+    pub handles: Vec<String>,
+    pub groups: Vec<String>,
+    pub self_claim: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -363,6 +389,29 @@ pub enum ActionRequest {
     ForgetOrbit {
         space: String,
     },
+    BookPut {
+        card: Option<String>,
+        name: String,
+        note: Option<String>,
+    },
+    BookDelete {
+        card: String,
+    },
+    BookMerge {
+        from: String,
+        into: String,
+    },
+    BookClaimSelf {
+        card: String,
+    },
+    BookLink {
+        card: String,
+        handle: String,
+    },
+    BookUnlink {
+        card: String,
+        handle: String,
+    },
 }
 
 impl ActionRequest {
@@ -380,6 +429,12 @@ impl ActionRequest {
             Self::StartHead => Action::StartHead,
             Self::StopHead { id } => Action::StopHead(id),
             Self::ForgetOrbit { space } => Action::OrbitForget { space },
+            Self::BookPut { card, name, note } => Action::BookPut { card, name, note },
+            Self::BookDelete { card } => Action::BookDelete { card },
+            Self::BookMerge { from, into } => Action::BookMerge { from, into },
+            Self::BookClaimSelf { card } => Action::BookClaimSelf { card },
+            Self::BookLink { card, handle } => Action::BookLink { card, handle },
+            Self::BookUnlink { card, handle } => Action::BookUnlink { card, handle },
         }
     }
 }
@@ -625,6 +680,7 @@ fn empty() -> ClientView {
         storage: Vec::new(),
         orbits: Vec::new(),
         space: None,
+        book: None,
         notices: Vec::new(),
         failures: Vec::new(),
         in_flight: Vec::new(),
@@ -777,6 +833,7 @@ fn project(app: &App) -> ClientView {
                 .map(|member| MemberRow {
                     id: member.key.clone(),
                     nick: Some(member.alias.clone()).filter(|alias| !alias.is_empty()),
+                    authored_name: authored_name_for(app.book(), &member.key),
                     admin: member.role == "admin",
                 })
                 .collect(),
@@ -808,6 +865,23 @@ fn project(app: &App) -> ClientView {
                 summary: taken.summary.clone(),
             }),
         }),
+        book: app.book().map(|book| BookFacts {
+            cards: book
+                .cards
+                .iter()
+                .map(|card| CardRow {
+                    card: card.card.clone(),
+                    name: card.name.clone(),
+                    note: card.note.clone(),
+                    handles: card.handles.clone(),
+                    groups: card.groups.clone(),
+                    self_claim: card.self_claim,
+                })
+                .collect(),
+            migration_complete: book.migration_complete,
+            migration_pending: u32::try_from(book.migration_pending).unwrap_or(u32::MAX),
+            migration_imported: u32::try_from(book.migration_imported).unwrap_or(u32::MAX),
+        }),
         notices: app
             .notices()
             .map(|notice| NoticeRow {
@@ -825,6 +899,21 @@ fn project(app: &App) -> ClientView {
             .collect(),
         in_flight: app.in_flight_keys(),
     }
+}
+
+fn authored_name_for(
+    book: Option<&crate::client::book::BookSnapshot>,
+    member_id: &str,
+) -> Option<String> {
+    let book = book?;
+    book.cards
+        .iter()
+        .find(|card| {
+            card.handles
+                .iter()
+                .any(|handle| handle == member_id || handle.ends_with(&format!(":{member_id}")))
+        })
+        .map(|card| card.name.clone())
 }
 
 #[cfg(test)]
@@ -921,6 +1010,40 @@ mod tests {
     }
 
     /// Loading is not empty, and it survives the crossing as its own fact.
+    #[test]
+    fn the_book_crosses_as_authored_cards_not_as_reachability() {
+        let mut app = App::new();
+        app.absorb_book(crate::client::book::BookSnapshot {
+            cards: vec![crate::client::book::CardFacts {
+                card: "crd_one".into(),
+                name: "Ada".into(),
+                note: "colleague".into(),
+                handles: vec!["actor:ws_one:act_ada".into()],
+                groups: Vec::new(),
+                self_claim: true,
+            }],
+            migration_complete: false,
+            migration_pending: 1,
+            migration_imported: 0,
+        });
+        let view = project(&app);
+        let book = view.book.expect("the book was read");
+        assert_eq!(book.cards.len(), 1);
+        assert_eq!(book.cards[0].name, "Ada");
+        assert_eq!(book.cards[0].handles[0], "actor:ws_one:act_ada");
+        assert!(book.cards[0].self_claim);
+        assert_eq!(book.migration_pending, 1);
+        assert_eq!(
+            authored_name_for(app.book(), "act_ada").as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(
+            authored_name_for(app.book(), "Ada"),
+            None,
+            "a Card name is not a handle"
+        );
+    }
+
     #[test]
     fn loading_and_empty_are_told_apart_across_the_bridge() {
         let loading = project(&App::new());

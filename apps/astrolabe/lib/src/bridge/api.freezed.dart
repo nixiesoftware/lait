@@ -62,6 +62,12 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_StartHead value)? startHead,
     TResult Function(ActionRequest_StopHead value)? stopHead,
     TResult Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
+    TResult Function(ActionRequest_BookPut value)? bookPut,
+    TResult Function(ActionRequest_BookDelete value)? bookDelete,
+    TResult Function(ActionRequest_BookMerge value)? bookMerge,
+    TResult Function(ActionRequest_BookClaimSelf value)? bookClaimSelf,
+    TResult Function(ActionRequest_BookLink value)? bookLink,
+    TResult Function(ActionRequest_BookUnlink value)? bookUnlink,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -90,6 +96,18 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that);
+      case ActionRequest_BookPut() when bookPut != null:
+        return bookPut(_that);
+      case ActionRequest_BookDelete() when bookDelete != null:
+        return bookDelete(_that);
+      case ActionRequest_BookMerge() when bookMerge != null:
+        return bookMerge(_that);
+      case ActionRequest_BookClaimSelf() when bookClaimSelf != null:
+        return bookClaimSelf(_that);
+      case ActionRequest_BookLink() when bookLink != null:
+        return bookLink(_that);
+      case ActionRequest_BookUnlink() when bookUnlink != null:
+        return bookUnlink(_that);
       case _:
         return orElse();
     }
@@ -123,6 +141,12 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_StartHead value) startHead,
     required TResult Function(ActionRequest_StopHead value) stopHead,
     required TResult Function(ActionRequest_ForgetOrbit value) forgetOrbit,
+    required TResult Function(ActionRequest_BookPut value) bookPut,
+    required TResult Function(ActionRequest_BookDelete value) bookDelete,
+    required TResult Function(ActionRequest_BookMerge value) bookMerge,
+    required TResult Function(ActionRequest_BookClaimSelf value) bookClaimSelf,
+    required TResult Function(ActionRequest_BookLink value) bookLink,
+    required TResult Function(ActionRequest_BookUnlink value) bookUnlink,
   }) {
     final _that = this;
     switch (_that) {
@@ -150,6 +174,18 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that);
       case ActionRequest_ForgetOrbit():
         return forgetOrbit(_that);
+      case ActionRequest_BookPut():
+        return bookPut(_that);
+      case ActionRequest_BookDelete():
+        return bookDelete(_that);
+      case ActionRequest_BookMerge():
+        return bookMerge(_that);
+      case ActionRequest_BookClaimSelf():
+        return bookClaimSelf(_that);
+      case ActionRequest_BookLink():
+        return bookLink(_that);
+      case ActionRequest_BookUnlink():
+        return bookUnlink(_that);
     }
   }
 
@@ -179,6 +215,12 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_StartHead value)? startHead,
     TResult? Function(ActionRequest_StopHead value)? stopHead,
     TResult? Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
+    TResult? Function(ActionRequest_BookPut value)? bookPut,
+    TResult? Function(ActionRequest_BookDelete value)? bookDelete,
+    TResult? Function(ActionRequest_BookMerge value)? bookMerge,
+    TResult? Function(ActionRequest_BookClaimSelf value)? bookClaimSelf,
+    TResult? Function(ActionRequest_BookLink value)? bookLink,
+    TResult? Function(ActionRequest_BookUnlink value)? bookUnlink,
   }) {
     final _that = this;
     switch (_that) {
@@ -206,6 +248,18 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that);
+      case ActionRequest_BookPut() when bookPut != null:
+        return bookPut(_that);
+      case ActionRequest_BookDelete() when bookDelete != null:
+        return bookDelete(_that);
+      case ActionRequest_BookMerge() when bookMerge != null:
+        return bookMerge(_that);
+      case ActionRequest_BookClaimSelf() when bookClaimSelf != null:
+        return bookClaimSelf(_that);
+      case ActionRequest_BookLink() when bookLink != null:
+        return bookLink(_that);
+      case ActionRequest_BookUnlink() when bookUnlink != null:
+        return bookUnlink(_that);
       case _:
         return null;
     }
@@ -237,6 +291,12 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function()? startHead,
     TResult Function(String id)? stopHead,
     TResult Function(String space)? forgetOrbit,
+    TResult Function(String? card, String name, String? note)? bookPut,
+    TResult Function(String card)? bookDelete,
+    TResult Function(String from, String into)? bookMerge,
+    TResult Function(String card)? bookClaimSelf,
+    TResult Function(String card, String handle)? bookLink,
+    TResult Function(String card, String handle)? bookUnlink,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -265,6 +325,18 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that.id);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that.space);
+      case ActionRequest_BookPut() when bookPut != null:
+        return bookPut(_that.card, _that.name, _that.note);
+      case ActionRequest_BookDelete() when bookDelete != null:
+        return bookDelete(_that.card);
+      case ActionRequest_BookMerge() when bookMerge != null:
+        return bookMerge(_that.from, _that.into);
+      case ActionRequest_BookClaimSelf() when bookClaimSelf != null:
+        return bookClaimSelf(_that.card);
+      case ActionRequest_BookLink() when bookLink != null:
+        return bookLink(_that.card, _that.handle);
+      case ActionRequest_BookUnlink() when bookUnlink != null:
+        return bookUnlink(_that.card, _that.handle);
       case _:
         return orElse();
     }
@@ -297,6 +369,12 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function() startHead,
     required TResult Function(String id) stopHead,
     required TResult Function(String space) forgetOrbit,
+    required TResult Function(String? card, String name, String? note) bookPut,
+    required TResult Function(String card) bookDelete,
+    required TResult Function(String from, String into) bookMerge,
+    required TResult Function(String card) bookClaimSelf,
+    required TResult Function(String card, String handle) bookLink,
+    required TResult Function(String card, String handle) bookUnlink,
   }) {
     final _that = this;
     switch (_that) {
@@ -324,6 +402,18 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that.id);
       case ActionRequest_ForgetOrbit():
         return forgetOrbit(_that.space);
+      case ActionRequest_BookPut():
+        return bookPut(_that.card, _that.name, _that.note);
+      case ActionRequest_BookDelete():
+        return bookDelete(_that.card);
+      case ActionRequest_BookMerge():
+        return bookMerge(_that.from, _that.into);
+      case ActionRequest_BookClaimSelf():
+        return bookClaimSelf(_that.card);
+      case ActionRequest_BookLink():
+        return bookLink(_that.card, _that.handle);
+      case ActionRequest_BookUnlink():
+        return bookUnlink(_that.card, _that.handle);
     }
   }
 
@@ -353,6 +443,12 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function()? startHead,
     TResult? Function(String id)? stopHead,
     TResult? Function(String space)? forgetOrbit,
+    TResult? Function(String? card, String name, String? note)? bookPut,
+    TResult? Function(String card)? bookDelete,
+    TResult? Function(String from, String into)? bookMerge,
+    TResult? Function(String card)? bookClaimSelf,
+    TResult? Function(String card, String handle)? bookLink,
+    TResult? Function(String card, String handle)? bookUnlink,
   }) {
     final _that = this;
     switch (_that) {
@@ -380,6 +476,18 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that.id);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that.space);
+      case ActionRequest_BookPut() when bookPut != null:
+        return bookPut(_that.card, _that.name, _that.note);
+      case ActionRequest_BookDelete() when bookDelete != null:
+        return bookDelete(_that.card);
+      case ActionRequest_BookMerge() when bookMerge != null:
+        return bookMerge(_that.from, _that.into);
+      case ActionRequest_BookClaimSelf() when bookClaimSelf != null:
+        return bookClaimSelf(_that.card);
+      case ActionRequest_BookLink() when bookLink != null:
+        return bookLink(_that.card, _that.handle);
+      case ActionRequest_BookUnlink() when bookUnlink != null:
+        return bookUnlink(_that.card, _that.handle);
       case _:
         return null;
     }
@@ -1047,6 +1155,436 @@ class _$ActionRequest_ForgetOrbitCopyWithImpl<$Res>
       space: null == space
           ? _self.space
           : space // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookPut extends ActionRequest {
+  const ActionRequest_BookPut({this.card, required this.name, this.note})
+      : super._();
+
+  final String? card;
+  final String name;
+  final String? note;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookPutCopyWith<ActionRequest_BookPut> get copyWith =>
+      _$ActionRequest_BookPutCopyWithImpl<ActionRequest_BookPut>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookPut &&
+            (identical(other.card, card) || other.card == card) &&
+            (identical(other.name, name) || other.name == name) &&
+            (identical(other.note, note) || other.note == note));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, card, name, note);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookPut(card: $card, name: $name, note: $note)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookPutCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookPutCopyWith(ActionRequest_BookPut value,
+          $Res Function(ActionRequest_BookPut) _then) =
+      _$ActionRequest_BookPutCopyWithImpl;
+  @useResult
+  $Res call({String? card, String name, String? note});
+}
+
+/// @nodoc
+class _$ActionRequest_BookPutCopyWithImpl<$Res>
+    implements $ActionRequest_BookPutCopyWith<$Res> {
+  _$ActionRequest_BookPutCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookPut _self;
+  final $Res Function(ActionRequest_BookPut) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? card = freezed,
+    Object? name = null,
+    Object? note = freezed,
+  }) {
+    return _then(ActionRequest_BookPut(
+      card: freezed == card
+          ? _self.card
+          : card // ignore: cast_nullable_to_non_nullable
+              as String?,
+      name: null == name
+          ? _self.name
+          : name // ignore: cast_nullable_to_non_nullable
+              as String,
+      note: freezed == note
+          ? _self.note
+          : note // ignore: cast_nullable_to_non_nullable
+              as String?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookDelete extends ActionRequest {
+  const ActionRequest_BookDelete({required this.card}) : super._();
+
+  final String card;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookDeleteCopyWith<ActionRequest_BookDelete> get copyWith =>
+      _$ActionRequest_BookDeleteCopyWithImpl<ActionRequest_BookDelete>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookDelete &&
+            (identical(other.card, card) || other.card == card));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, card);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookDelete(card: $card)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookDeleteCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookDeleteCopyWith(ActionRequest_BookDelete value,
+          $Res Function(ActionRequest_BookDelete) _then) =
+      _$ActionRequest_BookDeleteCopyWithImpl;
+  @useResult
+  $Res call({String card});
+}
+
+/// @nodoc
+class _$ActionRequest_BookDeleteCopyWithImpl<$Res>
+    implements $ActionRequest_BookDeleteCopyWith<$Res> {
+  _$ActionRequest_BookDeleteCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookDelete _self;
+  final $Res Function(ActionRequest_BookDelete) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? card = null,
+  }) {
+    return _then(ActionRequest_BookDelete(
+      card: null == card
+          ? _self.card
+          : card // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookMerge extends ActionRequest {
+  const ActionRequest_BookMerge({required this.from, required this.into})
+      : super._();
+
+  final String from;
+  final String into;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookMergeCopyWith<ActionRequest_BookMerge> get copyWith =>
+      _$ActionRequest_BookMergeCopyWithImpl<ActionRequest_BookMerge>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookMerge &&
+            (identical(other.from, from) || other.from == from) &&
+            (identical(other.into, into) || other.into == into));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, from, into);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookMerge(from: $from, into: $into)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookMergeCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookMergeCopyWith(ActionRequest_BookMerge value,
+          $Res Function(ActionRequest_BookMerge) _then) =
+      _$ActionRequest_BookMergeCopyWithImpl;
+  @useResult
+  $Res call({String from, String into});
+}
+
+/// @nodoc
+class _$ActionRequest_BookMergeCopyWithImpl<$Res>
+    implements $ActionRequest_BookMergeCopyWith<$Res> {
+  _$ActionRequest_BookMergeCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookMerge _self;
+  final $Res Function(ActionRequest_BookMerge) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? from = null,
+    Object? into = null,
+  }) {
+    return _then(ActionRequest_BookMerge(
+      from: null == from
+          ? _self.from
+          : from // ignore: cast_nullable_to_non_nullable
+              as String,
+      into: null == into
+          ? _self.into
+          : into // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookClaimSelf extends ActionRequest {
+  const ActionRequest_BookClaimSelf({required this.card}) : super._();
+
+  final String card;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookClaimSelfCopyWith<ActionRequest_BookClaimSelf>
+      get copyWith => _$ActionRequest_BookClaimSelfCopyWithImpl<
+          ActionRequest_BookClaimSelf>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookClaimSelf &&
+            (identical(other.card, card) || other.card == card));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, card);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookClaimSelf(card: $card)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookClaimSelfCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookClaimSelfCopyWith(
+          ActionRequest_BookClaimSelf value,
+          $Res Function(ActionRequest_BookClaimSelf) _then) =
+      _$ActionRequest_BookClaimSelfCopyWithImpl;
+  @useResult
+  $Res call({String card});
+}
+
+/// @nodoc
+class _$ActionRequest_BookClaimSelfCopyWithImpl<$Res>
+    implements $ActionRequest_BookClaimSelfCopyWith<$Res> {
+  _$ActionRequest_BookClaimSelfCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookClaimSelf _self;
+  final $Res Function(ActionRequest_BookClaimSelf) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? card = null,
+  }) {
+    return _then(ActionRequest_BookClaimSelf(
+      card: null == card
+          ? _self.card
+          : card // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookLink extends ActionRequest {
+  const ActionRequest_BookLink({required this.card, required this.handle})
+      : super._();
+
+  final String card;
+  final String handle;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookLinkCopyWith<ActionRequest_BookLink> get copyWith =>
+      _$ActionRequest_BookLinkCopyWithImpl<ActionRequest_BookLink>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookLink &&
+            (identical(other.card, card) || other.card == card) &&
+            (identical(other.handle, handle) || other.handle == handle));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, card, handle);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookLink(card: $card, handle: $handle)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookLinkCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookLinkCopyWith(ActionRequest_BookLink value,
+          $Res Function(ActionRequest_BookLink) _then) =
+      _$ActionRequest_BookLinkCopyWithImpl;
+  @useResult
+  $Res call({String card, String handle});
+}
+
+/// @nodoc
+class _$ActionRequest_BookLinkCopyWithImpl<$Res>
+    implements $ActionRequest_BookLinkCopyWith<$Res> {
+  _$ActionRequest_BookLinkCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookLink _self;
+  final $Res Function(ActionRequest_BookLink) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? card = null,
+    Object? handle = null,
+  }) {
+    return _then(ActionRequest_BookLink(
+      card: null == card
+          ? _self.card
+          : card // ignore: cast_nullable_to_non_nullable
+              as String,
+      handle: null == handle
+          ? _self.handle
+          : handle // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookUnlink extends ActionRequest {
+  const ActionRequest_BookUnlink({required this.card, required this.handle})
+      : super._();
+
+  final String card;
+  final String handle;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookUnlinkCopyWith<ActionRequest_BookUnlink> get copyWith =>
+      _$ActionRequest_BookUnlinkCopyWithImpl<ActionRequest_BookUnlink>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookUnlink &&
+            (identical(other.card, card) || other.card == card) &&
+            (identical(other.handle, handle) || other.handle == handle));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, card, handle);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookUnlink(card: $card, handle: $handle)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookUnlinkCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookUnlinkCopyWith(ActionRequest_BookUnlink value,
+          $Res Function(ActionRequest_BookUnlink) _then) =
+      _$ActionRequest_BookUnlinkCopyWithImpl;
+  @useResult
+  $Res call({String card, String handle});
+}
+
+/// @nodoc
+class _$ActionRequest_BookUnlinkCopyWithImpl<$Res>
+    implements $ActionRequest_BookUnlinkCopyWith<$Res> {
+  _$ActionRequest_BookUnlinkCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookUnlink _self;
+  final $Res Function(ActionRequest_BookUnlink) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? card = null,
+    Object? handle = null,
+  }) {
+    return _then(ActionRequest_BookUnlink(
+      card: null == card
+          ? _self.card
+          : card // ignore: cast_nullable_to_non_nullable
+              as String,
+      handle: null == handle
+          ? _self.handle
+          : handle // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }
