@@ -412,6 +412,13 @@ pub enum ActionRequest {
         card: String,
         handle: String,
     },
+    BookExport {
+        path: String,
+        cards: Option<Vec<String>>,
+    },
+    BookImport {
+        path: String,
+    },
 }
 
 impl ActionRequest {
@@ -435,6 +442,8 @@ impl ActionRequest {
             Self::BookClaimSelf { card } => Action::BookClaimSelf { card },
             Self::BookLink { card, handle } => Action::BookLink { card, handle },
             Self::BookUnlink { card, handle } => Action::BookUnlink { card, handle },
+            Self::BookExport { path, cards } => Action::BookExport { path, cards },
+            Self::BookImport { path } => Action::BookImport { path },
         }
     }
 }

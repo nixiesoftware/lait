@@ -186,6 +186,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   Unopenable? dco_decode_opt_box_autoadd_unopenable(dynamic raw);
 
   @protected
+  List<String>? dco_decode_opt_list_String(dynamic raw);
+
+  @protected
   List<LibraryRow>? dco_decode_opt_list_library_row(dynamic raw);
 
   @protected
@@ -389,6 +392,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   Unopenable? sse_decode_opt_box_autoadd_unopenable(
       SseDeserializer deserializer);
+
+  @protected
+  List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
 
   @protected
   List<LibraryRow>? sse_decode_opt_list_library_row(
@@ -612,6 +618,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_opt_box_autoadd_unopenable(
       Unopenable? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_list_library_row(

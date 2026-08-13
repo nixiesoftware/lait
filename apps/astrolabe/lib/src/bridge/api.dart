@@ -121,6 +121,13 @@ sealed class ActionRequest with _$ActionRequest {
     required String card,
     required String handle,
   }) = ActionRequest_BookUnlink;
+  const factory ActionRequest.bookExport({
+    required String path,
+    List<String>? cards,
+  }) = ActionRequest_BookExport;
+  const factory ActionRequest.bookImport({
+    required String path,
+  }) = ActionRequest_BookImport;
 }
 
 /// The identity's address book, as last read.

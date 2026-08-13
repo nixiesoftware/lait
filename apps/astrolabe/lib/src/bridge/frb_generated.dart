@@ -293,6 +293,15 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           card: dco_decode_String(raw[1]),
           handle: dco_decode_String(raw[2]),
         );
+      case 18:
+        return ActionRequest_BookExport(
+          path: dco_decode_String(raw[1]),
+          cards: dco_decode_opt_list_String(raw[2]),
+        );
+      case 19:
+        return ActionRequest_BookImport(
+          path: dco_decode_String(raw[1]),
+        );
       default:
         throw Exception("unreachable");
     }
@@ -720,6 +729,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  List<String>? dco_decode_opt_list_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_list_String(raw);
+  }
+
+  @protected
   List<LibraryRow>? dco_decode_opt_list_library_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_list_library_row(raw);
@@ -921,6 +936,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         var var_card = sse_decode_String(deserializer);
         var var_handle = sse_decode_String(deserializer);
         return ActionRequest_BookUnlink(card: var_card, handle: var_handle);
+      case 18:
+        var var_path = sse_decode_String(deserializer);
+        var var_cards = sse_decode_opt_list_String(deserializer);
+        return ActionRequest_BookExport(path: var_path, cards: var_cards);
+      case 19:
+        var var_path = sse_decode_String(deserializer);
+        return ActionRequest_BookImport(path: var_path);
       default:
         throw UnimplementedError('');
     }
@@ -1496,6 +1518,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  List<String>? sse_decode_opt_list_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_list_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   List<LibraryRow>? sse_decode_opt_list_library_row(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1713,6 +1746,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         sse_encode_i_32(17, serializer);
         sse_encode_String(card, serializer);
         sse_encode_String(handle, serializer);
+      case ActionRequest_BookExport(path: final path, cards: final cards):
+        sse_encode_i_32(18, serializer);
+        sse_encode_String(path, serializer);
+        sse_encode_opt_list_String(cards, serializer);
+      case ActionRequest_BookImport(path: final path):
+        sse_encode_i_32(19, serializer);
+        sse_encode_String(path, serializer);
     }
   }
 
@@ -2175,6 +2215,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_unopenable(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_list_String(
+      List<String>? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_list_String(self, serializer);
     }
   }
 

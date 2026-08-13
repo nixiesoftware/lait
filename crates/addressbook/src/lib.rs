@@ -23,6 +23,7 @@
 //! daemon, Runtime, Replica, World, or a product. A0 ships no surface.
 
 mod bounds;
+mod bundle;
 mod codec;
 mod engine;
 mod error;
@@ -32,9 +33,11 @@ mod store;
 mod types;
 
 pub use bounds::{
-    MAX_ADDRESSBOOK_HISTORY_BYTES, MAX_BOOK_BYTES, MAX_CARDS, MAX_HANDLES_PER_CARD, MAX_NAME_BYTES,
-    MAX_NOTE_BYTES, MAX_SHARED_DEVICES, MAX_TOMBSTONES,
+    MAX_ADDRESSBOOK_HISTORY_BYTES, MAX_BOOK_BYTES, MAX_BUNDLE_BYTES, MAX_CARDS,
+    MAX_CARDS_PER_BUNDLE, MAX_HANDLES_PER_CARD, MAX_NAME_BYTES, MAX_NOTE_BYTES, MAX_SHARED_DEVICES,
+    MAX_TOMBSTONES,
 };
+pub use bundle::{CardBundle, SharedCard, BUNDLE_VERSION};
 pub use codec::{HANDLE_KEY_VERSION, SCHEMA_VERSION};
 pub use engine::{Action, BookEngine};
 pub use error::Error;

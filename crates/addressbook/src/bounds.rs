@@ -23,3 +23,7 @@ pub const MAX_SHARED_DEVICES: usize = 8;
 pub const MAX_TOMBSTONES: usize = 8192;
 /// Authoritative envelope, including causal history.
 pub const MAX_ADDRESSBOOK_HISTORY_BYTES: usize = 16 * 1024 * 1024;
+/// Shareable card-exchange file, encoded.
+pub const MAX_BUNDLE_BYTES: usize = 256 * 1024;
+/// Cards in one shareable bundle.
+pub const MAX_CARDS_PER_BUNDLE: usize = 128;

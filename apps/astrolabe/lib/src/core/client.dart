@@ -235,4 +235,6 @@ abstract final class ActionKeys {
   static String bookClaim(String card) => 'book.claim:$card';
   static String bookLink(String card) => 'book.link:$card';
   static String bookUnlink(String card) => 'book.unlink:$card';
+  static const String bookExport = 'book.export';
+  static const String bookImport = 'book.import';
 }

@@ -203,6 +203,24 @@ void main() {
     expect(asked, isEmpty, reason: 'searching the book asked the core');
   });
 
+  testWidgets('export asks the core for a path, not a second model',
+      (tester) async {
+    final asked = await _pump(tester, _view(book: _book([_card()])));
+    await tester.tap(find.text('Export'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(
+      find.byKey(const ValueKey('book-bundle-path')),
+      r'D:\tmp\cards.json',
+    );
+    await tester.ensureVisible(find.text('Export').last);
+    await tester.tap(find.text('Export').last);
+    await tester.pump();
+    expect(
+      asked,
+      [const ActionRequest.bookExport(path: r'D:\tmp\cards.json')],
+    );
+  });
+
   testWidgets('unlinking a handle names the card and the handle',
       (tester) async {
     final asked = await _pump(

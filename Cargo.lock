@@ -134,6 +134,7 @@ dependencies = [
  "mechanics",
  "postcard",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -479,6 +480,7 @@ dependencies = [
 name = "astrolabe"
 version = "0.1.0"
 dependencies = [
+ "addressbook",
  "anyhow",
  "eframe",
  "egui",

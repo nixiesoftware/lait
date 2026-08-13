@@ -38,6 +38,7 @@ egui-ui = ["dep:eframe", "dep:egui"]
 [dependencies]
 lait = { path = "../.." }
 lait-workbench = { path = "../workbench" }
+addressbook = { path = "../../crates/addressbook" }
 mechanics = { path = "../../crates/mechanics" }
 anyhow = "1"
 fs2 = "0.4"

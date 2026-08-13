@@ -63,6 +63,83 @@ impl Client {
             .await
     }
 
+    /// Write a shareable bundle. Local-agent handles and My Card do not travel.
+    pub async fn book_export(
+        &self,
+        path: String,
+        cards: Option<Vec<String>>,
+    ) -> ClientResult<BookSnapshot> {
+        let book = self.book_list().await?;
+        let mut shared = Vec::new();
+        for card in &book.cards {
+            if let Some(filter) = cards.as_ref() {
+                if !filter.iter().any(|id| id == &card.card) {
+                    continue;
+                }
+            }
+            let handles = card
+                .handles
+                .iter()
+                .filter(|raw| {
+                    addressbook::Handle::parse_wire(raw)
+                        .map(|handle| handle.may_leave_device())
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            shared.push(addressbook::SharedCard {
+                name: card.name.clone(),
+                note: card.note.clone(),
+                handles,
+            });
+        }
+        let bundle = addressbook::CardBundle::propose(shared)
+            .map_err(|error| ClientError::refused(error.to_string()))?;
+        let bytes = bundle
+            .encode()
+            .map_err(|error| ClientError::refused(error.to_string()))?;
+        std::fs::write(&path, bytes).map_err(|error| {
+            ClientError::internal(format!("write card bundle {}: {error}", path))
+        })?;
+        Ok(book)
+    }
+
+    /// Import a shareable bundle as *new* Cards. Never claims My Card, never
+    /// overwrites an existing Card, and refuses LocalAgent handles.
+    pub async fn book_import(&self, path: String) -> ClientResult<BookSnapshot> {
+        let bytes = std::fs::read(&path).map_err(|error| {
+            ClientError::internal(format!("read card bundle {}: {error}", path))
+        })?;
+        let bundle = addressbook::CardBundle::decode(&bytes)
+            .map_err(|error| ClientError::refused(error.to_string()))?;
+        let mut before: std::collections::BTreeSet<String> = self
+            .book_list()
+            .await?
+            .cards
+            .into_iter()
+            .map(|card| card.card)
+            .collect();
+        let mut last = self.book_list().await?;
+        for card in bundle.cards {
+            last = self
+                .book_put(
+                    None,
+                    card.name,
+                    (!card.note.is_empty()).then_some(card.note),
+                )
+                .await?;
+            let minted = last.cards.iter().find(|row| !before.contains(&row.card));
+            let Some(minted) = minted.cloned() else {
+                continue;
+            };
+            before.insert(minted.card.clone());
+            for handle in card.handles {
+                last = self.book_link(minted.card.clone(), handle).await?;
+            }
+        }
+        Ok(last)
+    }
+
     async fn book_request(&self, request: Request) -> ClientResult<BookSnapshot> {
         let daemon = self.daemon()?;
         let reply = daemon

@@ -83,6 +83,8 @@ class _BookPageState extends State<BookPage> {
     final view = ClientScope.watch(context);
     final book = view.book;
     final rereading = view.inFlight.contains(ActionKeys.refresh);
+    final busyExport = view.inFlight.contains(ActionKeys.bookExport);
+    final busyImport = view.inFlight.contains(ActionKeys.bookImport);
     final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
     final shown = _filtered(book?.cards ?? const []);
 
@@ -115,6 +117,21 @@ class _BookPageState extends State<BookPage> {
                 : 'Use dark theme',
             variant: ButtonVariant.ghost,
             size: ButtonSize.iconSm,
+          ),
+          t.gap.x(Space.sm),
+          Button(
+            onPressed: book == null || busyExport
+                ? null
+                : () => _bundle(context, export: true),
+            label: 'Export',
+            variant: ButtonVariant.ghost,
+            size: ButtonSize.sm,
+          ),
+          Button(
+            onPressed: busyImport ? null : () => _bundle(context, export: false),
+            label: 'Import',
+            variant: ButtonVariant.ghost,
+            size: ButtonSize.sm,
           ),
           t.gap.x(Space.sm),
           Button(
@@ -327,6 +344,53 @@ class _CardRow extends StatelessWidget {
       ),
     );
   }
+}
+
+Future<void> _bundle(BuildContext context, {required bool export}) async {
+  final path = TextEditingController();
+  final saved = await showAppDialog<bool>(
+    context: context,
+    builder: (ctx) => DialogContent(
+      children: [
+        DialogHeader(
+          title: DialogTitle(export ? 'Export cards' : 'Import cards'),
+          description: DialogDescription(
+            export
+                ? 'A suggestion file. Local-agent handles and My Card do not travel.'
+                : 'New Cards only. Existing Cards and My Card are left alone.',
+          ),
+        ),
+        Input(
+          key: const ValueKey('book-bundle-path'),
+          controller: path,
+          label: 'Path',
+          mono: true,
+          autofocus: true,
+        ),
+        DialogFooter(
+          children: [
+            Button(
+              label: 'Cancel',
+              variant: ButtonVariant.outline,
+              onPressed: () => Navigator.pop(ctx, false),
+            ),
+            Button(
+              label: export ? 'Export' : 'Import',
+              onPressed: () => Navigator.pop(ctx, true),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+  final dest = path.text.trim();
+  path.dispose();
+  if (saved != true || dest.isEmpty || !context.mounted) return;
+  ClientScope.of(context).dispatch(
+    export
+        ? ActionRequest.bookExport(path: dest)
+        : ActionRequest.bookImport(path: dest),
+  );
 }
 
 Future<void> _edit(BuildContext context, CardRow? existing) async {

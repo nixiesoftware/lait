@@ -148,6 +148,13 @@ pub enum Action {
         card: String,
         handle: String,
     },
+    BookExport {
+        path: String,
+        cards: Option<Vec<String>>,
+    },
+    BookImport {
+        path: String,
+    },
     OrbitRebuild {
         orbit: String,
     },
@@ -195,6 +202,8 @@ impl Action {
             Self::BookClaimSelf { card } => format!("book.claim:{card}"),
             Self::BookLink { card, .. } => format!("book.link:{card}"),
             Self::BookUnlink { card, .. } => format!("book.unlink:{card}"),
+            Self::BookExport { .. } => "book.export".into(),
+            Self::BookImport { .. } => "book.import".into(),
             Self::InstallMcp { preview, .. } => {
                 if *preview {
                     "mcp.preview".into()
@@ -243,6 +252,8 @@ impl Action {
             Self::BookClaimSelf { card } => format!("claim {card} as My Card"),
             Self::BookLink { card, handle } => format!("link {handle} to {card}"),
             Self::BookUnlink { card, handle } => format!("unlink {handle} from {card}"),
+            Self::BookExport { path, .. } => format!("export cards to {path}"),
+            Self::BookImport { path } => format!("import cards from {path}"),
             Self::InstallMcp { preview: true, .. } => "preview an MCP binding".into(),
             Self::InstallMcp { .. } => "write an MCP binding".into(),
             Self::Exit(ExitRequest::GoOffline) => "go offline and exit".into(),
@@ -721,6 +732,14 @@ impl Worker {
             Action::BookUnlink { card, handle } => {
                 let _ = client.book_unlink(card.clone(), handle.clone()).await?;
                 Ok(Outcome::Said(format!("unlinked {handle}")))
+            }
+            Action::BookExport { path, cards } => {
+                let _ = client.book_export(path.clone(), cards.clone()).await?;
+                Ok(Outcome::Said(format!("exported cards to {path}")))
+            }
+            Action::BookImport { path } => {
+                let _ = client.book_import(path.clone()).await?;
+                Ok(Outcome::Said(format!("imported cards from {path}")))
             }
             Action::InstallMcp { binding, preview } => {
                 let outcome = client.install_mcp_head(binding, *preview).await?;

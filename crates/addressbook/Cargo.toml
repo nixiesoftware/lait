@@ -11,6 +11,7 @@ publish = false
 fabric = { path = "../fabric" }
 mechanics = { path = "../mechanics" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 postcard = { version = "1", features = ["use-std"] }
 blake3 = "1"
 data-encoding = "2.6"

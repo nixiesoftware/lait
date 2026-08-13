@@ -68,6 +68,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_BookClaimSelf value)? bookClaimSelf,
     TResult Function(ActionRequest_BookLink value)? bookLink,
     TResult Function(ActionRequest_BookUnlink value)? bookUnlink,
+    TResult Function(ActionRequest_BookExport value)? bookExport,
+    TResult Function(ActionRequest_BookImport value)? bookImport,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -108,6 +110,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookLink(_that);
       case ActionRequest_BookUnlink() when bookUnlink != null:
         return bookUnlink(_that);
+      case ActionRequest_BookExport() when bookExport != null:
+        return bookExport(_that);
+      case ActionRequest_BookImport() when bookImport != null:
+        return bookImport(_that);
       case _:
         return orElse();
     }
@@ -147,6 +153,8 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_BookClaimSelf value) bookClaimSelf,
     required TResult Function(ActionRequest_BookLink value) bookLink,
     required TResult Function(ActionRequest_BookUnlink value) bookUnlink,
+    required TResult Function(ActionRequest_BookExport value) bookExport,
+    required TResult Function(ActionRequest_BookImport value) bookImport,
   }) {
     final _that = this;
     switch (_that) {
@@ -186,6 +194,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookLink(_that);
       case ActionRequest_BookUnlink():
         return bookUnlink(_that);
+      case ActionRequest_BookExport():
+        return bookExport(_that);
+      case ActionRequest_BookImport():
+        return bookImport(_that);
     }
   }
 
@@ -221,6 +233,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_BookClaimSelf value)? bookClaimSelf,
     TResult? Function(ActionRequest_BookLink value)? bookLink,
     TResult? Function(ActionRequest_BookUnlink value)? bookUnlink,
+    TResult? Function(ActionRequest_BookExport value)? bookExport,
+    TResult? Function(ActionRequest_BookImport value)? bookImport,
   }) {
     final _that = this;
     switch (_that) {
@@ -260,6 +274,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookLink(_that);
       case ActionRequest_BookUnlink() when bookUnlink != null:
         return bookUnlink(_that);
+      case ActionRequest_BookExport() when bookExport != null:
+        return bookExport(_that);
+      case ActionRequest_BookImport() when bookImport != null:
+        return bookImport(_that);
       case _:
         return null;
     }
@@ -297,6 +315,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String card)? bookClaimSelf,
     TResult Function(String card, String handle)? bookLink,
     TResult Function(String card, String handle)? bookUnlink,
+    TResult Function(String path, List<String>? cards)? bookExport,
+    TResult Function(String path)? bookImport,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -337,6 +357,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookLink(_that.card, _that.handle);
       case ActionRequest_BookUnlink() when bookUnlink != null:
         return bookUnlink(_that.card, _that.handle);
+      case ActionRequest_BookExport() when bookExport != null:
+        return bookExport(_that.path, _that.cards);
+      case ActionRequest_BookImport() when bookImport != null:
+        return bookImport(_that.path);
       case _:
         return orElse();
     }
@@ -375,6 +399,8 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(String card) bookClaimSelf,
     required TResult Function(String card, String handle) bookLink,
     required TResult Function(String card, String handle) bookUnlink,
+    required TResult Function(String path, List<String>? cards) bookExport,
+    required TResult Function(String path) bookImport,
   }) {
     final _that = this;
     switch (_that) {
@@ -414,6 +440,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookLink(_that.card, _that.handle);
       case ActionRequest_BookUnlink():
         return bookUnlink(_that.card, _that.handle);
+      case ActionRequest_BookExport():
+        return bookExport(_that.path, _that.cards);
+      case ActionRequest_BookImport():
+        return bookImport(_that.path);
     }
   }
 
@@ -449,6 +479,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String card)? bookClaimSelf,
     TResult? Function(String card, String handle)? bookLink,
     TResult? Function(String card, String handle)? bookUnlink,
+    TResult? Function(String path, List<String>? cards)? bookExport,
+    TResult? Function(String path)? bookImport,
   }) {
     final _that = this;
     switch (_that) {
@@ -488,6 +520,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookLink(_that.card, _that.handle);
       case ActionRequest_BookUnlink() when bookUnlink != null:
         return bookUnlink(_that.card, _that.handle);
+      case ActionRequest_BookExport() when bookExport != null:
+        return bookExport(_that.path, _that.cards);
+      case ActionRequest_BookImport() when bookImport != null:
+        return bookImport(_that.path);
       case _:
         return null;
     }
@@ -1585,6 +1621,154 @@ class _$ActionRequest_BookUnlinkCopyWithImpl<$Res>
       handle: null == handle
           ? _self.handle
           : handle // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookExport extends ActionRequest {
+  const ActionRequest_BookExport(
+      {required this.path, final List<String>? cards})
+      : _cards = cards,
+        super._();
+
+  final String path;
+  final List<String>? _cards;
+  List<String>? get cards {
+    final value = _cards;
+    if (value == null) return null;
+    if (_cards is EqualUnmodifiableListView) return _cards;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(value);
+  }
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookExportCopyWith<ActionRequest_BookExport> get copyWith =>
+      _$ActionRequest_BookExportCopyWithImpl<ActionRequest_BookExport>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookExport &&
+            (identical(other.path, path) || other.path == path) &&
+            const DeepCollectionEquality().equals(other._cards, _cards));
+  }
+
+  @override
+  int get hashCode => Object.hash(
+      runtimeType, path, const DeepCollectionEquality().hash(_cards));
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookExport(path: $path, cards: $cards)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookExportCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookExportCopyWith(ActionRequest_BookExport value,
+          $Res Function(ActionRequest_BookExport) _then) =
+      _$ActionRequest_BookExportCopyWithImpl;
+  @useResult
+  $Res call({String path, List<String>? cards});
+}
+
+/// @nodoc
+class _$ActionRequest_BookExportCopyWithImpl<$Res>
+    implements $ActionRequest_BookExportCopyWith<$Res> {
+  _$ActionRequest_BookExportCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookExport _self;
+  final $Res Function(ActionRequest_BookExport) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? path = null,
+    Object? cards = freezed,
+  }) {
+    return _then(ActionRequest_BookExport(
+      path: null == path
+          ? _self.path
+          : path // ignore: cast_nullable_to_non_nullable
+              as String,
+      cards: freezed == cards
+          ? _self._cards
+          : cards // ignore: cast_nullable_to_non_nullable
+              as List<String>?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookImport extends ActionRequest {
+  const ActionRequest_BookImport({required this.path}) : super._();
+
+  final String path;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookImportCopyWith<ActionRequest_BookImport> get copyWith =>
+      _$ActionRequest_BookImportCopyWithImpl<ActionRequest_BookImport>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookImport &&
+            (identical(other.path, path) || other.path == path));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, path);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookImport(path: $path)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookImportCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookImportCopyWith(ActionRequest_BookImport value,
+          $Res Function(ActionRequest_BookImport) _then) =
+      _$ActionRequest_BookImportCopyWithImpl;
+  @useResult
+  $Res call({String path});
+}
+
+/// @nodoc
+class _$ActionRequest_BookImportCopyWithImpl<$Res>
+    implements $ActionRequest_BookImportCopyWith<$Res> {
+  _$ActionRequest_BookImportCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookImport _self;
+  final $Res Function(ActionRequest_BookImport) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? path = null,
+  }) {
+    return _then(ActionRequest_BookImport(
+      path: null == path
+          ? _self.path
+          : path // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

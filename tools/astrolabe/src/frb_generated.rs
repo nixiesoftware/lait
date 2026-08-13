@@ -303,6 +303,18 @@ impl SseDecode for crate::api::ActionRequest {
                     handle: var_handle,
                 };
             }
+            18 => {
+                let mut var_path = <String>::sse_decode(deserializer);
+                let mut var_cards = <Option<Vec<String>>>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookExport {
+                    path: var_path,
+                    cards: var_cards,
+                };
+            }
+            19 => {
+                let mut var_path = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookImport { path: var_path };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -859,6 +871,17 @@ impl SseDecode for Option<crate::api::Unopenable> {
     }
 }
 
+impl SseDecode for Option<Vec<String>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<String>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<Vec<crate::api::LibraryRow>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1110,6 +1133,15 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
                 handle.into_into_dart().into_dart(),
             ]
             .into_dart(),
+            crate::api::ActionRequest::BookExport { path, cards } => [
+                18.into_dart(),
+                path.into_into_dart().into_dart(),
+                cards.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::BookImport { path } => {
+                [19.into_dart(), path.into_into_dart().into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1629,6 +1661,15 @@ impl SseEncode for crate::api::ActionRequest {
                 <String>::sse_encode(card, serializer);
                 <String>::sse_encode(handle, serializer);
             }
+            crate::api::ActionRequest::BookExport { path, cards } => {
+                <i32>::sse_encode(18, serializer);
+                <String>::sse_encode(path, serializer);
+                <Option<Vec<String>>>::sse_encode(cards, serializer);
+            }
+            crate::api::ActionRequest::BookImport { path } => {
+                <i32>::sse_encode(19, serializer);
+                <String>::sse_encode(path, serializer);
+            }
             _ => {
                 unimplemented!("");
             }
@@ -2056,6 +2097,16 @@ impl SseEncode for Option<crate::api::Unopenable> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::Unopenable>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<Vec<String>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<String>>::sse_encode(value, serializer);
         }
     }
 }
