@@ -25,7 +25,7 @@ and stays the authority on its own presentation.
 
 ```sh
 cargo run -p astrolabe          # the client (needs lait.exe beside it when packaged)
-cargo test -p astrolabe         # unit + headless interaction + packaging tests
+cargo test -p astrolabe         # unit + interaction + packaging + presentation + launch
 ```
 
 Three layers, and **no boundary between them** — no FFI, no local HTTP hop, no
@@ -45,6 +45,23 @@ drawn:
 on their own thread and reach the frame loop as `Update`s drained at the top of
 each frame.
 
+### Drawing returns actions; it never calls anything
+
+```rust
+pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action>
+```
+
+A surface that called the client would do network work on the frame thread. One
+that called it and *kept the answer* would be a second model of client state,
+disagreeing with the first in exactly the case that matters — when the action was
+refused. The shell dispatches what comes back and records it as in flight on the
+same frame, so a control is disabled the moment it is clicked.
+
+That is also what makes a click assertable: an interaction test presses a real
+control and reads what the surface asked for, with no daemon, no browser and no
+window. Seven surfaces — Library · Spaces · Members · Devices · Heads · Storage ·
+Diagnostics — reachable by `Ctrl+1`–`Ctrl+7`, with `F5` to re-read.
+
 ### The UI substrate is adopted, not built
 
 `egui` + `eframe` + `accesskit`, all `MIT OR Apache-2.0`, as ordinary pinned
@@ -56,18 +73,65 @@ the finding is a `clarifies` observation on the Plan Spec.
 
 Interaction tests use `egui_kittest`, which renders offscreen and queries the
 **AccessKit tree** — so they assert what a screen reader reads, not what pixels
-looked like. Two gotchas found the hard way: a plain label's text lands in the
-node's `value`, not its `label`; and a selected tab is announced through the
-Toggle pattern, so assert `toggled()`, not `is_selected()`. Disambiguate with
-`get_by_role_and_label` — a surface heading carries the same text as its tab.
+looked like. Four gotchas found the hard way:
+
+- A plain label's text lands in the node's `value`, not its `label`.
+- A selected tab is announced through the Toggle pattern: assert `toggled()`,
+  not `is_selected()`.
+- A surface heading carries the same text as its tab, so disambiguate with
+  `get_by_role_and_label`.
+- **A text field's contents are a `value` on a node with no label**, so a scan
+  over `query_all_by_label_contains("")` cannot see them. Assert on the draft the
+  box is bound to.
+
+Build the harness **bigger than the surface draws**
+(`Harness::builder().with_size([1_200.0, 2_000.0])`). egui culls interaction
+outside the clip rect, so a click on a control that fell off a too-small virtual
+screen registers as nothing at all — which reads exactly like the control being
+broken.
 
 ### Rules that are tested, not documented
 
 Removal and data deletion are separate; deletion re-proves containment under the
-managed root *at deletion time*. A sampling failure degrades and preserves the
-last good topology — it never reads as "no peers". Unmeasured is absent, never
-zero. Ownership is a boundary: force-stop lives on an owned handle and there is
-no pid-based path to it. The overlay renders convenience and refuses authority.
+managed root *at deletion time*, and is confirmed by typing the device's name. A
+sampling failure degrades and preserves the last good topology — it never reads
+as "no peers". Ownership is a boundary: force-stop lives on an owned handle and
+there is no pid-based path to it. The overlay renders convenience and refuses
+authority.
+
+**Unmeasured is absent, never zero — and an absence says which kind it is.**
+"This Space is not running" and "this Space could not be asked" are different
+facts, and only one is worth acting on; folding them together is the
+false-disconnection defect one layer down. Same for a diagnosis that could not be
+taken, which is never "every gate passes".
+
+**Listing is passive; choosing is the act.** The Library and the Space list place
+nothing. `Open` places, and so does selecting a Space to administer.
+
+**Every accent clears 3∶1 against what is behind it** (`ui::theme::legible`).
+egui's light theme answers `warn_fg_color` at 2.79∶1 — asking the visuals is not
+the same as getting a readable answer.
+
+### The client-to-process seam has been wrong twice
+
+Both times: every component correct, the composition wrong, and a symptom that
+named nothing. `start_head` passed `--home` to a launcher mode that did not
+accept it, so the head exited before printing and the supervisor reported "head
+exited before it announced an address". Then `Client::head` handed the supervisor
+the *daemon's* directory beneath the identity, so the head came up, announced an
+address, minted a valid single-use ticket — and served an identity nobody had
+ever used.
+
+`tools/astrolabe/tests/launch.rs` exists for that class and asserts the chain
+rather than the parts. **Add to it before trusting a new seam between the client
+and a real process.**
+
+## Two generated files, and only one is Windows-hostile
+
+`THIRD-PARTY-NOTICES.md` is generated from the lockfile by
+`bash ci/third-party-notices.sh --update` and CI fails when it drifts. It is
+platform-independent — `cargo metadata` resolves every target — so regenerate it
+wherever you are.
 
 ## The coverage manifest cannot be regenerated on Windows
 
@@ -195,6 +259,7 @@ link step fails (`taskkill //F //IM lait.exe` on Windows).
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features --locked
   cargo nextest run --workspace --all-features --profile pr --no-fail-fast
+  bash ci/third-party-notices.sh --check
   ```
 
   `--workspace` is load-bearing: a bare `cargo test` covers only the root
