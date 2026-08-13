@@ -217,6 +217,17 @@ impl App {
     }
 
     /// Whether this client is waiting on the action a control would dispatch.
+    /// Every action asked for and not yet answered.
+    ///
+    /// The plural of [`Self::is_in_flight`], and it exists for the same reason
+    /// that one does: a surface drawn across a boundary cannot ask "is this
+    /// key in flight" one key at a time, so it is sent the set and asks
+    /// locally. Sending the set rather than a per-control flag keeps the
+    /// question the model's to answer.
+    pub fn in_flight_keys(&self) -> Vec<String> {
+        self.in_flight.iter().cloned().collect()
+    }
+
     pub fn is_in_flight(&self, key: &str) -> bool {
         self.in_flight.contains(key)
     }

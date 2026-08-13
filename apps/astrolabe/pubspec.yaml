@@ -1,0 +1,44 @@
+name: astrolabe
+description: >-
+  The local client through which a person reaches the Worlds their device
+  serves. A Dart interface over the Rust core in tools/astrolabe.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # The design system, by path. It is ours: a gap in it is fixed in it rather
+  # than worked around here, which is the whole reason the interface moved.
+  covalence:
+    path: ../../../covalence
+
+  # The bridge. Pinned to the exact version the Rust side carries — a bridge
+  # whose halves disagree is the defect the checked-in codegen exists to catch,
+  # and a floating constraint would let it drift between them.
+  flutter_rust_bridge: 2.12.0
+
+  # Undecorated window plus the caption this client draws itself.
+  window_manager: ^0.4.3
+  # Closing minimises rather than stopping a peer, so there has to be somewhere
+  # to minimise to.
+  tray_manager: ^0.3.2
+  freezed_annotation: ^3.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  custom_lint: ^0.8.0
+  covalence_lints:
+    path: ../../../covalence/packages/covalence_lints
+  freezed: ^3.2.3
+  build_runner: ^2.15.1
+
+flutter:
+  uses-material-design: false

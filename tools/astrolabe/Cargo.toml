@@ -14,13 +14,26 @@ workspace = true
 [lib]
 name = "astrolabe"
 path = "src/lib.rs"
+# `cdylib` is what the Flutter runner links; `rlib` is what the workspace's own
+# tests and the legacy binary link. Both, because the core is one thing with two
+# consumers and building it twice would let them disagree.
+crate-type = ["cdylib", "rlib"]
 
-# `windows_subsystem = "windows"` lives in main.rs, so a packaged launch opens no
-# console. The library half carries everything testable, which is why the binary
-# is nearly empty.
+# The egui interface, behind the feature that carries it.
+#
+# Revision 7 of the Plan moves the interface to Flutter. This binary is kept
+# until the Dart surfaces reach parity, because a client that cannot be launched
+# is a client nobody can compare against — but it is not built by default, so a
+# `cargo build` produces the core the bridge needs and nothing else.
 [[bin]]
-name = "astrolabe"
+name = "astrolabe-egui"
 path = "src/main.rs"
+required-features = ["egui-ui"]
+
+[features]
+default = []
+# The retiring interface: egui, eframe, and the surfaces drawn on them.
+egui-ui = ["dep:eframe", "dep:egui"]
 
 [dependencies]
 lait = { path = "../.." }
@@ -38,12 +51,18 @@ tracing = "0.1"
 # `egui` depends on `accesskit` unconditionally and re-exports it, so the
 # semantic tree is always available; `eframe`'s `accesskit` feature is what
 # bridges that tree to the platform — Windows UI Automation, here.
-eframe = { version = "0.35", default-features = false, features = [
+eframe = { version = "0.35", optional = true, default-features = false, features = [
     "accesskit",
     "default_fonts",
     "wgpu",
 ] }
-egui = "0.35"
+egui = { version = "0.35", optional = true }
+
+# The bridge to the Dart interface. `MIT`, so lait's dual offer is untouched.
+# The generated Dart and the generated Rust are both checked in, and CI fails on
+# drift — the boundary revision 7 reintroduced is only safe if a stale binding
+# cannot pass review.
+flutter_rust_bridge = "=2.12.0"
 
 [target.'cfg(windows)'.dependencies]
 # The single-instance mutex, the tray icon and the browser handoff. All three

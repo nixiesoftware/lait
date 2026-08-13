@@ -7,8 +7,6 @@
 //! program.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use astrolabe::model::App;
 use astrolabe::runtime::{Action, Runtime};
@@ -113,7 +111,7 @@ impl Shell {
         astrolabe::ui::install(&creation.egui_ctx);
 
         let sidecar = astrolabe::sidecar::resolve()?;
-        let state_root = state_root()?;
+        let state_root = astrolabe::sidecar::state_root()?;
 
         // The repaint request is passed in rather than captured inside the
         // runtime, so the background half has no opinion about what a frame
@@ -293,22 +291,6 @@ impl eframe::App for Shell {
 
         self.handle_close(ui);
     }
-}
-
-/// Where this client keeps what it manages.
-///
-/// Under the user's local data directory, not beside the executable: a program
-/// directory may be read-only, may be shared between users, and is replaced
-/// wholesale by an upgrade.
-fn state_root() -> Result<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .context("locate a local data directory for the managed state root")?;
-    let root = base.join("Astrolabe").join("devices");
-    std::fs::create_dir_all(&root)
-        .with_context(|| format!("create the managed state root {}", root.display()))?;
-    Ok(root)
 }
 
 fn tracing_subscriber_init() {

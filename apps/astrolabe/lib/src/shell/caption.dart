@@ -1,0 +1,244 @@
+/// The window's own controls: minimise, maximise/restore, close — and the bar
+/// itself, which is what you drag.
+///
+/// The window has no system title bar, so nothing draws these but this file.
+/// What that buys is one surface at the top of the window instead of two in
+/// colours the theme never agreed on; what it costs is the system menu on
+/// `Alt+Space`, and Windows 11's snap-layout flyout, which needs a hit-test
+/// reply no Flutter window plugin offers.
+///
+/// ## The marks are painted, not typed
+///
+/// Windows draws these glyphs from Segoe Fluent Icons at private-use code
+/// points, and the Unicode near-misses (`─ ☐ ✕`) are a different weight from
+/// each other in every font that carries all three. Four line segments and two
+/// rectangles are fewer moving parts than a font fallback chain, and they stay
+/// crisp at any scale factor.
+///
+/// ## Closing is not stopping
+///
+/// The close control asks the shell to close, and the shell minimises to the
+/// tray, because a person who clicked the wrong X did not ask their Spaces to
+/// stop converging. That decision stays in one place: this file raises the
+/// intent and never acts on it.
+library;
+
+import 'package:covalence/covalence.dart';
+import 'package:flutter/widgets.dart';
+
+/// One control's width. Windows' own caption metric, pinned: a person aims at
+/// the top-right corner with muscle memory built on every other window on the
+/// machine, and a cluster that is narrower than the system's is one they miss.
+const double kCaptionWidth = 46;
+
+/// The mark inside it — pinned like every other mark, because how big a close
+/// cross reads is a claim about the cross rather than about the bar around it.
+const double kCaptionMark = 10;
+
+/// How wide the three of them are together.
+const double kCaptionSpan = kCaptionWidth * 3;
+
+enum _Mark { minimise, maximise, restore, close }
+
+/// The three controls, flush with the window's corner.
+///
+/// Nothing may sit between these and the corner: a maximised window's corner is
+/// the easiest pixel on the screen to hit, and a cluster inset from it by even
+/// a point gives that up.
+class CaptionControls extends StatelessWidget {
+  const CaptionControls({
+    super.key,
+    required this.height,
+    required this.maximised,
+    required this.onMinimise,
+    required this.onToggleMaximise,
+    required this.onClose,
+  });
+
+  final double height;
+  final bool maximised;
+  final VoidCallback onMinimise;
+  final VoidCallback onToggleMaximise;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _CaptionButton(
+          height: height,
+          mark: _Mark.minimise,
+          semanticLabel: 'Minimise',
+          tooltip: 'Out of the way',
+          onPressed: onMinimise,
+        ),
+        _CaptionButton(
+          height: height,
+          mark: maximised ? _Mark.restore : _Mark.maximise,
+          semanticLabel: maximised ? 'Restore' : 'Maximise',
+          tooltip: maximised
+              ? 'Restore the window to its previous size'
+              : 'Fill the screen',
+          onPressed: onToggleMaximise,
+        ),
+        _CaptionButton(
+          height: height,
+          mark: _Mark.close,
+          semanticLabel: 'Close',
+          tooltip: 'Close (it keeps serving in the tray)',
+          danger: true,
+          onPressed: onClose,
+        ),
+      ],
+    );
+  }
+}
+
+class _CaptionButton extends StatefulWidget {
+  const _CaptionButton({
+    required this.height,
+    required this.mark,
+    required this.semanticLabel,
+    required this.tooltip,
+    required this.onPressed,
+    this.danger = false,
+  });
+
+  final double height;
+  final _Mark mark;
+  final String semanticLabel;
+  final String tooltip;
+  final VoidCallback onPressed;
+  final bool danger;
+
+  @override
+  State<_CaptionButton> createState() => _CaptionButtonState();
+}
+
+class _CaptionButtonState extends State<_CaptionButton> {
+  bool _hovered = false;
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    // The fill under a control whose click ends something is the theme's own
+    // error colour, not a fixed `#C42B1C`: a hard-coded red is invisible in
+    // exactly the scheme somebody chose because they could not see.
+    final Color? fill = switch ((_pressed, _hovered, widget.danger)) {
+      (true, _, true) => Err.l900.resolve(context),
+      (_, true, true) => Err.l800.resolve(context),
+      (true, _, false) => Surface.l200.resolve(context),
+      (_, true, false) => Surface.l100.resolve(context),
+      _ => null,
+    };
+    // The red is chromatic and does not invert with polarity, so the ink on it
+    // is `onSolid` rather than a surface step — the same rule the design
+    // system's own destructive button follows.
+    final Color ink = widget.danger && (_hovered || _pressed)
+        ? Surface.onSolid.resolve(context)
+        : Glyph.l950.resolve(context);
+
+    return Semantics(
+      button: true,
+      label: widget.semanticLabel,
+      child: Tooltip(
+        message: widget.tooltip,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.basic,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() {
+            _hovered = false;
+            _pressed = false;
+          }),
+          child: GestureDetector(
+            onTapDown: (_) => setState(() => _pressed = true),
+            onTapCancel: () => setState(() => _pressed = false),
+            onTap: () {
+              setState(() => _pressed = false);
+              widget.onPressed();
+            },
+            child: CustomPaint(
+              // Square, and to the edge. A rounded fill would leave the
+              // window's own corner unpainted at exactly the pixel a maximised
+              // window is aimed at.
+              painter: _CaptionPainter(mark: widget.mark, fill: fill, ink: ink),
+              child: SizedBox(width: kCaptionWidth, height: widget.height),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CaptionPainter extends CustomPainter {
+  const _CaptionPainter({required this.mark, required this.fill, required this.ink});
+
+  final _Mark mark;
+  final Color? fill;
+  final Color ink;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (fill != null) {
+      canvas.drawRect(Offset.zero & size, Paint()..color = fill!);
+    }
+    final stroke = Paint()
+      ..color = ink
+      ..strokeWidth = 1
+      ..isAntiAlias = false
+      ..style = PaintingStyle.stroke;
+
+    // Rounded to whole pixels: these are one-pixel lines, and half a pixel out
+    // turns a crisp hairline into two grey ones — at this size the difference
+    // between a system glyph and a smudge.
+    final centre = Offset(
+      (size.width / 2).roundToDouble(),
+      (size.height / 2).roundToDouble(),
+    );
+    final half = kCaptionMark / 2;
+    final box = Rect.fromCenter(center: centre, width: kCaptionMark, height: kCaptionMark);
+
+    switch (mark) {
+      case _Mark.minimise:
+        canvas.drawLine(
+          Offset(centre.dx - half, centre.dy + 0.5),
+          Offset(centre.dx + half, centre.dy + 0.5),
+          stroke,
+        );
+      case _Mark.maximise:
+        canvas.drawRect(box.deflate(0.5), stroke);
+      case _Mark.restore:
+        // Two sheets: the one in front, and the corner of the one behind it
+        // showing past its top-right. Drawn as two segments rather than a
+        // second rectangle so nothing has to be filled — a filled backing sheet
+        // would have to know the hover colour underneath it.
+        const offset = 3.0;
+        final front = Rect.fromLTRB(
+          box.left,
+          box.top + offset,
+          box.right - offset,
+          box.bottom,
+        );
+        canvas.drawRect(front.deflate(0.5), stroke);
+        canvas.drawLine(
+          Offset(front.left + offset, box.top + 0.5),
+          Offset(box.right - 0.5, box.top + 0.5),
+          stroke,
+        );
+        canvas.drawLine(
+          Offset(box.right - 0.5, box.top + 0.5),
+          Offset(box.right - 0.5, front.bottom - offset),
+          stroke,
+        );
+      case _Mark.close:
+        canvas.drawLine(box.topLeft, box.bottomRight, stroke);
+        canvas.drawLine(box.topRight, box.bottomLeft, stroke);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CaptionPainter old) =>
+      old.mark != mark || old.fill != fill || old.ink != ink;
+}

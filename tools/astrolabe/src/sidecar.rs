@@ -33,6 +33,28 @@ pub const EXPECTED: &str = lait::VERSION;
 /// person installed last decide; not from configuration, which would make it
 /// user input; not from an environment variable, which is user input a parent
 /// process can set.
+/// Where this client keeps what it manages.
+///
+/// Under the user's local data directory, not beside the executable: a program
+/// directory may be read-only, may be shared between users, and is replaced
+/// wholesale by an upgrade.
+///
+/// It lives beside the sidecar's own resolution because they are the same kind
+/// of question — *where does this installation keep its things* — and because
+/// the interface must not be the one answering it. A path computed on the far
+/// side of the bridge would be a second opinion about where the client's state
+/// lives, and the two would differ on exactly the machine where it mattered.
+pub fn state_root() -> Result<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .context("locate a local data directory for the managed state root")?;
+    let root = base.join("Astrolabe").join("devices");
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create the managed state root {}", root.display()))?;
+    Ok(root)
+}
+
 pub fn resolve() -> Result<PathBuf> {
     let current = std::env::current_exe().context("locate the running executable")?;
     Ok(beside(&current))

@@ -24,3 +24,8 @@ ci/coverage-manifest.txt.new
 
 # proptest saves shrunk counterexamples here and they SHOULD be committed —
 # but only when a real failure produced them, never a deliberate mutation.
+
+# Flutter build output for the client.
+apps/astrolabe/build/
+apps/astrolabe/.dart_tool/
+apps/astrolabe/windows/flutter/ephemeral/
