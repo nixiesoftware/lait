@@ -4,25 +4,25 @@ lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, ea
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-968 crates, under 50 distinct licence expressions.
+989 crates, under 51 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 430 |
-| `MIT` | 210 |
-| `Apache-2.0 OR MIT` | 94 |
-| `MIT/Apache-2.0` | 45 |
+| `MIT OR Apache-2.0` | 438 |
+| `MIT` | 216 |
+| `Apache-2.0 OR MIT` | 96 |
+| `MIT/Apache-2.0` | 47 |
 | `Apache-2.0` | 32 |
 | `Unicode-3.0` | 25 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 18 |
 | `Zlib OR Apache-2.0 OR MIT` | 17 |
 | `BSD-3-Clause` | 8 |
 | `MIT OR Apache-2.0 OR Zlib` | 8 |
+| `Apache-2.0/MIT` | 7 |
 | `MPL-2.0+` | 6 |
 | `Unlicense OR MIT` | 6 |
-| `Apache-2.0/MIT` | 5 |
 | `BSD-2-Clause` | 4 |
 | `Unlicense/MIT` | 4 |
 | `Zlib` | 4 |
@@ -43,6 +43,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | `(MIT OR Apache-2.0) AND Apache-2.0` | 1 |
 | `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` | 1 |
 | `(MIT OR Apache-2.0) AND Unicode-3.0` | 1 |
+| `(see the crate source)` | 1 |
 | `0BSD OR Apache-2.0` | 1 |
 | `0BSD OR CC0-1.0` | 1 |
 | `0BSD OR MIT OR Apache-2.0` | 1 |
@@ -74,15 +75,19 @@ Listed here is every crate reachable from this workspace through normal and buil
 | accesskit_unix | 0.21.1 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
 | accesskit_windows | 0.32.1 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
 | accesskit_winit | 0.32.2 | `Apache-2.0` | <https://github.com/AccessKit/accesskit> |
+| addr2line | 0.25.1 | `Apache-2.0 OR MIT` | <https://github.com/gimli-rs/addr2line> |
 | adler2 | 2.0.1 | `0BSD OR MIT OR Apache-2.0` | <https://github.com/oyvindln/adler2> |
 | aead | 0.5.2 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/traits> |
 | aes | 0.8.4 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/block-ciphers> |
 | aes-gcm | 0.10.3 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/AEADs> |
 | ahash | 0.8.12 | `MIT OR Apache-2.0` | <https://github.com/tkaitchuck/ahash> |
 | aho-corasick | 1.1.4 | `Unlicense OR MIT` | <https://github.com/BurntSushi/aho-corasick> |
+| allo-isolate | 0.1.27 | `(see the crate source)` | <https://github.com/sunshine-protocol/allo-isolate> |
 | allocator-api2 | 0.2.21 | `MIT OR Apache-2.0` | <https://github.com/zakarumych/allocator-api2> |
 | android-activity | 0.6.1 | `MIT OR Apache-2.0` | <https://github.com/rust-mobile/android-activity> |
 | android-properties | 0.2.2 | `MIT` | <https://github.com/miklelappo/android-properties> |
+| android_log-sys | 0.3.2 | `MIT OR Apache-2.0` | <https://github.com/rust-mobile/android_log-sys-rs> |
+| android_logger | 0.15.1 | `MIT OR Apache-2.0` | <https://github.com/rust-mobile/android_logger-rs> |
 | android_system_properties | 0.1.5 | `MIT/Apache-2.0` | <https://github.com/nical/android_system_properties> |
 | anstream | 1.0.0 | `MIT OR Apache-2.0` | <https://github.com/rust-cli/anstyle.git> |
 | anstyle | 1.0.14 | `MIT OR Apache-2.0` | <https://github.com/rust-cli/anstyle.git> |
@@ -117,6 +122,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | async-task | 4.7.1 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/async-task> |
 | async-trait | 0.1.89 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/async-trait> |
 | async_io_stream | 0.3.3 | `Unlicense` | <https://github.com/najamelan/async_io_stream> |
+| atomic | 0.5.3 | `Apache-2.0/MIT` | <https://github.com/Amanieu/atomic-rs> |
 | atomic-polyfill | 1.0.3 | `MIT OR Apache-2.0` | <https://github.com/embassy-rs/atomic-polyfill> |
 | atomic-waker | 1.1.2 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/atomic-waker> |
 | atspi | 0.29.0 | `Apache-2.0 OR MIT` | <https://github.com/odilia-app/atspi> |
@@ -130,6 +136,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | axum-core | 0.5.6 | `MIT` | <https://github.com/tokio-rs/axum> |
 | az | 1.3.0 | `MIT/Apache-2.0` | <https://gitlab.com/tspiteri/az> |
 | backon | 1.6.0 | `Apache-2.0` | <https://github.com/Xuanwo/backon> |
+| backtrace | 0.3.76 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/backtrace-rs> |
 | base16ct | 0.2.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats/tree/master/base16ct> |
 | base16ct | 1.0.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
 | base64 | 0.22.1 | `MIT OR Apache-2.0` | <https://github.com/marshallpierce/rust-base64> |
@@ -151,6 +158,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | block2 | 0.5.1 | `MIT` | <https://github.com/madsmtm/objc2> |
 | block2 | 0.6.2 | `MIT` | <https://github.com/madsmtm/objc2> |
 | blocking | 1.6.2 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/blocking> |
+| build-target | 0.4.0 | `MIT` | <https://github.com/OpenByteDev/build-target> |
 | bumpalo | 3.20.3 | `MIT OR Apache-2.0` | <https://github.com/fitzgen/bumpalo> |
 | by_address | 1.2.1 | `MIT OR Apache-2.0` | <https://github.com/mbrubeck/by_address> |
 | bytemuck | 1.25.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/Lokathor/bytemuck> |
@@ -194,6 +202,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | comemo-macros | 0.5.1 | `MIT OR Apache-2.0` | <https://github.com/typst/comemo> |
 | concurrent-queue | 2.5.0 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/concurrent-queue> |
 | console | 0.16.4 | `MIT` | <https://github.com/console-rs/console> |
+| console_error_panic_hook | 0.1.7 | `Apache-2.0/MIT` | <https://github.com/rustwasm/console_error_panic_hook> |
 | const-crc32-nostd | 1.3.1 | `MIT` | <https://git.shipyard.rs/jstrong/const-crc32> |
 | const-oid | 0.10.2 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
 | const-oid | 0.9.6 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats/tree/master/const-oid> |
@@ -233,11 +242,14 @@ Listed here is every crate reachable from this workspace through normal and buil
 | darling_core | 0.23.0 | `MIT` | <https://github.com/TedDriggs/darling> |
 | darling_macro | 0.20.11 | `MIT` | <https://github.com/TedDriggs/darling> |
 | darling_macro | 0.23.0 | `MIT` | <https://github.com/TedDriggs/darling> |
+| dart-sys | 4.1.5 | `MIT OR Apache-2.0` | <https://github.com/dart-sys/dart-sys> |
+| dashmap | 5.5.3 | `MIT` | <https://github.com/xacrimon/dashmap> |
 | dashmap | 6.2.1 | `MIT` | <https://github.com/xacrimon/dashmap> |
 | data-encoding | 2.11.0 | `MIT` | <https://github.com/ia0/data-encoding> |
 | data-encoding-macro | 0.1.20 | `MIT` | <https://github.com/ia0/data-encoding> |
 | data-encoding-macro-internal | 0.1.18 | `MIT` | <https://github.com/ia0/data-encoding> |
 | data-url | 0.3.2 | `MIT OR Apache-2.0` | <https://github.com/servo/rust-url> |
+| delegate-attr | 0.3.1 | `MIT` | <https://github.com/upsuper/delegate-attr> |
 | der | 0.7.10 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats/tree/master/der> |
 | der | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
 | der-parser | 10.0.0 | `MIT OR Apache-2.0` | <https://github.com/rusticata/der-parser.git> |
@@ -292,6 +304,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | enum_dispatch | 0.3.13 | `MIT OR Apache-2.0` | <https://gitlab.com/antonok/enum_dispatch> |
 | enumflags2 | 0.7.12 | `MIT OR Apache-2.0` | <https://github.com/meithecatte/enumflags2> |
 | enumflags2_derive | 0.7.12 | `MIT OR Apache-2.0` | <https://github.com/meithecatte/enumflags2> |
+| env_filter | 0.1.4 | `MIT OR Apache-2.0` | <https://github.com/rust-cli/env_logger> |
 | epaint | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/emilk/egui/tree/main/crates/epaint> |
 | epaint_default_fonts | 0.35.0 | `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` | <https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts> |
 | equivalent | 1.0.2 | `Apache-2.0 OR MIT` | <https://github.com/indexmap-rs/equivalent> |
@@ -312,6 +325,8 @@ Listed here is every crate reachable from this workspace through normal and buil
 | fixedbitset | 0.5.7 | `MIT OR Apache-2.0` | <https://github.com/petgraph/fixedbitset> |
 | flate2 | 1.1.9 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/flate2-rs> |
 | float-cmp | 0.9.0 | `MIT` | <https://github.com/mikedilger/float-cmp> |
+| flutter_rust_bridge | 2.12.0 | `MIT` | <https://github.com/fzyzcjy/flutter_rust_bridge> |
+| flutter_rust_bridge_macros | 2.12.0 | `MIT` | <https://github.com/fzyzcjy/flutter_rust_bridge> |
 | fnv | 1.0.7 | `Apache-2.0 / MIT` | <https://github.com/servo/rust-fnv> |
 | foldhash | 0.1.5 | `Zlib` | <https://github.com/orlp/foldhash> |
 | foldhash | 0.2.0 | `Zlib` | <https://github.com/orlp/foldhash> |
@@ -347,6 +362,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | getrandom | 0.4.2 | `MIT OR Apache-2.0` | <https://github.com/rust-random/getrandom> |
 | ghash | 0.5.1 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/universal-hashes> |
 | gif | 0.14.2 | `MIT OR Apache-2.0` | <https://github.com/image-rs/image-gif> |
+| gimli | 0.32.3 | `MIT OR Apache-2.0` | <https://github.com/gimli-rs/gimli> |
 | gl_generator | 0.14.0 | `Apache-2.0` | <https://github.com/brendanzab/gl-rs/> |
 | glidesort | 0.1.2 | `MIT OR Apache-2.0` | <https://github.com/orlp/glidesort> |
 | glifo | 0.1.1 | `Apache-2.0 OR MIT` | <https://github.com/linebender/vello> |
@@ -489,6 +505,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | mac-addr | 0.3.0 | `MIT` | <https://github.com/shellrow/mac-addr> |
 | matchers | 0.2.0 | `MIT` | <https://github.com/hawkw/matchers> |
 | matchit | 0.8.4 | `MIT AND BSD-3-Clause` | <https://github.com/ibraheemdev/matchit> |
+| md-5 | 0.10.6 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/hashes> |
 | md5 | 0.7.0 | `Apache-2.0/MIT` | <https://github.com/stainless-steel/md5> |
 | memchr | 2.8.1 | `Unlicense OR MIT` | <https://github.com/BurntSushi/memchr> |
 | memmap2 | 0.9.11 | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/memmap2-rs> |
@@ -530,6 +547,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | num-iter | 0.1.46 | `MIT OR Apache-2.0` | <https://github.com/rust-num/num-iter> |
 | num-rational | 0.4.2 | `MIT OR Apache-2.0` | <https://github.com/rust-num/num-rational> |
 | num-traits | 0.2.19 | `MIT OR Apache-2.0` | <https://github.com/rust-num/num-traits> |
+| num_cpus | 1.17.0 | `MIT OR Apache-2.0` | <https://github.com/seanmonstar/num_cpus> |
 | num_enum | 0.7.6 | `BSD-3-Clause OR MIT OR Apache-2.0` | <https://github.com/illicitonion/num_enum> |
 | num_enum_derive | 0.7.6 | `BSD-3-Clause OR MIT OR Apache-2.0` | <https://github.com/illicitonion/num_enum> |
 | num_threads | 0.1.7 | `MIT OR Apache-2.0` | <https://github.com/jhpratt/num_threads> |
@@ -563,6 +581,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | objc2-ui-kit | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-uniform-type-identifiers | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-user-notifications | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
+| object | 0.37.3 | `Apache-2.0 OR MIT` | <https://github.com/gimli-rs/object> |
 | object | 0.39.1 | `Apache-2.0 OR MIT` | <https://github.com/gimli-rs/object> |
 | oid-registry | 0.8.1 | `MIT OR Apache-2.0` | <https://github.com/rusticata/oid-registry.git> |
 | once_cell | 1.21.4 | `MIT OR Apache-2.0` | <https://github.com/matklad/once_cell> |
@@ -573,6 +592,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | orbclient | 0.3.55 | `MIT` | <https://gitlab.redox-os.org/redox-os/orbclient> |
 | ordered-float | 5.3.0 | `MIT` | <https://github.com/reem/rust-ordered-float> |
 | ordered-stream | 0.2.0 | `MIT OR Apache-2.0` | <https://github.com/danieldg/ordered-stream> |
+| oslog | 0.2.0 | `MIT` | <https://github.com/steven-joruk/oslog> |
 | palette | 0.7.7 | `MIT OR Apache-2.0` | <https://github.com/Ogeon/palette> |
 | palette_derive | 0.7.7 | `MIT OR Apache-2.0` | <https://github.com/Ogeon/palette> |
 | palette_math | 0.7.7 | `MIT OR Apache-2.0` | <https://github.com/Ogeon/palette> |
@@ -681,6 +701,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | roman-numerals-rs | 3.1.0 | `0BSD OR CC0-1.0` | <https://github.com/AA-Turner/roman-numerals/> |
 | roxmltree | 0.21.1 | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/roxmltree> |
 | rust_decimal | 1.42.1 | `MIT` | <https://github.com/paupino/rust-decimal> |
+| rustc-demangle | 0.1.28 | `MIT/Apache-2.0` | <https://github.com/rust-lang/rustc-demangle> |
 | rustc-hash | 1.1.0 | `Apache-2.0/MIT` | <https://github.com/rust-lang-nursery/rustc-hash> |
 | rustc-hash | 2.1.2 | `Apache-2.0 OR MIT` | <https://github.com/rust-lang/rustc-hash> |
 | rustc_version | 0.4.1 | `MIT OR Apache-2.0` | <https://github.com/djc/rustc-version-rs> |
@@ -794,6 +815,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | thiserror-impl | 1.0.69 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/thiserror> |
 | thiserror-impl | 2.0.18 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/thiserror> |
 | thread_local | 1.1.9 | `MIT OR Apache-2.0` | <https://github.com/Amanieu/thread_local-rs> |
+| threadpool | 1.8.1 | `MIT/Apache-2.0` | <https://github.com/rust-threadpool/rust-threadpool> |
 | tiff | 0.11.3 | `MIT` | <https://github.com/image-rs/image-tiff> |
 | time | 0.3.47 | `MIT OR Apache-2.0` | <https://github.com/time-rs/time> |
 | time-core | 0.1.8 | `MIT OR Apache-2.0` | <https://github.com/time-rs/time> |
