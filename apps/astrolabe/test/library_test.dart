@@ -173,6 +173,11 @@ void main() {
     await tester.tap(find.text('Launch'));
     await tester.pump();
 
+    expect(tester.widget<Text>(find.text('Launch')).style?.fontSize, 24);
+    expect(
+      tester.widget<Icon>(find.byIcon(AppIcons.playArrow)).size,
+      24,
+    );
     expect(asked, hasLength(1));
     expect(
       asked.single,
@@ -309,6 +314,12 @@ void main() {
 
     expect(find.text('Launching'), findsWidgets);
     expect(find.text('Launch'), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('Launching').last).style?.fontSize,
+      24,
+    );
+    expect(
+        tester.widget<Progress>(find.byType(Progress)).size, ProgressSize.lg);
     expect(asked, isEmpty);
   });
 
@@ -332,6 +343,18 @@ void main() {
     expect(find.text('Running'), findsWidgets);
     expect(find.text('Cancel'), findsNothing);
     expect(find.text('Stop'), findsNothing);
+
+    final openBand = find.byKey(const ValueKey('library-open-band'));
+    final runningLabel = find.descendant(
+      of: openBand,
+      matching: find.text('Running'),
+    );
+    final runningIcon = find.descendant(
+      of: openBand,
+      matching: find.byIcon(AppIcons.checkCircle),
+    );
+    expect(tester.widget<Text>(runningLabel).style?.fontSize, 24);
+    expect(tester.widget<Icon>(runningIcon).size, 24);
 
     final goTo = find.widgetWithIcon(Button, AppIcons.openInNew);
     expect(goTo, findsOneWidget);

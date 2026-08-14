@@ -18,6 +18,7 @@ import '../shell/type.dart';
 
 const double kRailWidth = 224;
 const double kHeroHeight = 196;
+const double _worldActionGlyphSize = 24;
 
 class LibrarySurface extends StatefulWidget {
   const LibrarySurface({super.key});
@@ -646,16 +647,17 @@ class _WorldAction extends StatelessWidget {
     final t = context.tokens;
 
     if (running) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
+      return Wrap(
+        spacing: t.size.md,
+        runSpacing: t.size.md,
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           _LifecycleState(
             label: 'Running',
             icon: AppIcons.checkCircle,
             tone: context.status.success.l800,
+            large: true,
           ),
-          t.gap.x(Space.md),
           Button(
             onPressed: onOpen,
             semanticLabel: 'Go to running World',
@@ -673,18 +675,36 @@ class _WorldAction extends StatelessWidget {
         label: 'Launching',
         loading: true,
         tone: context.text.l950,
+        large: true,
       );
     }
 
     if (onOpen != null) {
       return Button(
         onPressed: onOpen,
-        label: 'Launch',
         semanticLabel: 'Launch World',
-        icon: AppIcons.playArrow,
         variant: ButtonVariant.primary,
         size: ButtonSize.lg,
         tooltip: _openTooltip(showing, running: false),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              AppIcons.playArrow,
+              size: _worldActionGlyphSize,
+              color: context.surface.l50,
+            ),
+            t.gap.x(Space.sm),
+            Text(
+              'Launch',
+              style: context.bodyStyle.copyWith(
+                color: context.surface.l50,
+                fontSize: _worldActionGlyphSize,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ],
+        ),
       );
     }
 
@@ -706,12 +726,14 @@ class _LifecycleState extends StatelessWidget {
     required this.tone,
     this.icon,
     this.loading = false,
+    this.large = false,
   });
 
   final String label;
   final Color tone;
   final IconData? icon;
   final bool loading;
+  final bool large;
 
   @override
   Widget build(BuildContext context) {
@@ -734,16 +756,22 @@ class _LifecycleState extends StatelessWidget {
           children: [
             if (loading)
               Progress.spinner(
-                size: ProgressSize.xs,
+                size: large ? ProgressSize.lg : ProgressSize.xs,
                 color: tone,
               )
             else if (icon != null)
-              Icon(icon, size: 16, color: tone),
+              Icon(
+                icon,
+                size: large ? _worldActionGlyphSize : 16,
+                color: tone,
+              ),
             t.gap.x(Space.sm),
             Text(
               label,
               style: context.bodyStyle.copyWith(
                 color: tone,
+                fontSize:
+                    large ? _worldActionGlyphSize : context.bodyStyle.fontSize,
                 fontWeight: FontWeight.w700,
               ),
             ),

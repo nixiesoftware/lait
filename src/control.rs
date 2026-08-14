@@ -1629,6 +1629,11 @@ pub struct BookHitView {
     /// which is not a name and must not be drawn as one.
     #[serde(default)]
     pub name: String,
+    /// The card's stored picture (`<mime>;base64,<data>`), or `None`. This is
+    /// how an application resolves a face for a handle: through the book,
+    /// never through its own name-matched table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
 }
 
 /// Scoped decoration. `coverage` is `unavailable` when the Orbit is vacant.

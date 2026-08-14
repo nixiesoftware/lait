@@ -7,8 +7,7 @@ import 'package:astrolabe/src/shell/caption.dart';
 import 'package:astrolabe/src/shell/shell.dart';
 import 'package:astrolabe/src/shell/theme.dart';
 import 'package:astrolabe/src/shell/window.dart';
-import 'package:astrolabe/src/surfaces/surfaces.dart' show Surface;
-import 'package:covalence/covalence.dart' hide Surface;
+import 'package:covalence/covalence.dart';
 import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -89,8 +88,21 @@ void main() {
 
     expect(
         tester.getSize(find.byType(CaptionControls)).height, kUtilityBarHeight);
+    expect(tester.getSize(find.byKey(kPrimaryNavigationKey)).height,
+        kPrimaryBarHeight);
+    // The current destination is a held-down fill on its button. It cannot be
+    // `Button.active`: this app registers `FocusRing.none`, under which that
+    // flag draws nothing at all.
     expect(
-        tester.getSize(find.byType(Tabs<Surface>)).height, kPrimaryBarHeight);
+      tester.widget<Button>(find.widgetWithText(Button, 'Library'))
+          .backgroundColor,
+      isNotNull,
+    );
+    expect(
+      tester.widget<Button>(find.widgetWithText(Button, 'Spaces'))
+          .backgroundColor,
+      isNull,
+    );
     expect(find.text('Refresh local state'), findsNothing);
     expect(find.text('Use light theme'), findsNothing);
     expect(
@@ -154,5 +166,17 @@ void main() {
     expect(find.text('Heads'), findsOneWidget);
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('Diagnostics'), findsOneWidget);
+    // Both tiers mark the current item the same way: the Operations group
+    // button stays held down, and so does the operation now showing.
+    expect(
+      tester.widget<Button>(find.widgetWithText(Button, 'Operations'))
+          .backgroundColor,
+      isNotNull,
+    );
+    expect(
+      tester.widget<Button>(find.widgetWithText(Button, 'Devices'))
+          .backgroundColor,
+      isNotNull,
+    );
   });
 }

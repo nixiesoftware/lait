@@ -294,15 +294,21 @@ impl AddressBookService {
                 continue;
             }
             for card in book.authored_cards_for(&handle) {
-                let name = book
+                let (name, picture) = book
                     .cards
                     .get(&card)
-                    .map(|card| card.name.value.clone())
+                    .map(|card| {
+                        (
+                            card.name.value.clone(),
+                            Some(card.picture.value.clone()).filter(|picture| !picture.is_empty()),
+                        )
+                    })
                     .unwrap_or_default();
                 hits.push(BookHitView {
                     card: card.to_string(),
                     handle: handle.to_wire(),
                     name,
+                    picture,
                 });
             }
         }
@@ -364,7 +370,11 @@ impl AddressBookService {
     /// Called by the daemon funnel after a successful `AgentProvision`,
     /// because a Station has no reach into the identity-scoped book. Without
     /// this, the one verb that creates an agent leaves it unnamed on the one
-    /// surface built to show agents.
+    /// surface built to show agents. The card also receives the canonical
+    /// face the product ships for its tool, when one exists and the card has
+    /// none of its own — applications then resolve the picture through the
+    /// book like any other identity fact, instead of matching names
+    /// themselves.
     pub(crate) fn name_agent(&self, space: &mechanics::ids::SpaceId, actor: &str, name: &str) {
         let Some(actor) = ActorId::parse(actor) else {
             return;
@@ -373,7 +383,54 @@ impl AddressBookService {
             space: space.clone(),
             actor,
         };
-        let _ = self.upsert_named(name, handle);
+        let _ = self.upsert_named(name, handle.clone());
+        self.stamp_face_if_absent(&handle, name);
+    }
+
+    /// Put the shipped canonical face onto the card carrying `handle`, iff a
+    /// face exists for `name` and the card has no picture. An authored
+    /// picture is never overwritten — the ship is a default, not an
+    /// authority.
+    fn stamp_face_if_absent(&self, handle: &Handle, name: &str) {
+        let Some(bytes) = canonical_agent_face(name) else {
+            return;
+        };
+        let Ok(stored) = addressbook::encode_picture(bytes) else {
+            return;
+        };
+        let Ok(author) = self.author() else {
+            return;
+        };
+        let Ok(mut engine) = self.engine.lock() else {
+            return;
+        };
+        let Ok(book) = engine.book() else {
+            return;
+        };
+        let Some(id) = book.authored_cards_for(handle).into_iter().next() else {
+            return;
+        };
+        let has_picture = book
+            .cards
+            .get(&id)
+            .map(|card| !card.picture.value.is_empty())
+            .unwrap_or(true);
+        if has_picture {
+            return;
+        }
+        if engine
+            .apply(
+                &author,
+                Action::SetPicture {
+                    id,
+                    picture: stored,
+                },
+            )
+            .is_err()
+        {
+            return;
+        }
+        let _ = self.store.replace(&engine);
     }
 
     fn migrate_status(&self, catalog: &Catalog) -> Response {
@@ -825,6 +882,22 @@ fn suggestion_view(staged: &StagedSuggestion) -> BookSuggestionView {
     }
 }
 
+/// The canonical face the product ships for a known coding agent, or none.
+///
+/// These are the same marks the issue tracker used to carry as its own
+/// name-matched table; the book is their home now, stamped at provision, and
+/// every application resolves them through the book API like any other
+/// identity fact. Matching is exact on the provisioned agent name — a face
+/// is a default for the tool's own name, never an inference.
+fn canonical_agent_face(name: &str) -> Option<&'static [u8]> {
+    match name.to_ascii_lowercase().as_str() {
+        "claude" => Some(include_bytes!("agent_faces/claude.png")),
+        "codex" => Some(include_bytes!("agent_faces/codex.png")),
+        "grok" => Some(include_bytes!("agent_faces/grok.png")),
+        _ => None,
+    }
+}
+
 /// The first non-empty authored name for a handle, or nothing. Decoration
 /// wants one name per row; a handle on several Cards answers with the first
 /// authored one rather than failing the row.
@@ -1225,7 +1298,30 @@ mod tests {
         };
         assert_eq!(seeds[0].nick, "Basalt", "the book names the pinned seed");
 
-        // The provision seam authors a Card the roster decoration then reads.
+        // The provision seam authors a Card the roster decoration then reads
+        // — and a known coding agent receives the canonical face the product
+        // ships, so applications resolve it through the book, never by
+        // matching names themselves.
+        let agent = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[14u8; 32]));
+        service.name_agent(&space, agent.as_str(), "claude");
+        let book = service.engine.lock().expect("lock").book().expect("book");
+        let claude = book
+            .authored_cards_for(&Handle::Actor {
+                space: space.clone(),
+                actor: agent,
+            })
+            .into_iter()
+            .next()
+            .expect("the agent card exists");
+        assert!(
+            book.cards[&claude]
+                .picture
+                .value
+                .starts_with("image/png;base64,"),
+            "a known agent's card carries the shipped canonical face"
+        );
+        drop(book);
+
         let scout = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[12u8; 32]));
         service.name_agent(&space, scout.as_str(), "scout");
         let mut roster = Response::Members {

@@ -1285,7 +1285,10 @@ export type HostRequest =
    *  verbs the browser uses; Astrolabe's book window is the full surface. ── */
   | { cmd: "book_lookup"; handle: string }
   | { cmd: "book_put"; card?: string | null; name: string; note?: string | null }
-  | { cmd: "book_link"; card: string; handle: string };
+  | { cmd: "book_link"; card: string; handle: string }
+  /** Scoped decoration: an orbit this head already authorized plus handles
+   *  present in that answer. How the tracker resolves names and faces. */
+  | { cmd: "book_resolve"; orbit: string; handles: string[] };
 
 /** `control.rs` `HostReply`, tagged by `host` inside a `kind: "host"` response. */
 export type HostReply =
@@ -1346,6 +1349,15 @@ export interface BookCardDto {
   self_claim: boolean;
 }
 
+/** One authored hit of a scoped resolution (`BookHitView`). */
+export interface BookHitDto {
+  card: string;
+  handle: string;
+  name: string;
+  /** The stored picture (`<mime>;base64,<data>`); absent means none authored. */
+  picture?: string | null;
+}
+
 /** One row of the local Orbit registry (`orbits::Entry`). */
 export interface OrbitEntry {
   space: string;
@@ -1394,6 +1406,8 @@ export type Response =
   | { kind: "labels"; labels: LabelDto[] }
   /** `control.rs` `BookView`, trimmed to what the browser reads. */
   | { kind: "book"; cards: BookCardDto[] }
+  /** `control.rs` `BookResolutionView` — authored hits for resolved handles. */
+  | { kind: "book_resolution"; hits: BookHitDto[]; coverage?: string | null }
   | { kind: "members"; members: MemberDto[] }
   | { kind: "assignments"; rows: AssignmentDto[] }
   | { kind: "member_log"; entries: MemberLogEntry[] }

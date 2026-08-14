@@ -2,9 +2,10 @@
 ///
 /// The upper tier is the draggable title bar: Astrolabe's identity block opens
 /// the application menu, while address-book access and the window controls stay
-/// flush with the opposite corner. The lower tier carries primary navigation
-/// with a persistent active underline. This is deliberately the same hierarchy
-/// as a desktop client such as Steam rather than a web page toolbar.
+/// flush with the opposite corner. The lower tier carries primary navigation as
+/// a menu bar of buttons — the current destination is a held-down fill, not an
+/// underline. This is deliberately the same hierarchy as a desktop client such
+/// as Steam rather than a web page toolbar.
 library;
 
 import 'package:covalence/covalence.dart' hide Surface;
@@ -253,26 +254,84 @@ const Set<Surface> _operationSurfaces = {
   Surface.diagnostics,
 };
 
+/// Locates the primary navigation tier from tests without exporting its type.
+const Key kPrimaryNavigationKey = ValueKey<String>('primary-navigation');
+
 class _PrimaryNavigation extends StatelessWidget {
   const _PrimaryNavigation({required this.surface, required this.onSurface});
 
   final Surface surface;
   final ValueChanged<Surface> onSurface;
 
+  /// The four primary destinations. Operations fronts a family, so its button
+  /// stays held down while any of that family's surfaces is current.
+  static const List<(Surface, String)> _destinations = [
+    (Surface.library, 'Library'),
+    (Surface.spaces, 'Spaces'),
+    (Surface.members, 'Members'),
+    (Surface.devices, 'Operations'),
+  ];
+
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
+    final current =
+        _operationSurfaces.contains(surface) ? Surface.devices : surface;
     return SizedBox(
       height: kPrimaryBarHeight,
-      child: Tabs<Surface>(
-        value: _operationSurfaces.contains(surface) ? Surface.devices : surface,
-        options: const [
-          TabsOption(value: Surface.library, label: 'Library'),
-          TabsOption(value: Surface.spaces, label: 'Spaces'),
-          TabsOption(value: Surface.members, label: 'Members'),
-          TabsOption(value: Surface.devices, label: 'Operations'),
-        ],
-        onChanged: onSurface,
+      child: Container(
+        key: kPrimaryNavigationKey,
+        // A button carries its own horizontal padding (Space.xl at sm), so the
+        // bar contributes the remainder and the first label lands on the same
+        // 16px gutter as the wordmark above and OPERATIONS below.
+        padding: t.padding.symmetric(h: Space.xs),
+        decoration: BoxDecoration(
+          color: context.layer.bg,
+          border: t.stroke.edge(bottom: context.layer.border),
+        ),
+        child: Row(
+          children: [
+            for (final (candidate, label) in _destinations) ...[
+              _MenuBarButton(
+                label: label,
+                current: candidate == current,
+                size: ButtonSize.sm,
+                onPressed: () => onSurface(candidate),
+              ),
+              t.gap.x(Space.xs),
+            ],
+          ],
+        ),
       ),
+    );
+  }
+}
+
+/// One destination in a menu bar: a ghost button whose *current* state is a
+/// held-down fill. Not `Button.active` — this app opts out of focus rings
+/// (`FocusRing.none`), which leaves that flag drawing nothing at all.
+class _MenuBarButton extends StatelessWidget {
+  const _MenuBarButton({
+    required this.label,
+    required this.current,
+    required this.onPressed,
+    this.size = ButtonSize.xs,
+  });
+
+  final String label;
+  final bool current;
+  final VoidCallback onPressed;
+  final ButtonSize size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Button(
+      onPressed: onPressed,
+      label: label,
+      variant: ButtonVariant.ghost,
+      size: size,
+      backgroundColor: current ? context.layer.bgActive : null,
+      style: current ? const Style([$Typo(weight: FontWeight.w600)]) : null,
     );
   }
 }
@@ -299,12 +358,10 @@ class _OperationsBar extends StatelessWidget {
             Text('OPERATIONS', style: context.factLabelStyle),
             t.gap.x(Space.xl3),
             for (final candidate in _operationSurfaces) ...[
-              Button(
-                onPressed: () => onSurface(candidate),
+              _MenuBarButton(
                 label: candidate.title,
-                active: candidate == surface,
-                variant: ButtonVariant.ghost,
-                size: ButtonSize.xs,
+                current: candidate == surface,
+                onPressed: () => onSurface(candidate),
               ),
               t.gap.x(Space.xs),
             ],

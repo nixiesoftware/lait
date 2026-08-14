@@ -1,8 +1,8 @@
 import { User } from "lucide-react";
 
 import type { MemberDto } from "../types";
-import { agentLogo } from "./agentLogos";
 import { avatarColor } from "./colors";
+import { faceUrl, useFace } from "./faces";
 import { cn } from "./primitives";
 import { short } from "./time";
 
@@ -23,26 +23,24 @@ export function memberName(key: string, member: MemberDto | undefined): string {
 /**
  * A member, as a circle.
  *
- * There are no avatar images in lait and there will not be: a member is an ed25519
- * key plus a **local** petname (`MemberDto.alias`, never synced). So identity has to
- * be drawn from the only thing everyone agrees on — the key — and the petname rides
- * on top for whoever set one.
+ * Identity is drawn from the only thing everyone agrees on — the key — with
+ * two authored layers riding on top, both resolved through the address book:
+ * the name (`MemberDto.alias`, decorated by the daemon from Cards) and, when
+ * a Card carries one, the **face** (`useFace`, the book's stored picture —
+ * canonical for known coding agents, authored for everyone else). The book is
+ * how applications resolve identity; this component keeps no matching table
+ * of its own.
  *
- * The colour is derived from the key, which makes it the one honest half of the
- * identity: two nodes that disagree about what to *call* someone still draw them the
- * same colour, because they agree about the key. The letter comes from the petname
- * and can differ between nodes — that is the model working, not a bug (S non-goal 6:
- * nicks are advisory, keys are authenticated).
+ * The colour is derived from the key, which makes it the one honest half of
+ * the identity: two nodes that disagree about what to *call* someone still
+ * draw them the same colour, because they agree about the key. The letter and
+ * the face come from each node's own book and can differ between nodes — that
+ * is the model working, not a bug (S non-goal 6: names are advisory, keys are
+ * authenticated).
  *
- * An unnamed member gets a glyph rather than a letter pulled from their key. A hex
- * digit is not an initial; rendering `7` as though it named someone would be
- * inventing an identity the system does not have.
- *
- * The one exception to "no images": a **sponsored agent** whose local petname names
- * a known coding tool (Claude / Codex / Grok) is drawn with that tool's brand mark
- * (`agentLogos`). It rides purely on the local `alias`, so it changes nothing about
- * the key-derived identity underneath — it is a rendering affordance, not a synced
- * fact.
+ * An unnamed member gets a glyph rather than a letter pulled from their key.
+ * A hex digit is not an initial; rendering `7` as though it named someone
+ * would be inventing an identity the system does not have.
  */
 export function Avatar({
   deviceKey,
@@ -53,7 +51,7 @@ export function Avatar({
 }: {
   /** The ed25519 key — the thing colour is derived from. */
   deviceKey: string;
-  /** Local petname. May be empty; then we draw a glyph, not a hex digit. */
+  /** The book's name for them. May be empty; then we draw a glyph, not a hex digit. */
   alias?: string;
   /** Renders the "you" ring. The one member you never have to identify by name. */
   me?: boolean;
@@ -63,35 +61,26 @@ export function Avatar({
   const name = alias?.trim() ?? "";
   const label = me ? "you" : name || `${deviceKey.slice(0, 8)}…`;
   const color = avatarColor(deviceKey);
-  // A recognized agent (by petname) shows its brand mark instead of the
-  // key-colour + initial. `me` never applies to an agent, so the brand chip and
-  // the "you" ring never collide.
-  const logo = me ? null : agentLogo(name);
+  // The authored face, from the book. `me` keeps the ring either way.
+  const face = useFace(deviceKey);
 
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center justify-center rounded-full font-medium text-white select-none",
+        "inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full font-medium text-white select-none",
         size === "sm" ? "size-avatar-sm text-[8px]" : "size-avatar-md text-[9px]",
         // `me` gets a ring rather than a different colour: the colour still has to
         // be the key's, or you'd be the one member whose avatar means something else.
         me && "ring-accent ring-1 ring-offset-1 ring-offset-[var(--color-bg)]",
         className,
       )}
-      style={{ background: logo ? logo.bg : color }}
+      style={{ background: color }}
       role="img"
-      aria-label={logo ? `${name} (${logo.title})` : label}
-      title={logo ? `${name} · ${logo.title}` : label}
+      aria-label={label}
+      title={label}
     >
-      {logo ? (
-        <svg
-          viewBox={logo.viewBox}
-          className={size === "sm" ? "size-icon-2xs" : "size-icon-xs"}
-          fill={logo.fg}
-          aria-hidden="true"
-        >
-          <path d={logo.path} />
-        </svg>
+      {face ? (
+        <img src={faceUrl(face)} alt="" aria-hidden="true" className="size-full object-cover" />
       ) : name ? (
         // One grapheme, not `name[0]` — a surrogate pair (an emoji petname) would
         // otherwise render as half a character.
