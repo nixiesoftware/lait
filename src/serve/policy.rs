@@ -322,4 +322,39 @@ mod tests {
             ttl_hours: None,
         }));
     }
+
+    /// The book is identity-scoped: every Book verb rides the host plane, its
+    /// mutations are writes, and none of it belongs to a Space route. Named
+    /// here so a future read-only credential tier inherits a classified list
+    /// rather than a guess.
+    #[test]
+    fn the_address_book_is_host_plane_and_its_mutations_are_writes() {
+        assert!(is_host_plane(&Request::BookList));
+        assert!(is_host_plane(&Request::BookResolve {
+            orbit: String::new(),
+            handles: Vec::new(),
+        }));
+        assert!(is_host_plane(&Request::BookMigrate));
+        assert!(!is_read(&Request::BookPut {
+            card: None,
+            name: String::new(),
+            note: None,
+        }));
+        assert!(!is_read(&Request::BookDelete {
+            card: String::new(),
+        }));
+        assert!(!is_read(&Request::BookMerge {
+            from: String::new(),
+            into: String::new(),
+        }));
+        assert!(!is_read(&Request::BookMigrate));
+        // BookGet and BookLookup stay reads; BookList is *labelled* a read but
+        // runs demand-driven alias import today — kept honest on the issue.
+        assert!(is_read(&Request::BookGet {
+            card: String::new(),
+        }));
+        assert!(is_read(&Request::BookLookup {
+            handle: String::new(),
+        }));
+    }
 }

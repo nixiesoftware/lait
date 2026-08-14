@@ -267,7 +267,7 @@ impl AddressBookService {
     fn migrate(&self, router: &Router) -> Response {
         let catalog = router.catalog();
         let mut state = self.load_migration();
-        let mut imported = 0usize;
+        let before = serde_json::to_vec(&state).unwrap_or_default();
         for binding in catalog.bindings() {
             if !matches!(binding.identity, StationIdentity::Own) {
                 continue;
@@ -302,14 +302,12 @@ impl AddressBookService {
             for (selector, name) in map {
                 if let Some(actor) = ActorId::parse(&selector) {
                     if self.import_actor(&space, &actor, &name) {
-                        imported = imported.saturating_add(1);
                         progress.imported = progress.imported.saturating_add(1);
                     }
                     continue;
                 }
                 if DeviceId::parse(&selector).is_some() {
                     if self.import_device(&selector, &name) {
-                        imported = imported.saturating_add(1);
                         progress.imported = progress.imported.saturating_add(1);
                     }
                     continue;
@@ -328,9 +326,14 @@ impl AddressBookService {
                 progress.finished = true;
             }
         }
-        let _ = imported;
-        if let Err(err) = self.save_migration(&state) {
-            return Response::err(err);
+        // Rewrite the durable record only when this pass changed it: BookList
+        // runs migrate on every read, and an unchanged pass owes the disk
+        // nothing.
+        let after = serde_json::to_vec(&state).unwrap_or_default();
+        if before != after {
+            if let Err(err) = self.save_migration(&state) {
+                return Response::err(err);
+            }
         }
         self.migrate_status(catalog)
     }
@@ -432,8 +435,9 @@ impl AddressBookService {
     }
 
     fn author(&self) -> Result<Author, String> {
-        let seed = crate::config::load_or_create_identity(&self.identity_dir)
-            .map_err(|err| err.to_string())?;
+        // Load-only: a book write must never mint identity material.
+        let seed =
+            crate::config::load_identity(&self.identity_dir).map_err(|err| err.to_string())?;
         Ok(Author {
             device: mechanics::actor::device_from_seed(&seed),
             at: mechanics::wallclock::now_millis(),
@@ -535,6 +539,10 @@ fn coverage_label(coverage: Coverage) -> &'static str {
 /// Snapshot of authored handles an active Orbit can currently speak for.
 #[derive(Debug, Clone)]
 pub(crate) struct HandleSnapshot {
+    /// The Space the snapshot was taken in. An Actor handle names a Space,
+    /// and a handle for another Space must not resolve here — the same actor
+    /// id in a different Space is a fact this Orbit cannot speak for.
+    pub space: mechanics::ids::SpaceId,
     pub actors: Vec<ActorId>,
     pub devices: Vec<DeviceId>,
 }
@@ -542,7 +550,9 @@ pub(crate) struct HandleSnapshot {
 impl HandleSnapshot {
     fn contains(&self, handle: &Handle) -> bool {
         match handle {
-            Handle::Actor { actor, .. } => self.actors.iter().any(|id| id == actor),
+            Handle::Actor { space, actor } => {
+                space == &self.space && self.actors.iter().any(|id| id == actor)
+            }
             Handle::Device(device) => self.devices.iter().any(|id| id == device),
             Handle::LocalAgent { .. } => false,
         }
@@ -564,6 +574,9 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp");
+        // A book write never mints identity material, so the identity must
+        // exist before the first put — same as a real daemon's startup.
+        crate::config::load_or_create_identity(&dir).expect("seed");
         let svc = AddressBookService::open(&dir).expect("open");
         let Response::Book(view) = svc.put(None, "Ada".into(), Some("n".into())) else {
             panic!("put should return the book");
@@ -599,5 +612,95 @@ mod tests {
         assert!(ActorId::parse("ab").is_none());
         assert!(DeviceId::parse("ab").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real migration path, against a real catalog binding: a full actor
+    /// id becomes a Card with an Actor handle, a short prefix stays pending
+    /// rather than being canonicalised, a corrupt file is left alone, and a
+    /// second pass duplicates nothing.
+    #[test]
+    fn migration_imports_full_ids_and_keeps_prefixes_pending() {
+        let base = std::env::temp_dir().join(format!(
+            "lait-book-mig-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let identity = base.join("identity");
+        let agents = base.join("agents");
+        let home = base.join("home");
+        let broken = base.join("broken");
+        for dir in [&identity, &agents, &home, &broken] {
+            std::fs::create_dir_all(dir).expect("temp");
+        }
+        // author() is load-only by design; the test mints the seed up front.
+        crate::config::load_or_create_identity(&identity).expect("seed");
+
+        let space = mechanics::ids::SpaceId::from_digest([7; 16]);
+        let actor = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[7u8; 32]));
+        std::fs::write(
+            home.join("aliases.json"),
+            format!(r#"{{"{}":"Ada","ab":"short"}}"#, actor.as_str()),
+        )
+        .expect("aliases");
+        std::fs::write(broken.join("aliases.json"), b"{ not json").expect("broken");
+
+        let entry = |home: &std::path::Path| crate::orbits::Entry {
+            space: space.as_str().to_owned(),
+            name: "Mig".into(),
+            path: home.display().to_string(),
+            origin: crate::orbits::Origin::Founded,
+            host_nick: String::new(),
+            last_opened: 0,
+            projects: vec![],
+        };
+        let router = Router::new(
+            crate::orbits::Catalog::with_entries(
+                crate::config::canonical(&identity),
+                crate::config::canonical(&agents),
+                false,
+                vec![entry(&home), entry(&broken)],
+            ),
+            crate::world::packages(),
+        );
+        let service = AddressBookService::open(&identity).expect("open");
+
+        let first = service.migrate(&router);
+        let Response::Book(view) = first else {
+            panic!("migrate answers the migration view");
+        };
+        assert_eq!(view.migration.imported, 1, "the full actor id imported");
+        assert_eq!(view.migration.pending, 1, "the prefix stayed pending");
+        assert!(
+            !view.migration.complete,
+            "a pending selector means incomplete"
+        );
+
+        let book = service.engine.lock().expect("lock").book().expect("book");
+        let handle = Handle::Actor {
+            space: space.clone(),
+            actor: actor.clone(),
+        };
+        let cards = book.authored_cards_for(&handle);
+        assert_eq!(cards.len(), 1, "one Card carries the imported handle");
+
+        // A second pass changes nothing: no duplicate Card, no duplicate
+        // pending row, and the corrupt file is still there, untouched.
+        let second = service.migrate(&router);
+        let Response::Book(view) = second else {
+            panic!("migrate answers the migration view");
+        };
+        assert_eq!(view.migration.imported, 1, "no re-import");
+        assert_eq!(view.migration.pending, 1, "no duplicate pending row");
+        let book = service.engine.lock().expect("lock").book().expect("book");
+        assert_eq!(book.authored_cards_for(&handle).len(), 1);
+        assert!(
+            broken.join("aliases.json").exists(),
+            "a corrupt aliases.json is left alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -2055,6 +2055,7 @@ impl StationHost {
             .filter_map(|member| ActorId::parse(&member.key))
             .collect();
         crate::daemon::address_book::HandleSnapshot {
+            space: self.address.space.clone(),
             actors,
             devices: self.mechanics.device_list(),
         }

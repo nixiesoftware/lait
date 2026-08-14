@@ -118,7 +118,11 @@ impl Endpoint {
 /// process reads the payload that follows as a malformed second request, which
 /// is precisely why this cannot be tolerated across the boundary: the failure
 /// would not be a decode error, it would be a desynchronised connection.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 10;
+/// v11: the identity-scoped address book — twelve `Book*` requests and the
+/// `Book`/`BookResolution` responses on the daemon route. Framing unchanged;
+/// the vocabulary grew, and a v10 daemon answers these verbs with "unknown
+/// variant" rather than a version complaint unless the handshake names it.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 11;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
 ///
@@ -199,11 +203,13 @@ impl BuildFingerprint {
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// Protocol v10 is a deliberate compatibility cutoff: a v9 process cannot read
-/// a framed World call, and connections are reused now, so a single
+/// Protocol v10 was a deliberate compatibility cutoff: a v9 process cannot
+/// read a framed World call, and connections are reused now, so a single
 /// misinterpreted payload would poison every request that followed it rather
-/// than failing once.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 10;
+/// than failing once. The minimum moves with the version rather than trailing
+/// it — a v10 daemon answers the book's verbs with "unknown variant" instead
+/// of a version complaint, which is a worse failure than being told to stop.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 11;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -1525,9 +1531,13 @@ pub fn routing_rows() -> Vec<(String, &'static str)> {
 pub struct BookCardView {
     pub card: String,
     pub name: String,
+    #[serde(default)]
     pub note: String,
+    #[serde(default)]
     pub handles: Vec<String>,
+    #[serde(default)]
     pub groups: Vec<String>,
+    #[serde(default)]
     pub self_claim: bool,
 }
 
@@ -1544,7 +1554,9 @@ pub struct BookMigrationView {
 /// The identity's book, plus how far legacy alias import has got.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookView {
+    #[serde(default)]
     pub cards: Vec<BookCardView>,
+    #[serde(default)]
     pub migration: BookMigrationView,
 }
 
@@ -1562,7 +1574,9 @@ pub struct BookHitView {
 /// Scoped decoration. `coverage` is `unavailable` when the Orbit is vacant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookResolutionView {
+    #[serde(default)]
     pub hits: Vec<BookHitView>,
+    #[serde(default)]
     pub coverage: Option<String>,
 }
 

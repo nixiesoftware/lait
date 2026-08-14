@@ -619,6 +619,11 @@ impl Router {
         orbit: &str,
     ) -> Option<crate::daemon::address_book::HandleSnapshot> {
         let resolved = self.resolve(orbit).ok()?;
+        // A named agent's home is a distinct identity: its Orbit must never
+        // decorate from — or leak existence bits into — this identity's book.
+        if resolved.identity != crate::orbits::StationIdentity::Own {
+            return None;
+        }
         let placement = self.occupancy.peek(&resolved.address.orbit).await?;
         if !placement.is_live() {
             return None;

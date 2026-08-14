@@ -917,6 +917,11 @@ pub async fn run_lait_daemon(
     selection: crate::config::Selection,
 ) -> Result<()> {
     let identity = selection.identity_dir()?;
+    // The daemon is the identity singleton, so the seed is minted here, at
+    // boot, deliberately — never as a side effect of a later write (the
+    // address book's author path is load-only by design).
+    std::fs::create_dir_all(&identity)?;
+    crate::config::load_or_create_identity(&identity)?;
     let config_root = crate::config::config_root()?;
     let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&config_root);

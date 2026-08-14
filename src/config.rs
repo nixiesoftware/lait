@@ -710,19 +710,29 @@ fn secret_key_path(home: &Path) -> PathBuf {
 pub fn load_or_create_identity(home: &Path) -> Result<[u8; 32]> {
     let path = secret_key_path(home);
     if path.exists() {
-        let hex = fs::read_to_string(&path).context("read secret key")?;
-        let raw = data_encoding::HEXLOWER_PERMISSIVE
-            .decode(hex.trim().as_bytes())
-            .map_err(|e| anyhow::anyhow!("parse secret key: {e}"))?;
-        raw.as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("secret key must be 32 bytes"))
+        load_identity(home)
     } else {
         let seed = mechanics::actor::random_seed().context("generate secret key")?;
         let hex = data_encoding::HEXLOWER.encode(&seed);
         fs::write(&path, hex).context("write secret key")?;
         Ok(seed)
     }
+}
+
+/// Load the persistent identity seed without ever minting one.
+///
+/// An attributed write must name an identity that already exists: creating one
+/// as a side effect would let a bookkeeping call decide who this machine is.
+pub fn load_identity(home: &Path) -> Result<[u8; 32]> {
+    let path = secret_key_path(home);
+    let hex =
+        fs::read_to_string(&path).with_context(|| format!("no identity at {}", path.display()))?;
+    let raw = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(hex.trim().as_bytes())
+        .map_err(|e| anyhow::anyhow!("parse secret key: {e}"))?;
+    raw.as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("secret key must be 32 bytes"))
 }
 
 // ---- layered local settings (the `HostConfig*` requests) ----
