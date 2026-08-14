@@ -1,15 +1,13 @@
-/// The window: one bar across the top, and a page under it.
+/// The window: a compact utility tier, primary navigation, and a page.
 ///
-/// The bar is the title bar. It carries primary navigation as pills on the
-/// left, the one action that belongs on chrome rather than on a page in the
-/// middle-right, and the window's own three controls flush with the corner.
-/// Its contents are inset to the page margin so the first nav item lines up
-/// with the first word of every surface below it; the bar itself is full bleed,
-/// because a header inset from the window edge reads as a row of controls that
-/// happen to be at the top rather than as chrome.
+/// The upper tier is the draggable title bar: Astrolabe's wordmark opens the
+/// small application menu, while identity access and the window controls stay
+/// flush with the opposite corner. The lower tier carries primary navigation
+/// with a persistent active underline. This is deliberately the same hierarchy
+/// as a desktop client such as Steam rather than a web page toolbar.
 library;
 
-import 'package:covalence/covalence.dart' hide Surface;
+import 'package:covalence/covalence.dart' hide Surface, WindowChrome;
 import 'package:flutter/material.dart' show ThemeMode;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -24,15 +22,22 @@ import 'window.dart';
 /// The compact contextual band used by Operations.
 const double kOperationsBarHeight = 34;
 
+/// The two tiers of the primary client header. Secondary windows retain the
+/// roomier single 48-pixel caption supplied by [AstrolabeWindowFrame].
+const double kUtilityBarHeight = 32;
+const double kPrimaryBarHeight = 44;
+
 class AstrolabeShell extends StatefulWidget {
   const AstrolabeShell({
     super.key,
     required this.themeMode,
     required this.onToggleTheme,
+    this.chrome = const ManagerWindowChrome(),
   });
 
   final ThemeMode themeMode;
   final VoidCallback onToggleTheme;
+  final WindowChrome chrome;
 
   @override
   State<AstrolabeShell> createState() => _AstrolabeShellState();
@@ -63,17 +68,21 @@ class _AstrolabeShellState extends State<AstrolabeShell> {
           autofocus: true,
           child: AstrolabeWindowFrame(
             closePolicy: AstrolabeWindowClosePolicy.hide,
-            wordmarkMinWidth: 820,
-            captionBuilder: (context, constraints) => _PrimaryCaption(
-              surface: _surface,
-              showThemeLabel: constraints.maxWidth >= 760,
+            chrome: widget.chrome,
+            captionHeight: kUtilityBarHeight,
+            captionBottomBorder: false,
+            wordmark: _SettingsMenu(
               themeMode: widget.themeMode,
               onToggleTheme: widget.onToggleTheme,
-              onSurface: (surface) => setState(() => _surface = surface),
             ),
+            captionBuilder: (context, constraints) => const _UtilityCaption(),
             body: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                _PrimaryNavigation(
+                  surface: _surface,
+                  onSurface: (surface) => setState(() => _surface = surface),
+                ),
                 if (_operationSurfaces.contains(_surface))
                   _OperationsBar(
                     surface: _surface,
@@ -112,51 +121,88 @@ class _Reread extends Intent {
   const _Reread();
 }
 
-class _PrimaryCaption extends StatelessWidget {
-  const _PrimaryCaption({
-    required this.surface,
-    required this.showThemeLabel,
+class _SettingsMenu extends StatelessWidget {
+  const _SettingsMenu({
     required this.themeMode,
     required this.onToggleTheme,
-    required this.onSurface,
   });
 
-  final Surface surface;
-  final bool showThemeLabel;
   final ThemeMode themeMode;
   final VoidCallback onToggleTheme;
-  final ValueChanged<Surface> onSurface;
 
   @override
   Widget build(BuildContext context) {
-    final t = context.tokens;
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
     final rereading = view.inFlight.contains(ActionKeys.refresh);
 
+    return DropdownMenu(
+      side: PopoverSide.bottom,
+      align: PopoverAlign.start,
+      sideOffset: 4,
+      width: const PortalWidth.fixed(220),
+      triggerBuilder: (context, isOpen, onTap) => Button(
+        onPressed: onTap,
+        active: isOpen,
+        semanticLabel: 'Astrolabe settings',
+        tooltip: 'Astrolabe settings',
+        variant: ButtonVariant.ghost,
+        size: ButtonSize.sm,
+        minTapTarget: kUtilityBarHeight,
+        style: const Style([$Pad.symmetric(h: Space.zero)]),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'ASTROLABE',
+              style: context.factLabelStyle.copyWith(
+                color: context.text.l950,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.4,
+              ),
+            ),
+            context.tokens.gap.x(Space.xs),
+            Icon(
+              AppIcons.arrowDropDown,
+              size: 14,
+              color: context.text.l900,
+            ),
+          ],
+        ),
+      ),
+      itemsBuilder: (_) => [
+        MenuItem(
+          icon: AppIcons.refresh,
+          label: 'Refresh',
+          shortcut: 'F5',
+          enabled: !rereading,
+          onTap: rereading
+              ? null
+              : () => client.dispatch(const ActionRequest.refresh()),
+        ),
+        const MenuDivider(),
+        MenuItem(
+          icon: themeMode == ThemeMode.dark
+              ? AppIcons.toggleOff
+              : AppIcons.toggleOn,
+          label: themeMode == ThemeMode.dark
+              ? 'Use light theme'
+              : 'Use dark theme',
+          onTap: onToggleTheme,
+        ),
+      ],
+    );
+  }
+}
+
+class _UtilityCaption extends StatelessWidget {
+  const _UtilityCaption();
+
+  @override
+  Widget build(BuildContext context) {
     return Row(
+      mainAxisAlignment: MainAxisAlignment.end,
       children: [
-        _PrimaryDestination(
-          label: 'Library',
-          selected: surface == Surface.library,
-          onPressed: () => onSurface(Surface.library),
-        ),
-        _PrimaryDestination(
-          label: 'Spaces',
-          selected: surface == Surface.spaces,
-          onPressed: () => onSurface(Surface.spaces),
-        ),
-        _PrimaryDestination(
-          label: 'Members',
-          selected: surface == Surface.members,
-          onPressed: () => onSurface(Surface.members),
-        ),
-        _PrimaryDestination(
-          label: 'Operations',
-          selected: _operationSurfaces.contains(surface),
-          onPressed: () => onSurface(Surface.devices),
-        ),
-        const Spacer(),
         Button(
           onPressed: summonBook,
           icon: AppIcons.person,
@@ -165,37 +211,7 @@ class _PrimaryCaption extends StatelessWidget {
           size: ButtonSize.iconSm,
           tooltip: 'Open the address book',
         ),
-        t.gap.x(Space.xs),
-        Button(
-          onPressed: rereading
-              ? null
-              : () => client.dispatch(const ActionRequest.refresh()),
-          icon: AppIcons.refresh,
-          semanticLabel: 'Refresh',
-          isLoading: rereading,
-          variant: ButtonVariant.ghost,
-          size: ButtonSize.iconSm,
-          tooltip: 'Read this machine again (F5)',
-        ),
-        t.gap.x(Space.xs),
-        Button(
-          onPressed: onToggleTheme,
-          icon: themeMode == ThemeMode.dark
-              ? AppIcons.toggleOn
-              : AppIcons.toggleOff,
-          label: showThemeLabel
-              ? (themeMode == ThemeMode.dark ? 'Light' : 'Dark')
-              : null,
-          semanticLabel: themeMode == ThemeMode.dark
-              ? 'Use light theme'
-              : 'Use dark theme',
-          variant: ButtonVariant.ghost,
-          size: showThemeLabel ? ButtonSize.sm : ButtonSize.iconSm,
-          tooltip: themeMode == ThemeMode.dark
-              ? 'Use light theme'
-              : 'Use dark theme',
-        ),
-        t.gap.x(Space.md),
+        context.tokens.gap.x(Space.sm),
       ],
     );
   }
@@ -208,25 +224,26 @@ const Set<Surface> _operationSurfaces = {
   Surface.diagnostics,
 };
 
-class _PrimaryDestination extends StatelessWidget {
-  const _PrimaryDestination({
-    required this.label,
-    required this.selected,
-    required this.onPressed,
-  });
+class _PrimaryNavigation extends StatelessWidget {
+  const _PrimaryNavigation({required this.surface, required this.onSurface});
 
-  final String label;
-  final bool selected;
-  final VoidCallback onPressed;
+  final Surface surface;
+  final ValueChanged<Surface> onSurface;
 
   @override
   Widget build(BuildContext context) {
-    return Button(
-      onPressed: onPressed,
-      label: label,
-      active: selected,
-      variant: ButtonVariant.ghost,
-      size: ButtonSize.sm,
+    return SizedBox(
+      height: kPrimaryBarHeight,
+      child: Tabs<Surface>(
+        value: _operationSurfaces.contains(surface) ? Surface.devices : surface,
+        options: const [
+          TabsOption(value: Surface.library, label: 'Library'),
+          TabsOption(value: Surface.spaces, label: 'Spaces'),
+          TabsOption(value: Surface.members, label: 'Members'),
+          TabsOption(value: Surface.devices, label: 'Operations'),
+        ],
+        onChanged: onSurface,
+      ),
     );
   }
 }

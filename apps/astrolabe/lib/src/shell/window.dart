@@ -151,18 +151,34 @@ class AstrolabeWindowFrame extends StatefulWidget {
     required this.closePolicy,
     this.title,
     this.captionBuilder,
+    this.wordmark,
     this.wordmarkMinWidth,
+    this.captionHeight = kBarHeight,
+    this.captionBottomBorder = true,
     this.chrome = const ManagerWindowChrome(),
-  }) : assert(title != null || captionBuilder != null);
+  })  : assert(title != null || captionBuilder != null),
+        assert(captionHeight > 0);
 
   final Widget body;
   final AstrolabeWindowClosePolicy closePolicy;
   final String? title;
   final AstrolabeCaptionBuilder? captionBuilder;
 
+  /// Optional interactive replacement for the default wordmark. The primary
+  /// client uses it as its application-menu trigger; secondary windows keep
+  /// the plain label.
+  final Widget? wordmark;
+
   /// When null, the wordmark is always shown. Primary chrome may hide it at a
   /// narrow breakpoint to preserve its navigation targets.
   final double? wordmarkMinWidth;
+
+  /// Main-client chrome is intentionally denser than a secondary window's
+  /// standalone caption, so callers may choose the OS-facing tier's height.
+  final double captionHeight;
+
+  /// A two-tier header puts its separator under the navigation tier instead.
+  final bool captionBottomBorder;
 
   /// How this window is moved and closed. The main engine uses
   /// [ManagerWindowChrome]; a book window uses [NativeWindowChrome].
@@ -222,7 +238,10 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
           _Caption(
             title: widget.title,
             builder: widget.captionBuilder,
+            wordmark: widget.wordmark,
             wordmarkMinWidth: widget.wordmarkMinWidth,
+            height: widget.captionHeight,
+            bottomBorder: widget.captionBottomBorder,
             maximised: _maximised,
             chrome: widget.chrome,
             onToggleMaximise: _toggleMaximise,
@@ -240,7 +259,10 @@ class _Caption extends StatelessWidget {
   const _Caption({
     required this.title,
     required this.builder,
+    required this.wordmark,
     required this.wordmarkMinWidth,
+    required this.height,
+    required this.bottomBorder,
     required this.maximised,
     required this.chrome,
     required this.onToggleMaximise,
@@ -250,7 +272,10 @@ class _Caption extends StatelessWidget {
 
   final String? title;
   final AstrolabeCaptionBuilder? builder;
+  final Widget? wordmark;
   final double? wordmarkMinWidth;
+  final double height;
+  final bool bottomBorder;
   final bool maximised;
   final WindowChrome chrome;
   final Future<void> Function() onToggleMaximise;
@@ -263,11 +288,12 @@ class _Caption extends StatelessWidget {
     return t.box.height(
       // reason: the caption follows the operating system's target size rather
       // than the content rhythm used below it.
-      TokenEscape.rawSize(kBarHeight),
+      TokenEscape.rawSize(height),
       child: Container(
         decoration: BoxDecoration(
           color: context.surface.l100,
-          border: t.stroke.edge(bottom: context.border.l500),
+          border:
+              bottomBorder ? t.stroke.edge(bottom: context.border.l500) : null,
         ),
         child: GestureDetector(
           behavior: HitTestBehavior.translucent,
@@ -281,14 +307,15 @@ class _Caption extends StatelessWidget {
                 children: [
                   t.gap.x(Space.xl3),
                   if (showWordmark) ...[
-                    Text(
-                      'ASTROLABE',
-                      style: context.factLabelStyle.copyWith(
-                        color: context.text.l950,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 1.4,
-                      ),
-                    ),
+                    wordmark ??
+                        Text(
+                          'ASTROLABE',
+                          style: context.factLabelStyle.copyWith(
+                            color: context.text.l950,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.4,
+                          ),
+                        ),
                     t.gap.x(builder == null ? Space.xl3 : Space.xl5),
                   ],
                   if (builder != null)
@@ -310,7 +337,7 @@ class _Caption extends StatelessWidget {
                     ),
                   ],
                   CaptionControls(
-                    height: kBarHeight,
+                    height: height,
                     maximised: maximised,
                     onMinimise: chrome.minimize,
                     onToggleMaximise: onToggleMaximise,
