@@ -33,6 +33,11 @@ struct OwnedWindowState {
   std::string key;
   int minimum_width = 0;
   int minimum_height = 0;
+  // 0 means unbounded. A portrait-locked window pairs a ceiling here with a
+  // minimum height at least as large, so no track size the OS can grant is
+  // landscape.
+  int maximum_width = 0;
+  bool maximizable = true;
   bool configured = false;
 };
 
@@ -164,6 +169,13 @@ LRESULT CALLBACK OwnedWindowProc(HWND window, UINT message, WPARAM wparam,
       if (found->second.minimum_height > 0) {
         limits->ptMinTrackSize.y = found->second.minimum_height;
       }
+      // Every sizing path — edge drag, snap, Win+arrows — is clamped through
+      // this message, so a width ceiling here is the whole portrait
+      // enforcement rather than a correction racing the gesture.
+      if (found->second.maximum_width > 0) {
+        limits->ptMaxTrackSize.x = std::max(found->second.maximum_width,
+                                            found->second.minimum_width);
+      }
       return 0;
     }
     case WM_NCACTIVATE:
@@ -244,8 +256,31 @@ bool ConfigureOwnedWindow(HWND root, const flutter::EncodableMap& values) {
   OwnedWindowState& state = found->second;
   state.minimum_width = ScaleForWindow(root, *minimum_width);
   state.minimum_height = ScaleForWindow(root, *minimum_height);
+  // Optional keys: absent means unbounded and maximizable, the pre-existing
+  // contract, so older callers keep their behavior unchanged.
+  const auto* maximum_width = DoubleValue(values, "maximumWidth");
+  state.maximum_width =
+      maximum_width == nullptr ? 0 : ScaleForWindow(root, *maximum_width);
+  const auto* maximizable = BoolValue(values, "maximizable");
+  state.maximizable = maximizable == nullptr ? true : *maximizable;
   state.key = *key;
   g_owned_windows_by_key[*key] = root;
+
+  if (!state.maximizable) {
+    // Removing the style is what disarms Win+Up, snap-assist's maximize tile,
+    // and the top-edge drag gesture; undrawing the caption button alone would
+    // leave all three routes open.
+    LONG style = GetWindowLong(root, GWL_STYLE);
+    if ((style & WS_MAXIMIZEBOX) != 0) {
+      SetWindowLong(root, GWL_STYLE, style & ~WS_MAXIMIZEBOX);
+      SetWindowPos(root, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                       SWP_FRAMECHANGED);
+    }
+    if (IsZoomed(root)) {
+      ShowWindow(root, SW_RESTORE);
+    }
+  }
 
   const std::wstring wide_title = Utf8ToWide(*title);
   SetWindowTextW(root, wide_title.c_str());
@@ -313,10 +348,19 @@ void HandleCall(HWND window, const flutter::MethodCall<>& call,
     return;
   }
   if (method == "toggle_maximize") {
+    // The Dart chrome of a non-maximizable window draws no control that
+    // reaches here; this guard covers the summons that arrives anyway, so a
+    // stale caller restores at most and never maximizes.
+    const auto state = g_owned_window_states.find(root);
+    const bool maximizable =
+        state == g_owned_window_states.end() || state->second.maximizable;
     WINDOWPLACEMENT placement = {sizeof(placement)};
     GetWindowPlacement(root, &placement);
-    ShowWindow(root, placement.showCmd == SW_SHOWMAXIMIZED ? SW_RESTORE
-                                                           : SW_MAXIMIZE);
+    if (placement.showCmd == SW_SHOWMAXIMIZED) {
+      ShowWindow(root, SW_RESTORE);
+    } else if (maximizable) {
+      ShowWindow(root, SW_MAXIMIZE);
+    }
     result->Success();
     return;
   }

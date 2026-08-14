@@ -28,13 +28,29 @@ class OwnedWindowConfiguration {
     required this.size,
     required this.minimumSize,
     required this.dark,
-  });
+    this.maximumWidth,
+    this.maximisable = true,
+  }) : assert(
+          maximisable || maximumWidth != null,
+          'a window that cannot maximise needs a width ceiling, or dragging '
+          'an edge reintroduces the full-screen shape the flag removed',
+        );
 
   final String key;
   final String title;
   final Size size;
   final Size minimumSize;
   final bool dark;
+
+  /// The widest the window may be dragged, in logical pixels. When it is no
+  /// larger than [minimumSize]'s height, the window can never leave portrait —
+  /// the invariant is arithmetic, not a resize-time correction.
+  final double? maximumWidth;
+
+  /// Whether the OS may ever show this window maximised. `false` removes the
+  /// native maximise style, so Win+Up and a top-edge drag do nothing rather
+  /// than being undone after the fact.
+  final bool maximisable;
 
   Map<String, Object> toMap() => {
         'key': key,
@@ -44,6 +60,8 @@ class OwnedWindowConfiguration {
         'minimumWidth': minimumSize.width,
         'minimumHeight': minimumSize.height,
         'dark': dark,
+        'maximizable': maximisable,
+        if (maximumWidth != null) 'maximumWidth': maximumWidth!,
       };
 }
 
@@ -216,6 +234,7 @@ class AstrolabeWindowFrame extends StatefulWidget {
   })  : assert(title != null || captionBuilder != null),
         assert(captionHeight > 0),
         role = WindowChromeRole.primary,
+        maximisable = true,
         ownedConfiguration = null;
 
   /// A contextual window whose visible identity is structurally owned by
@@ -230,6 +249,8 @@ class AstrolabeWindowFrame extends StatefulWidget {
     required Size size,
     required Size minimumSize,
     required bool dark,
+    double? maximumWidth,
+    this.maximisable = true,
     this.closePolicy = AstrolabeWindowClosePolicy.close,
     this.chrome = const NativeWindowControlHost(),
   })  : captionBuilder = null,
@@ -244,6 +265,8 @@ class AstrolabeWindowFrame extends StatefulWidget {
           size: size,
           minimumSize: minimumSize,
           dark: dark,
+          maximumWidth: maximumWidth,
+          maximisable: maximisable,
         );
 
   final Widget body;
@@ -252,6 +275,13 @@ class AstrolabeWindowFrame extends StatefulWidget {
   final String? title;
   final AstrolabeCaptionBuilder? captionBuilder;
   final OwnedWindowConfiguration? ownedConfiguration;
+
+  /// Whether this window offers maximise at all. When false, the caption
+  /// draws no maximise control and the drag region's double-click does
+  /// nothing — the same fact the native configuration enforces on the HWND,
+  /// stated once here so the visible chrome cannot promise what the window
+  /// refuses.
+  final bool maximisable;
 
   /// Optional interactive replacement for the default wordmark. The primary
   /// client uses it as its application-menu trigger; secondary windows keep
@@ -351,7 +381,7 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
               dragRegionBuilder: (context, child) => GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onPanStart: (_) => widget.chrome.startDragging(),
-                onDoubleTap: _toggleMaximise,
+                onDoubleTap: widget.maximisable ? _toggleMaximise : null,
                 child: child,
               ),
               controlsBuilder: (context, policy) {
@@ -360,7 +390,8 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
                   height: kBarHeight,
                   maximised: _maximised,
                   onMinimise: widget.chrome.minimize,
-                  onToggleMaximise: _toggleMaximise,
+                  onToggleMaximise:
+                      widget.maximisable ? _toggleMaximise : null,
                   onClose: _close,
                   closeTooltip: 'Close window',
                 );

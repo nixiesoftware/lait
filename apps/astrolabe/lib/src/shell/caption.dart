@@ -58,7 +58,12 @@ class CaptionControls extends StatelessWidget {
   final double height;
   final bool maximised;
   final VoidCallback onMinimise;
-  final VoidCallback onToggleMaximise;
+
+  /// `null` means this window cannot be maximised, and the control is not
+  /// drawn at all. A disabled maximise button would advertise a capability
+  /// the HWND refuses; absence is the honest shape, and it is what a
+  /// fixed-format window like the address book shows.
+  final VoidCallback? onToggleMaximise;
   final VoidCallback onClose;
   final String closeTooltip;
 
@@ -74,15 +79,16 @@ class CaptionControls extends StatelessWidget {
           tooltip: 'Out of the way',
           onPressed: onMinimise,
         ),
-        _CaptionButton(
-          height: height,
-          mark: maximised ? _Mark.restore : _Mark.maximise,
-          semanticLabel: maximised ? 'Restore' : 'Maximise',
-          tooltip: maximised
-              ? 'Restore the window to its previous size'
-              : 'Fill the screen',
-          onPressed: onToggleMaximise,
-        ),
+        if (onToggleMaximise != null)
+          _CaptionButton(
+            height: height,
+            mark: maximised ? _Mark.restore : _Mark.maximise,
+            semanticLabel: maximised ? 'Restore' : 'Maximise',
+            tooltip: maximised
+                ? 'Restore the window to its previous size'
+                : 'Fill the screen',
+            onPressed: onToggleMaximise!,
+          ),
         _CaptionButton(
           height: height,
           mark: _Mark.close,
