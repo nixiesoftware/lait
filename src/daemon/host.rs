@@ -614,7 +614,10 @@ impl Listener {
             // client would read "no name" as a fact about the peer when it
             // was a fact about the route.
             if let Some(space) = &space {
-                if matches!(response, Response::Who { .. } | Response::Members { .. }) {
+                if matches!(
+                    response,
+                    Response::Who { .. } | Response::Members { .. } | Response::Seeds { .. }
+                ) {
                     if let Ok(book) = self.router.book() {
                         book.decorate(space, &mut response);
                     }
@@ -722,7 +725,10 @@ impl Listener {
                     .await
                     .unwrap_or_else(|error| Response::err(format!("{error:#}")));
                 if let Some(space) = &space {
-                    if matches!(response, Response::Members { .. } | Response::Who { .. }) {
+                    if matches!(
+                        response,
+                        Response::Members { .. } | Response::Who { .. } | Response::Seeds { .. }
+                    ) {
                         if let Ok(book) = self.router.book() {
                             book.decorate(space, &mut response);
                         }

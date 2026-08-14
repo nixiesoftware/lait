@@ -2217,7 +2217,6 @@ impl StationHost {
             &self.home,
             SeedRecord {
                 id: id.clone(),
-                nick: String::new(),
                 space,
             },
         ) {
@@ -2260,7 +2259,9 @@ impl StationHost {
                         .unwrap_or(false);
                 crate::dto::SeedDto {
                     id: s.id.as_str().to_string(),
-                    nick: s.nick,
+                    // Bare from the Station; the daemon decorates seed rows
+                    // from the identity's book, the one namer.
+                    nick: String::new(),
                     space: s.space,
                     state: if is_online { "online" } else { "offline" }.to_string(),
                     online: is_online,
@@ -2270,10 +2271,10 @@ impl StationHost {
         Response::Seeds { seeds }
     }
 
-    /// Unpin seeds matching a full id, id-prefix, or nick.
+    /// Unpin seeds matching a full id or an id-prefix.
     fn seed_remove(&self, needle: &str) -> Response {
         match remove_seed(&self.home, needle) {
-            Ok(0) => Response::err("no pinned seed matched that id/nick"),
+            Ok(0) => Response::err("no pinned seed matched that id"),
             Ok(n) => Response::Ok {
                 message: Some(format!("unpinned {n} seed(s)")),
             },
@@ -3649,12 +3650,12 @@ async fn write_line_half<T: serde::Serialize>(
 }
 
 /// One pinned bootstrap seed — a deliberately-placed anchor a cold client
-/// converges through. The id is the identity; nick/space are advisory.
+/// converges through. The id is the identity; space is advisory. Naming is
+/// the address book's: a record carries no nick (an old file's `nick` key is
+/// ignored on read), and the daemon decorates seed rows from Cards.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SeedRecord {
     id: mechanics::ids::DeviceId,
-    #[serde(default)]
-    nick: String,
     #[serde(default)]
     space: String,
 }
@@ -3702,14 +3703,13 @@ fn save_seeds(home: &Path, seeds: &[SeedRecord]) {
     }
 }
 
-/// Upsert a seed keyed by id (nick/space refresh in place). Returns whether it
+/// Upsert a seed keyed by id (space refreshes in place). Returns whether it
 /// was newly pinned.
 fn upsert_seed(home: &Path, rec: SeedRecord) -> Result<bool, String> {
     // Refusing here is the point: pinning a seed must never be the operation
     // that silently unpins every other one.
     let mut seeds = load_seeds(home)?;
     if let Some(existing) = seeds.iter_mut().find(|s| s.id == rec.id) {
-        existing.nick = rec.nick;
         existing.space = rec.space;
         save_seeds(home, &seeds);
         Ok(false)
@@ -3720,14 +3720,15 @@ fn upsert_seed(home: &Path, rec: SeedRecord) -> Result<bool, String> {
     }
 }
 
-/// Unpin seeds matching a full id, a ≥6-char id prefix, or a nick. Returns the
-/// count removed.
+/// Unpin seeds matching a full id or a ≥6-char id prefix. Returns the count
+/// removed. A name never selects an authority target — the book's rule, held
+/// here too: unpinning goes by the id the pin is keyed on.
 fn remove_seed(home: &Path, needle: &str) -> Result<usize, String> {
     let mut seeds = load_seeds(home)?;
     let before = seeds.len();
     seeds.retain(|s| {
         let id = s.id.as_str();
-        !(id == needle || (needle.len() >= 6 && id.starts_with(needle)) || s.nick == needle)
+        !(id == needle || (needle.len() >= 6 && id.starts_with(needle)))
     });
     let removed = before - seeds.len();
     if removed > 0 {

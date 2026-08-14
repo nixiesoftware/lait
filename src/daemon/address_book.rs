@@ -340,6 +340,16 @@ impl AddressBookService {
                     }
                 }
             }
+            Response::Seeds { seeds } => {
+                for seed in seeds.iter_mut() {
+                    let Some(device) = DeviceId::parse(&seed.id) else {
+                        continue;
+                    };
+                    if let Some(name) = first_authored_name(&book, &Handle::Device(device)) {
+                        seed.nick = name;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1173,6 +1183,22 @@ mod tests {
             panic!("still a presence reply");
         };
         assert_eq!(peers[0].nick, "Basalt", "the book names the device");
+
+        // A pin carries no name of its own; the book names the seed row too.
+        let mut seeds = Response::Seeds {
+            seeds: vec![crate::dto::SeedDto {
+                id: device.to_string(),
+                nick: String::new(),
+                space: space.as_str().to_owned(),
+                state: "offline".into(),
+                online: false,
+            }],
+        };
+        service.decorate(&space, &mut seeds);
+        let Response::Seeds { seeds } = &seeds else {
+            panic!("still a seeds reply");
+        };
+        assert_eq!(seeds[0].nick, "Basalt", "the book names the pinned seed");
 
         // The provision seam authors a Card the roster decoration then reads.
         let scout = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[12u8; 32]));

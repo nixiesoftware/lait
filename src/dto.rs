@@ -126,7 +126,9 @@ pub struct MemberLogEntry {
 pub struct SeedDto {
     /// The seed's endpoint id (== its ed25519 key, 64-hex).
     pub id: String,
-    /// Advisory nick (empty when pinned by bare id).
+    /// The name your address book authors for this device (empty when no
+    /// Card names it). Decorated by the daemon; a pin itself carries no name.
+    /// Kept as `nick` for wire compatibility.
     pub nick: String,
     /// The space id the seed serves.
     pub space: String,
