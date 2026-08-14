@@ -6,10 +6,13 @@ library;
 
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
 import '../surfaces/page.dart';
+import '../surfaces/surfaces.dart' show pageMargin;
+import 'record.dart';
 import 'theme.dart';
 import 'type.dart';
 import 'window.dart';
@@ -41,13 +44,30 @@ class _BookAppState extends State<BookApp> {
             title: 'Address book',
             closePolicy: AstrolabeWindowClosePolicy.close,
             chrome: const NativeWindowChrome(),
-            body: BookPage(
-              themeMode: _themeMode,
-              onToggleTheme: () => setState(() {
-                _themeMode = _themeMode == ThemeMode.dark
-                    ? ThemeMode.light
-                    : ThemeMode.dark;
-              }),
+            // The book is a conventional page, not the Library's client
+            // frame: it keeps the shared page gutter the main window's
+            // surfaces get from SurfacePage, and the same operational
+            // record underneath — which is also the window's live region
+            // for landed and refused writes.
+            body: Column(
+              children: [
+                Expanded(
+                  child: Builder(
+                    builder: (context) => Padding(
+                      padding: pageMargin(context.tokens),
+                      child: BookPage(
+                        themeMode: _themeMode,
+                        onToggleTheme: () => setState(() {
+                          _themeMode = _themeMode == ThemeMode.dark
+                              ? ThemeMode.light
+                              : ThemeMode.dark;
+                        }),
+                      ),
+                    ),
+                  ),
+                ),
+                const OperationalBar(),
+              ],
             ),
           ),
         ),
@@ -75,6 +95,13 @@ class BookPage extends StatefulWidget {
 
 class _BookPageState extends State<BookPage> {
   String _query = '';
+  final FocusNode _searchFocus = FocusNode();
+
+  @override
+  void dispose() {
+    _searchFocus.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -90,8 +117,17 @@ class _BookPageState extends State<BookPage> {
     final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
     final shown = _filtered(book?.cards ?? const []);
 
-    return SurfaceScaffold(
-      title: 'Address book',
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.f5): () =>
+            client.dispatch(const ActionRequest.refresh()),
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true): () =>
+            _searchFocus.requestFocus(),
+      },
+      child: Focus(
+        autofocus: true,
+        child: SurfaceScaffold(
+          title: 'Address book',
       prose:
           'Authored Cards for this identity. Names never select an authority target.',
       trailing: Row(
@@ -174,6 +210,7 @@ class _BookPageState extends State<BookPage> {
                   search: true,
                   hint: 'Search cards',
                   size: InputSize.sm,
+                  focusNode: _searchFocus,
                   onChanged: (value) => setState(() => _query = value),
                 ),
                 t.gap.y(Space.xl3),
@@ -196,6 +233,8 @@ class _BookPageState extends State<BookPage> {
                 ),
               ],
             ),
+        ),
+      ),
     );
   }
 
@@ -223,9 +262,21 @@ class _MyCardBand extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     if (mine.isEmpty) {
-      return const Empty(
-        said: 'No My Card.',
-        next: 'Claim one — nothing is implied from a name or a handle.',
+      return Card(
+        variant: CardVariant.muted,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('MY CARD', style: context.factLabelStyle),
+            t.gap.y(Space.sm),
+            Text('No My Card.', style: context.bodyStyle),
+            t.gap.y(Space.xxs),
+            Text(
+              'Claim one — nothing is implied from a name or a handle.',
+              style: context.labelStyle,
+            ),
+          ],
+        ),
       );
     }
     final card = mine.first;

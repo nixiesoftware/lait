@@ -112,6 +112,11 @@ void RegisterWindowChrome(flutter::FlutterViewController* controller) {
   }
   HWND window = controller->view()->GetNativeWindow();
   g_sub_window = RootOf(window);
+  // The plugin creates the window with no OS window text. Named here, at
+  // creation, rather than from Dart: the only sub-window today is the book,
+  // and a Dart-side ask races this very registration. The u2014 escape is an
+  // em dash, spelled out so MSVC's source-charset assumptions cannot mangle it.
+  SetWindowTextW(g_sub_window, L"Address book \u2014 Astrolabe");
   HideSystemCaption(window);
   auto channel = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       controller->engine()->messenger(), "astrolabe/window_chrome",

@@ -54,9 +54,10 @@ Future<void> main(List<String> arguments) async {
   // `window_manager` is not registered there — asking either is how
   // this window used to stay white.
   if (isBookEngine(arguments)) {
-    // The plugin creates the window with no OS window text; the taskbar and
-    // Alt-Tab label is this engine's to claim.
-    await const NativeWindowChrome().setTitle('Address book — Astrolabe');
+    // The OS window text is set natively at window creation (see
+    // RegisterWindowChrome): asking the chrome channel from here races the
+    // handler's registration, and an await that throws before runApp is a
+    // window that stays white.
     final client = await Client.start();
     runApp(BookApp(client: client));
     return;

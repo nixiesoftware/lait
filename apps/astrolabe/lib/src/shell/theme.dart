@@ -10,5 +10,9 @@ ThemeData astrolabeTheme(Brightness brightness) => covalenceTheme(
         // a raw colour at any component call site.
         brandSeed: TokenEscape.rawColor(0xFF5B8DEF),
         neutralSeed: TokenEscape.rawColor(0xFF53667D),
+        // Astrolabe draws no focus ring, by decision. `FocusRing.none` lands
+        // after the seeded ring in the extension list, so it replaces it for
+        // every control in every window.
+        extraExtensions: const [FocusRing.none],
       ),
     );
