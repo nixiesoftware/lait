@@ -20,13 +20,15 @@
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
-#ifndef DWMWA_BORDER_COLOR
-#define DWMWA_BORDER_COLOR 34
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
 #endif
 
 namespace {
-
-constexpr COLORREF kNoDwmBorder = 0xFFFFFFFE;
 
 struct OwnedWindowState {
   WNDPROC original_proc = nullptr;
@@ -93,11 +95,22 @@ void ApplyDwmPolicy(HWND window, bool dark) {
   const BOOL use_dark = dark ? TRUE : FALSE;
   DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &use_dark,
                         sizeof(use_dark));
-  // Windows 11 understands this attribute; older releases return
-  // E_INVALIDARG. The full-client NCCALCSIZE policy below remains the actual
-  // white-gap fix on every supported release.
-  DwmSetWindowAttribute(window, DWMWA_BORDER_COLOR, &kNoDwmBorder,
-                        sizeof(kNoDwmBorder));
+  // DWMWA_BORDER_COLOR is deliberately left at the system default: the main
+  // window keeps its DWM outline, and an owned window that suppressed its own
+  // read as a flat unfinished box beside it. The full-client NCCALCSIZE
+  // policy below is the actual white-gap fix; it does not need the border
+  // removed.
+  //
+  // The corner preference is explicit rather than inherited. The style bits
+  // alone should earn the Windows 11 treatment — this window carries the
+  // full standard frame — but DWM judged this window's shape when it was
+  // shown and does not re-judge on SWP_FRAMECHANGED, so the owned window
+  // stayed square (and borderless) beside a rounded main window. Asking by
+  // name is idempotent, a no-op where rounding already applies, and
+  // E_INVALIDARG on Windows 10, which is fine to ignore.
+  int corner = DWMWCP_ROUND;
+  DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, &corner,
+                        sizeof(corner));
 }
 
 LRESULT ResizeHitTest(HWND window, LPARAM lparam) {
@@ -179,8 +192,10 @@ LRESULT CALLBACK OwnedWindowProc(HWND window, UINT message, WPARAM wparam,
       return 0;
     }
     case WM_NCACTIVATE:
-      // No system caption exists to repaint. Returning TRUE also prevents DWM
-      // from briefly reintroducing a light inactive strip.
+      // The caption exists only in the style bits — the client area is the
+      // whole window — so there is nothing to repaint on activation, and
+      // returning TRUE keeps DWM from flashing a light strip. The main
+      // window's hidden-title-bar policy answers this message the same way.
       return TRUE;
     case WM_NCDESTROY: {
       const std::string key = found->second.key;
@@ -210,9 +225,17 @@ void InstallOwnedWindowPolicy(HWND window) {
                      reinterpret_cast<LONG_PTR>(g_main_window));
   }
 
+  // The style keeps the FULL standard frame — WS_CAPTION included. The
+  // caption never draws: WM_NCCALCSIZE below hands the whole window to the
+  // client, so there is no non-client strip for it to appear in. What the
+  // bit buys is DWM's standard-frame treatment: Windows 11 rounds and
+  // outlines a captioned window exactly like the main one, while a
+  // THICKFRAME-only window is a nonstandard frame with squarer corners and
+  // a differently drawn border — the visible mismatch between the two
+  // windows. The main window's hidden title bar works the same way:
+  // window_manager hides it geometrically and leaves the style bit set.
   LONG style = GetWindowLong(root, GWL_STYLE);
-  style &= ~WS_CAPTION;
-  style |= WS_THICKFRAME;
+  style |= WS_CAPTION | WS_THICKFRAME;
   SetWindowLong(root, GWL_STYLE, style);
 
   if (g_owned_window_states.find(root) == g_owned_window_states.end()) {
