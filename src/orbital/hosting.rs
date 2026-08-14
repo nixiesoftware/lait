@@ -1994,7 +1994,10 @@ impl StationHost {
             | Request::BookLookup { .. }
             | Request::BookResolve { .. }
             | Request::BookMigrateStatus
-            | Request::BookMigrate => {
+            | Request::BookMigrate
+            | Request::BookPropose { .. }
+            | Request::BookSuggestAccept { .. }
+            | Request::BookSuggestDismiss { .. } => {
                 Response::err("the address book is identity-scoped; send this on the daemon route")
             }
             other => Response::err(format!("request is not a lifecycle operation: {other:?}")),

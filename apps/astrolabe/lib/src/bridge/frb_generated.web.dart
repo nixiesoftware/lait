@@ -147,6 +147,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<StorageRow> dco_decode_list_storage_row(dynamic raw);
 
   @protected
+  List<SuggestionRow> dco_decode_list_suggestion_row(dynamic raw);
+
+  @protected
   MemberRow dco_decode_member_row(dynamic raw);
 
   @protected
@@ -208,6 +211,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   StorageRow dco_decode_storage_row(dynamic raw);
+
+  @protected
+  SuggestionRow dco_decode_suggestion_row(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -351,6 +357,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<StorageRow> sse_decode_list_storage_row(SseDeserializer deserializer);
 
   @protected
+  List<SuggestionRow> sse_decode_list_suggestion_row(
+      SseDeserializer deserializer);
+
+  @protected
   MemberRow sse_decode_member_row(SseDeserializer deserializer);
 
   @protected
@@ -417,6 +427,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   StorageRow sse_decode_storage_row(SseDeserializer deserializer);
+
+  @protected
+  SuggestionRow sse_decode_suggestion_row(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -574,6 +587,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<StorageRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_suggestion_row(
+      List<SuggestionRow> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_member_row(MemberRow self, SseSerializer serializer);
 
   @protected
@@ -643,6 +660,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_storage_row(StorageRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_suggestion_row(SuggestionRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

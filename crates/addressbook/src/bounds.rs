@@ -21,6 +21,10 @@ pub const MAX_SHARED_DEVICES: usize = 8;
 /// to discard. The leaf crate still refuses a *new* delete that would grow
 /// past it so a single device cannot write an unbounded graveyard.
 pub const MAX_TOMBSTONES: usize = 8192;
+
+/// Staged card-exchange suggestions awaiting review. A cap on what propose
+/// may accumulate, never a licence to discard what is already staged.
+pub const MAX_PENDING_SUGGESTIONS: usize = 1024;
 /// Authoritative envelope, including causal history.
 pub const MAX_ADDRESSBOOK_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 /// Shareable card-exchange file, encoded.

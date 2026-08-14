@@ -70,6 +70,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_BookUnlink value)? bookUnlink,
     TResult Function(ActionRequest_BookExport value)? bookExport,
     TResult Function(ActionRequest_BookImport value)? bookImport,
+    TResult Function(ActionRequest_BookAccept value)? bookAccept,
+    TResult Function(ActionRequest_BookDismiss value)? bookDismiss,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -114,6 +116,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookExport(_that);
       case ActionRequest_BookImport() when bookImport != null:
         return bookImport(_that);
+      case ActionRequest_BookAccept() when bookAccept != null:
+        return bookAccept(_that);
+      case ActionRequest_BookDismiss() when bookDismiss != null:
+        return bookDismiss(_that);
       case _:
         return orElse();
     }
@@ -155,6 +161,8 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_BookUnlink value) bookUnlink,
     required TResult Function(ActionRequest_BookExport value) bookExport,
     required TResult Function(ActionRequest_BookImport value) bookImport,
+    required TResult Function(ActionRequest_BookAccept value) bookAccept,
+    required TResult Function(ActionRequest_BookDismiss value) bookDismiss,
   }) {
     final _that = this;
     switch (_that) {
@@ -198,6 +206,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookExport(_that);
       case ActionRequest_BookImport():
         return bookImport(_that);
+      case ActionRequest_BookAccept():
+        return bookAccept(_that);
+      case ActionRequest_BookDismiss():
+        return bookDismiss(_that);
     }
   }
 
@@ -235,6 +247,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_BookUnlink value)? bookUnlink,
     TResult? Function(ActionRequest_BookExport value)? bookExport,
     TResult? Function(ActionRequest_BookImport value)? bookImport,
+    TResult? Function(ActionRequest_BookAccept value)? bookAccept,
+    TResult? Function(ActionRequest_BookDismiss value)? bookDismiss,
   }) {
     final _that = this;
     switch (_that) {
@@ -278,6 +292,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookExport(_that);
       case ActionRequest_BookImport() when bookImport != null:
         return bookImport(_that);
+      case ActionRequest_BookAccept() when bookAccept != null:
+        return bookAccept(_that);
+      case ActionRequest_BookDismiss() when bookDismiss != null:
+        return bookDismiss(_that);
       case _:
         return null;
     }
@@ -317,6 +335,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String card, String handle)? bookUnlink,
     TResult Function(String path, List<String>? cards)? bookExport,
     TResult Function(String path)? bookImport,
+    TResult Function(String suggestion)? bookAccept,
+    TResult Function(String suggestion)? bookDismiss,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -361,6 +381,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookExport(_that.path, _that.cards);
       case ActionRequest_BookImport() when bookImport != null:
         return bookImport(_that.path);
+      case ActionRequest_BookAccept() when bookAccept != null:
+        return bookAccept(_that.suggestion);
+      case ActionRequest_BookDismiss() when bookDismiss != null:
+        return bookDismiss(_that.suggestion);
       case _:
         return orElse();
     }
@@ -401,6 +425,8 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(String card, String handle) bookUnlink,
     required TResult Function(String path, List<String>? cards) bookExport,
     required TResult Function(String path) bookImport,
+    required TResult Function(String suggestion) bookAccept,
+    required TResult Function(String suggestion) bookDismiss,
   }) {
     final _that = this;
     switch (_that) {
@@ -444,6 +470,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookExport(_that.path, _that.cards);
       case ActionRequest_BookImport():
         return bookImport(_that.path);
+      case ActionRequest_BookAccept():
+        return bookAccept(_that.suggestion);
+      case ActionRequest_BookDismiss():
+        return bookDismiss(_that.suggestion);
     }
   }
 
@@ -481,6 +511,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String card, String handle)? bookUnlink,
     TResult? Function(String path, List<String>? cards)? bookExport,
     TResult? Function(String path)? bookImport,
+    TResult? Function(String suggestion)? bookAccept,
+    TResult? Function(String suggestion)? bookDismiss,
   }) {
     final _that = this;
     switch (_that) {
@@ -524,6 +556,10 @@ extension ActionRequestPatterns on ActionRequest {
         return bookExport(_that.path, _that.cards);
       case ActionRequest_BookImport() when bookImport != null:
         return bookImport(_that.path);
+      case ActionRequest_BookAccept() when bookAccept != null:
+        return bookAccept(_that.suggestion);
+      case ActionRequest_BookDismiss() when bookDismiss != null:
+        return bookDismiss(_that.suggestion);
       case _:
         return null;
     }
@@ -1769,6 +1805,138 @@ class _$ActionRequest_BookImportCopyWithImpl<$Res>
       path: null == path
           ? _self.path
           : path // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookAccept extends ActionRequest {
+  const ActionRequest_BookAccept({required this.suggestion}) : super._();
+
+  final String suggestion;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookAcceptCopyWith<ActionRequest_BookAccept> get copyWith =>
+      _$ActionRequest_BookAcceptCopyWithImpl<ActionRequest_BookAccept>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookAccept &&
+            (identical(other.suggestion, suggestion) ||
+                other.suggestion == suggestion));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, suggestion);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookAccept(suggestion: $suggestion)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookAcceptCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookAcceptCopyWith(ActionRequest_BookAccept value,
+          $Res Function(ActionRequest_BookAccept) _then) =
+      _$ActionRequest_BookAcceptCopyWithImpl;
+  @useResult
+  $Res call({String suggestion});
+}
+
+/// @nodoc
+class _$ActionRequest_BookAcceptCopyWithImpl<$Res>
+    implements $ActionRequest_BookAcceptCopyWith<$Res> {
+  _$ActionRequest_BookAcceptCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookAccept _self;
+  final $Res Function(ActionRequest_BookAccept) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? suggestion = null,
+  }) {
+    return _then(ActionRequest_BookAccept(
+      suggestion: null == suggestion
+          ? _self.suggestion
+          : suggestion // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookDismiss extends ActionRequest {
+  const ActionRequest_BookDismiss({required this.suggestion}) : super._();
+
+  final String suggestion;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookDismissCopyWith<ActionRequest_BookDismiss> get copyWith =>
+      _$ActionRequest_BookDismissCopyWithImpl<ActionRequest_BookDismiss>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookDismiss &&
+            (identical(other.suggestion, suggestion) ||
+                other.suggestion == suggestion));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, suggestion);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookDismiss(suggestion: $suggestion)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookDismissCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookDismissCopyWith(ActionRequest_BookDismiss value,
+          $Res Function(ActionRequest_BookDismiss) _then) =
+      _$ActionRequest_BookDismissCopyWithImpl;
+  @useResult
+  $Res call({String suggestion});
+}
+
+/// @nodoc
+class _$ActionRequest_BookDismissCopyWithImpl<$Res>
+    implements $ActionRequest_BookDismissCopyWith<$Res> {
+  _$ActionRequest_BookDismissCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookDismiss _self;
+  final $Res Function(ActionRequest_BookDismiss) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? suggestion = null,
+  }) {
+    return _then(ActionRequest_BookDismiss(
+      suggestion: null == suggestion
+          ? _self.suggestion
+          : suggestion // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

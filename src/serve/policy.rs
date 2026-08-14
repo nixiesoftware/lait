@@ -132,7 +132,10 @@ pub fn is_read(req: &Request) -> bool {
         | Request::BookUnlink { .. }
         | Request::BookMerge { .. }
         | Request::BookClaimSelf { .. }
-        | Request::BookMigrate => false,
+        | Request::BookMigrate
+        | Request::BookPropose { .. }
+        | Request::BookSuggestAccept { .. }
+        | Request::BookSuggestDismiss { .. } => false,
 
         // Not a one-shot at all — see `serve::rpc`, which refuses it with a
         // pointer to the endpoint that streams (`GET /api/events`).
@@ -224,7 +227,10 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::BookLookup { .. }
         | Request::BookResolve { .. }
         | Request::BookMigrateStatus
-        | Request::BookMigrate => true,
+        | Request::BookMigrate
+        | Request::BookPropose { .. }
+        | Request::BookSuggestAccept { .. }
+        | Request::BookSuggestDismiss { .. } => true,
 
         Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
@@ -348,6 +354,15 @@ mod tests {
             into: String::new(),
         }));
         assert!(!is_read(&Request::BookMigrate));
+        assert!(!is_read(&Request::BookPropose {
+            bundle: String::new()
+        }));
+        assert!(!is_read(&Request::BookSuggestAccept {
+            suggestion: String::new()
+        }));
+        assert!(is_host_plane(&Request::BookPropose {
+            bundle: String::new()
+        }));
         // BookGet and BookLookup stay reads; BookList is *labelled* a read but
         // runs demand-driven alias import today — kept honest on the issue.
         assert!(is_read(&Request::BookGet {

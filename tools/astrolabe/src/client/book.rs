@@ -14,6 +14,16 @@ pub struct BookSnapshot {
     pub migration_complete: bool,
     pub migration_pending: usize,
     pub migration_imported: usize,
+    pub suggestions: Vec<SuggestionFacts>,
+}
+
+/// One staged card-exchange suggestion, awaiting review. Not in the book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionFacts {
+    pub suggestion: String,
+    pub name: String,
+    pub note: String,
+    pub handles: Vec<String>,
 }
 
 /// One authored Card. No derived reachability, no online bit.
@@ -104,40 +114,28 @@ impl Client {
         Ok(book)
     }
 
-    /// Import a shareable bundle as *new* Cards. Never claims My Card, never
-    /// overwrites an existing Card, and refuses LocalAgent handles.
-    pub async fn book_import(&self, path: String) -> ClientResult<BookSnapshot> {
+    /// Stage a shareable bundle as pending suggestions. Nothing enters the
+    /// book until each suggestion is reviewed and accepted; the daemon
+    /// preflights the bounds and refuses local-agent handles before staging.
+    pub async fn book_propose(&self, path: String) -> ClientResult<BookSnapshot> {
         let bytes = std::fs::read(&path).map_err(|error| {
             ClientError::internal(format!("read card bundle {}: {error}", path))
         })?;
-        let bundle = addressbook::CardBundle::decode(&bytes)
-            .map_err(|error| ClientError::refused(error.to_string()))?;
-        let mut before: std::collections::BTreeSet<String> = self
-            .book_list()
-            .await?
-            .cards
-            .into_iter()
-            .map(|card| card.card)
-            .collect();
-        let mut last = self.book_list().await?;
-        for card in bundle.cards {
-            last = self
-                .book_put(
-                    None,
-                    card.name,
-                    (!card.note.is_empty()).then_some(card.note),
-                )
-                .await?;
-            let minted = last.cards.iter().find(|row| !before.contains(&row.card));
-            let Some(minted) = minted.cloned() else {
-                continue;
-            };
-            before.insert(minted.card.clone());
-            for handle in card.handles {
-                last = self.book_link(minted.card.clone(), handle).await?;
-            }
-        }
-        Ok(last)
+        let bundle = String::from_utf8(bytes)
+            .map_err(|_| ClientError::refused("a card bundle is UTF-8 JSON".to_owned()))?;
+        self.book_request(Request::BookPropose { bundle }).await
+    }
+
+    /// Accept one staged suggestion into the book.
+    pub async fn book_accept(&self, suggestion: String) -> ClientResult<BookSnapshot> {
+        self.book_request(Request::BookSuggestAccept { suggestion })
+            .await
+    }
+
+    /// Discard one staged suggestion. The book is untouched.
+    pub async fn book_dismiss(&self, suggestion: String) -> ClientResult<BookSnapshot> {
+        self.book_request(Request::BookSuggestDismiss { suggestion })
+            .await
     }
 
     async fn book_request(&self, request: Request) -> ClientResult<BookSnapshot> {
@@ -173,5 +171,15 @@ fn from_view(view: BookView) -> BookSnapshot {
         migration_complete: view.migration.complete,
         migration_pending: view.migration.pending,
         migration_imported: view.migration.imported,
+        suggestions: view
+            .suggestions
+            .into_iter()
+            .map(|s| SuggestionFacts {
+                suggestion: s.suggestion,
+                name: s.name,
+                note: s.note,
+                handles: s.handles,
+            })
+            .collect(),
     }
 }

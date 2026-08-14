@@ -8,13 +8,17 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use addressbook::{Action, Author, Book, BookEngine, CardId, Coverage, Handle, Store};
+use addressbook::{
+    Action, Author, Book, BookEngine, CardBundle, CardId, Coverage, Handle, Store,
+    MAX_PENDING_SUGGESTIONS,
+};
 use mechanics::ids::SystemUlidSource;
 use mechanics::ids::{ActorId, DeviceId};
 use serde::{Deserialize, Serialize};
 
 use crate::control::{
-    BookCardView, BookHitView, BookMigrationView, BookResolutionView, BookView, Request, Response,
+    BookCardView, BookHitView, BookMigrationView, BookResolutionView, BookSuggestionView, BookView,
+    Request, Response,
 };
 use crate::orbits::{Catalog, Router, StationIdentity};
 
@@ -37,6 +41,46 @@ struct PendingSelector {
     orbit: String,
     selector: String,
     name: String,
+}
+
+/// Staged card-exchange proposals, durable beside the book. Review is the
+/// only way into the book: nothing here has touched the Engine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SuggestionState {
+    suggestions: Vec<StagedSuggestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StagedSuggestion {
+    /// Content-derived (`sug_` + 16 hex of a hash over name, note and
+    /// handles), so proposing the same card twice stages it once.
+    id: String,
+    name: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    handles: Vec<String>,
+}
+
+impl StagedSuggestion {
+    fn from_shared(card: &addressbook::SharedCard) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(card.name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(card.note.as_bytes());
+        for handle in &card.handles {
+            hasher.update(&[0]);
+            hasher.update(handle.as_bytes());
+        }
+        let digest = hasher.finalize();
+        let hex = data_encoding::HEXLOWER.encode(digest.as_bytes());
+        Self {
+            id: format!("sug_{}", hex.get(..16).unwrap_or(&hex)),
+            name: card.name.clone(),
+            note: card.note.clone(),
+            handles: card.handles.clone(),
+        }
+    }
 }
 
 pub(crate) struct AddressBookService {
@@ -79,6 +123,9 @@ impl AddressBookService {
             Request::BookResolve { orbit, handles } => self.resolve(router, &orbit, handles).await,
             Request::BookMigrateStatus => self.migrate_status(router.catalog()),
             Request::BookMigrate => self.migrate(router),
+            Request::BookPropose { bundle } => self.propose(&bundle),
+            Request::BookSuggestAccept { suggestion } => self.suggest_accept(&suggestion),
+            Request::BookSuggestDismiss { suggestion } => self.suggest_dismiss(&suggestion),
             other => Response::err(format!("not an address-book request: {other:?}")),
         }
     }
@@ -101,6 +148,7 @@ impl AddressBookService {
         Response::Book(Box::new(BookView {
             cards: vec![card_view(card)],
             migration: self.migration_view(None),
+            suggestions: Vec::new(),
         }))
     }
 
@@ -215,6 +263,7 @@ impl AddressBookService {
         Response::Book(Box::new(BookView {
             cards,
             migration: self.migration_view(None),
+            suggestions: Vec::new(),
         }))
     }
 
@@ -261,6 +310,7 @@ impl AddressBookService {
         Response::Book(Box::new(BookView {
             cards: Vec::new(),
             migration: self.migration_view(Some(catalog)),
+            suggestions: Vec::new(),
         }))
     }
 
@@ -446,10 +496,178 @@ impl AddressBookService {
 
     fn view(&self, book: &Book) -> Response {
         let cards = book.cards.values().map(card_view).collect();
+        // Display tolerates an unreadable suggestions store so the book stays
+        // listable; the three suggestion verbs refuse loudly on the same
+        // fault, which is where the person can act on it.
+        let suggestions = self
+            .load_suggestions()
+            .unwrap_or_default()
+            .suggestions
+            .iter()
+            .map(suggestion_view)
+            .collect();
         Response::Book(Box::new(BookView {
             cards,
             migration: self.migration_view(None),
+            suggestions,
         }))
+    }
+
+    /// Stage a card-exchange bundle for review. Decode preflights the bounds
+    /// and refuses local-agent spellings before anything is staged; nothing
+    /// reaches the Engine here.
+    fn propose(&self, bundle: &str) -> Response {
+        let bundle = match CardBundle::decode(bundle.as_bytes()) {
+            Ok(bundle) => bundle,
+            Err(err) => return Response::err(err.to_string()),
+        };
+        let mut state = match self.load_suggestions() {
+            Ok(state) => state,
+            Err(err) => return Response::err(err),
+        };
+        for card in &bundle.cards {
+            let staged = StagedSuggestion::from_shared(card);
+            if state.suggestions.iter().any(|s| s.id == staged.id) {
+                continue;
+            }
+            if state.suggestions.len() >= MAX_PENDING_SUGGESTIONS {
+                return Response::err(
+                    "too many staged suggestions; review or dismiss some before proposing more",
+                );
+            }
+            state.suggestions.push(staged);
+        }
+        if let Err(err) = self.save_suggestions(&state) {
+            return Response::err(err);
+        }
+        self.list()
+    }
+
+    /// Accept one staged suggestion: mint the Card, link its handles, retire
+    /// the suggestion. A refusal leaves the suggestion staged, and a partial
+    /// application resynchronises the in-memory book from disk rather than
+    /// letting memory and envelope diverge.
+    fn suggest_accept(&self, suggestion: &str) -> Response {
+        let mut state = match self.load_suggestions() {
+            Ok(state) => state,
+            Err(err) => return Response::err(err),
+        };
+        let Some(index) = state.suggestions.iter().position(|s| s.id == suggestion) else {
+            return Response::err("no such suggestion");
+        };
+        let staged = match state.suggestions.get(index) {
+            Some(staged) => staged.clone(),
+            None => return Response::err("no such suggestion"),
+        };
+        let author = match self.author() {
+            Ok(author) => author,
+            Err(err) => return Response::err(err),
+        };
+        let mut engine = match self.engine.lock() {
+            Ok(engine) => engine,
+            Err(_) => return Response::err("address book is poisoned"),
+        };
+        let id = CardId::mint(&SystemUlidSource);
+        let mut actions = vec![Action::Create {
+            id: id.clone(),
+            name: staged.name.clone(),
+        }];
+        if !staged.note.is_empty() {
+            actions.push(Action::SetNote {
+                id: id.clone(),
+                note: staged.note.clone(),
+            });
+        }
+        for wire in &staged.handles {
+            let handle = match Handle::parse_wire(wire) {
+                Ok(handle) => handle,
+                Err(err) => {
+                    return Response::err(format!("suggested handle {wire}: {err}"));
+                }
+            };
+            if !handle.may_leave_device() {
+                // Decode already refuses these; a store edited by hand does
+                // not get a second chance here.
+                return Response::err("a local-agent handle cannot be accepted from a bundle");
+            }
+            actions.push(Action::AddHandle {
+                id: id.clone(),
+                handle,
+                evidence: addressbook::Evidence::Declared,
+            });
+        }
+        for action in actions {
+            if let Err(err) = engine.apply(&author, action) {
+                self.resync(&mut engine);
+                return Response::err(err.to_string());
+            }
+        }
+        if let Err(err) = self.store.replace(&engine) {
+            self.resync(&mut engine);
+            return Response::err(err.to_string());
+        }
+        state.suggestions.remove(index);
+        if let Err(err) = self.save_suggestions(&state) {
+            return Response::err(err);
+        }
+        drop(engine);
+        self.list()
+    }
+
+    /// Discard one staged suggestion. The book is untouched.
+    fn suggest_dismiss(&self, suggestion: &str) -> Response {
+        let mut state = match self.load_suggestions() {
+            Ok(state) => state,
+            Err(err) => return Response::err(err),
+        };
+        let before = state.suggestions.len();
+        state.suggestions.retain(|s| s.id != suggestion);
+        if state.suggestions.len() == before {
+            return Response::err("no such suggestion");
+        }
+        if let Err(err) = self.save_suggestions(&state) {
+            return Response::err(err);
+        }
+        self.list()
+    }
+
+    /// Re-read the envelope after a failed multi-action application, so the
+    /// in-memory book never drifts from disk. When even the re-read fails the
+    /// old state is kept: a broken disk is not a licence to invent one.
+    fn resync(&self, engine: &mut BookEngine) {
+        match self.store.open() {
+            Ok(Some(fresh)) => *engine = fresh,
+            Ok(None) => *engine = BookEngine::new(),
+            Err(_) => {}
+        }
+    }
+
+    fn suggestions_path(&self) -> PathBuf {
+        self.identity_dir.join("addressbook.suggestions.json")
+    }
+
+    /// Absent is an empty store; unreadable is a refusal, never an empty
+    /// default — silently answering nothing would discard staged review work
+    /// on one bad byte, the aliases.json failure this initiative exists to
+    /// retire.
+    fn load_suggestions(&self) -> Result<SuggestionState, String> {
+        let path = self.suggestions_path();
+        if !path.exists() {
+            return Ok(SuggestionState::default());
+        }
+        let bytes =
+            std::fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            format!(
+                "suggestions store unreadable at {}; fix or remove it",
+                path.display()
+            )
+        })
+    }
+
+    fn save_suggestions(&self, state: &SuggestionState) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(state).map_err(|err| err.to_string())?;
+        std::fs::write(self.suggestions_path(), bytes).map_err(|err| err.to_string())
     }
 
     fn migration_path(&self) -> PathBuf {
@@ -510,7 +728,19 @@ pub(crate) fn is_book_request(request: &Request) -> bool {
             | Request::BookResolve { .. }
             | Request::BookMigrateStatus
             | Request::BookMigrate
+            | Request::BookPropose { .. }
+            | Request::BookSuggestAccept { .. }
+            | Request::BookSuggestDismiss { .. }
     )
+}
+
+fn suggestion_view(staged: &StagedSuggestion) -> BookSuggestionView {
+    BookSuggestionView {
+        suggestion: staged.id.clone(),
+        name: staged.name.clone(),
+        note: staged.note.clone(),
+        handles: staged.handles.clone(),
+    }
 }
 
 fn card_view(card: &addressbook::Card) -> BookCardView {

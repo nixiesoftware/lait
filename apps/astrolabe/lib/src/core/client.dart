@@ -62,6 +62,7 @@ export '../bridge/api.dart'
         StorageRow,
         Unopenable,
         BookFacts,
+        SuggestionRow,
         CardRow;
 
 /// The core library, resolved for the process that is about to load it.
@@ -235,6 +236,8 @@ abstract final class ActionKeys {
   static String bookClaim(String card) => 'book.claim:$card';
   static String bookLink(String card) => 'book.link:$card';
   static String bookUnlink(String card) => 'book.unlink:$card';
+  static String bookAccept(String suggestion) => 'book.accept:$suggestion';
+  static String bookDismiss(String suggestion) => 'book.dismiss:$suggestion';
   static const String bookExport = 'book.export';
   static const String bookImport = 'book.import';
 }

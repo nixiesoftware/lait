@@ -122,7 +122,11 @@ impl Endpoint {
 /// `Book`/`BookResolution` responses on the daemon route. Framing unchanged;
 /// the vocabulary grew, and a v10 daemon answers these verbs with "unknown
 /// variant" rather than a version complaint unless the handshake names it.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 11;
+///
+/// v12: card exchange stages rather than mutates — `BookPropose`,
+/// `BookSuggestAccept`, `BookSuggestDismiss`, and the suggestions carried on
+/// the Book view.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 12;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
 ///
@@ -209,7 +213,7 @@ impl BuildFingerprint {
 /// than failing once. The minimum moves with the version rather than trailing
 /// it — a v10 daemon answers the book's verbs with "unknown variant" instead
 /// of a version complaint, which is a worse failure than being told to stop.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 11;
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 12;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -471,6 +475,21 @@ pub enum Request {
     },
     BookMigrateStatus,
     BookMigrate,
+    /// Stage a card-exchange bundle as pending suggestions. The bundle is the
+    /// file's JSON, carried by the head that owns the file dialog — the daemon
+    /// never reads a caller-named path. Nothing imports without review.
+    BookPropose {
+        bundle: String,
+    },
+    /// Accept one staged suggestion: mint the Card, link its handles, retire
+    /// the suggestion. Refusal leaves the suggestion staged.
+    BookSuggestAccept {
+        suggestion: String,
+    },
+    /// Discard one staged suggestion without touching the book.
+    BookSuggestDismiss {
+        suggestion: String,
+    },
 
     // ---- generic Space authority capabilities ----
     /// Effective scoped assignments (Mechanics history, not Catalog state).
@@ -1312,6 +1331,9 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::BookResolve { .. }
         | Request::BookMigrateStatus
         | Request::BookMigrate
+        | Request::BookPropose { .. }
+        | Request::BookSuggestAccept { .. }
+        | Request::BookSuggestDismiss { .. }
         // The host plane is lifecycle by definition: node-local state and the
         // two verbs that bring a Space into existence on this machine. None of
         // them has a Station to be owned by — most run before one could exist.
@@ -1434,6 +1456,9 @@ pub fn representative_requests() -> Vec<Request> {
         },
         Request::BookMigrateStatus,
         Request::BookMigrate,
+        Request::BookPropose { bundle: s() },
+        Request::BookSuggestAccept { suggestion: s() },
+        Request::BookSuggestDismiss { suggestion: s() },
         Request::Subscribe { since: 0 },
         Request::Status,
         Request::Storage,
@@ -1551,6 +1576,18 @@ pub struct BookMigrationView {
     pub files: usize,
 }
 
+/// One staged card-exchange suggestion, awaiting review. Never part of the
+/// book until accepted; carries only what the bundle was allowed to carry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookSuggestionView {
+    pub suggestion: String,
+    pub name: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub handles: Vec<String>,
+}
+
 /// The identity's book, plus how far legacy alias import has got.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookView {
@@ -1558,6 +1595,9 @@ pub struct BookView {
     pub cards: Vec<BookCardView>,
     #[serde(default)]
     pub migration: BookMigrationView,
+    /// Staged card-exchange proposals. Review is the only way in.
+    #[serde(default)]
+    pub suggestions: Vec<BookSuggestionView>,
 }
 
 /// One authored hit that survived the daemon's independent Orbit filter.

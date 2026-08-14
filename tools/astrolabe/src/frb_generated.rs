@@ -315,6 +315,18 @@ impl SseDecode for crate::api::ActionRequest {
                 let mut var_path = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookImport { path: var_path };
             }
+            20 => {
+                let mut var_suggestion = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookAccept {
+                    suggestion: var_suggestion,
+                };
+            }
+            21 => {
+                let mut var_suggestion = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookDismiss {
+                    suggestion: var_suggestion,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -329,11 +341,13 @@ impl SseDecode for crate::api::BookFacts {
         let mut var_migrationComplete = <bool>::sse_decode(deserializer);
         let mut var_migrationPending = <u32>::sse_decode(deserializer);
         let mut var_migrationImported = <u32>::sse_decode(deserializer);
+        let mut var_suggestions = <Vec<crate::api::SuggestionRow>>::sse_decode(deserializer);
         return crate::api::BookFacts {
             cards: var_cards,
             migration_complete: var_migrationComplete,
             migration_pending: var_migrationPending,
             migration_imported: var_migrationImported,
+            suggestions: var_suggestions,
         };
     }
 }
@@ -721,6 +735,18 @@ impl SseDecode for Vec<crate::api::StorageRow> {
     }
 }
 
+impl SseDecode for Vec<crate::api::SuggestionRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::SuggestionRow>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for crate::api::MemberRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -993,6 +1019,22 @@ impl SseDecode for crate::api::StorageRow {
     }
 }
 
+impl SseDecode for crate::api::SuggestionRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_suggestion = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_note = <String>::sse_decode(deserializer);
+        let mut var_handles = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::SuggestionRow {
+            suggestion: var_suggestion,
+            name: var_name,
+            note: var_note,
+            handles: var_handles,
+        };
+    }
+}
+
 impl SseDecode for u32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1142,6 +1184,12 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             crate::api::ActionRequest::BookImport { path } => {
                 [19.into_dart(), path.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::ActionRequest::BookAccept { suggestion } => {
+                [20.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ActionRequest::BookDismiss { suggestion } => {
+                [21.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1162,6 +1210,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::BookFacts {
             self.migration_complete.into_into_dart().into_dart(),
             self.migration_pending.into_into_dart().into_dart(),
             self.migration_imported.into_into_dart().into_dart(),
+            self.suggestions.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1542,6 +1591,24 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::StorageRow> for crate::api::S
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::SuggestionRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.suggestion.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.note.into_into_dart().into_dart(),
+            self.handles.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::SuggestionRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::SuggestionRow> for crate::api::SuggestionRow {
+    fn into_into_dart(self) -> crate::api::SuggestionRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::Unopenable {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
@@ -1670,6 +1737,14 @@ impl SseEncode for crate::api::ActionRequest {
                 <i32>::sse_encode(19, serializer);
                 <String>::sse_encode(path, serializer);
             }
+            crate::api::ActionRequest::BookAccept { suggestion } => {
+                <i32>::sse_encode(20, serializer);
+                <String>::sse_encode(suggestion, serializer);
+            }
+            crate::api::ActionRequest::BookDismiss { suggestion } => {
+                <i32>::sse_encode(21, serializer);
+                <String>::sse_encode(suggestion, serializer);
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1684,6 +1759,7 @@ impl SseEncode for crate::api::BookFacts {
         <bool>::sse_encode(self.migration_complete, serializer);
         <u32>::sse_encode(self.migration_pending, serializer);
         <u32>::sse_encode(self.migration_imported, serializer);
+        <Vec<crate::api::SuggestionRow>>::sse_encode(self.suggestions, serializer);
     }
 }
 
@@ -1967,6 +2043,16 @@ impl SseEncode for Vec<crate::api::StorageRow> {
     }
 }
 
+impl SseEncode for Vec<crate::api::SuggestionRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::SuggestionRow>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for crate::api::MemberRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2195,6 +2281,16 @@ impl SseEncode for crate::api::StorageRow {
         <Option<u64>>::sse_encode(self.object_count, serializer);
         <Option<u64>>::sse_encode(self.last_verified_ms, serializer);
         <Option<crate::api::Missing>>::sse_encode(self.missing, serializer);
+    }
+}
+
+impl SseEncode for crate::api::SuggestionRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.suggestion, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.note, serializer);
+        <Vec<String>>::sse_encode(self.handles, serializer);
     }
 }
 

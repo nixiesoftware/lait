@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `project`, `space_ref`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -128,6 +128,12 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.bookImport({
     required String path,
   }) = ActionRequest_BookImport;
+  const factory ActionRequest.bookAccept({
+    required String suggestion,
+  }) = ActionRequest_BookAccept;
+  const factory ActionRequest.bookDismiss({
+    required String suggestion,
+  }) = ActionRequest_BookDismiss;
 }
 
 /// The identity's address book, as last read.
@@ -137,11 +143,15 @@ class BookFacts {
   final int migrationPending;
   final int migrationImported;
 
+  /// Staged card-exchange proposals awaiting review. Not in the book.
+  final List<SuggestionRow> suggestions;
+
   const BookFacts({
     required this.cards,
     required this.migrationComplete,
     required this.migrationPending,
     required this.migrationImported,
+    required this.suggestions,
   });
 
   @override
@@ -149,7 +159,8 @@ class BookFacts {
       cards.hashCode ^
       migrationComplete.hashCode ^
       migrationPending.hashCode ^
-      migrationImported.hashCode;
+      migrationImported.hashCode ^
+      suggestions.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -159,7 +170,8 @@ class BookFacts {
           cards == other.cards &&
           migrationComplete == other.migrationComplete &&
           migrationPending == other.migrationPending &&
-          migrationImported == other.migrationImported;
+          migrationImported == other.migrationImported &&
+          suggestions == other.suggestions;
 }
 
 /// One authored Card. Handles are wire spellings, never reachability.
@@ -878,6 +890,36 @@ class StorageRow {
           objectCount == other.objectCount &&
           lastVerifiedMs == other.lastVerifiedMs &&
           missing == other.missing;
+}
+
+/// One staged suggestion from a card-exchange file. Review is the only way
+/// into the book, so this carries exactly what the person must judge.
+class SuggestionRow {
+  final String suggestion;
+  final String name;
+  final String note;
+  final List<String> handles;
+
+  const SuggestionRow({
+    required this.suggestion,
+    required this.name,
+    required this.note,
+    required this.handles,
+  });
+
+  @override
+  int get hashCode =>
+      suggestion.hashCode ^ name.hashCode ^ note.hashCode ^ handles.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SuggestionRow &&
+          runtimeType == other.runtimeType &&
+          suggestion == other.suggestion &&
+          name == other.name &&
+          note == other.note &&
+          handles == other.handles;
 }
 
 /// Why a row cannot be opened. Two facts, not one.

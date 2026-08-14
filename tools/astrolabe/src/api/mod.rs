@@ -312,6 +312,18 @@ pub struct BookFacts {
     pub migration_complete: bool,
     pub migration_pending: u32,
     pub migration_imported: u32,
+    /// Staged card-exchange proposals awaiting review. Not in the book.
+    pub suggestions: Vec<SuggestionRow>,
+}
+
+/// One staged suggestion from a card-exchange file. Review is the only way
+/// into the book, so this carries exactly what the person must judge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuggestionRow {
+    pub suggestion: String,
+    pub name: String,
+    pub note: String,
+    pub handles: Vec<String>,
 }
 
 /// One authored Card. Handles are wire spellings, never reachability.
@@ -419,6 +431,12 @@ pub enum ActionRequest {
     BookImport {
         path: String,
     },
+    BookAccept {
+        suggestion: String,
+    },
+    BookDismiss {
+        suggestion: String,
+    },
 }
 
 impl ActionRequest {
@@ -443,7 +461,9 @@ impl ActionRequest {
             Self::BookLink { card, handle } => Action::BookLink { card, handle },
             Self::BookUnlink { card, handle } => Action::BookUnlink { card, handle },
             Self::BookExport { path, cards } => Action::BookExport { path, cards },
-            Self::BookImport { path } => Action::BookImport { path },
+            Self::BookImport { path } => Action::BookPropose { path },
+            Self::BookAccept { suggestion } => Action::BookAccept { suggestion },
+            Self::BookDismiss { suggestion } => Action::BookDismiss { suggestion },
         }
     }
 }
@@ -895,6 +915,16 @@ fn project(app: &App) -> ClientView {
             migration_complete: book.migration_complete,
             migration_pending: u32::try_from(book.migration_pending).unwrap_or(u32::MAX),
             migration_imported: u32::try_from(book.migration_imported).unwrap_or(u32::MAX),
+            suggestions: book
+                .suggestions
+                .iter()
+                .map(|s| SuggestionRow {
+                    suggestion: s.suggestion.clone(),
+                    name: s.name.clone(),
+                    note: s.note.clone(),
+                    handles: s.handles.clone(),
+                })
+                .collect(),
         }),
         notices: app
             .notices()
@@ -1039,6 +1069,12 @@ mod tests {
             migration_complete: false,
             migration_pending: 1,
             migration_imported: 0,
+            suggestions: vec![crate::client::book::SuggestionFacts {
+                suggestion: "sug_abc".into(),
+                name: "Grace".into(),
+                note: String::new(),
+                handles: Vec::new(),
+            }],
         });
         let view = project(&app);
         let book = view.book.expect("the book was read");
@@ -1047,6 +1083,8 @@ mod tests {
         assert_eq!(book.cards[0].handles[0], "actor:ws_one:act_ada");
         assert!(book.cards[0].self_claim);
         assert_eq!(book.migration_pending, 1);
+        assert_eq!(book.suggestions.len(), 1, "staged suggestions cross whole");
+        assert_eq!(book.suggestions[0].suggestion, "sug_abc");
         assert_eq!(
             authored_name_for(app.book(), "act_ada").as_deref(),
             Some("Ada")

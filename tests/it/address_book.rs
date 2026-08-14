@@ -270,3 +270,76 @@ fn the_host_plane_carries_the_book_and_resolve_does_not_place() {
     head.stop();
     std::fs::remove_dir_all(&root).ok();
 }
+
+fn suggestions_named(response: &Response, name: &str) -> usize {
+    match response {
+        Response::Book(view) => view.suggestions.iter().filter(|s| s.name == name).count(),
+        other => panic!("expected a book, got {other:?}"),
+    }
+}
+
+fn suggestion_id(response: &Response, name: &str) -> String {
+    match response {
+        Response::Book(view) => view
+            .suggestions
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.suggestion.clone())
+            .unwrap_or_else(|| panic!("no suggestion named {name}")),
+        other => panic!("expected a book, got {other:?}"),
+    }
+}
+
+/// A proposed bundle stages suggestions; nothing enters the book until each
+/// one is reviewed. Accept mints the Card and retires the suggestion;
+/// dismiss retires it and touches nothing.
+#[test]
+fn a_bundle_stages_suggestions_and_review_is_the_only_way_in() {
+    let home = isolated_home("bookp");
+    std::fs::create_dir_all(&home).expect("home");
+
+    let mut child = spawn_daemon(&home);
+    let client = Client::at(home.join("daemon"));
+    wait_healthy(&client, Duration::from_secs(20));
+
+    let bundle =
+        r#"{"version":1,"cards":[{"name":"Grace","note":"met at the works"},{"name":"Edsger"}]}"#;
+    let staged = ask(
+        &client,
+        Request::BookPropose {
+            bundle: bundle.to_owned(),
+        },
+    );
+    assert_eq!(suggestions_named(&staged, "Grace"), 1, "{staged:?}");
+    assert_eq!(suggestions_named(&staged, "Edsger"), 1);
+    assert_eq!(
+        cards_named(&staged, "Grace"),
+        0,
+        "a proposal must not touch the book"
+    );
+
+    // Proposing the same file twice stages nothing new.
+    let again = ask(
+        &client,
+        Request::BookPropose {
+            bundle: bundle.to_owned(),
+        },
+    );
+    assert_eq!(suggestions_named(&again, "Grace"), 1, "{again:?}");
+
+    let grace = suggestion_id(&staged, "Grace");
+    let accepted = ask(&client, Request::BookSuggestAccept { suggestion: grace });
+    assert_eq!(cards_named(&accepted, "Grace"), 1, "{accepted:?}");
+    assert_eq!(
+        suggestions_named(&accepted, "Grace"),
+        0,
+        "an accepted suggestion retires"
+    );
+
+    let edsger = suggestion_id(&accepted, "Edsger");
+    let dismissed = ask(&client, Request::BookSuggestDismiss { suggestion: edsger });
+    assert_eq!(cards_named(&dismissed, "Edsger"), 0, "{dismissed:?}");
+    assert_eq!(suggestions_named(&dismissed, "Edsger"), 0);
+
+    stop_daemon_at(&home, &mut child);
+}

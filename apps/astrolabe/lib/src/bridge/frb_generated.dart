@@ -302,6 +302,14 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         return ActionRequest_BookImport(
           path: dco_decode_String(raw[1]),
         );
+      case 20:
+        return ActionRequest_BookAccept(
+          suggestion: dco_decode_String(raw[1]),
+        );
+      case 21:
+        return ActionRequest_BookDismiss(
+          suggestion: dco_decode_String(raw[1]),
+        );
       default:
         throw Exception("unreachable");
     }
@@ -311,13 +319,14 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   BookFacts dco_decode_book_facts(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return BookFacts(
       cards: dco_decode_list_card_row(arr[0]),
       migrationComplete: dco_decode_bool(arr[1]),
       migrationPending: dco_decode_u_32(arr[2]),
       migrationImported: dco_decode_u_32(arr[3]),
+      suggestions: dco_decode_list_suggestion_row(arr[4]),
     );
   }
 
@@ -637,6 +646,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  List<SuggestionRow> dco_decode_list_suggestion_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_suggestion_row).toList();
+  }
+
+  @protected
   MemberRow dco_decode_member_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -820,6 +835,20 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  SuggestionRow dco_decode_suggestion_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return SuggestionRow(
+      suggestion: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      note: dco_decode_String(arr[2]),
+      handles: dco_decode_list_String(arr[3]),
+    );
+  }
+
+  @protected
   int dco_decode_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
@@ -943,6 +972,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case 19:
         var var_path = sse_decode_String(deserializer);
         return ActionRequest_BookImport(path: var_path);
+      case 20:
+        var var_suggestion = sse_decode_String(deserializer);
+        return ActionRequest_BookAccept(suggestion: var_suggestion);
+      case 21:
+        var var_suggestion = sse_decode_String(deserializer);
+        return ActionRequest_BookDismiss(suggestion: var_suggestion);
       default:
         throw UnimplementedError('');
     }
@@ -955,11 +990,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_migrationComplete = sse_decode_bool(deserializer);
     var var_migrationPending = sse_decode_u_32(deserializer);
     var var_migrationImported = sse_decode_u_32(deserializer);
+    var var_suggestions = sse_decode_list_suggestion_row(deserializer);
     return BookFacts(
         cards: var_cards,
         migrationComplete: var_migrationComplete,
         migrationPending: var_migrationPending,
-        migrationImported: var_migrationImported);
+        migrationImported: var_migrationImported,
+        suggestions: var_suggestions);
   }
 
   @protected
@@ -1374,6 +1411,19 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  List<SuggestionRow> sse_decode_list_suggestion_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <SuggestionRow>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_suggestion_row(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   MemberRow sse_decode_member_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_id = sse_decode_String(deserializer);
@@ -1622,6 +1672,20 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  SuggestionRow sse_decode_suggestion_row(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_suggestion = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_note = sse_decode_String(deserializer);
+    var var_handles = sse_decode_list_String(deserializer);
+    return SuggestionRow(
+        suggestion: var_suggestion,
+        name: var_name,
+        note: var_note,
+        handles: var_handles);
+  }
+
+  @protected
   int sse_decode_u_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint32();
@@ -1753,6 +1817,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case ActionRequest_BookImport(path: final path):
         sse_encode_i_32(19, serializer);
         sse_encode_String(path, serializer);
+      case ActionRequest_BookAccept(suggestion: final suggestion):
+        sse_encode_i_32(20, serializer);
+        sse_encode_String(suggestion, serializer);
+      case ActionRequest_BookDismiss(suggestion: final suggestion):
+        sse_encode_i_32(21, serializer);
+        sse_encode_String(suggestion, serializer);
     }
   }
 
@@ -1763,6 +1833,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_bool(self.migrationComplete, serializer);
     sse_encode_u_32(self.migrationPending, serializer);
     sse_encode_u_32(self.migrationImported, serializer);
+    sse_encode_list_suggestion_row(self.suggestions, serializer);
   }
 
   @protected
@@ -2090,6 +2161,16 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  void sse_encode_list_suggestion_row(
+      List<SuggestionRow> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_suggestion_row(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_member_row(MemberRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
@@ -2294,6 +2375,15 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_opt_box_autoadd_u_64(self.objectCount, serializer);
     sse_encode_opt_box_autoadd_u_64(self.lastVerifiedMs, serializer);
     sse_encode_opt_box_autoadd_missing(self.missing, serializer);
+  }
+
+  @protected
+  void sse_encode_suggestion_row(SuggestionRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.suggestion, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.note, serializer);
+    sse_encode_list_String(self.handles, serializer);
   }
 
   @protected

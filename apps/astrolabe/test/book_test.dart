@@ -27,11 +27,30 @@ ClientView _view({
       inFlight: inFlight,
     );
 
-BookFacts _book(List<CardRow> cards, {int pending = 0}) => BookFacts(
+BookFacts _book(
+  List<CardRow> cards, {
+  int pending = 0,
+  List<SuggestionRow> suggestions = const [],
+}) =>
+    BookFacts(
       cards: cards,
       migrationComplete: pending == 0,
       migrationPending: pending,
       migrationImported: 0,
+      suggestions: suggestions,
+    );
+
+SuggestionRow _suggestion({
+  String id = 'sug_abc123',
+  String name = 'Grace',
+  String note = '',
+  List<String> handles = const [],
+}) =>
+    SuggestionRow(
+      suggestion: id,
+      name: name,
+      note: note,
+      handles: handles,
     );
 
 CardRow _card({
@@ -242,6 +261,61 @@ void main() {
       ],
     );
   });
+  testWidgets('a staged suggestion is drawn apart from the book', (tester) async {
+    final view = _view(
+      book: _book(
+        [_card()],
+        suggestions: [_suggestion(name: 'Grace', handles: const ['actor:ws_x:act_y'])],
+      ),
+    );
+    await _pump(tester, view);
+    expect(find.text('1 suggested from files'), findsOneWidget);
+    expect(find.text('Grace'), findsOneWidget);
+    expect(find.text('Accept'), findsOneWidget);
+    expect(find.text('Dismiss'), findsOneWidget);
+  });
+
+  testWidgets('accepting a suggestion asks the core by id, never by name',
+      (tester) async {
+    final view = _view(book: _book(const [], suggestions: [_suggestion()]));
+    final asked = await _pump(tester, view);
+    await tester.tap(find.text('Accept'));
+    await tester.pump();
+    expect(
+      asked.single,
+      const ActionRequest.bookAccept(suggestion: 'sug_abc123'),
+    );
+  });
+
+  testWidgets('dismissing a suggestion asks the core and touches no card',
+      (tester) async {
+    final view = _view(book: _book(const [], suggestions: [_suggestion()]));
+    final asked = await _pump(tester, view);
+    await tester.tap(find.text('Dismiss'));
+    await tester.pump();
+    expect(
+      asked.single,
+      const ActionRequest.bookDismiss(suggestion: 'sug_abc123'),
+    );
+  });
+
+  testWidgets('an in-flight accept disables its own control only',
+      (tester) async {
+    final view = _view(
+      book: _book(const [], suggestions: [_suggestion()]),
+      inFlight: [ActionKeys.bookAccept('sug_abc123')],
+    );
+    await _pump(tester, view);
+    final accept = tester.widget<Button>(
+      find.widgetWithText(Button, 'Accept'),
+    );
+    final dismiss = tester.widget<Button>(
+      find.widgetWithText(Button, 'Dismiss'),
+    );
+    expect(accept.onPressed, isNull);
+    expect(dismiss.onPressed, isNotNull);
+  });
+
 }
 
 void _noop() {}

@@ -152,8 +152,14 @@ pub enum Action {
         path: String,
         cards: Option<Vec<String>>,
     },
-    BookImport {
+    BookPropose {
         path: String,
+    },
+    BookAccept {
+        suggestion: String,
+    },
+    BookDismiss {
+        suggestion: String,
     },
     OrbitRebuild {
         orbit: String,
@@ -203,7 +209,9 @@ impl Action {
             Self::BookLink { card, .. } => format!("book.link:{card}"),
             Self::BookUnlink { card, .. } => format!("book.unlink:{card}"),
             Self::BookExport { .. } => "book.export".into(),
-            Self::BookImport { .. } => "book.import".into(),
+            Self::BookPropose { .. } => "book.import".into(),
+            Self::BookAccept { suggestion } => format!("book.accept:{suggestion}"),
+            Self::BookDismiss { suggestion } => format!("book.dismiss:{suggestion}"),
             Self::InstallMcp { preview, .. } => {
                 if *preview {
                     "mcp.preview".into()
@@ -253,7 +261,9 @@ impl Action {
             Self::BookLink { card, handle } => format!("link {handle} to {card}"),
             Self::BookUnlink { card, handle } => format!("unlink {handle} from {card}"),
             Self::BookExport { path, .. } => format!("export cards to {path}"),
-            Self::BookImport { path } => format!("import cards from {path}"),
+            Self::BookPropose { path } => format!("stage suggestions from {path}"),
+            Self::BookAccept { .. } => "accept a suggested card".to_owned(),
+            Self::BookDismiss { .. } => "dismiss a suggested card".to_owned(),
             Self::InstallMcp { preview: true, .. } => "preview an MCP binding".into(),
             Self::InstallMcp { .. } => "write an MCP binding".into(),
             Self::Exit(ExitRequest::GoOffline) => "go offline and exit".into(),
@@ -737,9 +747,17 @@ impl Worker {
                 let _ = client.book_export(path.clone(), cards.clone()).await?;
                 Ok(Outcome::Said(format!("exported cards to {path}")))
             }
-            Action::BookImport { path } => {
-                let _ = client.book_import(path.clone()).await?;
-                Ok(Outcome::Said(format!("imported cards from {path}")))
+            Action::BookPropose { path } => {
+                let _ = client.book_propose(path.clone()).await?;
+                Ok(Outcome::Said(format!("staged suggestions from {path}")))
+            }
+            Action::BookAccept { suggestion } => {
+                let _ = client.book_accept(suggestion.clone()).await?;
+                Ok(Outcome::Said("accepted the suggested card".to_owned()))
+            }
+            Action::BookDismiss { suggestion } => {
+                let _ = client.book_dismiss(suggestion.clone()).await?;
+                Ok(Outcome::Said("dismissed the suggestion".to_owned()))
             }
             Action::InstallMcp { binding, preview } => {
                 let outcome = client.install_mcp_head(binding, *preview).await?;

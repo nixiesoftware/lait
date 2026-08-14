@@ -86,6 +86,7 @@ class _BookPageState extends State<BookPage> {
     final busyExport = view.inFlight.contains(ActionKeys.bookExport);
     final busyImport = view.inFlight.contains(ActionKeys.bookImport);
     final busyNewCard = view.inFlight.contains(ActionKeys.bookPutNew);
+    bool busy(String key) => view.inFlight.contains(key);
     final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
     final shown = _filtered(book?.cards ?? const []);
 
@@ -158,6 +159,14 @@ class _BookPageState extends State<BookPage> {
                     '${book.migrationPending} alias selector(s) still pending. '
                     'They were not turned into Cards.',
                     style: context.labelStyle,
+                  ),
+                ],
+                if (book.suggestions.isNotEmpty) ...[
+                  t.gap.y(Space.xl),
+                  _SuggestionBand(
+                    suggestions: book.suggestions,
+                    busy: busy,
+                    client: client,
                   ),
                 ],
                 t.gap.y(Space.xl3),
@@ -619,4 +628,88 @@ Future<void> _delete(BuildContext context, CardRow card) async {
   ClientScope.of(context).dispatch(
     ActionRequest.bookDelete(card: card.card),
   );
+}
+
+/// Staged suggestions from card-exchange files. Review is the only way into
+/// the book: each row is accepted or dismissed, never silently applied.
+class _SuggestionBand extends StatelessWidget {
+  const _SuggestionBand({
+    required this.suggestions,
+    required this.busy,
+    required this.client,
+  });
+
+  final List<SuggestionRow> suggestions;
+  final bool Function(String key) busy;
+  final Client client;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Card(
+      child: Padding(
+        padding: t.padding.all(Space.lg),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '${suggestions.length} suggested from files',
+              style: context.headingStyle,
+            ),
+            t.gap.y(Space.xs),
+            Text(
+              'Nothing below is in the book until you accept it.',
+              style: context.labelStyle,
+            ),
+            for (final suggestion in suggestions) ...[
+              t.gap.y(Space.md),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(suggestion.name, style: context.bodyStyle),
+                        if (suggestion.note.isNotEmpty)
+                          Text(suggestion.note, style: context.labelStyle),
+                        for (final handle in suggestion.handles)
+                          Text(handle, style: context.monoStyle),
+                      ],
+                    ),
+                  ),
+                  t.gap.x(Space.md),
+                  Button(
+                    onPressed: busy(ActionKeys.bookAccept(suggestion.suggestion))
+                        ? null
+                        : () => client.dispatch(
+                              ActionRequest.bookAccept(
+                                suggestion: suggestion.suggestion,
+                              ),
+                            ),
+                    label: 'Accept',
+                    size: ButtonSize.sm,
+                  ),
+                  t.gap.x(Space.sm),
+                  Button(
+                    onPressed:
+                        busy(ActionKeys.bookDismiss(suggestion.suggestion))
+                            ? null
+                            : () => client.dispatch(
+                                  ActionRequest.bookDismiss(
+                                    suggestion: suggestion.suggestion,
+                                  ),
+                                ),
+                    label: 'Dismiss',
+                    variant: ButtonVariant.ghost,
+                    size: ButtonSize.sm,
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
