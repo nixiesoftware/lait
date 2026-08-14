@@ -338,7 +338,8 @@ fn empty_name_and_oversize_note_are_bounds() {
             },
         )
         .expect_err("blank");
-    assert!(matches!(err, Error::Bound(_)));
+    // A blank name is structural, not a length that happens to be zero.
+    assert!(matches!(err, Error::Invalid(_)));
 
     let id = card(31);
     engine
@@ -422,5 +423,284 @@ fn checkpoint_reconstructs_projection_and_version() {
         Err(err) => {
             panic!("A0 stops if a checkpoint cannot reconstruct the live Book and version: {err}")
         }
+    }
+}
+
+#[test]
+fn the_envelope_restores_projection_and_causal_version() {
+    // The A0 sentence, through the envelope itself: export the authoritative
+    // file, restart into a blank Engine, and prove an identical projection
+    // *and* causal version. The export/import proof above does not touch the
+    // envelope; the round-trip test does not assert the version. This one
+    // does both.
+    let dir = std::env::temp_dir().join(format!("lait-ab-env-{}", card(40).as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp");
+    let store = Store::at(&dir);
+
+    let mut engine = BookEngine::new();
+    let id = card(41);
+    engine
+        .apply(
+            &author(3),
+            Action::Create {
+                id: id.clone(),
+                name: "Ada".into(),
+            },
+        )
+        .expect("create");
+    engine
+        .apply(
+            &author(3),
+            Action::AddHandle {
+                id: id.clone(),
+                handle: Handle::Actor {
+                    space: space(7),
+                    actor: actor(7),
+                },
+                evidence: Evidence::Declared,
+            },
+        )
+        .expect("link");
+    store.replace(&engine).expect("write");
+
+    let reopened = store.open().expect("open").expect("present");
+    assert_eq!(
+        reopened.book().expect("book"),
+        engine.book().expect("book"),
+        "the envelope restores the projection"
+    );
+    assert_eq!(
+        reopened.version().expect("version"),
+        engine.version().expect("version"),
+        "the envelope restores the causal version"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_crash_between_remove_and_rename_recovers_the_survivor() {
+    // atomic_replace writes tmp, copies main to bak, removes main, renames
+    // tmp into place. A crash inside the remove/rename window leaves no main
+    // file while a fully-synced survivor exists — which must never read as a
+    // new empty book.
+    let dir = std::env::temp_dir().join(format!("lait-ab-crash-{}", card(50).as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp");
+    let store = Store::at(&dir);
+
+    let mut engine = BookEngine::new();
+    let id = card(51);
+    engine
+        .apply(
+            &author(4),
+            Action::Create {
+                id: id.clone(),
+                name: "Bo".into(),
+            },
+        )
+        .expect("create");
+    store.replace(&engine).expect("first write");
+    engine
+        .apply(
+            &author(4),
+            Action::SetNote {
+                id: id.clone(),
+                note: "kept".into(),
+            },
+        )
+        .expect("note");
+    store.replace(&engine).expect("second write");
+
+    // Simulate the window: the synced tmp survives, the main file is gone.
+    let tmp = store.path().with_extension("bin.tmp");
+    std::fs::copy(store.path(), &tmp).expect("craft survivor");
+    std::fs::remove_file(store.path()).expect("crash");
+
+    let recovered = store.open().expect("recover").expect("not a new book");
+    assert_eq!(
+        recovered.book().expect("book"),
+        engine.book().expect("book"),
+        "the tmp survivor carries the latest write"
+    );
+    assert!(store.path().exists(), "recovery restores the main file");
+
+    // And with only the backup left, the previous write still answers.
+    std::fs::remove_file(store.path()).expect("crash again");
+    std::fs::remove_file(&tmp).expect("no tmp");
+    let from_bak = store.open().expect("recover from bak").expect("present");
+    assert!(
+        from_bak.book().expect("book").cards.contains_key(&id),
+        "the backup survivor is the previous envelope, not an empty default"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn trailing_bytes_read_as_corrupt() {
+    // Appended bytes past the declared envelope must not be silently
+    // discarded: the checksum over the declared prefix would still verify.
+    let dir = std::env::temp_dir().join(format!("lait-ab-trail-{}", card(60).as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp");
+    let store = Store::at(&dir);
+
+    let mut engine = BookEngine::new();
+    engine
+        .apply(
+            &author(5),
+            Action::Create {
+                id: card(61),
+                name: "Cy".into(),
+            },
+        )
+        .expect("create");
+    store.replace(&engine).expect("write");
+
+    let mut bytes = std::fs::read(store.path()).expect("read");
+    bytes.push(0);
+    std::fs::write(store.path(), &bytes).expect("append");
+    match store.open() {
+        Err(Error::Corrupt(_)) => {}
+        Err(err) => panic!("a file with trailing bytes must fail closed, got {err}"),
+        Ok(_) => panic!("a file with trailing bytes must fail closed, got Ok"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hostile_header_length_is_refused() {
+    // The history bound covers the body; the header length needs its own
+    // gate or a local file can declare a 4 GiB header and be read in full.
+    let dir = std::env::temp_dir().join(format!("lait-ab-hdr-{}", card(70).as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp");
+    let store = Store::at(&dir);
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"LAITABK1");
+    bytes.push(1);
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // header_len
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // body_len
+    std::fs::write(store.path(), &bytes).expect("craft");
+    match store.open() {
+        Err(Error::Corrupt("header len")) => {}
+        Err(err) => panic!("a hostile header length must be refused as such, got {err}"),
+        Ok(_) => panic!("a hostile header length must be refused as such, got Ok"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_handle_bounds_refuse_and_corrupt_nothing() {
+    let mut engine = BookEngine::new();
+    let id = card(80);
+    engine
+        .apply(
+            &author(6),
+            Action::Create {
+                id: id.clone(),
+                name: "Fan".into(),
+            },
+        )
+        .expect("create");
+
+    // Device handles hit MAX_SHARED_DEVICES first: eight fit, a ninth is
+    // refused as exactly that bound.
+    for n in 0..8u8 {
+        engine
+            .apply(
+                &author(6),
+                Action::AddHandle {
+                    id: id.clone(),
+                    handle: Handle::Device(DeviceId::from_key_bytes(&[n; 32])),
+                    evidence: Evidence::Declared,
+                },
+            )
+            .expect("within the device bound");
+    }
+    let err = engine
+        .apply(
+            &author(6),
+            Action::AddHandle {
+                id: id.clone(),
+                handle: Handle::Device(DeviceId::from_key_bytes(&[8; 32])),
+                evidence: Evidence::Declared,
+            },
+        )
+        .expect_err("the ninth device handle");
+    assert!(
+        matches!(err, Error::Bound("MAX_SHARED_DEVICES")),
+        "got {err:?}"
+    );
+
+    // Actor handles ride to the per-card fan-out bound: 64 handles total on
+    // the card, and the 65th is refused without corrupting the Engine.
+    for n in 0..56u8 {
+        engine
+            .apply(
+                &author(6),
+                Action::AddHandle {
+                    id: id.clone(),
+                    handle: Handle::Actor {
+                        space: space(6),
+                        actor: ActorId::from_incept_hash(
+                            &HEXLOWER.encode(&[n.wrapping_add(100); 32]),
+                        ),
+                    },
+                    evidence: Evidence::Declared,
+                },
+            )
+            .expect("within the fan-out bound");
+    }
+    let err = engine
+        .apply(
+            &author(6),
+            Action::AddHandle {
+                id: id.clone(),
+                handle: Handle::Actor {
+                    space: space(6),
+                    actor: ActorId::from_incept_hash(&HEXLOWER.encode(&[200u8; 32])),
+                },
+                evidence: Evidence::Declared,
+            },
+        )
+        .expect_err("the 65th handle");
+    assert!(matches!(err, Error::Bound(_)), "got {err:?}");
+    let book = engine.book().expect("book");
+    let live = book.cards.get(&id).expect("card");
+    assert_eq!(live.handles.len(), 64, "the refusal left the card intact");
+}
+
+#[test]
+fn handle_wire_discriminants_are_frozen() {
+    // Handles go to disk as postcard encodings of the enum, so the variant
+    // order *is* a persistence surface: reordering it would silently change
+    // what stored links mean. Freeze the discriminants.
+    let device_handle = Handle::Device(device(9));
+    let actor_handle = Handle::Actor {
+        space: space(9),
+        actor: actor(9),
+    };
+    let agent = Handle::LocalAgent {
+        store: PathHash::parse("0123456789abcdef").expect("hash"),
+        name: "scribe".into(),
+    };
+    let encoded = |h: &Handle| crate::codec::encode(h).expect("encode");
+    assert_eq!(
+        encoded(&device_handle).first(),
+        Some(&0),
+        "Device is variant 0"
+    );
+    assert_eq!(
+        encoded(&actor_handle).first(),
+        Some(&1),
+        "Actor is variant 1"
+    );
+    assert_eq!(encoded(&agent).first(), Some(&2), "LocalAgent is variant 2");
+    for handle in &[device_handle, actor_handle, agent] {
+        let bytes = encoded(handle);
+        let back: Handle = crate::codec::decode(&bytes).expect("decode");
+        assert_eq!(&back, handle, "the encoding round-trips");
     }
 }

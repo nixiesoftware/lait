@@ -16,6 +16,10 @@ use crate::{bounds, Error};
 const MAGIC: &[u8; 8] = b"LAITABK1";
 const ENVELOPE_FORMAT: u8 = 1;
 const PREFIX: usize = 17; // magic + format + header_len + body_len
+/// The header is a handful of postcard bytes. A file declaring more is not
+/// ours, and the declared length is honoured only after this gate — the
+/// history bound alone would let a hostile header buy a 4 GiB read.
+const MAX_HEADER_BYTES: usize = 4096;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -41,13 +45,49 @@ impl Store {
     }
 
     /// Open an existing envelope, or `None` if the file is absent.
+    ///
+    /// Absence is only "a new book" when no swap survivor exists. A crash
+    /// between the replace's remove and rename leaves no main file while a
+    /// fully-synced `.tmp` (and the previous `.bak`) still do — recovering
+    /// from those is what keeps that window from silently emptying the book.
     pub fn open(&self) -> Result<Option<BookEngine>, Error> {
         if !self.path.exists() {
-            return Ok(None);
+            return self.recover();
         }
         let bytes = read_limited(&self.path)?;
         let engine = decode_envelope(&bytes)?;
         Ok(Some(engine))
+    }
+
+    /// Recover from an interrupted replace: prefer the newer `.tmp` (it was
+    /// synced before the swap began), fall back to `.bak`. A survivor that
+    /// decodes is copied back into place; the survivor itself is kept. When
+    /// both exist and both fail to decode, fail closed with the first error
+    /// rather than answering an empty book.
+    fn recover(&self) -> Result<Option<BookEngine>, Error> {
+        let tmp = self.path.with_extension("bin.tmp");
+        let bak = self.path.with_extension("bin.bak");
+        let mut first_failure: Option<Error> = None;
+        for candidate in [&tmp, &bak] {
+            if !candidate.exists() {
+                continue;
+            }
+            match read_limited(candidate).and_then(|bytes| decode_envelope(&bytes)) {
+                Ok(engine) => {
+                    fs::copy(candidate, &self.path)?;
+                    return Ok(Some(engine));
+                }
+                Err(err) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(err);
+                    }
+                }
+            }
+        }
+        match first_failure {
+            Some(err) => Err(err),
+            None => Ok(None),
+        }
     }
 
     /// Write the engine as a new atomic envelope. The previous file is kept
@@ -99,6 +139,9 @@ fn decode_envelope(bytes: &[u8]) -> Result<BookEngine, Error> {
     let body_len = u32_at(bytes, 13)?;
     let header_len_us = usize::try_from(header_len).map_err(|_| Error::Corrupt("header len"))?;
     let body_len_us = usize::try_from(body_len).map_err(|_| Error::Corrupt("body len"))?;
+    if header_len_us > MAX_HEADER_BYTES {
+        return Err(Error::Corrupt("header len"));
+    }
     if body_len_us > bounds::MAX_ADDRESSBOOK_HISTORY_BYTES {
         return Err(Error::Bound("MAX_ADDRESSBOOK_HISTORY_BYTES"));
     }
@@ -145,19 +188,35 @@ fn read_limited(path: &Path) -> Result<Vec<u8>, Error> {
     if prefix.get(..8) != Some(MAGIC.as_slice()) {
         return Err(Error::Corrupt("magic"));
     }
-    let body_len = u32_at(&prefix, 13)?;
-    let header_len = u32_at(&prefix, 9)?;
-    let total = PREFIX
-        .saturating_add(usize::try_from(header_len).unwrap_or(0))
-        .saturating_add(usize::try_from(body_len).unwrap_or(0))
-        .saturating_add(32);
-    if usize::try_from(body_len).unwrap_or(usize::MAX) > bounds::MAX_ADDRESSBOOK_HISTORY_BYTES {
+    let header_len =
+        usize::try_from(u32_at(&prefix, 9)?).map_err(|_| Error::Corrupt("header len"))?;
+    let body_len = usize::try_from(u32_at(&prefix, 13)?).map_err(|_| Error::Corrupt("body len"))?;
+    if header_len > MAX_HEADER_BYTES {
+        return Err(Error::Corrupt("header len"));
+    }
+    if body_len > bounds::MAX_ADDRESSBOOK_HISTORY_BYTES {
         return Err(Error::Bound("MAX_ADDRESSBOOK_HISTORY_BYTES"));
     }
-    let mut bytes = Vec::new();
+    let total = PREFIX
+        .saturating_add(header_len)
+        .saturating_add(body_len)
+        .saturating_add(32);
+    let declared = u64::try_from(total).map_err(|_| Error::Corrupt("length"))?;
+    // The declared lengths must account for the whole file: bytes past them
+    // would be silently discarded, and the checksum over the declared prefix
+    // would still verify — an appended-to file must read as corrupt.
+    let actual = file.metadata()?.len();
+    if actual != declared {
+        return Err(Error::Corrupt("trailing or truncated bytes"));
+    }
+    let rest =
+        declared.saturating_sub(u64::try_from(PREFIX).map_err(|_| Error::Corrupt("length"))?);
+    let mut bytes = Vec::with_capacity(total);
     bytes.extend_from_slice(&prefix);
-    file.take(u64::try_from(total.saturating_sub(PREFIX)).unwrap_or(0))
-        .read_to_end(&mut bytes)?;
+    file.take(rest).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_err(|_| Error::Corrupt("length"))? != declared {
+        return Err(Error::Corrupt("trailing or truncated bytes"));
+    }
     Ok(bytes)
 }
 

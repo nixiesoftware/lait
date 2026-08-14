@@ -472,8 +472,12 @@ fn next_tag(book: &mut Book, device: &mechanics::ids::DeviceId) -> Tag {
 }
 
 fn validate_name(name: &str) -> Result<(), Error> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() || name.len() > bounds::MAX_NAME_BYTES {
+    // An empty name is a structural refusal, not a bound: reporting it as
+    // MAX_NAME_BYTES sends the operator to fix a length that is zero.
+    if name.trim().is_empty() {
+        return Err(Error::Invalid("a card needs a nonempty name"));
+    }
+    if name.len() > bounds::MAX_NAME_BYTES {
         return Err(Error::Bound("MAX_NAME_BYTES"));
     }
     Ok(())
@@ -599,10 +603,18 @@ fn check_bounds(book: &Book) -> Result<(), Error> {
 
 fn project(view: &CollaborativeView) -> Result<Book, Error> {
     let meta = view.maps.get(PATH_META);
-    let schema = meta
+    let schema = match meta
         .and_then(|m| m.get(ENTRY_SCHEMA))
         .and_then(|b| b.first().copied())
-        .unwrap_or(crate::codec::SCHEMA_VERSION);
+    {
+        Some(schema) => schema,
+        // A blank Engine has no Body and therefore no schema entry; only a
+        // Body already carrying material without one is corrupt. Assuming
+        // "current" for a populated Body would read a future book wrongly
+        // instead of refusing it.
+        None if view.maps.is_empty() => crate::codec::SCHEMA_VERSION,
+        None => return Err(Error::Corrupt("schema missing")),
+    };
     if schema != crate::codec::SCHEMA_VERSION {
         return Err(Error::UnsupportedVersion(schema));
     }
@@ -634,9 +646,6 @@ fn project(view: &CollaborativeView) -> Result<Book, Error> {
     collect_scalars(view, "note", &mut raw_cards, |c, field| {
         c.note = Some(field)
     })?;
-    if let Some(entries) = view.maps.iter().find(|(p, _)| p.ends_with("/created")) {
-        let _ = entries;
-    }
     for (path, entries) in &view.maps {
         if let Some(id) = path
             .strip_prefix("card/")
