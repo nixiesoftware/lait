@@ -6,6 +6,7 @@
 library;
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
+import 'package:flutter/services.dart';
 
 /// The argument that marks the address-book window.
 ///
@@ -27,22 +28,52 @@ bool isBookEngine(List<String> argv) => argv.contains(bookWindowArgument);
 bool isSubEngine(List<String> argv) =>
     argv.isNotEmpty && argv.first == 'multi_window';
 
+/// The runner's summon channel. The plugin's `show()` is `SW_SHOW` alone —
+/// it neither restores a minimised window nor raises an occluded one — so
+/// the runner remembers the sub-window and restores + foregrounds it.
+const MethodChannel _summon = MethodChannel('astrolabe/window_summon');
+
+/// A summons already being answered. The caption button is not an
+/// [ActionRequest], so it has no in-flight key; two fast presses in the
+/// async gap before the window registers would otherwise both `create()`.
+bool _summoning = false;
+
 /// Open the book, or focus it if it is already open.
 ///
 /// Closing the book closes a window, never a peer. A second summons does
 /// not create a second engine.
 Future<void> summonBook() async {
-  for (final controller in await WindowController.getAll()) {
-    if (isBookWindow(controller.arguments)) {
-      await controller.show();
-      return;
-    }
+  if (_summoning) {
+    return;
   }
-  final created = await WindowController.create(
-    WindowConfiguration(
-      hiddenAtLaunch: true,
-      arguments: bookWindowArgument,
-    ),
-  );
-  await created.show();
+  _summoning = true;
+  try {
+    for (final controller in await WindowController.getAll()) {
+      if (isBookWindow(controller.arguments)) {
+        await controller.show();
+        await _raiseBook();
+        return;
+      }
+    }
+    final created = await WindowController.create(
+      WindowConfiguration(
+        hiddenAtLaunch: true,
+        arguments: bookWindowArgument,
+      ),
+    );
+    await created.show();
+    await _raiseBook();
+  } finally {
+    _summoning = false;
+  }
+}
+
+Future<void> _raiseBook() async {
+  try {
+    await _summon.invokeMethod<bool>('summon_book');
+  } on PlatformException {
+    // The window vanished between the scan and the raise; shown is enough.
+  } on MissingPluginException {
+    // Tests and non-Windows shells have no runner channel.
+  }
 }

@@ -85,6 +85,7 @@ class _BookPageState extends State<BookPage> {
     final rereading = view.inFlight.contains(ActionKeys.refresh);
     final busyExport = view.inFlight.contains(ActionKeys.bookExport);
     final busyImport = view.inFlight.contains(ActionKeys.bookImport);
+    final busyNewCard = view.inFlight.contains(ActionKeys.bookPutNew);
     final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
     final shown = _filtered(book?.cards ?? const []);
 
@@ -135,7 +136,7 @@ class _BookPageState extends State<BookPage> {
           ),
           t.gap.x(Space.sm),
           Button(
-            onPressed: () => _edit(context, null),
+            onPressed: busyNewCard ? null : () => _edit(context, null),
             icon: AppIcons.personAdd,
             label: 'New card',
             size: ButtonSize.sm,
@@ -297,6 +298,8 @@ class _CardRow extends StatelessWidget {
           ],
           t.gap.y(Space.md),
           Wrap(
+            spacing: t.size.sm,
+            runSpacing: t.size.xs,
             children: [
               Button(
                 onPressed: busy(ActionKeys.bookPut(card.card))
@@ -318,7 +321,9 @@ class _CardRow extends StatelessWidget {
                   size: ButtonSize.sm,
                 ),
               Button(
-                onPressed: () => _link(context, card),
+                onPressed: busy(ActionKeys.bookLink(card.card))
+                    ? null
+                    : () => _link(context, card),
                 label: 'Add handle',
                 variant: ButtonVariant.ghost,
                 size: ButtonSize.sm,

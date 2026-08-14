@@ -602,7 +602,12 @@ pub fn dispatch(action: ActionRequest) -> ClientView {
     let Core { app, runtime, .. } = &mut *core;
     app.dispatched(&action);
     runtime.dispatch(action);
-    project(app)
+    let view = project(app);
+    // Every watcher hears about the in-flight action now, not at completion:
+    // with two windows on one model, the peer window's control must disable
+    // on this dispatch, and the next pump only arrives when the action ends.
+    emit(view.clone());
+    view
 }
 
 /// The view as it stands, for a surface that has just been built.

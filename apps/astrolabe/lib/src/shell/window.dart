@@ -85,6 +85,12 @@ class NativeWindowChrome implements WindowChrome {
 
   @override
   Future<void> close() => _channel.invokeMethod<void>('close');
+
+  /// The OS window text — what the taskbar and Alt-Tab call this window.
+  /// Not on [WindowChrome]: the main window's title is set at startup by
+  /// `window_manager`, and only a sub-engine needs a way to name itself.
+  Future<void> setTitle(String title) =>
+      _channel.invokeMethod<void>('set_title', title);
 }
 
 /// The title band's Windows-sized height. It is chrome, not page spacing.

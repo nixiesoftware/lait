@@ -36,7 +36,7 @@
 
 use astrolabe::client::heads::McpBindingOutcome;
 use astrolabe::client::host::{HostContext, OrbitEntry};
-use astrolabe::client::library::{LibraryEntry, Opens, Placement};
+use astrolabe::client::library::{LibraryEntry, Opens, Placement, Template};
 use astrolabe::client::space::{DeviceKey, SpaceRef, SpaceView};
 use astrolabe::client::storage::{Missing, StorageFacts};
 use astrolabe::model::App;
@@ -143,6 +143,7 @@ fn populated() -> App {
 
     app.absorb_library(vec![
         LibraryEntry {
+            template: Template::default(),
             orbit: "ws_38TLCQUD96NG9376CBELI5I5V2".into(),
             space: "ws_38TLCQUD96NG9376CBELI5I5V2".into(),
             world_mount: "issues".into(),
@@ -151,6 +152,7 @@ fn populated() -> App {
             placement: Placement::Placed,
         },
         LibraryEntry {
+            template: Template::default(),
             orbit: "ws_7QK2M4RVJ8N3P5T6W9Y1Z0ABCD".into(),
             space: "ws_7QK2M4RVJ8N3P5T6W9Y1Z0ABCD".into(),
             world_mount: String::new(),

@@ -25,7 +25,7 @@
 
 use astrolabe::client::heads::{McpBinding, McpBindingOutcome};
 use astrolabe::client::host::{HostContext, OrbitEntry};
-use astrolabe::client::library::{LibraryEntry, Opens, Placement};
+use astrolabe::client::library::{LibraryEntry, Opens, Placement, Template};
 use astrolabe::client::space::{DeviceKey, SpaceOp, SpaceRef, SpaceView};
 use astrolabe::model::App;
 use astrolabe::runtime::{Action, Outcome, Read, Update};
@@ -623,6 +623,7 @@ fn a_world_with_no_entry_path_cannot_be_opened() {
     let mut app = App::new();
     app.absorb(snapshot(Vec::new()));
     app.absorb_library(vec![LibraryEntry {
+        template: Template::default(),
         orbit: "orb_one".into(),
         space: "ws_one".into(),
         world_mount: "issues".into(),
@@ -660,6 +661,7 @@ fn a_space_that_is_not_running_is_still_openable() {
     let mut app = App::new();
     app.absorb(snapshot(Vec::new()));
     app.absorb_library(vec![LibraryEntry {
+        template: Template::default(),
         orbit: "orb_one".into(),
         space: "ws_one".into(),
         world_mount: String::new(),
@@ -702,6 +704,7 @@ fn open_asks_to_launch_the_row_the_pane_is_about() {
     app.absorb(snapshot(Vec::new()));
     app.absorb_library(vec![
         LibraryEntry {
+            template: Template::default(),
             orbit: "orb_one".into(),
             space: "ws_one".into(),
             world_mount: "issues".into(),
@@ -710,6 +713,7 @@ fn open_asks_to_launch_the_row_the_pane_is_about() {
             placement: Placement::Vacant,
         },
         LibraryEntry {
+            template: Template::default(),
             orbit: "orb_two".into(),
             space: "ws_two".into(),
             world_mount: "issues".into(),
