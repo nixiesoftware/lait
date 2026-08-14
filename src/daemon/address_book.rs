@@ -22,6 +22,11 @@ use crate::control::{
 };
 use crate::orbits::{Catalog, Router, StationIdentity};
 
+/// The one canonical group an agent's card is filed under. Part of the book's
+/// wire vocabulary: clients that part agents from people key on this name, so
+/// it is a contract, not a display string.
+pub(crate) const AGENT_GROUP: &str = "Agents";
+
 /// Durable record of alias-file import. Lives beside the book.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct MigrationState {
@@ -328,6 +333,7 @@ impl AddressBookService {
         let Ok(book) = self.book() else { return };
         match response {
             Response::Members { members } => {
+                let mut agents = Vec::new();
                 for member in members.iter_mut() {
                     let Some(actor) = ActorId::parse(&member.key) else {
                         continue;
@@ -339,6 +345,18 @@ impl AddressBookService {
                     if let Some(name) = first_authored_name(&book, &handle) {
                         member.alias = name;
                     }
+                    if member.sponsor.is_some() {
+                        agents.push(handle);
+                    }
+                }
+                // The inverse decoration: the roster is the live authority on
+                // sponsorship, and sponsorship is agenthood, so a sponsored
+                // member's card is (re)filed under the agent group here. This
+                // heals books written before the group existed — provisioning
+                // stamped the name and the face but not what the actor is.
+                drop(book);
+                for handle in agents {
+                    self.file_as_agent(&handle);
                 }
             }
             Response::Who { peers } => {
@@ -385,6 +403,50 @@ impl AddressBookService {
         };
         let _ = self.upsert_named(name, handle.clone());
         self.stamp_face_if_absent(&handle, name);
+        self.file_as_agent(&handle);
+    }
+
+    /// File the card carrying `handle` under [`AGENT_GROUP`].
+    ///
+    /// The space plane holds the fact — sponsorship is agenthood — and the
+    /// book's own vocabulary carries it, so a client can part agents from
+    /// people without matching names. Idempotent: a card already in the group
+    /// is left untouched, and a handle no card carries files nothing — the
+    /// book never invents a card here.
+    fn file_as_agent(&self, handle: &Handle) {
+        let Ok(author) = self.author() else {
+            return;
+        };
+        let Ok(mut engine) = self.engine.lock() else {
+            return;
+        };
+        let Ok(book) = engine.book() else {
+            return;
+        };
+        let Some(id) = book.authored_cards_for(handle).into_iter().next() else {
+            return;
+        };
+        let filed = book
+            .cards
+            .get(&id)
+            .map(|card| card.groups.iter().any(|link| link.name == AGENT_GROUP))
+            .unwrap_or(true);
+        if filed {
+            return;
+        }
+        if engine
+            .apply(
+                &author,
+                Action::AddGroup {
+                    id,
+                    name: AGENT_GROUP.to_owned(),
+                },
+            )
+            .is_err()
+        {
+            return;
+        }
+        let _ = self.store.replace(&engine);
     }
 
     /// Put the shipped canonical face onto the card carrying `handle`, iff a
@@ -1265,6 +1327,7 @@ mod tests {
             peers: vec![crate::control::PresenceEntry {
                 id: device.to_string(),
                 nick: String::new(),
+                actor: None,
                 state: "online".into(),
                 online: true,
                 last_seen_secs: 0,
@@ -1320,6 +1383,13 @@ mod tests {
                 .starts_with("image/png;base64,"),
             "a known agent's card carries the shipped canonical face"
         );
+        assert!(
+            book.cards[&claude]
+                .groups
+                .iter()
+                .any(|link| link.name == AGENT_GROUP),
+            "provisioning files the agent's card under the agent group"
+        );
         drop(book);
 
         let scout = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[12u8; 32]));
@@ -1339,6 +1409,55 @@ mod tests {
             panic!("still a members reply");
         };
         assert_eq!(members[0].alias, "scout");
+
+        // The inverse decoration heals a book written before the group
+        // existed: Ada's card predates the stamp (a migration import, not a
+        // provision), and a roster naming her a sponsored member files her
+        // card under the agent group. A second pass adds nothing — the stamp
+        // is idempotent.
+        let mut sponsored = Response::Members {
+            members: vec![crate::dto::MemberDto {
+                key: actor.as_str().to_owned(),
+                role: "member".into(),
+                did: None,
+                me: false,
+                sponsor: Some(scout.as_str().to_owned()),
+                alias: String::new(),
+            }],
+        };
+        service.decorate(&space, &mut sponsored);
+        service.decorate(&space, &mut sponsored);
+        let book = service.engine.lock().expect("lock").book().expect("book");
+        let ada = book
+            .authored_cards_for(&Handle::Actor {
+                space: space.clone(),
+                actor: actor.clone(),
+            })
+            .into_iter()
+            .next()
+            .expect("Ada's card exists");
+        let filings: Vec<_> = book.cards[&ada]
+            .groups
+            .iter()
+            .filter(|link| link.name == AGENT_GROUP)
+            .collect();
+        assert_eq!(
+            filings.len(),
+            1,
+            "a sponsored member's card is filed under the agent group exactly once"
+        );
+        drop(book);
+
+        // An unsponsored member files nothing: Basalt's device card holds no
+        // actor handle and the bare roster row above carried no sponsor, so
+        // the only agent-group filings in the whole book are the three above.
+        let book = service.engine.lock().expect("lock").book().expect("book");
+        let filed = book
+            .cards
+            .values()
+            .filter(|card| card.groups.iter().any(|link| link.name == AGENT_GROUP))
+            .count();
+        assert_eq!(filed, 3, "claude, scout and Ada; nobody else");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

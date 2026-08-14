@@ -2061,6 +2061,14 @@ pub enum EventKind {
 pub struct PresenceEntry {
     pub id: String,
     pub nick: String,
+    /// The actor this device speaks for in the routed Space, resolved through
+    /// the Station's authority view — the same resolution [`LiveEntry::actor`]
+    /// rides on, carried here so a presence consumer can answer "is this
+    /// *person* reachable" without a second request. `None` when the Station
+    /// resolves no actor (a peer that lost standing, or one never admitted),
+    /// which is an absence and travels as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     /// Three-state presence: `online`, `away`, or `offline`.
     pub state: String,
     pub online: bool,

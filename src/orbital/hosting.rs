@@ -521,6 +521,7 @@ impl StationHost {
             .map_err(|e| anyhow!("acquire orbit: {e:?}"))?
             .open(Activation {
                 content: Default::default(),
+                find: Default::default(),
                 // Both planes on, which is what `lait/freight/1` being
                 // advertised has always implied and, until now, has not meant:
                 // the ALPN was registered and no driver owned it, so a peer
@@ -1782,6 +1783,10 @@ impl StationHost {
                     // Bare from the Station; the daemon decorates the row
                     // from the identity's book, the one namer.
                     nick: String::new(),
+                    // The person behind the device, when the authority view
+                    // resolves one — presence consumers join on this rather
+                    // than re-deriving the device→actor binding themselves.
+                    actor: self.actor_for(&n.station),
                     id,
                     state: state.to_string(),
                     online,
