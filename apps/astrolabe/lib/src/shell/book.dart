@@ -18,20 +18,20 @@ import 'theme.dart';
 import 'type.dart';
 import 'window.dart';
 
-const Size _bookOpening = Size(800, 600);
-const Size _bookNarrowest = Size(600, 400);
+/// The book is a permanently portrait window — a rolodex, not a workspace.
+/// The opening shape copies the reference client's friends panel (~370×760).
+/// Its width ceiling stays below its height floor, so no drag, snap, or
+/// shortcut can hand it a landscape shape: width ≤ 440 < 600 ≤ height at
+/// every size the OS can grant. Maximise is refused at the HWND, not merely
+/// undrawn.
+const Size _bookOpening = Size(370, 760);
+const Size _bookNarrowest = Size(320, 600);
+const double _bookWidest = 440;
 
-class BookApp extends StatefulWidget {
+class BookApp extends StatelessWidget {
   const BookApp({super.key, required this.client});
 
   final Client client;
-
-  @override
-  State<BookApp> createState() => _BookAppState();
-}
-
-class _BookAppState extends State<BookApp> {
-  ThemeMode _themeMode = ThemeMode.dark;
 
   @override
   Widget build(BuildContext context) {
@@ -40,17 +40,24 @@ class _BookAppState extends State<BookApp> {
       debugShowCheckedModeBanner: false,
       theme: astrolabeTheme(Brightness.light),
       darkTheme: astrolabeTheme(Brightness.dark),
-      themeMode: _themeMode,
+      themeMode: ThemeMode.dark,
       home: ClientScope(
-        client: widget.client,
+        client: client,
         child: Scaffold(
           body: AstrolabeWindowFrame.secondary(
-            title: 'Address book',
+            // The chrome carries no name. The canonical card below IS this
+            // window's identity, and a caption repeating "Address book" above
+            // it was a label spending height on what the card already says.
+            // The OS-facing title keeps the full name for the taskbar and
+            // Alt-Tab.
+            title: '',
             nativeTitle: 'Address book — Astrolabe',
             nativeKey: bookWindowKey,
             size: _bookOpening,
             minimumSize: _bookNarrowest,
-            dark: _themeMode == ThemeMode.dark,
+            maximumWidth: _bookWidest,
+            maximisable: false,
+            dark: true,
             // The book is a conventional page, not the Library's client
             // frame: it keeps the shared page gutter the main window's
             // surfaces get from SurfacePage, and the same operational
@@ -62,14 +69,7 @@ class _BookAppState extends State<BookApp> {
                   child: Builder(
                     builder: (context) => Padding(
                       padding: pageMargin(context.tokens),
-                      child: BookPage(
-                        themeMode: _themeMode,
-                        onToggleTheme: () => setState(() {
-                          _themeMode = _themeMode == ThemeMode.dark
-                              ? ThemeMode.light
-                              : ThemeMode.dark;
-                        }),
-                      ),
+                      child: const BookPage(),
                     ),
                   ),
                 ),
@@ -83,18 +83,11 @@ class _BookAppState extends State<BookApp> {
   }
 }
 
-/// List, search, create, edit, delete, merge, My Card.
+/// List, search, edit, delete, merge, My Card.
 ///
 /// Search and dialog fields are drafts. The book itself is the view.
 class BookPage extends StatefulWidget {
-  const BookPage({
-    super.key,
-    required this.themeMode,
-    required this.onToggleTheme,
-  });
-
-  final ThemeMode themeMode;
-  final VoidCallback onToggleTheme;
+  const BookPage({super.key});
 
   @override
   State<BookPage> createState() => _BookPageState();
@@ -102,12 +95,26 @@ class BookPage extends StatefulWidget {
 
 class _BookPageState extends State<BookPage> {
   String _query = '';
+  bool _searching = false;
   final FocusNode _searchFocus = FocusNode();
 
   @override
   void dispose() {
     _searchFocus.dispose();
     super.dispose();
+  }
+
+  void _openSearch() {
+    setState(() => _searching = true);
+    _searchFocus.requestFocus();
+  }
+
+  void _closeSearch() {
+    if (!_searching) return;
+    setState(() {
+      _searching = false;
+      _query = '';
+    });
   }
 
   @override
@@ -117,130 +124,105 @@ class _BookPageState extends State<BookPage> {
     final view = ClientScope.watch(context);
     final book = view.book;
     final rereading = view.inFlight.contains(ActionKeys.refresh);
-    final busyExport = view.inFlight.contains(ActionKeys.bookExport);
-    final busyImport = view.inFlight.contains(ActionKeys.bookImport);
-    final busyNewCard = view.inFlight.contains(ActionKeys.bookPutNew);
     bool busy(String key) => view.inFlight.contains(key);
     final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
     final shown = _filtered(book?.cards ?? const []);
 
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.f5): () =>
-            client.dispatch(const ActionRequest.refresh()),
-        const SingleActivator(LogicalKeyboardKey.keyF, control: true): () =>
-            _searchFocus.requestFocus(),
+        // The header's Refresh control is gone; the shortcut is the whole
+        // surface now, so it carries the same in-flight guard the button had.
+        const SingleActivator(LogicalKeyboardKey.f5): () {
+          if (!rereading) client.dispatch(const ActionRequest.refresh());
+        },
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+            _openSearch,
+        const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
       },
       child: Focus(
         autofocus: true,
-        child: SurfaceScaffold(
-          title: 'Address book',
-      prose:
-          'Authored Cards for this identity. Names never select an authority target.',
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Button(
-            onPressed: rereading
-                ? null
-                : () => client.dispatch(const ActionRequest.refresh()),
-            icon: AppIcons.refresh,
-            semanticLabel: 'Refresh',
-            isLoading: rereading,
-            variant: ButtonVariant.ghost,
-            size: ButtonSize.iconSm,
-            tooltip: 'Read this machine again',
-          ),
-          t.gap.x(Space.xs),
-          Button(
-            onPressed: widget.onToggleTheme,
-            icon: widget.themeMode == ThemeMode.dark
-                ? AppIcons.toggleOn
-                : AppIcons.toggleOff,
-            semanticLabel: widget.themeMode == ThemeMode.dark
-                ? 'Use light theme'
-                : 'Use dark theme',
-            variant: ButtonVariant.ghost,
-            size: ButtonSize.iconSm,
-          ),
-          t.gap.x(Space.sm),
-          Button(
-            onPressed: book == null || busyExport
-                ? null
-                : () => _bundle(context, export: true),
-            label: 'Export',
-            variant: ButtonVariant.ghost,
-            size: ButtonSize.sm,
-          ),
-          Button(
-            onPressed: busyImport ? null : () => _bundle(context, export: false),
-            label: 'Import',
-            variant: ButtonVariant.ghost,
-            size: ButtonSize.sm,
-          ),
-          t.gap.x(Space.sm),
-          Button(
-            onPressed: busyNewCard ? null : () => _edit(context, null),
-            icon: AppIcons.personAdd,
-            label: 'New card',
-            size: ButtonSize.sm,
-          ),
-        ],
-      ),
-      child: book == null
-          ? const Empty(
-              said: 'The book has not been read.',
-              next: 'Refresh to ask the daemon. Nothing is created on your behalf.',
-            )
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _MyCardBand(mine: mine),
-                if (book.migrationPending > 0) ...[
-                  t.gap.y(Space.md),
-                  Text(
-                    '${book.migrationPending} alias selector(s) still pending. '
-                    'They were not turned into Cards.',
-                    style: context.labelStyle,
-                  ),
-                ],
-                if (book.suggestions.isNotEmpty) ...[
-                  t.gap.y(Space.xl),
-                  _SuggestionBand(
-                    suggestions: book.suggestions,
-                    busy: busy,
-                    client: client,
-                  ),
-                ],
-                t.gap.y(Space.xl3),
-                Input(
-                  search: true,
-                  hint: 'Search cards',
-                  size: InputSize.sm,
-                  focusNode: _searchFocus,
-                  onChanged: (value) => setState(() => _query = value),
-                ),
-                t.gap.y(Space.xl3),
-                Expanded(
-                  child: shown.isEmpty
-                      ? Empty(
-                          said: book.cards.isEmpty
-                              ? 'No cards.'
-                              : 'No cards match that search.',
-                          next: book.cards.isEmpty
-                              ? 'Create one. The book is this identity\'s, even with no Space open.'
-                              : 'Clear the search to see every Card.',
-                        )
-                      : ListView.separated(
-                          itemCount: shown.length,
-                          separatorBuilder: (_, __) => t.gap.y(Space.md),
-                          itemBuilder: (context, index) =>
-                              _CardRow(card: shown[index], all: book.cards),
+        child: book == null
+            ? const Empty(
+                said: 'The book has not been read.',
+                next:
+                    'Press F5 to ask the daemon. Nothing is created on your behalf.',
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _CanonicalCard(mine: mine.isEmpty ? null : mine.first),
+                  if (book.migrationPending > 0) ...[
+                    t.gap.y(Space.md),
+                    Text(
+                      '${book.migrationPending} alias selector(s) still pending. '
+                      'They were not turned into Cards.',
+                      style: context.labelStyle,
+                    ),
+                  ],
+                  if (book.suggestions.isNotEmpty) ...[
+                    t.gap.y(Space.xl),
+                    _SuggestionBand(
+                      suggestions: book.suggestions,
+                      busy: busy,
+                      client: client,
+                    ),
+                  ],
+                  t.gap.y(Space.xl3),
+                  // Search is a button first, a field second — the reference
+                  // client's shape. Escape closes it and clears the draft.
+                  if (_searching)
+                    Input(
+                      search: true,
+                      hint: 'Search cards',
+                      size: InputSize.sm,
+                      focusNode: _searchFocus,
+                      autofocus: true,
+                      onChanged: (value) => setState(() => _query = value),
+                      // Cancel is a control, not only a key: it closes the
+                      // field and clears the draft, same as Escape.
+                      trailing: Button(
+                        onPressed: _closeSearch,
+                        icon: AppIcons.close,
+                        semanticLabel: 'Cancel search',
+                        variant: ButtonVariant.ghost,
+                        size: ButtonSize.iconSm,
+                        tooltip: 'Cancel search (Esc)',
+                      ),
+                    )
+                  else
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Button(
+                          onPressed: _openSearch,
+                          icon: AppIcons.search,
+                          semanticLabel: 'Search cards',
+                          variant: ButtonVariant.ghost,
+                          size: ButtonSize.iconSm,
+                          tooltip: 'Search cards (Ctrl+F)',
                         ),
-                ),
-              ],
-            ),
-        ),
+                      ],
+                    ),
+                  t.gap.y(Space.xl3),
+                  Expanded(
+                    child: shown.isEmpty
+                        ? Empty(
+                            said: book.cards.isEmpty
+                                ? 'No cards.'
+                                : 'No cards match that search.',
+                            next: book.cards.isEmpty
+                                ? 'The book is this identity\'s, even with no Space open.'
+                                : 'Clear the search to see every Card.',
+                          )
+                        : ListView.separated(
+                            itemCount: shown.length,
+                            separatorBuilder: (_, __) => t.gap.y(Space.md),
+                            itemBuilder: (context, index) =>
+                                _CardRow(card: shown[index], all: book.cards),
+                          ),
+                  ),
+                ],
+              ),
       ),
     );
   }
@@ -260,45 +242,76 @@ class _BookPageState extends State<BookPage> {
   }
 }
 
-class _MyCardBand extends StatelessWidget {
-  const _MyCardBand({required this.mine});
+/// The canonical card: how an identity is presented anywhere a person
+/// appears — a picture, a name, a status. The book leads with your own.
+///
+/// The picture is a placeholder (a monogram, or a person mark when there is
+/// nothing to monogram) until Cards carry an image. The status line is a
+/// design placeholder too: presence is not plumbed into [BookFacts] yet, and
+/// when it is, this line must come from a measurement — never a default.
+class _CanonicalCard extends StatelessWidget {
+  const _CanonicalCard({required this.mine});
 
-  final List<CardRow> mine;
+  /// The claimed My Card, or null when the book — already read — holds none.
+  final CardRow? mine;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    if (mine.isEmpty) {
-      return Card(
-        variant: CardVariant.muted,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('MY CARD', style: context.factLabelStyle),
-            t.gap.y(Space.sm),
-            Text('No My Card.', style: context.bodyStyle),
-            t.gap.y(Space.xxs),
-            Text(
-              'Claim one — nothing is implied from a name or a handle.',
-              style: context.labelStyle,
+    final card = mine;
+    final name = card == null ? 'No My Card.' : card.name;
+    final status = card == null
+        ? 'Claim one — nothing is implied from a name or a handle.'
+        : 'Online';
+    return Row(
+      children: [
+        t.box.square(
+          // reason: the face copies the reference client's plate — pinned
+          // like the caption controls, it sits against type rather than the
+          // spacing rhythm.
+          TokenEscape.rawSize(56),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: context.surface.l200,
+              border: Border.all(
+                color: context.border.l500,
+                width: t.stroke.xxs,
+              ),
+              borderRadius: t.radius.all(Space.xxs),
             ),
-          ],
+            child: Center(
+              child: card == null || card.name.isEmpty
+                  ? Icon(AppIcons.person, color: context.text.l700)
+                  : Text(
+                      card.name.substring(0, 1).toUpperCase(),
+                      style: context.headingStyle,
+                    ),
+            ),
+          ),
         ),
-      );
-    }
-    final card = mine.first;
-    return Card(
-      variant: CardVariant.muted,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('MY CARD', style: context.factLabelStyle),
-          t.gap.y(Space.sm),
-          Text(card.name, style: context.headingStyle),
-          t.gap.y(Space.xxs),
-          Text(card.card, style: context.monoStyle),
-        ],
-      ),
+        t.gap.x(Space.lg),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: context.headingStyle,
+              ),
+              t.gap.y(Space.xxs),
+              Text(
+                status,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: context.labelStyle,
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -416,53 +429,6 @@ class _CardRow extends StatelessWidget {
       ),
     );
   }
-}
-
-Future<void> _bundle(BuildContext context, {required bool export}) async {
-  final path = TextEditingController();
-  final saved = await showAppDialog<bool>(
-    context: context,
-    builder: (ctx) => DialogContent(
-      children: [
-        DialogHeader(
-          title: DialogTitle(export ? 'Export cards' : 'Import cards'),
-          description: DialogDescription(
-            export
-                ? 'A suggestion file. Local-agent handles and My Card do not travel.'
-                : 'New Cards only. Existing Cards and My Card are left alone.',
-          ),
-        ),
-        Input(
-          key: const ValueKey('book-bundle-path'),
-          controller: path,
-          label: 'Path',
-          mono: true,
-          autofocus: true,
-        ),
-        DialogFooter(
-          children: [
-            Button(
-              label: 'Cancel',
-              variant: ButtonVariant.outline,
-              onPressed: () => Navigator.pop(ctx, false),
-            ),
-            Button(
-              label: export ? 'Export' : 'Import',
-              onPressed: () => Navigator.pop(ctx, true),
-            ),
-          ],
-        ),
-      ],
-    ),
-  );
-  final dest = path.text.trim();
-  path.dispose();
-  if (saved != true || dest.isEmpty || !context.mounted) return;
-  ClientScope.of(context).dispatch(
-    export
-        ? ActionRequest.bookExport(path: dest)
-        : ActionRequest.bookImport(path: dest),
-  );
 }
 
 Future<void> _edit(BuildContext context, CardRow? existing) async {

@@ -4,11 +4,13 @@ library;
 import 'package:astrolabe/src/core/client.dart';
 import 'package:astrolabe/src/shell/book.dart';
 import 'package:covalence/covalence.dart' hide Surface;
-import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
+import 'package:flutter/material.dart' show MaterialApp, Scaffold;
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:astrolabe/src/shell/theme.dart';
+import 'package:astrolabe/src/shell/window.dart';
 
 ClientView _view({
   BookFacts? book,
@@ -89,10 +91,7 @@ Future<List<ActionRequest>> _pump(
         child: const Scaffold(
           body: Padding(
             padding: EdgeInsets.all(16),
-            child: BookPage(
-              themeMode: ThemeMode.dark,
-              onToggleTheme: _noop,
-            ),
+            child: BookPage(),
           ),
         ),
       ),
@@ -103,34 +102,76 @@ Future<List<ActionRequest>> _pump(
 }
 
 void main() {
-  testWidgets('the address book uses identity-free Covalence secondary chrome',
+  testWidgets('the chrome carries no name; the card is the identity',
       (tester) async {
     await tester.pumpWidget(BookApp(client: Client.canned(_view())));
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('ASTROLABE'), findsNothing);
-    expect(find.text('Address book'), findsNWidgets(2));
+    expect(find.text('Address book'), findsNothing);
     final chrome = tester.widget<WindowChrome>(find.byType(WindowChrome));
     expect(chrome.role, WindowChromeRole.secondary);
     expect(chrome.identity, isNull);
   });
 
+  testWidgets('My Card is the canonical card: a face, a name, a status',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(book: _book([_card(name: 'Ada', self: true)])),
+    );
+    // The face is a boxed monogram until Cards carry an image.
+    expect(find.text('A'), findsOneWidget);
+    expect(find.text('Online'), findsOneWidget);
+    // The claimed name appears on the card and on its list row alike.
+    expect(find.text('Ada'), findsNWidgets(2));
+  });
+
+  testWidgets('the book window is portrait for good and offers no maximise',
+      (tester) async {
+    await tester.pumpWidget(BookApp(client: Client.canned(_view())));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final frame = tester.widget<AstrolabeWindowFrame>(
+      find.byType(AstrolabeWindowFrame),
+    );
+    expect(frame.maximisable, isFalse);
+
+    // The portrait rule is arithmetic, not behavioral: the widest width the
+    // native config may grant is no larger than the shortest height, so no
+    // drag, snap, or shortcut can produce a landscape book.
+    final config = frame.ownedConfiguration!;
+    expect(config.maximisable, isFalse);
+    expect(config.maximumWidth, isNotNull);
+    expect(
+      config.maximumWidth!,
+      lessThanOrEqualTo(config.minimumSize.height),
+      reason: 'a width ceiling above the height floor readmits landscape',
+    );
+    expect(config.size.width, lessThan(config.size.height));
+    expect(config.size.width, lessThanOrEqualTo(config.maximumWidth!));
+    expect(config.minimumSize.width, lessThanOrEqualTo(config.maximumWidth!));
+
+    // No maximise affordance is drawn — absence, not a disabled button.
+    expect(find.bySemanticsLabel('Maximise'), findsNothing);
+    expect(find.bySemanticsLabel('Restore'), findsNothing);
+    expect(find.bySemanticsLabel('Minimise'), findsOneWidget);
+    expect(find.bySemanticsLabel('Close'), findsOneWidget);
+  });
+
   testWidgets('refresh on the book asks the core, not a second model',
       (tester) async {
     final asked = await _pump(tester, _view());
-    await tester.tap(find.bySemanticsLabel('Refresh'));
+    await tester.sendKeyEvent(LogicalKeyboardKey.f5);
     expect(asked, [const ActionRequest.refresh()]);
   });
 
-  testWidgets('an in-flight refresh disables the control', (tester) async {
+  testWidgets('an in-flight refresh keeps the shortcut quiet', (tester) async {
     final asked = await _pump(
       tester,
       _view(inFlight: [ActionKeys.refresh]),
     );
-    await tester.tap(
-      find.bySemanticsLabel('Refresh'),
-      warnIfMissed: false,
-    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.f5);
     expect(asked, isEmpty);
   });
 
@@ -143,30 +184,6 @@ void main() {
     expect(find.text('The book has not been read.'), findsNothing);
     expect(find.text('No cards.'), findsOneWidget);
     expect(find.text('No My Card.'), findsOneWidget);
-  });
-
-  testWidgets('saving a new card asks the core for a put, not a local write',
-      (tester) async {
-    final asked = await _pump(tester, _view(book: _book(const [])));
-    await tester.tap(find.text('New card'));
-    await tester.pump(const Duration(milliseconds: 300));
-
-    await tester.enterText(find.byKey(const ValueKey('book-name')), 'Ada');
-    await tester.enterText(find.byKey(const ValueKey('book-note')), 'colleague');
-    await tester.ensureVisible(find.text('Save'));
-    await tester.tap(find.text('Save'));
-    await tester.pump();
-
-    expect(
-      asked,
-      [
-        const ActionRequest.bookPut(
-          card: null,
-          name: 'Ada',
-          note: 'colleague',
-        ),
-      ],
-    );
   });
 
   testWidgets('claiming My Card names the card, never a name', (tester) async {
@@ -215,7 +232,7 @@ void main() {
     expect(asked, [const ActionRequest.bookDelete(card: 'crd_one')]);
   });
 
-  testWidgets('search is a draft: it filters, it does not dispatch',
+  testWidgets('search is a button first, and its draft only filters',
       (tester) async {
     final asked = await _pump(
       tester,
@@ -226,30 +243,25 @@ void main() {
         ]),
       ),
     );
+    expect(find.byType(Input), findsNothing);
+
+    await tester.tap(find.bySemanticsLabel('Search cards'));
+    await tester.pump();
     await tester.enterText(find.byType(Input), 'grace');
     await tester.pump();
 
     expect(find.text('Ada'), findsNothing);
     expect(find.text('Grace'), findsOneWidget);
     expect(asked, isEmpty, reason: 'searching the book asked the core');
-  });
 
-  testWidgets('export asks the core for a path, not a second model',
-      (tester) async {
-    final asked = await _pump(tester, _view(book: _book([_card()])));
-    await tester.tap(find.text('Export'));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.enterText(
-      find.byKey(const ValueKey('book-bundle-path')),
-      r'D:\tmp\cards.json',
-    );
-    await tester.ensureVisible(find.text('Export').last);
-    await tester.tap(find.text('Export').last);
+    // Cancelling closes the field and clears the draft — the full list is
+    // back and nothing was dispatched.
+    await tester.tap(find.bySemanticsLabel('Cancel search'));
     await tester.pump();
-    expect(
-      asked,
-      [const ActionRequest.bookExport(path: r'D:\tmp\cards.json')],
-    );
+    expect(find.byType(Input), findsNothing);
+    expect(find.text('Ada'), findsOneWidget);
+    expect(find.text('Grace'), findsOneWidget);
+    expect(asked, isEmpty, reason: 'cancelling the search asked the core');
   });
 
   testWidgets('unlinking a handle names the card and the handle',
@@ -329,5 +341,3 @@ void main() {
   });
 
 }
-
-void _noop() {}
