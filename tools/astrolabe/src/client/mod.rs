@@ -16,6 +16,7 @@ pub mod host;
 pub mod http;
 pub mod launch;
 pub mod library;
+pub mod presence;
 pub mod space;
 pub mod storage;
 

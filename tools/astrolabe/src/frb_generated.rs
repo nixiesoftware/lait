@@ -380,6 +380,7 @@ impl SseDecode for crate::api::CardRow {
         let mut var_picture = <Option<String>>::sse_decode(deserializer);
         let mut var_groups = <Vec<String>>::sse_decode(deserializer);
         let mut var_selfClaim = <bool>::sse_decode(deserializer);
+        let mut var_presence = <Option<crate::api::PresenceView>>::sse_decode(deserializer);
         return crate::api::CardRow {
             card: var_card,
             name: var_name,
@@ -391,6 +392,7 @@ impl SseDecode for crate::api::CardRow {
             picture: var_picture,
             groups: var_groups,
             self_claim: var_selfClaim,
+            presence: var_presence,
         };
     }
 }
@@ -858,6 +860,17 @@ impl SseDecode for Option<crate::api::Missing> {
     }
 }
 
+impl SseDecode for Option<crate::api::PresenceView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::PresenceView>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::SpaceRow> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -960,6 +973,19 @@ impl SseDecode for crate::api::PlacementView {
             1 => crate::api::PlacementView::Vacant,
             2 => crate::api::PlacementView::Unknown,
             _ => unreachable!("Invalid variant for PlacementView: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::PresenceView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::PresenceView::Online,
+            1 => crate::api::PresenceView::Away,
+            2 => crate::api::PresenceView::Offline,
+            _ => unreachable!("Invalid variant for PresenceView: {}", inner),
         };
     }
 }
@@ -1257,6 +1283,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::CardRow {
             self.picture.into_into_dart().into_dart(),
             self.groups.into_into_dart().into_dart(),
             self.self_claim.into_into_dart().into_dart(),
+            self.presence.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1541,6 +1568,23 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::PlacementView> for crate::api
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::PresenceView {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Online => 0.into_dart(),
+            Self::Away => 1.into_dart(),
+            Self::Offline => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::PresenceView {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::PresenceView> for crate::api::PresenceView {
+    fn into_into_dart(self) -> crate::api::PresenceView {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::RouteRow {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1814,6 +1858,7 @@ impl SseEncode for crate::api::CardRow {
         <Option<String>>::sse_encode(self.picture, serializer);
         <Vec<String>>::sse_encode(self.groups, serializer);
         <bool>::sse_encode(self.self_claim, serializer);
+        <Option<crate::api::PresenceView>>::sse_encode(self.presence, serializer);
     }
 }
 
@@ -2172,6 +2217,16 @@ impl SseEncode for Option<crate::api::Missing> {
     }
 }
 
+impl SseEncode for Option<crate::api::PresenceView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::PresenceView>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::SpaceRow> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2260,6 +2315,23 @@ impl SseEncode for crate::api::PlacementView {
                 crate::api::PlacementView::Placed => 0,
                 crate::api::PlacementView::Vacant => 1,
                 crate::api::PlacementView::Unknown => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::PresenceView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::PresenceView::Online => 0,
+                crate::api::PresenceView::Away => 1,
+                crate::api::PresenceView::Offline => 2,
                 _ => {
                     unimplemented!("");
                 }

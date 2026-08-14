@@ -9,16 +9,26 @@ import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:astrolabe/src/shell/record.dart';
 import 'package:astrolabe/src/shell/theme.dart';
 import 'package:astrolabe/src/shell/window.dart';
 
 ClientView _view({
   BookFacts? book,
   List<String> inFlight = const [],
+  bool hostAnswered = false,
 }) =>
     ClientView(
       loading: false,
       library_: const [],
+      host: hostAnswered
+          ? const HostFacts(
+              version: 'test',
+              identityHome: '',
+              spacesRoot: '',
+              orbitCount: 0,
+            )
+          : null,
       heads: const [],
       devices: const [],
       storage: const [],
@@ -62,8 +72,10 @@ CardRow _card({
   List<String> addresses = const [],
   List<String> devices = const [],
   List<String> agents = const [],
+  List<String> groups = const [],
   String? picture,
   bool self = false,
+  PresenceView? presence,
 }) =>
     CardRow(
       card: id,
@@ -74,8 +86,9 @@ CardRow _card({
       devices: devices,
       agents: agents,
       picture: picture,
-      groups: const [],
+      groups: groups,
       selfClaim: self,
+      presence: presence,
     );
 
 /// Double-click a person's row: the gesture that opens the profile
@@ -125,23 +138,191 @@ void main() {
 
     expect(find.text('ASTROLABE'), findsNothing);
     expect(find.text('Address book'), findsNothing);
-    final chrome = tester.widget<WindowChrome>(find.byType(WindowChrome));
-    expect(chrome.role, WindowChromeRole.secondary);
-    expect(chrome.identity, isNull);
+    // No caption band at all: the canonical card holds the window's top and
+    // the two controls float beside it, with no rule between them.
+    expect(find.byType(WindowChrome), findsNothing);
+    expect(find.bySemanticsLabel('Minimise'), findsOneWidget);
+    expect(find.bySemanticsLabel('Close'), findsOneWidget);
+    // And no operational metrics row — that record lives on the main window.
+    expect(find.byType(OperationalBar), findsNothing);
   });
 
   testWidgets('My Card is the canonical card: a face, a name, a status',
       (tester) async {
     await _pump(
       tester,
-      _view(book: _book([_card(name: 'Ada', self: true)])),
+      _view(
+        book: _book([_card(name: 'Ada', self: true)]),
+        hostAnswered: true,
+      ),
     );
     // The default face is a boxed monogram, drawn wherever the card is — the
     // canonical card up top and its phone-book row alike.
     expect(find.text('A'), findsNWidgets(2));
+    // The canonical card's Online is the local fact — this identity's daemon
+    // answered the read. The list row measures nothing here and says nothing.
     expect(find.text('Online'), findsOneWidget);
     // The claimed name appears on the card and on its list row alike.
     expect(find.text('Ada'), findsNWidgets(2));
+  });
+
+  testWidgets('an unreachable daemon takes My Card\'s Online with it',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(book: _book([_card(name: 'Ada', self: true)])),
+    );
+    expect(find.text('Online'), findsNothing);
+  });
+
+  testWidgets('a row wears measured presence over the authored note',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(
+        book: _book([
+          _card(
+            id: 'crd_one',
+            name: 'Ada',
+            note: 'Met at the workshop',
+            presence: PresenceView.online,
+          ),
+          _card(id: 'crd_two', name: 'Grace', presence: PresenceView.offline),
+          _card(id: 'crd_three', name: 'Basalt', presence: PresenceView.away),
+        ]),
+      ),
+    );
+    // Presence is the fact a friends list is for; the note yields to it and
+    // stays on the profile page.
+    expect(find.text('Online'), findsOneWidget);
+    expect(find.text('Met at the workshop'), findsNothing);
+    // Offline and Away are measurements too, and they draw — the measured
+    // absence twice, as its section head and as the row's own status.
+    expect(find.text('Offline'), findsNWidgets(2));
+    expect(find.text('Away'), findsOneWidget);
+  });
+
+  testWidgets('a row states the authored note and invents nothing',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(
+        book: _book([
+          _card(id: 'crd_one', name: 'Ada', note: 'Met at the workshop'),
+          _card(id: 'crd_two', name: 'Grace'),
+        ]),
+      ),
+    );
+    expect(find.text('Met at the workshop'), findsOneWidget);
+    // No My Card is claimed and nothing was measured, so nothing on this
+    // surface says Online — an unmeasured presence is absent, never a
+    // default.
+    expect(find.text('Online'), findsNothing);
+  });
+
+  testWidgets('the list is headed Contacts, with search beside it',
+      (tester) async {
+    await _pump(tester, _view(book: _book([_card()])));
+    expect(find.text('CONTACTS'), findsOneWidget);
+    expect(find.bySemanticsLabel('Search cards'), findsOneWidget);
+  });
+
+  testWidgets('the rule parts the measured absence from everyone else',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(
+        book: _book([
+          // Listed offline-first so the rule, not arrival order, does the
+          // parting — and the agent sits with everyone else: what an
+          // identity is and whether it is here are different axes.
+          _card(
+            id: 'crd_moon',
+            name: 'Moon',
+            addresses: const ['actor:ws_one:act_moon'],
+            presence: PresenceView.offline,
+          ),
+          _card(
+            id: 'crd_claude',
+            name: 'claude',
+            addresses: const ['actor:ws_one:act_claude'],
+            groups: const ['Agents'],
+            presence: PresenceView.online,
+          ),
+          _card(
+            id: 'crd_ada',
+            name: 'Ada',
+            addresses: const ['actor:ws_one:act_ada'],
+          ),
+        ]),
+      ),
+    );
+    expect(find.byType(Separator), findsOneWidget);
+    final rule = tester.getTopLeft(find.byType(Separator));
+    final online = tester.getTopLeft(find.text('claude'));
+    final unmeasured = tester.getTopLeft(find.text('Ada'));
+    final offline = tester.getTopLeft(find.text('Moon'));
+    expect(
+      online.dy,
+      lessThan(unmeasured.dy),
+      reason: 'measured presence sorts above the unmeasured',
+    );
+    expect(unmeasured.dy, lessThan(rule.dy));
+    expect(rule.dy, lessThan(offline.dy));
+    // The head and Moon's own status line both state the measured absence.
+    // The count sits on the present section alone — the absent get no tally.
+    expect(find.text('Offline'), findsNWidgets(2));
+    expect(find.text('(2)'), findsOneWidget);
+    expect(find.text('(1)'), findsNothing);
+    // The grey-out: the offline face is dimmed to the offline register.
+    final opacities = tester
+        .widgetList<Opacity>(find.byType(Opacity))
+        .map((widget) => widget.opacity);
+    expect(opacities, contains(0.45));
+  });
+
+  testWidgets('a book with nobody measured offline draws no rule',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(
+        book: _book([
+          _card(id: 'crd_one', name: 'Ada', presence: PresenceView.online),
+          // Unmeasured is not a lesser offline: Grace stays up top.
+          _card(id: 'crd_two', name: 'Grace'),
+        ]),
+      ),
+    );
+    expect(find.byType(Separator), findsNothing);
+    expect(find.text('Offline'), findsNothing);
+    expect(find.text('Contacts'), findsOneWidget);
+  });
+
+  testWidgets('an agent wears the AI mark, never a section of its own',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(
+        book: _book([
+          _card(
+            id: 'crd_claude',
+            name: 'claude',
+            addresses: const ['actor:ws_one:act_claude'],
+            groups: const ['Agents'],
+          ),
+          _card(id: 'crd_grok', name: 'grok', agents: const ['agent:h1:grok']),
+          _card(
+            id: 'crd_ada',
+            name: 'Ada',
+            addresses: const ['actor:ws_one:act_ada'],
+          ),
+        ]),
+      ),
+    );
+    // Both agent spellings wear the mark; the person does not.
+    expect(find.byType(AiMark), findsNWidgets(2));
+    // Nobody is measured offline, so kind alone parts nothing.
+    expect(find.byType(Separator), findsNothing);
   });
 
   testWidgets('the book window is portrait for good and offers no maximise',

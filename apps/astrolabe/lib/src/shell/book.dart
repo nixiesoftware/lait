@@ -15,8 +15,8 @@ import 'package:flutter/widgets.dart';
 import '../core/client.dart';
 import '../surfaces/page.dart';
 import '../surfaces/surfaces.dart' show pageMargin;
+import 'caption.dart' show kCaptionWidth;
 import 'host.dart';
-import 'record.dart';
 import 'theme.dart';
 import 'type.dart';
 import 'window.dart';
@@ -48,11 +48,11 @@ class BookApp extends StatelessWidget {
         client: client,
         child: Scaffold(
           body: AstrolabeWindowFrame.secondary(
-            // The chrome carries no name. The canonical card below IS this
-            // window's identity, and a caption repeating "Address book" above
-            // it was a label spending height on what the card already says.
-            // The OS-facing title keeps the full name for the taskbar and
-            // Alt-Tab.
+            // The chrome carries no name and no band: the canonical card IS
+            // this window's identity, so the caption merges into the body —
+            // the card holds the top of the window with the two controls
+            // floating beside it, and no rule between them. The OS-facing
+            // title keeps the full name for the taskbar and Alt-Tab.
             title: '',
             nativeTitle: 'Address book — Astrolabe',
             nativeKey: bookWindowKey,
@@ -60,25 +60,14 @@ class BookApp extends StatelessWidget {
             minimumSize: _bookNarrowest,
             maximumWidth: _bookWidest,
             maximisable: false,
+            mergedCaption: true,
             dark: true,
-            // The book is a conventional page, not the Library's client
-            // frame: it keeps the shared page gutter the main window's
-            // surfaces get from SurfacePage, and the same operational
-            // record underneath — which is also the window's live region
-            // for landed and refused writes.
-            body: Column(
-              children: [
-                Expanded(
-                  child: Builder(
-                    builder: (context) => Padding(
-                      padding: pageMargin(context.tokens),
-                      child: const BookPage(),
-                    ),
-                  ),
-                ),
-                const OperationalBar(),
-              ],
-            ),
+            // The book is a client frame like the Library, not a document in
+            // a page gutter: its CONTACTS strip owns the window edges, so the
+            // margin is applied per section inside BookPage rather than as
+            // one blanket wrapper here. It carries no operational metrics
+            // row — that record lives on the main window.
+            body: const BookPage(),
           ),
         ),
       ),
@@ -153,6 +142,18 @@ class _BookPageState extends State<BookPage> {
     bool busy(String key) => view.inFlight.contains(key);
     final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
     final shown = _filtered(book?.cards ?? const []);
+    // Presence parts the list, not kind: everyone reachable — or not askable —
+    // sits together, ordered by how present they are, and only the measured
+    // absence gets a section of its own. An unmeasured card stays up top:
+    // "could not be asked" is not a lesser Offline.
+    final offline = shown
+        .where((card) => card.presence == PresenceView.offline)
+        .toList();
+    final contacts = [
+      ...shown.where((card) => card.presence == PresenceView.online),
+      ...shown.where((card) => card.presence == PresenceView.away),
+      ...shown.where((card) => card.presence == null),
+    ];
     // The profile is re-read from the book every build: a deleted or merged
     // card falls back to the list on its own, never a stale page.
     CardRow? profiled;
@@ -178,98 +179,181 @@ class _BookPageState extends State<BookPage> {
       },
       child: Focus(
         autofocus: true,
+        // The unread state and the profile are documents and keep the page
+        // gutter; the list is a client frame whose strip owns the window
+        // edges, so its sections carry the gutter themselves.
         child: book == null
-            ? const Empty(
-                said: 'The book has not been read.',
-                next:
-                    'Press F5 to ask the daemon. Nothing is created on your behalf.',
+            ? Padding(
+                padding: pageMargin(t),
+                child: const Empty(
+                  said: 'The book has not been read.',
+                  next:
+                      'Press F5 to ask the daemon. Nothing is created on your behalf.',
+                ),
               )
             : profiled != null
-                ? _ProfilePage(
-                    card: profiled,
-                    all: book.cards,
-                    onBack: _closeProfile,
+                ? Padding(
+                    padding: pageMargin(t),
+                    child: _ProfilePage(
+                      card: profiled,
+                      all: book.cards,
+                      onBack: _closeProfile,
+                    ),
                   )
                 : Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _CanonicalCard(
-                    mine: mine.isEmpty ? null : mine.first,
-                    onOpen: mine.isEmpty
-                        ? null
-                        : () => _openProfile(mine.first.card),
-                  ),
-                  if (book.migrationPending > 0) ...[
-                    t.gap.y(Space.md),
-                    Text(
-                      '${book.migrationPending} alias selector(s) still pending. '
-                      'They were not turned into Cards.',
-                      style: context.labelStyle,
+                  Padding(
+                    padding: t.padding.fromLTRB(
+                      Space.xl3,
+                      Space.xl,
+                      Space.xl3,
+                      Space.zero,
                     ),
-                  ],
-                  if (book.suggestions.isNotEmpty) ...[
-                    t.gap.y(Space.xl),
-                    _SuggestionBand(
-                      suggestions: book.suggestions,
-                      busy: busy,
-                      client: client,
-                    ),
-                  ],
-                  t.gap.y(Space.xl3),
-                  // Search is a button first, a field second — the reference
-                  // client's shape. Escape closes it and clears the draft.
-                  if (_searching)
-                    Input(
-                      search: true,
-                      hint: 'Search cards',
-                      size: InputSize.sm,
-                      focusNode: _searchFocus,
-                      autofocus: true,
-                      onChanged: (value) => setState(() => _query = value),
-                      // Cancel is a control, not only a key: it closes the
-                      // field and clears the draft, same as Escape.
-                      trailing: Button(
-                        onPressed: _closeSearch,
-                        icon: AppIcons.close,
-                        semanticLabel: 'Cancel search',
-                        variant: ButtonVariant.ghost,
-                        size: ButtonSize.iconSm,
-                        tooltip: 'Cancel search (Esc)',
-                      ),
-                    )
-                  else
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Button(
-                          onPressed: _openSearch,
-                          icon: AppIcons.search,
-                          semanticLabel: 'Search cards',
-                          variant: ButtonVariant.ghost,
-                          size: ButtonSize.iconSm,
-                          tooltip: 'Search cards (Ctrl+F)',
+                        _CanonicalCard(
+                          mine: mine.isEmpty ? null : mine.first,
+                          onOpen: mine.isEmpty
+                              ? null
+                              : () => _openProfile(mine.first.card),
                         ),
+                        if (book.migrationPending > 0) ...[
+                          t.gap.y(Space.md),
+                          Text(
+                            '${book.migrationPending} alias selector(s) still pending. '
+                            'They were not turned into Cards.',
+                            style: context.labelStyle,
+                          ),
+                        ],
+                        if (book.suggestions.isNotEmpty) ...[
+                          t.gap.y(Space.xl),
+                          _SuggestionBand(
+                            suggestions: book.suggestions,
+                            busy: busy,
+                            client: client,
+                          ),
+                        ],
                       ],
                     ),
+                  ),
                   t.gap.y(Space.xl3),
+                  // The reference client's panel head: a full-bleed strip —
+                  // a raised band running edge to edge, with a hairline at
+                  // each border. Its inner padding is the same gutter rung
+                  // the sections use, so the title sits on the content line.
+                  // Search lives inside the strip: a button first, a field
+                  // second, and Escape closes it and clears the draft.
+                  Container(
+                    padding: t.padding.symmetric(h: Space.xl3, v: Space.xs),
+                    decoration: BoxDecoration(
+                      color: context.surface.l100,
+                      border: t.stroke.edge(
+                        top: context.border.l500,
+                        bottom: context.border.l500,
+                      ),
+                    ),
+                    child: _searching
+                        ? Input(
+                            search: true,
+                            hint: 'Search cards',
+                            size: InputSize.sm,
+                            focusNode: _searchFocus,
+                            autofocus: true,
+                            onChanged: (value) =>
+                                setState(() => _query = value),
+                            // Cancel is a control, not only a key: it closes
+                            // the field and clears the draft, same as Escape.
+                            trailing: Button(
+                              onPressed: _closeSearch,
+                              icon: AppIcons.close,
+                              semanticLabel: 'Cancel search',
+                              variant: ButtonVariant.ghost,
+                              size: ButtonSize.iconSm,
+                              tooltip: 'Cancel search (Esc)',
+                            ),
+                          )
+                        : Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'CONTACTS',
+                                  style: context.factLabelStyle.copyWith(
+                                    color: context.text.l900,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                              Button(
+                                onPressed: _openSearch,
+                                icon: AppIcons.search,
+                                semanticLabel: 'Search cards',
+                                variant: ButtonVariant.ghost,
+                                size: ButtonSize.iconSm,
+                                tooltip: 'Search cards (Ctrl+F)',
+                              ),
+                            ],
+                          ),
+                  ),
                   Expanded(
                     child: shown.isEmpty
-                        ? Empty(
-                            said: book.cards.isEmpty
-                                ? 'No cards.'
-                                : 'No cards match that search.',
-                            next: book.cards.isEmpty
-                                ? 'The book is this identity\'s, even with no Space open.'
-                                : 'Clear the search to see every Card.',
-                          )
-                        : ListView.separated(
-                            itemCount: shown.length,
-                            separatorBuilder: (_, __) => t.gap.y(Space.md),
-                            itemBuilder: (context, index) => _PersonRow(
-                              card: shown[index],
-                              onOpen: () =>
-                                  _openProfile(shown[index].card),
+                        ? Padding(
+                            padding: pageMargin(t),
+                            child: Empty(
+                              said: book.cards.isEmpty
+                                  ? 'No cards.'
+                                  : 'No cards match that search.',
+                              next: book.cards.isEmpty
+                                  ? 'The book is this identity\'s, even with no Space open.'
+                                  : 'Clear the search to see every Card.',
                             ),
+                          )
+                        // Present above, offline below, one rule between —
+                        // the reference client's parted friends list. A book
+                        // with nobody measured offline draws no rule.
+                        : ListView(
+                            padding: t.padding.fromLTRB(
+                              Space.xl3,
+                              Space.lg,
+                              Space.xl3,
+                              Space.xl3,
+                            ),
+                            children: [
+                              if (contacts.isNotEmpty) ...[
+                                // The count sits on the present section
+                                // alone: how many are around is the number
+                                // worth knowing; the absent need no tally.
+                                _SectionHead(
+                                  label: 'Contacts',
+                                  count: contacts.length,
+                                ),
+                                t.gap.y(Space.md),
+                                for (final row in contacts) ...[
+                                  _PersonRow(
+                                    card: row,
+                                    onOpen: () => _openProfile(row.card),
+                                  ),
+                                  t.gap.y(Space.lg),
+                                ],
+                              ],
+                              if (contacts.isNotEmpty &&
+                                  offline.isNotEmpty) ...[
+                                const Separator(),
+                                t.gap.y(Space.lg),
+                              ],
+                              if (offline.isNotEmpty) ...[
+                                const _SectionHead(label: 'Offline'),
+                                t.gap.y(Space.md),
+                                for (final row in offline) ...[
+                                  _PersonRow(
+                                    card: row,
+                                    onOpen: () => _openProfile(row.card),
+                                  ),
+                                  t.gap.y(Space.lg),
+                                ],
+                              ],
+                            ],
                           ),
                   ),
                 ],
@@ -297,9 +381,10 @@ class _BookPageState extends State<BookPage> {
 /// appears — a picture, a name, a status. The book leads with your own.
 ///
 /// The picture is a placeholder (a monogram, or a person mark when there is
-/// nothing to monogram) until Cards carry an image. The status line is a
-/// design placeholder too: presence is not plumbed into [BookFacts] yet, and
-/// when it is, this line must come from a measurement — never a default.
+/// nothing to monogram) until Cards carry an image. The status line is
+/// derived, never asserted: measured presence on the card's own handles when
+/// a Space answered, else the local fact — this identity's daemon answering
+/// this very read. When even that is absent, the line is absent too.
 class _CanonicalCard extends StatelessWidget {
   const _CanonicalCard({required this.mine, this.onOpen});
 
@@ -312,10 +397,11 @@ class _CanonicalCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final card = mine;
+    final hostAnswered = ClientScope.watch(context).host != null;
     final name = card == null ? 'No My Card.' : card.name;
     final status = card == null
         ? 'Claim one — nothing is implied from a name or a handle.'
-        : 'Online';
+        : _presenceLabel(card.presence) ?? (hostAnswered ? 'Online' : null);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onDoubleTap: onOpen,
@@ -327,7 +413,7 @@ class _CanonicalCard extends StatelessWidget {
     BuildContext context,
     CardRow? card,
     String name,
-    String status,
+    String? status,
   ) {
     final t = context.tokens;
     return Row(
@@ -349,24 +435,82 @@ class _CanonicalCard extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: context.headingStyle,
               ),
-              t.gap.y(Space.xxs),
-              Text(
-                status,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: context.labelStyle,
-              ),
+              if (status != null) ...[
+                t.gap.y(Space.xxs),
+                Text(
+                  status,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.labelStyle,
+                ),
+              ],
             ],
           ),
+        ),
+        // The card shares the window's top band with the floating minimise
+        // and close controls, so it cedes their corner — two caption widths
+        // — rather than running its text underneath them.
+        t.box.width(
+          TokenEscape.rawSize(kCaptionWidth * 2),
+          child: const SizedBox(),
         ),
       ],
     );
   }
 }
 
-/// A person in the list: the face and the name, nothing else. Everything a
-/// card carries — its handles and every action on it — lives on the profile
-/// page, and double-clicking the row opens it in this window.
+/// Wording for a measured presence, and nothing for an absence: an
+/// unmeasured presence has no words because it is not a fact about the peer.
+String? _presenceLabel(PresenceView? presence) => switch (presence) {
+      PresenceView.online => 'Online',
+      PresenceView.away => 'Away',
+      PresenceView.offline => 'Offline',
+      null => null,
+    };
+
+/// The marking a list section wears — the reference client's "In Game" /
+/// "Online Friends (7)" shape: a quiet sentence-case label with the count
+/// dimmer beside it. The list is parted by presence alone: Contacts (present
+/// or unmeasured) above, Offline — the measured absence — below.
+class _SectionHead extends StatelessWidget {
+  const _SectionHead({required this.label, this.count});
+
+  final String label;
+  final int? count;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Row(
+      children: [
+        Text(
+          label,
+          style: context.labelStyle.copyWith(
+            color: context.text.l800,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        if (count != null) ...[
+          t.gap.x(Space.xs),
+          Text('($count)', style: context.labelStyle),
+        ],
+      ],
+    );
+  }
+}
+
+/// A person in the list: the face, the name, and a second line that is only
+/// ever a fact — measured presence when a Space that names them answered,
+/// else the authored note, else nothing. A flat row, not a boxed card, like
+/// the reference client's friends panel. Everything a card carries — its
+/// handles and every action on it — lives on the profile page, and
+/// double-clicking the row opens it in this window.
+///
+/// Liveness reads through weight: an offline row is greyed hardest, an away
+/// row a little, everyone else drawn at full strength. An agent's card wears
+/// the shipped AI glyph beside its name instead of a section of its own —
+/// what an identity is and whether it is here are different axes, and the
+/// list is parted only by the second.
 class _PersonRow extends StatelessWidget {
   const _PersonRow({required this.card, required this.onOpen});
 
@@ -376,29 +520,78 @@ class _PersonRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final status = _presenceLabel(card.presence) ??
+        (card.note.isNotEmpty ? card.note : null);
+    final offline = card.presence == PresenceView.offline;
+    final away = card.presence == PresenceView.away;
     return Semantics(
       button: true,
       label: 'Open the profile of ${card.name}',
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onDoubleTap: onOpen,
-        child: Card(
-          child: Row(
-            children: [
-              _FacePlate(picture: card.picture, name: card.name, size: 40),
-              t.gap.x(Space.md),
-              Expanded(
-                child: Text(
-                  card.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.headingStyle,
-                ),
+        child: Row(
+          children: [
+            Opacity(
+              // The face carries the grey-out: measured absence dims it
+              // hardest, away part-way. Text keeps full opacity and dims
+              // through color instead, so it never drops below legibility.
+              opacity: offline ? 0.45 : (away ? 0.7 : 1.0),
+              child: _FacePlate(
+                picture: card.picture,
+                name: card.name,
+                size: 40,
               ),
-              if (card.selfClaim)
-                const Badge(label: 'My Card', variant: BadgeVariant.solid),
-            ],
-          ),
+            ),
+            t.gap.x(Space.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          card.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: offline
+                              ? context.headingStyle.copyWith(
+                                  color: context.text.l700,
+                                )
+                              : context.headingStyle,
+                        ),
+                      ),
+                      if (_agentCard(card)) ...[
+                        t.gap.x(Space.xs),
+                        // The shipped AI lettermark, bare: this identity IS
+                        // an AI, which is not the explainability affordance
+                        // the interactive AiLabel carries for AI-filled
+                        // values.
+                        const AiMark(),
+                      ],
+                    ],
+                  ),
+                  if (status != null) ...[
+                    t.gap.y(Space.xxs),
+                    Text(
+                      status,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: card.presence == PresenceView.online
+                          ? context.labelStyle.copyWith(
+                              color: context.status.success.l800,
+                            )
+                          : context.labelStyle,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (card.selfClaim)
+              const Badge(label: 'My Card', variant: BadgeVariant.solid),
+          ],
         ),
       ),
     );
@@ -597,35 +790,61 @@ class _FacePlate extends StatelessWidget {
       // rhythm.
       TokenEscape.rawSize(size),
       child: DecoratedBox(
+        // The stroke is painted in the FOREGROUND: painted behind, a
+        // cover-fit picture simply hides it, and only the default face
+        // appeared to have a border. Every plate wears the same one.
+        position: DecorationPosition.foreground,
         decoration: BoxDecoration(
-          color: context.surface.l200,
           border: Border.all(
             color: context.border.l500,
             width: t.stroke.xxs,
           ),
           borderRadius: t.radius.all(Space.xxs),
         ),
-        child: bytes != null
-            ? ClipRRect(
-                borderRadius: t.radius.all(Space.xxs),
-                child: Image.memory(
-                  bytes,
-                  fit: BoxFit.cover,
-                  gaplessPlayback: true,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: context.surface.l200,
+            borderRadius: t.radius.all(Space.xxs),
+          ),
+          child: bytes != null
+              ? ClipRRect(
+                  borderRadius: t.radius.all(Space.xxs),
+                  child: Image.memory(
+                    bytes,
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                  ),
+                )
+              : Center(
+                  child: name.isEmpty
+                      ? Icon(AppIcons.person, color: context.text.l700)
+                      : Text(
+                          name.substring(0, 1).toUpperCase(),
+                          style: context.headingStyle,
+                        ),
                 ),
-              )
-            : Center(
-                child: name.isEmpty
-                    ? Icon(AppIcons.person, color: context.text.l700)
-                    : Text(
-                        name.substring(0, 1).toUpperCase(),
-                        style: context.headingStyle,
-                      ),
-              ),
+        ),
       ),
     );
   }
 }
+
+/// The canonical group the daemon files an agent's card under — part of the
+/// book's wire vocabulary, not a display string. Provisioning stamps it, and
+/// the roster decoration heals older books, because an agent's card carries
+/// an ordinary `actor:` address: at the identity layer agents are members,
+/// so the handles alone cannot part them from people.
+const String _agentGroup = 'Agents';
+
+/// An agent's own card: filed under the agent group, or carrying nothing but
+/// `agent:` spellings. A person's card may list co-located agents; what keeps
+/// it a person's is that an address or a device anchors it. Worn as the AI
+/// mark on the card's row — never as a section: what an identity is and
+/// whether it is here are different axes, and the list is parted only by the
+/// second.
+bool _agentCard(CardRow card) =>
+    card.groups.contains(_agentGroup) ||
+    (card.agents.isNotEmpty && card.addresses.isEmpty && card.devices.isEmpty);
 
 /// Decode the stored `<mime>;base64,<data>` form. The engine validated it at
 /// write, so a miss here is a corrupt store answered with the default face —

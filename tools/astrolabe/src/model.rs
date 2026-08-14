@@ -64,6 +64,10 @@ pub struct App {
     space: Option<SpaceView>,
     /// The identity's address book. `None` until the first successful read.
     book: Option<BookSnapshot>,
+    /// What passive presence sampling last measured. `None` until a pass has
+    /// run; a pass that could not run leaves the last measurement in place,
+    /// under the staleness the model already wears.
+    presence: Option<crate::client::presence::PresenceMap>,
     /// How many times each device's log has been reported to have changed.
     ///
     /// A counter rather than a flag, and the *only* thing this model derives
@@ -146,6 +150,7 @@ impl App {
             Update::Heads(heads) => self.heads = heads,
             Update::Context(context) => self.context = Some(*context),
             Update::Book(book) => self.book = Some(book),
+            Update::Presence(presence) => self.presence = Some(presence),
             Update::Signal(signal) => self.consume(&signal),
             Update::Done { key, outcome } => {
                 self.in_flight.remove(&key);
@@ -325,6 +330,10 @@ impl App {
 
     pub fn book(&self) -> Option<&BookSnapshot> {
         self.book.as_ref()
+    }
+
+    pub fn presence(&self) -> Option<&crate::client::presence::PresenceMap> {
+        self.presence.as_ref()
     }
 
     /// How many log changes this model has been told about for `device`.

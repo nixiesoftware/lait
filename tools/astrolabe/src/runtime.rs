@@ -293,6 +293,9 @@ pub enum Update {
     Heads(Vec<HeadFacts>),
     Context(Box<HostContext>),
     Book(crate::client::book::BookSnapshot),
+    /// What passive presence sampling measured this pass — including which
+    /// Spaces answered at all, so absence keeps its kind.
+    Presence(crate::client::presence::PresenceMap),
     Signal(ClientSignal),
     /// An action finished, and what it produced.
     Done {
@@ -531,7 +534,15 @@ impl Worker {
             Err(error) => self.fail(None, "read storage", error),
         }
         match self.client.host_context().await {
-            Ok(context) => self.send(Update::Context(Box::new(context))),
+            Ok(context) => {
+                // Presence is asked of the Orbits the context just listed —
+                // passively, so this read places nothing. A pass that could
+                // not read the context measures nothing, and the model keeps
+                // its last measurement under the staleness it already wears.
+                let presence = self.client.presence(&context.orbits).await;
+                self.send(Update::Context(Box::new(context)));
+                self.send(Update::Presence(presence));
+            }
             Err(error) => self.fail(None, "read host context", error),
         }
         match self.client.book_list().await {

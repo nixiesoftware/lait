@@ -63,7 +63,8 @@ export '../bridge/api.dart'
         Unopenable,
         BookFacts,
         SuggestionRow,
-        CardRow;
+        CardRow,
+        PresenceView;
 
 /// The core library, resolved for the process that is about to load it.
 ///

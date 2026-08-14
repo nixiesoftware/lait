@@ -378,6 +378,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  PresenceView dco_decode_box_autoadd_presence_view(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_presence_view(raw);
+  }
+
+  @protected
   SpaceRow dco_decode_box_autoadd_space_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_space_row(raw);
@@ -411,8 +417,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   CardRow dco_decode_card_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
     return CardRow(
       card: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
@@ -424,6 +430,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       picture: dco_decode_opt_String(arr[7]),
       groups: dco_decode_list_String(arr[8]),
       selfClaim: dco_decode_bool(arr[9]),
+      presence: dco_decode_opt_box_autoadd_presence_view(arr[10]),
     );
   }
 
@@ -723,6 +730,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  PresenceView? dco_decode_opt_box_autoadd_presence_view(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_presence_view(raw);
+  }
+
+  @protected
   SpaceRow? dco_decode_opt_box_autoadd_space_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_space_row(raw);
@@ -782,6 +795,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   PlacementView dco_decode_placement_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return PlacementView.values[raw as int];
+  }
+
+  @protected
+  PresenceView dco_decode_presence_view(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return PresenceView.values[raw as int];
   }
 
   @protected
@@ -1057,6 +1076,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  PresenceView sse_decode_box_autoadd_presence_view(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_presence_view(deserializer));
+  }
+
+  @protected
   SpaceRow sse_decode_box_autoadd_space_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_space_row(deserializer));
@@ -1099,6 +1125,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_picture = sse_decode_opt_String(deserializer);
     var var_groups = sse_decode_list_String(deserializer);
     var var_selfClaim = sse_decode_bool(deserializer);
+    var var_presence = sse_decode_opt_box_autoadd_presence_view(deserializer);
     return CardRow(
         card: var_card,
         name: var_name,
@@ -1109,7 +1136,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         agents: var_agents,
         picture: var_picture,
         groups: var_groups,
-        selfClaim: var_selfClaim);
+        selfClaim: var_selfClaim,
+        presence: var_presence);
   }
 
   @protected
@@ -1532,6 +1560,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  PresenceView? sse_decode_opt_box_autoadd_presence_view(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_presence_view(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   SpaceRow? sse_decode_opt_box_autoadd_space_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1630,6 +1670,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return PlacementView.values[inner];
+  }
+
+  @protected
+  PresenceView sse_decode_presence_view(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return PresenceView.values[inner];
   }
 
   @protected
@@ -1909,6 +1956,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_presence_view(
+      PresenceView self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_presence_view(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_space_row(
       SpaceRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1954,6 +2008,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_opt_String(self.picture, serializer);
     sse_encode_list_String(self.groups, serializer);
     sse_encode_bool(self.selfClaim, serializer);
+    sse_encode_opt_box_autoadd_presence_view(self.presence, serializer);
   }
 
   @protected
@@ -2276,6 +2331,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_presence_view(
+      PresenceView? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_presence_view(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_space_row(
       SpaceRow? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2361,6 +2427,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
 
   @protected
   void sse_encode_placement_view(PlacementView self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_presence_view(PresenceView self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
   }

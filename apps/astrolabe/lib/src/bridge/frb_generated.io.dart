@@ -58,6 +58,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   Missing dco_decode_box_autoadd_missing(dynamic raw);
 
   @protected
+  PresenceView dco_decode_box_autoadd_presence_view(dynamic raw);
+
+  @protected
   SpaceRow dco_decode_box_autoadd_space_row(dynamic raw);
 
   @protected
@@ -172,6 +175,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   Missing? dco_decode_opt_box_autoadd_missing(dynamic raw);
 
   @protected
+  PresenceView? dco_decode_opt_box_autoadd_presence_view(dynamic raw);
+
+  @protected
   SpaceRow? dco_decode_opt_box_autoadd_space_row(dynamic raw);
 
   @protected
@@ -197,6 +203,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PlacementView dco_decode_placement_view(dynamic raw);
+
+  @protected
+  PresenceView dco_decode_presence_view(dynamic raw);
 
   @protected
   RouteRow dco_decode_route_row(dynamic raw);
@@ -266,6 +275,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   Missing sse_decode_box_autoadd_missing(SseDeserializer deserializer);
+
+  @protected
+  PresenceView sse_decode_box_autoadd_presence_view(
+      SseDeserializer deserializer);
 
   @protected
   SpaceRow sse_decode_box_autoadd_space_row(SseDeserializer deserializer);
@@ -386,6 +399,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   Missing? sse_decode_opt_box_autoadd_missing(SseDeserializer deserializer);
 
   @protected
+  PresenceView? sse_decode_opt_box_autoadd_presence_view(
+      SseDeserializer deserializer);
+
+  @protected
   SpaceRow? sse_decode_opt_box_autoadd_space_row(SseDeserializer deserializer);
 
   @protected
@@ -413,6 +430,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PlacementView sse_decode_placement_view(SseDeserializer deserializer);
+
+  @protected
+  PresenceView sse_decode_presence_view(SseDeserializer deserializer);
 
   @protected
   RouteRow sse_decode_route_row(SseDeserializer deserializer);
@@ -486,6 +506,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_box_autoadd_missing(Missing self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_presence_view(
+      PresenceView self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_space_row(
@@ -617,6 +641,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       Missing? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_presence_view(
+      PresenceView? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_space_row(
       SpaceRow? self, SseSerializer serializer);
 
@@ -646,6 +674,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_placement_view(PlacementView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presence_view(PresenceView self, SseSerializer serializer);
 
   @protected
   void sse_encode_route_row(RouteRow self, SseSerializer serializer);

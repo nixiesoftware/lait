@@ -326,6 +326,18 @@ pub struct SuggestionRow {
     pub handles: Vec<String>,
 }
 
+/// Measured reachability for the identity a Card names, from this device's
+/// vantage — the Neighbor registry's beacon-fed answer, never a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceView {
+    Online,
+    Away,
+    /// A Space that names this identity answered, and nothing speaks for it
+    /// right now. A measurement — distinct from the card-level `None`, which
+    /// is "no Space that names it could be asked".
+    Offline,
+}
+
 /// One authored Card. Handles are wire spellings, never reachability.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CardRow {
@@ -343,6 +355,10 @@ pub struct CardRow {
     pub picture: Option<String>,
     pub groups: Vec<String>,
     pub self_claim: bool,
+    /// Measured presence joined over this card's handles, or `None` when no
+    /// Space that names it could be asked. Unmeasured is absent, never
+    /// `Offline` — the wire keeps the two apart so the surface can too.
+    pub presence: Option<PresenceView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -928,6 +944,7 @@ fn project(app: &App) -> ClientView {
                     picture: card.picture.clone(),
                     groups: card.groups.clone(),
                     self_claim: card.self_claim,
+                    presence: card_presence(app.presence(), card),
                 })
                 .collect(),
             migration_complete: book.migration_complete,
@@ -961,6 +978,51 @@ fn project(app: &App) -> ClientView {
             .collect(),
         in_flight: app.in_flight_keys(),
     }
+}
+
+/// Measured presence for one card, joined over its handles.
+///
+/// A person online on one device is online, so the best observation wins.
+/// `Offline` is only ever produced from a measurement: a Space that answered
+/// with nothing speaking for the actor. A card none of whose Spaces could be
+/// asked, and none of whose devices any registry has seen, answers `None` —
+/// the "could not be asked" absence, kept apart from `Offline` all the way
+/// to the wire. Local-agent handles measure nothing here: they name a
+/// runtime on this machine, not a peer.
+fn card_presence(
+    presence: Option<&crate::client::presence::PresenceMap>,
+    card: &crate::client::book::CardFacts,
+) -> Option<PresenceView> {
+    use crate::client::presence::Reach;
+    let map = presence?;
+    let mut best: Option<Reach> = None;
+    let mut raise = |reach: Reach, best: &mut Option<Reach>| {
+        *best = Some(best.map_or(reach, |held| held.max(reach)));
+    };
+    for address in &card.addresses {
+        let mut parts = address.splitn(3, ':');
+        let (Some("actor"), Some(space), Some(actor)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if let Some(reach) = map.actors.get(&(space.to_owned(), actor.to_owned())) {
+            raise(*reach, &mut best);
+        } else if map.asked.contains(space) {
+            raise(Reach::Offline, &mut best);
+        }
+    }
+    for device in &card.devices {
+        // A device absent from every registry stays unmeasured: devices are
+        // not Space-scoped, so no answered Space can vouch for their absence.
+        if let Some(reach) = map.devices.get(device) {
+            raise(*reach, &mut best);
+        }
+    }
+    best.map(|reach| match reach {
+        Reach::Online => PresenceView::Online,
+        Reach::Away => PresenceView::Away,
+        Reach::Offline => PresenceView::Offline,
+    })
 }
 
 fn authored_name_for(

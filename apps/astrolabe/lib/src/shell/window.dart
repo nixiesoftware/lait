@@ -235,6 +235,7 @@ class AstrolabeWindowFrame extends StatefulWidget {
         assert(captionHeight > 0),
         role = WindowChromeRole.primary,
         maximisable = true,
+        mergedCaption = false,
         ownedConfiguration = null;
 
   /// A contextual window whose visible identity is structurally owned by
@@ -251,6 +252,7 @@ class AstrolabeWindowFrame extends StatefulWidget {
     required bool dark,
     double? maximumWidth,
     this.maximisable = true,
+    this.mergedCaption = false,
     this.closePolicy = AstrolabeWindowClosePolicy.close,
     this.chrome = const NativeWindowControlHost(),
   })  : captionBuilder = null,
@@ -282,6 +284,15 @@ class AstrolabeWindowFrame extends StatefulWidget {
   /// stated once here so the visible chrome cannot promise what the window
   /// refuses.
   final bool maximisable;
+
+  /// Draw no caption band at all: the body owns the window's whole height
+  /// and the window controls float over its top-right corner. For a window
+  /// whose leading content IS its identity — the address book's canonical
+  /// card — a band above it was chrome spending height on what the content
+  /// already says. The caption-height strip across the top stays a native
+  /// drag region, translucent over the body, so the window still moves like
+  /// one. Secondary windows only.
+  final bool mergedCaption;
 
   /// Optional interactive replacement for the default wordmark. The primary
   /// client uses it as its application-menu trigger; secondary windows keep
@@ -356,6 +367,46 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
 
   @override
   Widget build(BuildContext context) {
+    if (widget.mergedCaption) {
+      return ColoredBox(
+        color: context.surface.l50,
+        child: Stack(
+          children: [
+            Positioned.fill(child: widget.body),
+            // The drag region lies over the body's top strip but stays
+            // translucent and claims only the pan (and the double-click,
+            // where maximise exists), so the content beneath keeps every
+            // gesture of its own — the same arena split the primary caption
+            // draws, approached from the other side.
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: widget.captionHeight,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onPanStart: (_) => widget.chrome.startDragging(),
+                onDoubleTap: widget.maximisable ? _toggleMaximise : null,
+              ),
+            ),
+            Positioned(
+              top: 0,
+              right: 0,
+              child: CaptionControls(
+                height: widget.captionHeight,
+                maximised: _maximised,
+                onMinimise: widget.chrome.minimize,
+                onToggleMaximise: widget.maximisable ? _toggleMaximise : null,
+                onClose: _close,
+                closeTooltip: widget.closePolicy == AstrolabeWindowClosePolicy.hide
+                    ? 'Close (it keeps serving in the tray)'
+                    : 'Close window',
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return ColoredBox(
       color: context.surface.l50,
       child: Column(

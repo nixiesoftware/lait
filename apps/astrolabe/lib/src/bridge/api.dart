@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `project`, `space_ref`
+// These functions are ignored because they are not marked as `pub`: `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `project`, `space_ref`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -199,6 +199,11 @@ class CardRow {
   final List<String> groups;
   final bool selfClaim;
 
+  /// Measured presence joined over this card's handles, or `None` when no
+  /// Space that names it could be asked. Unmeasured is absent, never
+  /// `Offline` — the wire keeps the two apart so the surface can too.
+  final PresenceView? presence;
+
   const CardRow({
     required this.card,
     required this.name,
@@ -210,6 +215,7 @@ class CardRow {
     this.picture,
     required this.groups,
     required this.selfClaim,
+    this.presence,
   });
 
   @override
@@ -223,7 +229,8 @@ class CardRow {
       agents.hashCode ^
       picture.hashCode ^
       groups.hashCode ^
-      selfClaim.hashCode;
+      selfClaim.hashCode ^
+      presence.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -239,7 +246,8 @@ class CardRow {
           agents == other.agents &&
           picture == other.picture &&
           groups == other.groups &&
-          selfClaim == other.selfClaim;
+          selfClaim == other.selfClaim &&
+          presence == other.presence;
 }
 
 /// Everything a surface can draw, as of one moment.
@@ -786,6 +794,19 @@ enum PlacementView {
   placed,
   vacant,
   unknown,
+  ;
+}
+
+/// Measured reachability for the identity a Card names, from this device's
+/// vantage — the Neighbor registry's beacon-fed answer, never a default.
+enum PresenceView {
+  online,
+  away,
+
+  /// A Space that names this identity answered, and nothing speaks for it
+  /// right now. A measurement — distinct from the card-level `None`, which
+  /// is "no Space that names it could be asked".
+  offline,
   ;
 }
 
