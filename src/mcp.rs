@@ -172,7 +172,6 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "key_rotate",
     "members",
     "member_log",
-    "member_alias",
     // transport / presence
     "status",
     "doctor",
@@ -209,14 +208,6 @@ pub struct AgentAddArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MemberRemoveArgs {
     pub who: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MemberAliasArgs {
-    /// A who-ref: a key id-prefix, a full key, or an existing alias.
-    pub who: String,
-    /// The petname to assign (empty string clears it).
-    pub name: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -451,20 +442,6 @@ impl LaitMcp {
     )]
     async fn member_log(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::MemberLog).await
-    }
-
-    #[tool(
-        description = "Set (or clear, with an empty name) a local petname for a key. Local to this device, never synced or part of the signed ACL."
-    )]
-    async fn member_alias(
-        &self,
-        Parameters(a): Parameters<MemberAliasArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::MemberAlias {
-            who: a.who,
-            name: a.name,
-        })
-        .await
     }
 
     // ---- transport / presence ----

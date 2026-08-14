@@ -82,12 +82,6 @@ pub enum SpaceOp {
         who: String,
         admin: bool,
     },
-    /// A local petname. Never broadcast, never part of the signed ACL — which
-    /// is exactly why it is safe to offer beside a roster of keys.
-    MemberAlias {
-        who: String,
-        name: String,
-    },
     /// Mint an admission-bearing link.
     Invite {
         role: String,
@@ -122,10 +116,6 @@ impl SpaceOp {
             Self::MemberRemove { who } => format!("remove {who}"),
             Self::MemberSetRole { who, admin: true } => format!("promote {who}"),
             Self::MemberSetRole { who, .. } => format!("demote {who}"),
-            Self::MemberAlias { who, name } if name.trim().is_empty() => {
-                format!("clear the local name for {who}")
-            }
-            Self::MemberAlias { who, name } => format!("call {who} '{name}' locally"),
             Self::Invite { role, .. } => format!("mint a {role} invite"),
             Self::DeviceInvite => "print a device-enrolment token".into(),
             Self::DeviceAdd { .. } => "add a device from its consent".into(),
@@ -142,7 +132,6 @@ impl SpaceOp {
             Self::MemberAdd { who, .. } => format!("member.add:{who}"),
             Self::MemberRemove { who } => format!("member.remove:{who}"),
             Self::MemberSetRole { who, .. } => format!("member.role:{who}"),
-            Self::MemberAlias { who, .. } => format!("member.alias:{who}"),
             Self::Invite { .. } => "invite".into(),
             Self::DeviceInvite => "device.invite".into(),
             Self::DeviceAdd { .. } => "device.add".into(),
@@ -161,7 +150,6 @@ impl SpaceOp {
             },
             Self::MemberRemove { who } => Request::MemberRemove { who },
             Self::MemberSetRole { who, admin } => Request::MemberSetRole { who, admin },
-            Self::MemberAlias { who, name } => Request::MemberAlias { who, name },
             Self::Invite {
                 role,
                 reusable,

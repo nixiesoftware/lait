@@ -107,8 +107,9 @@ impl AddressBookService {
         match request {
             Request::BookList => {
                 // Import is demand-driven: listing is the first honest
-                // moment the identity asked for its book. It does not
-                // retire aliases.json.
+                // moment the identity asked for its book. A pass that
+                // imports a file completely also retires it — migration
+                // is a move, not a copy.
                 let _ = self.migrate(router);
                 self.list()
             }
@@ -306,6 +307,60 @@ impl AddressBookService {
         }))
     }
 
+    /// Decorate a Space reply's naming fields from the book — the one namer.
+    ///
+    /// Member rows carry actor handles scoped to the reply's space; presence
+    /// rows carry device handles. A handle no Card names stays bare, and a
+    /// book that cannot open decorates nothing: an absent name is an absence,
+    /// never an error, and never a reason to fail the reply it rides on.
+    pub(crate) fn decorate(&self, space: &mechanics::ids::SpaceId, response: &mut Response) {
+        let Ok(book) = self.book() else { return };
+        match response {
+            Response::Members { members } => {
+                for member in members.iter_mut() {
+                    let Some(actor) = ActorId::parse(&member.key) else {
+                        continue;
+                    };
+                    let handle = Handle::Actor {
+                        space: space.clone(),
+                        actor,
+                    };
+                    if let Some(name) = first_authored_name(&book, &handle) {
+                        member.alias = name;
+                    }
+                }
+            }
+            Response::Who { peers } => {
+                for peer in peers.iter_mut() {
+                    let Some(device) = DeviceId::parse(&peer.id) else {
+                        continue;
+                    };
+                    if let Some(name) = first_authored_name(&book, &Handle::Device(device)) {
+                        peer.nick = name;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Author a Card for a just-provisioned co-located agent.
+    ///
+    /// Called by the daemon funnel after a successful `AgentProvision`,
+    /// because a Station has no reach into the identity-scoped book. Without
+    /// this, the one verb that creates an agent leaves it unnamed on the one
+    /// surface built to show agents.
+    pub(crate) fn name_agent(&self, space: &mechanics::ids::SpaceId, actor: &str, name: &str) {
+        let Some(actor) = ActorId::parse(actor) else {
+            return;
+        };
+        let handle = Handle::Actor {
+            space: space.clone(),
+            actor,
+        };
+        let _ = self.upsert_named(name, handle);
+    }
+
     fn migrate_status(&self, catalog: &Catalog) -> Response {
         Response::Book(Box::new(BookView {
             cards: Vec::new(),
@@ -346,6 +401,9 @@ impl AddressBookService {
             };
             if map.is_empty() {
                 progress.finished = true;
+                // An empty map has nothing to lose; retire the file so no
+                // second reader can resurrect the old naming design.
+                let _ = std::fs::remove_file(&path);
                 continue;
             }
             let space = binding.entry.space.clone();
@@ -374,6 +432,11 @@ impl AddressBookService {
             }
             if progress.pending.is_empty() {
                 progress.finished = true;
+                // Migration is a move, not a copy: every selector above is
+                // now a Card (durably, before this line), so the file is
+                // retired on the spot. A corrupt file never reaches here —
+                // it was skipped unread and its bytes stay for a human.
+                let _ = std::fs::remove_file(&path);
             }
         }
         // Rewrite the durable record only when this pass changed it: BookList
@@ -743,6 +806,17 @@ fn suggestion_view(staged: &StagedSuggestion) -> BookSuggestionView {
     }
 }
 
+/// The first non-empty authored name for a handle, or nothing. Decoration
+/// wants one name per row; a handle on several Cards answers with the first
+/// authored one rather than failing the row.
+fn first_authored_name(book: &Book, handle: &Handle) -> Option<String> {
+    book.authored_cards_for(handle)
+        .into_iter()
+        .filter_map(|id| book.cards.get(&id))
+        .map(|card| card.name.value.clone())
+        .find(|name| !name.is_empty())
+}
+
 fn card_view(card: &addressbook::Card) -> BookCardView {
     BookCardView {
         card: card.id.to_string(),
@@ -930,7 +1004,173 @@ mod tests {
             broken.join("aliases.json").exists(),
             "a corrupt aliases.json is left alone"
         );
+        assert!(
+            home.join("aliases.json").exists(),
+            "a file with pending selectors keeps its source until they resolve"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Migration is a move, not a copy: a file whose every selector became a
+    /// Card is retired on the spot, and a later pass neither misses it nor
+    /// resurrects the old design from it.
+    #[test]
+    fn a_fully_imported_aliases_file_is_retired() {
+        let base = std::env::temp_dir().join(format!(
+            "lait-book-retire-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let identity = base.join("identity");
+        let agents = base.join("agents");
+        let home = base.join("home");
+        for dir in [&identity, &agents, &home] {
+            std::fs::create_dir_all(dir).expect("temp");
+        }
+        crate::config::load_or_create_identity(&identity).expect("seed");
+
+        let space = mechanics::ids::SpaceId::from_digest([8; 16]);
+        let actor = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[8u8; 32]));
+        let path = home.join("aliases.json");
+        std::fs::write(&path, format!(r#"{{"{}":"Ada"}}"#, actor.as_str())).expect("aliases");
+
+        let router = Router::new(
+            crate::orbits::Catalog::with_entries(
+                crate::config::canonical(&identity),
+                crate::config::canonical(&agents),
+                false,
+                vec![crate::orbits::Entry {
+                    space: space.as_str().to_owned(),
+                    name: "Retire".into(),
+                    path: home.display().to_string(),
+                    origin: crate::orbits::Origin::Founded,
+                    host_nick: String::new(),
+                    last_opened: 0,
+                    projects: vec![],
+                }],
+            ),
+            crate::world::packages(),
+        );
+        let service = AddressBookService::open(&identity).expect("open");
+
+        let Response::Book(view) = service.migrate(&router) else {
+            panic!("migrate answers the migration view");
+        };
+        assert_eq!(view.migration.imported, 1);
+        assert_eq!(view.migration.pending, 0);
+        assert!(!path.exists(), "a fully-imported file is retired");
+
+        // The Card is durable independently of the file that seeded it.
+        let handle = Handle::Actor { space, actor };
+        let book = service.engine.lock().expect("lock").book().expect("book");
+        assert_eq!(book.authored_cards_for(&handle).len(), 1);
+
+        let Response::Book(view) = service.migrate(&router) else {
+            panic!("migrate answers the migration view");
+        };
+        assert_eq!(
+            view.migration.imported, 1,
+            "a second pass re-imports nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The daemon decorates Space replies from the book: a member row whose
+    /// actor a Card names gains that name, a presence row gains it from a
+    /// device handle, and rows no Card names stay bare.
+    #[test]
+    fn members_and_presence_are_decorated_from_the_book() {
+        let dir = std::env::temp_dir().join(format!(
+            "lait-book-deco-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp");
+        crate::config::load_or_create_identity(&dir).expect("seed");
+        let service = AddressBookService::open(&dir).expect("open");
+
+        let space = mechanics::ids::SpaceId::from_digest([9; 16]);
+        let actor = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[9u8; 32]));
+        let device = mechanics::actor::device_from_seed(&[11u8; 32]);
+        assert!(service.upsert_named(
+            "Ada",
+            Handle::Actor {
+                space: space.clone(),
+                actor: actor.clone(),
+            },
+        ));
+        assert!(service.upsert_named("Basalt", Handle::Device(device.clone())));
+
+        let bare = crate::dto::MemberDto {
+            key: "act_0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            role: "member".into(),
+            did: None,
+            me: false,
+            sponsor: None,
+            alias: String::new(),
+        };
+        let named = crate::dto::MemberDto {
+            key: actor.as_str().to_owned(),
+            ..bare.clone()
+        };
+        let mut response = Response::Members {
+            members: vec![named, bare],
+        };
+        service.decorate(&space, &mut response);
+        let Response::Members { members } = &response else {
+            panic!("still a members reply");
+        };
+        assert_eq!(members[0].alias, "Ada", "the book names the actor");
+        assert_eq!(members[1].alias, "", "an unnamed actor stays bare");
+
+        let mut presence = Response::Who {
+            peers: vec![crate::control::PresenceEntry {
+                id: device.to_string(),
+                nick: String::new(),
+                state: "online".into(),
+                online: true,
+                last_seen_secs: 0,
+                dialable: true,
+                blocked_by: None,
+                pending: false,
+                due_in_secs: 0,
+                route_lease_secs: 0,
+                failures: 0,
+            }],
+        };
+        service.decorate(&space, &mut presence);
+        let Response::Who { peers } = &presence else {
+            panic!("still a presence reply");
+        };
+        assert_eq!(peers[0].nick, "Basalt", "the book names the device");
+
+        // The provision seam authors a Card the roster decoration then reads.
+        let scout = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[12u8; 32]));
+        service.name_agent(&space, scout.as_str(), "scout");
+        let mut roster = Response::Members {
+            members: vec![crate::dto::MemberDto {
+                key: scout.as_str().to_owned(),
+                role: "member".into(),
+                did: None,
+                me: false,
+                sponsor: Some(actor.as_str().to_owned()),
+                alias: String::new(),
+            }],
+        };
+        service.decorate(&space, &mut roster);
+        let Response::Members { members } = &roster else {
+            panic!("still a members reply");
+        };
+        assert_eq!(members[0].alias, "scout");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

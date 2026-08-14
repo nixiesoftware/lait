@@ -60,7 +60,6 @@ pub fn is_read(req: &Request) -> bool {
         | Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
-        | Request::MemberAlias { .. }
         | Request::KeyRotate
         | Request::InviteRevoke { .. }
         | Request::DeviceAdd { .. }
@@ -235,7 +234,6 @@ pub fn is_host_plane(req: &Request) -> bool {
         Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
-        | Request::MemberAlias { .. }
         | Request::Members
         | Request::MemberLog
         // Orbit-routed, not host-routed: it reads one Space's activation record

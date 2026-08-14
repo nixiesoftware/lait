@@ -1707,12 +1707,11 @@ impl StationHost {
             Ok(actor) => {
                 let device = mechanics::actor::device_from_seed(&seed);
                 let did = mechanics::actor::did_key_from_device(&device).unwrap_or_default();
-                // Name it here, where the name is already known. Without this the
-                // one command that creates an agent leaves it `unnamed` on the one
-                // surface built to show agents — and the browser draws a coding
-                // tool's brand mark off this petname, so an unnamed agent is also
-                // an unrecognisable one.
-                let _ = write_alias(&self.home, actor.as_str(), name);
+                // The NAME lands in the identity's address book, not here: the
+                // daemon funnel reads the `actor …` line below and authors a
+                // Card for the agent, because a Station has no reach into the
+                // identity-scoped book. The line's shape is therefore part of
+                // this reply's contract.
                 Response::Ok {
                     message: Some(format!(
                         "provisioned + sponsored agent '{name}'\nactor {}\n{did}\n\
@@ -1731,7 +1730,6 @@ impl StationHost {
     /// events, and Contact outcomes) projected into presence rows. The same
     /// truth `status.online_peers` counts — the two surfaces cannot disagree.
     fn who(&self) -> Vec<crate::control::PresenceEntry> {
-        let aliases = read_aliases(&self.home);
         let now = now_secs();
         self.station
             .neighbors()
@@ -1781,7 +1779,9 @@ impl StationHost {
                     None
                 };
                 crate::control::PresenceEntry {
-                    nick: aliases.get(&id).cloned().unwrap_or_default(),
+                    // Bare from the Station; the daemon decorates the row
+                    // from the identity's book, the one namer.
+                    nick: String::new(),
                     id,
                     state: state.to_string(),
                     online,
@@ -1982,7 +1982,6 @@ impl StationHost {
             Request::SeedAdd { arg } => self.seed_add(arg.trim()),
             Request::SeedList => self.seed_list(),
             Request::SeedRemove { who } => self.seed_remove(who.trim()),
-            Request::MemberAlias { who, name } => self.set_alias(&who, &name),
             Request::BookList
             | Request::BookGet { .. }
             | Request::BookPut { .. }
@@ -2065,27 +2064,13 @@ impl StationHost {
     }
 
     fn members(&self) -> Response {
-        // Overlay this node's local petnames (`aliases.json`) into the roster so
-        // the CLI and the viewer both render a member's name, not a bare actor
-        // id. The alias is local, never synced (the trusted half of the identity
-        // model) — the daemon is this node, so it is the right place to apply it.
-        let mut members = self.mechanics.members();
-        let aliases = read_aliases(&self.home);
-        if !aliases.is_empty() {
-            for m in &mut members {
-                if let Some(name) = aliases.get(&m.key).or_else(|| {
-                    // Aliases may be keyed by a short `act_` prefix the operator
-                    // typed; match a stored key that prefixes this full actor id.
-                    aliases
-                        .iter()
-                        .find(|(k, _)| !k.is_empty() && m.key.starts_with(k.as_str()))
-                        .map(|(_, v)| v)
-                }) {
-                    m.alias = name.clone();
-                }
-            }
+        // Bare actor rows. Naming is the identity's address book's job, and
+        // the daemon — which holds the book — decorates this reply on its way
+        // out. A Station never reads a name file of its own: `aliases.json`
+        // and the verb that wrote it are gone (2026-08-13).
+        Response::Members {
+            members: self.mechanics.members(),
         }
-        Response::Members { members }
     }
 
     /// Add a device to this actor from its hex-encoded consent blob (produced
@@ -2122,61 +2107,6 @@ impl StationHost {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    /// Set (or clear, with an empty name) a local petname for a key. Local to
-    /// this node, never broadcast, never part of the signed authority.
-    fn set_alias(&self, who: &str, name: &str) -> Response {
-        // Store the canonical actor id, never the fragment that was typed. The
-        // read path matches a stored key against the *full* `act_…` id, so an
-        // entry keyed by a bare hex prefix can never match anything: the write
-        // succeeds, the confirmation prints, and the name never appears. Resolve
-        // first, and say so when nothing answers.
-        let resolved = self.resolve_member_key(who);
-        let key = match (&resolved, name.trim().is_empty()) {
-            (Some(k), _) => k.clone(),
-            // Clearing may legitimately target an entry no longer backed by a
-            // member — including a dead one written before this resolved.
-            (None, true) => who.trim().to_string(),
-            (None, false) => {
-                return Response::err(format!(
-                    "no member here matches '{who}' — name one by its full actor id or a \
-                     prefix of it (the members view lists them)"
-                ))
-            }
-        };
-        match write_alias(&self.home, &key, name) {
-            Ok(()) if name.trim().is_empty() => Response::Ok {
-                message: Some(format!("cleared the local name for {who}")),
-            },
-            Ok(()) => Response::Ok {
-                message: Some(format!("{who} is now locally known as {name}")),
-            },
-            Err(e) => Response::err(format!("set alias: {e}")),
-        }
-    }
-
-    /// The full actor id for a who-ref: an exact key, a prefix of one (with or
-    /// without the `act_` namespace), or an existing petname.
-    fn resolve_member_key(&self, who: &str) -> Option<String> {
-        let who = who.trim();
-        if who.is_empty() {
-            return None;
-        }
-        let members = self.mechanics.members();
-        let bare = who.strip_prefix("act_").unwrap_or(who);
-        let prefixed = format!("act_{bare}");
-        if let Some(m) = members
-            .iter()
-            .find(|m| m.key == who || m.key.starts_with(who) || m.key.starts_with(&prefixed))
-        {
-            return Some(m.key.clone());
-        }
-        let aliases = read_aliases(&self.home);
-        aliases
-            .iter()
-            .find(|(_, v)| v.eq_ignore_ascii_case(who))
-            .map(|(k, _)| k.clone())
     }
 
     /// The guided-join verifier: project live daemon state into the ordered
@@ -3804,32 +3734,6 @@ fn remove_seed(home: &Path, needle: &str) -> Result<usize, String> {
         save_seeds(home, &seeds);
     }
     Ok(removed)
-}
-
-/// The local petname map (`aliases.json` beside the home).
-fn read_aliases(home: &Path) -> std::collections::BTreeMap<String, String> {
-    std::fs::read(home.join("aliases.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
-}
-
-/// Set or clear a **local** petname for a key in `aliases.json` beside the
-/// home. Local to this node, never synced; an empty `name` clears the entry.
-fn write_alias(home: &Path, who: &str, name: &str) -> Result<()> {
-    let path = home.join("aliases.json");
-    let mut map: std::collections::BTreeMap<String, String> = std::fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    let who = who.trim().to_string();
-    if name.trim().is_empty() {
-        map.remove(&who);
-    } else {
-        map.insert(who, name.trim().to_string());
-    }
-    std::fs::write(&path, serde_json::to_vec_pretty(&map)?)?;
-    Ok(())
 }
 
 /// Run one process-backed StationHost on `home`, holding the per-home lock for

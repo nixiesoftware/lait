@@ -427,14 +427,11 @@ pub enum Request {
     /// The membership audit log: the signed ACL DAG replayed in causal order
     /// with each op's authorization verdict (cryptographic provenance).
     MemberLog,
-    /// Set (or clear, with an empty name) a **local petname** for a key. Local to
-    /// this node, never broadcast, never part of the signed ACL.
-    MemberAlias {
-        who: String,
-        name: String,
-    },
 
     /// Identity-scoped address book. Daemon route only; never places an Orbit.
+    /// The book is the one namer: member and presence rows leave the Station
+    /// bare and the daemon decorates them from Cards — the `MemberAlias` verb
+    /// and `aliases.json` it wrote are gone (2026-08-13).
     BookList,
     BookGet {
         card: String,
@@ -1318,7 +1315,6 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::ConfigReload
         | Request::Stop
         | Request::Hello { .. }
-        | Request::MemberAlias { .. }
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
@@ -1424,10 +1420,6 @@ pub fn representative_requests() -> Vec<Request> {
         Request::Recover,
         Request::Members,
         Request::MemberLog,
-        Request::MemberAlias {
-            who: s(),
-            name: s(),
-        },
         Request::BookList,
         Request::BookGet { card: s() },
         Request::BookPut {

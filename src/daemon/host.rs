@@ -585,7 +585,11 @@ impl Listener {
         };
 
         if if_running {
-            let response = match (&route, &request) {
+            let space = match &route {
+                ControlRoute::Orbit { address } => Some(address.space.clone()),
+                _ => None,
+            };
+            let mut response = match (&route, &request) {
                 (
                     ControlRoute::Orbit { .. },
                     Request::Status
@@ -605,6 +609,17 @@ impl Listener {
                      through an explicit Space route",
                 ),
             };
+            // Presence sampled passively still carries names — the book
+            // decorates this path exactly as it does the placed one, or the
+            // client would read "no name" as a fact about the peer when it
+            // was a fact about the route.
+            if let Some(space) = &space {
+                if matches!(response, Response::Who { .. } | Response::Members { .. }) {
+                    if let Ok(book) = self.router.book() {
+                        book.decorate(space, &mut response);
+                    }
+                }
+            }
             let _ = write_line(&mut write_half, &response).await;
             return Flow::Next(reader, write_half);
         }
@@ -685,11 +700,51 @@ impl Listener {
                 Flow::Next(reader, write_half)
             }
             (route, request) => {
-                let response = self
+                // The book is the one namer, and this funnel is where it
+                // speaks: a Station answers with bare ids, and the identity
+                // that owns the names decorates the reply on its way out. The
+                // same seam names a just-provisioned agent — the Station has
+                // no reach into the identity-scoped book, so it reports the
+                // actor and the daemon authors the Card.
+                let provisioned = match &request {
+                    Request::AgentProvision { name } => Some(name.clone()),
+                    _ => None,
+                };
+                let space = match &route {
+                    ControlRoute::Orbit { address } | ControlRoute::World { address, .. } => {
+                        Some(address.space.clone())
+                    }
+                    ControlRoute::Daemon => None,
+                };
+                let mut response = self
                     .router
                     .request_routed(route, &request, act_as.as_deref())
                     .await
                     .unwrap_or_else(|error| Response::err(format!("{error:#}")));
+                if let Some(space) = &space {
+                    if matches!(response, Response::Members { .. } | Response::Who { .. }) {
+                        if let Ok(book) = self.router.book() {
+                            book.decorate(space, &mut response);
+                        }
+                    }
+                    if let (
+                        Some(name),
+                        Response::Ok {
+                            message: Some(message),
+                        },
+                    ) = (&provisioned, &response)
+                    {
+                        // The reply's `actor …` line is part of the provision
+                        // contract (see hosting's provision arm).
+                        if let Some(actor) =
+                            message.lines().find_map(|line| line.strip_prefix("actor "))
+                        {
+                            if let Ok(book) = self.router.book() {
+                                book.name_agent(space, actor.trim(), name);
+                            }
+                        }
+                    }
+                }
                 let _ = write_line(&mut write_half, &response).await;
                 Flow::Next(reader, write_half)
             }

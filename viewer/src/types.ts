@@ -1159,7 +1159,6 @@ export type Request =
   | { cmd: "space_custody_import"; path: string; passphrase: string; force: boolean }
   | { cmd: "members" }
   | { cmd: "member_log" }
-  | { cmd: "member_alias"; who: string; name: string }
   | { cmd: "status" }
   /** Identity + standing + view-completeness, one shot — `dto.rs` `WhoamiDto`. */
   | { cmd: "whoami" }
@@ -1229,7 +1228,6 @@ export type SpaceRequest = Extract<
       | "key_rotate"
       | "members"
       | "member_log"
-      | "member_alias"
       | "device_invite"
       | "device_add"
       | "device_revoke"
@@ -1281,7 +1279,13 @@ export type HostRequest =
   /** Stops the daemon under this server once the reply is out. The server
    *  survives and stands a fresh one up on its next request — which is how a
    *  swapped binary or a raised control protocol takes effect. */
-  | { cmd: "host_restart" };
+  | { cmd: "host_restart" }
+  /** ── The identity-scoped address book: the one namer. Host plane — the
+   *  book belongs to the identity, never to a Space route. Trimmed to the
+   *  verbs the browser uses; Astrolabe's book window is the full surface. ── */
+  | { cmd: "book_lookup"; handle: string }
+  | { cmd: "book_put"; card?: string | null; name: string; note?: string | null }
+  | { cmd: "book_link"; card: string; handle: string };
 
 /** `control.rs` `HostReply`, tagged by `host` inside a `kind: "host"` response. */
 export type HostReply =
@@ -1323,6 +1327,16 @@ export type HostReply =
       identities: string[];
       orbits: OrbitEntry[];
     };
+
+/** One authored Card of the identity's address book (`BookCardView`). */
+export interface BookCardDto {
+  card: string;
+  name: string;
+  note: string;
+  handles: string[];
+  groups: string[];
+  self_claim: boolean;
+}
 
 /** One row of the local Orbit registry (`orbits::Entry`). */
 export interface OrbitEntry {
@@ -1370,6 +1384,8 @@ export type Response =
       size?: number;
     }
   | { kind: "labels"; labels: LabelDto[] }
+  /** `control.rs` `BookView`, trimmed to what the browser reads. */
+  | { kind: "book"; cards: BookCardDto[] }
   | { kind: "members"; members: MemberDto[] }
   | { kind: "assignments"; rows: AssignmentDto[] }
   | { kind: "member_log"; entries: MemberLogEntry[] }

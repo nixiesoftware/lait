@@ -33,8 +33,6 @@ pub struct Draft {
     /// The member whose removal is being confirmed, and the name typed so far.
     pub removing: Option<String>,
     pub confirmation: String,
-    pub alias_for: Option<String>,
-    pub alias: String,
     pub invite_role: String,
     pub invite_reusable: bool,
     pub invite_hours: String,
@@ -52,8 +50,6 @@ impl Default for Draft {
             add_admin: false,
             removing: None,
             confirmation: String::new(),
-            alias_for: None,
-            alias: String::new(),
             // The engine's own default, spelled here so the form is not a blank
             // that quietly means something.
             invite_role: "contributor".into(),
@@ -253,16 +249,9 @@ fn draw_members(
                 actions.push(action);
             }
 
-            if ui
-                .button("Name locally…")
-                .on_hover_text(
-                    "A petname you can read. Never broadcast, and never part of the signed ACL.",
-                )
-                .clicked()
-            {
-                draft.alias_for = Some(member.key.clone());
-                draft.alias.clone_from(&member.alias);
-            }
+            // Naming a person happens in the address book — the one namer —
+            // never beside a roster of keys. The roster only reads what the
+            // book decorated onto it.
 
             if ui
                 .add_enabled(!member.me, egui::Button::new("Remove…"))
@@ -273,29 +262,6 @@ fn draw_members(
                 draft.confirmation.clear();
             }
         });
-
-        if draft.alias_for.as_deref() == Some(member.key.as_str()) {
-            ui.horizontal(|ui| {
-                ui.label("Local name");
-                ui.text_edit_singleline(&mut draft.alias);
-                let who = member.key.clone();
-                let name = draft.alias.trim().to_owned();
-                let named = act(ui, app, "Save name", true, "", || Action::Administer {
-                    at: at.clone(),
-                    operation: Box::new(SpaceOp::MemberAlias {
-                        who: who.clone(),
-                        name: name.clone(),
-                    }),
-                });
-                if let Some(action) = named {
-                    actions.push(action);
-                    draft.alias_for = None;
-                }
-                if ui.button("Cancel").clicked() {
-                    draft.alias_for = None;
-                }
-            });
-        }
 
         if draft.removing.as_deref() == Some(member.key.as_str()) {
             ui.horizontal(|ui| {

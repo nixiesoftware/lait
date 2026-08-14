@@ -38,8 +38,10 @@ pub struct MemberDto {
     /// standing dies with this sponsor.
     #[serde(default)]
     pub sponsor: Option<String>,
-    /// Local petname you've assigned (empty if none). A private, never-synced
-    /// label — the trusted half of the local-petname identity model.
+    /// The name your address book authors for this actor (empty if no Card
+    /// names it). Decorated by the daemon from the identity-scoped book on the
+    /// reply's way out — private to this identity, never synced. Kept as
+    /// `alias` for wire compatibility across client projections.
     #[serde(default)]
     pub alias: String,
 }
