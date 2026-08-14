@@ -78,6 +78,15 @@ CardRow _card({
       selfClaim: self,
     );
 
+/// Double-click a person's row: the gesture that opens the profile
+/// subsurface in the parent window.
+Future<void> _openProfile(WidgetTester tester, String name) async {
+  await tester.tap(find.text(name).first);
+  await tester.pump(const Duration(milliseconds: 80));
+  await tester.tap(find.text(name).first);
+  await tester.pump(const Duration(milliseconds: 400));
+}
+
 Future<List<ActionRequest>> _pump(
   WidgetTester tester,
   ClientView view,
@@ -194,11 +203,36 @@ void main() {
     expect(find.text('No My Card.'), findsOneWidget);
   });
 
+  testWidgets('a row is minimal; the profile subsurface carries the actions',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(book: _book([_card(addresses: const ['actor:ws_one:act_ada'])])),
+    );
+    // The list shows the person, never the machinery.
+    expect(find.text('Edit'), findsNothing);
+    expect(find.text('Delete'), findsNothing);
+    expect(find.text('ADDRESSES'), findsNothing);
+
+    await _openProfile(tester, 'Ada');
+    expect(find.text('ADDRESSES'), findsOneWidget);
+    expect(find.text('Edit'), findsOneWidget);
+    expect(find.text('Delete'), findsOneWidget);
+    expect(find.bySemanticsLabel('Back to the book'), findsOneWidget);
+
+    // Escape peels the profile and the list is back.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(find.text('Edit'), findsNothing);
+    expect(find.text('ADDRESSES'), findsNothing);
+  });
+
   testWidgets('claiming My Card names the card, never a name', (tester) async {
     final asked = await _pump(
       tester,
       _view(book: _book([_card()])),
     );
+    await _openProfile(tester, 'Ada');
     await tester.tap(find.text('Claim as My Card'));
     expect(
       asked,
@@ -214,6 +248,7 @@ void main() {
         inFlight: [ActionKeys.bookClaim('crd_one')],
       ),
     );
+    await _openProfile(tester, 'Ada');
     await tester.tap(find.text('Claim as My Card'), warnIfMissed: false);
     expect(asked, isEmpty);
   });
@@ -224,6 +259,7 @@ void main() {
       tester,
       _view(book: _book([_card(name: 'Ada')])),
     );
+    await _openProfile(tester, 'Ada');
     await tester.ensureVisible(find.text('Delete'));
     await tester.tap(find.text('Delete'));
     await tester.pump(const Duration(milliseconds: 300));
@@ -282,6 +318,7 @@ void main() {
         ]),
       ),
     );
+    await _openProfile(tester, 'Ada');
     await tester.tap(find.bySemanticsLabel('Unlink actor:ws_one:act_ada'));
     expect(
       asked,

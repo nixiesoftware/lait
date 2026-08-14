@@ -99,6 +99,11 @@ class BookPage extends StatefulWidget {
 class _BookPageState extends State<BookPage> {
   String _query = '';
   bool _searching = false;
+
+  /// The card whose profile subsurface is open, or null for the list. Held as
+  /// an id, never a row: the row is re-read from the book every frame, so a
+  /// profile can never show a card the book no longer holds.
+  String? _profile;
   final FocusNode _searchFocus = FocusNode();
 
   @override
@@ -120,6 +125,24 @@ class _BookPageState extends State<BookPage> {
     });
   }
 
+  void _openProfile(String card) {
+    setState(() => _profile = card);
+  }
+
+  void _closeProfile() {
+    if (_profile == null) return;
+    setState(() => _profile = null);
+  }
+
+  /// Escape peels one layer: the profile first, then the search draft.
+  void _dismiss() {
+    if (_profile != null) {
+      _closeProfile();
+      return;
+    }
+    _closeSearch();
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
@@ -130,6 +153,17 @@ class _BookPageState extends State<BookPage> {
     bool busy(String key) => view.inFlight.contains(key);
     final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
     final shown = _filtered(book?.cards ?? const []);
+    // The profile is re-read from the book every build: a deleted or merged
+    // card falls back to the list on its own, never a stale page.
+    CardRow? profiled;
+    if (_profile != null && book != null) {
+      for (final row in book.cards) {
+        if (row.card == _profile) {
+          profiled = row;
+          break;
+        }
+      }
+    }
 
     return CallbackShortcuts(
       bindings: {
@@ -140,7 +174,7 @@ class _BookPageState extends State<BookPage> {
         },
         const SingleActivator(LogicalKeyboardKey.keyF, control: true):
             _openSearch,
-        const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
+        const SingleActivator(LogicalKeyboardKey.escape): _dismiss,
       },
       child: Focus(
         autofocus: true,
@@ -150,10 +184,21 @@ class _BookPageState extends State<BookPage> {
                 next:
                     'Press F5 to ask the daemon. Nothing is created on your behalf.',
               )
-            : Column(
+            : profiled != null
+                ? _ProfilePage(
+                    card: profiled,
+                    all: book.cards,
+                    onBack: _closeProfile,
+                  )
+                : Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _CanonicalCard(mine: mine.isEmpty ? null : mine.first),
+                  _CanonicalCard(
+                    mine: mine.isEmpty ? null : mine.first,
+                    onOpen: mine.isEmpty
+                        ? null
+                        : () => _openProfile(mine.first.card),
+                  ),
                   if (book.migrationPending > 0) ...[
                     t.gap.y(Space.md),
                     Text(
@@ -220,8 +265,11 @@ class _BookPageState extends State<BookPage> {
                         : ListView.separated(
                             itemCount: shown.length,
                             separatorBuilder: (_, __) => t.gap.y(Space.md),
-                            itemBuilder: (context, index) =>
-                                _CardRow(card: shown[index], all: book.cards),
+                            itemBuilder: (context, index) => _PersonRow(
+                              card: shown[index],
+                              onOpen: () =>
+                                  _openProfile(shown[index].card),
+                            ),
                           ),
                   ),
                 ],
@@ -253,19 +301,35 @@ class _BookPageState extends State<BookPage> {
 /// design placeholder too: presence is not plumbed into [BookFacts] yet, and
 /// when it is, this line must come from a measurement — never a default.
 class _CanonicalCard extends StatelessWidget {
-  const _CanonicalCard({required this.mine});
+  const _CanonicalCard({required this.mine, this.onOpen});
 
   /// The claimed My Card, or null when the book — already read — holds none.
   final CardRow? mine;
 
+  /// Opens My Card's profile subsurface on double-click, like any row.
+  final VoidCallback? onOpen;
+
   @override
   Widget build(BuildContext context) {
-    final t = context.tokens;
     final card = mine;
     final name = card == null ? 'No My Card.' : card.name;
     final status = card == null
         ? 'Claim one — nothing is implied from a name or a handle.'
         : 'Online';
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onDoubleTap: onOpen,
+      child: _canonicalRow(context, card, name, status),
+    );
+  }
+
+  Widget _canonicalRow(
+    BuildContext context,
+    CardRow? card,
+    String name,
+    String status,
+  ) {
+    final t = context.tokens;
     return Row(
       children: [
         _FacePlate(
@@ -300,11 +364,59 @@ class _CanonicalCard extends StatelessWidget {
   }
 }
 
-class _CardRow extends StatelessWidget {
-  const _CardRow({required this.card, required this.all});
+/// A person in the list: the face and the name, nothing else. Everything a
+/// card carries — its handles and every action on it — lives on the profile
+/// page, and double-clicking the row opens it in this window.
+class _PersonRow extends StatelessWidget {
+  const _PersonRow({required this.card, required this.onOpen});
+
+  final CardRow card;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Semantics(
+      button: true,
+      label: 'Open the profile of ${card.name}',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onDoubleTap: onOpen,
+        child: Card(
+          child: Row(
+            children: [
+              _FacePlate(picture: card.picture, name: card.name, size: 40),
+              t.gap.x(Space.md),
+              Expanded(
+                child: Text(
+                  card.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.headingStyle,
+                ),
+              ),
+              if (card.selfClaim)
+                const Badge(label: 'My Card', variant: BadgeVariant.solid),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The profile page — the subsurface a card's whole truth lives on, rendered
+/// in the parent window in place of the list. Back (or Escape) returns.
+class _ProfilePage extends StatelessWidget {
+  const _ProfilePage({
+    required this.card,
+    required this.all,
+    required this.onBack,
+  });
 
   final CardRow card;
   final List<CardRow> all;
+  final VoidCallback onBack;
 
   @override
   Widget build(BuildContext context) {
@@ -313,121 +425,150 @@ class _CardRow extends StatelessWidget {
     final view = ClientScope.watch(context);
     bool busy(String key) => view.inFlight.contains(key);
 
-    return Card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // The canonical entry, phone-book style: the face, the name, and
-          // what the person carries — addresses, devices, agents.
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _FacePlate(picture: card.picture, name: card.name, size: 40),
-              t.gap.x(Space.md),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(card.name, style: context.headingStyle),
-                    if (card.note.isNotEmpty) ...[
-                      t.gap.y(Space.xxs),
-                      Text(card.note, style: context.labelStyle),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Button(
+              onPressed: onBack,
+              icon: AppIcons.arrowBack,
+              semanticLabel: 'Back to the book',
+              variant: ButtonVariant.ghost,
+              size: ButtonSize.iconSm,
+              tooltip: 'Back (Esc)',
+            ),
+          ],
+        ),
+        t.gap.y(Space.lg),
+        Row(
+          children: [
+            _FacePlate(picture: card.picture, name: card.name, size: 56),
+            t.gap.x(Space.lg),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          card.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.headingStyle,
+                        ),
+                      ),
+                      if (card.selfClaim)
+                        const Badge(
+                          label: 'My Card',
+                          variant: BadgeVariant.solid,
+                        ),
                     ],
+                  ),
+                  if (card.note.isNotEmpty) ...[
+                    t.gap.y(Space.xxs),
+                    Text(card.note, style: context.labelStyle),
                   ],
-                ),
+                ],
               ),
-              if (card.selfClaim)
-                const Badge(label: 'My Card', variant: BadgeVariant.solid),
-            ],
-          ),
-          _HandleSection(
-            label: 'ADDRESSES',
-            handles: card.addresses,
-            card: card.card,
-          ),
-          _HandleSection(
-            label: 'DEVICES',
-            handles: card.devices,
-            card: card.card,
-          ),
-          _HandleSection(
-            label: 'AGENTS',
-            handles: card.agents,
-            card: card.card,
-          ),
-          t.gap.y(Space.md),
-          Wrap(
-            spacing: t.size.sm,
-            runSpacing: t.size.xs,
+            ),
+          ],
+        ),
+        t.gap.y(Space.lg),
+        Expanded(
+          child: ListView(
             children: [
-              Button(
-                onPressed: busy(ActionKeys.bookPut(card.card))
-                    ? null
-                    : () => _edit(context, card),
-                label: 'Edit',
-                variant: ButtonVariant.ghost,
-                size: ButtonSize.sm,
+              _HandleSection(
+                label: 'ADDRESSES',
+                handles: card.addresses,
+                card: card.card,
               ),
-              Button(
-                onPressed: busy(ActionKeys.bookSetPicture(card.card))
-                    ? null
-                    : () => _setPicture(context, card),
-                label: 'Set picture',
-                variant: ButtonVariant.ghost,
-                size: ButtonSize.sm,
+              _HandleSection(
+                label: 'DEVICES',
+                handles: card.devices,
+                card: card.card,
               ),
-              if (card.picture != null)
-                Button(
-                  onPressed: busy(ActionKeys.bookSetPicture(card.card))
-                      ? null
-                      : () => client.dispatch(
-                            ActionRequest.bookSetPicture(
-                              card: card.card,
-                              path: null,
-                            ),
-                          ),
-                  label: 'Clear picture',
-                  variant: ButtonVariant.ghost,
-                  size: ButtonSize.sm,
-                ),
-              if (!card.selfClaim)
-                Button(
-                  onPressed: busy(ActionKeys.bookClaim(card.card))
-                      ? null
-                      : () => client.dispatch(
-                            ActionRequest.bookClaimSelf(card: card.card),
-                          ),
-                  label: 'Claim as My Card',
-                  variant: ButtonVariant.ghost,
-                  size: ButtonSize.sm,
-                ),
-              Button(
-                onPressed: busy(ActionKeys.bookLink(card.card))
-                    ? null
-                    : () => _link(context, card),
-                label: 'Add handle',
-                variant: ButtonVariant.ghost,
-                size: ButtonSize.sm,
+              _HandleSection(
+                label: 'AGENTS',
+                handles: card.agents,
+                card: card.card,
               ),
-              if (all.length > 1)
-                Button(
-                  onPressed: () => _merge(context, card, all),
-                  label: 'Merge',
-                  variant: ButtonVariant.ghost,
-                  size: ButtonSize.sm,
-                ),
-              Button(
-                onPressed: busy(ActionKeys.bookDelete(card.card))
-                    ? null
-                    : () => _delete(context, card),
-                label: 'Delete',
-                variant: ButtonVariant.destructiveGhost,
-                size: ButtonSize.sm,
+              t.gap.y(Space.xl),
+              Wrap(
+                spacing: t.size.sm,
+                runSpacing: t.size.xs,
+                children: [
+                  Button(
+                    onPressed: busy(ActionKeys.bookPut(card.card))
+                        ? null
+                        : () => _edit(context, card),
+                    label: 'Edit',
+                    variant: ButtonVariant.ghost,
+                    size: ButtonSize.sm,
+                  ),
+                  Button(
+                    onPressed: busy(ActionKeys.bookSetPicture(card.card))
+                        ? null
+                        : () => _setPicture(context, card),
+                    label: 'Set picture',
+                    variant: ButtonVariant.ghost,
+                    size: ButtonSize.sm,
+                  ),
+                  if (card.picture != null)
+                    Button(
+                      onPressed: busy(ActionKeys.bookSetPicture(card.card))
+                          ? null
+                          : () => client.dispatch(
+                                ActionRequest.bookSetPicture(
+                                  card: card.card,
+                                  path: null,
+                                ),
+                              ),
+                      label: 'Clear picture',
+                      variant: ButtonVariant.ghost,
+                      size: ButtonSize.sm,
+                    ),
+                  if (!card.selfClaim)
+                    Button(
+                      onPressed: busy(ActionKeys.bookClaim(card.card))
+                          ? null
+                          : () => client.dispatch(
+                                ActionRequest.bookClaimSelf(card: card.card),
+                              ),
+                      label: 'Claim as My Card',
+                      variant: ButtonVariant.ghost,
+                      size: ButtonSize.sm,
+                    ),
+                  Button(
+                    onPressed: busy(ActionKeys.bookLink(card.card))
+                        ? null
+                        : () => _link(context, card),
+                    label: 'Add handle',
+                    variant: ButtonVariant.ghost,
+                    size: ButtonSize.sm,
+                  ),
+                  if (all.length > 1)
+                    Button(
+                      onPressed: () => _merge(context, card, all),
+                      label: 'Merge',
+                      variant: ButtonVariant.ghost,
+                      size: ButtonSize.sm,
+                    ),
+                  Button(
+                    onPressed: busy(ActionKeys.bookDelete(card.card))
+                        ? null
+                        : () => _delete(context, card),
+                    label: 'Delete',
+                    variant: ButtonVariant.destructiveGhost,
+                    size: ButtonSize.sm,
+                  ),
+                ],
               ),
             ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
