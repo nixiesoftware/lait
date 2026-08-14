@@ -33,6 +33,14 @@ pub struct CardFacts {
     pub name: String,
     pub note: String,
     pub handles: Vec<String>,
+    /// The phone-book reading of `handles`: `actor:` spellings are addresses,
+    /// bare device ids are devices, `agent:` spellings are co-located agents.
+    pub addresses: Vec<String>,
+    pub devices: Vec<String>,
+    pub agents: Vec<String>,
+    /// The stored picture (`<mime>;base64,<data>`), or `None` — in which case
+    /// the surface draws its default face.
+    pub picture: Option<String>,
     pub groups: Vec<String>,
     pub self_claim: bool,
 }
@@ -54,6 +62,31 @@ impl Client {
 
     pub async fn book_delete(&self, card: String) -> ClientResult<BookSnapshot> {
         self.book_request(Request::BookDelete { card }).await
+    }
+
+    /// Set a card's picture from a file on this machine, or clear it with
+    /// `None`. The client owns the read — the daemon never opens a
+    /// caller-named path — and the crate's one constructor decides what is
+    /// storable, so a refused format or an oversize file is named here and a
+    /// stored picture is always drawable. Downscaling is a person's call,
+    /// never a silent one made on their behalf.
+    pub async fn book_set_picture(
+        &self,
+        card: String,
+        path: Option<String>,
+    ) -> ClientResult<BookSnapshot> {
+        let picture = match path {
+            None => String::new(),
+            Some(path) => {
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    ClientError::internal(format!("read picture {path}: {error}"))
+                })?;
+                addressbook::encode_picture(&bytes)
+                    .map_err(|error| ClientError::refused(error.to_string()))?
+            }
+        };
+        self.book_request(Request::BookSetPicture { card, picture })
+            .await
     }
 
     pub async fn book_merge(&self, from: String, into: String) -> ClientResult<BookSnapshot> {
@@ -164,6 +197,10 @@ fn from_view(view: BookView) -> BookSnapshot {
                 name: card.name,
                 note: card.note,
                 handles: card.handles,
+                addresses: card.addresses,
+                devices: card.devices,
+                agents: card.agents,
+                picture: card.picture,
                 groups: card.groups,
                 self_claim: card.self_claim,
             })

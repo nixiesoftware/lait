@@ -11,8 +11,8 @@ use crate::codec::{
 use crate::ids::CardId;
 use crate::mapping::{
     card_id_entry, entry_device, entry_tag_counter, path_created, path_groups, path_handles,
-    path_name, path_note, path_self, BODY_KEY, ENTRY_CLOCK, ENTRY_SCHEMA, PATH_GRAVES, PATH_META,
-    PATH_REDIRECTS,
+    path_name, path_note, path_picture, path_self, BODY_KEY, ENTRY_CLOCK, ENTRY_SCHEMA,
+    PATH_GRAVES, PATH_META, PATH_REDIRECTS,
 };
 use crate::types::{Author, Book, Card, Evidence, Field, GroupLink, Handle, Link, Stamp, Tag};
 use crate::{bounds, Error};
@@ -31,6 +31,12 @@ pub enum Action {
     SetNote {
         id: CardId,
         note: String,
+    },
+    /// Set (or clear, with an empty string) the card's picture, in the stored
+    /// `<mime>;base64,<data>` form.
+    SetPicture {
+        id: CardId,
+        picture: String,
     },
     AddGroup {
         id: CardId,
@@ -240,6 +246,10 @@ fn plan(book: &Book, author: &Author, action: Action) -> Result<Planned, Error> 
                     value: String::new(),
                     stamp: stamp.clone(),
                 },
+                picture: Field {
+                    value: String::new(),
+                    stamp: stamp.clone(),
+                },
                 groups: Vec::new(),
                 handles: Vec::new(),
                 self_claim: None,
@@ -291,6 +301,22 @@ fn plan(book: &Book, author: &Author, action: Action) -> Result<Planned, Error> 
                 &author.device,
                 "note",
                 &note,
+                &stamp,
+            )?);
+        }
+        Action::SetPicture { id, picture } => {
+            validate_picture(&picture)?;
+            let card = live_mut(&mut book, &id)?;
+            card.picture = Field {
+                value: picture.clone(),
+                stamp: stamp.clone(),
+            };
+            ops.extend(scalar_ops(
+                &key,
+                &id,
+                &author.device,
+                "picture",
+                &picture,
                 &stamp,
             )?);
         }
@@ -443,6 +469,7 @@ fn scalar_ops(
     let path = match field {
         "name" => path_name(id),
         "note" => path_note(id),
+        "picture" => path_picture(id),
         _ => return Err(Error::Invalid("unknown scalar")),
     };
     Ok(vec![Op::MapSet {
@@ -486,6 +513,35 @@ fn validate_name(name: &str) -> Result<(), Error> {
 fn validate_note(note: &str) -> Result<(), Error> {
     if note.len() > bounds::MAX_NOTE_BYTES {
         return Err(Error::Bound("MAX_NOTE_BYTES"));
+    }
+    Ok(())
+}
+
+/// A picture is `<mime>;base64,<data>` from a short allowlist, or empty (the
+/// clear). Validated at write so a stored picture is always drawable: a reader
+/// that had to sniff or repair would be a second opinion about what the book
+/// holds.
+fn validate_picture(picture: &str) -> Result<(), Error> {
+    if picture.is_empty() {
+        return Ok(());
+    }
+    if picture.len() > bounds::MAX_PICTURE_BYTES {
+        return Err(Error::Bound("MAX_PICTURE_BYTES"));
+    }
+    const MIMES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
+    let Some((mime, data)) = picture.split_once(";base64,") else {
+        return Err(Error::Invalid("a picture is `<mime>;base64,<data>`"));
+    };
+    if !MIMES.contains(&mime) {
+        return Err(Error::Invalid("picture mime must be png, jpeg, or webp"));
+    }
+    if data.is_empty()
+        || data_encoding::BASE64
+            .decode(data.as_bytes())
+            .map(|bytes| bytes.is_empty())
+            .unwrap_or(true)
+    {
+        return Err(Error::Invalid("picture payload is not base64"));
     }
     Ok(())
 }
@@ -646,6 +702,9 @@ fn project(view: &CollaborativeView) -> Result<Book, Error> {
     collect_scalars(view, "note", &mut raw_cards, |c, field| {
         c.note = Some(field)
     })?;
+    collect_scalars(view, "picture", &mut raw_cards, |c, field| {
+        c.picture = Some(field)
+    })?;
     for (path, entries) in &view.maps {
         if let Some(id) = path
             .strip_prefix("card/")
@@ -743,6 +802,7 @@ fn project(view: &CollaborativeView) -> Result<Book, Error> {
 struct PartialCard {
     name: Option<Field<String>>,
     note: Option<Field<String>>,
+    picture: Option<Field<String>>,
     groups: Vec<GroupLink>,
     handles: Vec<Link>,
     self_claim: Option<Stamp>,
@@ -757,6 +817,12 @@ impl PartialCard {
             id,
             name,
             note: self.note.unwrap_or_else(|| Field {
+                value: String::new(),
+                stamp: created.clone(),
+            }),
+            // A book written before pictures existed projects an empty one —
+            // the default face, not an error.
+            picture: self.picture.unwrap_or_else(|| Field {
                 value: String::new(),
                 stamp: created.clone(),
             }),

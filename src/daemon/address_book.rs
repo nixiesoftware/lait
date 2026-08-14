@@ -116,6 +116,7 @@ impl AddressBookService {
             Request::BookGet { card } => self.get(&card),
             Request::BookPut { card, name, note } => self.put(card, name, note),
             Request::BookDelete { card } => self.delete(&card),
+            Request::BookSetPicture { card, picture } => self.set_picture(&card, picture),
             Request::BookLink { card, handle } => self.link(&card, &handle),
             Request::BookUnlink { card, handle } => self.unlink(&card, &handle),
             Request::BookMerge { from, into } => self.merge(&from, &into),
@@ -209,6 +210,10 @@ impl AddressBookService {
 
     fn delete(&self, card: &str) -> Response {
         self.apply_one(card, |id| Action::Delete { id })
+    }
+
+    fn set_picture(&self, card: &str, picture: String) -> Response {
+        self.apply_one(card, |id| Action::SetPicture { id, picture })
     }
 
     fn claim_self(&self, card: &str) -> Response {
@@ -795,6 +800,7 @@ pub(crate) fn is_book_request(request: &Request) -> bool {
         Request::BookList
             | Request::BookGet { .. }
             | Request::BookPut { .. }
+            | Request::BookSetPicture { .. }
             | Request::BookDelete { .. }
             | Request::BookLink { .. }
             | Request::BookUnlink { .. }
@@ -831,6 +837,21 @@ fn first_authored_name(book: &Book, handle: &Handle) -> Option<String> {
 }
 
 fn card_view(card: &addressbook::Card) -> BookCardView {
+    // One set, two readings: `handles` keeps every wire spelling for clients
+    // that predate the split, and the phone-book triplet files each handle
+    // under what it is — an address (somewhere this person is someone), a
+    // device (a machine that answers as them), or a co-located agent.
+    let mut addresses = Vec::new();
+    let mut devices = Vec::new();
+    let mut agents = Vec::new();
+    for link in &card.handles {
+        let wire = link.handle.to_wire();
+        match link.handle {
+            Handle::Actor { .. } => addresses.push(wire),
+            Handle::Device(_) => devices.push(wire),
+            Handle::LocalAgent { .. } => agents.push(wire),
+        }
+    }
     BookCardView {
         card: card.id.to_string(),
         name: card.name.value.clone(),
@@ -840,6 +861,10 @@ fn card_view(card: &addressbook::Card) -> BookCardView {
             .iter()
             .map(|link| link.handle.to_wire())
             .collect(),
+        addresses,
+        devices,
+        agents,
+        picture: Some(card.picture.value.clone()).filter(|p| !p.is_empty()),
         groups: card.groups.iter().map(|link| link.name.clone()).collect(),
         self_claim: card.self_claim.is_some(),
     }

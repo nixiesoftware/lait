@@ -4,7 +4,10 @@
 /// Facts come from [ClientView.book]. Dispatch is the only write.
 library;
 
-import 'package:covalence/covalence.dart' hide Surface;
+import 'dart:convert' show base64Decode;
+import 'dart:typed_data' show Uint8List;
+
+import 'package:covalence/covalence.dart' hide Image, Surface;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
@@ -265,29 +268,10 @@ class _CanonicalCard extends StatelessWidget {
         : 'Online';
     return Row(
       children: [
-        t.box.square(
-          // reason: the face copies the reference client's plate — pinned
-          // like the caption controls, it sits against type rather than the
-          // spacing rhythm.
-          TokenEscape.rawSize(56),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: context.surface.l200,
-              border: Border.all(
-                color: context.border.l500,
-                width: t.stroke.xxs,
-              ),
-              borderRadius: t.radius.all(Space.xxs),
-            ),
-            child: Center(
-              child: card == null || card.name.isEmpty
-                  ? Icon(AppIcons.person, color: context.text.l700)
-                  : Text(
-                      card.name.substring(0, 1).toUpperCase(),
-                      style: context.headingStyle,
-                    ),
-            ),
-          ),
+        _FacePlate(
+          picture: card?.picture,
+          name: card?.name ?? '',
+          size: 56,
         ),
         t.gap.x(Space.lg),
         Expanded(
@@ -333,49 +317,44 @@ class _CardRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // The canonical entry, phone-book style: the face, the name, and
+          // what the person carries — addresses, devices, agents.
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              _FacePlate(picture: card.picture, name: card.name, size: 40),
+              t.gap.x(Space.md),
               Expanded(
-                child: Text(card.name, style: context.headingStyle),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(card.name, style: context.headingStyle),
+                    if (card.note.isNotEmpty) ...[
+                      t.gap.y(Space.xxs),
+                      Text(card.note, style: context.labelStyle),
+                    ],
+                  ],
+                ),
               ),
               if (card.selfClaim)
                 const Badge(label: 'My Card', variant: BadgeVariant.solid),
             ],
           ),
-          t.gap.y(Space.xxs),
-          Text(card.card, style: context.monoStyle),
-          if (card.note.isNotEmpty) ...[
-            t.gap.y(Space.sm),
-            Text(card.note, style: context.bodyStyle),
-          ],
-          if (card.handles.isNotEmpty) ...[
-            t.gap.y(Space.sm),
-            for (final handle in card.handles)
-              Padding(
-                padding: t.padding.only(bottom: Space.xxs),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(handle, style: context.monoStyle),
-                    ),
-                    Button(
-                      onPressed: busy(ActionKeys.bookUnlink(card.card))
-                          ? null
-                          : () => client.dispatch(
-                                ActionRequest.bookUnlink(
-                                  card: card.card,
-                                  handle: handle,
-                                ),
-                              ),
-                      label: 'Unlink',
-                      semanticLabel: 'Unlink $handle',
-                      variant: ButtonVariant.ghost,
-                      size: ButtonSize.sm,
-                    ),
-                  ],
-                ),
-              ),
-          ],
+          _HandleSection(
+            label: 'ADDRESSES',
+            handles: card.addresses,
+            card: card.card,
+          ),
+          _HandleSection(
+            label: 'DEVICES',
+            handles: card.devices,
+            card: card.card,
+          ),
+          _HandleSection(
+            label: 'AGENTS',
+            handles: card.agents,
+            card: card.card,
+          ),
           t.gap.y(Space.md),
           Wrap(
             spacing: t.size.sm,
@@ -389,6 +368,28 @@ class _CardRow extends StatelessWidget {
                 variant: ButtonVariant.ghost,
                 size: ButtonSize.sm,
               ),
+              Button(
+                onPressed: busy(ActionKeys.bookSetPicture(card.card))
+                    ? null
+                    : () => _setPicture(context, card),
+                label: 'Set picture',
+                variant: ButtonVariant.ghost,
+                size: ButtonSize.sm,
+              ),
+              if (card.picture != null)
+                Button(
+                  onPressed: busy(ActionKeys.bookSetPicture(card.card))
+                      ? null
+                      : () => client.dispatch(
+                            ActionRequest.bookSetPicture(
+                              card: card.card,
+                              path: null,
+                            ),
+                          ),
+                  label: 'Clear picture',
+                  variant: ButtonVariant.ghost,
+                  size: ButtonSize.sm,
+                ),
               if (!card.selfClaim)
                 Button(
                   onPressed: busy(ActionKeys.bookClaim(card.card))
@@ -429,6 +430,174 @@ class _CardRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The face on a card: the stored picture when one was authored, else the
+/// default — a monogram, or the person mark when there is nothing to
+/// monogram. Boxed like the reference client's plates.
+class _FacePlate extends StatelessWidget {
+  const _FacePlate({
+    required this.picture,
+    required this.name,
+    required this.size,
+  });
+
+  final String? picture;
+  final String name;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final bytes = _pictureBytes(picture);
+    return t.box.square(
+      // reason: the face copies the reference client's plate — pinned like
+      // the caption controls, it sits against type rather than the spacing
+      // rhythm.
+      TokenEscape.rawSize(size),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: context.surface.l200,
+          border: Border.all(
+            color: context.border.l500,
+            width: t.stroke.xxs,
+          ),
+          borderRadius: t.radius.all(Space.xxs),
+        ),
+        child: bytes != null
+            ? ClipRRect(
+                borderRadius: t.radius.all(Space.xxs),
+                child: Image.memory(
+                  bytes,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                ),
+              )
+            : Center(
+                child: name.isEmpty
+                    ? Icon(AppIcons.person, color: context.text.l700)
+                    : Text(
+                        name.substring(0, 1).toUpperCase(),
+                        style: context.headingStyle,
+                      ),
+              ),
+      ),
+    );
+  }
+}
+
+/// Decode the stored `<mime>;base64,<data>` form. The engine validated it at
+/// write, so a miss here is a corrupt store answered with the default face —
+/// never a crash in a list row.
+Uint8List? _pictureBytes(String? stored) {
+  if (stored == null) return null;
+  final split = stored.indexOf(';base64,');
+  if (split < 0) return null;
+  try {
+    return base64Decode(stored.substring(split + 8));
+  } catch (_) {
+    return null;
+  }
+}
+
+/// One phone-book section: a label and its rows, each unlinkable. Absent
+/// kinds draw nothing — a card with no devices has no DEVICES heading.
+class _HandleSection extends StatelessWidget {
+  const _HandleSection({
+    required this.label,
+    required this.handles,
+    required this.card,
+  });
+
+  final String label;
+  final List<String> handles;
+  final String card;
+
+  @override
+  Widget build(BuildContext context) {
+    if (handles.isEmpty) return const SizedBox.shrink();
+    final t = context.tokens;
+    final client = ClientScope.of(context);
+    final view = ClientScope.watch(context);
+    final busy = view.inFlight.contains(ActionKeys.bookUnlink(card));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        t.gap.y(Space.md),
+        Text(label, style: context.factLabelStyle),
+        t.gap.y(Space.xxs),
+        for (final handle in handles)
+          Padding(
+            padding: t.padding.only(bottom: Space.xxs),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(handle, style: context.monoStyle),
+                ),
+                Button(
+                  onPressed: busy
+                      ? null
+                      : () => client.dispatch(
+                            ActionRequest.bookUnlink(
+                              card: card,
+                              handle: handle,
+                            ),
+                          ),
+                  label: 'Unlink',
+                  semanticLabel: 'Unlink $handle',
+                  variant: ButtonVariant.ghost,
+                  size: ButtonSize.sm,
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+Future<void> _setPicture(BuildContext context, CardRow card) async {
+  final path = TextEditingController();
+  final saved = await showAppDialog<bool>(
+    context: context,
+    builder: (ctx) => DialogContent(
+      children: [
+        DialogHeader(
+          title: DialogTitle('Set the picture on ${card.name}'),
+          description: const DialogDescription(
+            'A PNG, JPEG, or WebP on this machine. The book stores the '
+            'picture itself — keep it face-sized, not a photo.',
+          ),
+        ),
+        Input(
+          key: const ValueKey('book-picture-path'),
+          controller: path,
+          label: 'Path',
+          mono: true,
+          autofocus: true,
+        ),
+        DialogFooter(
+          children: [
+            Button(
+              label: 'Cancel',
+              variant: ButtonVariant.outline,
+              onPressed: () => Navigator.pop(ctx, false),
+            ),
+            Button(
+              label: 'Set picture',
+              onPressed: () => Navigator.pop(ctx, true),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+  final dest = path.text.trim();
+  path.dispose();
+  if (saved != true || dest.isEmpty || !context.mounted) return;
+  ClientScope.of(context).dispatch(
+    ActionRequest.bookSetPicture(card: card.card, path: dest),
+  );
 }
 
 Future<void> _edit(BuildContext context, CardRow? existing) async {

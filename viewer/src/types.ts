@@ -1334,6 +1334,14 @@ export interface BookCardDto {
   name: string;
   note: string;
   handles: string[];
+  /** The phone-book reading of `handles`: addresses (`actor:` spellings),
+   *  devices (bare device ids), co-located agents (`agent:` spellings). */
+  addresses: string[];
+  devices: string[];
+  agents: string[];
+  /** The stored picture (`<mime>;base64,<data>`); absent means the default
+   *  face. */
+  picture?: string | null;
   groups: string[];
   self_claim: boolean;
 }

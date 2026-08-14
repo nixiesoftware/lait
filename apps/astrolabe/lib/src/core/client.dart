@@ -232,6 +232,7 @@ abstract final class ActionKeys {
   static const String bookPutNew = 'book.put';
   static String bookPut(String card) => 'book.put:$card';
   static String bookDelete(String card) => 'book.delete:$card';
+  static String bookSetPicture(String card) => 'book.picture:$card';
   static String bookMerge(String from, String into) => 'book.merge:$from:$into';
   static String bookClaim(String card) => 'book.claim:$card';
   static String bookLink(String card) => 'book.link:$card';

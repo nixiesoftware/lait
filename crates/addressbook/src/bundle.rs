@@ -173,6 +173,10 @@ mod tests {
                 value: String::new(),
                 stamp: stamp(),
             },
+            picture: Field {
+                value: String::new(),
+                stamp: stamp(),
+            },
             groups: Vec::new(),
             handles: handles
                 .into_iter()

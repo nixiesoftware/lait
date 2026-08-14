@@ -170,6 +170,11 @@ pub struct Card {
     pub id: CardId,
     pub name: Field<String>,
     pub note: Field<String>,
+    /// The card's picture, stored as `<mime>;base64,<data>` — or empty when
+    /// none was authored, in which case every client draws its default face.
+    /// An additive path: a book written before pictures existed projects an
+    /// empty one, and an older reader skips the path it does not know.
+    pub picture: Field<String>,
     pub groups: Vec<GroupLink>,
     pub handles: Vec<Link>,
     pub self_claim: Option<Stamp>,

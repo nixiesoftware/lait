@@ -446,6 +446,13 @@ pub enum Request {
     BookDelete {
         card: String,
     },
+    /// Set (or clear, with an empty string) a card's picture, in the stored
+    /// `<mime>;base64,<data>` form. The engine validates shape and size; a
+    /// stored picture is always drawable.
+    BookSetPicture {
+        card: String,
+        picture: String,
+    },
     BookLink {
         card: String,
         handle: String,
@@ -1319,6 +1326,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::BookGet { .. }
         | Request::BookPut { .. }
         | Request::BookDelete { .. }
+        | Request::BookSetPicture { .. }
         | Request::BookLink { .. }
         | Request::BookUnlink { .. }
         | Request::BookMerge { .. }
@@ -1428,6 +1436,10 @@ pub fn representative_requests() -> Vec<Request> {
             note: None,
         },
         Request::BookDelete { card: s() },
+        Request::BookSetPicture {
+            card: s(),
+            picture: s(),
+        },
         Request::BookLink {
             card: s(),
             handle: s(),
@@ -1550,8 +1562,24 @@ pub struct BookCardView {
     pub name: String,
     #[serde(default)]
     pub note: String,
+    /// Every handle in its wire spelling, whatever its kind. The categorized
+    /// triplet below is the same set split the way a phone book reads —
+    /// add-only fields, so older clients keep reading this one.
     #[serde(default)]
     pub handles: Vec<String>,
+    /// `actor:<space>:<actor>` spellings — where this person is someone.
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    /// Bare device ids — the machines that answer as them.
+    #[serde(default)]
+    pub devices: Vec<String>,
+    /// `agent:<store>:<name>` spellings — co-located agents, never shared.
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// The stored picture (`<mime>;base64,<data>`), or `None` when the card
+    /// has none — in which case a client draws its default face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
     #[serde(default)]
     pub groups: Vec<String>,
     #[serde(default)]

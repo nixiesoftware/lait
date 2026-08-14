@@ -133,6 +133,11 @@ pub enum Action {
     BookDelete {
         card: String,
     },
+    /// Set a card's picture from a file on this machine; `None` clears it.
+    BookSetPicture {
+        card: String,
+        path: Option<String>,
+    },
     BookMerge {
         from: String,
         into: String,
@@ -204,6 +209,7 @@ impl Action {
             } => format!("book.put:{card}"),
             Self::BookPut { .. } => "book.put".into(),
             Self::BookDelete { card } => format!("book.delete:{card}"),
+            Self::BookSetPicture { card, .. } => format!("book.picture:{card}"),
             Self::BookMerge { from, into } => format!("book.merge:{from}:{into}"),
             Self::BookClaimSelf { card } => format!("book.claim:{card}"),
             Self::BookLink { card, .. } => format!("book.link:{card}"),
@@ -256,6 +262,13 @@ impl Action {
             Self::OrbitRebuild { orbit } => format!("rebuild {orbit}"),
             Self::BookPut { name, .. } => format!("save the card '{name}'"),
             Self::BookDelete { card } => format!("delete card {card}"),
+            Self::BookSetPicture {
+                card,
+                path: Some(_),
+            } => format!("set the picture on {card}"),
+            Self::BookSetPicture { card, path: None } => {
+                format!("clear the picture on {card}")
+            }
             Self::BookMerge { from, into } => format!("merge {from} into {into}"),
             Self::BookClaimSelf { card } => format!("claim {card} as My Card"),
             Self::BookLink { card, handle } => format!("link {handle} to {card}"),
@@ -726,6 +739,13 @@ impl Worker {
             Action::BookDelete { card } => {
                 let _ = client.book_delete(card.clone()).await?;
                 Ok(Outcome::Said(format!("deleted {card}")))
+            }
+            Action::BookSetPicture { card, path } => {
+                let _ = client.book_set_picture(card.clone(), path.clone()).await?;
+                Ok(Outcome::Said(match path {
+                    Some(_) => format!("set the picture on {card}"),
+                    None => format!("cleared the picture on {card}"),
+                }))
             }
             Action::BookMerge { from, into } => {
                 let _ = client.book_merge(from.clone(), into.clone()).await?;

@@ -125,3 +125,21 @@ pub fn decode_u64(bytes: &[u8]) -> Result<u64, Error> {
 pub fn evidence_is_authored(evidence: &Evidence) -> bool {
     matches!(evidence, Evidence::Declared | Evidence::Asserted { .. })
 }
+
+/// Build the stored picture form (`<mime>;base64,<data>`) from raw image
+/// bytes: sniff the format from the magic bytes, refuse what no client could
+/// draw, and bound the stored size. The one constructor, so every stored
+/// picture is drawable and every client sniffs nothing.
+pub fn encode_picture(bytes: &[u8]) -> Result<String, Error> {
+    let mime = match bytes {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        _ => return Err(Error::Invalid("a picture is a PNG, JPEG, or WebP file")),
+    };
+    let stored = format!("{mime};base64,{}", data_encoding::BASE64.encode(bytes));
+    if stored.len() > crate::bounds::MAX_PICTURE_BYTES {
+        return Err(Error::Bound("MAX_PICTURE_BYTES"));
+    }
+    Ok(stored)
+}

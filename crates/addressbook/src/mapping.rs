@@ -28,6 +28,10 @@ pub fn path_note(id: &CardId) -> String {
     format!("card/{}/note", id.as_str())
 }
 
+pub fn path_picture(id: &CardId) -> String {
+    format!("card/{}/picture", id.as_str())
+}
+
 pub fn path_created(id: &CardId) -> String {
     format!("card/{}/created", id.as_str())
 }

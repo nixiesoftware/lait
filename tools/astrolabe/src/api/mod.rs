@@ -333,6 +333,14 @@ pub struct CardRow {
     pub name: String,
     pub note: String,
     pub handles: Vec<String>,
+    /// The phone-book reading of `handles`: addresses (`actor:` spellings),
+    /// devices (bare device ids), and co-located agents (`agent:` spellings).
+    pub addresses: Vec<String>,
+    pub devices: Vec<String>,
+    pub agents: Vec<String>,
+    /// The stored picture (`<mime>;base64,<data>`), or `None` — the surface
+    /// draws its default face for a card without one.
+    pub picture: Option<String>,
     pub groups: Vec<String>,
     pub self_claim: bool,
 }
@@ -409,6 +417,11 @@ pub enum ActionRequest {
     BookDelete {
         card: String,
     },
+    /// Set a card's picture from a file on this machine; `None` clears it.
+    BookSetPicture {
+        card: String,
+        path: Option<String>,
+    },
     BookMerge {
         from: String,
         into: String,
@@ -456,6 +469,7 @@ impl ActionRequest {
             Self::ForgetOrbit { space } => Action::OrbitForget { space },
             Self::BookPut { card, name, note } => Action::BookPut { card, name, note },
             Self::BookDelete { card } => Action::BookDelete { card },
+            Self::BookSetPicture { card, path } => Action::BookSetPicture { card, path },
             Self::BookMerge { from, into } => Action::BookMerge { from, into },
             Self::BookClaimSelf { card } => Action::BookClaimSelf { card },
             Self::BookLink { card, handle } => Action::BookLink { card, handle },
@@ -908,6 +922,10 @@ fn project(app: &App) -> ClientView {
                     name: card.name.clone(),
                     note: card.note.clone(),
                     handles: card.handles.clone(),
+                    addresses: card.addresses.clone(),
+                    devices: card.devices.clone(),
+                    agents: card.agents.clone(),
+                    picture: card.picture.clone(),
                     groups: card.groups.clone(),
                     self_claim: card.self_claim,
                 })
@@ -1063,6 +1081,10 @@ mod tests {
                 name: "Ada".into(),
                 note: "colleague".into(),
                 handles: vec!["actor:ws_one:act_ada".into()],
+                addresses: vec!["actor:ws_one:act_ada".into()],
+                devices: Vec::new(),
+                agents: Vec::new(),
+                picture: None,
                 groups: Vec::new(),
                 self_claim: true,
             }],

@@ -64,6 +64,7 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
     TResult Function(ActionRequest_BookPut value)? bookPut,
     TResult Function(ActionRequest_BookDelete value)? bookDelete,
+    TResult Function(ActionRequest_BookSetPicture value)? bookSetPicture,
     TResult Function(ActionRequest_BookMerge value)? bookMerge,
     TResult Function(ActionRequest_BookClaimSelf value)? bookClaimSelf,
     TResult Function(ActionRequest_BookLink value)? bookLink,
@@ -104,6 +105,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookPut(_that);
       case ActionRequest_BookDelete() when bookDelete != null:
         return bookDelete(_that);
+      case ActionRequest_BookSetPicture() when bookSetPicture != null:
+        return bookSetPicture(_that);
       case ActionRequest_BookMerge() when bookMerge != null:
         return bookMerge(_that);
       case ActionRequest_BookClaimSelf() when bookClaimSelf != null:
@@ -155,6 +158,8 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_ForgetOrbit value) forgetOrbit,
     required TResult Function(ActionRequest_BookPut value) bookPut,
     required TResult Function(ActionRequest_BookDelete value) bookDelete,
+    required TResult Function(ActionRequest_BookSetPicture value)
+        bookSetPicture,
     required TResult Function(ActionRequest_BookMerge value) bookMerge,
     required TResult Function(ActionRequest_BookClaimSelf value) bookClaimSelf,
     required TResult Function(ActionRequest_BookLink value) bookLink,
@@ -194,6 +199,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookPut(_that);
       case ActionRequest_BookDelete():
         return bookDelete(_that);
+      case ActionRequest_BookSetPicture():
+        return bookSetPicture(_that);
       case ActionRequest_BookMerge():
         return bookMerge(_that);
       case ActionRequest_BookClaimSelf():
@@ -241,6 +248,7 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
     TResult? Function(ActionRequest_BookPut value)? bookPut,
     TResult? Function(ActionRequest_BookDelete value)? bookDelete,
+    TResult? Function(ActionRequest_BookSetPicture value)? bookSetPicture,
     TResult? Function(ActionRequest_BookMerge value)? bookMerge,
     TResult? Function(ActionRequest_BookClaimSelf value)? bookClaimSelf,
     TResult? Function(ActionRequest_BookLink value)? bookLink,
@@ -280,6 +288,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookPut(_that);
       case ActionRequest_BookDelete() when bookDelete != null:
         return bookDelete(_that);
+      case ActionRequest_BookSetPicture() when bookSetPicture != null:
+        return bookSetPicture(_that);
       case ActionRequest_BookMerge() when bookMerge != null:
         return bookMerge(_that);
       case ActionRequest_BookClaimSelf() when bookClaimSelf != null:
@@ -329,6 +339,7 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String space)? forgetOrbit,
     TResult Function(String? card, String name, String? note)? bookPut,
     TResult Function(String card)? bookDelete,
+    TResult Function(String card, String? path)? bookSetPicture,
     TResult Function(String from, String into)? bookMerge,
     TResult Function(String card)? bookClaimSelf,
     TResult Function(String card, String handle)? bookLink,
@@ -369,6 +380,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookPut(_that.card, _that.name, _that.note);
       case ActionRequest_BookDelete() when bookDelete != null:
         return bookDelete(_that.card);
+      case ActionRequest_BookSetPicture() when bookSetPicture != null:
+        return bookSetPicture(_that.card, _that.path);
       case ActionRequest_BookMerge() when bookMerge != null:
         return bookMerge(_that.from, _that.into);
       case ActionRequest_BookClaimSelf() when bookClaimSelf != null:
@@ -419,6 +432,7 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(String space) forgetOrbit,
     required TResult Function(String? card, String name, String? note) bookPut,
     required TResult Function(String card) bookDelete,
+    required TResult Function(String card, String? path) bookSetPicture,
     required TResult Function(String from, String into) bookMerge,
     required TResult Function(String card) bookClaimSelf,
     required TResult Function(String card, String handle) bookLink,
@@ -458,6 +472,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookPut(_that.card, _that.name, _that.note);
       case ActionRequest_BookDelete():
         return bookDelete(_that.card);
+      case ActionRequest_BookSetPicture():
+        return bookSetPicture(_that.card, _that.path);
       case ActionRequest_BookMerge():
         return bookMerge(_that.from, _that.into);
       case ActionRequest_BookClaimSelf():
@@ -505,6 +521,7 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String space)? forgetOrbit,
     TResult? Function(String? card, String name, String? note)? bookPut,
     TResult? Function(String card)? bookDelete,
+    TResult? Function(String card, String? path)? bookSetPicture,
     TResult? Function(String from, String into)? bookMerge,
     TResult? Function(String card)? bookClaimSelf,
     TResult? Function(String card, String handle)? bookLink,
@@ -544,6 +561,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookPut(_that.card, _that.name, _that.note);
       case ActionRequest_BookDelete() when bookDelete != null:
         return bookDelete(_that.card);
+      case ActionRequest_BookSetPicture() when bookSetPicture != null:
+        return bookSetPicture(_that.card, _that.path);
       case ActionRequest_BookMerge() when bookMerge != null:
         return bookMerge(_that.from, _that.into);
       case ActionRequest_BookClaimSelf() when bookClaimSelf != null:
@@ -1373,6 +1392,80 @@ class _$ActionRequest_BookDeleteCopyWithImpl<$Res>
           ? _self.card
           : card // ignore: cast_nullable_to_non_nullable
               as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BookSetPicture extends ActionRequest {
+  const ActionRequest_BookSetPicture({required this.card, this.path})
+      : super._();
+
+  final String card;
+  final String? path;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BookSetPictureCopyWith<ActionRequest_BookSetPicture>
+      get copyWith => _$ActionRequest_BookSetPictureCopyWithImpl<
+          ActionRequest_BookSetPicture>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BookSetPicture &&
+            (identical(other.card, card) || other.card == card) &&
+            (identical(other.path, path) || other.path == path));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, card, path);
+
+  @override
+  String toString() {
+    return 'ActionRequest.bookSetPicture(card: $card, path: $path)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BookSetPictureCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BookSetPictureCopyWith(
+          ActionRequest_BookSetPicture value,
+          $Res Function(ActionRequest_BookSetPicture) _then) =
+      _$ActionRequest_BookSetPictureCopyWithImpl;
+  @useResult
+  $Res call({String card, String? path});
+}
+
+/// @nodoc
+class _$ActionRequest_BookSetPictureCopyWithImpl<$Res>
+    implements $ActionRequest_BookSetPictureCopyWith<$Res> {
+  _$ActionRequest_BookSetPictureCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BookSetPicture _self;
+  final $Res Function(ActionRequest_BookSetPicture) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? card = null,
+    Object? path = freezed,
+  }) {
+    return _then(ActionRequest_BookSetPicture(
+      card: null == card
+          ? _self.card
+          : card // ignore: cast_nullable_to_non_nullable
+              as String,
+      path: freezed == path
+          ? _self.path
+          : path // ignore: cast_nullable_to_non_nullable
+              as String?,
     ));
   }
 }

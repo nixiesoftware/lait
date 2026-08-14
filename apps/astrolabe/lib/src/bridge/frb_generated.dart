@@ -275,38 +275,43 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           card: dco_decode_String(raw[1]),
         );
       case 14:
+        return ActionRequest_BookSetPicture(
+          card: dco_decode_String(raw[1]),
+          path: dco_decode_opt_String(raw[2]),
+        );
+      case 15:
         return ActionRequest_BookMerge(
           from: dco_decode_String(raw[1]),
           into: dco_decode_String(raw[2]),
         );
-      case 15:
+      case 16:
         return ActionRequest_BookClaimSelf(
           card: dco_decode_String(raw[1]),
         );
-      case 16:
+      case 17:
         return ActionRequest_BookLink(
           card: dco_decode_String(raw[1]),
           handle: dco_decode_String(raw[2]),
         );
-      case 17:
+      case 18:
         return ActionRequest_BookUnlink(
           card: dco_decode_String(raw[1]),
           handle: dco_decode_String(raw[2]),
         );
-      case 18:
+      case 19:
         return ActionRequest_BookExport(
           path: dco_decode_String(raw[1]),
           cards: dco_decode_opt_list_String(raw[2]),
         );
-      case 19:
+      case 20:
         return ActionRequest_BookImport(
           path: dco_decode_String(raw[1]),
         );
-      case 20:
+      case 21:
         return ActionRequest_BookAccept(
           suggestion: dco_decode_String(raw[1]),
         );
-      case 21:
+      case 22:
         return ActionRequest_BookDismiss(
           suggestion: dco_decode_String(raw[1]),
         );
@@ -406,15 +411,19 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   CardRow dco_decode_card_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
     return CardRow(
       card: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
       note: dco_decode_String(arr[2]),
       handles: dco_decode_list_String(arr[3]),
-      groups: dco_decode_list_String(arr[4]),
-      selfClaim: dco_decode_bool(arr[5]),
+      addresses: dco_decode_list_String(arr[4]),
+      devices: dco_decode_list_String(arr[5]),
+      agents: dco_decode_list_String(arr[6]),
+      picture: dco_decode_opt_String(arr[7]),
+      groups: dco_decode_list_String(arr[8]),
+      selfClaim: dco_decode_bool(arr[9]),
     );
   }
 
@@ -951,31 +960,35 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         var var_card = sse_decode_String(deserializer);
         return ActionRequest_BookDelete(card: var_card);
       case 14:
+        var var_card = sse_decode_String(deserializer);
+        var var_path = sse_decode_opt_String(deserializer);
+        return ActionRequest_BookSetPicture(card: var_card, path: var_path);
+      case 15:
         var var_from = sse_decode_String(deserializer);
         var var_into = sse_decode_String(deserializer);
         return ActionRequest_BookMerge(from: var_from, into: var_into);
-      case 15:
-        var var_card = sse_decode_String(deserializer);
-        return ActionRequest_BookClaimSelf(card: var_card);
       case 16:
         var var_card = sse_decode_String(deserializer);
-        var var_handle = sse_decode_String(deserializer);
-        return ActionRequest_BookLink(card: var_card, handle: var_handle);
+        return ActionRequest_BookClaimSelf(card: var_card);
       case 17:
         var var_card = sse_decode_String(deserializer);
         var var_handle = sse_decode_String(deserializer);
-        return ActionRequest_BookUnlink(card: var_card, handle: var_handle);
+        return ActionRequest_BookLink(card: var_card, handle: var_handle);
       case 18:
+        var var_card = sse_decode_String(deserializer);
+        var var_handle = sse_decode_String(deserializer);
+        return ActionRequest_BookUnlink(card: var_card, handle: var_handle);
+      case 19:
         var var_path = sse_decode_String(deserializer);
         var var_cards = sse_decode_opt_list_String(deserializer);
         return ActionRequest_BookExport(path: var_path, cards: var_cards);
-      case 19:
+      case 20:
         var var_path = sse_decode_String(deserializer);
         return ActionRequest_BookImport(path: var_path);
-      case 20:
+      case 21:
         var var_suggestion = sse_decode_String(deserializer);
         return ActionRequest_BookAccept(suggestion: var_suggestion);
-      case 21:
+      case 22:
         var var_suggestion = sse_decode_String(deserializer);
         return ActionRequest_BookDismiss(suggestion: var_suggestion);
       default:
@@ -1080,6 +1093,10 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_name = sse_decode_String(deserializer);
     var var_note = sse_decode_String(deserializer);
     var var_handles = sse_decode_list_String(deserializer);
+    var var_addresses = sse_decode_list_String(deserializer);
+    var var_devices = sse_decode_list_String(deserializer);
+    var var_agents = sse_decode_list_String(deserializer);
+    var var_picture = sse_decode_opt_String(deserializer);
     var var_groups = sse_decode_list_String(deserializer);
     var var_selfClaim = sse_decode_bool(deserializer);
     return CardRow(
@@ -1087,6 +1104,10 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         name: var_name,
         note: var_note,
         handles: var_handles,
+        addresses: var_addresses,
+        devices: var_devices,
+        agents: var_agents,
+        picture: var_picture,
         groups: var_groups,
         selfClaim: var_selfClaim);
   }
@@ -1795,33 +1816,37 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case ActionRequest_BookDelete(card: final card):
         sse_encode_i_32(13, serializer);
         sse_encode_String(card, serializer);
-      case ActionRequest_BookMerge(from: final from, into: final into):
+      case ActionRequest_BookSetPicture(card: final card, path: final path):
         sse_encode_i_32(14, serializer);
+        sse_encode_String(card, serializer);
+        sse_encode_opt_String(path, serializer);
+      case ActionRequest_BookMerge(from: final from, into: final into):
+        sse_encode_i_32(15, serializer);
         sse_encode_String(from, serializer);
         sse_encode_String(into, serializer);
       case ActionRequest_BookClaimSelf(card: final card):
-        sse_encode_i_32(15, serializer);
-        sse_encode_String(card, serializer);
-      case ActionRequest_BookLink(card: final card, handle: final handle):
         sse_encode_i_32(16, serializer);
         sse_encode_String(card, serializer);
-        sse_encode_String(handle, serializer);
-      case ActionRequest_BookUnlink(card: final card, handle: final handle):
+      case ActionRequest_BookLink(card: final card, handle: final handle):
         sse_encode_i_32(17, serializer);
         sse_encode_String(card, serializer);
         sse_encode_String(handle, serializer);
-      case ActionRequest_BookExport(path: final path, cards: final cards):
+      case ActionRequest_BookUnlink(card: final card, handle: final handle):
         sse_encode_i_32(18, serializer);
+        sse_encode_String(card, serializer);
+        sse_encode_String(handle, serializer);
+      case ActionRequest_BookExport(path: final path, cards: final cards):
+        sse_encode_i_32(19, serializer);
         sse_encode_String(path, serializer);
         sse_encode_opt_list_String(cards, serializer);
       case ActionRequest_BookImport(path: final path):
-        sse_encode_i_32(19, serializer);
+        sse_encode_i_32(20, serializer);
         sse_encode_String(path, serializer);
       case ActionRequest_BookAccept(suggestion: final suggestion):
-        sse_encode_i_32(20, serializer);
+        sse_encode_i_32(21, serializer);
         sse_encode_String(suggestion, serializer);
       case ActionRequest_BookDismiss(suggestion: final suggestion):
-        sse_encode_i_32(21, serializer);
+        sse_encode_i_32(22, serializer);
         sse_encode_String(suggestion, serializer);
     }
   }
@@ -1923,6 +1948,10 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_String(self.name, serializer);
     sse_encode_String(self.note, serializer);
     sse_encode_list_String(self.handles, serializer);
+    sse_encode_list_String(self.addresses, serializer);
+    sse_encode_list_String(self.devices, serializer);
+    sse_encode_list_String(self.agents, serializer);
+    sse_encode_opt_String(self.picture, serializer);
     sse_encode_list_String(self.groups, serializer);
     sse_encode_bool(self.selfClaim, serializer);
   }

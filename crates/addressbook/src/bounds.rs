@@ -10,6 +10,9 @@ pub const MAX_CARDS: usize = 4096;
 pub const MAX_HANDLES_PER_CARD: usize = 64;
 /// One authored note field, in bytes.
 pub const MAX_NOTE_BYTES: usize = 4096;
+/// One authored picture, as stored (`<mime>;base64,<data>`), in bytes. A
+/// face for a card, not a photo library — clients downscale before dispatch.
+pub const MAX_PICTURE_BYTES: usize = 262_144;
 /// One authored name field, in bytes.
 pub const MAX_NAME_BYTES: usize = 256;
 /// Materialized live projection, encoded.

@@ -86,6 +86,98 @@ fn persistence_proof_restart_into_a_blank_engine() {
     assert_eq!(restored.version().expect("restored version"), version);
 }
 
+/// The picture lifecycle: authored in the stored `<mime>;base64,<data>` form,
+/// validated at write, cleared with the empty string, defaulted for cards
+/// that never had one — and it survives the export/import boundary like every
+/// other authored field.
+#[test]
+fn a_picture_is_authored_validated_cleared_and_defaulted() {
+    let mut engine = BookEngine::new();
+    let id = card(2);
+    let alice = author(1);
+    engine
+        .apply(
+            &alice,
+            Action::Create {
+                id: id.clone(),
+                name: "Ada".into(),
+            },
+        )
+        .expect("create");
+
+    // A card that never had a picture projects an empty one — the default
+    // face, not an error.
+    let book = engine.book().expect("book");
+    assert_eq!(book.cards[&id].picture.value, "");
+
+    // Only the stored form is storable: no separator, a foreign mime, and a
+    // non-base64 payload are refusals, and an oversize one names its bound.
+    for bad in [
+        "not-a-picture",
+        "image/tiff;base64,AAAA",
+        "image/png;base64,@@not-base64@@",
+    ] {
+        let refused = engine.apply(
+            &alice,
+            Action::SetPicture {
+                id: id.clone(),
+                picture: bad.into(),
+            },
+        );
+        assert!(refused.is_err(), "{bad:?} must be refused");
+    }
+    let oversize = format!(
+        "image/png;base64,{}",
+        "A".repeat(crate::bounds::MAX_PICTURE_BYTES)
+    );
+    assert!(matches!(
+        engine.apply(
+            &alice,
+            Action::SetPicture {
+                id: id.clone(),
+                picture: oversize,
+            },
+        ),
+        Err(Error::Bound("MAX_PICTURE_BYTES"))
+    ));
+
+    let stored = format!(
+        "image/png;base64,{}",
+        data_encoding::BASE64.encode(&[137, 80, 78, 71])
+    );
+    engine
+        .apply(
+            &alice,
+            Action::SetPicture {
+                id: id.clone(),
+                picture: stored.clone(),
+            },
+        )
+        .expect("set picture");
+    let book = engine.book().expect("book");
+    assert_eq!(book.cards[&id].picture.value, stored);
+
+    // It is an authored field like any other: it crosses export/import.
+    let export = engine.export_body().expect("export");
+    let restored = BookEngine::import_body(&export).expect("import");
+    assert_eq!(
+        restored.book().expect("book").cards[&id].picture.value,
+        stored
+    );
+
+    // The empty string is the clear.
+    engine
+        .apply(
+            &alice,
+            Action::SetPicture {
+                id: id.clone(),
+                picture: String::new(),
+            },
+        )
+        .expect("clear picture");
+    assert_eq!(engine.book().expect("book").cards[&id].picture.value, "");
+}
+
 #[test]
 fn store_round_trip_and_corrupt_refuses() {
     let dir = std::env::temp_dir().join(format!("lait-ab-{}", card(9).as_str()));

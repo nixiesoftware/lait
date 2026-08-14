@@ -126,6 +126,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::ConfigReload
         | Request::Stop
         | Request::BookPut { .. }
+        | Request::BookSetPicture { .. }
         | Request::BookDelete { .. }
         | Request::BookLink { .. }
         | Request::BookUnlink { .. }
@@ -218,6 +219,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::BookList
         | Request::BookGet { .. }
         | Request::BookPut { .. }
+        | Request::BookSetPicture { .. }
         | Request::BookDelete { .. }
         | Request::BookLink { .. }
         | Request::BookUnlink { .. }

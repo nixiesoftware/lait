@@ -59,14 +59,21 @@ CardRow _card({
   String id = 'crd_one',
   String name = 'Ada',
   String note = '',
-  List<String> handles = const [],
+  List<String> addresses = const [],
+  List<String> devices = const [],
+  List<String> agents = const [],
+  String? picture,
   bool self = false,
 }) =>
     CardRow(
       card: id,
       name: name,
       note: note,
-      handles: handles,
+      handles: [...addresses, ...devices, ...agents],
+      addresses: addresses,
+      devices: devices,
+      agents: agents,
+      picture: picture,
       groups: const [],
       selfClaim: self,
     );
@@ -120,8 +127,9 @@ void main() {
       tester,
       _view(book: _book([_card(name: 'Ada', self: true)])),
     );
-    // The face is a boxed monogram until Cards carry an image.
-    expect(find.text('A'), findsOneWidget);
+    // The default face is a boxed monogram, drawn wherever the card is — the
+    // canonical card up top and its phone-book row alike.
+    expect(find.text('A'), findsNWidgets(2));
     expect(find.text('Online'), findsOneWidget);
     // The claimed name appears on the card and on its list row alike.
     expect(find.text('Ada'), findsNWidgets(2));
@@ -270,7 +278,7 @@ void main() {
       tester,
       _view(
         book: _book([
-          _card(handles: const ['actor:ws_one:act_ada']),
+          _card(addresses: const ['actor:ws_one:act_ada']),
         ]),
       ),
     );

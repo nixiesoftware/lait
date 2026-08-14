@@ -106,6 +106,12 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.bookDelete({
     required String card,
   }) = ActionRequest_BookDelete;
+
+  /// Set a card's picture from a file on this machine; `None` clears it.
+  const factory ActionRequest.bookSetPicture({
+    required String card,
+    String? path,
+  }) = ActionRequest_BookSetPicture;
   const factory ActionRequest.bookMerge({
     required String from,
     required String into,
@@ -180,6 +186,16 @@ class CardRow {
   final String name;
   final String note;
   final List<String> handles;
+
+  /// The phone-book reading of `handles`: addresses (`actor:` spellings),
+  /// devices (bare device ids), and co-located agents (`agent:` spellings).
+  final List<String> addresses;
+  final List<String> devices;
+  final List<String> agents;
+
+  /// The stored picture (`<mime>;base64,<data>`), or `None` — the surface
+  /// draws its default face for a card without one.
+  final String? picture;
   final List<String> groups;
   final bool selfClaim;
 
@@ -188,6 +204,10 @@ class CardRow {
     required this.name,
     required this.note,
     required this.handles,
+    required this.addresses,
+    required this.devices,
+    required this.agents,
+    this.picture,
     required this.groups,
     required this.selfClaim,
   });
@@ -198,6 +218,10 @@ class CardRow {
       name.hashCode ^
       note.hashCode ^
       handles.hashCode ^
+      addresses.hashCode ^
+      devices.hashCode ^
+      agents.hashCode ^
+      picture.hashCode ^
       groups.hashCode ^
       selfClaim.hashCode;
 
@@ -210,6 +234,10 @@ class CardRow {
           name == other.name &&
           note == other.note &&
           handles == other.handles &&
+          addresses == other.addresses &&
+          devices == other.devices &&
+          agents == other.agents &&
+          picture == other.picture &&
           groups == other.groups &&
           selfClaim == other.selfClaim;
 }

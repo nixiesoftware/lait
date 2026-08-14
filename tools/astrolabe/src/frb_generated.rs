@@ -276,6 +276,14 @@ impl SseDecode for crate::api::ActionRequest {
                 return crate::api::ActionRequest::BookDelete { card: var_card };
             }
             14 => {
+                let mut var_card = <String>::sse_decode(deserializer);
+                let mut var_path = <Option<String>>::sse_decode(deserializer);
+                return crate::api::ActionRequest::BookSetPicture {
+                    card: var_card,
+                    path: var_path,
+                };
+            }
+            15 => {
                 let mut var_from = <String>::sse_decode(deserializer);
                 let mut var_into = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookMerge {
@@ -283,11 +291,11 @@ impl SseDecode for crate::api::ActionRequest {
                     into: var_into,
                 };
             }
-            15 => {
+            16 => {
                 let mut var_card = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookClaimSelf { card: var_card };
             }
-            16 => {
+            17 => {
                 let mut var_card = <String>::sse_decode(deserializer);
                 let mut var_handle = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookLink {
@@ -295,7 +303,7 @@ impl SseDecode for crate::api::ActionRequest {
                     handle: var_handle,
                 };
             }
-            17 => {
+            18 => {
                 let mut var_card = <String>::sse_decode(deserializer);
                 let mut var_handle = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookUnlink {
@@ -303,7 +311,7 @@ impl SseDecode for crate::api::ActionRequest {
                     handle: var_handle,
                 };
             }
-            18 => {
+            19 => {
                 let mut var_path = <String>::sse_decode(deserializer);
                 let mut var_cards = <Option<Vec<String>>>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookExport {
@@ -311,17 +319,17 @@ impl SseDecode for crate::api::ActionRequest {
                     cards: var_cards,
                 };
             }
-            19 => {
+            20 => {
                 let mut var_path = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookImport { path: var_path };
             }
-            20 => {
+            21 => {
                 let mut var_suggestion = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookAccept {
                     suggestion: var_suggestion,
                 };
             }
-            21 => {
+            22 => {
                 let mut var_suggestion = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookDismiss {
                     suggestion: var_suggestion,
@@ -366,6 +374,10 @@ impl SseDecode for crate::api::CardRow {
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_note = <String>::sse_decode(deserializer);
         let mut var_handles = <Vec<String>>::sse_decode(deserializer);
+        let mut var_addresses = <Vec<String>>::sse_decode(deserializer);
+        let mut var_devices = <Vec<String>>::sse_decode(deserializer);
+        let mut var_agents = <Vec<String>>::sse_decode(deserializer);
+        let mut var_picture = <Option<String>>::sse_decode(deserializer);
         let mut var_groups = <Vec<String>>::sse_decode(deserializer);
         let mut var_selfClaim = <bool>::sse_decode(deserializer);
         return crate::api::CardRow {
@@ -373,6 +385,10 @@ impl SseDecode for crate::api::CardRow {
             name: var_name,
             note: var_note,
             handles: var_handles,
+            addresses: var_addresses,
+            devices: var_devices,
+            agents: var_agents,
+            picture: var_picture,
             groups: var_groups,
             self_claim: var_selfClaim,
         };
@@ -1154,41 +1170,47 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             crate::api::ActionRequest::BookDelete { card } => {
                 [13.into_dart(), card.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::ActionRequest::BookMerge { from, into } => [
+            crate::api::ActionRequest::BookSetPicture { card, path } => [
                 14.into_dart(),
+                card.into_into_dart().into_dart(),
+                path.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::BookMerge { from, into } => [
+                15.into_dart(),
                 from.into_into_dart().into_dart(),
                 into.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::ActionRequest::BookClaimSelf { card } => {
-                [15.into_dart(), card.into_into_dart().into_dart()].into_dart()
+                [16.into_dart(), card.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::BookLink { card, handle } => [
-                16.into_dart(),
-                card.into_into_dart().into_dart(),
-                handle.into_into_dart().into_dart(),
-            ]
-            .into_dart(),
-            crate::api::ActionRequest::BookUnlink { card, handle } => [
                 17.into_dart(),
                 card.into_into_dart().into_dart(),
                 handle.into_into_dart().into_dart(),
             ]
             .into_dart(),
-            crate::api::ActionRequest::BookExport { path, cards } => [
+            crate::api::ActionRequest::BookUnlink { card, handle } => [
                 18.into_dart(),
+                card.into_into_dart().into_dart(),
+                handle.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::BookExport { path, cards } => [
+                19.into_dart(),
                 path.into_into_dart().into_dart(),
                 cards.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::ActionRequest::BookImport { path } => {
-                [19.into_dart(), path.into_into_dart().into_dart()].into_dart()
+                [20.into_dart(), path.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::BookAccept { suggestion } => {
-                [20.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
+                [21.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::BookDismiss { suggestion } => {
-                [21.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
+                [22.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -1229,6 +1251,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::CardRow {
             self.name.into_into_dart().into_dart(),
             self.note.into_into_dart().into_dart(),
             self.handles.into_into_dart().into_dart(),
+            self.addresses.into_into_dart().into_dart(),
+            self.devices.into_into_dart().into_dart(),
+            self.agents.into_into_dart().into_dart(),
+            self.picture.into_into_dart().into_dart(),
             self.groups.into_into_dart().into_dart(),
             self.self_claim.into_into_dart().into_dart(),
         ]
@@ -1709,40 +1735,45 @@ impl SseEncode for crate::api::ActionRequest {
                 <i32>::sse_encode(13, serializer);
                 <String>::sse_encode(card, serializer);
             }
-            crate::api::ActionRequest::BookMerge { from, into } => {
+            crate::api::ActionRequest::BookSetPicture { card, path } => {
                 <i32>::sse_encode(14, serializer);
+                <String>::sse_encode(card, serializer);
+                <Option<String>>::sse_encode(path, serializer);
+            }
+            crate::api::ActionRequest::BookMerge { from, into } => {
+                <i32>::sse_encode(15, serializer);
                 <String>::sse_encode(from, serializer);
                 <String>::sse_encode(into, serializer);
             }
             crate::api::ActionRequest::BookClaimSelf { card } => {
-                <i32>::sse_encode(15, serializer);
+                <i32>::sse_encode(16, serializer);
                 <String>::sse_encode(card, serializer);
             }
             crate::api::ActionRequest::BookLink { card, handle } => {
-                <i32>::sse_encode(16, serializer);
-                <String>::sse_encode(card, serializer);
-                <String>::sse_encode(handle, serializer);
-            }
-            crate::api::ActionRequest::BookUnlink { card, handle } => {
                 <i32>::sse_encode(17, serializer);
                 <String>::sse_encode(card, serializer);
                 <String>::sse_encode(handle, serializer);
             }
-            crate::api::ActionRequest::BookExport { path, cards } => {
+            crate::api::ActionRequest::BookUnlink { card, handle } => {
                 <i32>::sse_encode(18, serializer);
+                <String>::sse_encode(card, serializer);
+                <String>::sse_encode(handle, serializer);
+            }
+            crate::api::ActionRequest::BookExport { path, cards } => {
+                <i32>::sse_encode(19, serializer);
                 <String>::sse_encode(path, serializer);
                 <Option<Vec<String>>>::sse_encode(cards, serializer);
             }
             crate::api::ActionRequest::BookImport { path } => {
-                <i32>::sse_encode(19, serializer);
+                <i32>::sse_encode(20, serializer);
                 <String>::sse_encode(path, serializer);
             }
             crate::api::ActionRequest::BookAccept { suggestion } => {
-                <i32>::sse_encode(20, serializer);
+                <i32>::sse_encode(21, serializer);
                 <String>::sse_encode(suggestion, serializer);
             }
             crate::api::ActionRequest::BookDismiss { suggestion } => {
-                <i32>::sse_encode(21, serializer);
+                <i32>::sse_encode(22, serializer);
                 <String>::sse_encode(suggestion, serializer);
             }
             _ => {
@@ -1777,6 +1808,10 @@ impl SseEncode for crate::api::CardRow {
         <String>::sse_encode(self.name, serializer);
         <String>::sse_encode(self.note, serializer);
         <Vec<String>>::sse_encode(self.handles, serializer);
+        <Vec<String>>::sse_encode(self.addresses, serializer);
+        <Vec<String>>::sse_encode(self.devices, serializer);
+        <Vec<String>>::sse_encode(self.agents, serializer);
+        <Option<String>>::sse_encode(self.picture, serializer);
         <Vec<String>>::sse_encode(self.groups, serializer);
         <bool>::sse_encode(self.self_claim, serializer);
     }
