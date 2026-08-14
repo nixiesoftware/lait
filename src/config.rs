@@ -274,6 +274,34 @@ impl Selection {
         }
     }
 
+    /// Resolve the store for the stdio agent head: everything
+    /// [`Self::resolve_existing_store`] accepts, then the Orbit registry when
+    /// the directory names none.
+    ///
+    /// An agent head runs wherever its harness spawned it, so "cd into a
+    /// space" is advice no agent config can follow — while the registry
+    /// already records every local Orbit this device serves. When it holds
+    /// exactly one whose store is really there, that Orbit is the only thing
+    /// the head could mean, and it binds. Zero, several, or a sole entry whose
+    /// store is gone stay the typed refusal: this is selection among what
+    /// exists, never a guess between candidates and never a creation.
+    pub fn resolve_for_agent(&self) -> Result<PathBuf> {
+        let miss = match self.resolve_existing_store() {
+            Ok(store) => return Ok(store),
+            Err(error) if error.downcast_ref::<NoStoreHere>().is_some() => error,
+            Err(error) => return Err(error),
+        };
+        let entries = crate::orbits::list();
+        let [entry] = entries.as_slice() else {
+            return Err(miss);
+        };
+        let store = PathBuf::from(&entry.path);
+        match crate::orbital::discover_space(&store) {
+            crate::orbital::SpaceStore::One(_) => Ok(canonical(&store)),
+            _ => Err(miss),
+        }
+    }
+
     /// The store directory a creation verb will populate under `dir`: this
     /// selection's self-contained home if it has one, else `<dir>/.lait`.
     pub fn store_dir_for_init(&self, dir: &Path) -> Result<PathBuf> {

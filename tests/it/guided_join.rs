@@ -432,6 +432,170 @@ fn the_mcp_head_with_an_empty_registry_still_refuses_and_names_the_way_in() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// The inverse of the decoy guard: a registry holding exactly ONE Orbit whose
+/// store is really there is not ambiguous, and the agent head binds it instead
+/// of refusing. An agent runs wherever its harness spawned it — "cd into a
+/// space" is advice no agent config can follow, and while the head refused,
+/// every agent on this machine fell back to the HTTP planes.
+///
+/// Proven by the handshake, not the exit code: the head must answer
+/// `initialize` and list its product tools, which the pre-fallback build never
+/// reached from a bare directory. Nothing is created along the way.
+#[test]
+fn the_mcp_head_binds_the_sole_registered_orbit_when_the_directory_names_none() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+
+    let cfg = unique("solo-cfg");
+    let cwd = unique("solo-cwd");
+    let store = unique("solo-store");
+    lait::orbital::found_space(&store, &FOUNDER_SEED, "Solo").unwrap();
+
+    let entry = Entry {
+        space: "ws_01JSOLOORBITTESTSPACEX".into(),
+        name: "solo".into(),
+        path: store.display().to_string(),
+        origin: Origin::Founded,
+        host_nick: String::new(),
+        last_opened: 42,
+        projects: vec![],
+    };
+    std::fs::write(
+        cfg.join("spaces.json"),
+        serde_json::to_string(&vec![entry]).unwrap(),
+    )
+    .unwrap();
+
+    let mut child = Command::new(bin())
+        .arg("mcp")
+        .current_dir(&cwd)
+        .env("LAIT_CONFIG_ROOT", &cfg)
+        .env_remove("LAIT_HOME")
+        .env_remove("LAIT_STORE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn `lait mcp`");
+
+    let mut stdin = child.stdin.take().expect("mcp stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("mcp stdout"));
+    for line in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"it","version":"0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    ] {
+        writeln!(stdin, "{line}").expect("write to mcp stdin");
+    }
+
+    let mut tools: Option<serde_json::Value> = None;
+    let mut line = String::new();
+    while stdout.read_line(&mut line).unwrap_or(0) > 0 {
+        let parsed: serde_json::Value = match serde_json::from_str(line.trim()) {
+            Ok(v) => v,
+            Err(_) => {
+                line.clear();
+                continue;
+            }
+        };
+        if parsed["id"] == 2 {
+            tools = Some(parsed["result"]["tools"].clone());
+            break;
+        }
+        line.clear();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let tools = tools.expect("the head must answer tools/list, not exit at store resolution");
+    let names: Vec<&str> = tools
+        .as_array()
+        .expect("tools/list returns an array")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("issues_")),
+        "the bound head must serve the product tools, got: {names:?}"
+    );
+    assert!(
+        !cwd.join(".lait").exists(),
+        "binding the registered Orbit must not leave a decoy .lait/ behind"
+    );
+
+    let _ = std::fs::remove_dir_all(&cfg);
+    let _ = std::fs::remove_dir_all(&cwd);
+    let _ = std::fs::remove_dir_all(&store);
+}
+
+/// With SEVERAL Orbits registered the head still refuses: binding is selection,
+/// and choosing among candidates implicitly would serve whichever space won a
+/// sort order. The refusal must name every candidate and the one mechanism an
+/// agent config can actually use to choose — `LAIT_STORE` — because "cd into
+/// one" is not an operation an agent config has.
+#[test]
+fn the_mcp_head_refuses_to_guess_among_several_registered_orbits() {
+    let cfg = unique("many-cfg");
+    let cwd = unique("many-cwd");
+
+    let entries = vec![
+        Entry {
+            space: "ws_01JMANYORBITSFIRSTXXXX".into(),
+            name: "firstws".into(),
+            path: "/nowhere/first/.lait".into(),
+            origin: Origin::Founded,
+            host_nick: String::new(),
+            last_opened: 42,
+            projects: vec![],
+        },
+        Entry {
+            space: "ws_01JMANYORBITSSECONDXXX".into(),
+            name: "secondws".into(),
+            path: "/nowhere/second/.lait".into(),
+            origin: Origin::Joined,
+            host_nick: "alice".into(),
+            last_opened: 41,
+            projects: vec![],
+        },
+    ];
+    std::fs::write(
+        cfg.join("spaces.json"),
+        serde_json::to_string(&entries).unwrap(),
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .arg("mcp")
+        .current_dir(&cwd)
+        .env("LAIT_CONFIG_ROOT", &cfg)
+        .env_remove("LAIT_HOME")
+        .env_remove("LAIT_STORE")
+        .output()
+        .expect("spawn `lait mcp`");
+
+    assert!(
+        !out.status.success(),
+        "several registered Orbits are a choice, not a binding; got {:?}",
+        out.status.code()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("firstws") && stderr.contains("secondws"),
+        "the refusal must name every candidate, got stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("LAIT_STORE"),
+        "the refusal must name the selection mechanism an agent config can use, got stderr: {stderr}"
+    );
+    assert!(
+        !cwd.join(".lait").exists(),
+        "the refusal must NOT leave a decoy .lait/ behind"
+    );
+
+    let _ = std::fs::remove_dir_all(&cfg);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 /// Entering a space into a directory already bound to a DIFFERENT one is a hard
 /// refusal — never adopt, never wipe. This drives the real binary's host plane
 /// because it is the pre-Station store-resolution path. The invite is a real

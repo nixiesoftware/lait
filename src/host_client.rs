@@ -124,6 +124,11 @@ pub fn report_error(e: &anyhow::Error, json: bool) -> std::process::ExitCode {
 /// is empty") is gone by construction, not by guard — so the refusal has to
 /// carry the navigation state it refused on: which local Orbits exist, or, when
 /// none do, how a space comes into existence at all.
+///
+/// The stdio agent head only reaches this after
+/// [`crate::config::Selection::resolve_for_agent`]'s sole-Orbit fallback found
+/// nothing unambiguous to bind, so a listing with entries here means several
+/// Orbits (a choice), or one whose store is gone (a repair).
 pub fn no_store_here() -> String {
     use std::fmt::Write;
 
@@ -145,7 +150,9 @@ pub fn no_store_here() -> String {
         };
         let _ = writeln!(out, "  \u{2022} {name}  \u{2192}  {}", entry.path);
     }
-    out.push_str("\ncd into one, or run `lait` to see them all in the local app.");
+    out.push_str(
+        "\nset LAIT_STORE to one of these paths (an agent config cannot cd), or run `lait` to see them all in the local app.",
+    );
     out
 }
 

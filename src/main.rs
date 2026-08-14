@@ -190,14 +190,17 @@ impl Mode {
             Mode::Mcp => {
                 let selection = Selection::default();
                 // The one mode that needs a store before it can speak: its tools
-                // address an Orbit. Nothing is created implicitly, so a bare
-                // directory is a refusal that names what exists instead.
-                let home = selection.resolve_existing_store().map_err(|error| {
-                    match error.downcast_ref::<lait::config::NoStoreHere>() {
+                // address an Orbit. `resolve_for_agent` adds the registry's
+                // sole-Orbit fallback — an agent config cannot cd — and still
+                // creates nothing implicitly, so a miss stays a refusal that
+                // names what exists instead.
+                let home =
+                    selection.resolve_for_agent().map_err(|error| match error
+                        .downcast_ref::<lait::config::NoStoreHere>(
+                    ) {
                         Some(_) => anyhow::anyhow!(lait::host_client::no_store_here()),
                         None => error,
-                    }
-                })?;
+                    })?;
                 lait::mcp::run_mcp(&home, selection).await
             }
             Mode::Serve {
