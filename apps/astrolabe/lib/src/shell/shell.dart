@@ -1,7 +1,7 @@
 /// The window: a compact utility tier, primary navigation, and a page.
 ///
-/// The upper tier is the draggable title bar: Astrolabe's wordmark opens the
-/// small application menu, while identity access and the window controls stay
+/// The upper tier is the draggable title bar: Astrolabe's identity block opens
+/// the application menu, while address-book access and the window controls stay
 /// flush with the opposite corner. The lower tier carries primary navigation
 /// with a persistent active underline. This is deliberately the same hierarchy
 /// as a desktop client such as Steam rather than a web page toolbar.
@@ -24,7 +24,7 @@ const double kOperationsBarHeight = 34;
 
 /// The two tiers of the primary client header. Secondary windows retain the
 /// roomier single 48-pixel caption supplied by [AstrolabeWindowFrame].
-const double kUtilityBarHeight = 32;
+const double kUtilityBarHeight = 64;
 const double kPrimaryBarHeight = 44;
 
 class AstrolabeShell extends StatefulWidget {
@@ -140,26 +140,37 @@ class _SettingsMenu extends StatelessWidget {
       side: PopoverSide.bottom,
       align: PopoverAlign.start,
       sideOffset: 4,
-      width: const PortalWidth.fixed(220),
+      width: const PortalWidth.fixed(336),
       triggerBuilder: (context, isOpen, onTap) => Button(
         onPressed: onTap,
         active: isOpen,
         semanticLabel: 'Astrolabe settings',
-        tooltip: 'Astrolabe settings',
         variant: ButtonVariant.ghost,
-        size: ButtonSize.sm,
+        size: ButtonSize.xl,
         minTapTarget: kUtilityBarHeight,
         style: const Style([$Pad.symmetric(h: Space.zero)]),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              'ASTROLABE',
-              style: context.factLabelStyle.copyWith(
-                color: context.text.l950,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.4,
-              ),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'ASTROLABE',
+                  style: context.bodyStyle.copyWith(
+                    color: context.brand.l800,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.35,
+                  ),
+                ),
+                Text(
+                  _identityStatus(view),
+                  style: context.labelStyle.copyWith(
+                    color: context.brand.l700,
+                  ),
+                ),
+              ],
             ),
             context.tokens.gap.x(Space.xs),
             Icon(
@@ -171,26 +182,90 @@ class _SettingsMenu extends StatelessWidget {
         ),
       ),
       itemsBuilder: (_) => [
-        MenuItem(
-          icon: AppIcons.refresh,
-          label: 'Refresh',
-          shortcut: 'F5',
-          enabled: !rereading,
-          onTap: rereading
-              ? null
-              : () => client.dispatch(const ActionRequest.refresh()),
+        MenuLabel(
+          child: _SettingsIdentityHeader(
+            status: _identityStatus(view),
+            version: view.host?.version,
+          ),
         ),
         const MenuDivider(),
-        MenuItem(
-          icon: themeMode == ThemeMode.dark
-              ? AppIcons.toggleOff
-              : AppIcons.toggleOn,
-          label: themeMode == ThemeMode.dark
-              ? 'Use light theme'
-              : 'Use dark theme',
-          onTap: onToggleTheme,
+        MenuSection(
+          label: 'CLIENT SETTINGS',
+          children: [
+            MenuItem(
+              icon: AppIcons.refresh,
+              label: 'Refresh local state',
+              shortcut: 'F5',
+              enabled: !rereading,
+              onTap: rereading
+                  ? null
+                  : () => client.dispatch(const ActionRequest.refresh()),
+            ),
+            MenuItem(
+              icon: themeMode == ThemeMode.dark
+                  ? AppIcons.toggleOff
+                  : AppIcons.toggleOn,
+              label: themeMode == ThemeMode.dark
+                  ? 'Use light theme'
+                  : 'Use dark theme',
+              onTap: onToggleTheme,
+            ),
+          ],
         ),
       ],
+    );
+  }
+}
+
+String _identityStatus(ClientView view) {
+  if (view.loading) return 'Reading local identity';
+  if (view.host == null) return 'Local identity unavailable';
+  return 'Local identity online';
+}
+
+class _SettingsIdentityHeader extends StatelessWidget {
+  const _SettingsIdentityHeader({
+    required this.status,
+    required this.version,
+  });
+
+  final String status;
+  final String? version;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: context.tokens.padding.all(Space.md),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'ASTROLABE',
+                  style: context.headingStyle.copyWith(
+                    color: context.brand.l800,
+                  ),
+                ),
+                context.tokens.gap.y(Space.xxs),
+                Text(
+                  status,
+                  style: context.labelStyle.copyWith(
+                    color: context.brand.l700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (version != null)
+            Text(
+              'v$version',
+              style: context.monoStyle.copyWith(color: context.text.l700),
+            ),
+        ],
+      ),
     );
   }
 }

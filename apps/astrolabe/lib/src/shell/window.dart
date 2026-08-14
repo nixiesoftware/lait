@@ -295,61 +295,76 @@ class _Caption extends StatelessWidget {
           border:
               bottomBorder ? t.stroke.edge(bottom: context.border.l500) : null,
         ),
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onPanStart: (_) => chrome.startDragging(),
-          onDoubleTap: onToggleMaximise,
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final showWordmark = wordmarkMinWidth == null ||
-                  constraints.maxWidth >= wordmarkMinWidth!;
-              return Row(
-                children: [
-                  t.gap.x(Space.xl3),
-                  if (showWordmark) ...[
-                    wordmark ??
-                        Text(
-                          'ASTROLABE',
-                          style: context.factLabelStyle.copyWith(
-                            color: context.text.l950,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 1.4,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // The drag region sits behind the caption's controls. Keeping it
+            // out of their ancestor chain means its double-click recognizer
+            // cannot delay a normal click on the app menu or window buttons.
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onPanStart: (_) => chrome.startDragging(),
+                onDoubleTap: onToggleMaximise,
+              ),
+            ),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final showWordmark = wordmarkMinWidth == null ||
+                    constraints.maxWidth >= wordmarkMinWidth!;
+                return Row(
+                  children: [
+                    t.gap.x(Space.xl3),
+                    if (showWordmark) ...[
+                      wordmark ??
+                          IgnorePointer(
+                            child: Text(
+                              'ASTROLABE',
+                              style: context.factLabelStyle.copyWith(
+                                color: context.text.l950,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 1.4,
+                              ),
+                            ),
+                          ),
+                      t.gap.x(builder == null ? Space.xl3 : Space.xl5),
+                    ],
+                    if (builder != null)
+                      Expanded(child: builder!(context, constraints))
+                    else ...[
+                      Container(
+                        width: t.stroke.xxs,
+                        height: 16,
+                        color: context.border.l500,
+                      ),
+                      t.gap.x(Space.xl3),
+                      Expanded(
+                        child: IgnorePointer(
+                          child: Text(
+                            title!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.bodyStyle,
                           ),
                         ),
-                    t.gap.x(builder == null ? Space.xl3 : Space.xl5),
-                  ],
-                  if (builder != null)
-                    Expanded(child: builder!(context, constraints))
-                  else ...[
-                    Container(
-                      width: t.stroke.xxs,
-                      height: 16,
-                      color: context.border.l500,
-                    ),
-                    t.gap.x(Space.xl3),
-                    Expanded(
-                      child: Text(
-                        title!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.bodyStyle,
                       ),
+                    ],
+                    CaptionControls(
+                      height: height,
+                      maximised: maximised,
+                      onMinimise: chrome.minimize,
+                      onToggleMaximise: onToggleMaximise,
+                      onClose: onClose,
+                      closeTooltip:
+                          closePolicy == AstrolabeWindowClosePolicy.hide
+                              ? 'Close (it keeps serving in the tray)'
+                              : 'Close window',
                     ),
                   ],
-                  CaptionControls(
-                    height: height,
-                    maximised: maximised,
-                    onMinimise: chrome.minimize,
-                    onToggleMaximise: onToggleMaximise,
-                    onClose: onClose,
-                    closeTooltip: closePolicy == AstrolabeWindowClosePolicy.hide
-                        ? 'Close (it keeps serving in the tray)'
-                        : 'Close window',
-                  ),
-                ],
-              );
-            },
-          ),
+                );
+              },
+            ),
+          ],
         ),
       ),
     );
