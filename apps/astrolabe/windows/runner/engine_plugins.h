@@ -3,8 +3,8 @@
 
 #include <flutter/plugin_registry.h>
 
-// Plugins a book window's engine may see. Not the generated registrant:
+// Plugins an owned window's engine may see. Not the generated registrant:
 // that one also registers the tray and window_manager.
-void RegisterBookEnginePlugins(flutter::PluginRegistry* registry);
+void RegisterOwnedWindowEnginePlugins(flutter::PluginRegistry* registry);
 
 #endif  // RUNNER_ENGINE_PLUGINS_H_

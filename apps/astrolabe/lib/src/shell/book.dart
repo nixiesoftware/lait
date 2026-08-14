@@ -12,10 +12,14 @@ import 'package:flutter/widgets.dart';
 import '../core/client.dart';
 import '../surfaces/page.dart';
 import '../surfaces/surfaces.dart' show pageMargin;
+import 'host.dart';
 import 'record.dart';
 import 'theme.dart';
 import 'type.dart';
 import 'window.dart';
+
+const Size _bookOpening = Size(800, 600);
+const Size _bookNarrowest = Size(600, 400);
 
 class BookApp extends StatefulWidget {
   const BookApp({super.key, required this.client});
@@ -40,10 +44,13 @@ class _BookAppState extends State<BookApp> {
       home: ClientScope(
         client: widget.client,
         child: Scaffold(
-          body: AstrolabeWindowFrame(
+          body: AstrolabeWindowFrame.secondary(
             title: 'Address book',
-            closePolicy: AstrolabeWindowClosePolicy.close,
-            chrome: const NativeWindowChrome(),
+            nativeTitle: 'Address book — Astrolabe',
+            nativeKey: bookWindowKey,
+            size: _bookOpening,
+            minimumSize: _bookNarrowest,
+            dark: _themeMode == ThemeMode.dark,
             // The book is a conventional page, not the Library's client
             // frame: it keeps the shared page gutter the main window's
             // surfaces get from SurfacePage, and the same operational

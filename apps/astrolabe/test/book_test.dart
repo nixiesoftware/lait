@@ -103,6 +103,18 @@ Future<List<ActionRequest>> _pump(
 }
 
 void main() {
+  testWidgets('the address book uses identity-free Covalence secondary chrome',
+      (tester) async {
+    await tester.pumpWidget(BookApp(client: Client.canned(_view())));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('ASTROLABE'), findsNothing);
+    expect(find.text('Address book'), findsNWidgets(2));
+    final chrome = tester.widget<WindowChrome>(find.byType(WindowChrome));
+    expect(chrome.role, WindowChromeRole.secondary);
+    expect(chrome.identity, isNull);
+  });
+
   testWidgets('refresh on the book asks the core, not a second model',
       (tester) async {
     final asked = await _pump(tester, _view());

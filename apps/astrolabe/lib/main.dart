@@ -27,44 +27,28 @@ import 'src/shell/window.dart';
 /// corner.
 const Size _opening = Size(1040, 720);
 const Size _narrowest = Size(640, 480);
-const Size _settingsOpening = Size(560, 680);
-const Size _settingsNarrowest = Size(440, 520);
-
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // World settings is still a separate process — not this windowing
-  // mechanism. It never starts a second core.
-  final settings = WorldSettingsSnapshot.fromArguments(arguments);
-  if (settings != null) {
-    await windowManager.ensureInitialized();
-    await showAstrolabeWindow(
-      astrolabeWindowOptions(
-        size: _settingsOpening,
-        minimumSize: _settingsNarrowest,
-        title: '${settings.name} settings',
-      ),
-    );
-    runApp(WorldSettingsApp(snapshot: settings));
-    return;
-  }
 
   // Sub-engines get argv from the plugin (`multi_window`, id, argument).
   // `fromCurrentEngine` is not ready yet on that isolate, and
   // `window_manager` is not registered there — asking either is how
   // this window used to stay white.
-  if (isBookEngine(arguments)) {
+  if (isSubEngine(arguments)) {
+    final settings = WorldSettingsSnapshot.fromArguments(arguments);
+    if (settings != null) {
+      runApp(WorldSettingsApp(snapshot: settings));
+      return;
+    }
+    if (!isBookEngine(arguments)) {
+      debugPrint('unknown sub-window arguments: $arguments');
+      return;
+    }
     // The OS window text is set natively at window creation (see
-    // RegisterWindowChrome): asking the chrome channel from here races the
-    // handler's registration, and an await that throws before runApp is a
-    // window that stays white.
+    // RegisterOwnedWindowChrome). The visible secondary frame configures the
+    // contextual title and reveals the already-owned native window.
     final client = await Client.start();
     runApp(BookApp(client: client));
-    return;
-  }
-
-  if (isSubEngine(arguments)) {
-    debugPrint('unknown sub-window arguments: $arguments');
     return;
   }
 

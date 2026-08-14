@@ -6,6 +6,8 @@
 /// with the active Astrolabe theme.
 library;
 
+import 'dart:async';
+
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -14,13 +16,45 @@ import 'package:window_manager/window_manager.dart';
 import 'caption.dart';
 import 'type.dart';
 
-/// How a window is moved, sized, and closed.
+/// Native configuration for an owned top-level window.
+///
+/// Geometry remains a host concern: Covalence describes the visible role, and
+/// this value describes the HWND that carries it.
+@immutable
+class OwnedWindowConfiguration {
+  const OwnedWindowConfiguration({
+    required this.key,
+    required this.title,
+    required this.size,
+    required this.minimumSize,
+    required this.dark,
+  });
+
+  final String key;
+  final String title;
+  final Size size;
+  final Size minimumSize;
+  final bool dark;
+
+  Map<String, Object> toMap() => {
+        'key': key,
+        'title': title,
+        'width': size.width,
+        'height': size.height,
+        'minimumWidth': minimumSize.width,
+        'minimumHeight': minimumSize.height,
+        'dark': dark,
+      };
+}
+
+/// How a window is configured, moved, sized, and closed.
 ///
 /// The main engine uses [window_manager]. A sub-engine must not: that
 /// plugin is registered only on the main engine, and a second copy would
-/// fight it for the process. [NativeWindowChrome] talks to the runner
+/// fight it for the process. [NativeWindowControlHost] talks to the runner
 /// instead — the alternative CLIENT-43 named for the book window.
-abstract class WindowChrome {
+abstract class WindowControlHost {
+  Future<void> configureOwned(OwnedWindowConfiguration configuration);
   Future<void> minimize();
   Future<void> toggleMaximize();
   Future<bool> isMaximized();
@@ -30,8 +64,11 @@ abstract class WindowChrome {
 }
 
 /// The main engine, and the World-settings process.
-class ManagerWindowChrome implements WindowChrome {
-  const ManagerWindowChrome();
+class ManagerWindowControlHost implements WindowControlHost {
+  const ManagerWindowControlHost();
+
+  @override
+  Future<void> configureOwned(OwnedWindowConfiguration configuration) async {}
 
   @override
   Future<void> minimize() => windowManager.minimize();
@@ -60,11 +97,31 @@ class ManagerWindowChrome implements WindowChrome {
 
 /// A sub-engine's chrome. The runner owns the HWND; this channel is
 /// registered only there.
-class NativeWindowChrome implements WindowChrome {
-  const NativeWindowChrome();
+class NativeWindowControlHost implements WindowControlHost {
+  const NativeWindowControlHost();
 
   static const MethodChannel _channel =
       MethodChannel('astrolabe/window_chrome');
+
+  @override
+  Future<void> configureOwned(OwnedWindowConfiguration configuration) async {
+    // The engine and its channel are installed by the same native callback.
+    // A first-frame call normally lands after registration; the short retry
+    // also covers a scheduler interleave without ever revealing an
+    // unconfigured native window.
+    for (var attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await _channel.invokeMethod<void>(
+          'configure_owned',
+          configuration.toMap(),
+        );
+        return;
+      } on MissingPluginException {
+        if (attempt == 3) return;
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+      }
+    }
+  }
 
   @override
   Future<void> minimize() => _channel.invokeMethod<void>('minimize');
@@ -87,7 +144,7 @@ class NativeWindowChrome implements WindowChrome {
   Future<void> close() => _channel.invokeMethod<void>('close');
 
   /// The OS window text — what the taskbar and Alt-Tab call this window.
-  /// Not on [WindowChrome]: the main window's title is set at startup by
+  /// Not on [WindowControlHost]: the main window's title is set at startup by
   /// `window_manager`, and only a sub-engine needs a way to name itself.
   Future<void> setTitle(String title) =>
       _channel.invokeMethod<void>('set_title', title);
@@ -100,7 +157,7 @@ enum AstrolabeWindowClosePolicy {
   /// Keep the owning process and its active Worlds available from the tray.
   hide,
 
-  /// Close a disposable secondary process, leaving the main client untouched.
+  /// Close a disposable owned window, leaving the main client untouched.
   close,
 }
 
@@ -145,7 +202,7 @@ Future<void> showAstrolabeWindow(WindowOptions options) {
 /// windows. The caption owns movement, maximise state, and system-sized window
 /// controls; callers own only the content placed between brand and controls.
 class AstrolabeWindowFrame extends StatefulWidget {
-  const AstrolabeWindowFrame({
+  const AstrolabeWindowFrame.primary({
     super.key,
     required this.body,
     required this.closePolicy,
@@ -155,14 +212,46 @@ class AstrolabeWindowFrame extends StatefulWidget {
     this.wordmarkMinWidth,
     this.captionHeight = kBarHeight,
     this.captionBottomBorder = true,
-    this.chrome = const ManagerWindowChrome(),
+    this.chrome = const ManagerWindowControlHost(),
   })  : assert(title != null || captionBuilder != null),
-        assert(captionHeight > 0);
+        assert(captionHeight > 0),
+        role = WindowChromeRole.primary,
+        ownedConfiguration = null;
+
+  /// A contextual window whose visible identity is structurally owned by
+  /// Covalence's secondary role. This constructor has no wordmark slot, so an
+  /// address book or settings window cannot repeat `ASTROLABE` by accident.
+  AstrolabeWindowFrame.secondary({
+    super.key,
+    required this.body,
+    required this.title,
+    required String nativeTitle,
+    required String nativeKey,
+    required Size size,
+    required Size minimumSize,
+    required bool dark,
+    this.closePolicy = AstrolabeWindowClosePolicy.close,
+    this.chrome = const NativeWindowControlHost(),
+  })  : captionBuilder = null,
+        wordmark = null,
+        wordmarkMinWidth = null,
+        captionHeight = kBarHeight,
+        captionBottomBorder = true,
+        role = WindowChromeRole.secondary,
+        ownedConfiguration = OwnedWindowConfiguration(
+          key: nativeKey,
+          title: nativeTitle,
+          size: size,
+          minimumSize: minimumSize,
+          dark: dark,
+        );
 
   final Widget body;
   final AstrolabeWindowClosePolicy closePolicy;
+  final WindowChromeRole role;
   final String? title;
   final AstrolabeCaptionBuilder? captionBuilder;
+  final OwnedWindowConfiguration? ownedConfiguration;
 
   /// Optional interactive replacement for the default wordmark. The primary
   /// client uses it as its application-menu trigger; secondary windows keep
@@ -181,8 +270,9 @@ class AstrolabeWindowFrame extends StatefulWidget {
   final bool captionBottomBorder;
 
   /// How this window is moved and closed. The main engine uses
-  /// [ManagerWindowChrome]; a book window uses [NativeWindowChrome].
-  final WindowChrome chrome;
+  /// [ManagerWindowControlHost]; an owned window uses
+  /// [NativeWindowControlHost].
+  final WindowControlHost chrome;
 
   @override
   State<AstrolabeWindowFrame> createState() => _AstrolabeWindowFrameState();
@@ -195,17 +285,23 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
   @override
   void initState() {
     super.initState();
-    if (widget.chrome is ManagerWindowChrome) {
+    if (widget.chrome is ManagerWindowControlHost) {
       windowManager.addListener(this);
     }
     widget.chrome.isMaximized().then((maximised) {
       if (mounted) setState(() => _maximised = maximised);
     });
+    final configuration = widget.ownedConfiguration;
+    if (configuration != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(widget.chrome.configureOwned(configuration));
+      });
+    }
   }
 
   @override
   void dispose() {
-    if (widget.chrome is ManagerWindowChrome) {
+    if (widget.chrome is ManagerWindowControlHost) {
       windowManager.removeListener(this);
     }
     super.dispose();
@@ -235,19 +331,41 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Caption(
-            title: widget.title,
-            builder: widget.captionBuilder,
-            wordmark: widget.wordmark,
-            wordmarkMinWidth: widget.wordmarkMinWidth,
-            height: widget.captionHeight,
-            bottomBorder: widget.captionBottomBorder,
-            maximised: _maximised,
-            chrome: widget.chrome,
-            onToggleMaximise: _toggleMaximise,
-            closePolicy: widget.closePolicy,
-            onClose: _close,
-          ),
+          if (widget.role == WindowChromeRole.primary)
+            _PrimaryCaption(
+              title: widget.title,
+              builder: widget.captionBuilder,
+              wordmark: widget.wordmark,
+              wordmarkMinWidth: widget.wordmarkMinWidth,
+              height: widget.captionHeight,
+              bottomBorder: widget.captionBottomBorder,
+              maximised: _maximised,
+              chrome: widget.chrome,
+              onToggleMaximise: _toggleMaximise,
+              closePolicy: widget.closePolicy,
+              onClose: _close,
+            )
+          else
+            WindowChrome.secondary(
+              title: widget.title!,
+              dragRegionBuilder: (context, child) => GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onPanStart: (_) => widget.chrome.startDragging(),
+                onDoubleTap: _toggleMaximise,
+                child: child,
+              ),
+              controlsBuilder: (context, policy) {
+                assert(policy == WindowChromeControlPolicy.standard);
+                return CaptionControls(
+                  height: kBarHeight,
+                  maximised: _maximised,
+                  onMinimise: widget.chrome.minimize,
+                  onToggleMaximise: _toggleMaximise,
+                  onClose: _close,
+                  closeTooltip: 'Close window',
+                );
+              },
+            ),
           Expanded(child: widget.body),
         ],
       ),
@@ -255,8 +373,8 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
   }
 }
 
-class _Caption extends StatelessWidget {
-  const _Caption({
+class _PrimaryCaption extends StatelessWidget {
+  const _PrimaryCaption({
     required this.title,
     required this.builder,
     required this.wordmark,
@@ -277,7 +395,7 @@ class _Caption extends StatelessWidget {
   final double height;
   final bool bottomBorder;
   final bool maximised;
-  final WindowChrome chrome;
+  final WindowControlHost chrome;
   final Future<void> Function() onToggleMaximise;
   final AstrolabeWindowClosePolicy closePolicy;
   final Future<void> Function() onClose;

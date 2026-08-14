@@ -8,7 +8,7 @@ import 'package:astrolabe/src/shell/shell.dart';
 import 'package:astrolabe/src/shell/theme.dart';
 import 'package:astrolabe/src/shell/window.dart';
 import 'package:astrolabe/src/surfaces/surfaces.dart' show Surface;
-import 'package:covalence/covalence.dart' hide Surface, WindowChrome;
+import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,7 +25,10 @@ const _view = ClientView(
   inFlight: [],
 );
 
-class _WindowChrome implements WindowChrome {
+class _WindowControlHost implements WindowControlHost {
+  @override
+  Future<void> configureOwned(OwnedWindowConfiguration configuration) async {}
+
   @override
   Future<void> close() async {}
 
@@ -68,7 +71,7 @@ Future<List<ActionRequest>> _pump(
             body: AstrolabeShell(
               themeMode: ThemeMode.dark,
               onToggleTheme: onToggleTheme,
-              chrome: _WindowChrome(),
+              chrome: _WindowControlHost(),
             ),
           ),
         ),
@@ -90,6 +93,14 @@ void main() {
         tester.getSize(find.byType(Tabs<Surface>)).height, kPrimaryBarHeight);
     expect(find.text('Refresh local state'), findsNothing);
     expect(find.text('Use light theme'), findsNothing);
+    expect(
+      find.descendant(
+        of: find.widgetWithText(Button, 'ASTROLABE'),
+        matching: find.text('Local identity unavailable'),
+      ),
+      findsNothing,
+    );
+    expect(find.byIcon(AppIcons.arrowDropDown), findsNothing);
   });
 
   testWidgets('the Astrolabe wordmark owns refresh and theme settings',
@@ -107,6 +118,18 @@ void main() {
     expect(find.text('F5'), findsOneWidget);
     expect(find.text('Use light theme'), findsOneWidget);
     expect(find.text('CLIENT SETTINGS'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.widgetWithText(Button, 'ASTROLABE'),
+        matching: find.text('Local identity unavailable'),
+      ),
+      findsNothing,
+    );
+    expect(find.byIcon(AppIcons.arrowDropDown), findsNothing);
+    expect(
+      tester.widget<Button>(find.widgetWithText(Button, 'ASTROLABE')).active,
+      isFalse,
+    );
 
     await tester.tap(find.text('Refresh local state'));
     await tester.pumpAndSettle();

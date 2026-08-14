@@ -5,8 +5,8 @@
 - Two-tier hierarchy source: `C:\Users\Huginn\Pictures\Screenshots\Screenshot 2026-08-13 194943.png`.
 - Identity-block shape source: `C:\Users\Huginn\Pictures\Screenshots\Screenshot 2026-08-13 202916.png`.
 - Before-state reference: `C:\Users\Huginn\Pictures\Screenshots\Screenshot 2026-08-13 194936.png`.
-- Native closed state: `implementation-no-in-app-icon.png`.
-- Native open state: `implementation-no-in-app-icon-open.png`.
+- Native closed state: `implementation-plain-compact-header.png`.
+- Native open state: `implementation-plain-compact-header-open.png`.
 - Earlier focused side-by-side evidence: `comparison-identity-shape.png`.
 
 ## Normalization
@@ -18,8 +18,8 @@
 
 ## Fidelity review
 
-- Header geometry: the primary client now has a 64 px identity tier followed by a distinct 44 px navigation tier. The mark, two-line identity, caret, navigation, address-book action, and Windows controls remain aligned without clipping.
-- Identity treatment: the in-app mark was removed at the user's request. The title uses Astrolabe's brand color and the second line reports live local-identity state.
+- Header geometry: the primary client now has a compact 32 px identity tier followed by a distinct 40 px navigation tier. The wordmark, navigation, address-book action, and Windows controls remain aligned without clipping.
+- Identity treatment: the in-app mark, status subtext, caret, and explicit open-state treatment were removed at the user's request. `ASTROLABE` remains as plain brand-colored text and does not visually change when the menu opens.
 - Settings surface: the identity trigger opens a 336 px anchored menu with a text-only identity header, version, labelled settings section, refresh shortcut, and theme action. Its narrow stacked silhouette follows the supplied Friends & Chat reference while retaining proper menu semantics.
 - Typography and color: the implementation keeps Astrolabe's existing Covalence type roles and color tokens. It matches the reference's bright identity name, quieter status, charcoal bands, and low-contrast separators without copying Steam's proprietary typeface.
 - Accessibility and interaction: the trigger announces `Astrolabe settings` with expanded/collapsed semantics. Keyboard activation, menu-item roles, F5 refresh, theme switching, tab navigation, address-book access, window dragging, double-click maximize, and caption controls remain available.
@@ -47,6 +47,9 @@
 - Removed the mark from both in-app identity placements and removed its Flutter asset registration.
 - Preserved `Runner.rc` and the `.ico` launcher resource unchanged.
 - Rebuilt and relaunched the complete native application; the final closed and open states contain no in-app icon.
+- Removed the wordmark's status line and caret, and removed its explicit toggle-active state.
+- Compacted the two header tiers from 64/44 px to 32/40 px.
+- Relaunched under Flutter's debug runner with a local reload-control pipe for subsequent Dart/UI hot reloads.
 
 ## Verification
 

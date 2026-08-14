@@ -7,7 +7,7 @@
 /// as a desktop client such as Steam rather than a web page toolbar.
 library;
 
-import 'package:covalence/covalence.dart' hide Surface, WindowChrome;
+import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart' show ThemeMode;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -24,20 +24,20 @@ const double kOperationsBarHeight = 34;
 
 /// The two tiers of the primary client header. Secondary windows retain the
 /// roomier single 48-pixel caption supplied by [AstrolabeWindowFrame].
-const double kUtilityBarHeight = 64;
-const double kPrimaryBarHeight = 44;
+const double kUtilityBarHeight = 32;
+const double kPrimaryBarHeight = 40;
 
 class AstrolabeShell extends StatefulWidget {
   const AstrolabeShell({
     super.key,
     required this.themeMode,
     required this.onToggleTheme,
-    this.chrome = const ManagerWindowChrome(),
+    this.chrome = const ManagerWindowControlHost(),
   });
 
   final ThemeMode themeMode;
   final VoidCallback onToggleTheme;
-  final WindowChrome chrome;
+  final WindowControlHost chrome;
 
   @override
   State<AstrolabeShell> createState() => _AstrolabeShellState();
@@ -66,7 +66,7 @@ class _AstrolabeShellState extends State<AstrolabeShell> {
         },
         child: Focus(
           autofocus: true,
-          child: AstrolabeWindowFrame(
+          child: AstrolabeWindowFrame.primary(
             closePolicy: AstrolabeWindowClosePolicy.hide,
             chrome: widget.chrome,
             captionHeight: kUtilityBarHeight,
@@ -141,50 +141,25 @@ class _SettingsMenu extends StatelessWidget {
       align: PopoverAlign.start,
       sideOffset: 4,
       width: const PortalWidth.fixed(336),
-      triggerBuilder: (context, isOpen, onTap) => Button(
+      triggerBuilder: (context, _, onTap) => Button(
         onPressed: onTap,
-        active: isOpen,
         semanticLabel: 'Astrolabe settings',
         variant: ButtonVariant.ghost,
-        size: ButtonSize.xl,
+        size: ButtonSize.sm,
         minTapTarget: kUtilityBarHeight,
         style: const Style([$Pad.symmetric(h: Space.zero)]),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'ASTROLABE',
-                  style: context.bodyStyle.copyWith(
-                    color: context.brand.l800,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.35,
-                  ),
-                ),
-                Text(
-                  _identityStatus(view),
-                  style: context.labelStyle.copyWith(
-                    color: context.brand.l700,
-                  ),
-                ),
-              ],
-            ),
-            context.tokens.gap.x(Space.xs),
-            Icon(
-              AppIcons.arrowDropDown,
-              size: 14,
-              color: context.text.l900,
-            ),
-          ],
+        child: Text(
+          'ASTROLABE',
+          style: context.bodyStyle.copyWith(
+            color: context.brand.l800,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.35,
+          ),
         ),
       ),
       itemsBuilder: (_) => [
         MenuLabel(
           child: _SettingsIdentityHeader(
-            status: _identityStatus(view),
             version: view.host?.version,
           ),
         ),
@@ -217,19 +192,11 @@ class _SettingsMenu extends StatelessWidget {
   }
 }
 
-String _identityStatus(ClientView view) {
-  if (view.loading) return 'Reading local identity';
-  if (view.host == null) return 'Local identity unavailable';
-  return 'Local identity online';
-}
-
 class _SettingsIdentityHeader extends StatelessWidget {
   const _SettingsIdentityHeader({
-    required this.status,
     required this.version,
   });
 
-  final String status;
   final String? version;
 
   @override
@@ -239,24 +206,11 @@ class _SettingsIdentityHeader extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'ASTROLABE',
-                  style: context.headingStyle.copyWith(
-                    color: context.brand.l800,
-                  ),
-                ),
-                context.tokens.gap.y(Space.xxs),
-                Text(
-                  status,
-                  style: context.labelStyle.copyWith(
-                    color: context.brand.l700,
-                  ),
-                ),
-              ],
+            child: Text(
+              'ASTROLABE',
+              style: context.headingStyle.copyWith(
+                color: context.brand.l800,
+              ),
             ),
           ),
           if (version != null)

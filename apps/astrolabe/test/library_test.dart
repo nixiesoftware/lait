@@ -461,8 +461,11 @@ void main() {
       find.byKey(const ValueKey('world-settings-window-shell')),
       findsOneWidget,
     );
-    expect(find.text('ASTROLABE'), findsOneWidget);
+    expect(find.text('ASTROLABE'), findsNothing);
     expect(find.text('Issues settings'), findsNWidgets(2));
+    final chrome = tester.widget<WindowChrome>(find.byType(WindowChrome));
+    expect(chrome.role, WindowChromeRole.secondary);
+    expect(chrome.identity, isNull);
     expect(find.bySemanticsLabel('Close'), findsOneWidget);
   });
 

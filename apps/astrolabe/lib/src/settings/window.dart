@@ -6,7 +6,6 @@
 library;
 
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart'
@@ -14,10 +13,13 @@ import 'package:flutter/material.dart'
 import 'package:flutter/widgets.dart';
 
 import '../shell/theme.dart';
+import '../shell/host.dart';
 import '../shell/type.dart';
 import '../shell/window.dart';
 
 const _settingsArgument = '--world-settings=';
+const Size _settingsOpening = Size(560, 680);
+const Size _settingsNarrowest = Size(440, 520);
 
 @immutable
 class WorldSettingsSnapshot {
@@ -126,12 +128,11 @@ class WorldSettingsScope extends InheritedWidget {
 }
 
 Future<void> launchWorldSettings(WorldSettingsSnapshot snapshot) async {
-  // An absolute executable path is important on Windows, where Process.start
-  // does not use the supplied working directory to resolve an executable.
-  await Process.start(
-    Platform.resolvedExecutable,
-    [snapshot.toArgument()],
-    mode: ProcessStartMode.detached,
+  await summonOwnedWindow(
+    OwnedWindowRoute(
+      key: 'world-settings:${snapshot.key}',
+      arguments: snapshot.toArgument(),
+    ),
   );
 }
 
@@ -149,10 +150,14 @@ class WorldSettingsApp extends StatelessWidget {
       darkTheme: astrolabeTheme(Brightness.dark),
       themeMode: snapshot.dark ? ThemeMode.dark : ThemeMode.light,
       home: Scaffold(
-        body: AstrolabeWindowFrame(
+        body: AstrolabeWindowFrame.secondary(
           key: const ValueKey('world-settings-window-shell'),
           title: '${snapshot.name} settings',
-          closePolicy: AstrolabeWindowClosePolicy.close,
+          nativeTitle: '${snapshot.name} settings — Astrolabe',
+          nativeKey: 'world-settings:${snapshot.key}',
+          size: _settingsOpening,
+          minimumSize: _settingsNarrowest,
+          dark: snapshot.dark,
           body: WorldSettingsPage(snapshot: snapshot),
         ),
       ),

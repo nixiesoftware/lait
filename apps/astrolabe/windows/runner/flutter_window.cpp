@@ -28,14 +28,17 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
-  RegisterWindowSummon(flutter_controller_.get());
   DesktopMultiWindowSetWindowCreatedCallback([](void* controller) {
     auto* flutter_view_controller =
         reinterpret_cast<flutter::FlutterViewController*>(controller);
-    RegisterBookEnginePlugins(flutter_view_controller->engine());
-    RegisterWindowChrome(flutter_view_controller);
+    RegisterOwnedWindowEnginePlugins(flutter_view_controller->engine());
+    RegisterOwnedWindowChrome(flutter_view_controller);
   });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  // Register only after SetChildContent. Before attachment the Flutter view is
+  // itself a top-level HWND, so GA_ROOT would record the view as an owner
+  // instead of Astrolabe's real outer window.
+  RegisterWindowHost(flutter_controller_.get());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
