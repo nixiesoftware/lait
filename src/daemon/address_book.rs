@@ -381,13 +381,16 @@ impl AddressBookService {
             let path = home.join("aliases.json");
             let key = path.display().to_string();
             let progress = state.files.entry(key).or_default();
-            if progress.finished {
-                continue;
-            }
             if !path.exists() {
                 progress.finished = true;
                 continue;
             }
+            // The file's existence outranks the durable record. A `finished`
+            // record with the file still on disk is either the pre-retirement
+            // design's leftover or a writer that touched the file after the
+            // record closed (agent provisioning used to) — and both hid
+            // selectors from the book for good. Re-reading is idempotent:
+            // a selector whose handle is already on a Card imports as a no-op.
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
@@ -1076,6 +1079,25 @@ mod tests {
             view.migration.imported, 1,
             "a second pass re-imports nothing"
         );
+
+        // The file's existence outranks the durable record. The
+        // pre-retirement design closed a `finished` record and then kept
+        // writing to the file (agent provisioning did), hiding those
+        // selectors from the book for good — so a reappeared file gets one
+        // more idempotent pass and is retired again.
+        let late = ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&[13u8; 32]));
+        std::fs::write(&path, format!(r#"{{"{}":"Claude"}}"#, late.as_str())).expect("aliases");
+        let Response::Book(view) = service.migrate(&router) else {
+            panic!("migrate answers the migration view");
+        };
+        assert_eq!(view.migration.imported, 2, "the late selector imports");
+        assert!(!path.exists(), "the reappeared file is retired again");
+        let late_handle = Handle::Actor {
+            space: mechanics::ids::SpaceId::from_digest([8; 16]),
+            actor: late,
+        };
+        let book = service.engine.lock().expect("lock").book().expect("book");
+        assert_eq!(book.authored_cards_for(&late_handle).len(), 1);
 
         let _ = std::fs::remove_dir_all(&base);
     }
