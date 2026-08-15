@@ -18,6 +18,45 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The Astrolabe interface: `flutter analyze` and the widget suite.
+  #
+  # These ran on developer machines and on no machine else — the suite is what
+  # the notes point every contributor at, and until now nothing enforced it. A
+  # test suite that only ever runs where somebody remembers to run it is a
+  # convention, not a gate, and the Rust half of this client is gated on every
+  # push while the half a person actually looks at was not.
+  #
+  # The widget tests need no bridge, no core, no daemon and no window: they
+  # press real controls against `Client.canned` and assert the `ActionRequest`
+  # that comes out. That is what makes them cheap enough to gate — Flutter SDK
+  # and nothing else.
+  astrolabe-interface:
+    name: astrolabe interface
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # SHA-pinned, and the version pinned to the same constant the release
+      # build uses: an interface checked by one Flutter and shipped by another
+      # is two different programs.
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.41.6'
+          channel: stable
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+        working-directory: apps/astrolabe
+
+      - name: Analyze
+        run: flutter analyze
+        working-directory: apps/astrolabe
+
+      - name: Widget and interaction suite
+        run: flutter test
+        working-directory: apps/astrolabe
+
   # The web client (the UI bare `lait` serves). Its build output is COMMITTED under
   # src/serve/assets because `include_dir!` embeds it at compile time and
   # `cargo install lait` must not need npm (docs/SERVE.md). Committed build output
@@ -470,7 +509,15 @@ jobs:
   orbital-complete:
     name: orbital-complete
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [test, platform, viewer, coverage-manifest, schema-contract]
+    needs:
+      [
+        test,
+        platform,
+        viewer,
+        astrolabe-interface,
+        coverage-manifest,
+        schema-contract,
+      ]
     if: always()
     steps:
       - name: Assert every dependency succeeded
