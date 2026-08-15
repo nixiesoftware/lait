@@ -14,6 +14,7 @@ members = [
     "products/issues-app",
     "tools/workbench",
     "tools/astrolabe",
+    "tools/astrolabe-ios",
     "tools/feed",
 ]
 # Two packages live in this repository but are NOT members, each because it

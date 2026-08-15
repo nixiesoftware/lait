@@ -1,0 +1,92 @@
+# The native iOS client's project definition — the checked-in truth from which
+# Runner.xcodeproj is generated (`xcodegen generate`, from this directory).
+# The .xcodeproj itself is a build product and is not reviewed; this file is.
+name: Astrolabe
+options:
+  bundleIdPrefix: com.nixiesoftware
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "26.2"
+
+settings:
+  base:
+    # Language mode 5 while UniFFI's Swift 6 strict-concurrency conformance is
+    # partial around async (uniffi-rs #2633) — recorded in the bridge survey.
+    SWIFT_VERSION: "5.0"
+    # Xcode ≥15 sandboxes run-script phases by default, which denies cargo the
+    # file access it needs. Off, deliberately.
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+targets:
+  Astrolabe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Generated
+        # Generated Swift is checked in (drift-checked in CI), never edited.
+        buildPhase: sources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Astrolabe
+        CFBundleIconName: AppIcon
+        # An invite is a link. Tapping lait://join/… anywhere on the phone
+        # lands in the join sheet with the ticket already read.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.nixiesoftware.astrolabe
+            CFBundleURLSchemes: [lait]
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # The head serves on loopback; without this ATS refuses the WebKit
+        # load of http://127.0.0.1.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSCameraUsageDescription: "Astrolabe scans invite QR codes shown on another device."
+        NSLocalNetworkUsageDescription: "Astrolabe finds your other devices on this network to sync your Spaces directly."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nixiesoftware.astrolabe
+        PRODUCT_NAME: Astrolabe
+        # iPhone-only v1, by decision (interface Spec, 2026-08-15). iPad
+        # follows the product's existence.
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Automatic
+        # The company team, matching the macOS client's signing identity.
+        DEVELOPMENT_TEAM: HXT63ZDAAW
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Where build-core.sh stages the FFI header and modulemap the generated
+        # Swift imports.
+        SWIFT_INCLUDE_PATHS: "$(PROJECT_DIR)/Core/include"
+        # The core links as an ordinary archive, NOT -force_load: the generated
+        # Swift references every FFI symbol it uses, so the linker extracts
+        # exactly the live objects — and leaves behind the ones that only make
+        # sense on macOS (hickory-resolver's system-configuration objects
+        # reference SCNetworkInterface constants the iOS SDK does not export;
+        # force-loading the whole archive turns those into undefined-symbol
+        # link failures). The path is platform- and configuration-scoped
+        # because device and simulator slices may never be conflated.
+        LIBRARY_SEARCH_PATHS:
+          - "$(PROJECT_DIR)/Core/$(PLATFORM_NAME)-$(CONFIGURATION)"
+        OTHER_LDFLAGS:
+          - "-lastrolabe_ios"
+    preBuildScripts:
+      - name: Build the Rust core
+        script: "\"${PROJECT_DIR}/build-core.sh\"\n"
+        basedOnDependencyAnalysis: false
+        # Declared so the build system knows the linker's -force_load input is
+        # produced here — without this it fails the build before running the
+        # phase that would have created the file.
+        outputFiles:
+          - "$(PROJECT_DIR)/Core/$(PLATFORM_NAME)-$(CONFIGURATION)/libastrolabe_ios.a"
+    dependencies:
+      - sdk: WebKit.framework
+      # The Rust core's Apple-side dependencies (hickory-resolver reads DNS
+      # config through SCDynamicStore; netdev enumerates interfaces through
+      # Network.framework on iOS). cargo's framework link flags do not
+      # propagate through a hand-linked archive, so they are declared here.
+      - sdk: SystemConfiguration.framework
+      - sdk: Network.framework
