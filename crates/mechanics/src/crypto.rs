@@ -488,6 +488,105 @@ mod tests {
         );
     }
 
+    /// Mint the golden fixtures frozen below. Ignored: it exists to be run by
+    /// hand, once, and its output pasted in.
+    ///
+    /// It cannot be a normal test because a v1 envelope is not reproducible —
+    /// the ephemeral key and the nonce are drawn from the CSPRNG, so sealing
+    /// the same plaintext twice gives different bytes. That is exactly why the
+    /// fixtures have to be *data* rather than something a test regenerates:
+    /// once the sealing code changes, the old envelopes can never be produced
+    /// again, and if none were kept there is nothing left to prove the new code
+    /// can still read the old ones.
+    #[test]
+    #[ignore = "run by hand to mint fixtures; output is pasted into V1_GOLDEN"]
+    fn mint_v1_golden_fixtures() {
+        for (seed_byte, label, msg) in [
+            (0x11u8, "empty", &b""[..]),
+            (0x22, "space-key-sized", &[0xABu8; 32][..]),
+            (0x33, "multi-block", &[0x5Au8; 200][..]),
+        ] {
+            let seed = [seed_byte; 32];
+            let device = device_from_seed(&seed);
+            let sealed = seal_to(&device, msg).unwrap().unwrap();
+            println!(
+                "(\n    // {label}\n    [0x{seed_byte:02x}; 32],\n    \"{}\",\n    \"{}\",\n),",
+                hex_of(msg),
+                hex_of(&sealed)
+            );
+        }
+    }
+
+    fn hex_of(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn unhex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("fixture hex"))
+            .collect()
+    }
+
+    /// Real v1 sealed boxes, minted by [`mint_v1_golden_fixtures`] against the
+    /// sealing code as it stood before any HPKE work, and frozen here.
+    ///
+    /// `(recipient seed, plaintext hex, sealed hex)`.
+    ///
+    /// These are durable-format evidence, not test data. Sealed epoch keys live
+    /// as long as the Space that minted them, so whatever replaces `seal_to`
+    /// has to keep opening bytes shaped like these forever. Do not regenerate
+    /// them, do not "fix" them to match new output, and do not delete one
+    /// because a new construction cannot read it — that last case is the
+    /// finding, not the problem with the fixture.
+    const V1_GOLDEN: &[([u8; 32], &str, &str)] = &[
+        // empty plaintext: the ciphertext is nothing but the tag, which is the
+        // shape most likely to be mishandled by a length check.
+        (
+            [0x11; 32],
+            "",
+            "191a2510565613a22f2fd42c2cf913762afe9faff13f7ab3bde5d44fbae5c442881853ad91c918c9a07da0bfdf6350034afc8b7ca20c06c075279a4c",
+        ),
+        // 32 bytes: a space key, which is what the dominant call site seals.
+        (
+            [0x22; 32],
+            "abababababababababababababababababababababababababababababababab",
+            "a4a4d4ef9db07ce55174fd2fede5a5f1b51f2141a2ff575ad0cacd442ae140625cd5d1a972deb92531a2aad33f0f6cb0d9e80afe2e1366314b87f45fc655290882d84525717fe07a5e7256dfacd1a80bde31758fb385cbbbbe240f33",
+        ),
+        // 200 bytes: spans more than one ChaCha20 block.
+        (
+            [0x33; 32],
+            "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "67a24b2e09de50649422c39cbde8d314a51b31045a2c1b8385b95144d27bdb36053ec9daef79bfeb60b02175d3166649b3d95f784769b974d3d93c0fe3f7d9a02392c40f96c496adc70b61e4f3b7d122d780e89fb9924e74c6a650a82e12e221e2c5cfa738406ab2c93c34b5033c76cf5ab078bb2aaa2c2d48dbce00830524db7875c278c6aca04ec578e08af8566a22e24088a5390a2ae87ad09fcb930a8ea794da337b30b1b800f33e9192568b20512e9d3f107afd49134fe9e3782ff505ab2697b6ddf196a4b66674fd339e73e58ad2de805ee77eae1226cc6886b22816c77285735a77aadb5d43cec56c3f2887700144d3ffb0ac214abe9efaa74d002daddbe40f18",
+        ),
+    ];
+
+    /// Every frozen v1 envelope still opens, and yields exactly the plaintext
+    /// it was sealed over.
+    ///
+    /// This is the guard the whole HPKE migration rests on: v2 cannot be
+    /// self-describing in-band, because a v1 envelope opens with a uniformly
+    /// random byte and any version tag collides with roughly one in 256 of
+    /// them. So the version has to ride the record that holds the blob, and the
+    /// v1 path has to stay live and correct while it does.
+    #[test]
+    fn every_frozen_v1_envelope_still_opens() {
+        assert!(
+            !V1_GOLDEN.is_empty(),
+            "the v1 fixtures are the only evidence that old envelopes remain \
+             readable; an empty set silently proves nothing"
+        );
+        for (seed, plaintext_hex, sealed_hex) in V1_GOLDEN {
+            let device = device_from_seed(seed);
+            let opened = open_sealed(seed, &device, &unhex(sealed_hex));
+            assert_eq!(
+                opened.as_deref(),
+                Some(&unhex(plaintext_hex)[..]),
+                "a frozen v1 envelope stopped opening"
+            );
+        }
+    }
+
     #[test]
     fn sealed_box_only_opens_for_recipient() {
         let seed = [7u8; 32];
