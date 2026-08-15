@@ -77,8 +77,15 @@ pub const FEED_BASE_URL: &str = "https://storage.googleapis.com/the-foundation-d
 /// Recovering from theft without shipping a binary needs key statements carried
 /// *in* the feed and changed only by a quorum, which is deliberately not this
 /// change.
-pub const FEED_PUBKEYS_HEX: &[&str] =
-    &["227e448a16c19623707a3da8b8af6e1f70afcf18fb4e509e82115ef797666ba9"];
+pub const FEED_PUBKEYS_HEX: &[&str] = &[
+    // Minted 2026-08, the key every published release is signed with today.
+    "227e448a16c19623707a3da8b8af6e1f70afcf18fb4e509e82115ef797666ba9",
+    // Successor, minted 2026-08-15 into separate custody and not yet used to
+    // sign anything. It is here first on purpose: a machine can only accept a
+    // key it already carries, so the successor must reach the fleet before it
+    // signs, never alongside. Step 3 of the rotation waits for this build.
+    "6397aa15cd939de1109abf2c265147201eb7d189029c2d0137d917292d689e50",
+];
 
 /// A pointer or manifest larger than this is not a feed object; refuse before
 /// buffering someone's mistake (or someone's flood) into memory.
