@@ -68,9 +68,14 @@ fn the_implementation_id_is_pinned_and_moving_it_is_deliberate() {
     // shipped before sections existed.
     assert_eq!(descriptor.version(), 2);
     let id = descriptor.id().expect("canonical descriptor");
+    // Moved deliberately when durable Exec control landed: the package now
+    // declares `issues::contract::verify_spec()` in its Spec section, and
+    // COMPATIBILITY.md's rule is that changing declared Spec meaning changes
+    // the descriptor identity. Spaces on the previous implementation take the
+    // ordinary World-upgrade path.
     assert_eq!(
         id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "3182716c0f0231410c594a1f1790d06c0d297cb31be47510b2093188746c2778",
+        "e405d9b52ba7a3aca4a1db28f802c4566890338ea2412fa0a70e832e80d04b56",
         "the Issues implementation id moved — see COMPATIBILITY.md before updating this"
     );
 }

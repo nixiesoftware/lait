@@ -2723,28 +2723,28 @@ pub enum WorkReply {
 
 /// Why a generic Work request could not produce a lifecycle projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkError {
+pub enum WorkRefusal {
     Invalid(Invalid),
     Session(crate::world::Failure),
     NotFound(RunId),
     Unsupported(&'static str),
 }
 
-impl std::fmt::Display for WorkError {
+impl std::fmt::Display for WorkRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{self:?}")
     }
 }
 
-impl std::error::Error for WorkError {}
+impl std::error::Error for WorkRefusal {}
 
-impl From<Invalid> for WorkError {
+impl From<Invalid> for WorkRefusal {
     fn from(value: Invalid) -> Self {
         Self::Invalid(value)
     }
 }
 
-impl From<crate::world::Failure> for WorkError {
+impl From<crate::world::Failure> for WorkRefusal {
     fn from(value: crate::world::Failure) -> Self {
         Self::Session(value)
     }
