@@ -153,6 +153,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<SuggestionRow> dco_decode_list_suggestion_row(dynamic raw);
 
   @protected
+  List<WorldPersonRow> dco_decode_list_world_person_row(dynamic raw);
+
+  @protected
   MemberRow dco_decode_member_row(dynamic raw);
 
   @protected
@@ -201,6 +204,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<LibraryRow>? dco_decode_opt_list_library_row(dynamic raw);
 
   @protected
+  List<WorldPersonRow>? dco_decode_opt_list_world_person_row(dynamic raw);
+
+  @protected
   OrbitRow dco_decode_orbit_row(dynamic raw);
 
   @protected
@@ -238,6 +244,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   Unopenable dco_decode_unopenable(dynamic raw);
+
+  @protected
+  WorldPersonRow dco_decode_world_person_row(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -374,6 +383,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  List<WorldPersonRow> sse_decode_list_world_person_row(
+      SseDeserializer deserializer);
+
+  @protected
   MemberRow sse_decode_member_row(SseDeserializer deserializer);
 
   @protected
@@ -428,6 +441,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  List<WorldPersonRow>? sse_decode_opt_list_world_person_row(
+      SseDeserializer deserializer);
+
+  @protected
   OrbitRow sse_decode_orbit_row(SseDeserializer deserializer);
 
   @protected
@@ -465,6 +482,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   Unopenable sse_decode_unopenable(SseDeserializer deserializer);
+
+  @protected
+  WorldPersonRow sse_decode_world_person_row(SseDeserializer deserializer);
 
   @protected
   void sse_encode_AnyhowException(
@@ -615,6 +635,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<SuggestionRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_world_person_row(
+      List<WorldPersonRow> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_member_row(MemberRow self, SseSerializer serializer);
 
   @protected
@@ -672,6 +696,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<LibraryRow>? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_list_world_person_row(
+      List<WorldPersonRow>? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_orbit_row(OrbitRow self, SseSerializer serializer);
 
   @protected
@@ -709,6 +737,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_unopenable(Unopenable self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_world_person_row(
+      WorldPersonRow self, SseSerializer serializer);
 }
 
 // Section: wire_class

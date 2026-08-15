@@ -22,10 +22,9 @@ use crate::control::{
 };
 use crate::orbits::{Catalog, Router, StationIdentity};
 
-/// The one canonical group an agent's card is filed under. Part of the book's
-/// wire vocabulary: clients that part agents from people key on this name, so
-/// it is a contract, not a display string.
-pub(crate) const AGENT_GROUP: &str = "Agents";
+// The agent group's canonical name lives with the rest of the wire
+// vocabulary; this module is its writer, not its owner.
+use crate::control::AGENT_GROUP;
 
 /// Durable record of alias-file import. Lives beside the book.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

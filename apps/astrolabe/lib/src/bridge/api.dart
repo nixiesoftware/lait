@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `project`, `space_ref`
+// These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -625,7 +625,15 @@ class LibraryRow {
   final int? accent;
 
   /// Named places inside the World, already resolved for this Orbit.
+  ///
+  /// Declared facts, not drawn ones: the client surfaces lifecycle only,
+  /// so no surface renders these as navigation.
   final List<RouteRow> routes;
+
+  /// People from the identity's book addressed in this row's Space.
+  /// `None` until the book has been read — which is not the same as a
+  /// Space nobody in the book is addressed in.
+  final List<WorldPersonRow>? people;
 
   const LibraryRow({
     required this.key,
@@ -644,6 +652,7 @@ class LibraryRow {
     this.tagline,
     this.accent,
     required this.routes,
+    this.people,
   });
 
   @override
@@ -663,7 +672,8 @@ class LibraryRow {
       syncDetail.hashCode ^
       tagline.hashCode ^
       accent.hashCode ^
-      routes.hashCode;
+      routes.hashCode ^
+      people.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -685,7 +695,8 @@ class LibraryRow {
           syncDetail == other.syncDetail &&
           tagline == other.tagline &&
           accent == other.accent &&
-          routes == other.routes;
+          routes == other.routes &&
+          people == other.people;
 }
 
 class MemberRow {
@@ -979,4 +990,57 @@ enum Unopenable {
   /// The World is hosted here and has not declared where to open it.
   undeclared,
   ;
+}
+
+/// One person the book addresses in a World's Space — the at-a-glance join
+/// between the identity's own book and a Library row. Not the Space's
+/// roster: that is an authoritative read a person asks for by choosing the
+/// Space, and this panel never places anything to find out. My Card is
+/// excluded — the glance answers "who of mine is here", and you are not a
+/// contact of yourself.
+class WorldPersonRow {
+  final String name;
+
+  /// The stored picture (`<mime>;base64,<data>`), or `None` for the
+  /// default face — the same canonical face the book draws.
+  final String? picture;
+
+  /// Measured presence in THIS Space alone, or `None` when it could not
+  /// be asked. A person online somewhere else is not online here.
+  final PresenceView? presence;
+
+  /// Filed under the canonical agent group.
+  final bool agent;
+
+  /// Has this World open right now: a World-scoped Live row spoke for
+  /// them when the Space was asked. The panel's nearest liveness — a
+  /// launched World, not merely a reachable device.
+  final bool here;
+
+  const WorldPersonRow({
+    required this.name,
+    this.picture,
+    this.presence,
+    required this.agent,
+    required this.here,
+  });
+
+  @override
+  int get hashCode =>
+      name.hashCode ^
+      picture.hashCode ^
+      presence.hashCode ^
+      agent.hashCode ^
+      here.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WorldPersonRow &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          picture == other.picture &&
+          presence == other.presence &&
+          agent == other.agent &&
+          here == other.here;
 }

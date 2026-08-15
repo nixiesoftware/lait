@@ -21,6 +21,8 @@ mod control_classification;
 mod control_plane;
 mod control_pool;
 mod daemon_reaping;
+mod exec_contract;
+mod find_contract;
 mod frost_interop;
 mod guided_join;
 mod head;

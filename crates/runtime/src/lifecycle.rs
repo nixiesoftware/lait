@@ -98,6 +98,7 @@ pub enum Failure {
     Persistence(Persistence),
     StationDormant,
     PrincipalDenied,
+    InvalidFindPolicy,
     UnknownWorld(WorldId),
 }
 
@@ -196,6 +197,8 @@ pub struct Activation {
     /// The content plane's local policy: how much disk it may hold, and how
     /// large a single content this Station will accept.
     pub content: ContentOptions,
+    /// Local ceilings for the Find evaluator.
+    pub find: crate::find::Policy,
     /// Which delivery planes this Station answers on.
     pub planes: PlaneOptions,
     /// The Station's Contact plane: transport, station identity, mechanics
@@ -213,6 +216,7 @@ impl Activation {
         Self {
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
             content: ContentOptions::default(),
+            find: crate::find::Policy::default(),
             planes: PlaneOptions::default(),
             comms: None,
             observation_capacity: 0,
@@ -534,6 +538,10 @@ impl Orbit {
     /// The durable Orbit remains the same participation. Valid offline; grants
     /// no new Space authority.
     fn open_station(self, options: Activation) -> Result<Station, Failure> {
+        options
+            .find
+            .validate()
+            .map_err(|_| Failure::InvalidFindPolicy)?;
         let drain_deadline = if options.drain_deadline.is_zero() {
             DEFAULT_DRAIN_DEADLINE
         } else {
@@ -570,6 +578,18 @@ impl Orbit {
                         schema.version,
                         schema.encoding.clone(),
                         model,
+                    );
+                }
+                // Exec truth is Runtime-owned under each World, so these exact
+                // schemas are interpretable even though package composition
+                // forbids the World from declaring or writing them itself.
+                for schema in crate::exec::body_schemas() {
+                    supported.declare(
+                        id.clone(),
+                        schema.id,
+                        schema.version,
+                        schema.encoding,
+                        replica::body::MUTATION_COLLABORATIVE,
                     );
                 }
             }
@@ -649,6 +669,7 @@ impl Orbit {
             content,
             live,
             max_content_len: options.content.max_content_len,
+            find_policy: options.find,
         };
         if let Some(comms) = options.comms {
             // Held before `comms` moves into the Contact driver's context: the
@@ -885,6 +906,8 @@ pub struct Station {
     /// policy. Kept here because every local content call has to enforce it and
     /// the options struct does not outlive activation.
     max_content_len: u64,
+    /// Local ceilings inherited by every Session admitted here.
+    find_policy: crate::find::Policy,
 }
 
 impl std::fmt::Debug for Station {
@@ -1135,6 +1158,7 @@ impl Station {
             self.epoch,
             registration.limits,
             registration.schemas.clone(),
+            self.find_policy,
             self.alive.clone(),
             self.core.clone(),
             self.authority.clone(),

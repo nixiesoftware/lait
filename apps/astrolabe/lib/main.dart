@@ -10,6 +10,7 @@ library;
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
 import 'package:flutter/widgets.dart';
+import 'package:lit_ui/lit_ui.dart' show LitShader;
 import 'package:window_manager/window_manager.dart';
 
 import 'src/core/client.dart';
@@ -29,6 +30,11 @@ const Size _opening = Size(1040, 720);
 const Size _narrowest = Size(640, 480);
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // The lighting shader, once, before anything lit is drawn: with it loaded
+  // a Lit surface with a material renders per-pixel PBR; without it every
+  // window falls back to the canvas approximation for its whole life.
+  await LitShader.load();
 
   // Sub-engines get argv from the plugin (`multi_window`, id, argument).
   // `fromCurrentEngine` is not ready yet on that isolate, and

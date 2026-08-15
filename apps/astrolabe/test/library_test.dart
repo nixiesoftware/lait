@@ -13,6 +13,7 @@ library;
 
 import 'package:astrolabe/src/core/client.dart';
 import 'package:astrolabe/src/settings/window.dart';
+import 'package:astrolabe/src/shell/person.dart';
 import 'package:astrolabe/src/surfaces/library.dart';
 import 'package:astrolabe/src/surfaces/surfaces.dart' as astrolabe;
 import 'package:covalence/covalence.dart' hide Surface;
@@ -52,6 +53,7 @@ LibraryRow _row({
   String? syncState,
   String? syncDetail,
   List<RouteRow> routes = const [],
+  List<WorldPersonRow>? people,
 }) =>
     LibraryRow(
       key: '$orbit/$mount',
@@ -69,6 +71,7 @@ LibraryRow _row({
       syncDetail: syncDetail,
       tagline: tagline,
       routes: routes,
+      people: people,
     );
 
 Future<List<ActionRequest>> _pump(
@@ -170,14 +173,21 @@ void main() {
       _view(library: [_row(orbit: 'orb_one', mount: '', name: 'Work')]),
     );
 
-    await tester.tap(find.text('Launch'));
+    await tester.tap(find.text('LAUNCH'));
     await tester.pump();
 
-    expect(tester.widget<Text>(find.text('Launch')).style?.fontSize, 24);
+    expect(tester.widget<Text>(find.text('LAUNCH')).style?.fontSize, 20);
     expect(
       tester.widget<Icon>(find.byIcon(AppIcons.playArrow)).size,
-      24,
+      20,
     );
+    final launchButton = tester.widget<Button>(
+      find.ancestor(
+        of: find.text('LAUNCH'),
+        matching: find.byType(Button),
+      ),
+    );
+    expect(launchButton.borderRadius, BorderRadius.circular(2));
     expect(asked, hasLength(1));
     expect(
       asked.single,
@@ -200,7 +210,7 @@ void main() {
       ]),
     );
 
-    expect(find.text('Launch'), findsNothing);
+    expect(find.text('LAUNCH'), findsNothing);
     expect(
       asked,
       isEmpty,
@@ -230,7 +240,7 @@ void main() {
       reason: 'choosing a row in the rail did something — listing is passive',
     );
 
-    await tester.tap(find.text('Launch'));
+    await tester.tap(find.text('LAUNCH'));
     await tester.pump();
     expect(
       asked.single,
@@ -239,12 +249,13 @@ void main() {
     );
   });
 
-  testWidgets('a declared route opens at the path the World named',
+  testWidgets('a declared route draws no navigation — lifecycle only',
       (tester) async {
-    // The template is the World's, and the client only draws it. A route that
-    // resolved to a path this side invented would be the client holding a copy
-    // of a URL grammar it does not own.
-    final asked = await _pump(
+    // The template still declares its routes, and the client still refuses
+    // to surface them: Board/Issues/Specs are the World's own navigation,
+    // and drawing them here would cross the one boundary this client keeps.
+    // Open is the whole act.
+    await _pump(
       tester,
       _view(library: [
         _row(
@@ -257,15 +268,76 @@ void main() {
       ]),
     );
 
-    await tester.tap(find.text('Board'));
-    await tester.pump();
-    expect(
-      asked.single,
-      const ActionRequest.open(
-        orbit: 'orb_one',
-        entryPath: '/spaces/orb_one/board',
-      ),
+    expect(find.text('Board'), findsNothing);
+  });
+
+  testWidgets('the glance is the book joined to this World', (tester) async {
+    // The reference client's "friends who play", resolved through the book,
+    // in two tiers of liveness: a canonical row for whoever has the World
+    // open right now, and a bare face for whoever merely holds it — the
+    // name travelling as a tooltip, never a bespoke row.
+    await _pump(
+      tester,
+      _view(library: [
+        _row(
+          orbit: 'orb_one',
+          name: 'Issues',
+          // A reported sync gate, so the action band's own wording cannot
+          // collide with the presence labels this test is about.
+          syncState: 'pass',
+          people: const [
+            WorldPersonRow(
+              name: 'Moon',
+              presence: PresenceView.offline,
+              agent: false,
+              here: false,
+            ),
+            WorldPersonRow(
+              name: 'claude',
+              presence: PresenceView.online,
+              agent: true,
+              here: true,
+            ),
+          ],
+        ),
+      ]),
     );
+
+    // No panel head and no count: the two tier lines beneath already say
+    // who is in the World and who merely holds it.
+    expect(find.textContaining('IN THIS WORLD'), findsNothing);
+    expect(find.text('1 is in the World now'), findsOneWidget);
+    expect(find.text('1 has it in their library'), findsOneWidget);
+    // The launched tier draws the one canonical tile; the holding tier
+    // draws only the face, its name in the tooltip.
+    expect(find.byType(PersonTile), findsOneWidget);
+    expect(find.text('claude'), findsOneWidget);
+    expect(find.byType(AiMark), findsOneWidget);
+    expect(find.text('Moon'), findsNothing);
+    expect(
+      find.bySemanticsLabel('Moon — Offline'),
+      findsOneWidget,
+      reason: 'the bare face still names and measures its person',
+    );
+    expect(find.text('Online'), findsOneWidget);
+  });
+
+  testWidgets('the glance keeps its two absences apart', (tester) async {
+    // An unread book and a Space nobody in the book is addressed in are
+    // different facts, and the panel says which it is.
+    await _pump(
+      tester,
+      _view(library: [_row(orbit: 'orb_one', name: 'Issues')]),
+    );
+    expect(find.text('The book has not been read.'), findsOneWidget);
+
+    await _pump(
+      tester,
+      _view(library: [
+        _row(orbit: 'orb_one', name: 'Issues', people: const []),
+      ]),
+    );
+    expect(find.text('Nobody in the book is addressed here.'), findsOneWidget);
   });
 
   testWidgets('a row with no template draws none of it', (tester) async {
@@ -312,18 +384,22 @@ void main() {
       ),
     );
 
-    expect(find.text('Launching'), findsWidgets);
-    expect(find.text('Launch'), findsNothing);
+    expect(find.text('LAUNCHING'), findsOneWidget);
+    expect(find.text('LAUNCH'), findsNothing);
     expect(
-      tester.widget<Text>(find.text('Launching').last).style?.fontSize,
-      24,
+      tester.widget<Text>(find.text('LAUNCHING')).style?.fontSize,
+      20,
+    );
+    expect(
+      tester.widget<Text>(find.text('LAUNCHING')).style?.fontWeight,
+      FontWeight.w400,
     );
     expect(
         tester.widget<Progress>(find.byType(Progress)).size, ProgressSize.lg);
     expect(asked, isEmpty);
   });
 
-  testWidgets('a running World offers icon-only Go to at its declared entry',
+  testWidgets('a running World is one solid split control, both halves Go to',
       (tester) async {
     final asked = await _pump(
       tester,
@@ -340,39 +416,65 @@ void main() {
     );
 
     expect(find.text('Go to'), findsNothing);
-    expect(find.text('Running'), findsWidgets);
+    expect(find.text('RUNNING'), findsWidgets);
     expect(find.text('Cancel'), findsNothing);
     expect(find.text('Stop'), findsNothing);
 
     final openBand = find.byKey(const ValueKey('library-open-band'));
     final runningLabel = find.descendant(
       of: openBand,
-      matching: find.text('Running'),
+      matching: find.text('RUNNING'),
     );
-    final runningIcon = find.descendant(
+    expect(tester.widget<Text>(runningLabel).style?.fontSize, 20);
+    expect(
+        tester.widget<Text>(runningLabel).style?.fontWeight, FontWeight.w400);
+
+    // The reference client's anatomy: one solid slab — a play mark and the
+    // state, a hairline, the handoff glyph — not a status chip beside a
+    // detached ghost button.
+    final playMark = find.descendant(
       of: openBand,
-      matching: find.byIcon(AppIcons.checkCircle),
+      matching: find.byIcon(AppIcons.playArrow),
     );
-    expect(tester.widget<Text>(runningLabel).style?.fontSize, 24);
-    expect(tester.widget<Icon>(runningIcon).size, 24);
+    expect(playMark, findsOneWidget);
+    expect(tester.widget<Icon>(playMark).size, 20);
+    // White ink on the vivid fill, in either theme.
+    expect(
+      tester.widget<Text>(runningLabel).style?.color,
+      const Color(0xFFFFFFFF),
+    );
+    expect(
+      find.descendant(
+        of: openBand,
+        matching: find.byIcon(AppIcons.checkCircle),
+      ),
+      findsNothing,
+    );
+    expect(find.widgetWithIcon(Button, AppIcons.openInNew), findsNothing);
+    final handoff = find.descendant(
+      of: openBand,
+      matching: find.byIcon(AppIcons.openInNew),
+    );
+    expect(handoff, findsOneWidget);
+    expect(
+      tester.widget<Icon>(handoff).size,
+      tester.widget<Icon>(playMark).size,
+      reason: 'the slab\'s two glyphs share one size',
+    );
+    expect(tester.getCenter(handoff).dy, tester.getCenter(runningLabel).dy);
 
-    final goTo = find.widgetWithIcon(Button, AppIcons.openInNew);
-    expect(goTo, findsOneWidget);
-    final button = tester.widget<Button>(goTo);
-    expect(button.label, isNull);
-    expect(button.variant, ButtonVariant.ghost);
-    expect(button.size, ButtonSize.icon);
-    expect(button.semanticLabel, 'Go to running World');
-
-    await tester.tap(goTo);
+    // Both segments are the same act, at the World-declared entry path.
+    await tester.tap(runningLabel);
+    await tester.pump();
+    await tester.tap(handoff);
     await tester.pump();
     expect(
-      asked.single,
-      const ActionRequest.open(
-        orbit: 'orb_one',
-        entryPath: '/spaces/orb_one',
-      ),
-      reason: 'Go to bypassed the World-declared entry path',
+      asked,
+      const [
+        ActionRequest.open(orbit: 'orb_one', entryPath: '/spaces/orb_one'),
+        ActionRequest.open(orbit: 'orb_one', entryPath: '/spaces/orb_one'),
+      ],
+      reason: 'a segment bypassed the World-declared entry path',
     );
   });
 
@@ -385,7 +487,7 @@ void main() {
       ),
     );
 
-    expect(find.text('Launching'), findsWidgets);
+    expect(find.text('LAUNCHING'), findsOneWidget);
     expect(find.text('Cancel'), findsNothing);
   });
 

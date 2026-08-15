@@ -818,31 +818,10 @@ impl StationHost {
         };
         let device = mechanics::actor::device_from_seed(&seed);
 
-        // Hard partial-view guard (docs/plans/09 §10 finding 3): a *delegated*
-        // identity — a sponsored agent — must not AUTHOR against a view it knows
-        // is incomplete. "Close what's done" against a missing-epoch partial
-        // view could act on issues it cannot see. A human acting for themselves
-        // gets the loud `whoami`/`sync` signal and judges; an agent is stopped
-        // by construction. Reads are always allowed (that is how it re-syncs).
-        if access == Access::Command {
-            use runtime::world::AuthorityView;
-            if let Some(actor) = self.mechanics.resolve(&device).map(|r| r.actor) {
-                if self.mechanics.is_agent(&actor) {
-                    let divergence = self.mechanics.view_divergence();
-                    if !divergence.is_empty() {
-                        return Reply::error(
-                            call,
-                            Code::Denied,
-                            format!(
-                                "refusing to author against a partial view — {}. Run `sync` \
-                                 until whole first; a delegated agent must not act on World \
-                                 state it cannot see. Nothing was changed.",
-                                divergence.join("; ")
-                            ),
-                        );
-                    }
-                }
-            }
+        if let Some(message) =
+            self.delegated_partial_view_refusal(&device, access == Access::Command)
+        {
+            return Reply::error(call, Code::Denied, message);
         }
 
         // The primary (human) uses the World-keyed primary Session; a sponsored
@@ -1061,6 +1040,31 @@ impl StationHost {
         }
     }
 
+    /// Refuse delegated writes against a known-partial view on every authoring
+    /// seam, including product World actions and generic Work controls.
+    fn delegated_partial_view_refusal(
+        &self,
+        device: &mechanics::ids::DeviceId,
+        command: bool,
+    ) -> Option<String> {
+        if !command {
+            return None;
+        }
+        use runtime::world::AuthorityView;
+        let actor = self.mechanics.resolve(device)?.actor;
+        if !self.mechanics.is_agent(&actor) {
+            return None;
+        }
+        let divergence = self.mechanics.view_divergence();
+        (!divergence.is_empty()).then(|| {
+            format!(
+                "refusing to author against a partial view — {}. Run `sync` until whole first; \
+                 a delegated agent must not act on World state it cannot see. Nothing was changed.",
+                divergence.join("; ")
+            )
+        })
+    }
+
     /// Route one control request to its terminal owner — the value the
     /// PRODUCTION classifier returns. Tests and the generated routing table
     /// consume the same `control::classify`; there is no second table and no
@@ -1090,6 +1094,7 @@ impl StationHost {
                 response
             }
             RequestOwner::Station => self.dispatch_station(req),
+            RequestOwner::Work => self.dispatch_work(req, act_as),
             RequestOwner::Observation => self.dispatch_observation(req),
             RequestOwner::Lifecycle => self.dispatch_lifecycle(req),
         }
@@ -1545,6 +1550,84 @@ impl StationHost {
             Request::Signals => self.drain_signals(),
             Request::Sync => self.sync(),
             other => Response::err(format!("request is not a Station operation: {other:?}")),
+        }
+    }
+
+    /// Runtime-owned durable Run lifecycle requests from application packages
+    /// and generic engine clients.
+    fn dispatch_work(&self, req: Request, act_as: Option<&str>) -> Response {
+        let Request::Work { request, operation } = req else {
+            return Response::err("request is not a Work operation");
+        };
+        if let Err(error) = request.validate() {
+            return Response::invalid(format!("invalid Runtime Work request: {error}"));
+        }
+        let operation = match data_encoding::HEXLOWER
+            .decode(operation.trim().as_bytes())
+            .ok()
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes.as_slice()).ok())
+        {
+            Some(operation) => operation,
+            None => {
+                return Response::invalid("a Work operation id is 32 lowercase hex characters");
+            }
+        };
+        let world = request.world().clone();
+        if !self.worlds.contains(&world) {
+            return Response::not_found(format!("World '{world}' is not hosted"));
+        }
+        let seed = match self.acting_seed(act_as) {
+            Ok(seed) => seed,
+            Err(response) => return response,
+        };
+        let device = mechanics::actor::device_from_seed(&seed);
+        if let Some(message) = self.delegated_partial_view_refusal(&device, request.is_command()) {
+            return Response::denied(message);
+        }
+        let result = if act_as.is_none() {
+            if !self.ensure_world_session(&world) {
+                return Response::denied(
+                    "not admitted to this space yet — complete admission before operating Work",
+                );
+            }
+            self.worlds
+                .with_primary(&world, |session| session.work(request.clone(), operation))
+                .ok_or_else(|| runtime::exec::WorkError::Unsupported("World Session unavailable"))
+                .and_then(|result| result)
+        } else {
+            let identity = Runtime::identity_from_seed(&seed);
+            match self
+                .worlds
+                .with_agent(&self.station, &world, &identity, |session| {
+                    session.work(request, operation)
+                }) {
+                Ok(result) => result,
+                Err(_) => {
+                    return Response::denied(
+                        "this agent identity holds no standing in the space yet — a human member \
+                         must sponsor it before it can operate Work",
+                    );
+                }
+            }
+        };
+        match result {
+            Ok(reply) => Response::Work { reply },
+            Err(runtime::exec::WorkError::NotFound(run)) => Response::not_found(format!(
+                "no Runtime Run matches '{}'",
+                data_encoding::HEXLOWER.encode(&run.as_bytes())
+            )),
+            Err(runtime::exec::WorkError::Invalid(error)) => {
+                Response::invalid(format!("invalid Runtime Work request: {error}"))
+            }
+            Err(runtime::exec::WorkError::Unsupported(message)) => Response::invalid(message),
+            Err(runtime::exec::WorkError::Session(
+                runtime::world::Failure::Rejected(runtime::world::Rejection::Denied(_)),
+            )) => Response::denied(
+                "you don't hold the capability required to control this Run; ask an admin or your sponsor for the matching project work grant",
+            ),
+            Err(runtime::exec::WorkError::Session(error)) => {
+                Response::err(format!("Runtime Work failed: {error}"))
+            }
         }
     }
 

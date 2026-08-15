@@ -621,6 +621,29 @@ pub struct ReactionDto {
     pub actors: Vec<ActorId>,
 }
 
+/// One issue-owned target bound to a durable Runtime Run.
+///
+/// Lifecycle details are intentionally absent. Clients inspect those through
+/// the generic Work capability using `run`; this record only explains what the
+/// Issues product asked that Run to verify and what product decision landed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckDto {
+    pub run: String,
+    pub spec: String,
+    pub version: u32,
+    pub build: String,
+    pub source: String,
+    pub state: String,
+    pub by: String,
+    pub ts: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+}
+
 /// The full issue projection — populated by lazily loading the issue doc
 /// `provisional` is set when only the catalog row is known.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -667,6 +690,9 @@ pub struct IssueView {
     /// Attachment metadata (CREATE-5) — payloads come from `attachment get`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentMetaDto>,
+    /// Stable issue-to-Run bindings; Runtime remains the lifecycle authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CheckDto>,
     pub provisional: bool,
     /// Records under this issue that failed to project (see [`CorruptRecord`]).
     ///

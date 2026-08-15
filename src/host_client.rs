@@ -568,6 +568,40 @@ impl world_interface::ClientHost for PackageClientHost {
         })
     }
 
+    fn call_work<'a>(
+        &'a self,
+        request: runtime::exec::WorkRequest,
+    ) -> world_interface::ClientFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            let operation =
+                data_encoding::HEXLOWER.encode(&runtime::world::RequestId::mint().as_bytes());
+            let response = client_as_scoped(
+                &self.home,
+                Request::Work { request, operation },
+                &self.scope,
+                self.act_as.as_deref(),
+                &self.selection,
+            )
+            .await
+            .map_err(|error| world_interface::Failure::new(format!("{error:#}")))?;
+            match response {
+                Response::Work { reply } => serde_json::to_value(reply).map_err(|error| {
+                    world_interface::Failure::new(format!("encode Runtime Work reply: {error}"))
+                }),
+                response @ Response::Error { .. } => {
+                    serde_json::to_value(response).map_err(|error| {
+                        world_interface::Failure::new(format!(
+                            "encode Runtime Work refusal: {error}"
+                        ))
+                    })
+                }
+                other => Err(world_interface::Failure::new(format!(
+                    "Runtime Work request returned an unexpected response: {other:?}"
+                ))),
+            }
+        })
+    }
+
     fn call_control<'a>(
         &'a self,
         request: world_interface::HostControlRequest,

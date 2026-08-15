@@ -52,6 +52,11 @@ pub struct PresenceMap {
     pub actors: BTreeMap<(String, String), Reach>,
     /// Best observed reach per device id, across every Space that answered.
     pub devices: BTreeMap<String, Reach>,
+    /// `(space, world, actor)` triples with a live World-scoped row — the
+    /// Live plane's transient table saying this actor has that World open
+    /// right now. A launched World is its own liveness, one notch nearer
+    /// than a reachable device.
+    pub in_world: BTreeSet<(String, String, String)>,
 }
 
 impl PresenceMap {
@@ -63,6 +68,31 @@ impl PresenceMap {
             if let Some(actor) = peer.actor {
                 merge_keyed(&mut self.actors, (space.to_owned(), actor), reach);
             }
+        }
+    }
+
+    /// Every World-scoped Live row is "this actor has that World open". A
+    /// content-residency row is not: holding bytes of something is not being
+    /// in it. An actor seen in a World is also at least Online in the Space
+    /// — a live session outranks a stale Neighbor latch.
+    fn absorb_live(&mut self, space: &str, entries: Vec<lait::control::LiveEntry>) {
+        use lait::control::LiveScope;
+        for entry in entries {
+            let world = match &entry.scope {
+                LiveScope::Body { world, .. }
+                | LiveScope::Material { world, .. }
+                | LiveScope::Field { world, .. }
+                | LiveScope::Preview { world, .. }
+                | LiveScope::Typing { world, .. }
+                | LiveScope::World { world, .. } => world.clone(),
+                LiveScope::Content { .. } => continue,
+            };
+            merge_keyed(
+                &mut self.actors,
+                (space.to_owned(), entry.actor.clone()),
+                Reach::Online,
+            );
+            self.in_world.insert((space.to_owned(), world, entry.actor));
         }
     }
 }
@@ -96,12 +126,35 @@ impl Client {
             let route = ControlRoute::Orbit {
                 address: OrbitAddress::for_store(Path::new(&orbit.path), space),
             };
-            match daemon.request_if_running(route, &Request::Who).await {
+            match daemon
+                .request_if_running(route.clone(), &Request::Who)
+                .await
+            {
                 Ok(Response::Who { peers }) => map.absorb(&orbit.space, peers),
                 // Not running, not reachable, or refused: nothing was
                 // measured, and nothing is recorded — absence, of the
                 // "could not be asked" kind.
                 _ => {}
+            }
+            // The Live plane, same glance: who has which World open right
+            // now. Only asked where Who answered — a Space that could not be
+            // asked stays wholly unmeasured rather than half-measured.
+            if map.asked.contains(&orbit.space) {
+                match daemon
+                    .request_if_running(
+                        route,
+                        &Request::Live {
+                            since_generation: None,
+                            issue: None,
+                        },
+                    )
+                    .await
+                {
+                    Ok(Response::Live { entries, .. }) => {
+                        map.absorb_live(&orbit.space, entries);
+                    }
+                    _ => {}
+                }
             }
         }
         map

@@ -52,7 +52,10 @@
 use replica::body::{MutationModel, Schema};
 use replica::body::{SchemaId, WorldId};
 
-use crate::world::{Descriptor, ScopeSchema, SignalSchema};
+use crate::{
+    exec, find,
+    world::{Descriptor, ScopeSchema, SignalSchema},
+};
 
 /// BLAKE3 derive-key context for the implementation id.
 const IMPLEMENTATION_CONTEXT: &str = "lait.world-implementation.v1";
@@ -72,7 +75,7 @@ pub const DESCRIPTOR_VERSION_SECTIONED: u16 = 2;
 /// encoding, and an unchecked cast would truncate the count, derive an id over
 /// bytes carrying it, and leave `decode` refusing the very bytes the id
 /// commits to. The section table needs no such guard — tags strictly ascend
-/// over a two-tag set, which bounds it at two.
+/// over a four-tag set, which bounds it at four.
 pub const MAX_ENCODABLE_ENTRIES: usize = u16::MAX as usize;
 
 /// The section tags this build interprets. A tag outside this set rejects.
@@ -81,6 +84,10 @@ pub mod section {
     pub const SCOPE_SCHEMAS: u16 = 0x0001;
     /// Declared World signals.
     pub const SIGNAL_SCHEMAS: u16 = 0x0002;
+    /// Declared World-owned Find vocabularies.
+    pub const FIND_SCHEMAS: u16 = 0x0003;
+    /// Declared callable Exec Specs, including their Link Specs.
+    pub const EXEC_SPECS: u16 = 0x0004;
 }
 
 /// Why a descriptor failed to encode/decode.
@@ -154,6 +161,8 @@ pub struct Implementation {
 pub enum DescriptorSection {
     ScopeSchemas(Vec<ScopeSchema>),
     SignalSchemas(Vec<SignalSchema>),
+    FindSchemas(Vec<find::Schema>),
+    ExecSpecs(Vec<exec::Spec>),
 }
 
 impl DescriptorSection {
@@ -161,6 +170,8 @@ impl DescriptorSection {
         match self {
             DescriptorSection::ScopeSchemas(_) => section::SCOPE_SCHEMAS,
             DescriptorSection::SignalSchemas(_) => section::SIGNAL_SCHEMAS,
+            DescriptorSection::FindSchemas(_) => section::FIND_SCHEMAS,
+            DescriptorSection::ExecSpecs(_) => section::EXEC_SPECS,
         }
     }
 
@@ -171,19 +182,42 @@ impl DescriptorSection {
     /// rather than merely rejected.
     fn validate(&self) -> Result<(), Invalid> {
         let tag = self.tag();
-        let names: Vec<&SchemaId> = match self {
-            DescriptorSection::ScopeSchemas(entries) => entries.iter().map(|e| &e.name).collect(),
-            DescriptorSection::SignalSchemas(entries) => entries.iter().map(|e| &e.name).collect(),
-        };
-        if names.is_empty() {
-            return Err(Invalid::BadSection(tag));
-        }
-        if names.len() > MAX_ENCODABLE_ENTRIES {
-            return Err(Invalid::TooManyDeclarations(tag));
-        }
-        for w in names.windows(2) {
-            if w[0] >= w[1] {
-                return Err(Invalid::UnsortedOrDuplicateDeclarations(tag));
+        match self {
+            DescriptorSection::ScopeSchemas(entries) => {
+                validate_names(tag, entries.iter().map(|entry| &entry.name))?;
+            }
+            DescriptorSection::SignalSchemas(entries) => {
+                validate_names(tag, entries.iter().map(|entry| &entry.name))?;
+            }
+            DescriptorSection::FindSchemas(entries) => {
+                if entries.is_empty() {
+                    return Err(Invalid::BadSection(tag));
+                }
+                if entries.len() > MAX_ENCODABLE_ENTRIES {
+                    return Err(Invalid::TooManyDeclarations(tag));
+                }
+                if !entries
+                    .windows(2)
+                    .all(|pair| pair[0].reference < pair[1].reference)
+                    || entries.iter().any(|entry| entry.validate().is_err())
+                {
+                    return Err(Invalid::UnsortedOrDuplicateDeclarations(tag));
+                }
+            }
+            DescriptorSection::ExecSpecs(entries) => {
+                if entries.is_empty() {
+                    return Err(Invalid::BadSection(tag));
+                }
+                if entries.len() > MAX_ENCODABLE_ENTRIES {
+                    return Err(Invalid::TooManyDeclarations(tag));
+                }
+                if !entries
+                    .windows(2)
+                    .all(|pair| (&pair[0].name, pair[0].version) < (&pair[1].name, pair[1].version))
+                    || entries.iter().any(|entry| entry.validate().is_err())
+                {
+                    return Err(Invalid::UnsortedOrDuplicateDeclarations(tag));
+                }
             }
         }
         Ok(())
@@ -191,7 +225,7 @@ impl DescriptorSection {
 
     /// The count casts here are lossless because [`Self::validate`] has already
     /// refused a longer list, and `encode` runs it first.
-    fn encode_payload(&self) -> Vec<u8> {
+    fn encode_payload(&self) -> Result<Vec<u8>, Invalid> {
         let mut out = Vec::new();
         match self {
             DescriptorSection::ScopeSchemas(entries) => {
@@ -210,8 +244,28 @@ impl DescriptorSection {
                     out.extend_from_slice(&entry.demand);
                 }
             }
+            DescriptorSection::FindSchemas(entries) => {
+                out.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+                for entry in entries {
+                    let bytes = entry
+                        .encode()
+                        .map_err(|_| Invalid::BadSection(section::FIND_SCHEMAS))?;
+                    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&bytes);
+                }
+            }
+            DescriptorSection::ExecSpecs(entries) => {
+                out.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+                for entry in entries {
+                    let bytes = entry
+                        .encode()
+                        .map_err(|_| Invalid::BadSection(section::EXEC_SPECS))?;
+                    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&bytes);
+                }
+            }
         }
-        out
+        Ok(out)
     }
 
     fn decode_payload(tag: u16, payload: &[u8]) -> Result<Self, Invalid> {
@@ -222,6 +276,8 @@ impl DescriptorSection {
         let parse: Parse = match tag {
             section::SCOPE_SCHEMAS => decode_scope_entries,
             section::SIGNAL_SCHEMAS => decode_signal_entries,
+            section::FIND_SCHEMAS => decode_find_entries,
+            section::EXEC_SPECS => decode_exec_entries,
             _ => return Err(Invalid::UnknownSectionTag(tag)),
         };
         let mut r = SectionReader::new(tag, payload);
@@ -234,6 +290,23 @@ impl DescriptorSection {
         section.validate()?;
         Ok(section)
     }
+}
+
+fn validate_names<'a>(
+    tag: u16,
+    names: impl ExactSizeIterator<Item = &'a SchemaId>,
+) -> Result<(), Invalid> {
+    if names.len() == 0 {
+        return Err(Invalid::BadSection(tag));
+    }
+    if names.len() > MAX_ENCODABLE_ENTRIES {
+        return Err(Invalid::TooManyDeclarations(tag));
+    }
+    let names: Vec<&SchemaId> = names.collect();
+    if !names.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(Invalid::UnsortedOrDuplicateDeclarations(tag));
+    }
+    Ok(())
 }
 
 fn decode_scope_entries(
@@ -269,6 +342,36 @@ fn decode_signal_entries(
         });
     }
     Ok(DescriptorSection::SignalSchemas(entries))
+}
+
+fn decode_find_entries(
+    r: &mut SectionReader<'_>,
+    count: usize,
+) -> Result<DescriptorSection, Invalid> {
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let length = r.u32()? as usize;
+        let bytes = r.take(length)?;
+        let schema = find::Schema::decode_canonical(bytes)
+            .map_err(|_| Invalid::BadSection(section::FIND_SCHEMAS))?;
+        entries.push(schema);
+    }
+    Ok(DescriptorSection::FindSchemas(entries))
+}
+
+fn decode_exec_entries(
+    r: &mut SectionReader<'_>,
+    count: usize,
+) -> Result<DescriptorSection, Invalid> {
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let length = r.u32()? as usize;
+        let bytes = r.take(length)?;
+        let spec = exec::Spec::decode_canonical(bytes)
+            .map_err(|_| Invalid::BadSection(section::EXEC_SPECS))?;
+        entries.push(spec);
+    }
+    Ok(DescriptorSection::ExecSpecs(entries))
 }
 
 fn push_name(out: &mut Vec<u8>, name: &SchemaId) {
@@ -403,6 +506,22 @@ impl Implementation {
             signals.sort_by(|a, b| a.name.cmp(&b.name));
             sections.push(DescriptorSection::SignalSchemas(signals));
         }
+        if !registration.find_schemas.is_empty() {
+            let mut schemas: Vec<find::Schema> = registration
+                .find_schemas
+                .iter()
+                .map(find::Schema::canonicalized)
+                .collect();
+            schemas.sort_by(|left, right| left.reference.cmp(&right.reference));
+            sections.push(DescriptorSection::FindSchemas(schemas));
+        }
+        if !registration.exec_specs.is_empty() {
+            let mut specs = registration.exec_specs.clone();
+            specs.sort_by(|left, right| {
+                (&left.name, left.version).cmp(&(&right.name, right.version))
+            });
+            sections.push(DescriptorSection::ExecSpecs(specs));
+        }
 
         Self {
             world: registration.id.clone(),
@@ -442,6 +561,26 @@ impl Implementation {
         for s in &self.sections {
             s.validate()?;
         }
+        let find_schemas = self
+            .sections
+            .iter()
+            .find_map(|section| match section {
+                DescriptorSection::FindSchemas(schemas) => Some(schemas.as_slice()),
+                DescriptorSection::ScopeSchemas(_)
+                | DescriptorSection::SignalSchemas(_)
+                | DescriptorSection::ExecSpecs(_) => None,
+            })
+            .unwrap_or_default();
+        if let Some(DescriptorSection::ExecSpecs(specs)) = self
+            .sections
+            .iter()
+            .find(|section| matches!(section, DescriptorSection::ExecSpecs(_)))
+        {
+            for spec in specs {
+                spec.validate_with_find(find_schemas)
+                    .map_err(|_| Invalid::BadSection(section::EXEC_SPECS))?;
+            }
+        }
         let mut out = Vec::new();
         out.extend_from_slice(&self.version().to_be_bytes());
         let world = self.world.as_str().as_bytes();
@@ -459,7 +598,7 @@ impl Implementation {
         if !self.sections.is_empty() {
             out.extend_from_slice(&(self.sections.len() as u16).to_be_bytes());
             for s in &self.sections {
-                let payload = s.encode_payload();
+                let payload = s.encode_payload()?;
                 out.extend_from_slice(&s.tag().to_be_bytes());
                 out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
                 out.extend_from_slice(&payload);
@@ -593,6 +732,9 @@ mod tests {
             limits: crate::world::Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
+            find_schemas: Vec::new(),
+            find_extractors: Vec::new(),
+            exec_specs: Vec::new(),
         }
     }
 
@@ -636,6 +778,146 @@ mod tests {
             name: SchemaId::parse(name).unwrap(),
             max_payload_bytes,
             demand: vec![9, 9, 9],
+        }
+    }
+
+    fn demand(capability: &str) -> Vec<u8> {
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("com.example.notes", capability),
+            mechanics::authorization::Resource::root("com.example.notes"),
+        )
+        .encode_canonical()
+        .unwrap()
+    }
+
+    fn find_ref(name: &str, version: u32) -> find::SchemaRef {
+        find::SchemaRef {
+            name: SchemaId::parse(name).unwrap(),
+            version,
+        }
+    }
+
+    fn find_bound(value: u64) -> find::Bound {
+        find::Bound {
+            decoded_bodies: value,
+            postings_read: value,
+            edges_visited: value,
+            nodes_visited: value,
+            paths_retained: value,
+            candidates_per_branch: value,
+            score_evaluations: value,
+            projected_bytes: value,
+            packed_tokens: value,
+            wall_millis: value,
+        }
+    }
+
+    fn find_schema(name: &str) -> find::Schema {
+        let reference = find_ref(name, 1);
+        let analyzer = find::AnalyzerRef {
+            schema: reference.clone(),
+            name: SchemaId::parse("plain").unwrap(),
+        };
+        let gate = find::GateRef {
+            schema: reference.clone(),
+            name: SchemaId::parse("read").unwrap(),
+        };
+        find::Schema {
+            reference: reference.clone(),
+            sources: vec![find::SourceRef {
+                name: SchemaId::parse("aa").unwrap(),
+                version: 1,
+            }],
+            fields: vec![find::Field {
+                reference: find::FieldRef {
+                    schema: reference.clone(),
+                    name: SchemaId::parse("title").unwrap(),
+                },
+                kind: find::FieldKind::Text,
+                analyzer: Some(analyzer.clone()),
+            }],
+            edges: vec![find::Edge {
+                reference: find::EdgeRef {
+                    schema: reference.clone(),
+                    name: SchemaId::parse("related").unwrap(),
+                },
+                target: reference.clone(),
+                gate: gate.clone(),
+            }],
+            gates: vec![find::Gate {
+                reference: gate,
+                demand: demand("find.read"),
+            }],
+            analyzers: vec![find::Analyzer {
+                reference: analyzer,
+                configuration: b"unicode-v1".to_vec(),
+            }],
+            features: vec![find::Feature {
+                reference: find::FeatureRef {
+                    schema: reference,
+                    name: SchemaId::parse("semantic").unwrap(),
+                },
+                stamp: [5; 32],
+            }],
+            ops: find::OpSet::ALL,
+            modes: find::ModeSet::ALL,
+            bound: find_bound(100),
+        }
+    }
+
+    fn exec_spec(name: &str, find_name: Option<&str>) -> exec::Spec {
+        let payload = |name: &str| exec::PayloadSpec {
+            schema: exec::SchemaRef {
+                name: SchemaId::parse(name).unwrap(),
+                version: 1,
+            },
+            max_inline_bytes: 1_024,
+            max_content_refs: 1,
+            max_content_bytes: 4_096,
+            read: demand("payload.read"),
+            max_additional_input_bytes: 0,
+        };
+        let queries = find_name
+            .map(|name| {
+                vec![find::Grant {
+                    schemas: vec![find_ref(name, 1)],
+                    ops: find::OpSet::SEEK,
+                    fields: Vec::new(),
+                    edges: Vec::new(),
+                    gates: Vec::new(),
+                    modes: find::ModeSet::EXACT,
+                    features: Vec::new(),
+                    bound: find_bound(10),
+                }]
+            })
+            .unwrap_or_default();
+        exec::Spec {
+            name: SchemaId::parse(name).unwrap(),
+            version: 1,
+            access: exec::Access {
+                start: demand("exec.start"),
+                offer: demand("exec.offer"),
+                control: demand("exec.control"),
+                accept: demand("exec.accept"),
+            },
+            input: payload("exec.input"),
+            output: payload("exec.output"),
+            mode: exec::Mode::Unary,
+            resume: exec::Resume::Restart,
+            effects: exec::Effects::Pure,
+            accept: exec::AcceptRule::World,
+            queries,
+            service: None,
+            links: Vec::new(),
+            limits: exec::Limits {
+                attempts: 2,
+                events: 64,
+                checkpoints: 0,
+                child_runs: 2,
+                progress_bytes: 4_096,
+                checkpoint_bytes: 0,
+                wall_millis: 30_000,
+            },
         }
     }
 
@@ -733,9 +1015,16 @@ mod tests {
                 signal("note", 1024),
                 signal("typing", 8),
             ])],
+            vec![DescriptorSection::FindSchemas(vec![find_schema("notes")])],
+            vec![DescriptorSection::ExecSpecs(vec![exec_spec(
+                "summarize",
+                None,
+            )])],
             vec![
                 DescriptorSection::ScopeSchemas(vec![scope("board", 64), scope("card", 32)]),
                 DescriptorSection::SignalSchemas(vec![signal("note", 1024)]),
+                DescriptorSection::FindSchemas(vec![find_schema("notes")]),
+                DescriptorSection::ExecSpecs(vec![exec_spec("summarize", Some("notes"))]),
             ],
         ] {
             let mut d = descriptor(&[schema("aa", 1)]);
@@ -756,12 +1045,25 @@ mod tests {
         let mut reg = registration(&[schema("aa", 1)]);
         reg.scope_schemas = vec![scope("card", 32), scope("board", 64)];
         reg.signal_schemas = vec![signal("typing", 8), signal("note", 1024)];
+        reg.find_schemas = vec![find_schema("z-notes"), find_schema("a-notes")];
+        reg.exec_specs = vec![
+            exec_spec("z-run", None),
+            exec_spec("a-run", Some("a-notes")),
+        ];
         let d = Implementation::from_registration(&reg, 1, [3u8; 32], [4u8; 32]);
         assert_eq!(
             d.sections,
             vec![
                 DescriptorSection::ScopeSchemas(vec![scope("board", 64), scope("card", 32)]),
                 DescriptorSection::SignalSchemas(vec![signal("note", 1024), signal("typing", 8)]),
+                DescriptorSection::FindSchemas(vec![
+                    find_schema("a-notes"),
+                    find_schema("z-notes"),
+                ]),
+                DescriptorSection::ExecSpecs(vec![
+                    exec_spec("a-run", Some("a-notes")),
+                    exec_spec("z-run", None),
+                ]),
             ]
         );
         assert_eq!(d.implementation_version, 7);
@@ -785,6 +1087,62 @@ mod tests {
     }
 
     #[test]
+    fn only_the_canonical_order_of_every_section_permutation_encodes() {
+        let sections = [
+            DescriptorSection::ScopeSchemas(vec![scope("board", 64)]),
+            DescriptorSection::SignalSchemas(vec![signal("note", 1_024)]),
+            DescriptorSection::FindSchemas(vec![find_schema("notes")]),
+            DescriptorSection::ExecSpecs(vec![exec_spec("summarize", None)]),
+        ];
+        let canonical_tags = [
+            section::SCOPE_SCHEMAS,
+            section::SIGNAL_SCHEMAS,
+            section::FIND_SCHEMAS,
+            section::EXEC_SPECS,
+        ];
+
+        for a in 0..4 {
+            for b in 0..4 {
+                for c in 0..4 {
+                    for d in 0..4 {
+                        if [a, b, c, d]
+                            .iter()
+                            .copied()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len()
+                            != 4
+                        {
+                            continue;
+                        }
+                        let mut descriptor = descriptor(&[schema("aa", 1)]);
+                        descriptor.sections = vec![
+                            sections[a].clone(),
+                            sections[b].clone(),
+                            sections[c].clone(),
+                            sections[d].clone(),
+                        ];
+                        let tags: Vec<_> = descriptor
+                            .sections
+                            .iter()
+                            .map(DescriptorSection::tag)
+                            .collect();
+                        if tags == canonical_tags {
+                            let bytes = descriptor.encode().unwrap();
+                            assert_eq!(Implementation::decode(&bytes), Ok(descriptor));
+                        } else {
+                            assert_eq!(
+                                descriptor.encode(),
+                                Err(Invalid::UnsortedOrDuplicateSections),
+                                "permutation {tags:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn an_empty_or_misordered_section_rejects() {
         let mut d = descriptor(&[schema("aa", 1)]);
         d.sections = vec![DescriptorSection::ScopeSchemas(Vec::new())];
@@ -801,6 +1159,80 @@ mod tests {
             Err(Invalid::UnsortedOrDuplicateDeclarations(
                 section::SIGNAL_SCHEMAS
             ))
+        );
+
+        d.sections = vec![DescriptorSection::ExecSpecs(vec![
+            exec_spec("z-run", None),
+            exec_spec("a-run", None),
+        ])];
+        assert_eq!(
+            d.encode(),
+            Err(Invalid::UnsortedOrDuplicateDeclarations(
+                section::EXEC_SPECS
+            ))
+        );
+    }
+
+    #[test]
+    fn every_section_kind_rejects_duplicate_declaration_coordinates() {
+        let find = find_schema("notes");
+        let exec = exec_spec("summarize", None);
+        for (tag, section) in [
+            (
+                section::SCOPE_SCHEMAS,
+                DescriptorSection::ScopeSchemas(vec![scope("board", 32), scope("board", 64)]),
+            ),
+            (
+                section::SIGNAL_SCHEMAS,
+                DescriptorSection::SignalSchemas(vec![signal("note", 8), signal("note", 16)]),
+            ),
+            (
+                section::FIND_SCHEMAS,
+                DescriptorSection::FindSchemas(vec![find.clone(), find]),
+            ),
+            (
+                section::EXEC_SPECS,
+                DescriptorSection::ExecSpecs(vec![exec.clone(), exec]),
+            ),
+        ] {
+            let mut descriptor = descriptor(&[schema("aa", 1)]);
+            descriptor.sections = vec![section];
+            assert_eq!(
+                descriptor.encode(),
+                Err(Invalid::UnsortedOrDuplicateDeclarations(tag)),
+                "section {tag:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_section_tag_bytes_and_find_containment_are_frozen() {
+        let mut registration = registration(&[schema("aa", 1)]);
+        registration.find_schemas = vec![find_schema("notes")];
+        registration.exec_specs = vec![exec_spec("summarize", Some("notes"))];
+        let descriptor = Implementation::from_registration(&registration, 1, [3; 32], [4; 32]);
+        assert_eq!(
+            descriptor
+                .sections
+                .iter()
+                .map(DescriptorSection::tag)
+                .collect::<Vec<_>>(),
+            vec![section::FIND_SCHEMAS, section::EXEC_SPECS]
+        );
+        let bytes = descriptor.encode().unwrap();
+        assert_eq!(Implementation::decode(&bytes), Ok(descriptor.clone()));
+        assert_eq!(
+            blake3::hash(&bytes).to_hex().as_str(),
+            "9673ac7603f569cc978a702750ae6d63b0d0819658b4d9fdf059824a1870b074"
+        );
+
+        let mut missing_find = descriptor;
+        missing_find
+            .sections
+            .retain(|section| !matches!(section, DescriptorSection::FindSchemas(_)));
+        assert_eq!(
+            missing_find.encode(),
+            Err(Invalid::BadSection(section::EXEC_SPECS))
         );
     }
 
@@ -860,7 +1292,7 @@ mod tests {
         // A byte hidden in the section's own tail is how a frozen grammar would
         // otherwise be extended.
         let mut fat = good.clone();
-        let len_at = good.len() - d.sections[0].encode_payload().len() - 4;
+        let len_at = good.len() - d.sections[0].encode_payload().unwrap().len() - 4;
         let len = u32::from_be_bytes(good[len_at..len_at + 4].try_into().unwrap());
         fat[len_at..len_at + 4].copy_from_slice(&(len + 1).to_be_bytes());
         fat.push(0);
@@ -879,6 +1311,48 @@ mod tests {
             Implementation::decode(&short),
             Err(Invalid::BadSection(section::SCOPE_SCHEMAS))
         );
+    }
+
+    #[test]
+    fn adversarial_lengths_reject_before_section_payload_allocation() {
+        let raw_section = |tag: u16, payload: &[u8]| {
+            let mut bytes = descriptor(&[schema("aa", 1)]).encode().unwrap();
+            bytes[1] = DESCRIPTOR_VERSION_SECTIONED as u8;
+            bytes.extend_from_slice(&1u16.to_be_bytes());
+            bytes.extend_from_slice(&tag.to_be_bytes());
+            bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+
+        // Scope and Signal first read their bounded u16 name length; Find and
+        // Exec first read their bounded u32 standalone-entry length. None may
+        // allocate from the claimed size before proving those bytes exist.
+        for tag in [section::SCOPE_SCHEMAS, section::SIGNAL_SCHEMAS] {
+            let bytes = raw_section(tag, &[0, 1, 0xff, 0xff]);
+            assert_eq!(
+                Implementation::decode(&bytes),
+                Err(Invalid::BadSection(tag))
+            );
+        }
+        for tag in [section::FIND_SCHEMAS, section::EXEC_SPECS] {
+            let mut payload = 1u16.to_be_bytes().to_vec();
+            payload.extend_from_slice(&u32::MAX.to_be_bytes());
+            let bytes = raw_section(tag, &payload);
+            assert_eq!(
+                Implementation::decode(&bytes),
+                Err(Invalid::BadSection(tag))
+            );
+        }
+
+        // The enclosing table applies the same rule before dispatching a
+        // section grammar at all.
+        let mut bytes = descriptor(&[schema("aa", 1)]).encode().unwrap();
+        bytes[1] = DESCRIPTOR_VERSION_SECTIONED as u8;
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&section::EXEC_SPECS.to_be_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(Implementation::decode(&bytes), Err(Invalid::Truncated));
     }
 
     #[test]
@@ -907,6 +1381,45 @@ mod tests {
             ..signal("note", 1024)
         }]);
         assert_ne!(redemanded.id().unwrap(), with_both.id().unwrap());
+    }
+
+    #[test]
+    fn every_find_semantic_coordinate_is_identity_material() {
+        let mut declared = descriptor(&[schema("aa", 1)]);
+        declared.sections = vec![DescriptorSection::FindSchemas(vec![find_schema("notes")])];
+        let declared_id = declared.id().unwrap();
+
+        let changed = |mut declaration: find::Schema| {
+            let mut descriptor = descriptor(&[schema("aa", 1)]);
+            declaration = declaration.canonicalized();
+            descriptor.sections = vec![DescriptorSection::FindSchemas(vec![declaration])];
+            assert_ne!(descriptor.id().unwrap(), declared_id);
+        };
+
+        let mut semantic = find_schema("notes");
+        semantic.fields[0].kind = find::FieldKind::Bytes;
+        semantic.fields[0].analyzer = None;
+        changed(semantic);
+
+        let mut gate = find_schema("notes");
+        gate.gates[0].demand = demand("find.other");
+        changed(gate);
+
+        let mut analyzer = find_schema("notes");
+        analyzer.analyzers[0].configuration.push(1);
+        changed(analyzer);
+
+        let mut feature = find_schema("notes");
+        feature.features[0].stamp[0] ^= 1;
+        changed(feature);
+
+        let mut operators = find_schema("notes");
+        operators.ops = find::OpSet::SEEK;
+        changed(operators);
+
+        let mut bound = find_schema("notes");
+        bound.bound.wall_millis -= 1;
+        changed(bound);
     }
 
     #[test]

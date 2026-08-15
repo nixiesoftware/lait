@@ -106,6 +106,7 @@ impl World for TallyWorld {
         let key = self.body();
         Ok(Effect {
             content_refs: Vec::new(),
+            exec: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),

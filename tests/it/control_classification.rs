@@ -24,6 +24,16 @@ fn every_request_variant_has_a_terminal_owner() {
         classify(&Request::Connect { ticket: "x".into() }),
         RequestOwner::Station
     );
+    assert_eq!(
+        classify(&Request::Work {
+            request: runtime::exec::WorkRequest::Inspect {
+                world: replica::body::WorldId::parse("com.example.work").unwrap(),
+                run: runtime::exec::RunId::from_bytes([0; 16]),
+            },
+            operation: String::new(),
+        }),
+        RequestOwner::Work
+    );
     assert_eq!(classify(&Request::Status), RequestOwner::Observation);
     // Storage projects what the durable store holds and changes nothing, so it
     // sits with Status rather than with the membership verbs.

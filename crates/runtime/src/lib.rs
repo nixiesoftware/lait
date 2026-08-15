@@ -57,7 +57,9 @@ pub mod coordinates;
 #[cfg(test)]
 mod dispatch_tests;
 mod dto;
+pub mod exec;
 mod fetch;
+pub mod find;
 pub mod generation;
 mod implementation;
 #[cfg(test)]

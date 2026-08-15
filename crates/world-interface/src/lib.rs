@@ -42,12 +42,9 @@ use replica::body::WorldId;
 use runtime::world::call::{Call, Reply};
 use serde_json::Value;
 
-/// A typed client-surface failure.
-///
-/// Concrete adapter diagnostics are logged at conversion and are deliberately
-/// not retained in this public value.
+/// Stable classification of a client-surface failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Failure {
+pub enum FailureKind {
     /// A declaration, invocation, or returned value was invalid.
     Invalid,
     /// A valid operation was refused by the selected surface.
@@ -58,32 +55,72 @@ pub enum Failure {
     Interruption,
 }
 
+/// A typed client-surface failure.
+///
+/// Adapter diagnostics remain separate from the stable classification. Most
+/// boundaries deliberately render only the classification; an argument-owning
+/// surface such as MCP may explicitly preserve [`Self::diagnostic`] so callers
+/// can repair malformed input without depending on a tracing subscriber.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    kind: FailureKind,
+    diagnostic: Option<String>,
+}
+
 impl Failure {
     pub fn new(message: impl fmt::Display) -> Self {
-        tracing::warn!(diagnostic = %message, "World client adapter rejected an operation");
-        Self::Invalid
+        let diagnostic = message.to_string();
+        tracing::warn!(%diagnostic, "World client adapter rejected an operation");
+        Self {
+            kind: FailureKind::Invalid,
+            diagnostic: Some(diagnostic),
+        }
+    }
+
+    pub const fn invalid() -> Self {
+        Self {
+            kind: FailureKind::Invalid,
+            diagnostic: None,
+        }
     }
 
     pub const fn refusal() -> Self {
-        Self::Refusal
+        Self {
+            kind: FailureKind::Refusal,
+            diagnostic: None,
+        }
     }
 
     pub const fn operation() -> Self {
-        Self::Operation
+        Self {
+            kind: FailureKind::Operation,
+            diagnostic: None,
+        }
     }
 
     pub const fn interruption() -> Self {
-        Self::Interruption
+        Self {
+            kind: FailureKind::Interruption,
+            diagnostic: None,
+        }
+    }
+
+    pub const fn kind(&self) -> FailureKind {
+        self.kind
+    }
+
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.diagnostic.as_deref()
     }
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Invalid => "invalid client operation",
-            Self::Refusal => "client operation refused",
-            Self::Operation => "client operation failed",
-            Self::Interruption => "client operation interrupted",
+        f.write_str(match self.kind {
+            FailureKind::Invalid => "invalid client operation",
+            FailureKind::Refusal => "client operation refused",
+            FailureKind::Operation => "client operation failed",
+            FailureKind::Interruption => "client operation interrupted",
         })
     }
 }
@@ -363,6 +400,15 @@ impl PresentationResolution {
 pub trait ClientHost: Send + Sync {
     fn local_root(&self) -> &Path;
     fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply>;
+    /// Inspect or request product-neutral durable Run lifecycle transitions.
+    ///
+    /// The DTO is owned by Runtime Exec. Packages remain responsible for the
+    /// product vocabulary that decides when to call it, while the host binds
+    /// the acting identity, Orbit, transport, and common Exec validator. The
+    /// returned JSON is either a serialized `WorkReply` or the host's typed
+    /// `{kind, error_kind, message}` refusal, so package routing preserves the
+    /// reason a caller can act on.
+    fn call_work<'a>(&'a self, request: runtime::exec::WorkRequest) -> ClientFuture<'a, Value>;
     fn call_control<'a>(&'a self, request: HostControlRequest) -> ClientFuture<'a, Value>;
     /// Move bytes on and off the content plane.
     ///
@@ -1189,6 +1235,13 @@ mod tests {
         }
 
         fn call_control<'a>(&'a self, _request: HostControlRequest) -> ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_work<'a>(
+            &'a self,
+            _request: runtime::exec::WorkRequest,
+        ) -> ClientFuture<'a, Value> {
             Box::pin(async { Err(Failure::refusal()) })
         }
 

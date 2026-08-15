@@ -63,7 +63,7 @@ pub const CATALOG_SCHEMA_VERSION: u32 = 2;
 pub const CATALOG_ENCODING: &str = "lait.catalog.v1";
 
 /// The legacy projection schema version carried by every view DTO.
-pub const VIEW_SCHEMA_VERSION: u32 = 4;
+pub const VIEW_SCHEMA_VERSION: u32 = 5;
 
 /// The link kinds, frozen.
 pub const LINK_KINDS: [&str; 3] = ["blocks", "relates", "duplicates"];
@@ -89,6 +89,12 @@ pub const MAX_ESTIMATE: u32 = 1000;
 /// through the product surface, and stayed fetchable by id. Counting the raw
 /// map makes the cap mean what it says.
 pub const MAX_ATTACHMENTS_PER_ISSUE: usize = 8;
+/// How many durable verification Runs one issue may retain.
+///
+/// Counted against the raw `checks` map so an entry written by a newer build
+/// still occupies a slot. Each record also retains its pinned source and,
+/// once accepted, its report, so the map must have a product-owned ceiling.
+pub const MAX_CHECKS_PER_ISSUE: usize = 32;
 
 /// The largest inline attachment this build will still *read*.
 ///
@@ -207,6 +213,114 @@ pub fn demand_read() -> Vec<u8> {
         .expect("canonical read demand")
 }
 
+/// The one executable contract the Issues package currently adopts.
+pub const VERIFY_SPEC: &str = "issue.verify";
+pub const VERIFY_SPEC_VERSION: u32 = 1;
+pub const VERIFY_INPUT_SCHEMA: &str = "issue.verify.input";
+pub const VERIFY_OUTPUT_SCHEMA: &str = "issue.verify.output";
+
+pub fn verify_spec_ref() -> runtime::exec::SchemaRef {
+    runtime::exec::SchemaRef {
+        name: SchemaId::parse(VERIFY_SPEC).expect("verification Spec id"),
+        version: VERIFY_SPEC_VERSION,
+    }
+}
+
+pub fn verify_output_ref() -> runtime::exec::SchemaRef {
+    runtime::exec::SchemaRef {
+        name: SchemaId::parse(VERIFY_OUTPUT_SCHEMA).expect("verification output schema"),
+        version: 1,
+    }
+}
+
+pub fn verify_limits() -> runtime::exec::Limits {
+    runtime::exec::Limits {
+        attempts: 3,
+        events: 64,
+        checkpoints: 0,
+        child_runs: 0,
+        progress_bytes: 4 * 1024,
+        checkpoint_bytes: 0,
+        wall_millis: 30 * 60 * 1_000,
+    }
+}
+
+/// `issue.verify/v1`: one pinned repository input and one report output.
+///
+/// Build publication is intentionally not claimed here. Until E4 lands, the
+/// caller supplies an exact Build id which Runtime binds into the Run; dispatch
+/// still refuses to imply that the Build was published or attested.
+pub fn verify_spec() -> runtime::exec::Spec {
+    let contributor = demand_contributor();
+    runtime::exec::Spec {
+        name: verify_spec_ref().name,
+        version: VERIFY_SPEC_VERSION,
+        access: runtime::exec::Access {
+            start: contributor.clone(),
+            offer: contributor.clone(),
+            control: contributor.clone(),
+            accept: contributor,
+        },
+        input: runtime::exec::PayloadSpec {
+            schema: runtime::exec::SchemaRef {
+                name: SchemaId::parse(VERIFY_INPUT_SCHEMA).expect("verification input schema"),
+                version: 1,
+            },
+            max_inline_bytes: 1_024,
+            max_content_refs: 1,
+            max_content_bytes: replica::content::MAX_CONTENT_LEN,
+            read: demand_read(),
+            max_additional_input_bytes: 0,
+        },
+        output: runtime::exec::PayloadSpec {
+            schema: verify_output_ref(),
+            max_inline_bytes: 64,
+            max_content_refs: 1,
+            max_content_bytes: replica::content::MAX_CONTENT_LEN,
+            read: demand_read(),
+            max_additional_input_bytes: 0,
+        },
+        mode: runtime::exec::Mode::Unary,
+        resume: runtime::exec::Resume::Restart,
+        effects: runtime::exec::Effects::Pure,
+        accept: runtime::exec::AcceptRule::World,
+        queries: Vec::new(),
+        service: None,
+        links: Vec::new(),
+        limits: verify_limits(),
+    }
+}
+
+/// Build the exact output material an `issue.verify/v1` handler returns.
+///
+/// A failed check is still a successfully executed verifier, so both verdicts
+/// use [`runtime::exec::TerminalClass::Succeeded`]. The verdict itself is
+/// canonical inline JSON and therefore enters the Runtime output digest beside
+/// the report ContentRef. Acceptance can validate the decision without reading
+/// either payload.
+pub fn verify_candidate(
+    verdict: &str,
+    report: replica::content::ContentRef,
+    report_bytes: u64,
+) -> Option<runtime::exec::Candidate> {
+    if !matches!(verdict, "pass" | "fail") {
+        return None;
+    }
+    let inline = serde_json::to_vec(&VerifyOutput {
+        verdict: verdict.to_owned(),
+    })
+    .ok()?;
+    Some(runtime::exec::Candidate {
+        output: verify_output_ref(),
+        inline,
+        content: vec![report],
+        content_bytes: report_bytes,
+        terminal: runtime::exec::TerminalClass::Succeeded,
+        usage: Vec::new(),
+        evidence: Vec::new(),
+    })
+}
+
 // ---- Reliable signals -----------------------------------------------------
 
 /// The signals this World declares, by name.
@@ -307,7 +421,7 @@ pub const SPACE_CAPABILITIES: [&str; 8] = [
 
 /// The Project-scoped capability ids, sorted. `workflow.transition.<id>` is a
 /// qualified family validated by grammar, not enumerated here.
-pub const PROJECT_CAPABILITIES: [&str; 19] = [
+pub const PROJECT_CAPABILITIES: [&str; 20] = [
     "baseline.issue",
     "baseline.write",
     "comment.create",
@@ -322,6 +436,7 @@ pub const PROJECT_CAPABILITIES: [&str; 19] = [
     "issue.move_out",
     "issue.parent",
     "issue.restore",
+    "issue.verify",
     "project.configure",
     "project.delete",
     "spec.issue",
@@ -892,6 +1007,31 @@ pub enum IssueIntent {
     WorkState {
         doc: String,
         action: WorkAction,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Start the product-owned verification of one pinned repository source.
+    /// `run` is derived by the adapter from this action's persistent request
+    /// coordinate and rechecked by the World against `Context::run_id(0)`.
+    Verify {
+        doc: String,
+        run: String,
+        source: String,
+        build: String,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Accept one returned verification Outcome into ordinary issue truth.
+    AcceptCheck {
+        doc: String,
+        run: String,
+        attempt: String,
+        report: String,
+        verdict: String,
+        move_to_done: bool,
+        id: String,
         actor: String,
         device: String,
         ts: u64,
@@ -1615,11 +1755,51 @@ impl IssueQuery {
     }
 }
 
+/// Inline semantic input committed into an `issue.verify/v1` Start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyInput {
+    pub doc: String,
+    pub source: String,
+}
+
+/// Canonical inline result of an `issue.verify/v1` handler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyOutput {
+    pub verdict: String,
+}
+
+/// One issue-owned binding to Runtime lifecycle truth.
+///
+/// The map key is the Run id. This record deliberately repeats enough of the
+/// Start coordinates for an older Issues build to explain the check even when
+/// it cannot project the protected Run Body. Runtime remains authoritative for
+/// every lifecycle fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckRecord {
+    pub spec: String,
+    pub v: u32,
+    pub build: String,
+    pub source: String,
+    pub state: String,
+    pub by: String,
+    pub ts: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+}
+
 /// The effect every mutating intent returns: the DocId(s) it touched (the
 /// daemon renders the canonical reff).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueEffect {
     pub doc: Option<String>,
+    /// The stable Runtime Run bound by this product action, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
     /// Whether the intent was an idempotent no-op (nothing staged).
     #[serde(default)]
     pub unchanged: bool,
@@ -1805,6 +1985,32 @@ mod ring_digest_tests {
     fn an_unknown_plane_fails_the_decode() {
         let json = br#"{"planes":[{"plane":{"scope":"from_the_future"},"digest":"x"}],"docs":[]}"#;
         assert!(serde_json::from_slice::<RingDigestView>(json).is_err());
+    }
+}
+
+#[cfg(test)]
+mod verify_contract_tests {
+    use super::*;
+
+    fn report(byte: u8) -> replica::content::ContentRef {
+        replica::content::ContentRef {
+            content_id: [byte; 32],
+        }
+    }
+
+    #[test]
+    fn verdict_report_and_geometry_are_all_bound_into_the_output_digest() {
+        let pass = verify_candidate("pass", report(1), 100).unwrap();
+        let fail = verify_candidate("fail", report(1), 100).unwrap();
+        let other_report = verify_candidate("pass", report(2), 100).unwrap();
+        let other_size = verify_candidate("pass", report(1), 101).unwrap();
+
+        assert_eq!(pass.inline, br#"{"verdict":"pass"}"#);
+        assert_eq!(pass.terminal, runtime::exec::TerminalClass::Succeeded);
+        assert_ne!(pass.digest().unwrap(), fail.digest().unwrap());
+        assert_ne!(pass.digest().unwrap(), other_report.digest().unwrap());
+        assert_ne!(pass.digest().unwrap(), other_size.digest().unwrap());
+        assert!(verify_candidate("unknown", report(1), 100).is_none());
     }
 }
 

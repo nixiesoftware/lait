@@ -64,7 +64,8 @@ export '../bridge/api.dart'
         BookFacts,
         SuggestionRow,
         CardRow,
-        PresenceView;
+        PresenceView,
+        WorldPersonRow;
 
 /// The core library, resolved for the process that is about to load it.
 ///

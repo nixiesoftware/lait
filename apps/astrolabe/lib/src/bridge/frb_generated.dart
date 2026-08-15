@@ -561,8 +561,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   LibraryRow dco_decode_library_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 16)
-      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
+    if (arr.length != 17)
+      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
     return LibraryRow(
       key: dco_decode_String(arr[0]),
       orbit: dco_decode_String(arr[1]),
@@ -580,6 +580,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       tagline: dco_decode_opt_String(arr[13]),
       accent: dco_decode_opt_box_autoadd_u_32(arr[14]),
       routes: dco_decode_list_route_row(arr[15]),
+      people: dco_decode_opt_list_world_person_row(arr[16]),
     );
   }
 
@@ -665,6 +666,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   List<SuggestionRow> dco_decode_list_suggestion_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_suggestion_row).toList();
+  }
+
+  @protected
+  List<WorldPersonRow> dco_decode_list_world_person_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_world_person_row).toList();
   }
 
   @protected
@@ -775,6 +782,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   List<LibraryRow>? dco_decode_opt_list_library_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_list_library_row(raw);
+  }
+
+  @protected
+  List<WorldPersonRow>? dco_decode_opt_list_world_person_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_list_world_person_row(raw);
   }
 
   @protected
@@ -904,6 +917,21 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   Unopenable dco_decode_unopenable(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return Unopenable.values[raw as int];
+  }
+
+  @protected
+  WorldPersonRow dco_decode_world_person_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return WorldPersonRow(
+      name: dco_decode_String(arr[0]),
+      picture: dco_decode_opt_String(arr[1]),
+      presence: dco_decode_opt_box_autoadd_presence_view(arr[2]),
+      agent: dco_decode_bool(arr[3]),
+      here: dco_decode_bool(arr[4]),
+    );
   }
 
   @protected
@@ -1289,6 +1317,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_tagline = sse_decode_opt_String(deserializer);
     var var_accent = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_routes = sse_decode_list_route_row(deserializer);
+    var var_people = sse_decode_opt_list_world_person_row(deserializer);
     return LibraryRow(
         key: var_key,
         orbit: var_orbit,
@@ -1305,7 +1334,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         syncDetail: var_syncDetail,
         tagline: var_tagline,
         accent: var_accent,
-        routes: var_routes);
+        routes: var_routes,
+        people: var_people);
   }
 
   @protected
@@ -1468,6 +1498,19 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var ans_ = <SuggestionRow>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_suggestion_row(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<WorldPersonRow> sse_decode_list_world_person_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <WorldPersonRow>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_world_person_row(deserializer));
     }
     return ans_;
   }
@@ -1652,6 +1695,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  List<WorldPersonRow>? sse_decode_opt_list_world_person_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_list_world_person_row(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   OrbitRow sse_decode_orbit_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_space = sse_decode_String(deserializer);
@@ -1781,6 +1836,22 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return Unopenable.values[inner];
+  }
+
+  @protected
+  WorldPersonRow sse_decode_world_person_row(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_name = sse_decode_String(deserializer);
+    var var_picture = sse_decode_opt_String(deserializer);
+    var var_presence = sse_decode_opt_box_autoadd_presence_view(deserializer);
+    var var_agent = sse_decode_bool(deserializer);
+    var var_here = sse_decode_bool(deserializer);
+    return WorldPersonRow(
+        name: var_name,
+        picture: var_picture,
+        presence: var_presence,
+        agent: var_agent,
+        here: var_here);
   }
 
   @protected
@@ -2118,6 +2189,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_opt_String(self.tagline, serializer);
     sse_encode_opt_box_autoadd_u_32(self.accent, serializer);
     sse_encode_list_route_row(self.routes, serializer);
+    sse_encode_opt_list_world_person_row(self.people, serializer);
   }
 
   @protected
@@ -2251,6 +2323,16 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_suggestion_row(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_world_person_row(
+      List<WorldPersonRow> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_world_person_row(item, serializer);
     }
   }
 
@@ -2417,6 +2499,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  void sse_encode_opt_list_world_person_row(
+      List<WorldPersonRow>? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_list_world_person_row(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_orbit_row(OrbitRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.space, serializer);
@@ -2514,5 +2607,16 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   void sse_encode_unopenable(Unopenable self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_world_person_row(
+      WorldPersonRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.name, serializer);
+    sse_encode_opt_String(self.picture, serializer);
+    sse_encode_opt_box_autoadd_presence_view(self.presence, serializer);
+    sse_encode_bool(self.agent, serializer);
+    sse_encode_bool(self.here, serializer);
   }
 }

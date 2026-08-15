@@ -156,10 +156,14 @@ impl Driver {
     }
 
     fn signed(&self, intent: &IssueIntent) -> SignedWorldAction {
+        self.signed_at(RequestId::mint(), intent)
+    }
+
+    fn signed_at(&self, request: RequestId, intent: &IssueIntent) -> SignedWorldAction {
         self.writer
             .sign_action(
                 &self.session,
-                RequestId::mint(),
+                request,
                 Intent {
                     schema: contract::issue_schema(),
                     schema_version: contract::ISSUE_SCHEMA_VERSION,
@@ -256,6 +260,113 @@ fn seed_space(driver: &mut Driver) -> (String, String, String) {
         })
         .unwrap();
     (project, doc, "ENG-1".to_string())
+}
+
+#[test]
+fn verification_binds_the_issue_and_started_run_in_one_effect() {
+    let root = temp_root("verification-run");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (_project, doc, _) = seed_space(&mut driver);
+    let source_ref = station
+        .content_write(
+            &driver.writer,
+            [0x51; 16],
+            &mut std::io::Cursor::new(b"pinned repository source"),
+        )
+        .unwrap();
+    let source = data_encoding::HEXLOWER.encode(source_ref.as_bytes());
+    let build = data_encoding::HEXLOWER.encode(&[0x52; 32]);
+
+    // A caller cannot invent a product link to a different Run. The World
+    // recomputes the Runtime coordinate before it stages either half.
+    let bad_request = RequestId::from_bytes([0x53; 16]);
+    let bad_run = data_encoding::HEXLOWER.encode(&[0x54; 16]);
+    let before_bad = station.frontier();
+    let bad_ts = driver.ts();
+    let bad = IssueIntent::Verify {
+        doc: doc.clone(),
+        run: bad_run,
+        source: source.clone(),
+        build: build.clone(),
+        actor: my_actor().as_str().into(),
+        device: my_device().as_str().into(),
+        ts: bad_ts,
+    };
+    assert!(driver
+        .session
+        .submit(driver.signed_at(bad_request, &bad))
+        .is_err());
+    assert_eq!(station.frontier(), before_bad);
+    let unchanged: IssueView = driver.query(&IssueQuery::View {
+        doc: doc.clone(),
+        me: None,
+    });
+    assert!(unchanged.checks.is_empty());
+
+    let request = RequestId::from_bytes([0x55; 16]);
+    let run = runtime::exec::derive_run_id(
+        station.space_id(),
+        &contract::world_id(),
+        driver.writer.device(),
+        request.as_bytes(),
+        0,
+    );
+    let run_text = data_encoding::HEXLOWER.encode(&run.as_bytes());
+    let ts = driver.ts();
+    let intent = IssueIntent::Verify {
+        doc: doc.clone(),
+        run: run_text.clone(),
+        source: source.clone(),
+        build: build.clone(),
+        actor: my_actor().as_str().into(),
+        device: my_device().as_str().into(),
+        ts,
+    };
+    let action = driver.signed_at(request, &intent);
+    let replay = action.clone();
+    let committed = driver.session.submit(action).unwrap();
+    let after_first = station.frontier();
+    let replayed = driver.session.submit(replay).unwrap();
+    assert_eq!(replayed, committed);
+    assert_eq!(station.frontier(), after_first);
+
+    let effect = contract::IssueEffect::from_json(&committed.effect).unwrap();
+    assert_eq!(effect.doc.as_deref(), Some(doc.as_str()));
+    assert_eq!(effect.run.as_deref(), Some(run_text.as_str()));
+    let run_body = replica::body::BodyKey::new(
+        contract::world_id(),
+        replica::body::BodyId::from_bytes(run.as_bytes()),
+    );
+    assert!(committed.bodies.contains(&run_body));
+
+    let view: IssueView = driver.query(&IssueQuery::View { doc, me: None });
+    assert_eq!(view.checks.len(), 1);
+    let check = &view.checks[0];
+    assert_eq!(check.run, run_text);
+    assert_eq!(check.spec, contract::VERIFY_SPEC);
+    assert_eq!(check.version, contract::VERIFY_SPEC_VERSION);
+    assert_eq!(check.build, build);
+    assert_eq!(check.source, source);
+    assert_eq!(check.state, "started");
+
+    let state = driver
+        .session
+        .work(
+            runtime::exec::WorkRequest::Inspect {
+                world: contract::world_id(),
+                run,
+            },
+            [0x56; 16],
+        )
+        .unwrap();
+    let runtime::exec::WorkReply::State(state) = state else {
+        panic!("inspect must return the started verification Run");
+    };
+    assert_eq!(state.run, run);
+    assert_eq!(state.event_count, 1);
+    assert!(state.unresolved);
+    assert!(state.attempts.is_empty());
 }
 
 #[test]
@@ -487,7 +598,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         doc: doc.clone(),
         me: Some(my_actor().as_str().to_string()),
     });
-    assert_eq!(view.schema_version, 4);
+    assert_eq!(view.schema_version, 5);
     assert_eq!(view.title, "First issue");
     assert_eq!(view.description, "the description");
     assert_eq!(view.status, "backlog");
@@ -537,7 +648,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         project: project.clone(),
         me: None,
     });
-    assert_eq!(board.schema_version, 4);
+    assert_eq!(board.schema_version, 5);
     assert_eq!(board.columns.len(), 4);
     let backlog = &board.columns[0];
     assert_eq!(backlog.state.id, "backlog");
@@ -963,6 +1074,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(ta, STATION_A_SEED)),
             observation_capacity: 0,
@@ -977,6 +1089,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb, STATION_B_SEED)),
             observation_capacity: 0,

@@ -247,6 +247,195 @@ identities and historical authorization. An actor id inside unsigned application
 content is not cryptographic proof of authorship; signed Body transactions and
 receipts provide the attribution boundary.
 
+## Exec execution boundary
+
+Exec adds a durable request boundary; it does not make remote code, scheduling
+claims, or resource claims trustworthy.
+
+- Every `Start`, `Try`, lifecycle control, Offer publication, Build publication,
+  and `Accept`/`Reject` transition evaluates its own non-empty demand at the
+  authority frontier the command references. Authority held now is not
+  substituted for authority at that frontier, and a product mutation cannot lend
+  its demand to an Exec command in the same transaction.
+- A World may stage `Start` only through its ordinary `Effect::exec` result.
+  Runtime validates the World mutation and Start coordinates separately, forms
+  a canonical deduplicated `All` of their demands, and signs one transaction
+  containing both the World operations and the protected `Started` Run event.
+  No handler, reservation, message, or external effect is reachable before that
+  commit succeeds. An invalid command, coordinate collision, operation-limit
+  overflow, authorization refusal, or persistence failure leaves neither half
+  visible; a Start necessarily contributes Body operations and cannot enter the
+  Replica's receipt-only path.
+- A Build identifies canonical reviewed material, not what a Station actually
+  loaded. Build artifacts, dependencies, configuration, checkpoints, inputs,
+  and outputs are content-addressed and hash-verified before use. Build identity
+  is not attestation, readiness evidence is not intent, and a resource
+  reservation is not isolation.
+- The application package, rather than Astrolabe or a Session shortcut, binds
+  local handler code. Composition requires its Specs to equal the reviewed
+  World descriptor and rejects Builds or handler bindings that name another
+  World implementation, executable artifact, Spec, Role, or Link. This proves
+  local configuration consistency; it does not prove publication authority or
+  sandbox the trusted in-process backend.
+- Application controls reach generic lifecycle state through the typed Work
+  capability. Runtime owns `WorkRequest`, `WorkReply`, authorization, and Run
+  projection; the package owns words such as Issues `continue` and `stop`.
+  There is no Work `Start`: new work remains a signed semantic World action so
+  the issue mutation and protected `Started` event can commit atomically. The
+  root adapter transports the exact Runtime types and invokes the same
+  `lower_exec` validator rather than implementing a second lifecycle path.
+- Work projections expose World/Run/Attempt/Event/Build/Spec ids and lifecycle
+  facts only. They omit inputs, outputs, digests, evidence, resources, and World
+  Bodies. Inspect and watch are read-classified; cancel and later transitions
+  retain the delegated-agent partial-view guard. Watch is a causal-head
+  comparison, not a promise of a live stream. Continue and resume may derive a
+  new fenced Attempt only from a completed Attempt's committed scheduling
+  evidence in the same Station activation; service-backed work requires a new
+  Role lease. Resume also requires a committed checkpoint and a matching Spec
+  contract. A Started-only Run fails explicitly until a scheduler publishes its
+  first Offer; the host never reconstructs or guesses coordinates from product
+  state.
+- The Issues reference adopter makes that split concrete. `issues_verify`
+  carries a committed source ContentRef and caller-supplied BuildId through a
+  semantic issue action. Issues writes its check record only in the transaction
+  that writes Runtime's `Started` event, and rejects a Run link that differs
+  from the request-derived coordinate. Build publication and publisher
+  attestation are still required before a dispatcher may execute that Run; the
+  reference adopter does not treat an arbitrary 32-byte BuildId as trusted
+  executable material. `issues_accept_check` similarly accepts only typed
+  Outcome facts from the pinned snapshot and makes the report, verdict,
+  workflow transition, history, and protected `Accepted` event one commit.
+- Handler code receives a bounded `exec::Context`, never a Session, Replica,
+  unrestricted filesystem, process environment, transport, clock, random
+  source, device key, or secret store. Product mutation remains behind the
+  World's deterministic callback. External effects must declare whether they
+  are pure, idempotent, or at-least-once; Exec does not claim exactly once.
+- A hosted World may inspect one returned candidate only through
+  `Context::outcome(RunId, AttemptId)`. Runtime decodes the protected Run at the
+  same pinned snapshot as the callback's ordinary reads, binds the lookup to the
+  ambient World, and returns schema, digest, geometry, content references, and
+  terminal facts rather than raw protected Body bytes or output bytes. Missing,
+  malformed, cross-World, or multiply-returned truth fails closed.
+- `Returned` is evidence, not product acceptance. Accept/Reject lowering
+  revalidates the exact Run, Attempt, Spec, Build, output contract, and causal
+  lease-to-`Began`-to-checkpoint-to-`Returned` chain at the pinned snapshot. It
+  refuses failed or cancelled Attempts and stages at most one terminal choice;
+  the choice's demand and ordinary product demand authorize one transaction so
+  product state cannot commit without its protected acceptance event, or vice
+  versa. Current lifecycle facts have no trustworthy elapsed-time coordinate,
+  so this layer does not pretend that `wall_millis` is a verifiable deadline.
+- `Cancel` records `CancelAsked` and makes no claim that handler work stopped.
+  Every admitted retry is a new visible Attempt id derived from its persistent
+  command coordinates; command batches account for already-staged Attempts and
+  cannot spend the same remaining Attempt allowance twice.
+- The first trusted in-process backend explicitly reports resource enforcement
+  as advisory. It validates selected coordinates and candidate output and
+  contains a Rust unwind, but shares the host process and therefore claims no
+  memory, CPU, filesystem, network, or kernel isolation. Later measured,
+  process, container, or externally attested backends must state that stronger
+  enforcement without changing the durable Run model.
+- Counts and byte sizes for commands, Builds, Links, inputs, outputs,
+  checkpoints, events, resources, and child Runs are checked before allocation.
+  Per-peer, Space, World, Spec, and Run ceilings compose; satisfying one does
+  not bypass another. Class and rank never bypass admission, quotas, or fair
+  share.
+- Run, Build, and Service truth uses the Runtime-reserved schema ids
+  `lait.exec.run`, `lait.exec.build`, and `lait.exec.service`. Registry
+  composition rejects a World package that declares any of them at any version,
+  Replica recognizes Runtime's exact version-1 schemas under every hosted
+  World, and the raw World snapshot reader hides their Bodies. Later typed
+  Outcome access is the sanctioned, independently authorized read boundary.
+- `Started` binds the complete persistent-idempotency scope through the derived
+  Run id, and binds the active implementation, historical authority frontier,
+  parent Manifest, selected Spec and Build, invoker, input/query commitments,
+  resources, limits, and the digest and chunk geometry of the retained canonical
+  Start command. Dispatch must reconstruct and verify those protected chunks;
+  the event alone is not executable material.
+- Every later Run event binds one exact Run and, where applicable, one exact
+  Attempt. Its immediate predecessor ids are bounded, sorted, duplicate-free,
+  present in the same Run history, and reachable from the single `Started`
+  root. Event-set projection computes causal heads without list-order or LWW
+  selection, so competing Attempts and concurrent acceptance choices remain
+  visible until an authorized event explicitly joins every conflicting head.
+- `Returned` is a Station claim containing the output schema and digest,
+  content geometry, terminal class, accounting quantities, and immutable
+  evidence. It is not completion: only a distinct authorized `Accepted` event
+  chooses an Attempt. `CancelAsked` likewise records only a committed request;
+  it does not assert that a partitioned executor stopped.
+- A Run's instantiated Find Grants are the intersection of the Spec maximum,
+  the invoker's authority, Station policy, and remaining Attempt budget. An
+  Attempt cannot widen that intersection, ask for latest mutable state, or lend
+  ambient query authority to a child Run.
+- Offers are private, bounded, signed, and advisory. They reveal only the exact
+  capabilities the protocol permits and confer no reservation or ownership. A
+  lying or stalled Station cannot prevent another authorized Attempt.
+- Remote incorporation is inert: adopting `Started`, `Began`, or any other Run
+  event never launches a handler. Dispatch is a local act after the complete
+  committed root becomes active. The unresolved-Run scan accepts only an
+  immutable committed Replica generation and has no executor or callback seam;
+  before returning local control candidates it validates the exact protected
+  binding, event DAG, Body/Run identity, complete ordered command chunks,
+  canonical Start digest, and duplicated coordinates. Corrupt or partial truth
+  fails the scan rather than being skipped.
+- The local dispatcher does not accept a caller-built Run or Attempt. It
+  re-projects their exact ids from the immutable committed Replica generation
+  for both discovery and invocation, then requires the Attempt's committed
+  `Began` event to follow its selected lease and refuses terminal Attempts.
+  Therefore a pre-commit candidate, a `Started`-only root, or an uncommitted
+  lifecycle extension cannot enter even the trusted in-process backend.
+- Logs, metrics, refusals, and generic DTOs redact payloads, prompts, secrets,
+  local paths, private Offer material, and protected content. Generic surfaces
+  expose identifiers and lifecycle state without decoding World payloads.
+
+Residual risks remain explicit. A malicious authorized handler can consume the
+resources its backend fails to enforce, lie in an Outcome, duplicate declared
+external effects, or continue briefly after `CancelAsked`. Acceptance records
+an authorized decision about that evidence; it is not proof the computation was
+honest, isolated, unique, or physically stopped.
+
+## Find read boundary
+
+Find Grants are ceilings over reviewed World vocabulary, not authority and not
+named product calls. A Grant contains no principal, Space, World, root,
+frontier, backend, product verb, or mutation handle. Before its bytes are
+trusted or digested, Runtime checks the standalone size and version,
+decode/re-encode equality, sorted duplicate-free reference sets, known operator
+and mode bits, finite non-sentinel work ceilings, and that every named reference
+belongs to a granted Schema. A child or instantiated Grant must prove set,
+operator, mode, and work-budget containment in its parent; composition can only
+narrow.
+
+The F0 Query decoder applies the same standalone size, version, canonical-byte,
+and trailing-byte rules before accepting a typed DAG. It also proves canonical
+topological identity and input order, acyclicity, reachability, stable final
+output type, operator composition, declared-Schema reference containment, finite per-Step and whole
+Query ceilings, exact-versus-augmented feature use, and containment in a Grant.
+
+`Session::find` now derives a fresh principal, its authority frontier, the
+active World implementation, and local Station policy without accepting any of
+them from its caller. It pins either the requested retained Manifest root or the
+current read snapshot while holding the Station writer, releases that writer,
+and enters one Runtime-owned Find path. Revocation, inactive implementation,
+invalid or missing generation, and Station-policy exhaustion are typed
+admission failures. A generic Find never enters `World::submit` or
+`World::query`, and World callbacks receive no Find or Session facade.
+
+A World that declares Find commits that vocabulary under descriptor section tag
+`0x0003`. Empty declarations emit no section, while every source, semantic
+Field, Edge/Gate demand, analyzer configuration, feature stamp, operator/mode
+set, and Bound is implementation-identity material. Registry composition
+requires every declared Body source to exist and to have exactly one extractor
+coordinate; missing, extra, duplicated, or cross-wired bindings reject before a
+Station can host the package. F0 binds coordinates only and introduces no
+product-selected backend or executable evaluator.
+
+This is still not a query evaluator. F0 returns `Unavailable` after successful
+admission rather than claiming an empty complete result. Candidate-production
+authority filtering, Grant intersection, feature coverage, cursor binding,
+measured work, and Answer honesty remain mandatory before that terminal can be
+replaced by evaluation. No raw Grant or Query decoder is a client surface, and
+possession of canonical bytes grants no read.
+
 ## Peer-authored names on local paths
 
 Product data authored by a peer is not a path. An attachment's display name is

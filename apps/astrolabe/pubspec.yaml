@@ -18,13 +18,19 @@ dependencies:
   covalence:
     path: ../../../covalence
 
+  # The lighting system: widgets derive gradients and sheen from a scene of
+  # lights instead of hand-tuned stops. Proprietary (scrapsignal); a local
+  # checkout like covalence, so fixes land here first and push upstream.
+  lit_ui:
+    path: ../../../lit-ui
+
   # The bridge. Pinned to the exact version the Rust side carries — a bridge
   # whose halves disagree is the defect the checked-in codegen exists to catch,
   # and a floating constraint would let it drift between them.
   flutter_rust_bridge: 2.12.0
 
   # Undecorated window plus the caption this client draws itself.
-  window_manager: ^0.4.3
+  window_manager: ^0.5.2
   # Closing minimises rather than stopping a peer, so there has to be somewhere
   # to minimise to.
   tray_manager: ^0.3.2
@@ -44,4 +50,7 @@ dev_dependencies:
   build_runner: ^2.15.1
 
 flutter:
-  uses-material-design: false
+  # True for the MaterialIcons font lit_ui's debug workbench draws its panel
+  # with. The app's own icons stay covalence's; release builds tree-shake the
+  # font down to the glyphs actually drawn, which outside debug is none.
+  uses-material-design: true

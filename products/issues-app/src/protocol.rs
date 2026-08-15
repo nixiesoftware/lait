@@ -237,6 +237,22 @@ pub enum IssuesRequest {
     IssueStop {
         reff: String,
     },
+    /// Start the Issues-owned verification of one pinned repository source.
+    Verify {
+        reff: String,
+        source: String,
+        build: String,
+    },
+    /// Accept one returned verification report into issue truth.
+    AcceptCheck {
+        reff: String,
+        run: String,
+        attempt: String,
+        report: String,
+        verdict: String,
+        #[serde(default)]
+        move_to_done: bool,
+    },
     IssueView {
         reff: String,
     },
@@ -619,6 +635,10 @@ pub enum IssuesResponse {
     Ref {
         reff: String,
     },
+    Check {
+        reff: String,
+        run: String,
+    },
     Issue(Box<issues::dto::IssueView>),
     List {
         rows: Vec<issues::dto::Row>,
@@ -730,6 +750,7 @@ pub enum IssuesResponse {
 pub enum IssuesErrorKind {
     #[default]
     Error,
+    Invalid,
     NotFound,
     Denied,
     Retry,
@@ -745,9 +766,9 @@ impl IssuesErrorKind {
     /// throws that message away and leaves the caller nothing to do.
     pub const fn failure(self) -> world_interface::Failure {
         match self {
-            Self::NotFound => world_interface::Failure::Invalid,
-            Self::Denied => world_interface::Failure::Refusal,
-            Self::Error | Self::Retry => world_interface::Failure::Operation,
+            Self::Invalid | Self::NotFound => world_interface::Failure::invalid(),
+            Self::Denied => world_interface::Failure::refusal(),
+            Self::Error | Self::Retry => world_interface::Failure::operation(),
         }
     }
 }
@@ -760,6 +781,7 @@ impl IssuesErrorKind {
 /// answer, and nearly every answer is fine.
 pub fn classify_failure(value: &Value) -> Option<(world_interface::Failure, String)> {
     let kind = match value.get("error_kind").and_then(Value::as_str)? {
+        "invalid" => IssuesErrorKind::Invalid,
         "not_found" => IssuesErrorKind::NotFound,
         "denied" => IssuesErrorKind::Denied,
         "retry" => IssuesErrorKind::Retry,
@@ -860,6 +882,8 @@ impl IssuesRequest {
             | IssueStart { .. }
             | IssueDone { .. }
             | IssueStop { .. }
+            | Verify { .. }
+            | AcceptCheck { .. }
             | ProjectNew { .. }
             | ProjectEdit { .. }
             | ProjectDelete { .. }

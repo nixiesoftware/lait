@@ -256,6 +256,7 @@ mod behaviour {
             let body = self.body(key);
             Ok(Effect {
                 content_refs: Vec::new(),
+                exec: Vec::new(),
                 demand: demand(),
                 operations: vec![(
                     body.clone(),
@@ -311,6 +312,7 @@ mod behaviour {
         Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: None,
             observation_capacity: 0,

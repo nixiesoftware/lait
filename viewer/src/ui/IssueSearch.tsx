@@ -4,7 +4,7 @@ import { AlertTriangle, Clock3, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { rpc } from "../api";
-import { cmdkFilter } from "../core/fuzzy";
+import { searchIssueRows } from "../core/issueSearch";
 import { loadRecentIssues, loadRecentSearches, rememberRecentIssue, rememberRecentSearch } from "../core/personalNav";
 import { indexBy } from "../core/performance";
 import type { ProjectDto, Row, WorkflowState } from "../types";
@@ -85,21 +85,7 @@ export function IssueSearch({
   }, [spaceId, available]);
   const recentSearches = useMemo(() => loadRecentSearches(spaceId), [spaceId]);
   const results = useMemo(() => {
-    const text = query.trim();
-    if (!text) return available;
-    return available
-      .map((row) => ({
-        row,
-        score: cmdkFilter(row.key_alias ?? row.reff, text, [
-          row.title,
-          row.reff,
-          row.project_id,
-          row.status,
-        ]),
-      }))
-      .filter(({ score }) => score > 0)
-      .sort((a, b) => b.score - a.score)
-      .map(({ row }) => row);
+    return searchIssueRows(available, query);
   }, [available, query]);
   const projectById = useMemo(
     () => indexBy(projects, (project) => project.id),

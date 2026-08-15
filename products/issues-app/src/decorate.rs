@@ -182,6 +182,13 @@ mod tests {
             Box::pin(async { Err(Failure::refusal()) })
         }
 
+        fn call_work<'a>(
+            &'a self,
+            _request: runtime::exec::WorkRequest,
+        ) -> ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
         fn call_content<'a>(&'a self, _request: HostContentRequest) -> ClientFuture<'a, Value> {
             Box::pin(async { Err(Failure::refusal()) })
         }

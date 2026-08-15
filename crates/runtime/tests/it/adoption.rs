@@ -173,6 +173,7 @@ impl World for KvWorld {
         let body = self.body(key);
         Ok(Effect {
             content_refs: Vec::new(),
+            exec: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 body.clone(),

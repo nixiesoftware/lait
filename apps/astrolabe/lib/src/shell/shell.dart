@@ -16,6 +16,7 @@ import 'package:flutter/widgets.dart';
 import '../core/client.dart';
 import '../surfaces/surfaces.dart';
 import 'host.dart';
+import 'lighting.dart';
 import 'record.dart';
 import 'type.dart';
 import 'window.dart';
@@ -49,7 +50,11 @@ class _AstrolabeShellState extends State<AstrolabeShell> {
 
   @override
   Widget build(BuildContext context) {
-    return Shortcuts(
+    // The lighting workbench wraps the whole window: its scene is the one
+    // every lit surface reads, and in debug builds its panel floats over
+    // the corner so the rules can be tuned against the real controls.
+    return LightingWorkbench(
+        child: Shortcuts(
       shortcuts: <ShortcutActivator, Intent>{
         for (final (index, surface) in Surface.values.indexed)
           SingleActivator(_digits[index], control: true): _ShowSurface(surface),
@@ -99,7 +104,7 @@ class _AstrolabeShellState extends State<AstrolabeShell> {
           ),
         ),
       ),
-    );
+    ));
   }
 }
 

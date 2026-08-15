@@ -13,6 +13,10 @@ pub struct LibraryEntry {
     pub orbit: String,
     pub space: String,
     pub world_mount: String,
+    /// The World's id — the key Live-plane scopes name, so presence in a
+    /// World can be joined to its row. Empty for the Space front row, which
+    /// stands for whatever the Space serves rather than one World.
+    pub world: String,
     /// What to call this row. `None` means nothing authoritative names it —
     /// drawn as unnamed rather than as a path or an id dressed up as a name.
     pub display_name: Option<String>,
@@ -242,6 +246,7 @@ impl Client {
                     orbit: orbit.space.clone(),
                     space: orbit.space.clone(),
                     world_mount: String::new(),
+                    world: String::new(),
                     display_name: (!orbit.name.trim().is_empty()).then(|| orbit.name.clone()),
                     opens: Opens::Front,
                     template: Template {
@@ -264,6 +269,7 @@ impl Client {
                     // Orbit serves something this program cannot open, and
                     // saying so beats pretending it is not there.
                     world_mount: package.map_or_else(|| world.clone(), |p| p.mount().to_owned()),
+                    world: world.clone(),
                     display_name: package
                         .map(|p| p.display().name().to_owned())
                         .or_else(|| (!orbit.name.trim().is_empty()).then(|| orbit.name.clone())),
@@ -351,6 +357,7 @@ mod tests {
             orbit: "orb_one".into(),
             space: "ws_one".into(),
             world_mount: "issues".into(),
+            world: String::new(),
             display_name: None,
             opens: Opens::Undeclared,
             template: Template::default(),

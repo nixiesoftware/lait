@@ -4,9 +4,6 @@
 /// Facts come from [ClientView.book]. Dispatch is the only write.
 library;
 
-import 'dart:convert' show base64Decode;
-import 'dart:typed_data' show Uint8List;
-
 import 'package:covalence/covalence.dart' hide Image, Surface;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
@@ -16,7 +13,9 @@ import '../core/client.dart';
 import '../surfaces/page.dart';
 import '../surfaces/surfaces.dart' show pageMargin;
 import 'caption.dart' show kCaptionWidth;
+import 'face.dart';
 import 'host.dart';
+import 'person.dart';
 import 'theme.dart';
 import 'type.dart';
 import 'window.dart';
@@ -401,7 +400,7 @@ class _CanonicalCard extends StatelessWidget {
     final name = card == null ? 'No My Card.' : card.name;
     final status = card == null
         ? 'Claim one — nothing is implied from a name or a handle.'
-        : _presenceLabel(card.presence) ?? (hostAnswered ? 'Online' : null);
+        : presenceLabel(card.presence) ?? (hostAnswered ? 'Online' : null);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onDoubleTap: onOpen,
@@ -418,7 +417,7 @@ class _CanonicalCard extends StatelessWidget {
     final t = context.tokens;
     return Row(
       children: [
-        _FacePlate(
+        FacePlate(
           picture: card?.picture,
           name: card?.name ?? '',
           size: 56,
@@ -459,15 +458,6 @@ class _CanonicalCard extends StatelessWidget {
   }
 }
 
-/// Wording for a measured presence, and nothing for an absence: an
-/// unmeasured presence has no words because it is not a fact about the peer.
-String? _presenceLabel(PresenceView? presence) => switch (presence) {
-      PresenceView.online => 'Online',
-      PresenceView.away => 'Away',
-      PresenceView.offline => 'Offline',
-      null => null,
-    };
-
 /// The marking a list section wears — the reference client's "In Game" /
 /// "Online Friends (7)" shape: a quiet sentence-case label with the count
 /// dimmer beside it. The list is parted by presence alone: Contacts (present
@@ -499,18 +489,10 @@ class _SectionHead extends StatelessWidget {
   }
 }
 
-/// A person in the list: the face, the name, and a second line that is only
-/// ever a fact — measured presence when a Space that names them answered,
-/// else the authored note, else nothing. A flat row, not a boxed card, like
-/// the reference client's friends panel. Everything a card carries — its
-/// handles and every action on it — lives on the profile page, and
-/// double-clicking the row opens it in this window.
-///
-/// Liveness reads through weight: an offline row is greyed hardest, an away
-/// row a little, everyone else drawn at full strength. An agent's card wears
-/// the shipped AI glyph beside its name instead of a section of its own —
-/// what an identity is and whether it is here are different axes, and the
-/// list is parted only by the second.
+/// A person in the list — the canonical [PersonTile], with the book's own
+/// affordances composed around it. Everything a card carries — its handles
+/// and every action on it — lives on the profile page, and double-clicking
+/// the row opens it in this window.
 class _PersonRow extends StatelessWidget {
   const _PersonRow({required this.card, required this.onOpen});
 
@@ -519,79 +501,23 @@ class _PersonRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = context.tokens;
-    final status = _presenceLabel(card.presence) ??
-        (card.note.isNotEmpty ? card.note : null);
-    final offline = card.presence == PresenceView.offline;
-    final away = card.presence == PresenceView.away;
     return Semantics(
       button: true,
       label: 'Open the profile of ${card.name}',
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onDoubleTap: onOpen,
-        child: Row(
-          children: [
-            Opacity(
-              // The face carries the grey-out: measured absence dims it
-              // hardest, away part-way. Text keeps full opacity and dims
-              // through color instead, so it never drops below legibility.
-              opacity: offline ? 0.45 : (away ? 0.7 : 1.0),
-              child: _FacePlate(
-                picture: card.picture,
-                name: card.name,
-                size: 40,
-              ),
-            ),
-            t.gap.x(Space.md),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          card.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: offline
-                              ? context.headingStyle.copyWith(
-                                  color: context.text.l700,
-                                )
-                              : context.headingStyle,
-                        ),
-                      ),
-                      if (_agentCard(card)) ...[
-                        t.gap.x(Space.xs),
-                        // The shipped AI lettermark, bare: this identity IS
-                        // an AI, which is not the explainability affordance
-                        // the interactive AiLabel carries for AI-filled
-                        // values.
-                        const AiMark(),
-                      ],
-                    ],
-                  ),
-                  if (status != null) ...[
-                    t.gap.y(Space.xxs),
-                    Text(
-                      status,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: card.presence == PresenceView.online
-                          ? context.labelStyle.copyWith(
-                              color: context.status.success.l800,
-                            )
-                          : context.labelStyle,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            if (card.selfClaim)
-              const Badge(label: 'My Card', variant: BadgeVariant.solid),
-          ],
+        // The canonical tile draws the person; this row only composes the
+        // book's own affordances around it — the gesture and the claim.
+        child: PersonTile(
+          name: card.name,
+          picture: card.picture,
+          presence: card.presence,
+          agent: _agentCard(card),
+          note: card.note,
+          trailing: card.selfClaim
+              ? const Badge(label: 'My Card', variant: BadgeVariant.solid)
+              : null,
         ),
       ),
     );
@@ -636,7 +562,7 @@ class _ProfilePage extends StatelessWidget {
         t.gap.y(Space.lg),
         Row(
           children: [
-            _FacePlate(picture: card.picture, name: card.name, size: 56),
+            FacePlate(picture: card.picture, name: card.name, size: 56),
             t.gap.x(Space.lg),
             Expanded(
               child: Column(
@@ -766,74 +692,12 @@ class _ProfilePage extends StatelessWidget {
   }
 }
 
-/// The face on a card: the stored picture when one was authored, else the
-/// default — a monogram, or the person mark when there is nothing to
-/// monogram. Boxed like the reference client's plates.
-class _FacePlate extends StatelessWidget {
-  const _FacePlate({
-    required this.picture,
-    required this.name,
-    required this.size,
-  });
-
-  final String? picture;
-  final String name;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final bytes = _pictureBytes(picture);
-    return t.box.square(
-      // reason: the face copies the reference client's plate — pinned like
-      // the caption controls, it sits against type rather than the spacing
-      // rhythm.
-      TokenEscape.rawSize(size),
-      child: DecoratedBox(
-        // The stroke is painted in the FOREGROUND: painted behind, a
-        // cover-fit picture simply hides it, and only the default face
-        // appeared to have a border. Every plate wears the same one.
-        position: DecorationPosition.foreground,
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: context.border.l500,
-            width: t.stroke.xxs,
-          ),
-          borderRadius: t.radius.all(Space.xxs),
-        ),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: context.surface.l200,
-            borderRadius: t.radius.all(Space.xxs),
-          ),
-          child: bytes != null
-              ? ClipRRect(
-                  borderRadius: t.radius.all(Space.xxs),
-                  child: Image.memory(
-                    bytes,
-                    fit: BoxFit.cover,
-                    gaplessPlayback: true,
-                  ),
-                )
-              : Center(
-                  child: name.isEmpty
-                      ? Icon(AppIcons.person, color: context.text.l700)
-                      : Text(
-                          name.substring(0, 1).toUpperCase(),
-                          style: context.headingStyle,
-                        ),
-                ),
-        ),
-      ),
-    );
-  }
-}
-
 /// The canonical group the daemon files an agent's card under — part of the
-/// book's wire vocabulary, not a display string. Provisioning stamps it, and
-/// the roster decoration heals older books, because an agent's card carries
-/// an ordinary `actor:` address: at the identity layer agents are members,
-/// so the handles alone cannot part them from people.
+/// book's wire vocabulary (`lait::control::AGENT_GROUP`), not a display
+/// string. Provisioning stamps it, and the roster decoration heals older
+/// books, because an agent's card carries an ordinary `actor:` address: at
+/// the identity layer agents are members, so the handles alone cannot part
+/// them from people.
 const String _agentGroup = 'Agents';
 
 /// An agent's own card: filed under the agent group, or carrying nothing but
@@ -845,20 +709,6 @@ const String _agentGroup = 'Agents';
 bool _agentCard(CardRow card) =>
     card.groups.contains(_agentGroup) ||
     (card.agents.isNotEmpty && card.addresses.isEmpty && card.devices.isEmpty);
-
-/// Decode the stored `<mime>;base64,<data>` form. The engine validated it at
-/// write, so a miss here is a corrupt store answered with the default face —
-/// never a crash in a list row.
-Uint8List? _pictureBytes(String? stored) {
-  if (stored == null) return null;
-  final split = stored.indexOf(';base64,');
-  if (split < 0) return null;
-  try {
-    return base64Decode(stored.substring(split + 8));
-  } catch (_) {
-    return null;
-  }
-}
 
 /// One phone-book section: a label and its rows, each unlinkable. Absent
 /// kinds draw nothing — a card with no devices has no DEVICES heading.

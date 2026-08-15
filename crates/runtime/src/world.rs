@@ -410,6 +410,16 @@ pub struct Descriptor {
     pub scope_schemas: Vec<ScopeSchema>,
     /// Declared World signals, under the same rule.
     pub signal_schemas: Vec<SignalSchema>,
+    /// World-owned Find vocabularies. Empty preserves the implementation id
+    /// that shipped before Find existed.
+    pub find_schemas: Vec<crate::find::Schema>,
+    /// Exact package bindings for the declared Body sources. These coordinates
+    /// are checked one-to-one at composition; F0 does not invoke them.
+    pub find_extractors: Vec<crate::find::Extractor>,
+    /// Callable Exec contracts. Empty omits the Exec descriptor section and
+    /// preserves the implementation identity of Worlds that do not adopt it.
+    #[serde(default)]
+    pub exec_specs: Vec<crate::exec::Spec>,
 }
 
 /// A decoded, authorized-by-Runtime application intent handed to a World. The
@@ -441,6 +451,34 @@ pub struct BodyDeclaration {
     pub schema_version: u32,
 }
 
+mod serde_exec_commands {
+    use super::*;
+
+    pub fn serialize<S>(commands: &[crate::exec::Cmd], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let canonical = commands
+            .iter()
+            .map(crate::exec::Cmd::encode)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::ser::Error::custom)?;
+        canonical.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<crate::exec::Cmd>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Vec::<Vec<u8>>::deserialize(deserializer)?
+            .into_iter()
+            .map(|bytes| {
+                crate::exec::Cmd::decode_canonical(&bytes).map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+}
+
 /// The result a World returns from `submit`: the staged Body operations, the
 /// Observation Bodies they touch, an opaque application effect payload, and the
 /// **canonical non-empty authorization demand** the mutation requires. There
@@ -461,6 +499,13 @@ pub struct Effect {
     /// Absent means unchanged. An empty vector means "this Body references
     /// nothing", which is how content is released.
     pub content_refs: Vec<(BodyKey, Vec<replica::content::ContentRef>)>,
+    /// Durable work commands staged by the World for Runtime to contain and
+    /// lower beside the Body operations in this same transaction.
+    ///
+    /// The World declares work here; it never executes it. Runtime owns every
+    /// command's authorization, canonical event lowering, and dispatch.
+    #[serde(with = "serde_exec_commands")]
+    pub exec: Vec<crate::exec::Cmd>,
     /// Body operations staged this transaction, each keyed to the Body it
     /// mutates.
     pub operations: Vec<(BodyKey, Op)>,
@@ -591,6 +636,28 @@ pub struct ContentStatus {
     pub resident_chunks: u32,
 }
 
+/// Runtime-decoded facts for one exactly-once returned Exec Outcome.
+///
+/// A World receives coordinates and immutable content identities, never the
+/// output bytes or a handle to Runtime-owned Bodies. `Context::outcome` returns
+/// this only when the named Run and Attempt exist in the callback's pinned
+/// snapshot and the Attempt has exactly one valid `Returned` fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeFacts {
+    pub run: crate::exec::RunId,
+    pub attempt: crate::exec::AttemptId,
+    pub spec: crate::exec::SchemaRef,
+    pub build: crate::exec::BuildId,
+    pub station: mechanics::station::Key,
+    pub terminal: crate::exec::TerminalClass,
+    pub output: crate::exec::SchemaRef,
+    pub output_digest: [u8; 32],
+    pub output_inline_bytes: u32,
+    pub output_content: Vec<replica::content::ContentRef>,
+    pub output_content_bytes: u64,
+    pub returned_exactly_once: bool,
+}
+
 impl ContentStatus {
     pub fn is_complete(&self) -> bool {
         self.resident_chunks == self.chunk_count
@@ -644,6 +711,19 @@ pub trait BodyReader {
     /// a `ContentRef` alone authorizes nothing.
     fn content_status(&self, content: &replica::content::ContentRef) -> Option<ContentStatus>;
 
+    /// Runtime-decoded Outcome facts from this exact committed snapshot.
+    ///
+    /// The default is deliberately unavailable for readers that do not carry
+    /// Runtime's protected projection capability.
+    fn outcome(
+        &self,
+        _world: &WorldId,
+        _run: crate::exec::RunId,
+        _attempt: crate::exec::AttemptId,
+    ) -> Option<OutcomeFacts> {
+        None
+    }
+
     /// An opaque per-Body VERSION STAMP: two reads returning the same stamp
     /// for a key are guaranteed byte-equivalent Bodies, so a World may reuse
     /// state it derived from the earlier read. `None` (the default) promises
@@ -662,6 +742,8 @@ pub trait BodyReader {
 pub struct Context<'a> {
     principal: &'a PrincipalFacts,
     reads: Option<&'a dyn BodyReader>,
+    outcome_world: Option<&'a WorldId>,
+    request: Option<crate::action::RequestId>,
     /// The committed Manifest root this callback is pinned to (the parent of a
     /// submitted transaction; the snapshot root of a query).
     manifest_root: [u8; 32],
@@ -674,6 +756,8 @@ impl<'a> Context<'a> {
         Self {
             principal,
             reads: None,
+            outcome_world: None,
+            request: None,
             manifest_root: [0u8; 32],
         }
     }
@@ -688,6 +772,47 @@ impl<'a> Context<'a> {
         Self {
             principal,
             reads: Some(reads),
+            outcome_world: None,
+            request: None,
+            manifest_root,
+        }
+    }
+
+    /// Construct the capability used by a hosted World callback. Outcome
+    /// access is bound to that World and cannot name another namespace.
+    pub(crate) fn with_world_reads(
+        principal: &'a PrincipalFacts,
+        reads: &'a dyn BodyReader,
+        manifest_root: [u8; 32],
+        world: &'a WorldId,
+    ) -> Self {
+        Self {
+            principal,
+            reads: Some(reads),
+            outcome_world: Some(world),
+            request: None,
+            manifest_root,
+        }
+    }
+
+    /// Construct the capability used by one hosted World submission.
+    ///
+    /// In addition to pinned reads and Outcome facts, a submission may derive
+    /// the stable Run id Runtime will assign to a staged command. This lets the
+    /// World bind its own target to that id in the same Effect without learning
+    /// or duplicating Runtime's derivation algorithm.
+    pub(crate) fn with_world_submission(
+        principal: &'a PrincipalFacts,
+        reads: &'a dyn BodyReader,
+        manifest_root: [u8; 32],
+        world: &'a WorldId,
+        request: crate::action::RequestId,
+    ) -> Self {
+        Self {
+            principal,
+            reads: Some(reads),
+            outcome_world: Some(world),
+            request: Some(request),
             manifest_root,
         }
     }
@@ -695,6 +820,21 @@ impl<'a> Context<'a> {
     /// The committed Manifest root this callback is pinned to.
     pub fn manifest_root(&self) -> [u8; 32] {
         self.manifest_root
+    }
+
+    /// The stable Run id Runtime will assign to `command` in this submission.
+    /// Queries and detached fixture contexts return `None` because they carry
+    /// no persistent request coordinate.
+    pub fn run_id(&self, command: u32) -> Option<crate::exec::RunId> {
+        let world = self.outcome_world?;
+        let request = self.request?;
+        Some(crate::exec::derive_run_id(
+            &self.principal.space,
+            world,
+            &self.principal.device,
+            request.as_bytes(),
+            command,
+        ))
     }
 
     /// Every interpreted Body of `world` bound to `schema` in the committed
@@ -716,8 +856,11 @@ impl<'a> Context<'a> {
         self.principal
     }
 
-    /// Read an atomic Body from the stable committed snapshot. Returns `None`
-    /// if the Body is absent or this context has no read access.
+    /// Read a World-owned atomic Body from the stable committed snapshot.
+    /// Returns `None` if the Body is absent, this context has no read access,
+    /// or its schema is Runtime-reserved. Runtime-owned Exec truth is exposed
+    /// only through typed, independently authorized facades such as the later
+    /// `Context::outcome`, never through raw Body decoding.
     pub fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>> {
         self.reads.and_then(|r| r.read_body(key))
     }
@@ -750,7 +893,22 @@ impl<'a> Context<'a> {
         self.reads.and_then(|r| r.content_status(content))
     }
 
-    /// Read a collaborative Body's view from the stable committed snapshot.
+    /// Read Runtime-decoded facts for one exactly-once returned Outcome from
+    /// the same committed snapshot as every other Context read.
+    pub fn outcome(
+        &self,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+    ) -> Option<OutcomeFacts> {
+        self.reads.and_then(|reads| {
+            self.outcome_world
+                .and_then(|world| reads.outcome(world, run, attempt))
+        })
+    }
+
+    /// Read a World-owned collaborative Body's view from the stable committed
+    /// snapshot. A Runtime-reserved Body is reported as unavailable here; its
+    /// typed facade is the only sanctioned read boundary.
     pub fn read_collaborative(
         &self,
         key: &BodyKey,
@@ -782,6 +940,9 @@ pub trait World: Send + Sync + 'static {
             limits: Limits::default(),
             scope_schemas: self.scope_schemas().to_vec(),
             signal_schemas: self.signal_schemas().to_vec(),
+            find_schemas: self.find_schemas().to_vec(),
+            find_extractors: self.find_extractors().to_vec(),
+            exec_specs: self.exec_specs().to_vec(),
         }
     }
 
@@ -807,6 +968,25 @@ pub trait World: Send + Sync + 'static {
         &[]
     }
 
+    /// The World-owned Find vocabularies this package declares.
+    fn find_schemas(&self) -> &[crate::find::Schema] {
+        &[]
+    }
+
+    /// Exact extractor coordinates implemented by this package.
+    ///
+    /// Runtime composition requires one binding for every declared source and
+    /// refuses missing, extra, duplicated, or cross-wired coordinates. The
+    /// executable callback arrives with the evaluator after F0.
+    fn find_extractors(&self) -> &[crate::find::Extractor] {
+        &[]
+    }
+
+    /// Callable Exec Specs implemented by this World package.
+    fn exec_specs(&self) -> &[crate::exec::Spec] {
+        &[]
+    }
+
     /// Decode, authorize, and stage Body operations for an application intent.
     fn submit(
         &self,
@@ -817,4 +997,29 @@ pub trait World: Send + Sync + 'static {
     /// Decode a query and derive a Projection from the stable snapshot.
     fn query(&self, ctx: &Context<'_>, query: Query)
         -> Result<Projection, crate::world::Rejection>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effect_serde_round_trips_exec_through_the_canonical_command_codec() {
+        let effect = Effect {
+            content_refs: Vec::new(),
+            exec: vec![crate::exec::Cmd::Cancel {
+                run: crate::exec::RunId::from_bytes([0x42; 16]),
+            }],
+            operations: Vec::new(),
+            bodies: Vec::new(),
+            effect: Vec::new(),
+            declarations: Vec::new(),
+            demand: vec![1],
+        };
+
+        let bytes = postcard::to_stdvec(&effect).unwrap();
+        let decoded: Effect = postcard::from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded, effect);
+    }
 }

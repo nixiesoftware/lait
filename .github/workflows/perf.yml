@@ -49,3 +49,38 @@ jobs:
           name: issues-reference-report
           path: target/perf/issues-reference-report.json
           if-no-files-found: error
+
+      # FIND-5's focused diagnostic is deliberately separate from the public-
+      # socket reference corpus above. It fixes the scales at 1k/10k/50k and
+      # records the structural work (Body parses/scans, edge visits, allocation
+      # traffic and returned bytes) that explains the end-to-end wall.
+      - name: Issues scan baseline (Rust, full corpus)
+        env:
+          LAIT_ISSUES_SCAN_FULL: "1"
+        run: |
+          mkdir -p target/perf
+          cargo test --release --locked -p lait-issues \
+            scan_baseline::current_issue_scan_work_is_measured_at_cold_and_warm_roots \
+            --lib -- --nocapture --exact 2>&1 | tee target/perf/issues-scan-rust-report.log
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+      - name: Install viewer dependencies
+        run: npm ci
+        working-directory: viewer
+      - name: Issues scan baseline (browser, full corpus)
+        env:
+          LAIT_ISSUES_SCAN_FULL: "1"
+          LAIT_BROWSER_SCAN_REPORT: ${{ github.workspace }}/target/perf/issues-scan-browser-report.json
+        run: npm test -- src/core/issueSearch.test.ts
+        working-directory: viewer
+      - name: Upload Issues scan diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issues-scan-reports
+          path: target/perf/issues-scan-*-report.*
+          if-no-files-found: warn

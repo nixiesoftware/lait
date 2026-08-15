@@ -55,6 +55,8 @@ pub fn is_read(req: &Request) -> bool {
         | Request::BookResolve { .. }
         | Request::BookMigrateStatus => true,
 
+        Request::Work { request, .. } if !request.is_command() => true,
+
         Request::AgentAdd { .. }
         | Request::AgentProvision { .. }
         | Request::MemberAdd { .. }
@@ -101,6 +103,9 @@ pub fn is_read(req: &Request) -> bool {
         | Request::AssignmentGrant { .. }
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
+        // Runtime owns this classification. Product heads independently
+        // classify their app vocabulary before it reaches the typed seam.
+        | Request::Work { .. }
         // …draining signals, which empties a queue somebody else is waiting to
         // act on — the signals are addressed to that identity, not to whoever
         // has its space open in a browser…
@@ -261,6 +266,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::AssignmentGrant { .. }
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
+        | Request::Work { .. }
         | Request::Subscribe { .. }
         | Request::Status
         // Orbit-routed, not host-routed, for the same reason `WorldsActive` is:
@@ -309,6 +315,23 @@ mod tests {
         assert!(is_read(&Request::Status));
         assert!(is_read(&Request::Members));
         assert!(is_read(&Request::AssignmentList { actor: None }));
+    }
+
+    #[test]
+    fn runtime_work_classifies_its_typed_operation_not_its_transport_envelope() {
+        let world = replica::body::WorldId::parse("com.example.work").unwrap();
+        let run = runtime::exec::RunId::from_bytes([0; 16]);
+        assert!(is_read(&Request::Work {
+            request: runtime::exec::WorkRequest::Inspect {
+                world: world.clone(),
+                run,
+            },
+            operation: String::new(),
+        }));
+        assert!(!is_read(&Request::Work {
+            request: runtime::exec::WorkRequest::Cancel { world, run },
+            operation: String::new(),
+        }));
     }
 
     /// Asking what a Space is storing reads one Space, so it takes the Space

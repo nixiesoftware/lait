@@ -303,6 +303,12 @@ pub struct WatchingTyping {
     pub field: String,
 }
 
+/// The one canonical group an agent's card is filed under. Part of the
+/// book's wire vocabulary: the daemon stamps it at provisioning and heals it
+/// from rosters, and clients that part or mark agents key on this name — a
+/// contract, not a display string.
+pub const AGENT_GROUP: &str = "Agents";
+
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -517,6 +523,16 @@ pub enum Request {
     /// from the active one should run this before writing.
     WorldActivate {
         world: String,
+    },
+    /// Product-neutral durable Exec lifecycle facility.
+    ///
+    /// The root control protocol transports Runtime's exact type and never
+    /// interprets product payloads or invents product verbs.
+    Work {
+        #[schemars(with = "serde_json::Value")]
+        request: runtime::exec::WorkRequest,
+        /// Host-minted 128-bit persistent idempotency coordinate (32 hex).
+        operation: String,
     },
     /// Which Worlds this Orbit has activated, with what a client needs to draw
     /// and open each one.
@@ -1239,6 +1255,7 @@ impl ContentReply {
 pub enum RequestOwner {
     Mechanics,
     Station,
+    Work,
     Observation,
     Lifecycle,
 }
@@ -1249,6 +1266,7 @@ impl RequestOwner {
         match self {
             RequestOwner::Mechanics => "mechanics",
             RequestOwner::Station => "station",
+            RequestOwner::Work => "work",
             RequestOwner::Observation => "observation",
             RequestOwner::Lifecycle => "lifecycle",
         }
@@ -1294,6 +1312,9 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::WorldsActive
         | Request::Id
         | Request::Whoami => Mechanics,
+
+        // ---- Work: Runtime-owned durable Run lifecycle ----
+        Request::Work { .. } => Work,
 
         // ---- Station: connect/neighbor/Contact ----
         // Live and Signals sit here for the same reason Who does: both read
@@ -1381,6 +1402,13 @@ pub fn representative_requests() -> Vec<Request> {
         },
         Request::AssignmentRevoke { grant_id: s() },
         Request::WorldActivate { world: s() },
+        Request::Work {
+            request: runtime::exec::WorkRequest::Inspect {
+                world: replica::body::WorldId::parse("com.example.work").unwrap(),
+                run: runtime::exec::RunId::from_bytes([0; 16]),
+            },
+            operation: s(),
+        },
         Request::MemberAdd {
             who: s(),
             admin: false,
@@ -1678,6 +1706,11 @@ pub enum Response {
     Assignments {
         rows: Vec<mechanics::assignment::AssignmentDto>,
     },
+    /// Runtime-owned lifecycle answer to [`Request::Work`]. Product packages
+    /// receive Runtime's exact type; no World payload crosses this route.
+    Work {
+        reply: runtime::exec::WorkReply,
+    },
     /// The membership audit log (reply to [`Request::MemberLog`]).
     MemberLog {
         entries: Vec<MemberLogEntry>,
@@ -1961,6 +1994,9 @@ pub enum HostReply {
 pub enum ErrorKind {
     #[default]
     Error,
+    /// The request reached the right capability but its arguments or current
+    /// lifecycle state do not admit the requested operation.
+    Invalid,
     NotFound,
     /// The caller's identity lacks the standing this action needs (write access,
     /// admin, sponsorship). A **typed** authorization failure so a client — the
@@ -1983,6 +2019,13 @@ impl Response {
         Response::Error {
             message: msg.into(),
             error_kind: ErrorKind::NotFound,
+        }
+    }
+    /// A caller-correctable validation or lifecycle refusal (exit `1`).
+    pub fn invalid(msg: impl Into<String>) -> Self {
+        Response::Error {
+            message: msg.into(),
+            error_kind: ErrorKind::Invalid,
         }
     }
     /// The caller lacks the standing this action requires — an authorization

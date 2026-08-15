@@ -160,14 +160,14 @@ mod tests {
         assert_eq!(
             classify_failure(&denied),
             Some((
-                world_interface::Failure::Refusal,
+                world_interface::Failure::refusal(),
                 "you need write standing".into()
             ))
         );
         let missing = serde_json::to_value(IssuesResponse::not_found("no such issue")).unwrap();
         assert_eq!(
             classify_failure(&missing).map(|(failure, _)| failure),
-            Some(world_interface::Failure::Invalid)
+            Some(world_interface::Failure::invalid())
         );
         let fine = serde_json::to_value(IssuesResponse::List { rows: Vec::new() }).unwrap();
         assert_eq!(classify_failure(&fine), None);

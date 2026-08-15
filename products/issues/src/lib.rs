@@ -31,7 +31,11 @@ pub mod ids;
 mod implementation;
 mod rank;
 pub mod roles;
+#[cfg(test)]
+mod scan_baseline;
 pub mod spec;
+#[cfg(test)]
+mod test_allocation;
 pub mod views;
 pub mod workflow;
 

@@ -98,6 +98,7 @@ fn options() -> Activation {
     Activation {
         planes: Default::default(),
         content: Default::default(),
+        find: Default::default(),
         drain_deadline: Duration::from_secs(5),
         comms: None,
         observation_capacity: 0,
@@ -138,6 +139,7 @@ fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> A
     Activation {
         planes: Default::default(),
         content: Default::default(),
+        find: Default::default(),
         drain_deadline: Duration::from_secs(5),
         comms: Some(runtime::plane::CommsOptions {
             transport,

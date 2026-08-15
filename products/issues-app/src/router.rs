@@ -361,9 +361,17 @@ impl<'a> IssueRouter<'a> {
     }
 
     fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, SessionFailure> {
+        self.submit_with_request(intent, RequestId::mint())
+    }
+
+    fn submit_with_request(
+        &self,
+        intent: &IssueIntent,
+        request: RequestId,
+    ) -> Result<contract::IssueEffect, SessionFailure> {
         let action = self.identity.sign_action(
             self.session,
-            RequestId::mint(),
+            request,
             Intent {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
@@ -374,6 +382,7 @@ impl<'a> IssueRouter<'a> {
         Ok(
             contract::IssueEffect::from_json(&committed.effect).unwrap_or(contract::IssueEffect {
                 doc: None,
+                run: None,
                 unchanged: false,
             }),
         )
@@ -640,6 +649,8 @@ impl<'a> IssueRouter<'a> {
                 | Request::IssueStart { .. }
                 | Request::IssueDone { .. }
                 | Request::IssueStop { .. }
+                | Request::Verify { .. }
+                | Request::AcceptCheck { .. }
                 | Request::IssueGraph { .. }
                 | Request::ProjectGraph { .. }
                 | Request::Geometry { .. }
@@ -1126,6 +1137,84 @@ impl<'a> IssueRouter<'a> {
             Request::IssueStart { reff } => self.work(&snapshot, reff, WorkAction::Start, facts),
             Request::IssueDone { reff } => self.work(&snapshot, reff, WorkAction::Done, facts),
             Request::IssueStop { reff } => self.work(&snapshot, reff, WorkAction::Stop, facts),
+            Request::Verify {
+                reff,
+                source,
+                build,
+            } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                let request = RequestId::mint();
+                let run = runtime::exec::derive_run_id(
+                    self.session.space_id(),
+                    self.session.world_id(),
+                    self.identity.device(),
+                    request.as_bytes(),
+                    0,
+                );
+                let run = data_encoding::HEXLOWER.encode(&run.as_bytes());
+                let effect = self
+                    .submit_with_request(
+                        &IssueIntent::Verify {
+                            doc: doc.clone(),
+                            run: run.clone(),
+                            source,
+                            build,
+                            actor: facts.actor.clone(),
+                            device: facts.device.clone(),
+                            ts: facts.now,
+                        },
+                        request,
+                    )
+                    .map_err(Self::effect_err)?;
+                if effect.run.as_deref() != Some(run.as_str()) {
+                    return Err(Response::err(
+                        "verification committed without its expected Run binding",
+                    ));
+                }
+                Ok((
+                    Response::Check {
+                        reff: self.reff_for(&snapshot, &doc),
+                        run,
+                    },
+                    true,
+                ))
+            }
+            Request::AcceptCheck {
+                reff,
+                run,
+                attempt,
+                report,
+                verdict,
+                move_to_done,
+            } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                let effect = self
+                    .submit(&IssueIntent::AcceptCheck {
+                        doc: doc.clone(),
+                        run: run.clone(),
+                        attempt,
+                        report,
+                        verdict,
+                        move_to_done,
+                        id: issues::ids::mint_attachment_id(self.clock),
+                        actor: facts.actor.clone(),
+                        device: facts.device.clone(),
+                        ts: facts.now,
+                    })
+                    .map_err(Self::effect_err)?;
+                if effect.run.as_deref() != Some(run.as_str()) {
+                    return Err(Response::err(
+                        "check acceptance committed without its expected Run binding",
+                    ));
+                }
+                Ok((
+                    Response::Check {
+                        reff: self.reff_for(&snapshot, &doc),
+                        run,
+                    },
+                    true,
+                ))
+            }
             Request::IssueView { reff } => {
                 let doc = self.resolve(&snapshot, &reff)?;
                 let view: IssueView = self

@@ -596,6 +596,12 @@ impl Listener {
                     | Request::Id
                     | Request::ConfigReload
                     | Request::Who
+                    // Live sits here for the same reason Who does: it reads
+                    // the Station's own transient table — who is doing what
+                    // right now — and neither journals nor replays anything.
+                    // A glance at who has a World open must never be the act
+                    // that places one.
+                    | Request::Live { .. }
                     | Request::Storage
                     | Request::WorldsActive
                     | Request::Diagnose { .. },

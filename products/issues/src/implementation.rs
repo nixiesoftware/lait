@@ -101,6 +101,7 @@ fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
 pub struct IssuesWorld {
     id: replica::body::WorldId,
     schemas: Vec<Schema>,
+    exec_specs: Vec<runtime::exec::Spec>,
     /// Owned rather than built on demand, because the trait hands back a slice
     /// and the registry compares it against the registration byte for byte —
     /// two constructions of "the same" list is how they come to differ.
@@ -292,6 +293,7 @@ impl IssuesWorld {
             id: contract::world_id(),
             cache: std::sync::Mutex::new(RootKeyedCache::default()),
             signal_schemas: contract::signal_schemas(),
+            exec_specs: vec![contract::verify_spec()],
             schemas: vec![
                 Schema {
                     id: contract::issue_schema(),
@@ -372,9 +374,9 @@ impl IssuesWorld {
         let world = Self::new();
         runtime::world::Implementation::from_registration(
             &world.descriptor(),
-            2,
-            *blake3::hash(b"lait.issues.policy-table.v2").as_bytes(),
-            *blake3::hash(b"lait.issues.spec-lifecycle.v2").as_bytes(),
+            3,
+            *blake3::hash(b"lait.issues.policy-table.v3").as_bytes(),
+            *blake3::hash(b"lait.issues.spec-lifecycle.v3").as_bytes(),
         )
     }
 }
@@ -400,6 +402,10 @@ struct Staging {
     declare_catalog_on_use: bool,
     /// The canonical demand this mutation requires (defaults to contributor).
     demand: Option<Vec<u8>>,
+    /// Runtime-owned lifecycle commands committed beside the product writes.
+    exec: Vec<runtime::exec::Cmd>,
+    /// Stable product target binding returned to the application adapter.
+    run: Option<String>,
 }
 
 impl Staging {
@@ -412,6 +418,8 @@ impl Staging {
             declared: std::collections::BTreeMap::new(),
             declare_catalog_on_use,
             demand: None,
+            exec: Vec::new(),
+            run: None,
         }
     }
 }
@@ -551,6 +559,12 @@ impl Staging {
         self.demand = Some(demand);
     }
 
+    /// Bind one product target to its Runtime command in this same Effect.
+    fn bind_run(&mut self, run: String, command: runtime::exec::Cmd) {
+        self.run = Some(run);
+        self.exec.push(command);
+    }
+
     /// Declare the complete content set for one Body.
     ///
     /// Complete, not additive: `content_refs` on an effect replaces whatever
@@ -566,10 +580,12 @@ impl Staging {
         let demand = self.demand.unwrap_or_else(contract::demand_contributor);
         Effect {
             content_refs: self.declared.into_iter().collect(),
+            exec: self.exec,
             operations: self.ops,
             bodies: self.bodies,
             effect: IssueEffect {
                 doc,
+                run: self.run,
                 unchanged: false,
             }
             .to_json(),
@@ -587,6 +603,46 @@ fn parse_content_ref(raw: &str) -> Option<replica::content::ContentRef> {
     })
 }
 
+fn parse_run_id(raw: &str) -> Option<runtime::exec::RunId> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    Some(runtime::exec::RunId::from_bytes(
+        <[u8; 16]>::try_from(bytes.as_slice()).ok()?,
+    ))
+}
+
+fn parse_attempt_id(raw: &str) -> Option<runtime::exec::AttemptId> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    Some(runtime::exec::AttemptId::from_bytes(
+        <[u8; 16]>::try_from(bytes.as_slice()).ok()?,
+    ))
+}
+
+fn parse_build_id(raw: &str) -> Option<runtime::exec::BuildId> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    Some(runtime::exec::BuildId::from_bytes(
+        <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
+    ))
+}
+
+/// Require two independently meaningful product decisions in one mutation.
+///
+/// Staging's ordinary `require` is replacement-shaped because most intents
+/// choose one policy route. Check acceptance can also move workflow state, and
+/// neither the verification authority nor the transition gate may lend its
+/// standing to the other.
+fn require_both(left: Vec<u8>, right: Vec<u8>) -> Result<Vec<u8>, Rejection> {
+    if left == right {
+        return Ok(left);
+    }
+    let left = mechanics::authorization::AuthorizationDemand::decode_canonical(&left)
+        .map_err(|_| Rejection::ContractViolation)?;
+    let right = mechanics::authorization::AuthorizationDemand::decode_canonical(&right)
+        .map_err(|_| Rejection::ContractViolation)?;
+    mechanics::authorization::AuthorizationDemand::All(vec![left, right])
+        .encode_canonical()
+        .map_err(|_| Rejection::LimitExceeded)
+}
+
 /// The attachment records exactly as they sit in the Body, undecoded.
 ///
 /// The decoded list is the wrong input for anything that has to be complete: it
@@ -598,6 +654,13 @@ fn raw_attachments(ctx: &Context<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
     ctx.read_collaborative(&issue_key(doc))
         .ok()
         .and_then(|view| view.maps.get("attachments").cloned())
+        .unwrap_or_default()
+}
+
+fn raw_checks(ctx: &Context<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
+    ctx.read_collaborative(&issue_key(doc))
+        .ok()
+        .and_then(|view| view.maps.get("checks").cloned())
         .unwrap_or_default()
 }
 
@@ -629,6 +692,35 @@ fn content_of(
     Ok(refs)
 }
 
+fn check_content_of(
+    records: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<replica::content::ContentRef>, Rejection> {
+    let mut refs = Vec::new();
+    for value in records.values() {
+        let record: contract::CheckRecord =
+            serde_json::from_slice(value).map_err(|_| Rejection::ContractViolation)?;
+        for raw in std::iter::once(Some(record.source.as_str())).chain([record.report.as_deref()]) {
+            let Some(raw) = raw else { continue };
+            let reference = parse_content_ref(raw).ok_or(Rejection::ContractViolation)?;
+            if !refs.contains(&reference) {
+                refs.push(reference);
+            }
+        }
+    }
+    Ok(refs)
+}
+
+fn issue_content_of(
+    attachments: &BTreeMap<String, Vec<u8>>,
+    checks: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<replica::content::ContentRef>, Rejection> {
+    let mut refs = content_of(attachments)?;
+    refs.extend(check_content_of(checks)?);
+    refs.sort_unstable();
+    refs.dedup();
+    Ok(refs)
+}
+
 fn reg(path: &str, value: impl Into<Vec<u8>>) -> Op {
     Op::RegisterSet {
         path: path.into(),
@@ -650,10 +742,12 @@ fn unchanged_effect(doc: Option<String>) -> Effect {
         // *for* a Body: an empty list here means no key is named at all, so no
         // Body's existing declaration is touched.
         content_refs: Vec::new(),
+        exec: Vec::new(),
         operations: vec![],
         bodies: vec![],
         effect: IssueEffect {
             doc,
+            run: None,
             unchanged: true,
         }
         .to_json(),
@@ -1825,11 +1919,14 @@ impl World for IssuesWorld {
     fn descriptor(&self) -> runtime::world::Descriptor {
         runtime::world::Descriptor {
             id: self.id.clone(),
-            implementation_version: runtime::world::Version(2),
+            implementation_version: runtime::world::Version(3),
             schemas: self.schemas.clone(),
             limits: runtime::world::Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: self.signal_schemas.clone(),
+            find_schemas: Vec::new(),
+            find_extractors: Vec::new(),
+            exec_specs: self.exec_specs.clone(),
         }
     }
 
@@ -1843,6 +1940,10 @@ impl World for IssuesWorld {
 
     fn signal_schemas(&self) -> &[runtime::world::SignalSchema] {
         &self.signal_schemas
+    }
+
+    fn exec_specs(&self) -> &[runtime::exec::Spec] {
+        &self.exec_specs
     }
 
     fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
@@ -2870,6 +2971,273 @@ impl World for IssuesWorld {
                     ev.x = serde_json::to_string(evidence).expect("transition evidence json");
                 }
                 push_event(&mut staging, ctx, &doc, &ev);
+                Ok(staging.into_effect(Some(doc)))
+            }
+            IssueIntent::Verify {
+                doc,
+                run,
+                source,
+                build,
+                actor,
+                device,
+                ts,
+            } => {
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                if DocId::parse(&doc).is_none()
+                    || catalog.tombstones.contains(&doc)
+                    || actor != ctx.principal().actor.as_str()
+                    || device != ctx.principal().device.as_str()
+                    || ts == 0
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let run_id = parse_run_id(&run).ok_or(Rejection::InvalidRequest)?;
+                if ctx.run_id(0) != Some(run_id) {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let source_ref = parse_content_ref(&source).ok_or(Rejection::InvalidRequest)?;
+                let source_status = ctx
+                    .content_status(&source_ref)
+                    .ok_or(Rejection::InvalidRequest)?;
+                let build_id = parse_build_id(&build).ok_or(Rejection::InvalidRequest)?;
+                let workflow = catalog
+                    .workflow_head(&issue.project)
+                    .ok_or(Rejection::Conflict)?;
+                if !workflow
+                    .body
+                    .states
+                    .iter()
+                    .any(|state| state.category == "done")
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+
+                let attachments = raw_attachments(ctx, &doc);
+                let mut checks = raw_checks(ctx, &doc);
+                if checks.contains_key(&run) {
+                    return Err(Rejection::Conflict);
+                }
+                if checks.len() >= contract::MAX_CHECKS_PER_ISSUE {
+                    return Err(Rejection::LimitExceeded);
+                }
+                let record = contract::CheckRecord {
+                    spec: contract::VERIFY_SPEC.into(),
+                    v: contract::VERIFY_SPEC_VERSION,
+                    build: build.clone(),
+                    source: source.clone(),
+                    state: "started".into(),
+                    by: actor,
+                    ts,
+                    attempt: None,
+                    report: None,
+                    verdict: None,
+                };
+                let record_bytes = serde_json::to_vec(&record).expect("check record JSON");
+                checks.insert(run.clone(), record_bytes.clone());
+                let key = issue_key(&doc);
+                staging.issue(
+                    &key,
+                    Op::MapSet {
+                        path: "checks".into(),
+                        key: run.clone(),
+                        value: record_bytes,
+                    },
+                );
+                staging.declare(&key, issue_content_of(&attachments, &checks)?);
+                let mut ev = event("check_started", &device, ts);
+                ev.x = run.clone();
+                push_event(&mut staging, ctx, &doc, &ev);
+                staging.require(contract::demand_project_work(
+                    "issue.verify",
+                    &issue.project,
+                ));
+                let input = contract::VerifyInput {
+                    doc: doc.clone(),
+                    source: source.clone(),
+                };
+                staging.bind_run(
+                    run.clone(),
+                    runtime::exec::Cmd::Start(runtime::exec::Start {
+                        spec: contract::verify_spec_ref(),
+                        build: build_id,
+                        input: runtime::exec::Input {
+                            inline: serde_json::to_vec(&input).expect("verification input JSON"),
+                            content: vec![source_ref],
+                            content_bytes: source_status.plaintext_len,
+                        },
+                        parent: None,
+                        source: None,
+                        service: None,
+                        resources: Vec::new(),
+                        limits: contract::verify_limits(),
+                        queries: Vec::new(),
+                    }),
+                );
+                Ok(staging.into_effect(Some(doc)))
+            }
+            IssueIntent::AcceptCheck {
+                doc,
+                run,
+                attempt,
+                report,
+                verdict,
+                move_to_done,
+                id,
+                actor,
+                device,
+                ts,
+            } => {
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                if DocId::parse(&doc).is_none()
+                    || catalog.tombstones.contains(&doc)
+                    || actor != ctx.principal().actor.as_str()
+                    || device != ctx.principal().device.as_str()
+                    || ts == 0
+                    || !matches!(verdict.as_str(), "pass" | "fail")
+                    || (move_to_done && verdict != "pass")
+                    || crate::ids::AttachmentId::parse(&id).is_none()
+                    || id != id.to_ascii_lowercase()
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let run_id = parse_run_id(&run).ok_or(Rejection::InvalidRequest)?;
+                let attempt_id = parse_attempt_id(&attempt).ok_or(Rejection::InvalidRequest)?;
+                let report_ref = parse_content_ref(&report).ok_or(Rejection::InvalidRequest)?;
+                let report_status = ctx
+                    .content_status(&report_ref)
+                    .ok_or(Rejection::InvalidRequest)?;
+                let facts = ctx
+                    .outcome(run_id, attempt_id)
+                    .ok_or(Rejection::InvalidRequest)?;
+                let expected_output =
+                    contract::verify_candidate(&verdict, report_ref, report_status.plaintext_len)
+                        .ok_or(Rejection::InvalidRequest)?;
+                let expected_digest = expected_output
+                    .digest()
+                    .map_err(|_| Rejection::ContractViolation)?;
+                let expected_inline_bytes = u32::try_from(expected_output.inline.len())
+                    .map_err(|_| Rejection::ContractViolation)?;
+                if !facts.returned_exactly_once
+                    || facts.run != run_id
+                    || facts.attempt != attempt_id
+                    || facts.spec != contract::verify_spec_ref()
+                    || facts.output != contract::verify_output_ref()
+                    || facts.terminal != expected_output.terminal
+                    || facts.output_digest != expected_digest
+                    || facts.output_inline_bytes != expected_inline_bytes
+                    || facts.output_content.as_slice() != [report_ref]
+                    || facts.output_content_bytes != report_status.plaintext_len
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+
+                let mut attachments = raw_attachments(ctx, &doc);
+                if attachments.contains_key(&id) {
+                    return Err(Rejection::Conflict);
+                }
+                if attachments.len() >= contract::MAX_ATTACHMENTS_PER_ISSUE {
+                    return Err(Rejection::LimitExceeded);
+                }
+                let mut checks = raw_checks(ctx, &doc);
+                let stored = checks.get(&run).ok_or(Rejection::InvalidRequest)?;
+                let mut check: contract::CheckRecord =
+                    serde_json::from_slice(stored).map_err(|_| Rejection::ContractViolation)?;
+                let actual_build = data_encoding::HEXLOWER.encode(&facts.build.as_bytes());
+                if check.spec != contract::VERIFY_SPEC
+                    || check.v != contract::VERIFY_SPEC_VERSION
+                    || check.build != actual_build
+                    || check.state != "started"
+                    || check.attempt.is_some()
+                    || check.report.is_some()
+                    || check.verdict.is_some()
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                check.state = "accepted".into();
+                check.attempt = Some(attempt.clone());
+                check.report = Some(report.clone());
+                check.verdict = Some(verdict.clone());
+                let check_bytes = serde_json::to_vec(&check).expect("accepted check JSON");
+                checks.insert(run.clone(), check_bytes.clone());
+
+                let attachment = serde_json::json!({
+                    "id": id,
+                    "name": format!("verification-{run}.json"),
+                    "mime": "application/json",
+                    "size": report_status.plaintext_len,
+                    "by": actor,
+                    "ts": ts,
+                    "comment": "",
+                    "content": report,
+                });
+                let attachment_bytes =
+                    serde_json::to_vec(&attachment).expect("verification report attachment JSON");
+                attachments.insert(id.clone(), attachment_bytes.clone());
+                let key = issue_key(&doc);
+                let mut acceptance_demand =
+                    contract::demand_project_work("issue.verify", &issue.project);
+                staging.issue(
+                    &key,
+                    Op::MapSet {
+                        path: "checks".into(),
+                        key: run.clone(),
+                        value: check_bytes,
+                    },
+                );
+                staging.issue(
+                    &key,
+                    Op::MapSet {
+                        path: "attachments".into(),
+                        key: id,
+                        value: attachment_bytes,
+                    },
+                );
+                let mut changes = Vec::new();
+                let mut transition_evidence = None;
+                if move_to_done {
+                    let workflow = catalog
+                        .workflow_head(&issue.project)
+                        .ok_or(Rejection::Conflict)?;
+                    let done = workflow
+                        .body
+                        .states
+                        .iter()
+                        .find(|state| state.category == "done")
+                        .ok_or(Rejection::InvalidRequest)?;
+                    if issue.status != done.state_id {
+                        let (demand, evidence) = transition_gate(
+                            &catalog,
+                            &issue.project,
+                            &issue.status,
+                            &done.state_id,
+                        )?;
+                        acceptance_demand = require_both(acceptance_demand, demand)?;
+                        transition_evidence = Some(evidence);
+                        changes.push(EventChange {
+                            f: "status".into(),
+                            from: Some(issue.status.clone()),
+                            to: Some(done.state_id.clone()),
+                        });
+                        staging.issue(&key, reg("status", done.state_id.as_bytes().to_vec()));
+                        board_remove(&mut staging, &catalog, &issue.project, &doc);
+                    }
+                }
+                staging.require(acceptance_demand);
+                staging.declare(&key, issue_content_of(&attachments, &checks)?);
+                let mut ev = event("check_accepted", &device, ts);
+                ev.c = changes;
+                ev.x = transition_evidence.map_or_else(
+                    || verdict.clone(),
+                    |evidence| serde_json::to_string(&evidence).expect("transition evidence JSON"),
+                );
+                push_event(&mut staging, ctx, &doc, &ev);
+                staging.bind_run(
+                    run.clone(),
+                    runtime::exec::Cmd::Accept {
+                        run: run_id,
+                        attempt: attempt_id,
+                    },
+                );
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::ProjectNew {
@@ -4586,6 +4954,7 @@ impl World for IssuesWorld {
                 }
                 let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let existing = raw_attachments(ctx, &doc);
+                let checks = raw_checks(ctx, &doc);
                 if existing.contains_key(&id) {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -4633,7 +5002,7 @@ impl World for IssuesWorld {
                 // reason the cap counts raw records — a record that does not
                 // decode is content this Body still references, and leaving it
                 // out of the declaration would make those bytes collectable.
-                let mut refs = content_of(&existing)?;
+                let mut refs = issue_content_of(&existing, &checks)?;
                 if !refs.contains(&content_ref) {
                     refs.push(content_ref);
                 }
@@ -4654,13 +5023,18 @@ impl World for IssuesWorld {
                     return Err(Rejection::InvalidRequest);
                 };
                 let name = meta.name.clone();
+                let mut attachments = raw_attachments(ctx, &doc);
+                attachments.remove(&id);
+                let checks = raw_checks(ctx, &doc);
+                let key = issue_key(&doc);
                 staging.issue(
-                    &issue_key(&doc),
+                    &key,
                     Op::MapRemove {
                         path: "attachments".into(),
                         key: id,
                     },
                 );
+                staging.declare(&key, issue_content_of(&attachments, &checks)?);
                 let mut ev = event("detached", &device, ts);
                 ev.x = name;
                 push_event(&mut staging, ctx, &doc, &ev);
@@ -5507,6 +5881,7 @@ fn provisional_view(
         cycle: None,
         baseline: None,
         attachments: vec![],
+        checks: vec![],
         provisional: true,
         corrupt_records: vec![],
     }
@@ -5525,12 +5900,18 @@ fn graph_view(
     let mut children: Vec<crate::dto::Row> = catalog
         .parents
         .iter()
-        .filter(|(c, p)| p.as_str() == doc && live(c))
+        .filter(|(c, p)| {
+            #[cfg(test)]
+            scan_observation::edge();
+            p.as_str() == doc && live(c)
+        })
         .map(|(c, _)| row(c))
         .collect();
     children.sort_by(|a, b| a.doc_id.cmp(&b.doc_id));
     let mut links = Vec::new();
     for (from, kind, to) in &catalog.edges {
+        #[cfg(test)]
+        scan_observation::edge();
         if from == doc && live(to) {
             links.push(crate::dto::LinkDto {
                 kind: kind.clone(),
@@ -5553,6 +5934,8 @@ fn graph_view(
     visited.insert(doc.to_string());
     while let Some(cursor) = queue.pop_front() {
         for (from, kind, to) in &catalog.edges {
+            #[cfg(test)]
+            scan_observation::edge();
             if kind == "blocks" && to == &cursor && visited.insert(from.clone()) {
                 let open = issues
                     .get(from)
@@ -5572,6 +5955,41 @@ fn graph_view(
         children,
         links,
         blocked_by,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod scan_observation {
+    use std::cell::Cell;
+
+    thread_local! {
+        static EDGE_VISITS: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn edge() {
+        let _ = EDGE_VISITS.try_with(|visits| {
+            if let Some(value) = visits.get() {
+                visits.set(Some(value.saturating_add(1)));
+            }
+        });
+    }
+
+    struct Active(Option<u64>);
+
+    impl Drop for Active {
+        fn drop(&mut self) {
+            let previous = self.0;
+            let _ = EDGE_VISITS.try_with(|visits| visits.set(previous));
+        }
+    }
+
+    pub(crate) fn measure<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+        let previous = EDGE_VISITS.with(|visits| visits.replace(Some(0)));
+        let guard = Active(previous);
+        let value = operation();
+        let visits = EDGE_VISITS.with(|observed| observed.get().unwrap_or(0));
+        drop(guard);
+        (value, visits)
     }
 }
 
@@ -5816,6 +6234,30 @@ mod milestone_order_tests {
             milestone("mls_a", "First", "5", None),
         ];
         assert_eq!(order(list), ["First", "Second"]);
+    }
+}
+
+#[cfg(test)]
+mod check_demand_tests {
+    use super::*;
+
+    #[test]
+    fn accepting_into_done_requires_both_verification_and_transition_authority() {
+        let verification = contract::demand_project_work("issue.verify", "prj_example");
+        let transition = contract::demand_project_any("issue.transition", "prj_example");
+        let combined = require_both(verification.clone(), transition.clone()).unwrap();
+        let decoded = mechanics::authorization::AuthorizationDemand::decode_canonical(&combined)
+            .expect("combined demand is canonical");
+        let mechanics::authorization::AuthorizationDemand::All(children) = decoded else {
+            panic!("independent product decisions must remain an All demand");
+        };
+        assert_eq!(children.len(), 2);
+        let encoded = children
+            .iter()
+            .map(|child| child.encode_canonical().unwrap())
+            .collect::<Vec<_>>();
+        assert!(encoded.contains(&verification));
+        assert!(encoded.contains(&transition));
     }
 }
 

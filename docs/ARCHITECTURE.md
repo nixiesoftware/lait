@@ -350,7 +350,7 @@ The sibling `products/issues-app` package owns the `issues.control` v1 codec,
 query/command classification, `IssueRouter` execution adapter, product response
 schema, host-capability vocabulary, role-to-authority planning, formation
 policy, status/inbox/doorbell projections, the `issues` mount’s web parser, and
-all 38 Issues MCP descriptors. It depends on the semantic package and generic
+all 67 Issues MCP descriptors. It depends on the semantic package and generic
 substrate/runtime/client interfaces, never back on `lait`.
 Most client operations become `WorldCall`s at parse time. Inbox watermark I/O,
 access assignment, attachment filesystem I/O, and implementation activation are
@@ -358,6 +358,27 @@ explicit named host-capability calls: their
 interface and asynchronous orchestration remain product-owned while the shell
 supplies generic World-call and Space-authority facilities that a semantic
 World must not hold.
+
+That ownership includes work controls. `issues_verify` is a semantic Issues
+command: the application mints one persistent request coordinate, derives the
+Run Runtime will assign to command zero, and submits the issue target plus
+`Start` in one World effect. The World independently re-derives that Run id,
+requires committed repository content and a valid project workflow, and writes
+the check link only if Runtime can commit the protected `Started` event in the
+same transaction. `issues_work` is the separate generic lifecycle facade for
+inspect, watch, cancel, continue, and resume. Astrolabe may present either
+surface, but neither contract is owned by Astrolabe or requires its harness.
+Continue commits a fresh visible Attempt by deriving a bounded `Try` from a
+completed Attempt's durable Offer, enforcement, limit, and fence evidence.
+Resume additionally requires the exact committed checkpoint and a Spec whose
+resume contract is `Checkpoint`; the current Issues verification Spec is
+`Restart`, so its supported next action is continue. A Started-only Run still
+waits for a scheduler to publish its first Offer: the application control seam
+never invents scheduling coordinates from issue state.
+Returned verification evidence becomes issue truth only through
+`issues_accept_check`, which validates Runtime's typed Outcome and atomically
+records the report, verdict, optional Done transition, history, and `Accepted`
+event.
 
 Role assignment is split at that boundary: Issues resolves `(role, project)`
 into a package-owned `AccessPlan`; root control can only commit generic

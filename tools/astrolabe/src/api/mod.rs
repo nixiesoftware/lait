@@ -128,7 +128,14 @@ pub struct LibraryRow {
     /// there is no asset here and nothing to fetch.
     pub accent: Option<u32>,
     /// Named places inside the World, already resolved for this Orbit.
+    ///
+    /// Declared facts, not drawn ones: the client surfaces lifecycle only,
+    /// so no surface renders these as navigation.
     pub routes: Vec<RouteRow>,
+    /// People from the identity's book addressed in this row's Space.
+    /// `None` until the book has been read — which is not the same as a
+    /// Space nobody in the book is addressed in.
+    pub people: Option<Vec<WorldPersonRow>>,
 }
 
 /// One named place inside a World.
@@ -137,6 +144,29 @@ pub struct RouteRow {
     pub label: String,
     /// Absolute, and resolved: `Open` takes it as it stands.
     pub path: String,
+}
+
+/// One person the book addresses in a World's Space — the at-a-glance join
+/// between the identity's own book and a Library row. Not the Space's
+/// roster: that is an authoritative read a person asks for by choosing the
+/// Space, and this panel never places anything to find out. My Card is
+/// excluded — the glance answers "who of mine is here", and you are not a
+/// contact of yourself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldPersonRow {
+    pub name: String,
+    /// The stored picture (`<mime>;base64,<data>`), or `None` for the
+    /// default face — the same canonical face the book draws.
+    pub picture: Option<String>,
+    /// Measured presence in THIS Space alone, or `None` when it could not
+    /// be asked. A person online somewhere else is not online here.
+    pub presence: Option<PresenceView>,
+    /// Filed under the canonical agent group.
+    pub agent: bool,
+    /// Has this World open right now: a World-scoped Live row spoke for
+    /// them when the Space was asked. The panel's nearest liveness — a
+    /// launched World, not merely a reachable device.
+    pub here: bool,
 }
 
 /// Whether an Orbit is currently up. Three states, because "not running" and
@@ -814,6 +844,12 @@ fn project(app: &App) -> ClientView {
                                 path: route.path.clone(),
                             })
                             .collect(),
+                        people: world_people(
+                            app.book(),
+                            app.presence(),
+                            &entry.space,
+                            &entry.world,
+                        ),
                     }
                 })
                 .collect()
@@ -1000,9 +1036,7 @@ fn card_presence(
         *best = Some(best.map_or(reach, |held| held.max(reach)));
     };
     for address in &card.addresses {
-        let mut parts = address.splitn(3, ':');
-        let (Some("actor"), Some(space), Some(actor)) = (parts.next(), parts.next(), parts.next())
-        else {
+        let Some((space, actor)) = actor_address(address) else {
             continue;
         };
         if let Some(reach) = map.actors.get(&(space.to_owned(), actor.to_owned())) {
@@ -1018,11 +1052,89 @@ fn card_presence(
             raise(*reach, &mut best);
         }
     }
-    best.map(|reach| match reach {
+    best.map(view_of)
+}
+
+/// The `(space, actor)` of an `actor:` wire spelling, or nothing. The one
+/// place this side reads a handle's shape — Dart is never handed a spelling
+/// it would have to parse.
+fn actor_address(address: &str) -> Option<(&str, &str)> {
+    let mut parts = address.splitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("actor"), Some(space), Some(actor)) => Some((space, actor)),
+        _ => None,
+    }
+}
+
+fn view_of(reach: crate::client::presence::Reach) -> PresenceView {
+    use crate::client::presence::Reach;
+    match reach {
         Reach::Online => PresenceView::Online,
         Reach::Away => PresenceView::Away,
         Reach::Offline => PresenceView::Offline,
-    })
+    }
+}
+
+/// The book ∩ one Space: every non-self card holding an address there, with
+/// presence measured in that Space alone — a person online elsewhere is not
+/// online here. `None` before the book has been read; the distinction
+/// between "unread" and "nobody addressed here" survives to the wire.
+fn world_people(
+    book: Option<&crate::client::book::BookSnapshot>,
+    presence: Option<&crate::client::presence::PresenceMap>,
+    space: &str,
+    world: &str,
+) -> Option<Vec<WorldPersonRow>> {
+    use crate::client::presence::Reach;
+    let book = book?;
+    Some(
+        book.cards
+            .iter()
+            .filter(|card| !card.self_claim)
+            .filter_map(|card| {
+                let actors: Vec<&str> = card
+                    .addresses
+                    .iter()
+                    .filter_map(|address| actor_address(address))
+                    .filter(|(there, _)| *there == space)
+                    .map(|(_, actor)| actor)
+                    .collect();
+                if actors.is_empty() {
+                    return None;
+                }
+                let mut best: Option<Reach> = None;
+                let mut here = false;
+                if let Some(map) = presence {
+                    for actor in &actors {
+                        let reach = map
+                            .actors
+                            .get(&(space.to_owned(), (*actor).to_owned()))
+                            .copied()
+                            .or_else(|| map.asked.contains(space).then_some(Reach::Offline));
+                        if let Some(reach) = reach {
+                            best = Some(best.map_or(reach, |held| held.max(reach)));
+                        }
+                        // The Space front row (an empty world) stands for
+                        // whatever the Space serves: an actor in any of its
+                        // Worlds is here.
+                        here |= map.in_world.iter().any(|(s, w, a)| {
+                            s == space && a == *actor && (world.is_empty() || w == world)
+                        });
+                    }
+                }
+                Some(WorldPersonRow {
+                    name: card.name.clone(),
+                    picture: card.picture.clone(),
+                    presence: best.map(view_of),
+                    agent: card
+                        .groups
+                        .iter()
+                        .any(|group| group == lait::control::AGENT_GROUP),
+                    here,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn authored_name_for(
@@ -1055,6 +1167,7 @@ mod tests {
             orbit: "orb_one".into(),
             space: "ws_one".into(),
             world_mount: "issues".into(),
+            world: String::new(),
             display_name: Some("Issues".into()),
             opens: Opens::Declared("/".into()),
             template: crate::client::library::Template::default(),
@@ -1096,6 +1209,7 @@ mod tests {
                 orbit: "a".into(),
                 space: "a".into(),
                 world_mount: "issues".into(),
+                world: String::new(),
                 display_name: None,
                 opens: Opens::Undeclared,
                 template: crate::client::library::Template::default(),
@@ -1105,6 +1219,7 @@ mod tests {
                 orbit: "b".into(),
                 space: "b".into(),
                 world_mount: "other".into(),
+                world: String::new(),
                 display_name: None,
                 opens: Opens::Unhosted,
                 template: crate::client::library::Template::default(),
@@ -1114,6 +1229,7 @@ mod tests {
                 orbit: "c".into(),
                 space: "c".into(),
                 world_mount: String::new(),
+                world: String::new(),
                 display_name: None,
                 opens: Opens::Front,
                 template: crate::client::library::Template::default(),
@@ -1283,5 +1399,118 @@ mod tests {
         watchers.emit(&next);
         assert_eq!(watchers.len(), 1);
         assert_eq!(live_views.lock().expect("live").len(), 2);
+    }
+
+    /// The at-a-glance panel is the book joined to one Space: self and other
+    /// Spaces excluded, presence measured in that Space alone, and the two
+    /// absences — an unread book and an unasked Space — kept apart from a
+    /// measured Offline.
+    #[test]
+    fn the_glance_is_the_book_joined_to_one_space() {
+        fn card(
+            id: &str,
+            name: &str,
+            addresses: Vec<String>,
+            groups: Vec<String>,
+            self_claim: bool,
+        ) -> crate::client::book::CardFacts {
+            crate::client::book::CardFacts {
+                card: id.into(),
+                name: name.into(),
+                note: String::new(),
+                handles: addresses.clone(),
+                addresses,
+                devices: Vec::new(),
+                agents: Vec::new(),
+                picture: None,
+                groups,
+                self_claim,
+            }
+        }
+        let book = crate::client::book::BookSnapshot {
+            cards: vec![
+                card(
+                    "crd_me",
+                    "Me",
+                    vec!["actor:ws_one:act_me".into()],
+                    vec![],
+                    true,
+                ),
+                card(
+                    "crd_moon",
+                    "Moon",
+                    vec!["actor:ws_one:act_moon".into()],
+                    vec![],
+                    false,
+                ),
+                card(
+                    "crd_claude",
+                    "claude",
+                    vec!["actor:ws_one:act_claude".into()],
+                    vec![lait::control::AGENT_GROUP.into()],
+                    false,
+                ),
+                card(
+                    "crd_far",
+                    "Far",
+                    vec!["actor:ws_two:act_far".into()],
+                    vec![],
+                    false,
+                ),
+            ],
+            migration_complete: true,
+            migration_pending: 0,
+            migration_imported: 0,
+            suggestions: Vec::new(),
+        };
+        let mut presence = crate::client::presence::PresenceMap::default();
+        presence.asked.insert("ws_one".into());
+        presence.actors.insert(
+            ("ws_one".into(), "act_moon".into()),
+            crate::client::presence::Reach::Online,
+        );
+        presence
+            .in_world
+            .insert(("ws_one".into(), "wrl_issues".into(), "act_moon".into()));
+
+        let people = world_people(Some(&book), Some(&presence), "ws_one", "wrl_issues")
+            .expect("book was read");
+        assert_eq!(people.len(), 2, "self and the other Space are excluded");
+        let moon = people.iter().find(|p| p.name == "Moon").expect("moon");
+        assert_eq!(moon.presence, Some(PresenceView::Online));
+        assert!(!moon.agent);
+        assert!(moon.here, "a World-scoped Live row is being here");
+        let agent = people.iter().find(|p| p.name == "claude").expect("claude");
+        assert!(agent.agent);
+        assert_eq!(
+            agent.presence,
+            Some(PresenceView::Offline),
+            "asked and absent is a measurement"
+        );
+        assert!(!agent.here);
+
+        // A different World in the same Space is not this one; the Space
+        // front row (an empty world) stands for any of them.
+        let elsewhere =
+            world_people(Some(&book), Some(&presence), "ws_one", "wrl_other").expect("read");
+        assert!(
+            !elsewhere
+                .iter()
+                .find(|p| p.name == "Moon")
+                .expect("moon")
+                .here
+        );
+        let front = world_people(Some(&book), Some(&presence), "ws_one", "").expect("read");
+        assert!(front.iter().find(|p| p.name == "Moon").expect("moon").here);
+
+        assert!(
+            world_people(None, None, "ws_one", "").is_none(),
+            "an unread book joins to nothing"
+        );
+        let unasked = world_people(Some(&book), None, "ws_two", "").expect("read");
+        assert_eq!(
+            unasked[0].presence, None,
+            "an unasked Space is unmeasured, never offline"
+        );
     }
 }
