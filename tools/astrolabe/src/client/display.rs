@@ -56,8 +56,9 @@ impl Client {
 
     pub async fn display_assignment_put(
         &self,
-        assignment: DisplayAssignmentInput,
+        mut assignment: DisplayAssignmentInput,
     ) -> ClientResult<()> {
+        assignment.orbit = self.display_orbit(&assignment.orbit).await?;
         self.display_ok(Request::DisplayAssignmentPut {
             device: assignment.device,
             orbit: assignment.orbit,
@@ -70,6 +71,47 @@ impl Client {
             expires_at_unix_ms: assignment.expires_at_unix_ms,
         })
         .await
+    }
+
+    /// Resolve the Space-shaped selector the Astrolabe surface carries to the
+    /// exact local Orbit address the daemon requires.
+    ///
+    /// Most of Astrolabe addresses a Space with `(space, path)` and constructs
+    /// an [`lait::control::OrbitAddress`] at the client boundary. Display
+    /// assignment is the one daemon request whose wire shape carries only the
+    /// local Orbit id, so forwarding the Space id made every real assignment
+    /// fail as an invalid Orbit. Keep accepting an already-resolved id for
+    /// non-UI callers, and refuse rather than guess when this identity holds
+    /// more than one local Orbit in the same Space.
+    async fn display_orbit(&self, selector: &str) -> ClientResult<String> {
+        if selector.starts_with("orb_") {
+            return Ok(selector.to_owned());
+        }
+        let space = mechanics::ids::SpaceId::parse(selector).ok_or_else(|| {
+            ClientError::invalid(format!(
+                "'{selector}' is neither a Space id nor a local Orbit id"
+            ))
+        })?;
+        let context = self.host_context().await?;
+        let mut matching = context
+            .orbits
+            .iter()
+            .filter(|orbit| orbit.space == selector);
+        let orbit = matching.next().ok_or_else(|| {
+            ClientError::refused(format!(
+                "Space {selector} has no local Orbit registered to this identity"
+            ))
+        })?;
+        if matching.next().is_some() {
+            return Err(ClientError::refused(format!(
+                "Space {selector} has more than one local Orbit; choose an exact Orbit"
+            )));
+        }
+        Ok(
+            lait::control::OrbitAddress::for_store(std::path::Path::new(&orbit.path), space)
+                .orbit
+                .to_string(),
+        )
     }
 
     pub async fn display_assignment_revoke(&self, assignment: String) -> ClientResult<()> {

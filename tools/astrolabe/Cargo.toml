@@ -55,4 +55,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+replica = { path = "../../crates/replica" }
+signage = { package = "lait-signage", path = "../../products/signage" }
+signage-app = { package = "lait-signage-app", path = "../../products/signage-app" }
 tempfile = "3"

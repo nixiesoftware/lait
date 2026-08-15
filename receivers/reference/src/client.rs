@@ -435,6 +435,9 @@ impl ReferenceReceiver {
                             SessionSignal::Revoked => SessionDisposition::Revoked,
                         });
                     }
+                    if let Some(active) = runtime.as_mut() {
+                        active.mark_health_due();
+                    }
                     eprintln!("Display receiver recovering: {error:#}");
                     recovery_wait(runtime.as_mut(), &mut self.presenter, backoff)?;
                     backoff = backoff.saturating_mul(2).min(Duration::from_secs(30));
@@ -489,11 +492,7 @@ impl ReferenceReceiver {
             *runtime = None;
             return Ok(());
         }
-        if active.health_due() {
-            self.report_health(session, active)?;
-            active.mark_health_reported();
-            return Ok(());
-        }
+        let health_due = active.health_due();
         let sent = active.playback()?;
         let wait_ms = active.wait_ms()?;
         let program = active.program();
@@ -520,7 +519,14 @@ impl ReferenceReceiver {
             MAX_PROGRAM_BODY_BYTES,
         )?;
         let change: ProgramChange = decode_success_json(response, "program change")?;
-        self.adopt_change(session, runtime, change, Some(&sent))
+        self.adopt_change(session, runtime, change, Some(&sent))?;
+        if health_due {
+            if let Some(active) = runtime.as_mut() {
+                self.report_health(session, active)?;
+                active.mark_health_reported();
+            }
+        }
+        Ok(())
     }
 
     fn adopt_change(

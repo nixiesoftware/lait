@@ -27,7 +27,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use astrolabe::client::http::{post_json, Head};
-use astrolabe::client::Client;
+use astrolabe::client::{display::DisplayAssignmentInput, Client};
 use astrolabe::Config;
 
 /// The `lait` this build produced, if it is there.
@@ -68,8 +68,14 @@ async fn wait_for_daemon_stop(home: &Path) {
     for _ in 0..100 {
         let selection = lait::config::Selection::for_identity(home);
         let stopped = match lait::daemon::Client::for_selection(&selection) {
-            Ok(daemon) => !matches!(daemon.probe().await, lait::control::Probe::Healthy),
+            Ok(daemon) if matches!(daemon.probe().await, lait::control::Probe::Absent) => {
+                // The endpoint closes before the process has necessarily
+                // released its single-instance lock while active Orbits drain.
+                // A replacement is safe only after both are gone.
+                lait::config::acquire_daemon_lock(daemon.home()).is_ok()
+            }
             Err(_) => true,
+            _ => false,
         };
         if stopped {
             return;
@@ -121,6 +127,116 @@ async fn wait_for_unassigned(path: &Path, device: &str) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("enrolled receiver never presented its authenticated unassigned state");
+}
+
+async fn wait_for_assigned(path: &Path, assignment: &str, program: &str) -> (String, String) {
+    for _ in 0..200 {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let (Some(revision), Some(item)) =
+                    (status["revision"].as_str(), status["item"].as_str())
+                {
+                    if status["assignment"] == assignment
+                        && status["program"] == program
+                        && status["scene"]["kind"] == "frame"
+                        && !revision.is_empty()
+                        && !item.is_empty()
+                    {
+                        return (revision.to_owned(), item.to_owned());
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("assigned receiver never presented the compiled Signage frame");
+}
+
+async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &str) {
+    for _ in 0..200 {
+        let display = client.display_status().await.expect("read receiver health");
+        if let Some(health) = display
+            .devices
+            .iter()
+            .find(|row| row.device == device)
+            .and_then(|row| row.health.as_ref())
+            .filter(|health| health.revision == revision && health.current_item == item)
+        {
+            assert_eq!(health.connection, "online");
+            assert_eq!(health.playback, "displaying");
+            assert_eq!(health.last_error, "none");
+            assert_eq!(health.staged_items, 1);
+            assert!(health.staged_bytes > 0);
+            assert!(health.pipeline_unobservable);
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("coordinator never observed health for the presented Signage revision");
+}
+
+async fn seed_signage_program(client: &Client, store: &Path) -> (String, String) {
+    client
+        .space_found(
+            &store.to_string_lossy(),
+            "Display recovery",
+            Some("Astrolabe".into()),
+        )
+        .await
+        .expect("found a real Space for the Signage program");
+    let context = client
+        .host_context()
+        .await
+        .expect("read the founded Signage Orbit");
+    let canonical_store = store.canonicalize().expect("canonical Signage store");
+    let orbit = context
+        .orbits
+        .iter()
+        .find(|orbit| {
+            Path::new(&orbit.path)
+                .canonicalize()
+                .is_ok_and(|path| path == canonical_store)
+        })
+        .expect("founded Signage Orbit is registered");
+    let space = mechanics::ids::SpaceId::parse(&orbit.space).expect("founded Space id");
+    let program = signage::SignageProgram {
+        id: replica::body::BodyId::from_bytes([9; 16]).render(),
+        name: "Restart proof".into(),
+        cycle: signage::ProgramCycle::Loop,
+        items: vec![signage::SignageItem {
+            id: "welcome".into(),
+            title: "Astrolabe is coordinating this display".into(),
+            body: "This frame came from the durable Signage World.".into(),
+            background: "102030".into(),
+            foreground: "ffffff".into(),
+            duration_ms: Some(60_000),
+        }],
+    };
+    let call = signage_app::encode_call(&signage_app::SignageRequest::ProgramPut {
+        program: program.clone(),
+    })
+    .expect("encode Signage program write");
+    let reply = client
+        .daemon()
+        .expect("identity daemon for Signage write")
+        .call_world(
+            lait::control::ControlRoute::World {
+                address: lait::control::OrbitAddress::for_store(store, space),
+                world: signage::contract::PRODUCT_WORLD.into(),
+            },
+            call.clone(),
+            None,
+        )
+        .await
+        .expect("write the Signage program through its real World adapter");
+    let decoded = signage_app::decode_reply(&call, reply).expect("decode Signage write reply");
+    let response: signage_app::SignageResponse =
+        serde_json::from_value(decoded).expect("typed Signage write reply");
+    assert!(
+        matches!(response, signage_app::SignageResponse::Saved { program: ref saved } if saved == &program.id),
+        "Signage World did not save the receiver program: {response:?}"
+    );
+    (orbit.space.clone(), program.id)
 }
 
 async fn wait_for_receiver_exit(receiver: &mut OwnedReceiver) {
@@ -233,6 +349,8 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     );
     attached.shutdown().await;
 
+    let (signage_orbit, signage_program) = seed_signage_program(&client, identity.path()).await;
+
     // Run the real receiver binary against the real coordinator. This is the
     // restart/recovery seam: the public certificate copied by Astrolabe must
     // establish TLS, both halves of the pairing ceremony must enroll one
@@ -285,6 +403,48 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             .expect("approve the receiver in Astrolabe");
         let device = wait_for_receiver(&client).await;
         wait_for_unassigned(&output_path.join("active.json"), &device).await;
+        client
+            .display_assignment_put(DisplayAssignmentInput {
+                device: device.clone(),
+                // The Astrolabe surface selects by Space. The client boundary
+                // resolves this to the exact local Orbit id before it reaches
+                // the daemon.
+                orbit: signage_orbit,
+                world: signage::contract::PRODUCT_WORLD.into(),
+                surface: "signage.program".into(),
+                input: serde_json::json!({ "program": signage_program }),
+                theme: lait::control::DisplayThemeSetting::Dark,
+                stale_after_ms: 60_000,
+                on_stale: lait::control::DisplayStaleActionSetting::Blank,
+                expires_at_unix_ms: None,
+            })
+            .await
+            .expect("assign the durable Signage program in Astrolabe");
+        let assigned_status = client
+            .display_status()
+            .await
+            .expect("read committed display assignment");
+        let assignment = assigned_status
+            .assignments
+            .iter()
+            .find(|row| row.device == device && row.revoked_at_unix_ms.is_none())
+            .expect("the receiver has one active assignment");
+        let assignment_id = assignment.assignment.clone();
+        let receiver_program = assignment.program.clone();
+        let (revision, item) = wait_for_assigned(
+            &output_path.join("active.json"),
+            &assignment_id,
+            &receiver_program,
+        )
+        .await;
+        let frame = std::fs::read(output_path.join("frame.png"))
+            .expect("read the atomically presented Signage frame");
+        assert_eq!(
+            frame.get(..8),
+            Some(b"\x89PNG\r\n\x1a\n".as_slice()),
+            "the assigned Signage surface did not present a PNG frame"
+        );
+        wait_for_health(&client, &device, &revision, &item).await;
 
         client.shutdown().await;
         drop(signals);
@@ -312,6 +472,15 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 .any(|row| row.device == device),
             "restarted daemon lost its enrolled display"
         );
+        assert!(
+            restarted_displays.assignments.iter().any(|row| {
+                row.assignment == assignment_id
+                    && row.program == receiver_program
+                    && row.revoked_at_unix_ms.is_none()
+            }),
+            "restarted daemon lost its active Signage assignment"
+        );
+        wait_for_health(&restarted, &device, &revision, &item).await;
         restarted
             .display_device_revoke(device)
             .await

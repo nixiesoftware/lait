@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -26,7 +26,7 @@ pub struct Runtime {
     elapsed_base_ms: u64,
     item_started_at: Instant,
     delivered_at: Instant,
-    last_health_at: Instant,
+    last_health_at: Option<Instant>,
     ended: bool,
 }
 
@@ -42,7 +42,10 @@ impl Runtime {
             elapsed_base_ms,
             item_started_at: now,
             delivered_at: now,
-            last_health_at: now,
+            // Activation is itself a health transition. Report it immediately
+            // so the controller can observe a newly staged program without a
+            // thirty-second blind window.
+            last_health_at: None,
             ended: false,
         }
     }
@@ -99,7 +102,9 @@ impl Runtime {
                 |duration| duration.saturating_sub(playback.elapsed_ms).max(1),
             );
         let stale = remaining_ms(self.delivered_at, self.program.freshness.stale_after_ms);
-        let health = remaining_ms(self.last_health_at, 30_000);
+        let health = self
+            .last_health_at
+            .map_or(1, |reported| remaining_ms(reported, 30_000));
         Ok(boundary
             .min(stale)
             .min(health)
@@ -107,11 +112,19 @@ impl Runtime {
     }
 
     pub fn health_due(&self) -> bool {
-        self.last_health_at.elapsed().as_millis() >= 30_000
+        self.last_health_at
+            .is_none_or(|reported| reported.elapsed().as_millis() >= 30_000)
     }
 
     pub fn mark_health_reported(&mut self) {
-        self.last_health_at = Instant::now();
+        self.last_health_at = Some(Instant::now());
+    }
+
+    /// Prioritise a fresh operational sample after any failed live-loop
+    /// exchange. The report can only succeed once transport is back, so an
+    /// accepted sample is also evidence that reauthentication recovered.
+    pub fn mark_health_due(&mut self) {
+        self.last_health_at = None;
     }
 
     pub fn should_refresh_snapshot(&self) -> bool {
@@ -341,7 +354,9 @@ struct PresentedStatus<'a> {
 fn atomic_copy(source: &Path, target: &Path) -> Result<()> {
     let temporary = target.with_extension("png.tmp");
     fs::copy(source, &temporary).context("copy staged frame to presentation candidate")?;
-    File::open(&temporary)
+    OpenOptions::new()
+        .write(true)
+        .open(&temporary)
         .context("open presentation candidate for flush")?
         .sync_all()
         .context("flush presentation candidate")?;
@@ -360,4 +375,26 @@ fn atomic_json<T: Serialize>(target: &Path, value: &T) -> Result<()> {
     drop(file);
     mechanics::secretfs::persist_replace(&temporary, target)
         .context("atomically present receiver status")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_first_frame_is_flushed_and_presented_atomically() {
+        let root =
+            std::env::temp_dir().join(format!("astrolabe-reference-frame-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create frame test root");
+        let staged = root.join("staged.png");
+        let presented = root.join("frame.png");
+        fs::write(&staged, b"verified-frame").expect("write staged frame");
+
+        atomic_copy(&staged, &presented).expect("present first frame");
+
+        assert_eq!(fs::read(&presented).unwrap(), b"verified-frame");
+        assert!(!presented.with_extension("png.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
 }
