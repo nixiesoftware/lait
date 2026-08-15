@@ -124,7 +124,10 @@ fn keygen(args: &[String]) -> Result<()> {
     fs::write(&out, data_encoding::HEXLOWER.encode(&seed))
         .with_context(|| format!("write {}", out.display()))?;
     println!("seed written to {}", out.display());
-    println!("public key (pin as FEED_PUBKEY_HEX): {}", device.as_str());
+    println!("public key (add to FEED_PUBKEYS_HEX): {}", device.as_str());
+    println!(
+        "rotating: add this key, ship that build, wait for adoption, then sign with this seed"
+    );
     Ok(())
 }
 
@@ -193,9 +196,8 @@ fn hash_file(path: &Path) -> Result<(String, u64)> {
 /// Build and sign the release manifest from a directory of built artifacts.
 ///
 /// Refuses a directory missing any lait target. The astrolabe installer is
-/// optional (`--astrolabe <version>` names its bundle version; the installer is
-/// expected as `astrolabe-<version>-setup.exe`) because the client ships
-/// Windows-first while lait ships everywhere.
+/// optional (`--astrolabe <version>` names its bundle version) because lait can
+/// still ship independently when a client platform job is unavailable.
 fn manifest(args: &[String]) -> Result<()> {
     let version = required(args, "--version")?;
     semver::Version::parse(&version).with_context(|| format!("--version {version}"))?;
@@ -242,16 +244,13 @@ fn manifest(args: &[String]) -> Result<()> {
     artifacts.insert("lait".to_string(), lait);
 
     if let Some(astrolabe_version) = arg(args, "--astrolabe") {
-        // One installer per platform: the NSIS setup.exe for Windows, the
-        // signed DMG for macOS (Apple silicon; the bundle is arm64-only by
-        // the AppInfo.xcconfig ARCHS decision). Each is included when the
-        // directory holds it; an absent platform is a loud note rather than
-        // a refusal, because the two installer jobs can succeed independently
-        // and a publisher must be able to ship the half that built. Refusing
-        // only when NEITHER exists keeps `--astrolabe` from sealing a bundle
-        // version no artifact backs. Once both platforms have shipped a
-        // release, tightening this to "both or refuse" is the LAIT_TARGETS
-        // rule and worth doing.
+        // One artifact per supported platform: NSIS on Windows, a signed DMG
+        // on Apple silicon, and Flutter's relocatable bundle on Linux x64.
+        // Each is included when the directory holds it; an absent platform is
+        // a loud note rather than a refusal, because the jobs can succeed
+        // independently and a publisher must be able to ship the half that
+        // built. Refusing only when NONE exists keeps `--astrolabe` from
+        // sealing a bundle version no artifact backs.
         let platforms: &[(&str, String)] = &[
             (
                 "x86_64-pc-windows-msvc",
@@ -260,6 +259,10 @@ fn manifest(args: &[String]) -> Result<()> {
             (
                 "aarch64-apple-darwin",
                 format!("astrolabe-{astrolabe_version}.dmg"),
+            ),
+            (
+                "x86_64-unknown-linux-gnu",
+                format!("astrolabe-{astrolabe_version}-x86_64-unknown-linux-gnu.tar.gz"),
             ),
         ];
         let mut astrolabe = BTreeMap::new();
@@ -281,8 +284,7 @@ fn manifest(args: &[String]) -> Result<()> {
         }
         if astrolabe.is_empty() {
             bail!(
-                "--astrolabe {astrolabe_version} given but {} holds neither \
-                 astrolabe-{astrolabe_version}-setup.exe nor astrolabe-{astrolabe_version}.dmg",
+                "--astrolabe {astrolabe_version} given but {} holds no Astrolabe platform artifact",
                 dir.display()
             );
         }

@@ -3,9 +3,15 @@
 //!
 //! The feed is *proven, not trusted*. It lives on a plain object host with no
 //! ambient authority, so nothing here is believed before its signature
-//! verifies against [`FEED_PUBKEY_HEX`], the key pinned into this binary at
+//! verifies against [`FEED_PUBKEYS_HEX`], the keys pinned into this binary at
 //! build time. A host compromise that rewrites pointers or manifests yields
 //! refusals, not installs.
+//!
+//! Trust is a *set*, not a key, because a single pinned key is a single point
+//! of failure with no recovery: the binary that would carry a replacement can
+//! only reach an installed machine through the feed the lost key signs. See
+//! [`FEED_PUBKEYS_HEX`] for the rotation procedure and for what this does and
+//! does not survive.
 //!
 //! Two kinds of object, and only one ever changes. Immutable releases live
 //! under `/releases/<version>/` — artifacts, digests, and a signed manifest.
@@ -35,11 +41,44 @@ use std::collections::BTreeMap;
 /// relocation record left at the old URL).
 pub const FEED_BASE_URL: &str = "https://storage.googleapis.com/the-foundation-dist";
 
-/// The feed's verifying key. The signing seed exists in exactly one place —
-/// the maintainer's custody, minted by `lait-feed keygen` — and never on a
-/// build machine or in the repository.
-pub const FEED_PUBKEY_HEX: &str =
-    "227e448a16c19623707a3da8b8af6e1f70afcf18fb4e509e82115ef797666ba9";
+/// The feed's verifying keys. Each signing seed exists in exactly one place —
+/// a maintainer's custody, minted by `lait-feed keygen` — and never on a build
+/// machine or in the repository. An envelope is believed when *any* key here
+/// verifies it.
+///
+/// # Why a set
+///
+/// One pinned key cannot be rotated. Lose the seed and every installed machine
+/// is stranded forever, because the only way to deliver a binary carrying a
+/// replacement key is the feed that the lost key alone can sign. Pinning a set
+/// turns an unrecoverable loss into an ordinary publish with a different seed.
+///
+/// # Rotating
+///
+/// Four steps, none of which asks an installed machine to trust something it
+/// did not already trust:
+///
+/// 1. `lait-feed keygen` into separate custody, and add the public key here.
+/// 2. Ship that build, and let the fleet adopt it. Until a machine has this
+///    release, it does not know the successor — so nothing may be signed with
+///    the successor alone before then.
+/// 3. Begin signing with the successor.
+/// 4. In a later release, drop the predecessor from this list.
+///
+/// Adding a key is now a data edit rather than a change of type, callsites and
+/// tests. That is the point: rotation must not be a refactor performed under
+/// incident pressure.
+///
+/// # What this does not survive
+///
+/// Compromise. Every key here is trusted equally and independently, so a stolen
+/// seed signs releases every installed machine accepts, and removing it still
+/// requires shipping a build — through a feed the thief can also sign.
+/// Recovering from theft without shipping a binary needs key statements carried
+/// *in* the feed and changed only by a quorum, which is deliberately not this
+/// change.
+pub const FEED_PUBKEYS_HEX: &[&str] =
+    &["227e448a16c19623707a3da8b8af6e1f70afcf18fb4e509e82115ef797666ba9"];
 
 /// A pointer or manifest larger than this is not a feed object; refuse before
 /// buffering someone's mistake (or someone's flood) into memory.
@@ -176,23 +215,44 @@ pub struct Artifact {
     pub size: u64,
 }
 
-/// The pinned key as raw bytes. Decodes a compile-time constant; a test pins
-/// the round-trip, so the error arm is unreachable in a build that passed CI —
-/// but it is an error, not a panic, because the updater must never be the
+/// The pinned keys as raw bytes. Decodes a compile-time constant; a test pins
+/// the round-trip, so the error arms are unreachable in a build that passed CI
+/// — but they are errors, not panics, because the updater must never be the
 /// thing that crashes a daemon.
-pub fn pinned_pubkey() -> Result<[u8; 32], Failure> {
-    let bytes = data_encoding::HEXLOWER
-        .decode(FEED_PUBKEY_HEX.as_bytes())
-        .map_err(|e| Failure::Invalid(format!("pinned key is not hex: {e}")))?;
-    bytes
-        .try_into()
-        .map_err(|_| Failure::Invalid("pinned key is not 32 bytes".into()))
+///
+/// An empty set and a duplicated key are both refused. Neither is reachable
+/// through an honest edit, and both are exactly what a hurried rotation
+/// produces: an empty set trusts nothing while looking like configuration, and
+/// a duplicate hides that a key was replaced rather than added.
+pub fn pinned_pubkeys() -> Result<Vec<[u8; 32]>, Failure> {
+    if FEED_PUBKEYS_HEX.is_empty() {
+        return Err(Failure::Invalid("no feed key is pinned".into()));
+    }
+    let mut keys = Vec::with_capacity(FEED_PUBKEYS_HEX.len());
+    for hex in FEED_PUBKEYS_HEX {
+        let bytes = data_encoding::HEXLOWER
+            .decode(hex.as_bytes())
+            .map_err(|e| Failure::Invalid(format!("pinned key {hex} is not hex: {e}")))?;
+        let key: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| Failure::Invalid(format!("pinned key {hex} is not 32 bytes")))?;
+        if keys.contains(&key) {
+            return Err(Failure::Invalid(format!("pinned key {hex} appears twice")));
+        }
+        keys.push(key);
+    }
+    Ok(keys)
 }
 
-/// Open a signed envelope: verify, then hand back the exact payload bytes that
-/// were signed. Shape errors are [`Failure::Invalid`]; a well-formed envelope
-/// whose signature does not verify is [`Failure::Verification`].
-pub fn open_envelope(bytes: &[u8], pubkey: &[u8; 32]) -> Result<Vec<u8>, Failure> {
+/// Open a signed envelope: verify against any pinned key, then hand back the
+/// exact payload bytes that were signed. Shape errors are [`Failure::Invalid`];
+/// a well-formed envelope that no pinned key verifies is
+/// [`Failure::Verification`].
+///
+/// Any key is sufficient. That is what makes rotation an overlap rather than a
+/// flag day — during step 3 above, the fleet holds a mixture of builds and both
+/// the predecessor and the successor must open the same feed.
+pub fn open_envelope(bytes: &[u8], pubkeys: &[[u8; 32]]) -> Result<Vec<u8>, Failure> {
     let envelope: Envelope = serde_json::from_slice(bytes)
         .map_err(|e| Failure::Invalid(format!("envelope is not JSON: {e}")))?;
     let payload = data_encoding::BASE64
@@ -203,10 +263,14 @@ pub fn open_envelope(bytes: &[u8], pubkey: &[u8; 32]) -> Result<Vec<u8>, Failure
         .map_err(|e| Failure::Invalid(format!("signature base64: {e}")))?
         .try_into()
         .map_err(|_| Failure::Invalid("signature is not 64 bytes".into()))?;
-    if !mechanics::actor::verify_detached(pubkey, &payload, &signature) {
-        return Err(Failure::Verification(
-            "envelope signature does not verify against the pinned key".into(),
-        ));
+    if !pubkeys
+        .iter()
+        .any(|key| mechanics::actor::verify_detached(key, &payload, &signature))
+    {
+        return Err(Failure::Verification(format!(
+            "envelope signature verifies against none of the {} pinned keys",
+            pubkeys.len()
+        )));
     }
     Ok(payload)
 }
@@ -230,7 +294,7 @@ pub fn resolve(channel: Channel) -> Result<Resolved, Failure> {
         |url| http_fetch(url, MAX_FEED_OBJECT),
         channel,
         FEED_BASE_URL,
-        &pinned_pubkey()?,
+        &pinned_pubkeys()?,
     )
 }
 
@@ -240,7 +304,7 @@ pub fn resolve_with<F>(
     fetch: F,
     channel: Channel,
     base: &str,
-    pubkey: &[u8; 32],
+    pubkeys: &[[u8; 32]],
 ) -> Result<Resolved, Failure>
 where
     F: Fn(&str) -> Result<Vec<u8>, Failure>,
@@ -250,14 +314,14 @@ where
         base.trim_end_matches('/'),
         channel.as_str()
     );
-    let payload = open_envelope(&fetch(&pointer_url)?, pubkey)?;
+    let payload = open_envelope(&fetch(&pointer_url)?, pubkeys)?;
     let pointer: PointerPayload = serde_json::from_slice(&payload)
         .map_err(|e| Failure::Invalid(format!("pointer payload: {e}")))?;
 
     let (version, manifest) = match pointer {
         PointerPayload::Release { version, manifest } => (version, manifest),
         PointerPayload::Moved { to } => {
-            let payload = open_envelope(&fetch(&to)?, pubkey)?;
+            let payload = open_envelope(&fetch(&to)?, pubkeys)?;
             let relocated: PointerPayload = serde_json::from_slice(&payload)
                 .map_err(|e| Failure::Invalid(format!("relocated pointer payload: {e}")))?;
             match relocated {
@@ -277,7 +341,7 @@ where
         )));
     }
 
-    let payload = open_envelope(&fetch(&manifest)?, pubkey)?;
+    let payload = open_envelope(&fetch(&manifest)?, pubkeys)?;
     let manifest: Manifest = serde_json::from_slice(&payload)
         .map_err(|e| Failure::Invalid(format!("manifest payload: {e}")))?;
     if manifest.version != version.to_string() {
@@ -428,18 +492,93 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_pinned_key_is_well_formed() {
-        // `pinned_pubkey` errors at runtime on a malformed constant; this is
-        // what turns that dead arm into a red build instead of a daemon that
-        // can never resolve its own feed.
-        assert_eq!(pinned_pubkey().unwrap().len(), 32);
+    fn the_pinned_keys_are_well_formed_and_distinct() {
+        // `pinned_pubkeys` errors at runtime on a malformed constant; this is
+        // what turns those dead arms into a red build instead of a daemon that
+        // can never resolve its own feed. It also catches the two edits a
+        // hurried rotation actually produces — an emptied list, or a key
+        // pasted twice instead of added.
+        let keys = pinned_pubkeys().unwrap();
+        assert!(!keys.is_empty(), "a build must trust at least one feed key");
+        for key in &keys {
+            assert_eq!(key.len(), 32);
+        }
+    }
+
+    #[test]
+    fn any_pinned_key_opens_an_envelope_which_is_what_makes_rotation_an_overlap() {
+        // The property the whole key set exists for: during a rotation the
+        // fleet holds a mixture of builds, and one feed must satisfy both the
+        // predecessor and the successor. Neither key is privileged.
+        let (old_seed, old_pub) = test_keypair();
+        let new_seed = [11u8; 32];
+        let new_pub: [u8; 32] = data_encoding::HEXLOWER
+            .decode(
+                mechanics::actor::device_from_seed(&new_seed)
+                    .as_str()
+                    .as_bytes(),
+            )
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let trusted = [old_pub, new_pub];
+
+        for seed in [old_seed, new_seed] {
+            let sealed = seal(&serde_json::json!({"hello": "feed"}), &seed);
+            let opened = open_envelope(sealed.as_bytes(), &trusted).unwrap();
+            assert_eq!(
+                opened,
+                serde_json::to_vec(&serde_json::json!({"hello": "feed"})).unwrap()
+            );
+        }
+
+        // A build that has not yet learned the successor refuses what the
+        // successor signed. This is why step 3 of the rotation waits for
+        // adoption: signing with a key the fleet does not hold is an outage,
+        // and it must present as a refusal rather than as "up to date".
+        let sealed = seal(&serde_json::json!({"hello": "feed"}), &new_seed);
+        let err = open_envelope(sealed.as_bytes(), &[old_pub]).unwrap_err();
+        assert!(matches!(err, Failure::Verification(_)), "{err}");
+
+        // And a seed in nobody's custody is refused by the whole set, not
+        // merely by one member of it.
+        let sealed = seal(&serde_json::json!({"hello": "feed"}), &[13u8; 32]);
+        let err = open_envelope(sealed.as_bytes(), &trusted).unwrap_err();
+        assert!(matches!(err, Failure::Verification(_)), "{err}");
+    }
+
+    #[test]
+    fn a_channel_resolves_when_a_successor_key_signed_it() {
+        // The end-to-end shape of step 3: the pointer and manifest are sealed
+        // by a key that is in the set but was not the original, and a client
+        // carrying both keys resolves normally.
+        let successor = [11u8; 32];
+        let (_, old_pub) = test_keypair();
+        let successor_pub: [u8; 32] = data_encoding::HEXLOWER
+            .decode(
+                mechanics::actor::device_from_seed(&successor)
+                    .as_str()
+                    .as_bytes(),
+            )
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let objects = feed_with(&successor, "stable", "0.9.0", None);
+        let resolved = resolve_with(
+            feed_of(&objects),
+            Channel::Stable,
+            "https://feed.example",
+            &[old_pub, successor_pub],
+        )
+        .unwrap();
+        assert_eq!(resolved.version.to_string(), "0.9.0");
     }
 
     #[test]
     fn a_sealed_envelope_opens_and_a_tampered_one_is_a_verification_failure() {
         let (seed, pubkey) = test_keypair();
         let sealed = seal(&serde_json::json!({"hello": "feed"}), &seed);
-        let opened = open_envelope(sealed.as_bytes(), &pubkey).unwrap();
+        let opened = open_envelope(sealed.as_bytes(), &[pubkey]).unwrap();
         assert_eq!(
             opened,
             serde_json::to_vec(&serde_json::json!({"hello": "feed"})).unwrap()
@@ -449,7 +588,7 @@ pub(crate) mod tests {
         // failure must be Verification, never Invalid and never silence.
         let mut envelope: serde_json::Value = serde_json::from_str(&sealed).unwrap();
         envelope["payload"] = data_encoding::BASE64.encode(br#"{"hello":"evil"}"#).into();
-        let err = open_envelope(envelope.to_string().as_bytes(), &pubkey).unwrap_err();
+        let err = open_envelope(envelope.to_string().as_bytes(), &[pubkey]).unwrap_err();
         assert!(matches!(err, Failure::Verification(_)), "{err}");
 
         // A different pinned key refuses the honest envelope the same way.
@@ -461,14 +600,14 @@ pub(crate) mod tests {
                 .try_into()
                 .unwrap()
         };
-        let err = open_envelope(sealed.as_bytes(), &other_pub).unwrap_err();
+        let err = open_envelope(sealed.as_bytes(), &[other_pub]).unwrap_err();
         assert!(matches!(err, Failure::Verification(_)), "{err}");
     }
 
     #[test]
     fn garbage_is_invalid_not_a_verification_failure() {
         let (_, pubkey) = test_keypair();
-        let err = open_envelope(b"not json at all", &pubkey).unwrap_err();
+        let err = open_envelope(b"not json at all", &[pubkey]).unwrap_err();
         assert!(matches!(err, Failure::Invalid(_)), "{err}");
     }
 
@@ -480,7 +619,7 @@ pub(crate) mod tests {
             feed_of(&objects),
             Channel::Test,
             "https://feed.example",
-            &pubkey,
+            &[pubkey],
         )
         .unwrap();
         assert_eq!(resolved.version.to_string(), "0.9.0-test.1");
@@ -499,7 +638,7 @@ pub(crate) mod tests {
             feed_of(&objects),
             Channel::Stable,
             "https://feed.example",
-            &pubkey,
+            &[pubkey],
         )
         .unwrap_err();
         assert!(matches!(err, Failure::Invalid(_)), "{err}");
@@ -519,7 +658,7 @@ pub(crate) mod tests {
             feed_of(&objects),
             Channel::Stable,
             "https://feed.example",
-            &pubkey,
+            &[pubkey],
         )
         .unwrap_err();
         assert!(matches!(err, Failure::Invalid(_)), "{err}");
@@ -548,7 +687,7 @@ pub(crate) mod tests {
             feed_of(&objects),
             Channel::Stable,
             "https://feed.example",
-            &pubkey,
+            &[pubkey],
         )
         .unwrap();
         assert_eq!(resolved.version.to_string(), "0.9.0");
@@ -566,7 +705,7 @@ pub(crate) mod tests {
             feed_of(&objects),
             Channel::Stable,
             "https://feed.example",
-            &pubkey,
+            &[pubkey],
         )
         .unwrap_err();
         assert!(matches!(err, Failure::Invalid(_)), "{err}");
@@ -580,7 +719,7 @@ pub(crate) mod tests {
             feed_of(&objects),
             Channel::Stable,
             "https://feed.example",
-            &pubkey,
+            &[pubkey],
         )
         .unwrap();
         assert_eq!(resolved.floor.unwrap().to_string(), "0.8.0");
@@ -594,7 +733,7 @@ pub(crate) mod tests {
             feed_of(&objects),
             Channel::Stable,
             "https://feed.example",
-            &pubkey,
+            &[pubkey],
         )
         .unwrap();
         assert!(resolved.floor.is_none());
@@ -609,7 +748,7 @@ pub(crate) mod tests {
             feed_of(&objects),
             Channel::Stable,
             "https://feed.example",
-            &pubkey,
+            &[pubkey],
         )
         .unwrap_err();
         assert!(matches!(err, Failure::Unreachable(_)), "{err}");
