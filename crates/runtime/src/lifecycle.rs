@@ -98,7 +98,12 @@ pub enum Failure {
     Persistence(Persistence),
     StationDormant,
     PrincipalDenied,
-    InvalidFindPolicy,
+    /// The activation's Find policy failed validation. Carries the refusal:
+    /// `Policy` has one field today, but `find::Invalid` names fifteen ways a
+    /// contract can be refused, and a discard here is how a diagnosable
+    /// refusal becomes one word the moment the policy grows a second field —
+    /// the exact defect the error-context ratchet exists to stop.
+    InvalidFindPolicy(crate::find::Invalid),
     UnknownWorld(WorldId),
 }
 
@@ -541,7 +546,7 @@ impl Orbit {
         options
             .find
             .validate()
-            .map_err(|_| Failure::InvalidFindPolicy)?;
+            .map_err(Failure::InvalidFindPolicy)?;
         let drain_deadline = if options.drain_deadline.is_zero() {
             DEFAULT_DRAIN_DEADLINE
         } else {

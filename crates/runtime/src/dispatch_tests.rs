@@ -898,7 +898,7 @@ fn invalid_station_find_policy_refuses_activation() {
             find: crate::find::Policy { bound: invalid },
             ..Activation::default()
         }),
-        Err(crate::lifecycle::Failure::InvalidFindPolicy)
+        Err(crate::lifecycle::Failure::InvalidFindPolicy(_))
     ));
 }
 
