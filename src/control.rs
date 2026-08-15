@@ -2153,6 +2153,10 @@ pub enum HostReply {
         /// The newest release the channel points at.
         #[serde(default)]
         available: Option<String>,
+        /// Set when this daemon is a client's sidecar and declined to replace
+        /// itself. Carries the client's path — the thing that *does* update it.
+        #[serde(default)]
+        managed_by: Option<String>,
         /// The published compatibility floor — the lowest version still
         /// permitted to run — when the release declares a satisfiable one.
         #[serde(default)]

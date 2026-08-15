@@ -1323,7 +1323,26 @@ export type HostReply =
   | { host: "forgotten"; entries: OrbitEntry[] }
   | { host: "pruned"; entries: OrbitEntry[] }
   | { host: "rebuilt"; generation: string; effects: number; bodies: number; receipts: number; evidence: string }
-  | { host: "updated"; from: string; to: string; replaced: boolean }
+  | {
+      host: "updated";
+      from: string;
+      to: string;
+      replaced: boolean;
+      /** The channel this node follows. */
+      channel?: string;
+      /** The newest release the channel points at. */
+      available?: string | null;
+      /** The published floor, when the release declares a satisfiable one. */
+      floor?: string | null;
+      /**
+       * Set when this daemon is a client's sidecar and declined to replace
+       * itself; carries the client's path. `replaced` is false and `available`
+       * may still name a newer release — the two together are "an update
+       * exists, and *that* is what installs it", which is a different fact from
+       * "you are up to date".
+       */
+      managed_by?: string | null;
+    }
   | { host: "restarting"; pid?: number | null }
   | {
       host: "context";

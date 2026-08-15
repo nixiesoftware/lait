@@ -14,6 +14,8 @@
 
 pub mod feed;
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{anyhow, bail, Context, Result};
 use feed::Channel;
 
@@ -32,6 +34,58 @@ pub struct Updated {
     /// The published compatibility floor, when the release declares a
     /// satisfiable one.
     pub floor: Option<String>,
+    /// Set when this binary is a component of an installed client, which owns
+    /// updating it. Carries that client's executable path.
+    ///
+    /// A refusal with a name, not a silent no-op: `available` is still filled
+    /// in above, so the answer is "0.9.0 exists and *this* is what updates you
+    /// to it" rather than "nothing happened".
+    pub managed_by: Option<String>,
+}
+
+/// Who is responsible for replacing this binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Custody {
+    /// Nobody else. This binary may replace itself.
+    SelfManaged,
+    /// An installed client, whose executable sits beside this one.
+    Managed { by: PathBuf },
+}
+
+/// The client executable that would own this one, if it exists.
+///
+/// The exact inverse of `astrolabe`'s `sidecar::beside`, which finds `lait`
+/// beside the client. These two must agree about the layout or they will
+/// disagree on precisely the machine where it matters, so they are tested
+/// against the same shape.
+pub fn custody_of(executable: &Path) -> Custody {
+    let name = if cfg!(windows) {
+        "astrolabe.exe"
+    } else {
+        "astrolabe"
+    };
+    let client = executable.with_file_name(name);
+    if client.is_file() {
+        Custody::Managed { by: client }
+    } else {
+        Custody::SelfManaged
+    }
+}
+
+/// Who is responsible for replacing the running binary.
+pub fn custody() -> Custody {
+    match std::env::current_exe() {
+        Ok(executable) => custody_of(&executable),
+        // Unable to locate ourselves is not evidence of self-management. It is
+        // the reading under which we would proceed to overwrite something, so
+        // it degrades to the side that changes nothing.
+        Err(error) => {
+            tracing::warn!(%error, "cannot locate the running executable; declining to self-update");
+            Custody::Managed {
+                by: PathBuf::from("<unknown>"),
+            }
+        }
+    }
 }
 
 /// Resolve this node's channel and move the installed binary to the release it
@@ -56,7 +110,21 @@ pub fn run() -> Result<Updated> {
         channel: channel.as_str().to_string(),
         available: Some(resolved.version.to_string()),
         floor: resolved.floor.as_ref().map(|floor| floor.to_string()),
+        managed_by: None,
     };
+    // A sidecar must never replace itself. The client pins its daemon to the
+    // same major.minor, so a lait that updated past its client would leave a
+    // client that can no longer start a daemon and no repair path but a
+    // reinstall — the pair rule asserted at the release gate, undone at runtime
+    // by a feature written when lait was standalone.
+    //
+    // Refused after the channel resolves, deliberately: the answer still says
+    // what is available and who can install it.
+    if let Custody::Managed { by } = custody() {
+        tracing::info!(client = %by.display(), "declining to self-update: this lait is a client's sidecar");
+        updated.managed_by = Some(by.display().to_string());
+        return Ok(updated);
+    }
     // Stage and prove before the swap, so every failure short of the swap
     // leaves the machine exactly as it was.
     let Some(binary) = stage_with(feed::http_fetch, &resolved, &current, env!("LAIT_TARGET"))?
@@ -214,6 +282,50 @@ fn bin_path_for(target: &str) -> String {
 mod tests {
     use super::bin_path_for;
     use crate::update::feed::{self, Channel};
+
+    #[test]
+    fn a_binary_beside_a_client_is_that_client_s_to_replace() {
+        use super::{custody_of, Custody};
+
+        let root = std::env::temp_dir().join(format!("lait-custody-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the fake install");
+
+        let lait = root.join(if cfg!(windows) { "lait.exe" } else { "lait" });
+        std::fs::write(&lait, b"not really a binary").expect("stage lait");
+
+        assert_eq!(
+            custody_of(&lait),
+            Custody::SelfManaged,
+            "a lait installed on its own replaces itself"
+        );
+
+        let client = root.join(if cfg!(windows) {
+            "astrolabe.exe"
+        } else {
+            "astrolabe"
+        });
+        std::fs::write(&client, b"not really a client").expect("stage the client");
+
+        assert_eq!(
+            custody_of(&lait),
+            Custody::Managed { by: client.clone() },
+            "the same lait, with a client beside it, is the client's to replace"
+        );
+
+        // A directory of that name is not a client. The check is `is_file`
+        // rather than `exists` because the failure it guards is a lait that
+        // refuses forever on a machine that happens to hold a stray path.
+        std::fs::remove_file(&client).expect("remove the client");
+        std::fs::create_dir_all(&client).expect("a directory in its place");
+        assert_eq!(
+            custody_of(&lait),
+            Custody::SelfManaged,
+            "a directory named like the client is not a client"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn updater_version_is_clean_semver() {

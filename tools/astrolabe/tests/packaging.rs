@@ -501,3 +501,37 @@ fn the_notices_say_they_are_generated_and_name_what_generates_them() {
         "the notices do not state what lait itself is offered under"
     );
 }
+
+/// The client finds its sidecar, and the sidecar knows the client owns it.
+///
+/// These are two functions in two crates describing one layout, and they are
+/// asserted together because that is the only way they cannot drift. If they
+/// ever disagree the failure is invisible until the machine that matters: the
+/// client would attach to a daemon that believes it may replace itself, and a
+/// minor bump would leave a client unable to start one.
+#[test]
+fn the_client_and_its_sidecar_agree_about_the_layout() {
+    let root = tempfile::tempdir().expect("a fake installation");
+    let client = root.path().join(if cfg!(windows) {
+        "astrolabe.exe"
+    } else {
+        "astrolabe"
+    });
+    std::fs::write(&client, b"the client").expect("stage the client");
+
+    // The client's half: where it looks for the daemon it manages.
+    let found = astrolabe::sidecar::beside_for_test(&client);
+    std::fs::write(&found, b"the sidecar").expect("stage the sidecar");
+    assert_eq!(
+        found.file_name().and_then(|n| n.to_str()),
+        Some(if cfg!(windows) { "lait.exe" } else { "lait" }),
+        "the client looks for lait beside itself"
+    );
+
+    // The sidecar's half: who it believes owns replacing it.
+    assert_eq!(
+        lait::update::custody_of(&found),
+        lait::update::Custody::Managed { by: client },
+        "and that lait must know it is a component, not a self-managing install"
+    );
+}

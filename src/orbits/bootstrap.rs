@@ -646,6 +646,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                     channel: updated.channel,
                     available: updated.available,
                     floor: updated.floor,
+                    managed_by: updated.managed_by,
                 })
             })
             .await

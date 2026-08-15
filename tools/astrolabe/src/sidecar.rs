@@ -60,6 +60,15 @@ pub fn resolve() -> Result<PathBuf> {
     Ok(beside(&current))
 }
 
+/// [`beside`], reachable from the paired layout test.
+///
+/// The pairing is asserted across two crates — this half and `lait`'s
+/// `update::custody_of` — because one layout described in two places drifts
+/// silently otherwise, and the failure only shows on an installed machine.
+pub fn beside_for_test(executable: &Path) -> PathBuf {
+    beside(executable)
+}
+
 fn beside(executable: &Path) -> PathBuf {
     let name = if cfg!(windows) { "lait.exe" } else { "lait" };
     executable.with_file_name(name)
