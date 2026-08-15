@@ -366,8 +366,13 @@ export default function LaitDocumentEditor({
    * Called once when the document cannot be edited safely here — its stored
    * form does not survive the projection round-trip, so positional offsets
    * would address the wrong text.
+   *
+   * `canonical` is the form it *would* round-trip to. The editor has already
+   * computed it to draw the document at all, so handing it over costs nothing
+   * and spares the surface from importing the projection (and ProseMirror with
+   * it) just to offer the repair.
    */
-  onNotEditable?: (reason: string) => void;
+  onNotEditable?: (reason: string, canonical: string) => void;
   onCommit: () => void;
   remoteCursors?: RemoteCursor[];
   remoteContexts?: RemoteContext[];
@@ -425,11 +430,12 @@ export default function LaitDocumentEditor({
   useEffect(() => {
     if (!readOnly && !initialProjection.canonical) {
       onNotEditable?.(
-        "This description was written in a form the editor cannot address safely. " +
-          "Editing it here would move unrelated text, so it is read-only until it is normalized.",
+        "This description is stored in a form this editor cannot address safely, so it is " +
+          "read-only. Normalizing rewrites it to an equivalent form and makes it editable.",
+        initialProjection.source,
       );
     }
-  }, [readOnly, initialProjection.canonical, onNotEditable]);
+  }, [readOnly, initialProjection.canonical, initialProjection.source, onNotEditable]);
   emit.current = onChange;
   commit.current = onCommit;
   awareness.current = onAwareness;

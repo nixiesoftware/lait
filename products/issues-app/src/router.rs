@@ -866,13 +866,31 @@ impl<'a> IssueRouter<'a> {
                         }),
                     }
                 }
-                let body = body.map(|body| {
-                    if body.starts_with(contract::DOCUMENT_PREFIX) {
-                        body
-                    } else {
-                        crate::document::plain_document(&body)
+                // A body that already declares itself a document is passed
+                // through, because escaping it would render an author's
+                // headings and emphasis as literal text. Passed through is not
+                // the same as unchecked: it must at least compile, or the issue
+                // is created carrying a document nothing can render.
+                //
+                // What this cannot check is *canonicality* — whether the source
+                // survives the editor's projection round-trip — because that is
+                // defined by a serializer that lives in the viewer and has no
+                // counterpart here. A non-canonical document is safe (the World
+                // refuses a splice whose `base_len` disagrees) but not editable
+                // in the browser until it is normalized through
+                // `IssueDocumentUpgrade`.
+                let body = match body {
+                    Some(body) if body.starts_with(contract::DOCUMENT_PREFIX) => {
+                        if !crate::document::compile_document(&body).valid {
+                            return Err(Response::err(
+                                "the description declares a document that does not compile",
+                            ));
+                        }
+                        Some(body)
                     }
-                });
+                    Some(body) => Some(crate::document::plain_document(&body)),
+                    None => None,
+                };
                 let doc = DocId::mint(self.clock).as_str().to_string();
                 let effect = self
                     .submit(&IssueIntent::IssueNew {
@@ -914,15 +932,21 @@ impl<'a> IssueRouter<'a> {
                             me: None,
                         })
                         .map_err(Self::effect_err)?;
-                    Some(
-                        if issue.document_schema == contract::DOCUMENT_SCHEMA_VERSION
-                            && !description.starts_with(contract::DOCUMENT_PREFIX)
-                        {
-                            crate::document::plain_document(&description)
-                        } else {
-                            description
-                        },
-                    )
+                    let description = if issue.document_schema == contract::DOCUMENT_SCHEMA_VERSION
+                        && !description.starts_with(contract::DOCUMENT_PREFIX)
+                    {
+                        crate::document::plain_document(&description)
+                    } else {
+                        description
+                    };
+                    if description.starts_with(contract::DOCUMENT_PREFIX)
+                        && !crate::document::compile_document(&description).valid
+                    {
+                        return Err(Response::err(
+                            "the description declares a document that does not compile",
+                        ));
+                    }
+                    Some(description)
                 } else {
                     None
                 };

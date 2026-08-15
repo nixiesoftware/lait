@@ -890,9 +890,17 @@ pub enum IssueIntent {
         #[serde(default)]
         base_len: Option<u64>,
     },
-    /// Atomically move one legacy issue body onto the current hidden document
-    /// schema. `expected` is a compare-and-swap over the exact legacy source;
-    /// a concurrent edit refuses the migration instead of being overwritten.
+    /// Atomically replace one issue's whole description source.
+    ///
+    /// Two callers, one mechanism: moving a legacy (schema 0) body onto the
+    /// document schema, and rewriting a schema-1 document into the canonical
+    /// form an editor can address positionally. `expected` is a
+    /// compare-and-swap over the exact source being replaced, so a concurrent
+    /// edit refuses the rewrite instead of being overwritten.
+    ///
+    /// Normalization cannot use [`IssueIntent::IssueTextSplice`]: a document
+    /// needing it is one whose offsets are not trustworthy, so repairing it
+    /// with the primitive the mismatch breaks would be circular.
     IssueDocumentUpgrade {
         doc: String,
         expected: String,

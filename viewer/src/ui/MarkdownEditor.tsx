@@ -48,7 +48,7 @@ export function MarkdownEditor(props: {
    * wrong text. Only the document editor can reach this; the source editor
    * writes whole values and has no offsets to be wrong about.
    */
-  onNotEditable?: (reason: string) => void;
+  onNotEditable?: (reason: string, canonical: string) => void;
 }) {
   const {
     documentSchema = 0,

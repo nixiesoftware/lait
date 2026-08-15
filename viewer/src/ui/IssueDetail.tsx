@@ -47,7 +47,7 @@ import {
 } from "../core/activity";
 import { codeUnitSpan } from "../core/anchor";
 import { continueTextPreview, textRevision } from "../core/textPreview";
-import { upgradeMarkdown } from "../core/document";
+import { sourceSplices, upgradeMarkdown } from "../core/document";
 import {
   awarenessReadyFor,
   caretPhrase,
@@ -983,6 +983,14 @@ export function IssueDetail({
             return response.description;
           }}
           onError={onError}
+          onNormalize={(canonical) =>
+            rpc(spaceId, {
+              cmd: "issue_document_upgrade",
+              reff,
+              expected: issue.description,
+              splices: sourceSplices(issue.description, canonical),
+            })
+          }
         />
 
         <SpecPacket
@@ -2986,6 +2994,7 @@ function Description({
   onCheckpoint,
   onReadLatest,
   onError,
+  onNormalize,
   remoteCursors,
   remoteContexts,
   remotePreviews,
@@ -2999,6 +3008,8 @@ function Description({
   onCheckpoint: () => Promise<unknown>;
   onReadLatest: () => Promise<string>;
   onError: (message: string) => void;
+  /** Rewrite the stored source into the form the editor can address. */
+  onNormalize: (canonical: string) => Promise<unknown>;
   remoteCursors: RemoteCursor[];
   remoteContexts: RemoteContext[];
   remotePreviews: RemoteTextPreview[];
@@ -3034,6 +3045,11 @@ function Description({
 
   const report = useRef(onError);
   report.current = onError;
+  // The form this document would round-trip to, when it does not round-trip
+  // cleanly today. Present means read-only *and* repairable, which is a better
+  // thing to show a person than either fact alone.
+  const [normalizable, setNormalizable] = useState<string | null>(null);
+  const [normalizing, setNormalizing] = useState(false);
 
   const checkpoint = () => {
     if (!uncheckpointed.current) return;
@@ -3090,10 +3106,35 @@ function Description({
   }
 
   return (
+    <>
+    {normalizable !== null && (
+      <div className="border-warn/30 bg-warn/5 text-dim mb-2 flex items-center gap-2 rounded-surface border px-3 py-2 text-sm" role="status">
+        <span>This description is stored in a form the editor cannot edit safely.</span>
+        <button
+          type="button"
+          className="astryx-button"
+          disabled={normalizing}
+          onClick={() => {
+            setNormalizing(true);
+            void onNormalize(normalizable)
+              .then(() => setNormalizable(null))
+              .catch((error: unknown) => {
+                report.current(error instanceof Error ? error.message : String(error));
+              })
+              .finally(() => setNormalizing(false));
+          }}
+        >
+          {normalizing ? "Normalizing…" : "Normalize"}
+        </button>
+      </div>
+    )}
     <MarkdownEditor
       value={authoritative}
       documentSchema={documentSchema}
-      onNotEditable={(reason) => report.current(reason)}
+      onNotEditable={(reason, canonical) => {
+        report.current(reason);
+        setNormalizable(canonical);
+      }}
       placeholder="Add description…"
       className="min-h-ctl-xl py-2"
       remoteCursors={remoteCursors}
@@ -3242,5 +3283,6 @@ function Description({
         checkpoint();
       }}
     />
+    </>
   );
 }

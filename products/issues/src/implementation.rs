@@ -2468,8 +2468,20 @@ impl World for IssuesWorld {
                 ts,
             } => {
                 let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                if issue.document_schema != 0 || issue.description != expected {
-                    return Err(Rejection::InvalidRequest);
+                // Two jobs, one mechanism. A schema-0 body being moved onto the
+                // document schema, and a schema-1 document being rewritten into
+                // the form an editor can address positionally — both are
+                // "replace this whole source, atomically, only if it is still
+                // what I read". The `expected` compare-and-swap is the whole of
+                // the safety, and it is the same in both directions.
+                //
+                // Normalization needs this route rather than a splice because a
+                // non-canonical document is precisely one whose offsets cannot
+                // be trusted: fixing it with the primitive that the mismatch
+                // breaks would be circular.
+                if issue.document_schema > DOCUMENT_SCHEMA_VERSION || issue.description != expected
+                {
+                    return Err(Rejection::Conflict);
                 }
 
                 let key = issue_key(&doc);
