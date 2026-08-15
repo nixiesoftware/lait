@@ -770,6 +770,19 @@ async fn dispatch_incoming(
             }
         }
     };
+    // Correspondence is identity-scoped and routes without a Space. It is
+    // answered here rather than dispatched, because this build registers the
+    // protocol and serves no plane behind it — and a registered protocol that
+    // declines is legible where an unregistered one teaches nobody anything.
+    if incoming.alpn == runtime::correspondence::CORRESPONDENCE_ALPN {
+        let reply = runtime::correspondence::answer(&first);
+        tracing::debug!(
+            outcome = ?reply.outcome,
+            "correspondence opening answered without a Space"
+        );
+        let _ = incoming.stream.send(&reply.encode()).await;
+        return;
+    }
     let Some(space) = opening_space(&incoming.alpn, &first) else {
         dropped(&incoming.alpn, "the opening did not decode");
         return;
@@ -804,6 +817,8 @@ fn opening_limit(alpn: &[u8]) -> Option<usize> {
         Some(runtime::plane::contact::MAX_FRAME)
     } else if alpn == runtime::neighbor::PRESENCE_ALPN {
         Some(runtime::neighbor::MAX_MESSAGE)
+    } else if alpn == runtime::correspondence::CORRESPONDENCE_ALPN {
+        Some(runtime::correspondence::MAX_MESSAGE)
     } else {
         None
     }
@@ -1025,6 +1040,7 @@ mod tests {
     const ALPNS: &[Alpn] = &[
         runtime::plane::contact::CONTACT_ALPN,
         runtime::neighbor::PRESENCE_ALPN,
+        runtime::correspondence::CORRESPONDENCE_ALPN,
     ];
     const SESSION_ALPNS: &[Alpn] = &[runtime::plane::FREIGHT_ALPN, runtime::plane::LIVE_ALPN];
     fn protocols() -> comms::Protocols<'static> {
@@ -1277,6 +1293,62 @@ mod tests {
             "a connection belongs to the Space its opening named"
         );
         dialed.close(0, b"done");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_correspondence_opening_is_answered_without_consulting_a_space() {
+        // The one structural change correspondence needs from the transport: a
+        // route that is not keyed by Space. Every other plane's opening names
+        // one and is refused without it; an identity-scoped opening has none by
+        // construction, so it must be answered before the Space lookup rather
+        // than falling through it.
+        let inner = Arc::new(MemFactory {
+            net: MemNet::new(),
+            builds: AtomicUsize::new(0),
+        });
+        let factory = TransportHubFactory::new(inner.clone());
+        let network = Network::Isolated;
+        let seed_a = [61; 32];
+        let seed_b = [62; 32];
+        let space_a = space(1);
+
+        let a = factory
+            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+        let b = factory
+            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+
+        let peer_b = mechanics::actor::device_from_seed(&seed_b);
+        let mut dialed = a
+            .connect(peer_b, runtime::correspondence::CORRESPONDENCE_ALPN)
+            .await
+            .expect("the ALPN is registered, so the dial is accepted");
+        dialed
+            .send(&runtime::correspondence::Hello::probe().encode())
+            .await
+            .unwrap();
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), dialed.recv())
+            .await
+            .expect("answered in time")
+            .expect("the stream is live")
+            .expect("a reply frame");
+        let reply = runtime::correspondence::Reply::decode(&frame).expect("a well-formed reply");
+        assert_eq!(
+            reply.outcome,
+            runtime::correspondence::Outcome::Unavailable,
+            "a registered protocol with no plane behind it declines legibly"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), b.accept())
+                .await
+                .is_err(),
+            "an identity-scoped opening must never be delivered into a Space"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
