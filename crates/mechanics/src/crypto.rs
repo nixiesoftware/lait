@@ -354,7 +354,7 @@ fn open_blake3_box(my_seed: &[u8; 32], my_ed: &[u8; 32], sealed: &[u8]) -> Optio
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeviceSealed {
     /// The payload under the data key.
-    pub ciphertext: Vec<u8>,
+    pub(crate) ciphertext: Vec<u8>,
     /// A commitment to the data key, shared by every reader.
     ///
     /// This is what makes the readers agree. ChaCha20-Poly1305 is not
@@ -365,10 +365,34 @@ pub struct DeviceSealed {
     /// wrap gets the same payload and none of them constrains the key. It has to
     /// be one value all readers check against, which means it lives here and not
     /// in a per-wrap derivation.
-    pub dek_commitment: [u8; 32],
+    pub(crate) dek_commitment: [u8; 32],
     /// The data key, wrapped once per reader. Sorted by device, so the same set
     /// of readers always encodes the same way.
-    pub wraps: Vec<(DeviceId, Vec<u8>)>,
+    pub(crate) wraps: Vec<(DeviceId, Vec<u8>)>,
+}
+
+impl DeviceSealed {
+    /// The sealed payload. Opaque without a wrap.
+    pub fn ciphertext(&self) -> &[u8] {
+        &self.ciphertext
+    }
+
+    /// The devices holding a path to this payload, in their stable order.
+    pub fn devices(&self) -> impl Iterator<Item = &DeviceId> {
+        self.wraps.iter().map(|(device, _)| device)
+    }
+
+    /// How many readers hold a wrap.
+    pub fn reader_count(&self) -> usize {
+        self.wraps.len()
+    }
+
+    /// Whether this device holds a wrap. Says nothing about whether it can
+    /// *open* one — that needs the seed and the context, and is
+    /// [`open_as_device`]'s answer, not this one.
+    pub fn addresses(&self, device: &DeviceId) -> bool {
+        self.wraps.iter().any(|(held, _)| held == device)
+    }
 }
 
 /// A commitment to the payload every wrap in a [`DeviceSealed`] must belong to.
@@ -985,10 +1009,6 @@ mod tests {
     /// once the sealing code changes, the old envelopes can never be produced
     /// again, and if none were kept there is nothing left to prove the new code
     /// can still read the old ones.
-    fn hex_of(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
     fn unhex(text: &str) -> Vec<u8> {
         (0..text.len())
             .step_by(2)

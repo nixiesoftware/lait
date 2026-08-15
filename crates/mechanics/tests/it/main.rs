@@ -11,4 +11,5 @@
 //!
 //! Add a file here and declare it below; nothing else changes.
 
+mod device_sealing;
 mod world_policy;

@@ -1,8 +1,9 @@
 //! Authorization demands, receipts, evidence, and refusal facts.
 
 pub use crate::crypto::{
-    body_epoch_id, body_open, content_chunk_open, open_sealed, AuthorizedBodyKey,
-    ContentChunkBinding, SpaceKey, BODY_ENVELOPE_OVERHEAD, BODY_EPOCH_ID_LEN, KEY_LEN,
+    body_epoch_id, body_open, content_chunk_open, open_as_device, open_sealed, open_sealed_bound,
+    AuthorizedBodyKey, ContentChunkBinding, DeviceSealed, SpaceKey, BODY_ENVELOPE_OVERHEAD,
+    BODY_EPOCH_ID_LEN, KEY_LEN,
 };
 pub use crate::demand::{
     policy_evidence_digest, AuthorizationDemand, AuthorizationReceipt, Invalid, PolicyCapability,
@@ -52,6 +53,55 @@ pub fn seal_to(
     message: &[u8],
 ) -> Result<Option<Vec<u8>>, Failure> {
     crate::crypto::seal_to(recipient, message).map_err(map_failure)
+}
+
+/// Seal `message` to a member, bound to `context`.
+///
+/// The binding rides in the HPKE `info`, so an envelope sealed under one context
+/// is a decryption failure under another rather than a policy question. Context
+/// parts are length-framed with their count first, so `["ab", "c"]` and
+/// `["a", "bc"]` are different bindings.
+///
+/// The kernel does not own the vocabulary: a caller composes whatever context
+/// identifies the thing being sealed. What it must own is a leading part
+/// distinct from every other consumer's — the framing removes the concatenation
+/// ambiguity, not the naming collision.
+pub fn seal_to_bound(
+    recipient: &crate::ids::DeviceId,
+    context: &[&[u8]],
+    message: &[u8],
+) -> Result<Option<Vec<u8>>, Failure> {
+    crate::crypto::seal_to_bound(recipient, context, message).map_err(map_failure)
+}
+
+/// Seal `plaintext` once so that exactly `devices` can read it.
+///
+/// One random data key encrypts the payload, and each device gets an
+/// independent wrap of that key — so admitting a reader is one more wrap and
+/// re-encrypts nothing. [`Failure::Unaddressable`] when no device in the set
+/// produced a usable wrap: a payload nobody can open is a failure, never a
+/// success with an empty result.
+pub fn seal_to_devices(
+    devices: &[crate::ids::DeviceId],
+    context: &[&[u8]],
+    plaintext: &[u8],
+) -> Result<DeviceSealed, Failure> {
+    crate::crypto::seal_to_devices(devices, context, plaintext).map_err(map_failure)
+}
+
+/// Admit `newcomer` as a reader, using a device that can already read.
+///
+/// `false` when `me` cannot open the payload — which is the only way to learn
+/// the data key, and therefore the only authority this operation has. The
+/// ciphertext is never touched, so every existing wrap stays valid.
+pub fn add_device_to_sealed(
+    my_seed: &[u8; 32],
+    me: &crate::ids::DeviceId,
+    context: &[&[u8]],
+    sealed: &mut DeviceSealed,
+    newcomer: &crate::ids::DeviceId,
+) -> Result<bool, Failure> {
+    crate::crypto::add_device_to_sealed(my_seed, me, context, sealed, newcomer).map_err(map_failure)
 }
 
 pub fn body_seal(key: &AuthorizedBodyKey, plaintext: &[u8]) -> Result<Vec<u8>, Failure> {
