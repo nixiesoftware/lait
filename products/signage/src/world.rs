@@ -31,7 +31,7 @@ impl SignageWorld {
             &world.descriptor(),
             1,
             *blake3::hash(b"lait.signage.policy-table.v1").as_bytes(),
-            *blake3::hash(b"lait.signage.program.v1").as_bytes(),
+            *blake3::hash(b"lait.signage.program.v1:rolling-windows").as_bytes(),
         )
     }
 }

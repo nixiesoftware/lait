@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use world_interface::display::{
-    CanonicalDisplayInput, DisplayAssessment, DisplayOutputKind, DisplayProjection,
+    BlankReason, CanonicalDisplayInput, DisplayAssessment, DisplayOutputKind, DisplayProjection,
     DisplayRenderer, DisplayRequest, DisplaySurface, DisplaySurfaceDescriptor, DisplaySurfaceId,
     FrameMediaType, ProgramCycle, RenderedFrame, RenderedProgram, RenderedProgramItem,
     RenderedScene,
@@ -36,12 +36,12 @@ pub fn program_surface() -> Result<DisplaySurface, Failure> {
     let mut input_digest = Sha256::new();
     input_digest.update(b"signage.program.input.v1:{program:body-id}");
     let mut renderer_identity = Sha256::new();
-    renderer_identity.update(b"signage.program.frame-renderer.v1:font8x8:png");
+    renderer_identity.update(b"signage.program.frame-renderer.v2:font8x8:png:rolling-windows");
     let mut descriptor = DisplaySurfaceDescriptor {
         id: DisplaySurfaceId::new(SURFACE_ID)?,
         title: "Signage program".into(),
         runtime_implementation: crate::implementation_id(),
-        contract_version: 1,
+        contract_version: 2,
         input_contract_digest: input_digest.finalize().into(),
         renderer_identity: renderer_identity.finalize().into(),
         contract_digest: [0; 32],
@@ -106,8 +106,22 @@ impl DisplayRenderer for SignageRenderer {
             if !program.validate() {
                 return Err(Failure::new("Signage program failed validation"));
             }
-            let mut items = Vec::with_capacity(program.items.len());
-            for item in &program.items {
+            let now_unix_ms = request
+                .window_start_unix
+                .checked_mul(1_000)
+                .ok_or_else(|| Failure::new("Signage schedule time overflowed"))?;
+            let scheduled = program
+                .scheduled_at(now_unix_ms)
+                .map_err(|error| Failure::new(format!("evaluate Signage schedule: {error}")))?;
+            let refresh_after_ms = scheduled.next_boundary_unix_ms.and_then(|boundary| {
+                let delay = boundary.saturating_sub(now_unix_ms).max(1);
+                u32::try_from(delay)
+                    .ok()
+                    .filter(|delay| *delay <= request.window_horizon_ms)
+            });
+            let idle = scheduled.items.is_empty();
+            let mut items = Vec::with_capacity(scheduled.items.len().max(1));
+            for item in scheduled.items {
                 let bytes = render_item(item, request.width, request.height)?;
                 items.push(RenderedProgramItem {
                     id: item.id.clone(),
@@ -122,11 +136,24 @@ impl DisplayRenderer for SignageRenderer {
                     spoken_summary: Some(spoken_summary(item)),
                 });
             }
+            if idle {
+                items.push(RenderedProgramItem {
+                    id: "schedule-idle".into(),
+                    duration_ms: None,
+                    scene: RenderedScene::Blank(BlankReason::ProgramEnded),
+                    assessment: DisplayAssessment::Current,
+                    spoken_summary: Some("No content is scheduled".into()),
+                });
+            }
             Ok(DisplayProjection {
                 program: RenderedProgram {
                     items,
-                    cycle: cycle(program.cycle),
-                    refresh_after_ms: None,
+                    cycle: if idle {
+                        ProgramCycle::HoldLast
+                    } else {
+                        cycle(program.cycle)
+                    },
+                    refresh_after_ms,
                 },
                 assessment: DisplayAssessment::Current,
                 spoken_summary: Some(program.name),

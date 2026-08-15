@@ -12,6 +12,7 @@ pub const PRODUCT_WORLD: &str = "com.lait.signage";
 pub const PROGRAM_SCHEMA: &str = "signage.program";
 pub const PROGRAM_SCHEMA_VERSION: u32 = 1;
 pub const MAX_PROGRAM_ITEMS: usize = 16;
+pub const MAX_PROGRAM_WINDOWS: usize = 32;
 pub const MAX_PROGRAM_NAME_CHARS: usize = 96;
 pub const MAX_ITEM_TITLE_CHARS: usize = 160;
 pub const MAX_ITEM_BODY_CHARS: usize = 800;
@@ -55,6 +56,14 @@ pub struct SignageItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignageWindow {
+    pub id: String,
+    pub window: schedule::Window,
+    /// Ordered item identities selected while this window has precedence.
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignageProgram {
     /// Canonical `BodyId` rendering, minted by the authenticated application
     /// adapter before the semantic World runs.
@@ -62,6 +71,14 @@ pub struct SignageProgram {
     pub name: String,
     pub cycle: ProgramCycle,
     pub items: Vec<SignageItem>,
+    /// Empty preserves the authored program as an always-active playlist.
+    #[serde(default)]
+    pub windows: Vec<SignageWindow>,
+}
+
+pub struct ScheduledProgram<'a> {
+    pub items: Vec<&'a SignageItem>,
+    pub next_boundary_unix_ms: Option<u64>,
 }
 
 impl SignageProgram {
@@ -108,7 +125,94 @@ impl SignageProgram {
                 _ => return false,
             }
         }
-        horizon <= MAX_PROGRAM_HORIZON_MS
+        if horizon > MAX_PROGRAM_HORIZON_MS || self.windows.len() > MAX_PROGRAM_WINDOWS {
+            return false;
+        }
+        let mut window_ids = std::collections::BTreeSet::new();
+        for scheduled in &self.windows {
+            let valid_id = !scheduled.id.is_empty()
+                && scheduled.id.len() <= MAX_ITEM_ID_BYTES
+                && scheduled.id.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'-' | b'_')
+                });
+            let mut selected = std::collections::BTreeSet::new();
+            if !valid_id
+                || !window_ids.insert(&scheduled.id)
+                || scheduled.items.is_empty()
+                || scheduled.items.len() > MAX_PROGRAM_ITEMS
+                || scheduled.window.validate().is_err()
+                || scheduled
+                    .items
+                    .iter()
+                    .any(|item| !ids.contains(item) || !selected.insert(item))
+                || scheduled.items.iter().enumerate().any(|(index, id)| {
+                    self.items
+                        .iter()
+                        .find(|item| &item.id == id)
+                        .is_some_and(|item| {
+                            item.duration_ms.is_none() && index + 1 != scheduled.items.len()
+                        })
+                })
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn scheduled_at(
+        &self,
+        now_unix_ms: u64,
+    ) -> Result<ScheduledProgram<'_>, schedule::Invalid> {
+        if self.windows.is_empty() {
+            return Ok(ScheduledProgram {
+                items: self.items.iter().collect(),
+                next_boundary_unix_ms: None,
+            });
+        }
+        let mut selected: Option<&SignageWindow> = None;
+        let mut next_boundary = None;
+        for scheduled in &self.windows {
+            let (active, next) = scheduled.window.evaluate_at(now_unix_ms)?;
+            if let Some(next) = next {
+                next_boundary = Some(next_boundary.map_or(next, |current: u64| current.min(next)));
+            }
+            if active
+                && selected.is_none_or(|current| {
+                    scheduled.window.priority > current.window.priority
+                        || (scheduled.window.priority == current.window.priority
+                            && scheduled.id < current.id)
+                })
+            {
+                selected = Some(scheduled);
+            }
+        }
+        let items = selected.map_or_else(Vec::new, |scheduled| {
+            scheduled
+                .items
+                .iter()
+                .filter_map(|id| self.items.iter().find(|item| &item.id == id))
+                .collect()
+        });
+        Ok(ScheduledProgram {
+            items,
+            next_boundary_unix_ms: next_boundary,
+        })
+    }
+
+    pub fn schedule_overlaps_between(
+        &self,
+        range_start_unix_ms: u64,
+        range_end_unix_ms: u64,
+    ) -> Result<Vec<schedule::Overlap>, schedule::Invalid> {
+        let windows: Vec<_> = self
+            .windows
+            .iter()
+            .map(|scheduled| scheduled.window.clone())
+            .collect();
+        schedule::overlaps_between(&windows, range_start_unix_ms, range_end_unix_ms)
     }
 
     pub fn body_key(&self) -> Option<BodyKey> {
@@ -192,6 +296,7 @@ mod tests {
                 foreground: "ffffff".into(),
                 duration_ms: Some(10_000),
             }],
+            windows: Vec::new(),
         }
     }
 
@@ -203,5 +308,98 @@ mod tests {
         assert!(!bad.validate());
         bad.cycle = ProgramCycle::HoldLast;
         assert!(bad.validate());
+
+        bad.items.insert(
+            0,
+            SignageItem {
+                id: "intro".into(),
+                title: "Introduction".into(),
+                body: String::new(),
+                background: "102030".into(),
+                foreground: "ffffff".into(),
+                duration_ms: Some(1_000),
+            },
+        );
+        bad.windows.push(SignageWindow {
+            id: "reordered".into(),
+            window: schedule::Window {
+                start_local: "2026-08-15T10:00:00".into(),
+                duration_ms: 60_000,
+                recurrence: schedule::Recurrence::None,
+                until_unix_ms: None,
+                priority: 0,
+                enabled: true,
+                timezone: "UTC".into(),
+                exceptions: Vec::new(),
+            },
+            items: vec!["welcome".into(), "intro".into()],
+        });
+        assert!(!bad.validate());
+    }
+
+    #[test]
+    fn highest_priority_active_window_selects_items_and_exposes_the_next_boundary() {
+        let mut program = program();
+        program.items.push(SignageItem {
+            id: "urgent".into(),
+            title: "Urgent".into(),
+            body: String::new(),
+            background: "901010".into(),
+            foreground: "ffffff".into(),
+            duration_ms: Some(10_000),
+        });
+        program.windows = vec![
+            SignageWindow {
+                id: "regular".into(),
+                window: schedule::Window {
+                    start_local: "2026-08-15T10:00:00".into(),
+                    duration_ms: 60 * 60 * 1_000,
+                    recurrence: schedule::Recurrence::None,
+                    until_unix_ms: None,
+                    priority: 0,
+                    enabled: true,
+                    timezone: "America/Chicago".into(),
+                    exceptions: Vec::new(),
+                },
+                items: vec!["welcome".into()],
+            },
+            SignageWindow {
+                id: "override".into(),
+                window: schedule::Window {
+                    start_local: "2026-08-15T10:30:00".into(),
+                    duration_ms: 10 * 60 * 1_000,
+                    recurrence: schedule::Recurrence::None,
+                    until_unix_ms: None,
+                    priority: 10,
+                    enabled: true,
+                    timezone: "America/Chicago".into(),
+                    exceptions: Vec::new(),
+                },
+                items: vec!["urgent".into()],
+            },
+        ];
+        assert!(program.validate());
+        let now = u64::try_from(
+            "2026-08-15T15:35:00Z"
+                .parse::<jiff::Timestamp>()
+                .unwrap()
+                .as_millisecond(),
+        )
+        .unwrap();
+        let selected = program.scheduled_at(now).unwrap();
+        assert_eq!(selected.items.len(), 1);
+        assert_eq!(selected.items[0].id, "urgent");
+        assert_eq!(
+            selected.next_boundary_unix_ms,
+            Some(
+                u64::try_from(
+                    "2026-08-15T15:40:00Z"
+                        .parse::<jiff::Timestamp>()
+                        .unwrap()
+                        .as_millisecond()
+                )
+                .unwrap()
+            )
+        );
     }
 }

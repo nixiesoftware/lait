@@ -9,6 +9,7 @@ members = [
     "crates/relay",
     "crates/replica",
     "crates/runtime",
+    "crates/schedule",
     "crates/world-interface",
     "products/issues",
     "products/issues-app",

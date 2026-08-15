@@ -25,6 +25,6 @@ mod world;
 
 pub use contract::{
     ProgramCycle, SignageIntent, SignageItem, SignageProgram, SignageProjection, SignageQuery,
-    PRODUCT_WORLD,
+    SignageWindow, PRODUCT_WORLD,
 };
 pub use world::SignageWorld;

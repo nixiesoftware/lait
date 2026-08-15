@@ -58,6 +58,7 @@ pub fn signage_package() -> WorldPackage {
         signage_app::implementation_id(),
     )
     .with_control(Arc::new(signage_app::SignageCallHandler))
+    .with_projector(Arc::new(SignageProjector))
     .with_lifecycle(Arc::new(SignageLifecycle))
 }
 
@@ -108,6 +109,56 @@ impl ObservationProjector for IssuesProjector {
 struct IssuesLifecycle;
 
 struct SignageLifecycle;
+
+struct SignageProjector;
+
+impl ObservationProjector for SignageProjector {
+    fn status(&self, session: &runtime::Session) -> Option<StatusProjection> {
+        let projection = session
+            .query(runtime::world::Query {
+                schema: signage::contract::program_schema(),
+                schema_version: signage::contract::PROGRAM_SCHEMA_VERSION,
+                payload: serde_json::to_vec(&signage::SignageQuery::Programs).ok()?,
+            })
+            .ok()?;
+        let signage::SignageProjection::Programs { programs } =
+            serde_json::from_slice(&projection.bytes).ok()?
+        else {
+            return None;
+        };
+        Some(StatusProjection {
+            items: programs.len(),
+            scopes: usize::from(!programs.is_empty()),
+            name: "Signage".into(),
+            description: "Durable display programs".into(),
+        })
+    }
+
+    fn start(&self, _session: &runtime::Session, _space: &mechanics::ids::SpaceId) {}
+
+    fn project(
+        &self,
+        _session: &runtime::Session,
+        _space: &mechanics::ids::SpaceId,
+        observation: &runtime::world::Observation,
+    ) -> Invalidation {
+        if observation
+            .bodies
+            .iter()
+            .any(|key| key.world == signage::contract::world_id())
+        {
+            Invalidation {
+                dirty: Vec::new(),
+                planes: vec![runtime::world::DirtyPlane {
+                    plane: "programs".into(),
+                    scope: None,
+                }],
+            }
+        } else {
+            Invalidation::default()
+        }
+    }
+}
 
 impl WorldLifecycle for SignageLifecycle {
     fn founder_grants(&self) -> anyhow::Result<Vec<FounderGrant>> {

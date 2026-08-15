@@ -1,0 +1,15 @@
+[package]
+name = "schedule"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Deterministic timezone-aware recurrence windows for lait Worlds"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+jiff = "0.2.35"
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

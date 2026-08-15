@@ -4,25 +4,25 @@ lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, ea
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-822 crates, under 43 distinct licence expressions.
+832 crates, under 43 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 385 |
+| `MIT OR Apache-2.0` | 388 |
 | `MIT` | 156 |
-| `Apache-2.0 OR MIT` | 76 |
-| `MIT/Apache-2.0` | 40 |
+| `Apache-2.0 OR MIT` | 77 |
+| `MIT/Apache-2.0` | 41 |
 | `Unicode-3.0` | 25 |
 | `Apache-2.0` | 23 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 16 |
 | `Zlib OR Apache-2.0 OR MIT` | 11 |
 | `MPL-2.0` | 10 |
+| `Unlicense OR MIT` | 10 |
 | `BSD-3-Clause` | 8 |
 | `MPL-2.0+` | 6 |
 | `Apache-2.0/MIT` | 5 |
-| `Unlicense OR MIT` | 5 |
 | `BSD-2-Clause` | 4 |
 | `MIT OR Apache-2.0 OR Zlib` | 4 |
 | `Unlicense/MIT` | 4 |
@@ -116,6 +116,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | bit-set | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/contain-rs/bit-set> |
 | bit-vec | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/contain-rs/bit-vec> |
 | bit-vec | 0.9.1 | `Apache-2.0 OR MIT` | <https://github.com/contain-rs/bit-vec> |
+| bitflags | 1.3.2 | `MIT/Apache-2.0` | <https://github.com/bitflags/bitflags> |
 | bitflags | 2.13.0 | `MIT OR Apache-2.0` | <https://github.com/bitflags/bitflags> |
 | bitmaps | 2.1.0 | `MPL-2.0+` | <https://github.com/bodil/bitmaps> |
 | bitmaps | 3.2.1 | `MPL-2.0+` | <https://github.com/bodil/bitmaps> |
@@ -204,6 +205,9 @@ Listed here is every crate reachable from this workspace through normal and buil
 | data-encoding-macro | 0.1.20 | `MIT` | <https://github.com/ia0/data-encoding> |
 | data-encoding-macro-internal | 0.1.18 | `MIT` | <https://github.com/ia0/data-encoding> |
 | data-url | 0.3.2 | `MIT OR Apache-2.0` | <https://github.com/servo/rust-url> |
+| defmt | 1.1.1 | `MIT OR Apache-2.0` | <https://github.com/knurling-rs/defmt> |
+| defmt-macros | 1.1.1 | `MIT OR Apache-2.0` | <https://github.com/knurling-rs/defmt> |
+| defmt-parser | 1.0.0 | `MIT OR Apache-2.0` | <https://github.com/knurling-rs/defmt> |
 | delegate-attr | 0.3.1 | `MIT` | <https://github.com/upsuper/delegate-attr> |
 | der | 0.7.10 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats/tree/master/der> |
 | der | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
@@ -389,6 +393,11 @@ Listed here is every crate reachable from this workspace through normal and buil
 | itertools | 0.12.1 | `MIT OR Apache-2.0` | <https://github.com/rust-itertools/itertools> |
 | itertools | 0.14.0 | `MIT OR Apache-2.0` | <https://github.com/rust-itertools/itertools> |
 | itoa | 1.0.18 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/itoa> |
+| jiff | 0.2.35 | `Unlicense OR MIT` | <https://github.com/BurntSushi/jiff> |
+| jiff-core | 0.1.0 | `Unlicense OR MIT` | <https://github.com/BurntSushi/jiff> |
+| jiff-static | 0.2.35 | `Unlicense OR MIT` | <https://github.com/BurntSushi/jiff> |
+| jiff-tzdb | 0.1.8 | `Unlicense OR MIT` | <https://github.com/BurntSushi/jiff> |
+| jiff-tzdb-platform | 0.1.3 | `Unlicense OR MIT` | <https://github.com/BurntSushi/jiff> |
 | jni | 0.22.4 | `MIT OR Apache-2.0` | <https://github.com/jni-rs/jni-rs> |
 | jni-macros | 0.22.4 | `MIT OR Apache-2.0` | <https://github.com/jni-rs/jni-rs> |
 | jni-sys | 0.4.1 | `MIT OR Apache-2.0` | <https://github.com/jni-rs/jni-sys> |
@@ -519,6 +528,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | polycool | 0.4.0 | `MIT OR Apache-2.0` | <https://github.com/linebender/kurbo> |
 | polyval | 0.6.2 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/universal-hashes> |
 | portable-atomic | 1.13.1 | `Apache-2.0 OR MIT` | <https://github.com/taiki-e/portable-atomic> |
+| portable-atomic-util | 0.2.7 | `Apache-2.0 OR MIT` | <https://github.com/taiki-e/portable-atomic-util> |
 | portmapper | 0.18.0 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/net-tools> |
 | postcard | 1.1.3 | `MIT OR Apache-2.0` | <https://github.com/jamesmunns/postcard> |
 | postcard-derive | 0.2.2 | `MIT OR Apache-2.0` | <https://github.com/jamesmunns/postcard> |

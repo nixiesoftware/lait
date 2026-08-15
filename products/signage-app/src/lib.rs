@@ -69,6 +69,6 @@ mod tests {
             surface.descriptor.runtime_implementation,
             implementation_id()
         );
-        assert_eq!(surface.descriptor.contract_version, 1);
+        assert_eq!(surface.descriptor.contract_version, 2);
     }
 }

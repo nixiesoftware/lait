@@ -152,6 +152,35 @@ async fn wait_for_assigned(path: &Path, assignment: &str, program: &str) -> (Str
     panic!("assigned receiver never presented the compiled Signage frame");
 }
 
+async fn wait_for_revision_change(
+    path: &Path,
+    assignment: &str,
+    program: &str,
+    prior_revision: &str,
+    phase: &str,
+) -> (String, String) {
+    for _ in 0..200 {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let (Some(revision), Some(item)) =
+                    (status["revision"].as_str(), status["item"].as_str())
+                {
+                    if status["assignment"] == assignment
+                        && status["program"] == program
+                        && status["scene"]["kind"] == "frame"
+                        && revision != prior_revision
+                        && !item.is_empty()
+                    {
+                        return (revision.to_owned(), item.to_owned());
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("assigned receiver never received the {phase} semantic revision");
+}
+
 async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &str) {
     for _ in 0..200 {
         let display = client.display_status().await.expect("read receiver health");
@@ -198,7 +227,6 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
                 .is_ok_and(|path| path == canonical_store)
         })
         .expect("founded Signage Orbit is registered");
-    let space = mechanics::ids::SpaceId::parse(&orbit.space).expect("founded Space id");
     let program = signage::SignageProgram {
         id: replica::body::BodyId::from_bytes([9; 16]).render(),
         name: "Restart proof".into(),
@@ -211,7 +239,19 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
             foreground: "ffffff".into(),
             duration_ms: Some(60_000),
         }],
+        windows: Vec::new(),
     };
+    write_signage_program(client, store, &orbit.space, program.clone()).await;
+    (orbit.space.clone(), program.id)
+}
+
+async fn write_signage_program(
+    client: &Client,
+    store: &Path,
+    space: &str,
+    program: signage::SignageProgram,
+) {
+    let space = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
     let call = signage_app::encode_call(&signage_app::SignageRequest::ProgramPut {
         program: program.clone(),
     })
@@ -236,7 +276,83 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
         matches!(response, signage_app::SignageResponse::Saved { program: ref saved } if saved == &program.id),
         "Signage World did not save the receiver program: {response:?}"
     );
-    (orbit.space.clone(), program.id)
+}
+
+async fn schedule_signage_boundary(
+    client: &Client,
+    store: &Path,
+    space: &str,
+    program: &str,
+) -> u64 {
+    let now = mechanics::wallclock::now_millis();
+    let boundary = now
+        .checked_add(10_999)
+        .map(|value| value / 1_000 * 1_000)
+        .expect("schedule boundary within the test clock");
+    let start = boundary.saturating_sub(60_000);
+    let local = |unix_ms: u64| {
+        jiff::Timestamp::from_millisecond(i64::try_from(unix_ms).expect("test time fits i64"))
+            .expect("valid test timestamp")
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .datetime()
+            .to_string()
+    };
+    let scheduled = signage::SignageProgram {
+        id: program.to_owned(),
+        name: "Boundary proof".into(),
+        cycle: signage::ProgramCycle::HoldLast,
+        items: vec![
+            signage::SignageItem {
+                id: "before-boundary".into(),
+                title: "Before the schedule boundary".into(),
+                body: "The coordinator is holding an exact wake deadline.".into(),
+                background: "102030".into(),
+                foreground: "ffffff".into(),
+                duration_ms: Some(60_000),
+            },
+            signage::SignageItem {
+                id: "after-boundary".into(),
+                title: "After the schedule boundary".into(),
+                body: "This revision arrived without another World write.".into(),
+                background: "305010".into(),
+                foreground: "ffffff".into(),
+                duration_ms: Some(60_000),
+            },
+        ],
+        windows: vec![
+            signage::SignageWindow {
+                id: "before".into(),
+                window: schedule::Window {
+                    start_local: local(start),
+                    duration_ms: boundary.saturating_sub(start),
+                    recurrence: schedule::Recurrence::None,
+                    until_unix_ms: None,
+                    priority: 0,
+                    enabled: true,
+                    timezone: "UTC".into(),
+                    exceptions: Vec::new(),
+                },
+                items: vec!["before-boundary".into()],
+            },
+            signage::SignageWindow {
+                id: "after".into(),
+                window: schedule::Window {
+                    start_local: local(boundary),
+                    duration_ms: 60_000,
+                    recurrence: schedule::Recurrence::None,
+                    until_unix_ms: None,
+                    priority: 0,
+                    enabled: true,
+                    timezone: "UTC".into(),
+                    exceptions: Vec::new(),
+                },
+                items: vec!["after-boundary".into()],
+            },
+        ],
+    };
+    assert!(scheduled.validate(), "scheduled Signage program is valid");
+    write_signage_program(client, store, space, scheduled).await;
+    boundary
 }
 
 async fn wait_for_receiver_exit(receiver: &mut OwnedReceiver) {
@@ -443,6 +559,51 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             frame.get(..8),
             Some(b"\x89PNG\r\n\x1a\n".as_slice()),
             "the assigned Signage surface did not present a PNG frame"
+        );
+        wait_for_health(&client, &device, &revision, &item).await;
+
+        // One World write installs two civil-time windows. The invalidation
+        // pushes the first semantic revision; after that, no actor or World
+        // mutation occurs. The package's exact boundary deadline completes the
+        // held long poll, recompiles, and pushes the second semantic revision.
+        let boundary = schedule_signage_boundary(
+            &client,
+            identity.path(),
+            &assignment.space,
+            &signage_program,
+        )
+        .await;
+        let (before_revision, _) = wait_for_revision_change(
+            &output_path.join("active.json"),
+            &assignment_id,
+            &receiver_program,
+            &revision,
+            "pre-boundary",
+        )
+        .await;
+        let before_frame =
+            std::fs::read(output_path.join("frame.png")).expect("read pre-boundary frame");
+        assert!(
+            mechanics::wallclock::now_millis() < boundary,
+            "the test failed to observe the pre-boundary revision before its deadline"
+        );
+        let (revision, item) = wait_for_revision_change(
+            &output_path.join("active.json"),
+            &assignment_id,
+            &receiver_program,
+            &before_revision,
+            "post-boundary",
+        )
+        .await;
+        assert!(
+            mechanics::wallclock::now_millis() >= boundary,
+            "the semantic revision changed before the schedule boundary"
+        );
+        let after_frame =
+            std::fs::read(output_path.join("frame.png")).expect("read post-boundary frame");
+        assert_ne!(
+            before_frame, after_frame,
+            "the boundary revision did not change presented content"
         );
         wait_for_health(&client, &device, &revision, &item).await;
 
