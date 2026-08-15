@@ -6,7 +6,7 @@
 //! That is why this cannot live in a World: the page that would host it is
 //! unreachable until the thing it creates exists.
 
-use lait::control::{ControlRoute, HostReply, Request, Response};
+use lait::control::{ControlRoute, HostReply, Request, Response, SponsorshipAsk};
 
 use super::{Client, ClientError, ClientResult};
 
@@ -23,6 +23,13 @@ pub struct HostContext {
     pub worlds: Vec<String>,
     pub identities: Vec<String>,
     pub orbits: Vec<OrbitEntry>,
+    /// Unsponsored agents waiting on this identity to sponsor them.
+    ///
+    /// Host-plane state. The client diffs this list the same way it diffs a
+    /// workbench snapshot: a new row is an interruption, a standing row is
+    /// not, and the first reading of a machine that already has asks *is*
+    /// news — a decision is waiting, unlike four peers who were already here.
+    pub asks: Vec<SponsorshipAsk>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +59,7 @@ impl Client {
                 worlds,
                 identities,
                 orbits,
+                asks,
             }) => Ok(HostContext {
                 version,
                 identity_home,
@@ -67,6 +75,7 @@ impl Client {
                         last_opened: orbit.last_opened,
                     })
                     .collect(),
+                asks,
             }),
             Response::Error { message, .. } => Err(ClientError::refused(message)),
             other => Err(ClientError::internal(format!(

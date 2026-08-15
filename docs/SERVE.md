@@ -90,7 +90,9 @@ That reach is real and worth stating plainly. `HostSpaceFound`,
 caller holding this token can create a directory anywhere this process can
 write. Requests that name an *existing* store — the config layer, `HostOrbitRebuild` —
 go through `orbits::bootstrap::admit` first, which refuses a path this daemon
-does not serve.
+does not serve. `HostInstallMcp` writes a portable `lait mcp` entry (`lait`
+off PATH, optional `LAIT_AGENT` / `LAIT_WORLD`); it does not snapshot
+`current_exe()` or `$LAIT_HOME`. `world` is the mount this session speaks.
 
 ### A worked example
 
@@ -109,6 +111,7 @@ POST /api/spaces/{id}/worlds/issues/rpc  {"cmd":"issue_start","reff":"ENG-1"}
 # orientation, on both planes
 POST /api/spaces/{id}/rpc                {"cmd":"whoami"}
 POST /api/host/rpc                       {"cmd":"host_context"}
+# whoami as an unsponsored LAIT_AGENT files Context.asks; Astrolabe notifies.
 ```
 
 ## Credentials and origin

@@ -536,6 +536,65 @@ impl<'a> IssueRouter<'a> {
         })
     }
 
+    fn issuing_denied(kind: &str, capability: &str) -> Response {
+        Response::denied(format!(
+            "issuing or withdrawing a {kind} needs the {capability} capability \
+             (a project grant or space.admin). space.contributor can draft and \
+             send for review; it cannot make governing truth. Ask an admin to \
+             issue it, or to grant you {capability} on this project; nothing \
+             was changed"
+        ))
+    }
+
+    fn baseline_member_not_issued(
+        member: &issues::spec::SpecRef,
+        view: &issues::spec::SpecView,
+    ) -> Response {
+        Response::invalid(format!(
+            "Baseline member {}@{} is not an issued Spec revision — current \
+             head is {}, state {}. A Baseline is a named set of exact issued \
+             revisions; draft and review heads cannot enter it. Issue the Spec \
+             with spec_state state=issued (needs spec.issue or space.admin), \
+             then retry",
+            member.spec,
+            member.revision,
+            view.revision,
+            view.state.as_str()
+        ))
+    }
+
+    fn require_issued_members(&self, members: &[issues::spec::SpecRef]) -> Result<(), Response> {
+        for member in members {
+            let view: issues::spec::SpecView = self
+                .query(&IssueQuery::Spec {
+                    spec: member.spec.clone(),
+                })
+                .map_err(|failure| match failure {
+                    SessionFailure::Rejected(Rejection::InvalidRequest) => {
+                        Response::not_found(format!("no Spec matches {}", member.spec))
+                    }
+                    other => Self::effect_err(other),
+                })?;
+            if !view
+                .issued
+                .iter()
+                .any(|revision| revision == &member.revision)
+            {
+                return Err(Self::baseline_member_not_issued(member, &view));
+            }
+        }
+        Ok(())
+    }
+
+    fn lifecycle_err(e: SessionFailure, capability: &str, kind: &str) -> Response {
+        match e {
+            SessionFailure::Rejected(Rejection::Denied(DeniedCause::DemandUnsatisfied)) => {
+                Self::issuing_denied(kind, capability)
+            }
+            other => Self::effect_err(other),
+        }
+    }
+
     fn effect_err(e: SessionFailure) -> Response {
         match e {
             // Each denial cause names its own remedy. The collapsed form told
@@ -592,7 +651,7 @@ impl<'a> IssueRouter<'a> {
                 Response::err("duplicate request")
             }
             SessionFailure::Rejected(Rejection::InvalidRequest | Rejection::ContractViolation) => {
-                Response::err("invalid request")
+                Response::invalid("invalid request")
             }
             SessionFailure::Rejected(
                 Rejection::UnsupportedSchema | Rejection::UnsupportedSchemaVersion,
@@ -2405,7 +2464,16 @@ impl<'a> IssueRouter<'a> {
                     device: facts.device.clone(),
                     ts: facts.now,
                 })
-                .map_err(Self::effect_err)?;
+                .map_err(|failure| {
+                    if matches!(
+                        state,
+                        issues::spec::State::Issued | issues::spec::State::Withdrawn
+                    ) {
+                        Self::lifecycle_err(failure, "spec.issue", "Spec")
+                    } else {
+                        Self::effect_err(failure)
+                    }
+                })?;
                 let view = self
                     .query(&IssueQuery::Spec { spec })
                     .map_err(Self::effect_err)?;
@@ -2513,6 +2581,7 @@ impl<'a> IssueRouter<'a> {
                 let project = snapshot
                     .resolve_project(&project)
                     .ok_or_else(|| Response::not_found("no such project"))?;
+                self.require_issued_members(&members)?;
                 let baseline = issues::ids::mint_baseline_id(self.clock);
                 self.submit(&IssueIntent::BaselineCreate {
                     baseline: baseline.clone(),
@@ -2535,6 +2604,9 @@ impl<'a> IssueRouter<'a> {
                 name,
                 members,
             } => {
+                if let Some(members) = &members {
+                    self.require_issued_members(members)?;
+                }
                 self.submit(&IssueIntent::BaselineRevise {
                     baseline: baseline.clone(),
                     expected,
@@ -2563,7 +2635,16 @@ impl<'a> IssueRouter<'a> {
                     device: facts.device.clone(),
                     ts: facts.now,
                 })
-                .map_err(Self::effect_err)?;
+                .map_err(|failure| {
+                    if matches!(
+                        state,
+                        issues::spec::State::Issued | issues::spec::State::Withdrawn
+                    ) {
+                        Self::lifecycle_err(failure, "baseline.issue", "Baseline")
+                    } else {
+                        Self::effect_err(failure)
+                    }
+                })?;
                 let view = self
                     .query(&IssueQuery::Baseline { baseline })
                     .map_err(Self::effect_err)?;
@@ -2753,6 +2834,15 @@ mod tests {
             DeniedCause::DemandUnsatisfied,
         )));
         assert!(unsatisfied.contains("scoped member"), "{unsatisfied}");
+
+        let issuing = match IssueRouter::issuing_denied("Spec", "spec.issue") {
+            crate::protocol::IssuesResponse::Error { message, .. } => message,
+            other => panic!("expected an error response, got {other:?}"),
+        };
+        assert!(
+            issuing.contains("spec.issue") && issuing.contains("space.admin"),
+            "{issuing}"
+        );
 
         let read = message(SessionFailure::Rejected(Rejection::Denied(
             DeniedCause::ReadRefused,

@@ -817,6 +817,13 @@ impl IssuesResponse {
         }
     }
 
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            error_kind: IssuesErrorKind::Invalid,
+        }
+    }
+
     pub fn retry(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),

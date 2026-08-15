@@ -40,6 +40,22 @@ pub use protocol::{
 };
 pub use router::{IssueRouter, IssuesCallHandler, RouterFacts};
 
+/// What an agent is handed with the tool list. The verbs exist so this text
+/// does not have to be rediscovered in a human session.
+const ISSUES_MCP_INSTRUCTIONS: &str = "\
+Plans, Specs, labels, milestones, teams, and issues are first-class MCP tools. \
+A Spec is project truth: spec_new (draft) → spec_state review (any contributor) → \
+spec_state issued (spec.issue or space.admin). Never rewrite an issued revision; \
+spec_revise a successor and issue that. kind=plan seeds Blueprint from issue \
+roots — put order in issues_parent and issues_link kind=blocks, not in prose. \
+An Observation (spec_observe) notes; a Link governs. A Baseline is a named set \
+of exact issued Spec revisions: issue the Specs first, then baseline_new, then \
+baseline_state issued, then issue_baseline to pin it on work. Labels: \
+label_new / label / label_list. Milestones: milestone_set / milestone_list / \
+issue_milestone. Teams: team_set / team_list / project_edit team=. \
+whoami lists your grants; issuing names spec.issue when you lack it. \
+This MCP node spends your key — the HTTP custody fence does not apply here.";
+
 /// The namespace every head addresses this package by.
 ///
 /// It prefixes all public MCP tool names (`issues_list`, not `list`) and it is
@@ -53,8 +69,11 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
     world_interface::WorldClientPackage::new(
         issues::contract::world_id(),
         MOUNT,
-        mcp::tools(),
-        "Work with issues, projects, planning, roles, and workflows in the selected Orbit.",
+        world_interface::AgentSurface::designed(
+            mcp::tools(),
+            ISSUES_MCP_INSTRUCTIONS,
+            mcp::WITHOUT_A_TOOL,
+        ),
         decode_client_reply,
     )
     .and_then(|package| {
@@ -167,6 +186,14 @@ mod tests {
         let missing = serde_json::to_value(IssuesResponse::not_found("no such issue")).unwrap();
         assert_eq!(
             classify_failure(&missing).map(|(failure, _)| failure),
+            Some(world_interface::Failure::invalid())
+        );
+        let bad = serde_json::to_value(IssuesResponse::invalid(
+            "Baseline member is not an issued Spec revision",
+        ))
+        .unwrap();
+        assert_eq!(
+            classify_failure(&bad).map(|(failure, _)| failure),
             Some(world_interface::Failure::invalid())
         );
         let fine = serde_json::to_value(IssuesResponse::List { rows: Vec::new() }).unwrap();

@@ -10,6 +10,7 @@
 pub(crate) mod address_book;
 pub(crate) mod host;
 pub(crate) mod scope;
+pub(crate) mod sponsorship;
 pub(crate) mod transport_hub;
 
 pub use crate::orbits::OrbitDoorbell;

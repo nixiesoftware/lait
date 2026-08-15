@@ -612,6 +612,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
             no_agent,
             print,
             dir,
+            world,
         } => {
             blocking(move || {
                 crate::install::install_mcp(
@@ -622,6 +623,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                     no_agent,
                     print,
                     Path::new(&dir),
+                    world.as_deref(),
                 )
                 .map(|installed| HostReply::McpInstalled {
                     path: installed.path.display().to_string(),
@@ -656,6 +658,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                     .collect(),
                 identities,
                 orbits: orbits::list(),
+                asks: router.asks().list(),
             }),
             Err(error) => Response::err(format!("{error:#}")),
         },

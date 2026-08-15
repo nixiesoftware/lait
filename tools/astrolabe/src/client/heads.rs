@@ -15,11 +15,13 @@
 //! broken store rather than a stale config.
 //!
 //! So the binding is: which agent client, which config scope, what to call the
-//! server, and which sponsored identity its work signs as. The Orbit is
-//! discovered from the project directory at run time, which is what lets one
-//! entry serve every Space on the machine. A client that offered to pin an
-//! Orbit here would be offering to author the exact staleness that design
-//! removed, and this surface says what it does instead.
+//! server, which sponsored identity its work signs as, and which World the
+//! session speaks. The Orbit is discovered from the project directory at run
+//! time, which is what lets one entry serve every Space on the machine. A
+//! client that offered to pin an Orbit here would be offering to author the
+//! exact staleness that design removed, and this surface says what it does
+//! instead. The World pin is not that: it is a mount name this build hosts,
+//! written as `$LAIT_WORLD`, so two Worlds do not share one `tools/list`.
 
 use lait::control::{ControlRoute, HostReply, Request, Response};
 use lait::install::{Client as AgentClient, Scope};
@@ -45,6 +47,9 @@ pub struct McpBinding {
     /// The project directory a project-scoped config lands in. Carried
     /// explicitly because the daemon's working directory is not the person's.
     pub project: String,
+    /// Mount of the World this session speaks. `None` lets `lait mcp` take
+    /// the sole World this build hosts.
+    pub world: Option<String>,
 }
 
 /// What authoring one produced.
@@ -63,6 +68,9 @@ pub struct McpBindingOutcome {
     /// Whether anything was written. A preview that looked like a write would
     /// be the worst possible answer for a verb whose failure mode is silence.
     pub written: bool,
+    /// Mount this binding was authored for. The model holds one last outcome;
+    /// a surface showing another World must ignore it.
+    pub world: Option<String>,
 }
 
 impl Client {
@@ -113,6 +121,12 @@ impl Client {
                     no_agent: binding.no_agent,
                     print: preview,
                     dir: binding.project.trim().to_owned(),
+                    world: binding
+                        .world
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|world| !world.is_empty())
+                        .map(str::to_owned),
                 },
                 None,
             )
@@ -132,6 +146,7 @@ impl Client {
                 replaced,
                 agent,
                 written: !preview,
+                world: binding.world.clone(),
             }),
             Response::Error { message, .. } => Err(ClientError::refused(message)),
             other => Err(ClientError::internal(format!(
@@ -165,6 +180,7 @@ mod tests {
             agent: None,
             no_agent: false,
             project: "D:/work".into(),
+            world: None,
         }
     }
 
@@ -220,6 +236,7 @@ mod tests {
             replaced: false,
             agent: None,
             written: false,
+            world: Some("issues".into()),
         };
         assert!(!previewed.written);
     }

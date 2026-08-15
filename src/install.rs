@@ -106,12 +106,19 @@ fn config_path(client: Client, scope: Scope, project: &Path) -> Result<PathBuf> 
 /// it, and because a home is created on demand it resolves to a freshly-made
 /// empty directory — reported as "no local Orbit here", which reads like a
 /// broken store rather than a stale config.
-fn server_entry(agent: Option<&str>) -> Value {
+fn server_entry(agent: Option<&str>, world: Option<&str>) -> Value {
     let mut entry = Map::new();
     entry.insert("command".into(), json!("lait"));
     entry.insert("args".into(), json!(["mcp"]));
+    let mut env = Map::new();
     if let Some(a) = agent {
-        entry.insert("env".into(), json!({ "LAIT_AGENT": a }));
+        env.insert("LAIT_AGENT".into(), json!(a));
+    }
+    if let Some(world) = world.filter(|world| !world.is_empty()) {
+        env.insert("LAIT_WORLD".into(), json!(world));
+    }
+    if !env.is_empty() {
+        entry.insert("env".into(), Value::Object(env));
     }
     Value::Object(entry)
 }
@@ -162,6 +169,7 @@ pub fn install_mcp(
     no_agent: bool,
     print: bool,
     project: &Path,
+    world: Option<&str>,
 ) -> Result<Installed> {
     let scope = scope.unwrap_or_else(|| default_scope(client));
     let path = config_path(client, scope, project)?;
@@ -183,7 +191,7 @@ pub fn install_mcp(
     // this process can open. The entry below is built from the request alone, so
     // it discloses nothing the caller did not already send.
     if print {
-        let entry = json!({ "mcpServers": { name: server_entry(agent) } });
+        let entry = json!({ "mcpServers": { name: server_entry(agent, world) } });
         return Ok(Installed {
             path,
             detail: serde_json::to_string_pretty(&entry)? + "\n",
@@ -212,7 +220,7 @@ pub fn install_mcp(
         .as_object_mut()
         .ok_or_else(|| anyhow!("mcpServers in {} is not an object", path.display()))?;
     let existed = servers.contains_key(name);
-    servers.insert(name.to_string(), server_entry(agent));
+    servers.insert(name.to_string(), server_entry(agent, world));
 
     let pretty = serde_json::to_string_pretty(&root)? + "\n";
     if let Some(parent) = path.parent() {
@@ -233,8 +241,8 @@ pub fn install_mcp(
             use std::fmt::Write;
             let _ = write!(
                 detail,
-                "\n\nWork will be attributed to the agent identity '{a}'. Sponsor it once from \
-                 Settings > Members in the local app (run `lait`)."
+                "\n\nWork will be attributed to the agent identity '{a}'. The agent's first \
+                 whoami asks the person on this machine (Astrolabe) to sponsor it."
             );
         }
         None => detail.push_str(
@@ -261,7 +269,7 @@ mod tests {
     /// that set it and then resolved to an empty directory.
     #[test]
     fn entry_pins_nothing_machine_specific() {
-        let e = server_entry(None);
+        let e = server_entry(None, None);
         assert_eq!(e["command"], json!("lait"));
         assert_eq!(e["args"], json!(["mcp"]));
         assert!(
@@ -281,9 +289,22 @@ mod tests {
 
     #[test]
     fn naming_an_agent_adds_only_that() {
-        let e = server_entry(Some("claude"));
+        let e = server_entry(Some("claude"), None);
         assert_eq!(e["env"], json!({ "LAIT_AGENT": "claude" }));
         assert_eq!(e["command"], json!("lait"));
+    }
+
+    #[test]
+    fn naming_a_world_adds_the_pin_and_nothing_machine_specific() {
+        let e = server_entry(Some("claude"), Some("signage"));
+        assert_eq!(
+            e["env"],
+            json!({ "LAIT_AGENT": "claude", "LAIT_WORLD": "signage" })
+        );
+        assert!(
+            !e.to_string().contains("LAIT_HOME"),
+            "must never capture a home: {e}"
+        );
     }
 
     /// Naming the client names the agent. The identity is what the browser draws
@@ -341,6 +362,7 @@ mod tests {
             false,
             true,
             &dir,
+            None,
         )
         .expect("print");
 

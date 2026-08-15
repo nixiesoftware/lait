@@ -47,6 +47,10 @@ lait (the local app)
 lait mcp (pinned agent head)
   └─ WorldClientRegistry
        └─ explicit Orbit/World route -> daemon::Daemon
+
+astrolabe (library / launcher / identity)
+  └─ tools/astrolabe core -> host / Space / World planes
+       └─ Flutter (apps/astrolabe) draws ClientView; never a World
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -63,7 +67,12 @@ Web and MCP clients use one local control protocol. They do not open the store
 or CRDT engine. An explicit control route addresses the process-level daemon, a
 local Orbit plus its expected Space, or a World reached through that Orbit. The
 web head is a picker over the whole registered catalog under one identity; MCP
-is pinned to its launch Orbit and inherits no catalog-wide visibility.
+is pinned to its launch Orbit and to one World (`$LAIT_WORLD`, or the sole
+World this build hosts) and inherits no catalog-wide visibility. The World
+owns the agent surface (tools, omissions, instructions); `lait mcp` mounts
+that surface and does not generate tools from the wire protocol. Astrolabe
+authors the editor binding (`LAIT_AGENT`, `LAIT_WORLD`) and never parents
+that process; it is not on the tool-call path.
 
 **`lait` is a launcher, not a command surface.** It parses a mode, never a
 grammar: `lait daemon` is the identity-scoped host, `lait mcp` is the stdio head
@@ -209,6 +218,8 @@ issues     IssuesWorld schemas, semantic model, product DTOs and identifiers
 issues-app Issues application protocol plus its web and MCP client interfaces
 lait       launcher, identity-scoped daemon, HTTP head, MCP head,
            host-capability adapters, viewer, and application composition
+astrolabe  identity-scoped library client: reach, one model of client
+           state, Flutter drawing. Never a World head; authors MCP bindings
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as
@@ -350,7 +361,7 @@ The sibling `products/issues-app` package owns the `issues.control` v1 codec,
 query/command classification, `IssueRouter` execution adapter, product response
 schema, host-capability vocabulary, role-to-authority planning, formation
 policy, status/inbox/doorbell projections, the `issues` mount’s web parser, and
-all 67 Issues MCP descriptors. It depends on the semantic package and generic
+all 78 Issues MCP descriptors. It depends on the semantic package and generic
 substrate/runtime/client interfaces, never back on `lait`.
 Most client operations become `WorldCall`s at parse time. Inbox watermark I/O,
 access assignment, attachment filesystem I/O, and implementation activation are

@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `project`, `space_ref`, `view_of`, `world_people`
+// These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -139,6 +139,26 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.bookDismiss({
     required String suggestion,
   }) = ActionRequest_BookDismiss;
+
+  /// Author, or preview, an MCP binding for one World.
+  ///
+  /// Astrolabe writes the binding; the editor parents `lait mcp`. The World
+  /// pin (`world`) is a mount this build hosts, not a path.
+  const factory ActionRequest.installMcp({
+    /// `claude` | `cursor` | `windsurf` | `generic`.
+    required String client,
+
+    /// `user` | `project`; `None` takes the client's default.
+    String? scope,
+    required String name,
+    String? agent,
+    required bool noAgent,
+    required String project,
+
+    /// World mount. `None` is the sole-World default.
+    String? world,
+    required bool preview,
+  }) = ActionRequest_InstallMcp;
 }
 
 /// The identity's address book, as last read.
@@ -288,6 +308,9 @@ class ClientView {
   /// whichever later frame the answer arrives.
   final List<String> inFlight;
 
+  /// Last MCP binding this client authored or previewed. Absent until then.
+  final McpBindingRow? mcp;
+
   const ClientView({
     required this.loading,
     this.stale,
@@ -302,6 +325,7 @@ class ClientView {
     required this.notices,
     required this.failures,
     required this.inFlight,
+    this.mcp,
   });
 
   @override
@@ -318,7 +342,8 @@ class ClientView {
       book.hashCode ^
       notices.hashCode ^
       failures.hashCode ^
-      inFlight.hashCode;
+      inFlight.hashCode ^
+      mcp.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -337,7 +362,8 @@ class ClientView {
           book == other.book &&
           notices == other.notices &&
           failures == other.failures &&
-          inFlight == other.inFlight;
+          inFlight == other.inFlight &&
+          mcp == other.mcp;
 }
 
 class DeviceRow {
@@ -649,6 +675,53 @@ class LibraryRow {
           tagline == other.tagline &&
           accent == other.accent &&
           people == other.people;
+}
+
+/// What authoring an MCP binding produced. Bindings, not processes.
+class McpBindingRow {
+  final String path;
+  final String detail;
+  final String? note;
+  final bool replaced;
+  final String? agent;
+  final bool written;
+
+  /// Mount the binding was authored for. A surface showing another World
+  /// must ignore this row.
+  final String? world;
+
+  const McpBindingRow({
+    required this.path,
+    required this.detail,
+    this.note,
+    required this.replaced,
+    this.agent,
+    required this.written,
+    this.world,
+  });
+
+  @override
+  int get hashCode =>
+      path.hashCode ^
+      detail.hashCode ^
+      note.hashCode ^
+      replaced.hashCode ^
+      agent.hashCode ^
+      written.hashCode ^
+      world.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is McpBindingRow &&
+          runtimeType == other.runtimeType &&
+          path == other.path &&
+          detail == other.detail &&
+          note == other.note &&
+          replaced == other.replaced &&
+          agent == other.agent &&
+          written == other.written &&
+          world == other.world;
 }
 
 class MemberRow {

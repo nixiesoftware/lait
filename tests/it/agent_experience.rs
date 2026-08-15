@@ -147,3 +147,72 @@ fn a_sponsored_agent_acts_as_itself_in_one_store() {
     head.stop();
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// Installing the MCP binding first is the common order. The agent's first
+/// whoami must file a host-plane ask rather than only saying "go to Settings".
+#[test]
+fn an_unsponsored_agent_asks_the_person_to_sponsor_it() {
+    let root = temp_root("ask");
+    let config = root.join("cfg");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let head = Head::start(&config, Some(&home));
+    let (status, founded) = head.host(serde_json::json!({
+        "cmd": "host_space_found",
+        "home": home.display().to_string(),
+        "name": "PROJ",
+        "nick": "Huginn",
+    }));
+    assert_eq!(status, 200, "found: {founded}");
+    let orbit = head.orbit_for(&home);
+
+    let mut agent = Mcp::start(&config, &home, Some("scout"));
+    let reply = agent.call_raw("whoami", serde_json::json!({}));
+    assert_eq!(
+        reply["result"]["isError"], true,
+        "an unsponsored whoami must be a tool error, not a silent empty identity: {reply}"
+    );
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.contains("has been requested"),
+        "the agent was not told an ask was filed: {text}"
+    );
+
+    let waiting = agent.call("wait", serde_json::json!({}));
+    assert_eq!(waiting["wait"], "waiting", "{waiting}");
+    let heads = waiting["heads"].as_array().cloned().unwrap_or_default();
+    assert!(!heads.is_empty(), "{waiting}");
+    let again = agent.call("wait", serde_json::json!({ "heads": heads }));
+    assert_eq!(again["wait"], "unchanged", "{again}");
+
+    let (status, ctx) = head.host(serde_json::json!({ "cmd": "host_context" }));
+    assert_eq!(status, 200, "host_context: {ctx}");
+    let asks = ctx["asks"].as_array().cloned().unwrap_or_default();
+    assert_eq!(asks.len(), 1, "the ask did not reach the host plane: {ctx}");
+    assert_eq!(asks[0]["name"], "scout", "{ctx}");
+
+    let (status, provisioned) = head.space(
+        &orbit,
+        serde_json::json!({ "cmd": "agent_provision", "name": "scout" }),
+    );
+    assert_eq!(status, 200, "provision: {provisioned}");
+
+    let granted = agent.call("wait", serde_json::json!({ "heads": heads }));
+    assert_eq!(granted["wait"], "granted", "{granted}");
+
+    let me = agent.call("whoami", serde_json::json!({}));
+    assert_eq!(me["member"], true, "{me}");
+    assert_ne!(me["sponsorship_asked"], true, "{me}");
+
+    let (status, ctx) = head.host(serde_json::json!({ "cmd": "host_context" }));
+    assert_eq!(status, 200, "host_context after: {ctx}");
+    let leftover = ctx["asks"].as_array().cloned().unwrap_or_default();
+    assert!(leftover.is_empty(), "the ask survived approval: {ctx}");
+
+    agent.stop();
+    head.stop();
+    std::fs::remove_dir_all(&root).ok();
+}

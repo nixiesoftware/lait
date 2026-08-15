@@ -708,6 +708,25 @@ impl Listener {
                 .await;
                 Flow::Next(reader, write_half)
             }
+            (
+                ControlRoute::Orbit { address } | ControlRoute::World { address, .. },
+                Request::SponsorWatch { heads },
+            ) => {
+                // Identity-scoped, like the ask itself. The Station has no
+                // file for this; Exec Watch's comparison runs here so a
+                // reconnect still sees the same heads.
+                let reply = match act_as.as_deref() {
+                    Some(name) => crate::daemon::sponsorship::watch(
+                        self.router.asks(),
+                        address.space.as_str(),
+                        name,
+                        &heads,
+                    ),
+                    None => crate::control::WaitReply::Idle,
+                };
+                let _ = write_line(&mut write_half, &Response::Wait(reply)).await;
+                Flow::Next(reader, write_half)
+            }
             (route, request) => {
                 // The book is the one namer, and this funnel is where it
                 // speaks: a Station answers with bare ids, and the identity
@@ -754,6 +773,43 @@ impl Listener {
                             if let Ok(book) = self.router.book() {
                                 book.name_agent(space, actor.trim(), name);
                             }
+                        }
+                        let actor = message.lines().find_map(|line| line.strip_prefix("actor "));
+                        self.router
+                            .asks()
+                            .grant(space.as_str(), name, actor.map(str::trim));
+                    }
+                    if let (Request::Whoami, Some(name)) = (&request, act_as.as_deref()) {
+                        // A named agent that is not a member is asking this
+                        // identity to sponsor it — including the install-first
+                        // case, where the seed does not exist yet and whoami
+                        // is a Denied rather than a Whoami DTO. The ask is
+                        // host-plane state so the client can notify; it is
+                        // not a World signal.
+                        match &mut response {
+                            Response::Whoami(whoami) => {
+                                crate::daemon::sponsorship::note_whoami(
+                                    self.router.asks(),
+                                    space.as_str(),
+                                    name,
+                                    whoami,
+                                );
+                            }
+                            Response::Error { message, .. }
+                                if crate::daemon::sponsorship::note_denied(
+                                    self.router.asks(),
+                                    space.as_str(),
+                                    name,
+                                ) =>
+                            {
+                                *message = format!(
+                                    "you are not yet a member — sponsorship of '{name}' \
+                                     has been requested from the person on this machine; \
+                                     call wait (Work Watch) with the heads whoami gave you \
+                                     ({message})"
+                                );
+                            }
+                            _ => {}
                         }
                     }
                 }

@@ -15,8 +15,8 @@ workspace = true
 name = "astrolabe"
 path = "src/lib.rs"
 # `cdylib` is what the Flutter runner links; `rlib` is what the workspace's own
-# tests and the legacy binary link. Both, because the core is one thing with two
-# consumers and building it twice would let them disagree.
+# tests link. Both, because the core is one thing with two consumers and
+# building it twice would let them disagree.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

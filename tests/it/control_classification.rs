@@ -39,6 +39,10 @@ fn every_request_variant_has_a_terminal_owner() {
     // sits with Status rather than with the membership verbs.
     assert_eq!(classify(&Request::Storage), RequestOwner::Observation);
     assert_eq!(classify(&Request::Stop), RequestOwner::Lifecycle);
+    assert_eq!(
+        classify(&Request::SponsorWatch { heads: vec![] }),
+        RequestOwner::Mechanics
+    );
 }
 
 #[test]
@@ -58,6 +62,13 @@ fn the_representative_set_covers_every_wire_command_exactly_once() {
     tags.sort();
     tags.dedup();
     assert_eq!(tags.len(), count, "duplicate representative");
+    // The one representative built through an Option rather than a literal:
+    // if its parse ever failed it would drop out silently, so its presence is
+    // the assertion.
+    assert!(
+        tags.binary_search(&"work".to_string()).is_ok(),
+        "the Work representative fell out of the set"
+    );
 }
 
 /// Regenerate `docs/plans/generated/request-routing.tsv` from the SAME

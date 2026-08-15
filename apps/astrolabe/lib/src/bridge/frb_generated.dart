@@ -314,6 +314,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         return ActionRequest_BookDismiss(
           suggestion: dco_decode_String(raw[1]),
         );
+      case 23:
+        return ActionRequest_InstallMcp(
+          client: dco_decode_String(raw[1]),
+          scope: dco_decode_opt_String(raw[2]),
+          name: dco_decode_String(raw[3]),
+          agent: dco_decode_opt_String(raw[4]),
+          noAgent: dco_decode_bool(raw[5]),
+          project: dco_decode_String(raw[6]),
+          world: dco_decode_opt_String(raw[7]),
+          preview: dco_decode_bool(raw[8]),
+        );
       default:
         throw Exception("unreachable");
     }
@@ -368,6 +379,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   HostFacts dco_decode_box_autoadd_host_facts(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_host_facts(raw);
+  }
+
+  @protected
+  McpBindingRow dco_decode_box_autoadd_mcp_binding_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_mcp_binding_row(raw);
   }
 
   @protected
@@ -431,8 +448,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   ClientView dco_decode_client_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return ClientView(
       loading: dco_decode_bool(arr[0]),
       stale: dco_decode_opt_box_autoadd_staleness(arr[1]),
@@ -447,6 +464,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       notices: dco_decode_list_notice_row(arr[10]),
       failures: dco_decode_list_failure_row(arr[11]),
       inFlight: dco_decode_list_String(arr[12]),
+      mcp: dco_decode_opt_box_autoadd_mcp_binding_row(arr[13]),
     );
   }
 
@@ -653,6 +671,23 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  McpBindingRow dco_decode_mcp_binding_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return McpBindingRow(
+      path: dco_decode_String(arr[0]),
+      detail: dco_decode_String(arr[1]),
+      note: dco_decode_opt_String(arr[2]),
+      replaced: dco_decode_bool(arr[3]),
+      agent: dco_decode_opt_String(arr[4]),
+      written: dco_decode_bool(arr[5]),
+      world: dco_decode_opt_String(arr[6]),
+    );
+  }
+
+  @protected
   MemberRow dco_decode_member_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -706,6 +741,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   HostFacts? dco_decode_opt_box_autoadd_host_facts(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_host_facts(raw);
+  }
+
+  @protected
+  McpBindingRow? dco_decode_opt_box_autoadd_mcp_binding_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_mcp_binding_row(raw);
   }
 
   @protected
@@ -985,6 +1026,24 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case 22:
         var var_suggestion = sse_decode_String(deserializer);
         return ActionRequest_BookDismiss(suggestion: var_suggestion);
+      case 23:
+        var var_client = sse_decode_String(deserializer);
+        var var_scope = sse_decode_opt_String(deserializer);
+        var var_name = sse_decode_String(deserializer);
+        var var_agent = sse_decode_opt_String(deserializer);
+        var var_noAgent = sse_decode_bool(deserializer);
+        var var_project = sse_decode_String(deserializer);
+        var var_world = sse_decode_opt_String(deserializer);
+        var var_preview = sse_decode_bool(deserializer);
+        return ActionRequest_InstallMcp(
+            client: var_client,
+            scope: var_scope,
+            name: var_name,
+            agent: var_agent,
+            noAgent: var_noAgent,
+            project: var_project,
+            world: var_world,
+            preview: var_preview);
       default:
         throw UnimplementedError('');
     }
@@ -1042,6 +1101,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   HostFacts sse_decode_box_autoadd_host_facts(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_host_facts(deserializer));
+  }
+
+  @protected
+  McpBindingRow sse_decode_box_autoadd_mcp_binding_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_mcp_binding_row(deserializer));
   }
 
   @protected
@@ -1125,6 +1191,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_notices = sse_decode_list_notice_row(deserializer);
     var var_failures = sse_decode_list_failure_row(deserializer);
     var var_inFlight = sse_decode_list_String(deserializer);
+    var var_mcp = sse_decode_opt_box_autoadd_mcp_binding_row(deserializer);
     return ClientView(
         loading: var_loading,
         stale: var_stale,
@@ -1138,7 +1205,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         book: var_book,
         notices: var_notices,
         failures: var_failures,
-        inFlight: var_inFlight);
+        inFlight: var_inFlight,
+        mcp: var_mcp);
   }
 
   @protected
@@ -1427,6 +1495,26 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  McpBindingRow sse_decode_mcp_binding_row(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_path = sse_decode_String(deserializer);
+    var var_detail = sse_decode_String(deserializer);
+    var var_note = sse_decode_opt_String(deserializer);
+    var var_replaced = sse_decode_bool(deserializer);
+    var var_agent = sse_decode_opt_String(deserializer);
+    var var_written = sse_decode_bool(deserializer);
+    var var_world = sse_decode_opt_String(deserializer);
+    return McpBindingRow(
+        path: var_path,
+        detail: var_detail,
+        note: var_note,
+        replaced: var_replaced,
+        agent: var_agent,
+        written: var_written,
+        world: var_world);
+  }
+
+  @protected
   MemberRow sse_decode_member_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_id = sse_decode_String(deserializer);
@@ -1497,6 +1585,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_host_facts(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  McpBindingRow? sse_decode_opt_box_autoadd_mcp_binding_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_mcp_binding_row(deserializer));
     } else {
       return null;
     }
@@ -1842,6 +1942,25 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case ActionRequest_BookDismiss(suggestion: final suggestion):
         sse_encode_i_32(22, serializer);
         sse_encode_String(suggestion, serializer);
+      case ActionRequest_InstallMcp(
+          client: final client,
+          scope: final scope,
+          name: final name,
+          agent: final agent,
+          noAgent: final noAgent,
+          project: final project,
+          world: final world,
+          preview: final preview
+        ):
+        sse_encode_i_32(23, serializer);
+        sse_encode_String(client, serializer);
+        sse_encode_opt_String(scope, serializer);
+        sse_encode_String(name, serializer);
+        sse_encode_opt_String(agent, serializer);
+        sse_encode_bool(noAgent, serializer);
+        sse_encode_String(project, serializer);
+        sse_encode_opt_String(world, serializer);
+        sse_encode_bool(preview, serializer);
     }
   }
 
@@ -1894,6 +2013,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       HostFacts self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_host_facts(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_mcp_binding_row(
+      McpBindingRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_mcp_binding_row(self, serializer);
   }
 
   @protected
@@ -1967,6 +2093,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_list_notice_row(self.notices, serializer);
     sse_encode_list_failure_row(self.failures, serializer);
     sse_encode_list_String(self.inFlight, serializer);
+    sse_encode_opt_box_autoadd_mcp_binding_row(self.mcp, serializer);
   }
 
   @protected
@@ -2187,6 +2314,19 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  void sse_encode_mcp_binding_row(
+      McpBindingRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.path, serializer);
+    sse_encode_String(self.detail, serializer);
+    sse_encode_opt_String(self.note, serializer);
+    sse_encode_bool(self.replaced, serializer);
+    sse_encode_opt_String(self.agent, serializer);
+    sse_encode_bool(self.written, serializer);
+    sse_encode_opt_String(self.world, serializer);
+  }
+
+  @protected
   void sse_encode_member_row(MemberRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
@@ -2248,6 +2388,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_host_facts(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_mcp_binding_row(
+      McpBindingRow? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_mcp_binding_row(self, serializer);
     }
   }
 

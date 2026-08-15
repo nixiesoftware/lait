@@ -7,9 +7,10 @@
 //!
 //! ## Why this is hand-written
 //!
-//! `eframe` owns the event loop and has no tray. Every crate that provides one
-//! is another dependency in a closure that a build-failing licence audit and a
-//! generated notice file both have to carry — for four Win32 calls and a menu.
+//! Flutter owns the event loop and does not ship a tray of its own. Every crate
+//! that provides one is another dependency in a closure that a build-failing
+//! licence audit and a generated notice file both have to carry — for four
+//! Win32 calls and a menu.
 //! The shape here is the standard one: a message-only window on its own thread,
 //! `Shell_NotifyIconW` to place the icon, and a channel back to the frame loop.
 //!

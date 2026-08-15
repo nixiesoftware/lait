@@ -1205,7 +1205,7 @@ impl SpaceAuthority {
     /// invisible here. Empty when whole. Refreshes the keyring first so a
     /// just-synced envelope counts. This is the signal `whoami`/`sync` surface
     /// and the authoring gate enforces — the end of inferring a missing epoch by
-    /// diffing 141-vs-154 issue counts (`docs/plans/09` §10 finding 3).
+    /// diffing 141-vs-154 issue counts.
     pub fn view_divergence(&self) -> Vec<String> {
         let mut inner = self.lock();
         inner.refresh_keyring();

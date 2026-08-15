@@ -183,7 +183,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 include_dir = "0.7"
 
 # mcp server (stdio)
-rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.1", features = ["server", "macros", "transport-io"] }
 # Already in the tree via rmcp (which `mcp.rs` derives against). Declared directly
 # so `control::Request` can describe its own shape, which is what lets
 # `tests/viewer_parity.rs` check the hand-written TS mirror against it instead of

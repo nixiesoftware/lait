@@ -81,6 +81,22 @@ pub struct ClientView {
     /// is in here is disabled — on the frame the click happened, not on
     /// whichever later frame the answer arrives.
     pub in_flight: Vec<String>,
+    /// Last MCP binding this client authored or previewed. Absent until then.
+    pub mcp: Option<McpBindingRow>,
+}
+
+/// What authoring an MCP binding produced. Bindings, not processes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpBindingRow {
+    pub path: String,
+    pub detail: String,
+    pub note: Option<String>,
+    pub replaced: bool,
+    pub agent: Option<String>,
+    pub written: bool,
+    /// Mount the binding was authored for. A surface showing another World
+    /// must ignore this row.
+    pub world: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -449,11 +465,28 @@ pub enum ActionRequest {
     BookDismiss {
         suggestion: String,
     },
+    /// Author, or preview, an MCP binding for one World.
+    ///
+    /// Astrolabe writes the binding; the editor parents `lait mcp`. The World
+    /// pin (`world`) is a mount this build hosts, not a path.
+    InstallMcp {
+        /// `claude` | `cursor` | `windsurf` | `generic`.
+        client: String,
+        /// `user` | `project`; `None` takes the client's default.
+        scope: Option<String>,
+        name: String,
+        agent: Option<String>,
+        no_agent: bool,
+        project: String,
+        /// World mount. `None` is the sole-World default.
+        world: Option<String>,
+        preview: bool,
+    },
 }
 
 impl ActionRequest {
-    fn into_action(self) -> Action {
-        match self {
+    fn into_action(self) -> Result<Action, String> {
+        Ok(match self {
             Self::Refresh => Action::Refresh,
             Self::Open { entry_path } => Action::OpenWorld { entry_path },
             Self::StartDevice { id } => Action::StartDevice(id),
@@ -477,7 +510,48 @@ impl ActionRequest {
             Self::BookImport { path } => Action::BookPropose { path },
             Self::BookAccept { suggestion } => Action::BookAccept { suggestion },
             Self::BookDismiss { suggestion } => Action::BookDismiss { suggestion },
-        }
+            Self::InstallMcp {
+                client,
+                scope,
+                name,
+                agent,
+                no_agent,
+                project,
+                world,
+                preview,
+            } => Action::InstallMcp {
+                binding: Box::new(crate::client::heads::McpBinding {
+                    client: parse_agent_client(&client)?,
+                    scope: parse_mcp_scope(scope.as_deref()),
+                    name,
+                    agent,
+                    no_agent,
+                    project,
+                    world,
+                }),
+                preview,
+            },
+        })
+    }
+}
+
+fn parse_agent_client(name: &str) -> Result<lait::install::Client, String> {
+    match name {
+        "claude" => Ok(lait::install::Client::Claude),
+        "cursor" => Ok(lait::install::Client::Cursor),
+        "windsurf" => Ok(lait::install::Client::Windsurf),
+        "generic" => Ok(lait::install::Client::Generic),
+        other => Err(format!(
+            "unknown MCP client '{other}'; use claude, cursor, windsurf, or generic"
+        )),
+    }
+}
+
+fn parse_mcp_scope(scope: Option<&str>) -> Option<lait::install::Scope> {
+    match scope {
+        Some("user") => Some(lait::install::Scope::User),
+        Some("project") => Some(lait::install::Scope::Project),
+        _ => None,
     }
 }
 
@@ -625,7 +699,24 @@ pub fn dispatch(action: ActionRequest) -> ClientView {
     // Translated *before* the lock is taken: resolving an Orbit reads the
     // registry, which needs the same lock, and a translation done inside the
     // guard would deadlock on exactly the actions that touch a Space.
-    let action = action.into_action();
+    let action = match action.into_action() {
+        Ok(action) => action,
+        Err(error) => {
+            let Some(core) = CORE.get() else {
+                return empty();
+            };
+            let Ok(mut core) = core.lock() else {
+                return empty();
+            };
+            core.app.fail(
+                "author an MCP binding",
+                crate::client::ClientError::invalid(error),
+            );
+            let view = project(&core.app);
+            emit(view.clone());
+            return view;
+        }
+    };
     let Some(core) = CORE.get() else {
         return empty();
     };
@@ -731,6 +822,7 @@ fn empty() -> ClientView {
         notices: Vec::new(),
         failures: Vec::new(),
         in_flight: Vec::new(),
+        mcp: None,
     }
 }
 
@@ -928,6 +1020,15 @@ fn project(app: &App) -> ClientView {
             })
             .collect(),
         in_flight: app.in_flight_keys(),
+        mcp: app.mcp().map(|outcome| McpBindingRow {
+            path: outcome.path.clone(),
+            detail: outcome.detail.clone(),
+            note: outcome.note.clone(),
+            replaced: outcome.replaced,
+            agent: outcome.agent.clone(),
+            written: outcome.written,
+            world: outcome.world.clone(),
+        }),
     }
 }
 
@@ -1071,6 +1172,7 @@ fn authored_name_for(
 mod tests {
     use super::*;
     use crate::client::library::LibraryEntry;
+    use crate::runtime::Action;
 
     /// The install list crosses the bridge as it stands: the compiled-in
     /// declaration, keyed by mount, with an undeclared entry path travelling
@@ -1377,5 +1479,39 @@ mod tests {
             world_people(None, None, "wrl_issues").is_none(),
             "an unread book joins to nothing"
         );
+    }
+
+    #[test]
+    fn an_unknown_mcp_client_is_refused_rather_than_signed_as_claude() {
+        let error = ActionRequest::InstallMcp {
+            client: "grok".into(),
+            scope: None,
+            name: "lait-issues".into(),
+            agent: None,
+            no_agent: false,
+            project: "D:/work".into(),
+            world: Some("issues".into()),
+            preview: true,
+        }
+        .into_action()
+        .expect_err("an unknown client became Claude");
+        assert!(
+            error.contains("grok") && error.contains("claude"),
+            "{error}"
+        );
+
+        let ok = ActionRequest::InstallMcp {
+            client: "cursor".into(),
+            scope: None,
+            name: "lait-issues".into(),
+            agent: None,
+            no_agent: false,
+            project: "D:/work".into(),
+            world: Some("issues".into()),
+            preview: false,
+        }
+        .into_action()
+        .expect("a known client was refused");
+        assert!(matches!(ok, Action::InstallMcp { .. }));
     }
 }

@@ -37,6 +37,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::SeedList
         | Request::Log { .. }
         | Request::Who
+        | Request::SponsorWatch { .. }
         | Request::Live { .. }
         | Request::LiveSubscribe { .. }
         | Request::AssignmentList { .. }
@@ -277,6 +278,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::Diagnose { .. }
         | Request::Id
         | Request::Whoami
+        | Request::SponsorWatch { .. }
         | Request::Sync
         | Request::Invite { .. }
         | Request::Join { .. }

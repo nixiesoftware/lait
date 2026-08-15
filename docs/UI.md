@@ -5,7 +5,9 @@ the same daemon and use the same request and projection contract. No surface
 opens Replica or Engine independently; product work reaches a World through a
 docked Session.
 
-There is no third one. `lait` is a launcher — `lait daemon`, `lait mcp`, and
+There is no third product surface. Astrolabe is the library client above
+them — it lists Worlds, opens a browser, and authors an MCP binding. It
+never draws a World. `lait` is a launcher — `lait daemon`, `lait mcp`, and
 bare `lait` (the app, and the daemon under it) — not a command surface, and
 nothing about the product is reachable by typing a verb at a shell.
 
@@ -85,8 +87,12 @@ standing, and it never applies to a read.
 
 `lait mcp` exposes the daemon request surface as MCP tools for agents. MCP uses
 the same request and response types as the web head and remains pinned to the
-Orbit selected at launch even though the daemon knows the wider local catalog.
-A parity test guards the intentional tool mapping.
+Orbit selected at launch and to one World (`$LAIT_WORLD`, or the sole World
+this build hosts). The World designs that tool list; the adapter does not
+generate it from the wire protocol. Astrolabe writes the portable binding
+(`lait` off PATH, `LAIT_AGENT`, `LAIT_WORLD`) from the selected Library row
+and never parents that process. A parity test guards the shell half; World
+coverage lives on the package.
 
 Agents do not receive a privileged storage API. They resolve references, submit
 commands, encounter the same authorization checks, and receive the same

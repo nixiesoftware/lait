@@ -112,6 +112,11 @@ readiness line — `{"url":…,"token":…,"port":…}` — *before* the listene
 so a parent process can read one line and know the port is live. Exit codes:
 `0` ok · `1` usage/error · `2` selector matched nothing · `3` daemon unreachable.
 
+Astrolabe (`apps/astrolabe`) is the library client for the Worlds this device
+serves. It lists, launches, and authors an agent's MCP binding. It never
+draws a World — `Open` hands that to the browser. See
+[`apps/astrolabe/README.md`](apps/astrolabe/README.md).
+
 ## Use it like this
 
 ### 1 · Solo: found a space and start filing
@@ -229,45 +234,53 @@ are in [`docs/SERVE.md`](docs/SERVE.md).
 ## Use from an AI agent (MCP)
 
 Register the MCP server by POSTing `host_install_mcp` to the host plane — it
-merges a `lait` entry into that client's `mcpServers` (preserving any others),
-using this binary's absolute path (`post` is the helper defined above):
+merges a portable `lait` entry into that client's `mcpServers` (preserving any
+others). The entry is `lait` off PATH with no captured home; Astrolabe's
+Library authors the same shape, including the World pin (`post` is the helper
+defined above):
 
 ```bash
-post /api/host/rpc '{"cmd":"host_install_mcp","client":"claude","name":"lait","dir":"'"$PWD"'"}'
+post /api/host/rpc '{"cmd":"host_install_mcp","client":"claude","name":"lait-issues","dir":"'"$PWD"'","world":"issues"}'
 ```
 
 `client` is `claude | cursor | windsurf | generic`; `scope` picks `user` or
-`project`; `print` returns the would-be file contents instead of writing them.
+`project`; `world` is the mount this session speaks (`issues` today);
+`print` returns the would-be file contents instead of writing them.
 Naming the client also names the **agent identity** its work signs as, which is
 what makes the agent appear as itself in the roster rather than as an unnamed
-key. Sponsor that identity once from Settings → Members in the app.
+key. The agent's first `whoami` asks the person on this machine to sponsor it
+(Astrolabe notifies). Or sponsor it from Settings → Members in the app.
 
 Or add it to `.mcp.json` by hand:
 
 ```json
 {
   "mcpServers": {
-    "lait": {
-      "command": "/absolute/path/to/lait",
+    "lait-issues": {
+      "command": "lait",
       "args": ["mcp"],
-      "env": { "LAIT_AGENT": "claude", "LAIT_HOME": "/Users/you/.lait" }
+      "env": { "LAIT_AGENT": "claude", "LAIT_WORLD": "issues" }
     }
   }
 }
 ```
 
-`lait mcp` binds a space from `LAIT_HOME` or by walking up from the cwd, and is
-pinned to that Orbit for the session. Nothing is created implicitly, so a
-directory with no store is a refusal that names what does exist — found or enter
-a space in the app first.
+`lait mcp` binds a space by walking up from the client's working directory
+for a `.lait/`, and is pinned to that Orbit for the session. `$LAIT_WORLD`
+pins the session to one World; unset, a build that hosts a single World takes
+that pin. An unknown mount is a refusal, not an empty tool list. Nothing is
+created implicitly, so a directory with no store is a refusal that names what
+does exist — found or enter a space in the app first.
 
-Tools exposed: the full namespaced issue surface — `issues_new`, `issues_edit`,
-`issues_move`, `issues_assign`, `issues_label`, `issues_comment`,
-`issues_delete`, `issues_view`, `issues_list`, `issues_board`, history,
-projects, labels, roles, access, workflows and activity — plus shell-owned
-membership, diagnostics, identity, peer discovery and sync. Each returns the
-**same versioned JSON DTO** the HTTP planes emit; a build-gate parity test keeps
-the agent and browser surfaces in lock-step.
+Tools exposed: the pinned World's designed surface (for Issues: `issues_new`,
+`issues_edit`, `issues_move`, `issues_assign`, `issues_label`,
+`issues_comment`, `issues_delete`, `issues_view`, `issues_list`,
+`issues_board`, history, projects, labels, roles, access, workflows, Specs
+and activity) plus shell-owned membership, diagnostics, identity, peer
+discovery and sync. Each returns the **same versioned JSON DTO** the HTTP
+planes emit; a build-gate parity test keeps the agent and browser surfaces in
+lock-step. The World owns the tool list; `lait mcp` does not generate tools
+from the wire protocol.
 
 ## Multi-node & end-to-end encryption
 

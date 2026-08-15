@@ -823,6 +823,12 @@ export interface WhoamiInfo {
   name?: string | null;
   partial_view: boolean;
   divergence?: string[];
+  /** True when an unsponsored named agent has asked this machine to sponsor it. */
+  sponsorship_asked?: boolean;
+  /** True when this reading delivered a just-approved sponsorship. */
+  sponsorship_granted?: boolean;
+  /** Heads to pass to `wait` (Work Watch). */
+  wait_heads?: string[];
 }
 
 export type RecoveryIoKind =

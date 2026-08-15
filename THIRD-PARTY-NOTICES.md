@@ -4,13 +4,13 @@ lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, ea
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-814 crates, under 47 distinct licence expressions.
+815 crates, under 47 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 383 |
+| `MIT OR Apache-2.0` | 384 |
 | `MIT` | 154 |
 | `Apache-2.0 OR MIT` | 77 |
 | `MIT/Apache-2.0` | 39 |
@@ -110,6 +110,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | base16ct | 0.2.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats/tree/master/base16ct> |
 | base16ct | 1.0.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
 | base64 | 0.22.1 | `MIT OR Apache-2.0` | <https://github.com/marshallpierce/rust-base64> |
+| base64 | 0.23.1 | `MIT OR Apache-2.0` | <https://github.com/marshallpierce/rust-base64> |
 | base64ct | 1.8.3 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
 | biblatex | 0.12.0 | `MIT OR Apache-2.0` | <https://github.com/typst/biblatex> |
 | bincode | 1.3.3 | `MIT` | <https://github.com/servo/bincode> |
@@ -193,11 +194,11 @@ Listed here is every crate reachable from this workspace through normal and buil
 | curve25519-dalek | 5.0.0-pre.6 | `BSD-3-Clause` | <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek> |
 | curve25519-dalek-derive | 0.1.1 | `MIT/Apache-2.0` | <https://github.com/dalek-cryptography/curve25519-dalek> |
 | darling | 0.20.11 | `MIT` | <https://github.com/TedDriggs/darling> |
-| darling | 0.23.0 | `MIT` | <https://github.com/TedDriggs/darling> |
+| darling | 0.24.0 | `MIT` | <https://github.com/TedDriggs/darling> |
 | darling_core | 0.20.11 | `MIT` | <https://github.com/TedDriggs/darling> |
-| darling_core | 0.23.0 | `MIT` | <https://github.com/TedDriggs/darling> |
+| darling_core | 0.24.0 | `MIT` | <https://github.com/TedDriggs/darling> |
 | darling_macro | 0.20.11 | `MIT` | <https://github.com/TedDriggs/darling> |
-| darling_macro | 0.23.0 | `MIT` | <https://github.com/TedDriggs/darling> |
+| darling_macro | 0.24.0 | `MIT` | <https://github.com/TedDriggs/darling> |
 | dart-sys | 4.1.5 | `MIT OR Apache-2.0` | <https://github.com/dart-sys/dart-sys> |
 | dashmap | 5.5.3 | `MIT` | <https://github.com/xacrimon/dashmap> |
 | dashmap | 6.2.1 | `MIT` | <https://github.com/xacrimon/dashmap> |
@@ -571,8 +572,8 @@ Listed here is every crate reachable from this workspace through normal and buil
 | reqwest | 0.13.4 | `MIT OR Apache-2.0` | <https://github.com/seanmonstar/reqwest> |
 | resolv-conf | 0.7.6 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/resolv-conf> |
 | ring | 0.17.14 | `Apache-2.0 AND ISC` | <https://github.com/briansmith/ring> |
-| rmcp | 1.7.0 | `Apache-2.0` | <https://github.com/modelcontextprotocol/rust-sdk/> |
-| rmcp-macros | 1.7.0 | `Apache-2.0` | <https://github.com/modelcontextprotocol/rust-sdk/> |
+| rmcp | 3.1.2 | `Apache-2.0` | <https://github.com/modelcontextprotocol/rust-sdk/> |
+| rmcp-macros | 3.1.2 | `Apache-2.0` | <https://github.com/modelcontextprotocol/rust-sdk/> |
 | roman-numerals-rs | 3.1.0 | `0BSD OR CC0-1.0` | <https://github.com/AA-Turner/roman-numerals/> |
 | roxmltree | 0.21.1 | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/roxmltree> |
 | rust_decimal | 1.42.1 | `MIT` | <https://github.com/paupino/rust-decimal> |

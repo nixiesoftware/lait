@@ -477,11 +477,143 @@ impl McpTool {
     }
 
     pub fn schema(&self) -> Value {
-        (self.schema)()
+        let mut value = (self.schema)();
+        // MCP requires a tool's input schema to declare `"type": "object"` at
+        // the root. A serde-tagged union schemas as a bare `oneOf`/`anyOf` of
+        // object variants — the root type is implied by every branch, but
+        // clients validate the field itself and refuse the whole tool list
+        // over its absence.
+        if let Value::Object(root) = &mut value {
+            if !root.contains_key("type")
+                && (root.contains_key("oneOf") || root.contains_key("anyOf"))
+            {
+                root.insert("type".into(), Value::String("object".into()));
+            }
+        }
+        value
     }
 
     pub fn call(&self, input: Value) -> Result<ClientInvocation, Failure> {
         (self.call)(input)
+    }
+}
+
+/// The agent-facing surface one World designed.
+///
+/// This is not a projection of the World's wire protocol. Tools are authored:
+/// collapsed, split, retargeted, or omitted. [`Self::without`] names the
+/// protocol commands that must never become tools, so a new `cmd` fails the
+/// World's coverage test until someone decides.
+pub struct AgentSurface {
+    tools: Vec<McpTool>,
+    instructions: &'static str,
+    without: &'static [&'static str],
+}
+
+impl AgentSurface {
+    /// A hand-designed surface. There is no constructor that builds this from
+    /// a request enum — that path is what this type exists to refuse.
+    pub fn designed(
+        tools: Vec<McpTool>,
+        instructions: &'static str,
+        without: &'static [&'static str],
+    ) -> Self {
+        Self {
+            tools,
+            instructions,
+            without,
+        }
+    }
+
+    pub fn tools(&self) -> &[McpTool] {
+        &self.tools
+    }
+
+    pub fn instructions(&self) -> &'static str {
+        self.instructions
+    }
+
+    pub fn without(&self) -> &'static [&'static str] {
+        self.without
+    }
+}
+
+/// Gaps between a World's wire protocol and the agent surface it designed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoverageGaps {
+    /// Protocol commands with neither a tool nor an explicit omission.
+    pub missing: Vec<String>,
+    /// `without` entries that are not protocol commands.
+    pub stale_without: Vec<String>,
+    /// `without` entries that a tool now emits.
+    pub now_tooled: Vec<String>,
+}
+
+impl CoverageGaps {
+    pub fn is_empty(&self) -> bool {
+        self.missing.is_empty() && self.stale_without.is_empty() && self.now_tooled.is_empty()
+    }
+
+    pub fn check(self) -> Result<(), Failure> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        let mut parts = Vec::new();
+        if !self.missing.is_empty() {
+            parts.push(format!(
+                "commands with no tool and not listed as without: {:?}",
+                self.missing
+            ));
+        }
+        if !self.stale_without.is_empty() {
+            parts.push(format!(
+                "without entries that are not protocol commands: {:?}",
+                self.stale_without
+            ));
+        }
+        if !self.now_tooled.is_empty() {
+            parts.push(format!(
+                "without entries that now have a tool: {:?}",
+                self.now_tooled
+            ));
+        }
+        Err(Failure::new(parts.join("; ")))
+    }
+}
+
+/// Every protocol command is either reachable through a designed tool or
+/// written on `without`. A new `cmd` that nobody classified fails here.
+pub fn agent_surface_coverage(
+    defined: impl IntoIterator<Item = impl AsRef<str>>,
+    reachable: impl IntoIterator<Item = impl AsRef<str>>,
+    without: &[&str],
+) -> CoverageGaps {
+    let defined: BTreeSet<String> = defined
+        .into_iter()
+        .map(|tag| tag.as_ref().to_owned())
+        .collect();
+    let reachable: BTreeSet<String> = reachable
+        .into_iter()
+        .map(|tag| tag.as_ref().to_owned())
+        .collect();
+    let without_set: BTreeSet<&str> = without.iter().copied().collect();
+    CoverageGaps {
+        missing: defined
+            .iter()
+            .filter(|tag| !reachable.contains(*tag) && !without_set.contains(tag.as_str()))
+            .cloned()
+            .collect(),
+        stale_without: without
+            .iter()
+            .filter(|tag| !defined.iter().any(|command| command == *tag))
+            .map(|tag| (*tag).to_owned())
+            .collect(),
+        now_tooled: without
+            .iter()
+            .copied()
+            .filter(|tag| reachable.contains(*tag))
+            .map(str::to_owned)
+            .collect(),
     }
 }
 
@@ -492,6 +624,7 @@ pub struct WorldClientPackage {
     mount: &'static str,
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
+    without: &'static [&'static str],
     decode_reply: ReplyDecoder,
     classify_failure: Option<FailureClassifier>,
     local_handler: Option<LocalInvocationHandler>,
@@ -630,16 +763,17 @@ impl WorldClientPackage {
     /// is the `{world}` segment of the HTTP RPC route, so changing it renames
     /// every tool an agent has learned and breaks every URL a head has built.
     /// Treat it as published.
+    ///
+    /// The agent surface is designed, not generated from the wire protocol.
     pub fn new(
         world: WorldId,
         mount: &'static str,
-        mcp_tools: Vec<McpTool>,
-        mcp_instructions: &'static str,
+        surface: AgentSurface,
         decode_reply: ReplyDecoder,
     ) -> Result<Self, Failure> {
         validate_name("mount", mount)?;
         let mut local_tools = BTreeSet::new();
-        for tool in &mcp_tools {
+        for tool in surface.tools() {
             validate_name("MCP tool", tool.name())?;
             if !local_tools.insert(tool.name()) {
                 return Err(Failure::new(format!(
@@ -652,8 +786,9 @@ impl WorldClientPackage {
         Ok(Self {
             world,
             mount,
-            mcp_tools,
-            mcp_instructions,
+            mcp_tools: surface.tools,
+            mcp_instructions: surface.instructions,
+            without: surface.without,
             decode_reply,
             classify_failure: None,
             local_handler: None,
@@ -844,6 +979,33 @@ impl WorldClientPackage {
         self.mcp_instructions
     }
 
+    /// Protocol commands this World designed out of the agent surface.
+    pub fn without(&self) -> &'static [&'static str] {
+        self.without
+    }
+
+    /// Refuse when this package's public MCP names collide with a host's own.
+    ///
+    /// Composition of one pin is the only honest place to find this: two tools
+    /// with one public name means whichever the router registered last silently
+    /// wins. Checking a World that is not on this session would empty the
+    /// session for a collision nobody can reach.
+    pub fn validate_reserved<'a>(
+        &self,
+        reserved_mcp: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), Failure> {
+        let reserved_mcp: BTreeSet<_> = reserved_mcp.into_iter().collect();
+        for mounted in mounted_tools(self) {
+            if reserved_mcp.contains(mounted.public_name.as_str()) {
+                return Err(Failure::new(format!(
+                    "World '{}' MCP tool '{}' collides with a shell tool",
+                    self.world, mounted.public_name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn decode_reply(&self, call: &Call, reply: Reply) -> Result<Value, Failure> {
         (self.decode_reply)(call, reply)
     }
@@ -1000,15 +1162,7 @@ impl WorldClientRegistry {
     ) -> Result<(), Failure> {
         let reserved_mcp: BTreeSet<_> = reserved_mcp.into_iter().collect();
         for package in self.packages.values() {
-            for mounted in mounted_tools(package) {
-                if reserved_mcp.contains(mounted.public_name.as_str()) {
-                    return Err(Failure::new(format!(
-                        "World '{}' MCP tool '{}' collides with a shell tool",
-                        package.world(),
-                        mounted.public_name
-                    )));
-                }
-            }
+            package.validate_reserved(reserved_mcp.iter().copied())?;
         }
         Ok(())
     }
@@ -1028,6 +1182,43 @@ impl WorldClientRegistry {
 
     pub fn mcp_tools(&self) -> impl Iterator<Item = MountedMcpTool<'_>> {
         self.packages.values().flat_map(mounted_tools)
+    }
+
+    /// The one World this MCP session may speak.
+    ///
+    /// Unset + one package is the sole-World default. Unset + many is a
+    /// refusal that names `LAIT_WORLD`. A named mount this build does not
+    /// host is a refusal, not a silent empty tool list.
+    pub fn pin(&self, requested: Option<&str>) -> Result<&WorldClientPackage, Failure> {
+        if let Some(mount) = requested {
+            return self.package_for_mount(mount).ok_or_else(|| {
+                let hosted = self.hosted_mounts();
+                Failure::new(format!(
+                    "LAIT_WORLD={mount} is not a World this build hosts. Hosted mounts: {hosted}"
+                ))
+            });
+        }
+        let mut packages: Vec<_> = self.packages().collect();
+        match packages.len() {
+            0 => Err(Failure::new("this build hosts no World MCP surface")),
+            1 => Ok(packages.remove(0)),
+            _ => {
+                let hosted = self.hosted_mounts();
+                Err(Failure::new(format!(
+                    "LAIT_WORLD is unset and this build hosts more than one World ({hosted}); \
+                     set LAIT_WORLD to one mount"
+                )))
+            }
+        }
+    }
+
+    fn hosted_mounts(&self) -> String {
+        let mounts: Vec<_> = self.packages().map(WorldClientPackage::mount).collect();
+        if mounts.is_empty() {
+            "(none)".into()
+        } else {
+            mounts.join(", ")
+        }
     }
 }
 
@@ -1075,6 +1266,37 @@ mod tests {
 
     fn empty_schema() -> Value {
         serde_json::json!({"type": "object", "additionalProperties": false})
+    }
+
+    fn tagged_union_schema() -> Value {
+        serde_json::json!({
+            "oneOf": [
+                {"type": "object", "properties": {"action": {"const": "a"}}},
+                {"type": "object", "properties": {"action": {"const": "b"}}},
+            ]
+        })
+    }
+
+    fn refuse_call(_: Value) -> Result<ClientInvocation, Failure> {
+        Err(Failure::new("unused"))
+    }
+
+    /// MCP clients validate `inputSchema.type == "object"` on every tool and
+    /// refuse the whole tool list when one fails. A serde-tagged union schemas
+    /// as a bare `oneOf` of object variants, which is exactly that failure.
+    #[test]
+    fn a_tagged_union_tool_schema_declares_its_implied_object_type() {
+        let tool = McpTool::new("work", "lifecycle", tagged_union_schema, refuse_call);
+        let schema = tool.schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["oneOf"].is_array(), "the union itself must survive");
+
+        let plain = McpTool::new("view", "read", empty_schema, refuse_call);
+        assert_eq!(
+            plain.schema(),
+            empty_schema(),
+            "object schemas pass through"
+        );
     }
 
     fn files_call(_: Value) -> Result<Call, Failure> {
@@ -1125,8 +1347,11 @@ mod tests {
         WorldClientPackage::new(
             WorldId::parse(world).unwrap(),
             mount,
-            vec![McpTool::new("list", "List objects.", empty_schema, call)],
-            "Work with files.",
+            AgentSurface::designed(
+                vec![McpTool::new("list", "List objects.", empty_schema, call)],
+                "Work with files.",
+                &[],
+            ),
             decode_json_reply,
         )
         .unwrap()
@@ -1184,6 +1409,57 @@ mod tests {
             .unwrap();
         assert!(registry.validate_reserved(["files_list"]).is_err());
         assert!(registry.validate_reserved(["files"]).is_ok());
+    }
+
+    #[test]
+    fn a_reserved_collision_is_scoped_to_the_package_being_mounted() {
+        let files = package("com.example.files", "files");
+        let notes = package("com.example.notes", "notes");
+        assert!(
+            files.validate_reserved(["notes_list"]).is_ok(),
+            "a collision on an unpinned World emptied the session"
+        );
+        assert!(notes.validate_reserved(["notes_list"]).is_err());
+        assert!(files.validate_reserved(["files_list"]).is_err());
+    }
+
+    #[test]
+    fn an_unset_pin_takes_the_sole_world_and_refuses_when_there_are_two() {
+        let one = WorldClientRegistry::new()
+            .with_package(package("com.example.files", "files"))
+            .unwrap();
+        assert_eq!(one.pin(None).unwrap().mount(), "files");
+        assert_eq!(one.pin(Some("files")).unwrap().mount(), "files");
+        assert!(one.pin(Some("notes")).is_err());
+
+        let two = WorldClientRegistry::new()
+            .with_package(package("com.example.files", "files"))
+            .unwrap()
+            .with_package(package("com.example.notes", "notes"))
+            .unwrap();
+        let refused = match two.pin(None) {
+            Ok(_) => panic!("two Worlds cannot default"),
+            Err(error) => error,
+        };
+        assert!(
+            refused
+                .diagnostic()
+                .is_some_and(|text| text.contains("LAIT_WORLD")),
+            "{refused:?}"
+        );
+        assert_eq!(two.pin(Some("notes")).unwrap().mount(), "notes");
+    }
+
+    #[test]
+    fn coverage_requires_every_command_to_be_a_tool_or_an_omission() {
+        let gaps = agent_surface_coverage(["list", "geometry", "edit"], ["list"], &["geometry"]);
+        assert_eq!(gaps.missing, vec!["edit".to_string()]);
+        assert!(gaps.stale_without.is_empty());
+        assert!(gaps.now_tooled.is_empty());
+        assert!(gaps.check().is_err());
+
+        let clean = agent_surface_coverage(["list", "geometry"], ["list"], &["geometry"]);
+        assert!(clean.check().is_ok());
     }
 
     /// Both kinds classify themselves, so a head's own policy never has to

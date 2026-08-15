@@ -49,6 +49,7 @@ export '../bridge/api.dart'
         HeadRow,
         HostFacts,
         LibraryRow,
+        McpBindingRow,
         MemberRow,
         Missing,
         NoticeRow,
@@ -228,6 +229,7 @@ abstract final class ActionKeys {
   static const String startHead = 'head.start';
   static String stopHead(String id) => 'head.stop:$id';
   static String forgetOrbit(String space) => 'orbit.forget:$space';
+  static String stopOrbit(String orbit) => 'orbit.stop:$orbit';
   static const String bookPutNew = 'book.put';
   static String bookPut(String card) => 'book.put:$card';
   static String bookDelete(String card) => 'book.delete:$card';

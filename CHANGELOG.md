@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased — one World per MCP session, Astrolabe authors the binding
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Existing `lait mcp` bindings that omit `$LAIT_WORLD` stay
+> valid while Issues is the sole hosted World. Bindings that still pin an
+> absolute `lait` path or `$LAIT_HOME` should be rewritten to `lait` off
+> PATH.
+
+An agent session speaks one World. The World designs that surface; Astrolabe
+writes the editor binding; `lait mcp` is the stdio adapter. Traffic does not
+go through Astrolabe.
+
+### The pin
+
+- `$LAIT_WORLD` selects the mount (`issues` today). Unset, a single-World
+  build takes that pin. Unset with more than one hosted World, or an
+  unknown mount, is a refusal — not an empty tool list.
+- `host_install_mcp` writes the pin next to `LAIT_AGENT`. The entry is
+  portable: `command: lait`, `args: ["mcp"]`, no captured home.
+- `world_upgrade` activates the pinned World, not a hardcoded Issues id.
+- A reserved-name collision on the pin refuses construct. A collision on
+  an unpinned World does not empty this session.
+
+### Sponsorship is Exec Watch
+
+- An unsponsored named agent's `whoami` files a host-plane ask. Astrolabe
+  notifies; Approve is `AgentProvision`.
+- The agent Watches with MCP `wait` and the last heads — the same
+  comparison Exec Watch uses. It is not a `whoami` poll and not a World
+  Signal.
+
+### Astrolabe
+
+- The drawing client is Flutter (`apps/astrolabe`). The retired egui
+  interface is gone.
+- The Library is the compiled-in install list of Worlds. Spaces belong
+  to the head; this page does not list them and does not stop a
+  placement. Preview / Write authors a binding for the selected World
+  (`LAIT_WORLD`). A project-scoped file lands beside a `.lait` store,
+  never inside one. An unknown client name is refused.
+
 ## v0.7.11 — the cursor catches up with the words
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run

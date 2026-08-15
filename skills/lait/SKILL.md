@@ -16,10 +16,16 @@ Every tool returns the same versioned JSON DTO the HTTP head emits.
 
 Your identity is sponsored by a human and holds **write standing** — you file,
 comment, start, close, and delete issues under your own key, and the activity
-log attributes your work to you and not to your sponsor. Call `whoami` first if
-you need to know who you are and what you may do; call `sync` if a board looks
-short, since it reports keyring completeness loudly instead of silently showing
-fewer issues.
+log attributes your work to you and not to your sponsor. Call `whoami` first:
+it reports who you are, your role, and whether you are a member yet. If
+`member` is false and `sponsorship_asked` is true, call `wait` with
+`wait_heads` and keep calling it with the heads it returns — that is Exec
+Watch, not a `whoami` poll and not invite→connect. Invite→connect is the
+peer-JOIN flow for a new node. `doctor` is this *device's* onboarding gates;
+a pending membership there can be the machine, not you.
+
+Call `sync` if a board looks short, since it reports keyring completeness
+loudly instead of silently showing fewer issues.
 
 If a write is denied you get a typed refusal naming the next step. Take it at
 face value — ask the sponsor or an admin — rather than retrying.
@@ -60,8 +66,9 @@ Product tools are namespaced by the World's mount, so every issue-tracker tool i
   mentions. Durable, so it survives restarts.
 
 ## Multi-node & E2EE (P2P)
-Onboarding across nodes is one step: the host calls `invite_ticket` and shares it;
-the other side calls `connect`. Space data is end-to-end encrypted, gated by a
+A new *node* joins with a ticket: a human calls `invite_ticket` and the
+joiner calls `connect`. That is not how you attach. You already have a
+key; a human sponsors it. Space data is end-to-end encrypted, gated by a
 signed membership graph — a joiner sees only ciphertext until an admin admits it:
 - `member_add {who, admin?}` — seal the space key to a member (admin-only).
 - `member_remove {who}` — revoke + rotate the key (lazy revocation; admin-only).

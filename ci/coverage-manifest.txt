@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1715
-pr-platform    1336
-nightly        1742
+pr             1740
+pr-platform    1358
+nightly        1767
 mutants        98
 
 [gates]
@@ -24,7 +24,7 @@ orbital-bootstrap-real       15
 orbital-ceremonies           12
 orbital-independent-world    6
 convergence-simulation       6
-orbital-product-parity       24
+orbital-product-parity       26
 
 [tests]
 addressbook bundle::tests::a_local_agent_handle_in_an_import_is_refused
@@ -56,6 +56,7 @@ addressbook tests::unknown_envelope_version_is_unsupported
 addressbook tests::unlink_then_relink_is_a_new_tag
 astrolabe api::tests::a_dead_watcher_is_dropped_and_the_rest_keep_pumping
 astrolabe api::tests::a_second_boot_against_a_different_identity_is_refused
+astrolabe api::tests::an_unknown_mcp_client_is_refused_rather_than_signed_as_claude
 astrolabe api::tests::every_watcher_receives_the_same_view
 astrolabe api::tests::loading_and_empty_are_told_apart_across_the_bridge
 astrolabe api::tests::the_book_crosses_as_authored_cards_not_as_reachability
@@ -81,6 +82,7 @@ astrolabe client::presence::tests::an_unresolved_station_measures_only_its_devic
 astrolabe client::presence::tests::the_best_observation_of_an_identity_wins
 astrolabe client::space::tests::a_device_line_that_is_not_a_device_offers_nothing_to_revoke
 astrolabe client::space::tests::a_role_change_says_which_direction_it_went
+astrolabe client::space::tests::sponsoring_two_agents_are_two_things_in_flight
 astrolabe client::space::tests::the_device_answering_is_marked_and_still_parses_as_a_device
 astrolabe client::space::tests::two_asks_about_two_members_are_two_things_in_flight
 astrolabe client::storage::tests::an_absent_figure_says_which_kind_of_absent_it_is
@@ -96,6 +98,7 @@ astrolabe link::tests::an_invite_link_carries_its_ticket_through_either_spelling
 astrolabe link::tests::parsing_a_link_performs_no_action
 astrolabe link::tests::something_that_is_not_our_link_is_refused_rather_than_guessed_at
 astrolabe link::tests::the_link_is_found_wherever_the_shell_put_it
+astrolabe model::tests::a_new_sponsorship_ask_is_unsaid_once
 astrolabe model::tests::a_refusal_clears_what_it_was_answering_just_as_a_success_does
 astrolabe model::tests::a_silent_outcome_leaves_no_trace_but_still_clears_what_it_answered
 astrolabe model::tests::a_snapshot_required_marks_the_model_stale_and_says_why
@@ -109,8 +112,10 @@ astrolabe notify::tests::a_peer_arriving_and_leaving_are_both_said_and_both_name
 astrolabe notify::tests::a_quiet_client_says_nothing_at_all
 astrolabe notify::tests::a_sampling_failure_is_reported_with_its_reason
 astrolabe notify::tests::muting_a_space_silences_that_space_alone
+astrolabe notify::tests::only_a_new_ask_is_said_the_second_time
 astrolabe notify::tests::only_the_moment_something_changed_is_worth_saying
 astrolabe notify::tests::the_first_reading_of_a_machine_notifies_nothing
+astrolabe notify::tests::the_first_reading_of_a_pending_ask_is_worth_saying
 astrolabe runtime::tests::a_destructive_action_describes_itself_as_one
 astrolabe runtime::tests::a_failure_becomes_something_the_surface_can_draw
 astrolabe runtime::tests::a_frame_applies_every_update_that_is_waiting
@@ -333,6 +338,14 @@ lait daemon::host::tests::one_host_endpoint_places_routes_streams_and_drains_an_
 lait daemon::scope::tests::a_catalog_default_must_also_be_allowed
 lait daemon::scope::tests::local_orbit_ids_are_stable_path_distinct_and_strictly_parsed
 lait daemon::scope::tests::two_local_orbits_in_one_space_remain_distinct_and_scope_is_pinned
+lait daemon::sponsorship::tests::a_denied_whoami_still_files_an_ask
+lait daemon::sponsorship::tests::a_path_shaped_name_is_not_an_ask
+lait daemon::sponsorship::tests::asks_survive_reopening_the_file
+lait daemon::sponsorship::tests::grant_moves_the_wait_heads_and_watch_consumes_them
+lait daemon::sponsorship::tests::raising_the_same_ask_twice_does_not_change_it
+lait daemon::sponsorship::tests::taking_an_ask_forgets_it_and_taking_again_is_idle
+lait daemon::sponsorship::tests::whoami_as_a_member_clears_a_stale_ask
+lait daemon::sponsorship::tests::whoami_as_an_unsponsored_agent_files_an_ask_and_says_so
 lait daemon::transport_hub::tests::a_connection_for_an_unknown_space_is_refused_without_saying_why
 lait daemon::transport_hub::tests::a_connection_whose_opening_never_arrives_is_dropped_rather_than_held
 lait daemon::transport_hub::tests::a_queue_is_handed_over_once
@@ -373,10 +386,14 @@ lait install::tests::claude_warns_about_shadowing_the_plugin
 lait install::tests::derived_agent_names_stay_lowercase_plain_identifiers
 lait install::tests::each_known_client_brings_its_own_agent_identity
 lait install::tests::entry_pins_nothing_machine_specific
+lait install::tests::naming_a_world_adds_the_pin_and_nothing_machine_specific
 lait install::tests::naming_an_agent_adds_only_that
 lait install::tests::printing_never_returns_the_file_it_would_have_written
 lait mcp::scope_tests::an_mcp_server_is_pinned_to_the_home_it_was_constructed_for
+lait mcp::scope_tests::an_unknown_world_pin_is_refused_rather_than_served_empty
+lait mcp::scope_tests::the_issues_mount_is_a_legal_explicit_pin
 lait mcp::scope_tests::the_live_router_composes_shell_and_namespaced_world_tools
+lait mcp::scope_tests::world_upgrade_names_the_pinned_world
 lait orbital::hosting::nudge_delivery::a_nudge_reaches_only_sessions_belonging_to_the_actor_it_names
 lait orbital::hosting::nudge_delivery::actor_matching_is_equality_and_not_a_prefix
 lait orbital::hosting::nudge_delivery::an_actor_with_nobody_here_reaches_nobody_and_is_not_an_error
@@ -617,6 +634,7 @@ lait-issues-app host::tests::web_inbox_clear_is_a_complete_command_not_a_world_q
 lait-issues-app host::tests::world_upgrade_is_reachable_from_the_web_surface
 lait-issues-app lifecycle::tests::project_key_policy_is_product_owned
 lait-issues-app mcp::tests::every_protocol_command_is_reachable_through_a_tool
+lait-issues-app mcp::tests::every_tool_publishes_an_object_input_schema
 lait-issues-app mcp::tests::lifecycle_tool_schema_requires_action_specific_exact_ids
 lait-issues-app mcp::tests::tools_are_package_local_and_emit_world_calls
 lait-issues-app protocol::tests::codec_round_trips_without_root_control_types
@@ -682,6 +700,7 @@ lait::it address_book::a_bundle_stages_suggestions_and_review_is_the_only_way_in
 lait::it address_book::a_real_daemon_puts_a_card_and_keeps_it_across_restart
 lait::it address_book::the_host_plane_carries_the_book_and_resolve_does_not_place
 lait::it agent_experience::a_sponsored_agent_acts_as_itself_in_one_store
+lait::it agent_experience::an_unsponsored_agent_asks_the_person_to_sponsor_it
 lait::it authority_history::a_valid_record_followed_by_an_invalid_one_changes_nothing_even_after_restart
 lait::it authority_history::authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once
 lait::it authority_history::historical_authorized_but_currently_removed_remains_legitimate
@@ -771,7 +790,8 @@ lait::it launcher_safety::an_unresolvable_orbit_is_refused_in_one_voice
 lait::it launcher_safety::anything_that_is_not_a_mode_is_refused_by_name
 lait::it launcher_safety::the_launcher_reports_its_build_without_starting_anything
 lait::it live_control::the_live_view_and_the_signal_drain_are_served_rather_than_unreachable
-lait::it mcp_parity::every_replica_command_has_an_mcp_tool
+lait::it mcp_parity::a_baseline_of_an_unissued_spec_names_the_lifecycle
+lait::it mcp_parity::every_required_shell_command_is_on_the_shell
 lait::it mcp_parity::issue_response_status_field_survives_the_kind_tag
 lait::it mcp_parity::mcp_tool_names_are_unique
 lait::it mcp_parity::missing_work_run_is_not_an_internal_mcp_error
@@ -779,6 +799,7 @@ lait::it mcp_parity::onboarding_and_transport_tools_stay_wired
 lait::it mcp_parity::package_tool_argument_diagnostic_survives_stdio
 lait::it mcp_parity::response_dtos_round_trip
 lait::it mcp_parity::the_served_tool_list_matches_the_declared_surface
+lait::it mcp_parity::the_stdio_head_answers_discover_and_serves_planning_tools
 lait::it mixed_root_guard::any_product_cache_must_register_with_a_mixed_root_proof
 lait::it mixed_root_guard::every_registered_cache_names_a_real_test
 lait::it mixed_root_guard::the_detector_has_teeth
@@ -1772,8 +1793,12 @@ world-interface destination::tests::traversal_becomes_a_file_name
 world-interface destination::tests::windows_devices_are_not_files_at_any_path
 world-interface tests::a_live_hit_adds_only_a_presentation_field
 world-interface tests::a_package_without_a_decorator_keeps_decoded_json
+world-interface tests::a_reserved_collision_is_scoped_to_the_package_being_mounted
 world-interface tests::a_second_world_mounts_without_host_specific_code
+world-interface tests::a_tagged_union_tool_schema_declares_its_implied_object_type
 world-interface tests::a_world_that_declares_no_display_is_named_by_its_mount_and_is_not_openable
+world-interface tests::an_unset_pin_takes_the_sole_world_and_refuses_when_there_are_two
+world-interface tests::coverage_requires_every_command_to_be_a_tool_or_an_omission
 world-interface tests::every_invocation_declares_an_access_class
 world-interface tests::mount_and_reserved_name_collisions_fail_at_composition
 world-interface tests::unavailable_resolution_does_not_write_empty_names

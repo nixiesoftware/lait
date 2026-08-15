@@ -1,9 +1,13 @@
-//! MCP server over stdio composing shell and World-package tools.
+//! MCP server over stdio composing shell and one pinned World's tools.
 //!
-//! The root owns identity, Orbit scope, transport, and Mechanics tools. Each
-//! World package contributes namespaced schemas and call factories to the same
-//! RMCP router.
+//! The root owns identity, Orbit scope, transport, and Mechanics tools. The
+//! session speaks one World (`$LAIT_WORLD`, or the sole World this build
+//! hosts). That package designs the namespaced schemas, omissions, and
+//! teaching text; this adapter mounts them. It does not generate tools from
+//! the wire protocol, and it does not compose a second World onto the same
+//! `tools/list`.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -13,8 +17,8 @@ use rmcp::{
         wrapper::Parameters,
     },
     model::{
-        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
-        Tool,
+        CacheScope, CallToolResult, ContentBlock, Implementation, ListToolsResult,
+        PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities, ServerInfo, Tool,
     },
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
@@ -23,75 +27,15 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::{
-    control::{ErrorKind, Request, Response},
+    control::{Request, Response},
     daemon::ClientScope,
     host_client::{client_as_scoped, scope_for_home},
 };
 
-/// The minimum complete tracker operations an agent must be able to drive.
-///
-/// This is an end-to-end usability gate, not a mirror of any one protocol enum:
-/// package-local capabilities and shell membership operations have different
-/// owners. Multi-tool workflows whose prerequisite ids cannot yet be minted or
-/// listed through MCP stay out until that complete slice exists.
-pub const REQUIRED_TRACKER_COMMANDS: &[&str] = &[
-    "issues_new",
-    "issues_edit",
-    "issues_move",
-    "issues_start",
-    "issues_done",
-    "issues_stop",
-    "issues_inbox",
-    "issues_assign",
-    "issues_label",
-    "issues_comment",
-    "issues_comment_at",
-    "issues_react",
-    "issues_delete",
-    "issues_restore",
-    "issues_link",
-    "issues_unlink",
-    "issues_parent",
-    "issues_graph",
-    "issues_view",
-    "issues_list",
-    "issues_board",
-    "issues_history",
-    "issues_project_new",
-    "issues_project_list",
-    "issues_label_new",
-    "issues_label_list",
-    "issues_activity",
-    "issues_role_list",
-    "issues_role_show",
-    "issues_role_create",
-    "issues_role_edit",
-    "issues_role_delete",
-    "issues_role_resolve",
-    "issues_access_list",
-    "issues_access_grant",
-    "issues_access_revoke",
-    "issues_workflow_show",
-    "issues_workflow_validate",
-    "issues_workflow_set",
-    "issues_spec_list",
-    "issues_spec_show",
-    "issues_spec_new",
-    "issues_spec_revise",
-    "issues_spec_state",
-    "issues_spec_resolve",
-    "issues_spec_observations",
-    "issues_spec_observe",
-    "issues_spec_retract",
-    "issues_baseline_list",
-    "issues_baseline_show",
-    "issues_baseline_new",
-    "issues_baseline_revise",
-    "issues_baseline_state",
-    "issues_baseline_resolve",
-    "issues_issue_baseline",
-    "issues_packet",
-    // Shell/Mechanics tools needed alongside the product.
+/// The minimum complete shell operations an agent must be able to drive
+/// alongside a World. World-owned verbs live on the package that designed
+/// them — this list must not grow an `issues_*` (or any other product) name.
+pub const REQUIRED_SHELL_COMMANDS: &[&str] = &[
     "member_add",
     "member_remove",
     "agent_add",
@@ -100,96 +44,37 @@ pub const REQUIRED_TRACKER_COMMANDS: &[&str] = &[
     "member_log",
 ];
 
-/// The set of MCP tool names this server exposes (kept beside the `#[tool]`
-/// methods; the parity test cross-checks it covers `REQUIRED_TRACKER_COMMANDS`).
-pub const MCP_TOOL_NAMES: &[&str] = &[
-    // Issues application package (mounted as `issues_*`).
-    "issues_new",
-    "issues_start",
-    "issues_done",
-    "issues_stop",
-    "issues_work",
-    "issues_verify",
-    "issues_accept_check",
-    "issues_inbox",
-    "issues_edit",
-    "issues_move",
-    "issues_assign",
-    "issues_label",
-    "issues_comment",
-    "issues_comment_at",
-    "issues_react",
-    "issues_delete",
-    "issues_restore",
-    "issues_link",
-    "issues_unlink",
-    "issues_parent",
-    "issues_graph",
-    "issues_project_graph",
-    "issues_structure_status",
-    "issues_structure_migrate",
-    "issues_view",
-    "issues_list",
-    "issues_board",
-    "issues_history",
-    "issues_project_new",
-    "issues_project_list",
-    "issues_label_new",
-    "issues_label_list",
-    "issues_activity",
-    "issues_role_list",
-    "issues_role_show",
-    "issues_role_create",
-    "issues_role_edit",
-    "issues_role_delete",
-    "issues_role_resolve",
-    "issues_access_list",
-    "issues_access_grant",
-    "issues_access_revoke",
-    "issues_workflow_show",
-    "issues_workflow_validate",
-    "issues_workflow_set",
-    "issues_spec_list",
-    "issues_spec_show",
-    "issues_spec_history",
-    "issues_spec_links",
-    "issues_spec_new",
-    "issues_spec_revise",
-    "issues_spec_state",
-    "issues_spec_resolve",
-    "issues_spec_observations",
-    "issues_spec_observe",
-    "issues_spec_retract",
-    "issues_baseline_list",
-    "issues_baseline_show",
-    "issues_baseline_history",
-    "issues_baseline_new",
-    "issues_baseline_revise",
-    "issues_baseline_state",
-    "issues_baseline_resolve",
-    "issues_issue_baseline",
-    "issues_packet",
-    "issues_attach_file",
-    "issues_attachment_save",
-    // Mechanics and shell.
-    "member_add",
-    "member_remove",
-    "agent_add",
-    "key_rotate",
-    "members",
-    "member_log",
-    // transport / presence
-    "status",
-    "doctor",
-    "world_upgrade",
-    "my_id",
-    "invite_ticket",
-    "join_room",
-    "connect",
-    "who",
-    "whoami",
-    "sync",
-];
+fn pin_failure(error: world_interface::Failure) -> anyhow::Error {
+    match error.diagnostic() {
+        Some(text) => anyhow::anyhow!("{text}"),
+        None => anyhow::anyhow!("{error}"),
+    }
+}
+
+/// Shell/Mechanics tool names, asked of the macro-generated router so a
+/// `#[tool]` cannot land without appearing on the declared surface.
+pub fn shell_tool_names() -> Vec<String> {
+    LaitMcp::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect()
+}
+
+/// The declared MCP surface for a pin: shell names plus that World's public tools.
+pub fn declared_tool_names(world: Option<&str>) -> Result<Vec<String>> {
+    let package = crate::world::client_packages()
+        .pin(world)
+        .map_err(pin_failure)?;
+    let mut names = shell_tool_names();
+    names.extend(
+        package
+            .mcp_tools()
+            .iter()
+            .map(|tool| format!("{}_{}", package.mount(), tool.name())),
+    );
+    Ok(names)
+}
 
 // ---- tool argument schemas ----
 
@@ -223,6 +108,14 @@ pub struct JoinArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WaitArgs {
+    /// Heads from the last `whoami` or `wait`. Same comparison as
+    /// Exec Watch: matching heads mean nothing changed.
+    #[serde(default)]
+    pub heads: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConnectArgs {
     /// A base32 space ticket from a coworker's `invite_ticket`.
     pub ticket: String,
@@ -238,75 +131,103 @@ pub struct LaitMcp {
     /// every tool call is signed and attributed to the *agent*, not the human
     /// whose home hosts the daemon (Architecture B). `None` = the primary
     /// identity, the pre-B behavior. The human sponsors the agent once
-    /// (`Request::AgentAdd`, or Settings → Members); MCP attaches as it after.
+    /// (`Request::AgentAdd`, or the client's sponsorship ask); MCP attaches as it after.
     act_as: Option<String>,
     /// Which identity's daemon this server talks to, carried from the
     /// invocation rather than re-read from the environment per call.
     selection: crate::config::Selection,
-    /// Shell tools merged with the World packages' namespaced tools. The
+    /// Shell tools merged with the pinned World's namespaced tools. The
     /// `tool_handler` attribute on the `ServerHandler` impl must name this field
     /// explicitly, because its default is the macro-generated
     /// `Self::tool_router()`, which knows only the shell half. Left to that
     /// default, the merge below still runs and the field is simply never read:
-    /// every `issues_*` tool is built, then dropped at serve time.
+    /// the World's tools are built, then dropped at serve time.
     tool_router: ToolRouter<LaitMcp>,
+    /// Mount of the one World this session speaks. Teaching text comes from
+    /// that package; the shell does not name another product's verbs.
+    world_mount: &'static str,
+    world_instructions: &'static str,
+    /// Reverse-domain id of the pin. `world_upgrade` names this World, and
+    /// an invocation for any other is refused rather than routed.
+    world_id: String,
 }
 
 #[tool_router]
 impl LaitMcp {
-    pub fn new(home: PathBuf, selection: crate::config::Selection) -> Self {
-        // `$LAIT_AGENT` names the sponsored local agent identity this MCP server
-        // acts as, so its work is attributed to the agent (Architecture B). Unset
-        // → the primary identity (pre-B behavior).
-        let act_as = std::env::var("LAIT_AGENT").ok().filter(|s| !s.is_empty());
+    pub fn new(home: PathBuf, selection: crate::config::Selection) -> Result<Self> {
+        Self::from_pins(
+            home,
+            selection,
+            std::env::var("LAIT_AGENT").ok().filter(|s| !s.is_empty()),
+            std::env::var("LAIT_WORLD").ok().filter(|s| !s.is_empty()),
+        )
+    }
+
+    /// Construct with explicit pins. Tests use this so a process-wide
+    /// `$LAIT_WORLD` cannot silently change the default surface.
+    pub fn from_pins(
+        home: PathBuf,
+        selection: crate::config::Selection,
+        act_as: Option<String>,
+        world: Option<String>,
+    ) -> Result<Self> {
         let scope = scope_for_home(&home);
-        let mut tool_router = Self::tool_router();
-        tool_router.merge(Self::world_tool_router());
-        Self {
+        let registry = crate::world::client_packages();
+        let package = registry.pin(world.as_deref()).map_err(pin_failure)?;
+        let shell = Self::tool_router();
+        // Only the pin is composed, so only the pin is checked. A collision
+        // on an unpinned World must not empty this session, and a collision
+        // on the pin must refuse construct — silent empty is how 56 tools
+        // vanished from the wire once already.
+        package
+            .validate_reserved(shell.list_all().iter().map(|tool| tool.name.as_ref()))
+            .map_err(pin_failure)?;
+        let mut tool_router = shell;
+        tool_router.merge(Self::world_tool_router(package));
+        Ok(Self {
             home,
             scope,
             act_as,
             selection,
             tool_router,
-        }
+            world_mount: package.mount(),
+            world_instructions: package.mcp_instructions(),
+            world_id: package.world().as_str().to_owned(),
+        })
     }
 
-    fn world_tool_router() -> ToolRouter<Self> {
-        let registry = crate::world::client_packages();
-        if registry
-            .validate_reserved(
-                Self::tool_router()
-                    .list_all()
-                    .iter()
-                    .map(|tool| tool.name.as_ref()),
-            )
-            .is_err()
-        {
-            return ToolRouter::new();
-        }
+    fn world_tool_router(package: &world_interface::WorldClientPackage) -> ToolRouter<Self> {
         let mut router = ToolRouter::new();
-        for mounted in registry.mcp_tools() {
-            let Some(schema) = mounted.tool.schema().as_object().cloned() else {
+        for tool in package.mcp_tools() {
+            let Some(schema) = tool.schema().as_object().cloned() else {
                 continue;
             };
-            let tool = mounted.tool.clone();
+            let public_name = format!("{}_{}", package.mount(), tool.name());
+            let tool = tool.clone();
             let route = ToolRoute::new_dyn(
-                Tool::new(mounted.public_name, mounted.tool.description(), schema),
+                Tool::new(public_name, tool.description(), schema),
                 move |context: rmcp::handler::server::tool::ToolCallContext<'_, Self>| {
                     let tool = tool.clone();
                     Box::pin(async move {
                         let input =
                             serde_json::Value::Object(context.arguments.unwrap_or_default());
-                        let invocation = tool.call(input).map_err(|error| {
-                            McpError::invalid_params(
-                                error
-                                    .diagnostic()
-                                    .unwrap_or("invalid tool arguments")
-                                    .to_owned(),
-                                None,
-                            )
-                        })?;
-                        context.service.run_invocation(invocation).await
+                        let invocation = match tool.call(input) {
+                            Ok(invocation) => invocation,
+                            Err(error) => {
+                                return Ok(Self::tool_error(
+                                    error
+                                        .diagnostic()
+                                        .unwrap_or("invalid tool arguments")
+                                        .to_owned(),
+                                )
+                                .into());
+                            }
+                        };
+                        context
+                            .service
+                            .run_invocation(invocation)
+                            .await
+                            .map(Into::into)
                     })
                 },
             );
@@ -342,6 +263,16 @@ impl LaitMcp {
         &self,
         invocation: world_interface::ClientInvocation,
     ) -> Result<CallToolResult, McpError> {
+        if invocation.world_id().as_str() != self.world_id {
+            return Err(McpError::invalid_request(
+                format!(
+                    "this session is pinned to World '{}'; '{}' is not served here",
+                    self.world_id,
+                    invocation.world_id()
+                ),
+                None,
+            ));
+        }
         let package = crate::world::client_packages()
             .package_for_world(invocation.world_id())
             .cloned()
@@ -359,45 +290,38 @@ impl LaitMcp {
             self.selection.clone(),
         )
         .map_err(|error| McpError::invalid_request(format!("{error:#}"), None))?;
-        let value = package
-            .execute(&host, invocation)
-            .await
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let value = match package.execute(&host, invocation).await {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(Self::tool_error(
+                    error
+                        .diagnostic()
+                        .unwrap_or("invalid client operation")
+                        .to_owned(),
+                ));
+            }
+        };
         // A product answer that reports a failure arrived intact — only its own
-        // package can say so, and which kind. Same typing rule as `tool_result`:
-        // anything the caller can act on is `invalid_request` and keeps the
-        // message that names the next step.
-        if let Some((failure, message)) = package.classify_failure(&value) {
-            return Err(match failure.kind() {
-                world_interface::FailureKind::Invalid | world_interface::FailureKind::Refusal => {
-                    McpError::invalid_request(message, None)
-                }
-                world_interface::FailureKind::Operation
-                | world_interface::FailureKind::Interruption => {
-                    McpError::internal_error(message, None)
-                }
-            });
+        // package can say so. Caller-actionable refusals stay in the tool
+        // result so the model sees the message (SEP-1303). JSON-RPC errors are
+        // reserved for transport and unknown methods.
+        if package.classify_failure(&value).is_some() {
+            return Ok(CallToolResult::structured_error(value));
         }
-        let json = serde_json::to_string(&value)
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::structured(value))
+    }
+
+    fn tool_error(message: String) -> CallToolResult {
+        CallToolResult::error(vec![ContentBlock::text(message)])
     }
 
     fn tool_result(response: anyhow::Result<Response>) -> Result<CallToolResult, McpError> {
         match response {
-            Ok(Response::Error {
-                message,
-                error_kind,
-            }) => Err(match error_kind {
-                ErrorKind::Invalid | ErrorKind::Denied | ErrorKind::NotFound => {
-                    McpError::invalid_request(message, None)
-                }
-                ErrorKind::Error => McpError::internal_error(message, None),
-            }),
+            Ok(Response::Error { message, .. }) => Ok(Self::tool_error(message)),
             Ok(resp) => {
-                let json = serde_json::to_string(&resp)
-                    .unwrap_or_else(|_| "{\"kind\":\"ok\"}".to_string());
-                Ok(CallToolResult::success(vec![Content::text(json)]))
+                let value = serde_json::to_value(&resp)
+                    .unwrap_or_else(|_| serde_json::json!({"kind":"ok"}));
+                Ok(CallToolResult::structured(value))
             }
             Err(e) => Err(McpError::internal_error(format!("{e:#}"), None)),
         }
@@ -488,7 +412,7 @@ impl LaitMcp {
     )]
     async fn world_upgrade(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::WorldActivate {
-            world: crate::world::contract::world_id().as_str().to_string(),
+            world: self.world_id.clone(),
         })
         .await
     }
@@ -539,10 +463,22 @@ impl LaitMcp {
         description = "Who am I here? Your actor id, did:key, role, capabilities, sponsor, \
                        space, and whether your view is complete — in one shot. Call this \
                        first: it tells you if you are a member (attach) or need sponsoring, \
-                       and whether it is safe to author (partial_view must be false)."
+                       and whether it is safe to author (partial_view must be false). If \
+                       member is false and sponsorship_asked is true, call wait with \
+                       wait_heads — that is Exec Watch, not a whoami poll."
     )]
     async fn whoami(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::Whoami).await
+    }
+
+    #[tool(
+        description = "Watch the host-plane sponsorship wait. Same shape as Exec Watch: \
+                       pass heads from whoami.wait_heads or the last wait. \
+                       Unchanged means still waiting; granted means you are in — proceed \
+                       as yourself. Not a live stream; call again with the returned heads."
+    )]
+    async fn wait(&self, Parameters(a): Parameters<WaitArgs>) -> Result<CallToolResult, McpError> {
+        self.run(Request::SponsorWatch { heads: a.heads }).await
     }
 
     #[tool(
@@ -559,39 +495,58 @@ impl LaitMcp {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for LaitMcp {
     fn get_info(&self) -> ServerInfo {
-        let product_instructions = crate::world::client_packages()
-            .packages()
-            .map(|package| package.mcp_instructions())
-            .collect::<Vec<_>>()
-            .join(" ");
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(format!(
-                "A local-first, peer-to-peer issue tracker. You are a member of this space \
-                 with your OWN identity — you do not rebuild or re-join per session; you \
+                "You attach to the '{}' World on a local-first peer-to-peer Space. \
+                 You have your OWN identity — you do not rebuild or re-join per session; you \
                  attach. Start by calling whoami: it reports who you are (your actor + \
                  did:key), your role and capabilities, who sponsors you, and the space. If \
-                 whoami shows you are not yet a member, ask a human to sponsor you from \
-                 Settings > Members in the local app (they run `lait`) — then you hold \
-                 write access and act as yourself (your work is attributed to you, not to \
-                 them). Do NOT treat \
-                 onboarding as invite→connect; that is the peer-JOIN flow for a new node, \
-                 not for you. {product_instructions} File and drive issues with the namespaced \
-                 tools: create with issues_new, edit with issues_edit, use \
-                 issues_move/issues_assign/issues_label/issues_comment, and read with \
-                 issues_list/issues_board/issues_view. Refs are a short iss_ handle or a KEY-n alias \
-                 (ENG-142); @me is you. Before acting on a 'close what's done' style request, \
+                 whoami shows you are not yet a member, sponsorship has been requested from \
+                 the person on this machine (their local client). Call wait with \
+                 wait_heads and keep calling it with the heads it returns — that is Exec \
+                 Watch, not a whoami poll and not invite→connect. When wait returns \
+                 granted, you hold write access and act as yourself. \
+                 {} Before acting on a 'close what's done' style request, \
                  call sync — it converges and refuses to let you author against a known-partial \
                  view. Every tool returns the same versioned JSON DTO the local app reads; \
-                 a denied action tells you exactly what standing you lack and how to get it."
+                 a denied action tells you exactly what standing you lack and how to get it.",
+                self.world_mount, self.world_instructions
             ))
+    }
+
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(&[
+            ProtocolVersion::V_2026_07_28,
+            ProtocolVersion::V_2025_11_25,
+            ProtocolVersion::V_2025_06_18,
+            ProtocolVersion::V_2024_11_05,
+        ])
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let modern = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        Ok(ListToolsResult {
+            result_type: Some(ResultType::COMPLETE),
+            tools: self.tool_router.list_all(),
+            meta: None,
+            next_cursor: None,
+            ttl_ms: modern.then_some(60_000),
+            cache_scope: modern.then_some(CacheScope::Private),
+        })
     }
 }
 
 /// Run the MCP server over stdio until the client disconnects.
 pub async fn run_mcp(home: &Path, selection: crate::config::Selection) -> Result<()> {
-    let service = LaitMcp::new(home.to_path_buf(), selection)
+    let service = LaitMcp::new(home.to_path_buf(), selection)?
         .serve(stdio())
         .await?;
     service.waiting().await?;
@@ -609,7 +564,13 @@ mod scope_tests {
         let home = PathBuf::from("/tmp/lait-mcp-a");
         let sibling = PathBuf::from("/tmp/lait-mcp-b");
         let space = SpaceId::from_digest([9; 16]);
-        let mcp = LaitMcp::new(home.clone(), crate::config::Selection::default());
+        let mcp = LaitMcp::from_pins(
+            home.clone(),
+            crate::config::Selection::default(),
+            None,
+            None,
+        )
+        .expect("sole World pin");
         let own = OrbitAddress::for_store(&home, space.clone());
         let other = OrbitAddress::for_store(&sibling, space);
 
@@ -619,20 +580,70 @@ mod scope_tests {
 
     #[test]
     fn the_live_router_composes_shell_and_namespaced_world_tools() {
-        let mcp = LaitMcp::new(
+        let mcp = LaitMcp::from_pins(
             PathBuf::from("/tmp/lait-mcp-tools"),
             crate::config::Selection::default(),
-        );
+            None,
+            None,
+        )
+        .expect("sole World pin");
         let names: Vec<_> = mcp
             .tool_router
             .list_all()
             .into_iter()
             .map(|tool| tool.name.into_owned())
             .collect();
-        for expected in MCP_TOOL_NAMES {
+        let declared = declared_tool_names(None).expect("sole World pin");
+        for expected in &declared {
             assert!(names.iter().any(|name| name == expected), "{expected}");
         }
         assert!(!names.iter().any(|name| name == "issue_new"));
-        assert_eq!(names.len(), MCP_TOOL_NAMES.len());
+        assert_eq!(names.len(), declared.len());
+    }
+
+    #[test]
+    fn world_upgrade_names_the_pinned_world() {
+        let mcp = LaitMcp::from_pins(
+            PathBuf::from("/tmp/lait-mcp-upgrade"),
+            crate::config::Selection::default(),
+            None,
+            Some("issues".into()),
+        )
+        .expect("issues is hosted");
+        assert_eq!(mcp.world_id, crate::world::contract::world_id().as_str());
+        assert_eq!(mcp.world_mount, "issues");
+    }
+
+    #[test]
+    fn an_unknown_world_pin_is_refused_rather_than_served_empty() {
+        let error = match LaitMcp::from_pins(
+            PathBuf::from("/tmp/lait-mcp-world"),
+            crate::config::Selection::default(),
+            None,
+            Some("signage".into()),
+        ) {
+            Ok(_) => panic!("an unhosted World was mounted"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("LAIT_WORLD=signage"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_issues_mount_is_a_legal_explicit_pin() {
+        let mcp = LaitMcp::from_pins(
+            PathBuf::from("/tmp/lait-mcp-issues"),
+            crate::config::Selection::default(),
+            None,
+            Some("issues".into()),
+        )
+        .expect("issues is hosted");
+        assert!(mcp
+            .tool_router
+            .list_all()
+            .iter()
+            .any(|tool| tool.name == "issues_list"));
     }
 }

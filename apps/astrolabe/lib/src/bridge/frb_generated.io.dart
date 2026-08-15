@@ -55,6 +55,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   HostFacts dco_decode_box_autoadd_host_facts(dynamic raw);
 
   @protected
+  McpBindingRow dco_decode_box_autoadd_mcp_binding_row(dynamic raw);
+
+  @protected
   Missing dco_decode_box_autoadd_missing(dynamic raw);
 
   @protected
@@ -148,6 +151,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<WorldPersonRow> dco_decode_list_world_person_row(dynamic raw);
 
   @protected
+  McpBindingRow dco_decode_mcp_binding_row(dynamic raw);
+
+  @protected
   MemberRow dco_decode_member_row(dynamic raw);
 
   @protected
@@ -167,6 +173,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   HostFacts? dco_decode_opt_box_autoadd_host_facts(dynamic raw);
+
+  @protected
+  McpBindingRow? dco_decode_opt_box_autoadd_mcp_binding_row(dynamic raw);
 
   @protected
   Missing? dco_decode_opt_box_autoadd_missing(dynamic raw);
@@ -265,6 +274,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   HostFacts sse_decode_box_autoadd_host_facts(SseDeserializer deserializer);
 
   @protected
+  McpBindingRow sse_decode_box_autoadd_mcp_binding_row(
+      SseDeserializer deserializer);
+
+  @protected
   Missing sse_decode_box_autoadd_missing(SseDeserializer deserializer);
 
   @protected
@@ -361,6 +374,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  McpBindingRow sse_decode_mcp_binding_row(SseDeserializer deserializer);
+
+  @protected
   MemberRow sse_decode_member_row(SseDeserializer deserializer);
 
   @protected
@@ -382,6 +398,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   HostFacts? sse_decode_opt_box_autoadd_host_facts(
+      SseDeserializer deserializer);
+
+  @protected
+  McpBindingRow? sse_decode_opt_box_autoadd_mcp_binding_row(
       SseDeserializer deserializer);
 
   @protected
@@ -486,6 +506,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_box_autoadd_host_facts(
       HostFacts self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_mcp_binding_row(
+      McpBindingRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_missing(Missing self, SseSerializer serializer);
@@ -593,6 +617,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<WorldPersonRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_mcp_binding_row(McpBindingRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_member_row(MemberRow self, SseSerializer serializer);
 
   @protected
@@ -615,6 +642,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_opt_box_autoadd_host_facts(
       HostFacts? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_mcp_binding_row(
+      McpBindingRow? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_missing(

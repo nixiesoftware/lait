@@ -7,21 +7,23 @@
 //!
 //! ## What is notifiable today, and what is not
 //!
-//! Everything here is derived from *two authoritative readings* — the snapshot
-//! that just arrived and the one before it. Nothing is invented and nothing is
-//! polled: a peer that appears in one reading and not the previous one arrived,
-//! and that is a fact about what was observed rather than an inference about
+//! Device and peer news is derived from *two authoritative readings* — the
+//! snapshot that just arrived and the one before it. Nothing is invented:
+//! a peer that appears in one reading and not the previous one arrived, and
+//! that is a fact about what was observed rather than an inference about
 //! what happened.
 //!
-//! What is *not* here is item-level notification — an assignment, a comment on
-//! your work, a mention. Those are a World's vocabulary, and the client never
-//! speaks one. The substrate has a product-neutral channel for exactly this
-//! (`Request::Signals`, carrying `Attention`, `SessionInvite`, `FileOffer` and
-//! an opaque `WorldSignal`), but reading it is a *drain*: it empties the queue,
-//! and `src/serve/socket.rs` already drains it for whatever browser is attached.
-//! A second consumer would take signals the page never sees, and the page would
-//! take signals this client never sees. That needs a per-consumer cursor before
-//! either is honest, and it is filed rather than worked around.
+//! Sponsorship asks are a third reading, from the host plane. They are
+//! *decisions waiting*, not ambient topology: the first time this client sees
+//! one is news, even on a cold start, because nobody has answered it yet.
+//! They are still a diff of two lists — not a World signal. Item-level
+//! notification (an assignment, a comment, a mention) stays a World's
+//! vocabulary. The substrate has a product-neutral channel for exactly that
+//! (`Request::Signals`), but reading it is a *drain*: it empties the queue,
+//! and `src/serve/socket.rs` already drains it for whatever browser is
+//! attached. A second consumer would take signals the page never sees. That
+//! needs a per-consumer cursor before either is honest, and it is filed
+//! rather than worked around.
 //!
 //! ## Muting is honestly global
 //!
@@ -49,6 +51,8 @@ pub enum Interruption {
     PeerArrived { space: String, peer: String },
     /// A peer this device could see stopped being visible.
     PeerLeft { space: String, peer: String },
+    /// A co-located agent attached without standing and is waiting on a person.
+    SponsorshipAsked { space: String, agent: String },
 }
 
 impl Interruption {
@@ -61,7 +65,9 @@ impl Interruption {
     pub fn space(&self) -> Option<&str> {
         match self {
             Self::DeviceFailed { .. } | Self::ObservationDegraded { .. } => None,
-            Self::PeerArrived { space, .. } | Self::PeerLeft { space, .. } => Some(space),
+            Self::PeerArrived { space, .. }
+            | Self::PeerLeft { space, .. }
+            | Self::SponsorshipAsked { space, .. } => Some(space),
         }
     }
 
@@ -71,13 +77,16 @@ impl Interruption {
             Self::ObservationDegraded { device, .. } => format!("{device} is out of date"),
             Self::PeerArrived { peer, .. } => format!("{peer} is here"),
             Self::PeerLeft { peer, .. } => format!("{peer} went quiet"),
+            Self::SponsorshipAsked { agent, .. } => format!("{agent} wants to be sponsored"),
         }
     }
 
     pub fn body(&self) -> String {
         match self {
             Self::DeviceFailed { why, .. } | Self::ObservationDegraded { why, .. } => why.clone(),
-            Self::PeerArrived { space, .. } | Self::PeerLeft { space, .. } => {
+            Self::PeerArrived { space, .. }
+            | Self::PeerLeft { space, .. }
+            | Self::SponsorshipAsked { space, .. } => {
                 format!("in {space}")
             }
         }
@@ -189,6 +198,28 @@ pub fn between(
     }
 
     notices
+}
+
+/// What changed between two readings of the host-plane ask list.
+///
+/// Unlike [`between`], the first reading *is* news: an unanswered ask is a
+/// decision waiting, not four peers who were already online when the client
+/// started. Later readings only say what appeared.
+pub fn asks_between(
+    previous: Option<&BTreeSet<(String, String)>>,
+    current: &BTreeSet<(String, String)>,
+) -> Vec<Interruption> {
+    let fresh: Vec<&(String, String)> = match previous {
+        None => current.iter().collect(),
+        Some(was) => current.difference(was).collect(),
+    };
+    fresh
+        .into_iter()
+        .map(|(space, agent)| Interruption::SponsorshipAsked {
+            space: space.clone(),
+            agent: agent.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -346,12 +377,54 @@ mod tests {
             }),
             "muting a Space silenced a failure that had nothing to do with it"
         );
+        assert!(
+            !quiet.permits(&Interruption::SponsorshipAsked {
+                space: "ws_one".into(),
+                agent: "grok".into()
+            }),
+            "muting a Space did not silence a sponsorship ask in it"
+        );
 
         quiet.mute("ws_one", false);
         assert!(quiet.permits(&Interruption::PeerArrived {
             space: "ws_one".into(),
             peer: "bob".into()
         }));
+    }
+
+    /// An unanswered ask is news the first time this client sees it. Arriving
+    /// at a machine with a decision waiting is not the same as arriving at
+    /// one with four peers already online.
+    #[test]
+    fn the_first_reading_of_a_pending_ask_is_worth_saying() {
+        let current = BTreeSet::from([("ws_one".into(), "grok".into())]);
+        assert_eq!(
+            asks_between(None, &current),
+            vec![Interruption::SponsorshipAsked {
+                space: "ws_one".into(),
+                agent: "grok".into()
+            }]
+        );
+        assert!(
+            asks_between(Some(&current), &current).is_empty(),
+            "a standing ask was reported as having just appeared"
+        );
+    }
+
+    #[test]
+    fn only_a_new_ask_is_said_the_second_time() {
+        let was = BTreeSet::from([("ws_one".into(), "grok".into())]);
+        let now = BTreeSet::from([
+            ("ws_one".into(), "grok".into()),
+            ("ws_one".into(), "claude".into()),
+        ]);
+        assert_eq!(
+            asks_between(Some(&was), &now),
+            vec![Interruption::SponsorshipAsked {
+                space: "ws_one".into(),
+                agent: "claude".into()
+            }]
+        );
     }
 
     /// Global means global. There is no tier important enough to override it,
@@ -375,6 +448,10 @@ mod tests {
             Interruption::PeerArrived {
                 space: "ws_one".into(),
                 peer: "bob".into(),
+            },
+            Interruption::SponsorshipAsked {
+                space: "ws_one".into(),
+                agent: "grok".into(),
             },
         ] {
             assert!(

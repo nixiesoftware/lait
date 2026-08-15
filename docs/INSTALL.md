@@ -164,5 +164,5 @@ sponsored identity:
 # $PORT and $TOKEN come from the head's readiness line — `lait --json`
 curl -sS --fail-with-body -X POST "http://127.0.0.1:$PORT/api/host/rpc" \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"cmd":"host_install_mcp","client":"claude","name":"lait","dir":"'"$PWD"'"}'
+  -d '{"cmd":"host_install_mcp","client":"claude","name":"lait-issues","dir":"'"$PWD"'","world":"issues"}'
 ```

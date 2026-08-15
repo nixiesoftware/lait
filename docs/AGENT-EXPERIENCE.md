@@ -3,14 +3,16 @@
 lait treats an agent as a **member whose identity is sponsored** — not a separate
 actor class. There is no agent-specific vocabulary: grants, roles, removal,
 attribution, and space selection are the *same* member machinery for humans and
-agents. This document records what has shipped and the design for the two
-remaining optimizations. The full design docket is `docs/plans/09` (untracked).
+agents. This document records what has shipped. Plans that govern further
+work live as Specs in the tracker, not in `docs/plans/`.
 
 ## Sponsoring an agent
 
 Two steps, and only the first is a decision.
 
-**1 — sponsor the identity.** In the app: **Settings → Members -> Sponsor an
+**1 — sponsor the identity.** The usual path: the agent's first `whoami`
+asks the person (Astrolabe notifies; Approve runs `agent_provision`).
+Or, from the app: **Settings → Members -> Sponsor an
 agent**, name it, done. That sends `{"cmd":"agent_provision","name":"<name>"}`
 to `POST /api/spaces/{id}/rpc`. It mints the agent's seed under this store,
 self-incepts it into the shared actor plane (the co-located analogue of a
@@ -19,19 +21,42 @@ on this machine), sponsors it with the default content grant, and grants it the
 contributor role's scoped capabilities. Idempotent: re-provisioning a known,
 sponsored agent returns its actor.
 
-**2 — point the agent's client at it.** `POST /api/host/rpc` with
-`{"cmd":"host_install_mcp","client":"claude","name":"lait","dir":"<project>"}`
-merges a `lait` entry into that client's `mcpServers`, preserving any others.
-Naming the client also names the agent identity — `claude`, `cursor`,
-`windsurf` — so the entry carries `LAIT_AGENT=<name>` and the agent's work signs
-as itself. `client: "generic"` derives no name, so pass `agent` explicitly;
-`no_agent: true` declines one and leaves the work signed by the human. `print:
-true` returns the would-be file contents instead of writing them. Or write
-`.mcp.json` by hand — the binding is `{"command": "lait", "args": ["mcp"],
-"env": {"LAIT_AGENT": "<name>"}}`.
+**2 — point the agent's client at it.** Astrolabe's Library authors the
+binding from the selected World (Preview / Write). Or `POST /api/host/rpc`
+with `{"cmd":"host_install_mcp","client":"claude","name":"lait-issues","dir":"<project>","world":"issues"}`
+merges a portable entry into that client's `mcpServers`, preserving any
+others. The written shape is `{"command":"lait","args":["mcp"]}` — `lait`
+off PATH, no captured home, no absolute binary. Naming the client also
+names the agent identity — `claude`, `cursor`, `windsurf` — so the entry
+carries `LAIT_AGENT=<name>` and the agent's work signs as itself.
+`client: "generic"` derives no name, so pass `agent` explicitly;
+`no_agent: true` declines one and leaves the work signed by the human.
+`print: true` returns the would-be file contents instead of writing them.
+`$LAIT_WORLD` pins the session to one World mount; omit it only while this
+build hosts a single World. An unknown mount is a refusal, not an empty
+tool list. A project-scoped file lands beside a `.lait` store, never
+inside one.
+
+Ownership is split on purpose. The World designs the agent surface (tools,
+omissions, teaching text). Astrolabe authors the binding and never parents
+the process. `lait mcp` is the stdio adapter; traffic is editor →
+`lait mcp` → daemon → WorldHost. `lait mcp` does not generate tools from
+the wire protocol, and Astrolabe is not an MCP interchange.
 
 The order does not matter. Installing the config first is fine; the agent's
-first request simply fails until its identity is sponsored, and it is told so.
+first `whoami` files a host-plane sponsorship ask and returns `wait_heads`.
+Astrolabe notifies the person; Approve is `AgentProvision`, which moves those
+heads. The agent **Watches** (`wait` with the last heads) — Exec Watch's
+comparison, not a `whoami` poll. `Unchanged` means still waiting; `granted`
+is the wake, consumed once. A reconnect that missed the wake still sees it
+on the next `wait` or `whoami`.
+
+Do not treat onboarding as invite→connect: that is the peer-JOIN flow for a
+new node, not for a sponsored agent attaching to a Space that already
+exists. `whoami` is this agent's membership. `doctor` is this *device's*
+onboarding gates — a pending membership there can be the machine, not the
+agent. The Library is the install list of Worlds; Spaces belong to the
+head and are not titled here.
 
 ### The custody rule
 
@@ -98,8 +123,9 @@ special case.
   invite→connect (the peer-join flow for a *new node*).
 - **Structured, actionable errors.** A denied write returns a typed
   `ErrorKind::Denied` with the next step ("ask your sponsor / an admin to grant
-  write access"), mapped to an MCP `invalid_request`, not an opaque
-  `internal_error(blob)`.
+  write access"), as an MCP tool-execution error (`isError: true`) so the
+  model sees the message. JSON-RPC errors stay reserved for transport and
+  unknown methods.
 
 ### Observability — no more inference
 
@@ -143,7 +169,8 @@ are signing clients of it.** This is the seamless bar, and it is live:
   backward-compatible. An MCP head picks the identity with `LAIT_AGENT=<name>`,
   which `host_install_mcp` writes into the client config for you; the daemon
   signs as that local agent.
-- **One-step provisioning.** `agent_provision` (Settings → Members -> Sponsor an
+- **One-step provisioning.** `agent_provision` (Astrolabe Approve, or
+  Settings → Members -> Sponsor an
   agent) mints the agent's seed under the home, **self-incepts it into the shared
   store's actor plane** (no Contact round — the co-located analogue of a joiner's
   inception arriving over the wire), sponsors it with content authority, **and**

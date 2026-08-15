@@ -105,6 +105,10 @@ pub enum SpaceOp {
         passphrase: String,
         force: bool,
     },
+    /// Sponsor a co-located agent identity by name.
+    AgentProvision {
+        name: String,
+    },
 }
 
 impl SpaceOp {
@@ -122,6 +126,7 @@ impl SpaceOp {
             Self::DeviceRevoke { device } => format!("revoke device {device}"),
             Self::CustodyExport { .. } => "export this device's recovery share".into(),
             Self::CustodyImport { .. } => "restore a recovery share".into(),
+            Self::AgentProvision { name } => format!("sponsor agent '{name}'"),
         }
     }
 
@@ -138,6 +143,7 @@ impl SpaceOp {
             Self::DeviceRevoke { device } => format!("device.revoke:{device}"),
             Self::CustodyExport { .. } => "custody.export".into(),
             Self::CustodyImport { .. } => "custody.import".into(),
+            Self::AgentProvision { name } => format!("agent.provision:{name}"),
         }
     }
 
@@ -174,6 +180,7 @@ impl SpaceOp {
                 passphrase,
                 force,
             },
+            Self::AgentProvision { name } => Request::AgentProvision { name },
         }
     }
 }
@@ -367,5 +374,31 @@ mod tests {
         };
         assert!(up.what().contains("promote"), "{}", up.what());
         assert!(down.what().contains("demote"), "{}", down.what());
+    }
+
+    #[test]
+    fn sponsoring_two_agents_are_two_things_in_flight() {
+        assert_ne!(
+            SpaceOp::AgentProvision {
+                name: "grok".into()
+            }
+            .key(),
+            SpaceOp::AgentProvision {
+                name: "claude".into()
+            }
+            .key()
+        );
+        assert!(
+            SpaceOp::AgentProvision {
+                name: "grok".into()
+            }
+            .what()
+            .contains("grok"),
+            "{}",
+            SpaceOp::AgentProvision {
+                name: "grok".into()
+            }
+            .what()
+        );
     }
 }

@@ -73,6 +73,7 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_BookImport value)? bookImport,
     TResult Function(ActionRequest_BookAccept value)? bookAccept,
     TResult Function(ActionRequest_BookDismiss value)? bookDismiss,
+    TResult Function(ActionRequest_InstallMcp value)? installMcp,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -123,6 +124,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookAccept(_that);
       case ActionRequest_BookDismiss() when bookDismiss != null:
         return bookDismiss(_that);
+      case ActionRequest_InstallMcp() when installMcp != null:
+        return installMcp(_that);
       case _:
         return orElse();
     }
@@ -168,6 +171,7 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_BookImport value) bookImport,
     required TResult Function(ActionRequest_BookAccept value) bookAccept,
     required TResult Function(ActionRequest_BookDismiss value) bookDismiss,
+    required TResult Function(ActionRequest_InstallMcp value) installMcp,
   }) {
     final _that = this;
     switch (_that) {
@@ -217,6 +221,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookAccept(_that);
       case ActionRequest_BookDismiss():
         return bookDismiss(_that);
+      case ActionRequest_InstallMcp():
+        return installMcp(_that);
     }
   }
 
@@ -257,6 +263,7 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_BookImport value)? bookImport,
     TResult? Function(ActionRequest_BookAccept value)? bookAccept,
     TResult? Function(ActionRequest_BookDismiss value)? bookDismiss,
+    TResult? Function(ActionRequest_InstallMcp value)? installMcp,
   }) {
     final _that = this;
     switch (_that) {
@@ -306,6 +313,8 @@ extension ActionRequestPatterns on ActionRequest {
         return bookAccept(_that);
       case ActionRequest_BookDismiss() when bookDismiss != null:
         return bookDismiss(_that);
+      case ActionRequest_InstallMcp() when installMcp != null:
+        return installMcp(_that);
       case _:
         return null;
     }
@@ -348,6 +357,9 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String path)? bookImport,
     TResult Function(String suggestion)? bookAccept,
     TResult Function(String suggestion)? bookDismiss,
+    TResult Function(String client, String? scope, String name, String? agent,
+            bool noAgent, String project, String? world, bool preview)?
+        installMcp,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -398,6 +410,9 @@ extension ActionRequestPatterns on ActionRequest {
         return bookAccept(_that.suggestion);
       case ActionRequest_BookDismiss() when bookDismiss != null:
         return bookDismiss(_that.suggestion);
+      case ActionRequest_InstallMcp() when installMcp != null:
+        return installMcp(_that.client, _that.scope, _that.name, _that.agent,
+            _that.noAgent, _that.project, _that.world, _that.preview);
       case _:
         return orElse();
     }
@@ -441,6 +456,16 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(String path) bookImport,
     required TResult Function(String suggestion) bookAccept,
     required TResult Function(String suggestion) bookDismiss,
+    required TResult Function(
+            String client,
+            String? scope,
+            String name,
+            String? agent,
+            bool noAgent,
+            String project,
+            String? world,
+            bool preview)
+        installMcp,
   }) {
     final _that = this;
     switch (_that) {
@@ -490,6 +515,9 @@ extension ActionRequestPatterns on ActionRequest {
         return bookAccept(_that.suggestion);
       case ActionRequest_BookDismiss():
         return bookDismiss(_that.suggestion);
+      case ActionRequest_InstallMcp():
+        return installMcp(_that.client, _that.scope, _that.name, _that.agent,
+            _that.noAgent, _that.project, _that.world, _that.preview);
     }
   }
 
@@ -530,6 +558,9 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String path)? bookImport,
     TResult? Function(String suggestion)? bookAccept,
     TResult? Function(String suggestion)? bookDismiss,
+    TResult? Function(String client, String? scope, String name, String? agent,
+            bool noAgent, String project, String? world, bool preview)?
+        installMcp,
   }) {
     final _that = this;
     switch (_that) {
@@ -579,6 +610,9 @@ extension ActionRequestPatterns on ActionRequest {
         return bookAccept(_that.suggestion);
       case ActionRequest_BookDismiss() when bookDismiss != null:
         return bookDismiss(_that.suggestion);
+      case ActionRequest_InstallMcp() when installMcp != null:
+        return installMcp(_that.client, _that.scope, _that.name, _that.agent,
+            _that.noAgent, _that.project, _that.world, _that.preview);
       case _:
         return null;
     }
@@ -2023,6 +2057,143 @@ class _$ActionRequest_BookDismissCopyWithImpl<$Res>
           ? _self.suggestion
           : suggestion // ignore: cast_nullable_to_non_nullable
               as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_InstallMcp extends ActionRequest {
+  const ActionRequest_InstallMcp(
+      {required this.client,
+      this.scope,
+      required this.name,
+      this.agent,
+      required this.noAgent,
+      required this.project,
+      this.world,
+      required this.preview})
+      : super._();
+
+  /// `claude` | `cursor` | `windsurf` | `generic`.
+  final String client;
+
+  /// `user` | `project`; `None` takes the client's default.
+  final String? scope;
+  final String name;
+  final String? agent;
+  final bool noAgent;
+  final String project;
+
+  /// World mount. `None` is the sole-World default.
+  final String? world;
+  final bool preview;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_InstallMcpCopyWith<ActionRequest_InstallMcp> get copyWith =>
+      _$ActionRequest_InstallMcpCopyWithImpl<ActionRequest_InstallMcp>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_InstallMcp &&
+            (identical(other.client, client) || other.client == client) &&
+            (identical(other.scope, scope) || other.scope == scope) &&
+            (identical(other.name, name) || other.name == name) &&
+            (identical(other.agent, agent) || other.agent == agent) &&
+            (identical(other.noAgent, noAgent) || other.noAgent == noAgent) &&
+            (identical(other.project, project) || other.project == project) &&
+            (identical(other.world, world) || other.world == world) &&
+            (identical(other.preview, preview) || other.preview == preview));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, client, scope, name, agent,
+      noAgent, project, world, preview);
+
+  @override
+  String toString() {
+    return 'ActionRequest.installMcp(client: $client, scope: $scope, name: $name, agent: $agent, noAgent: $noAgent, project: $project, world: $world, preview: $preview)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_InstallMcpCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_InstallMcpCopyWith(ActionRequest_InstallMcp value,
+          $Res Function(ActionRequest_InstallMcp) _then) =
+      _$ActionRequest_InstallMcpCopyWithImpl;
+  @useResult
+  $Res call(
+      {String client,
+      String? scope,
+      String name,
+      String? agent,
+      bool noAgent,
+      String project,
+      String? world,
+      bool preview});
+}
+
+/// @nodoc
+class _$ActionRequest_InstallMcpCopyWithImpl<$Res>
+    implements $ActionRequest_InstallMcpCopyWith<$Res> {
+  _$ActionRequest_InstallMcpCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_InstallMcp _self;
+  final $Res Function(ActionRequest_InstallMcp) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? client = null,
+    Object? scope = freezed,
+    Object? name = null,
+    Object? agent = freezed,
+    Object? noAgent = null,
+    Object? project = null,
+    Object? world = freezed,
+    Object? preview = null,
+  }) {
+    return _then(ActionRequest_InstallMcp(
+      client: null == client
+          ? _self.client
+          : client // ignore: cast_nullable_to_non_nullable
+              as String,
+      scope: freezed == scope
+          ? _self.scope
+          : scope // ignore: cast_nullable_to_non_nullable
+              as String?,
+      name: null == name
+          ? _self.name
+          : name // ignore: cast_nullable_to_non_nullable
+              as String,
+      agent: freezed == agent
+          ? _self.agent
+          : agent // ignore: cast_nullable_to_non_nullable
+              as String?,
+      noAgent: null == noAgent
+          ? _self.noAgent
+          : noAgent // ignore: cast_nullable_to_non_nullable
+              as bool,
+      project: null == project
+          ? _self.project
+          : project // ignore: cast_nullable_to_non_nullable
+              as String,
+      world: freezed == world
+          ? _self.world
+          : world // ignore: cast_nullable_to_non_nullable
+              as String?,
+      preview: null == preview
+          ? _self.preview
+          : preview // ignore: cast_nullable_to_non_nullable
+              as bool,
     ));
   }
 }

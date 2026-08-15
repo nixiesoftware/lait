@@ -12,31 +12,45 @@ use issues::dto::{
 };
 use issues::ids::{DocId, ProjectId, SpaceId, SystemUlidSource};
 use issues_app::IssuesResponse as Response;
-use lait::mcp::{MCP_TOOL_NAMES, REQUIRED_TRACKER_COMMANDS};
+use lait::mcp::{declared_tool_names, shell_tool_names, REQUIRED_SHELL_COMMANDS};
 
-/// Every replica command an agent must drive has exactly one MCP tool. Adding a
-/// `Request` variant to the replica surface without wiring an MCP tool for it
-/// fails here (the parity guard).
+fn tool_error_text(reply: &serde_json::Value) -> String {
+    if let Some(message) = reply["result"]["structuredContent"]["message"].as_str() {
+        return message.to_string();
+    }
+    reply["result"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every shell command an agent must drive is on the shell router. World
+/// verbs are the package's to cover (`every_protocol_command_is_reachable_through_a_tool`).
 #[test]
-fn every_replica_command_has_an_mcp_tool() {
-    for cmd in REQUIRED_TRACKER_COMMANDS {
+fn every_required_shell_command_is_on_the_shell() {
+    let names = shell_tool_names();
+    for cmd in REQUIRED_SHELL_COMMANDS {
         assert!(
-            MCP_TOOL_NAMES.contains(cmd),
-            "replica command `{cmd}` has no MCP tool — the agent surface drifted \
-             from the Layer-B command surface"
+            names.iter().any(|name| name == cmd),
+            "shell command `{cmd}` has no MCP tool — the agent surface drifted \
+             from the Mechanics surface"
         );
     }
 }
 
-/// Onboarding/transport tools an agent needs but that live outside the replica
-/// CRUD set (and so aren't covered by `REQUIRED_TRACKER_COMMANDS`). Pinned here so
-/// removing, say, the `doctor` tool — the guided-join verifier's agent surface —
-/// fails the build instead of silently dropping a channel.
+/// Onboarding/transport tools an agent needs but that live outside membership.
+/// Pinned here so removing, say, the `doctor` tool — the guided-join
+/// verifier's agent surface — fails the build instead of silently dropping a
+/// channel.
 #[test]
 fn onboarding_and_transport_tools_stay_wired() {
+    let names = shell_tool_names();
     for tool in ["status", "doctor", "who", "my_id", "join_room"] {
         assert!(
-            MCP_TOOL_NAMES.contains(&tool),
+            names.iter().any(|name| name == tool),
             "MCP tool `{tool}` is missing — an agent-facing channel regressed"
         );
     }
@@ -73,8 +87,10 @@ fn the_served_tool_list_matches_the_declared_surface() {
     let mut mcp = Mcp::start(&config, &home, None);
     let served: std::collections::BTreeSet<String> = mcp.tool_names().into_iter().collect();
     mcp.stop();
-    let declared: std::collections::BTreeSet<String> =
-        MCP_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect();
+    let declared: std::collections::BTreeSet<String> = declared_tool_names(None)
+        .expect("sole World pin")
+        .into_iter()
+        .collect();
 
     let missing: Vec<_> = declared.difference(&served).collect();
     let extra: Vec<_> = served.difference(&declared).collect();
@@ -89,12 +105,16 @@ fn the_served_tool_list_matches_the_declared_surface() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The MCP tool-name list has no duplicates (a copy-paste guard).
+/// The declared surface has no duplicates (a copy-paste / merge guard).
 #[test]
 fn mcp_tool_names_are_unique() {
+    let names = declared_tool_names(None).expect("sole World pin");
     let mut seen = std::collections::HashSet::new();
-    for name in MCP_TOOL_NAMES {
-        assert!(seen.insert(*name), "duplicate MCP tool name: {name}");
+    for name in &names {
+        assert!(
+            seen.insert(name.as_str()),
+            "duplicate MCP tool name: {name}"
+        );
     }
 }
 
@@ -257,11 +277,14 @@ fn missing_work_run_is_not_an_internal_mcp_error() {
             "run": "71".repeat(16),
         }),
     );
-    assert_eq!(reply["error"]["code"], -32600, "{reply}");
-    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        reply.get("error").is_none(),
+        "a missing Run is a tool error, not a protocol error: {reply}"
+    );
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let message = tool_error_text(&reply);
     assert!(message.contains("no Runtime Run matches"), "{reply}");
     assert!(!message.contains("invalid client operation"), "{reply}");
-    assert_ne!(reply["error"]["code"], -32603, "{reply}");
 
     mcp.stop();
     head.stop();
@@ -292,13 +315,159 @@ fn package_tool_argument_diagnostic_survives_stdio() {
         "issues_work",
         serde_json::json!({"action": "inspect", "run": "short"}),
     );
-    assert_eq!(reply["error"]["code"], -32602, "{reply}");
-    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        reply.get("error").is_none(),
+        "malformed arguments are a tool error, not a protocol error: {reply}"
+    );
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let message = tool_error_text(&reply);
     assert!(
         message.contains("expected 32 lowercase hex characters"),
         "{reply}"
     );
     assert!(!message.contains("invalid client operation"), "{reply}");
+
+    mcp.stop();
+    head.stop();
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn the_stdio_head_answers_discover_and_serves_planning_tools() {
+    use crate::head::{temp_root, Head, Mcp};
+
+    let root = temp_root("discover");
+    let config = root.join("cfg");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let head = Head::start(&config, Some(&home));
+    let (status, founded) = head.host(serde_json::json!({
+        "cmd": "host_space_found",
+        "home": home.display().to_string(),
+        "name": "PROJ",
+        "nick": "Probe",
+    }));
+    assert_eq!(status, 200, "found: {founded}");
+
+    let mut mcp = Mcp::start(&config, &home, None);
+    let discover = mcp.request(
+        "server/discover",
+        serde_json::json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }),
+    );
+    assert!(discover.get("error").is_none(), "{discover}");
+    let versions = discover["result"]["supportedVersions"]
+        .as_array()
+        .expect("supportedVersions");
+    let versions: Vec<&str> = versions
+        .iter()
+        .filter_map(|version| version.as_str())
+        .collect();
+    assert!(
+        versions.contains(&"2026-07-28") && versions.contains(&"2024-11-05"),
+        "{versions:?}"
+    );
+
+    let listed = mcp.request("tools/list", serde_json::json!({}));
+    assert!(listed.get("error").is_none(), "{listed}");
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    for expected in [
+        "issues_milestone_set",
+        "issues_milestone_list",
+        "issues_issue_milestone",
+        "issues_team_set",
+        "issues_team_list",
+        "issues_project_edit",
+        "issues_spec_state",
+        "issues_baseline_new",
+    ] {
+        assert!(names.contains(&expected), "missing {expected} in {names:?}");
+    }
+    assert!(
+        !names.iter().any(|name| name.contains("geometry")),
+        "geometry is compiled Blueprint output, not an agent verb: {names:?}"
+    );
+
+    let projects = mcp.call("issues_project_list", serde_json::json!({}));
+    assert!(
+        projects.get("kind").is_some() || projects.get("projects").is_some(),
+        "{projects}"
+    );
+
+    mcp.stop();
+    head.stop();
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn a_baseline_of_an_unissued_spec_names_the_lifecycle() {
+    use crate::head::{temp_root, Head, Mcp};
+
+    let root = temp_root("baseline-lifecycle");
+    let config = root.join("cfg");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let head = Head::start(&config, Some(&home));
+    let (status, founded) = head.host(serde_json::json!({
+        "cmd": "host_space_found",
+        "home": home.display().to_string(),
+        "name": "PROJ",
+        "nick": "Probe",
+    }));
+    assert_eq!(status, 200, "found: {founded}");
+
+    let mut mcp = Mcp::start(&config, &home, None);
+    let project = mcp.call(
+        "issues_project_new",
+        serde_json::json!({ "name": "Engineering", "key": "ENG" }),
+    );
+    assert!(project.get("error").is_none(), "{project}");
+    let spec = mcp.call(
+        "issues_spec_new",
+        serde_json::json!({
+            "project": "ENG",
+            "kind": "plan",
+            "title": "The tree as it stands",
+        }),
+    );
+    let spec_id = spec["spec"]["spec"]
+        .as_str()
+        .or_else(|| spec["spec"].as_str())
+        .unwrap_or_else(|| panic!("spec id in {spec}"))
+        .to_string();
+    let revision = spec["spec"]["revision"]
+        .as_str()
+        .or_else(|| spec["revision"].as_str())
+        .unwrap_or_else(|| panic!("revision in {spec}"))
+        .to_string();
+
+    let reply = mcp.call_raw(
+        "issues_baseline_new",
+        serde_json::json!({
+            "project": "ENG",
+            "name": "E0",
+            "members": [{ "spec": spec_id, "revision": revision }],
+        }),
+    );
+    assert!(
+        reply.get("error").is_none(),
+        "an unissued member is a tool error, not a protocol error: {reply}"
+    );
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let message = tool_error_text(&reply);
+    assert!(
+        message.contains("not an issued Spec revision") && message.contains("spec_state"),
+        "{reply}"
+    );
 
     mcp.stop();
     head.stop();

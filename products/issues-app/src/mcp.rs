@@ -277,6 +277,130 @@ struct ProjectNewArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectEditArgs {
+    project: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    lead: Option<String>,
+    #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    archived: Option<bool>,
+    /// Team name, key, or `tm_` id. `"none"` clears.
+    #[serde(default)]
+    team: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MilestoneListArgs {
+    project: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MilestoneSetArgs {
+    project: String,
+    /// Name or `mls_` id of an existing milestone. Omit to create.
+    #[serde(default)]
+    milestone: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    /// `top`, `bottom`, `before:<milestone>`, or `after:<milestone>`.
+    #[serde(default)]
+    pos: Option<String>,
+    #[serde(default)]
+    remove: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IssueMilestoneArgs {
+    reff: String,
+    /// Milestone name or `mls_` id. `"none"` or omit to clear.
+    #[serde(default)]
+    milestone: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CycleListArgs {
+    project: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CycleSetArgs {
+    project: String,
+    #[serde(default)]
+    cycle: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
+    end: Option<String>,
+    #[serde(default)]
+    remove: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IssueCycleArgs {
+    reff: String,
+    #[serde(default)]
+    cycle: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TeamSetArgs {
+    /// Name, key, or `tm_` id. Omit to create.
+    #[serde(default)]
+    team: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    lead: Option<String>,
+    #[serde(default)]
+    add_members: Vec<String>,
+    #[serde(default)]
+    remove_members: Vec<String>,
+    #[serde(default)]
+    remove: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct InitiativeSetArgs {
+    #[serde(default)]
+    initiative: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    health: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    add_projects: Vec<String>,
+    #[serde(default)]
+    remove_projects: Vec<String>,
+    #[serde(default)]
+    remove: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct LabelNewArgs {
     name: String,
     #[serde(default)]
@@ -496,6 +620,49 @@ struct AttachmentSaveArgs {
     out: Option<String>,
 }
 
+/// Protocol commands this World designed out of the agent surface.
+///
+/// Two kinds, and both are named one by one rather than skipped by shape.
+/// `inbox`, `access_plan`, `attach` and `attachment_get` are driven through
+/// a LOCAL invocation — `attach_file` and `attachment_save` are their tools
+/// — so the World call a tool ends up making is not the one it returns. The
+/// text splice, checkpoint, and document-upgrade commands are transport
+/// primitives for the live web editor, not semantic agent actions.
+/// `geometry` is compiled Blueprint output — connected components, layers,
+/// residual loci — derived from parent/blocks/metadata at one World
+/// generation. It is how the viewer draws a Plan. It is not an authored
+/// object and must not become an agent verb; an agent asserts relations
+/// and lets the picture follow.
+/// The rest have no agent surface at all: they shipped on the web client
+/// and were never given a tool.
+///
+/// Writing them out is what makes the guard work. A command added after this
+/// list is not on it, so it must arrive with a tool or fail the build — and
+/// a tool added for one of these forces its removal from the list.
+pub const WITHOUT_A_TOOL: &[&str] = &[
+    "access_plan",
+    "attach",
+    "attachment_get",
+    "detach",
+    "follow",
+    "geometry",
+    "inbox",
+    "issue_document_upgrade",
+    "issue_text_checkpoint",
+    "issue_text_splice",
+    "label_delete",
+    "label_edit",
+    "project_delete",
+    "project_update_post",
+    "project_updates",
+    "space_describe",
+    "space_rename",
+    "spec_document_upgrade",
+    "triage_decide",
+    "triage_list",
+    "triage_submit",
+];
+
 pub fn tools() -> Vec<McpTool> {
     vec![
         tool::<IssueNewArgs>(
@@ -572,6 +739,54 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<ProjectNewArgs>("project_new", "Create a project.", project_new),
         tool::<EmptyArgs>("project_list", "List projects.", project_list),
+        tool::<ProjectEditArgs>(
+            "project_edit",
+            "Edit a project: name, color, description, lead, dates, archive, \
+             or move it onto a team. Pass team=\"none\" to clear the team.",
+            project_edit,
+        ),
+        tool::<MilestoneListArgs>(
+            "milestone_list",
+            "List a project's milestones.",
+            milestone_list,
+        ),
+        tool::<MilestoneSetArgs>(
+            "milestone_set",
+            "Create, edit, reorder, or remove a project milestone. Omit \
+             milestone to create; pass milestone (name or mls_ id) to edit; \
+             remove=true tombstones it.",
+            milestone_set,
+        ),
+        tool::<IssueMilestoneArgs>(
+            "issue_milestone",
+            "Assign or clear an issue's milestone. Pass milestone=\"none\" to \
+             clear. The milestone must belong to the issue's project.",
+            issue_milestone,
+        ),
+        tool::<CycleListArgs>("cycle_list", "List a project's cycles.", cycle_list),
+        tool::<CycleSetArgs>(
+            "cycle_set",
+            "Create, edit, or remove a project cycle.",
+            cycle_set,
+        ),
+        tool::<IssueCycleArgs>(
+            "issue_cycle",
+            "Assign or clear an issue's cycle. Pass cycle=\"none\" to clear.",
+            issue_cycle,
+        ),
+        tool::<EmptyArgs>("team_list", "List teams.", team_list),
+        tool::<TeamSetArgs>(
+            "team_set",
+            "Create, edit, or remove a team. Omit team to create; pass team \
+             (name, key, or tm_ id) to edit; remove=true tombstones it.",
+            team_set,
+        ),
+        tool::<EmptyArgs>("initiative_list", "List initiatives.", initiative_list),
+        tool::<InitiativeSetArgs>(
+            "initiative_set",
+            "Create, edit, or remove an initiative, including its project membership.",
+            initiative_set,
+        ),
         tool::<LabelNewArgs>("label_new", "Create a label.", label_new),
         tool::<EmptyArgs>("label_list", "List labels.", label_list),
         tool::<ActivityArgs>("activity", "Read recent IssuesWorld transitions.", activity),
@@ -623,11 +838,27 @@ pub fn tools() -> Vec<McpTool> {
             "Every revision of one Spec, oldest first, with its predecessors.",
             spec_history,
         ),
-        tool::<SpecNewArgs>("spec_new", "Create a draft Spec.", spec_new),
-        tool::<SpecReviseArgs>("spec_revise", "Create a draft Spec successor.", spec_revise),
+        tool::<SpecNewArgs>(
+            "spec_new",
+            "Create a draft Spec. kind is one of goal, requirement, plan, \
+             design, order, guide, proof, verdict, waiver, record. A plan \
+             Spec's optional plan field seeds which issue roots Blueprint \
+             compiles; it stores no phases or completion. Do not put order in \
+             prose — use issues_parent and issues_link kind=blocks.",
+            spec_new,
+        ),
+        tool::<SpecReviseArgs>(
+            "spec_revise",
+            "Create a draft successor. Never rewrite an issued revision — \
+             draft a successor and issue that.",
+            spec_revise,
+        ),
         tool::<SpecStateArgs>(
             "spec_state",
-            "Review, issue, or withdraw a Spec head.",
+            "Move a Spec head: draft→review (spec.write / contributor), \
+             review→issued or issued→withdrawn (spec.issue or space.admin). \
+             Issuing makes governing truth. expected is the current head \
+             revision from spec_show.",
             spec_state,
         ),
         tool::<ResolveArgs>(
@@ -669,7 +900,10 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<BaselineNewArgs>(
             "baseline_new",
-            "Create a draft Baseline of exact Spec revisions.",
+            "Create a draft Baseline of exact *issued* Spec revisions. \
+             members are {spec, revision} pairs; a review or draft head is \
+             refused. Issue each Spec first, then baseline, then \
+             baseline_state to issued, then issue_baseline to pin it on work.",
             baseline_new,
         ),
         tool::<BaselineReviseArgs>(
@@ -679,7 +913,9 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<BaselineStateArgs>(
             "baseline_state",
-            "Review, issue, or withdraw a Baseline head.",
+            "Move a Baseline head: draft→review (baseline.write / \
+             contributor), review→issued (baseline.issue or space.admin). \
+             Issuing freezes the named set of Spec revisions.",
             baseline_state,
         ),
         tool::<ResolveArgs>(
@@ -990,6 +1226,111 @@ fn project_new(input: Value) -> Result<ClientInvocation, Failure> {
 fn project_list(input: Value) -> Result<ClientInvocation, Failure> {
     let _: EmptyArgs = args(input)?;
     world(IssuesRequest::ProjectList)
+}
+
+fn project_edit(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: ProjectEditArgs = args(input)?;
+    world(IssuesRequest::ProjectEdit {
+        project: a.project,
+        name: a.name,
+        color: a.color,
+        description: a.description,
+        lead: a.lead,
+        start: a.start,
+        target: a.target,
+        archived: a.archived,
+        team: a.team,
+    })
+}
+
+fn milestone_list(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: MilestoneListArgs = args(input)?;
+    world(IssuesRequest::MilestoneList { project: a.project })
+}
+
+fn milestone_set(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: MilestoneSetArgs = args(input)?;
+    world(IssuesRequest::MilestoneSet {
+        project: a.project,
+        milestone: a.milestone,
+        name: a.name,
+        description: a.description,
+        target: a.target,
+        pos: a.pos.as_deref().and_then(parse_position),
+        remove: a.remove,
+    })
+}
+
+fn issue_milestone(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: IssueMilestoneArgs = args(input)?;
+    world(IssuesRequest::IssueMilestone {
+        reff: a.reff,
+        milestone: a.milestone,
+    })
+}
+
+fn cycle_list(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: CycleListArgs = args(input)?;
+    world(IssuesRequest::CycleList { project: a.project })
+}
+
+fn cycle_set(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: CycleSetArgs = args(input)?;
+    world(IssuesRequest::CycleSet {
+        project: a.project,
+        cycle: a.cycle,
+        name: a.name,
+        start: a.start,
+        end: a.end,
+        remove: a.remove,
+    })
+}
+
+fn issue_cycle(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: IssueCycleArgs = args(input)?;
+    world(IssuesRequest::IssueCycle {
+        reff: a.reff,
+        cycle: a.cycle,
+    })
+}
+
+fn team_list(input: Value) -> Result<ClientInvocation, Failure> {
+    let _: EmptyArgs = args(input)?;
+    world(IssuesRequest::TeamList)
+}
+
+fn team_set(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: TeamSetArgs = args(input)?;
+    world(IssuesRequest::TeamSet {
+        team: a.team,
+        name: a.name,
+        key: a.key,
+        icon: a.icon,
+        lead: a.lead,
+        add_members: a.add_members,
+        remove_members: a.remove_members,
+        remove: a.remove,
+    })
+}
+
+fn initiative_list(input: Value) -> Result<ClientInvocation, Failure> {
+    let _: EmptyArgs = args(input)?;
+    world(IssuesRequest::InitiativeList)
+}
+
+fn initiative_set(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: InitiativeSetArgs = args(input)?;
+    world(IssuesRequest::InitiativeSet {
+        initiative: a.initiative,
+        name: a.name,
+        description: a.description,
+        owner: a.owner,
+        health: a.health,
+        target: a.target,
+        add_projects: a.add_projects,
+        remove_projects: a.remove_projects,
+        remove: a.remove,
+    })
 }
 
 fn label_new(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1394,55 +1735,6 @@ mod tests {
         tags
     }
 
-    /// The commands no tool emits, as of this build.
-    ///
-    /// Two kinds, and both are named one by one rather than skipped by shape.
-    /// `inbox`, `access_plan`, `attach` and `attachment_get` are driven through
-    /// a LOCAL invocation — `attach_file` and `attachment_save` are their tools
-    /// — so the World call a tool ends up making is not the one it returns. The
-    /// text splice, checkpoint, and document-upgrade commands are transport
-    /// primitives for the live web editor, not semantic agent actions. The rest have no agent
-    /// surface at all: they shipped on the web client and were never given a
-    /// tool.
-    ///
-    /// Writing them out is what makes the guard work. A command added after this
-    /// list is not on it, so it must arrive with a tool or fail the build — and
-    /// a tool added for one of these forces its removal from the list.
-    const WITHOUT_A_TOOL: &[&str] = &[
-        "access_plan",
-        "attach",
-        "attachment_get",
-        "cycle_list",
-        "cycle_set",
-        "detach",
-        "follow",
-        "geometry",
-        "inbox",
-        "initiative_list",
-        "initiative_set",
-        "issue_cycle",
-        "issue_document_upgrade",
-        "issue_milestone",
-        "issue_text_checkpoint",
-        "issue_text_splice",
-        "label_delete",
-        "label_edit",
-        "milestone_list",
-        "milestone_set",
-        "project_delete",
-        "project_edit",
-        "project_update_post",
-        "project_updates",
-        "space_describe",
-        "space_rename",
-        "spec_document_upgrade",
-        "team_list",
-        "team_set",
-        "triage_decide",
-        "triage_list",
-        "triage_submit",
-    ];
-
     /// Every command on the wire protocol is reachable through a tool, or is
     /// written down as one that is not.
     ///
@@ -1454,31 +1746,17 @@ mod tests {
     fn every_protocol_command_is_reachable_through_a_tool() {
         let reachable = tags_reachable_through_tools();
         let defined = protocol_command_tags();
-        let missing: Vec<&String> = defined
-            .iter()
-            .filter(|tag| !reachable.contains(*tag) && !WITHOUT_A_TOOL.contains(&tag.as_str()))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "these commands are on the wire protocol with no MCP tool behind them — the \
-             agent surface drifted from the command surface: {missing:?}"
-        );
-        for tag in WITHOUT_A_TOOL {
-            assert!(
-                defined.iter().any(|command| command == tag),
-                "`{tag}` is listed as having no tool but is not a command"
-            );
-            assert!(
-                !reachable.contains(*tag),
-                "`{tag}` has a tool now and must come off the list"
-            );
-        }
+        world_interface::agent_surface_coverage(&defined, &reachable, WITHOUT_A_TOOL)
+            .check()
+            .unwrap_or_else(|error| {
+                panic!("the agent surface drifted from the command surface: {error}")
+            });
     }
 
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 67);
+        assert_eq!(tools.len(), 78);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()
@@ -1551,5 +1829,21 @@ mod tests {
                 .is_some_and(|message| message.contains("unknown variant `maybe`")),
             "{invalid_verdict:?}"
         );
+    }
+
+    /// MCP clients validate `inputSchema.type == "object"` on every tool and
+    /// refuse the entire tool list when one fails — a reconnect that fetches
+    /// zero tools, not one broken tool. `work`'s tagged union is the shape
+    /// that regressed.
+    #[test]
+    fn every_tool_publishes_an_object_input_schema() {
+        for tool in tools() {
+            assert_eq!(
+                tool.schema()["type"],
+                "object",
+                "tool '{}' publishes a non-object input schema",
+                tool.name()
+            );
+        }
     }
 }

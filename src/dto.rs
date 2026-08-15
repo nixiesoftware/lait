@@ -50,7 +50,7 @@ pub struct MemberDto {
 /// the viewer's identity panel). Answers the three questions that cost us a full multi-node
 /// session by inference — *which identity, what may it do, is its view
 /// complete* — as a glance, never a deduction. The observability half of the
-/// Agent Experience initiative (`docs/plans/09`).
+/// Agent Experience (see `docs/AGENT-EXPERIENCE.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WhoamiDto {
     /// This node's **actor id** (`act_…`), if this device resolves to one yet.
@@ -96,6 +96,19 @@ pub struct WhoamiDto {
     /// whole) — what epoch/history is missing, so it is never an inference.
     #[serde(default)]
     pub divergence: Vec<String>,
+    /// True when this `whoami` was an unsponsored named agent and a
+    /// sponsorship ask has been filed with the person on this machine.
+    /// Watch those heads with `wait`; do not poll `whoami`.
+    #[serde(default)]
+    pub sponsorship_asked: bool,
+    /// True when this reading delivered a just-approved sponsorship wake.
+    /// The next `wait`/`whoami` will not say so again — Watch consumes heads.
+    #[serde(default)]
+    pub sponsorship_granted: bool,
+    /// Causal heads of the host-plane sponsorship wait. Pass them to `wait`
+    /// the way `issues_work` watch takes Run heads. Empty when nothing is open.
+    #[serde(default)]
+    pub wait_heads: Vec<String>,
 }
 
 /// One rendered row of the membership audit log (`Request::MemberLog`): the signed

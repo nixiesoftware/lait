@@ -34,18 +34,36 @@ kind of bump and the one that needs feature bits to avoid.
 
 ### MCP protocol
 
-The stdio server advertises and speaks MCP `2024-11-05`, matching the current
-`rmcp` 1.7 integration. Newer dates are not aliases for that implementation:
-LAIT does not yet provide the `2025-06-18`/`2025-11-25` structured tool results,
-output schemas, JSON Schema 2020-12 advertisement, and tool-execution validation
-errors, nor the `2026-07-28` discovery, handshake-less version metadata,
-required result types, and tool-list cache controls. A client that initializes
-with a newer supported date may negotiate down; a discovery-first,
-handshake-less client is not compatible.
+The stdio server is `rmcp` 3.1 and advertises MCP `2026-07-28`. It still
+answers the legacy `initialize` handshake for `2024-11-05`, `2025-06-18`, and
+`2025-11-25`. `server/discover` is implemented. Successful tool results carry
+`structuredContent` (the same versioned DTO as the HTTP head) plus a text
+mirror. Product and argument failures are tool-execution errors
+(`isError: true`) so the model sees the diagnostic; JSON-RPC errors stay
+reserved for transport and unknown methods. `tools/list` for a 2026-07-28 peer
+includes `ttlMs` and `cacheScope: private`.
 
-Moving the advertised date requires a dedicated `rmcp` 3.x protocol project
-that implements and tests those surfaces together. The date must not be bumped
-as a dependency-only change.
+This server does not implement Streamable HTTP, OAuth, resources, prompts,
+sampling, roots, logging, or the Tasks extension. Geometry is compiled
+Blueprint output for the viewer and is not an MCP tool.
+
+`$LAIT_WORLD` pins the session to one World mount. Unset, a build that
+hosts a single World (today: `issues`) takes that pin. Unset with more
+than one hosted World is a refusal that names the mounts. An unknown
+mount is a refusal, not an empty tool list. Existing bindings that omit
+the variable stay valid while Issues is the sole package. A binding
+that names a World writes `LAIT_WORLD` next to `LAIT_AGENT`; it still
+does not pin a path or `LAIT_HOME`.
+
+`WhoamiDto.sponsorship_asked`, `sponsorship_granted`, `wait_heads`, and
+`HostReply::Context.asks` are additive optional fields (`serde default`,
+empty asks omitted). An unsponsored named agent's `whoami` files a
+host-plane ask; Astrolabe samples `HostContext` and notifies. The agent
+Watches that wait (`Request::SponsorWatch` / MCP `wait`) with the same
+head comparison Exec Watch uses. Approval (`AgentProvision`) moves the
+heads; `granted` consumes the wake. This is not a World Signal and does
+not drain `Request::Signals`. There is no Work `Start` for the wait —
+opening it is `Whoami` as a named agent.
 
 ## 2. Durable formats
 

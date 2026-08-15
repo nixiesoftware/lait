@@ -114,6 +114,17 @@ taken, which is never "every gate passes".
 compiled in. `Open` starts the identity head; selecting a Space happens at the
 destination.
 
+### MCP ownership
+
+The World designs the agent surface (tools, omissions, teaching text).
+Astrolabe authors the editor binding (`LAIT_AGENT`, `LAIT_WORLD`) from the
+selected Library World and never parents that process. `lait mcp` is the
+stdio adapter: editor → `lait mcp` → daemon → WorldHost. Do not elevate
+MCP onto Astrolabe, and do not generate tools from the wire protocol.
+
+A project-scoped binding lands beside a `.lait` store, never inside one.
+An unknown client name is refused.
+
 ### The client-to-process seam has been wrong twice
 
 Both times: every component correct, the composition wrong, and a symptom that

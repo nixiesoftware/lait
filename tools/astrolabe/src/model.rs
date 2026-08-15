@@ -148,7 +148,7 @@ impl App {
             Update::Library(entries) => self.absorb_library(entries),
             Update::Storage(facts) => self.absorb_storage(facts, Vec::new()),
             Update::Heads(heads) => self.heads = heads,
-            Update::Context(context) => self.context = Some(*context),
+            Update::Context(context) => self.absorb_context(*context),
             Update::Book(book) => self.book = Some(book),
             Update::Presence(presence) => self.presence = Some(presence),
             Update::Signal(signal) => self.consume(&signal),
@@ -285,6 +285,20 @@ impl App {
     }
 
     pub fn absorb_context(&mut self, context: HostContext) {
+        let current: BTreeSet<(String, String)> = context
+            .asks
+            .iter()
+            .map(|ask| (ask.space.clone(), ask.name.clone()))
+            .collect();
+        let previous = self.context.as_ref().map(|was| {
+            was.asks
+                .iter()
+                .map(|ask| (ask.space.clone(), ask.name.clone()))
+                .collect()
+        });
+        for notice in notify::asks_between(previous.as_ref(), &current) {
+            push_bounded(&mut self.unsaid, notice);
+        }
         self.context = Some(context);
     }
 
@@ -717,5 +731,54 @@ mod tests {
             "the exit did not say what it left running: {said}"
         );
         assert!(app.exit().is_some(), "the shell has no cue to close on");
+    }
+
+    fn context_with(asks: Vec<lait::control::SponsorshipAsk>) -> HostContext {
+        HostContext {
+            version: "lait".into(),
+            identity_home: "home".into(),
+            spaces_root: "root".into(),
+            worlds: Vec::new(),
+            identities: Vec::new(),
+            orbits: Vec::new(),
+            asks,
+        }
+    }
+
+    /// A pending ask is news the first time the host plane reports it, and
+    /// not news the second time. Approving it (the list shrinks) is not an
+    /// interruption — the action's own notice is the record of that.
+    #[test]
+    fn a_new_sponsorship_ask_is_unsaid_once() {
+        let mut app = App::new();
+        app.absorb_context(context_with(vec![lait::control::SponsorshipAsk {
+            space: "ws_one".into(),
+            name: "grok".into(),
+            actor: None,
+            asked_at_ms: 1,
+        }]));
+        let first = app.take_unsaid();
+        assert_eq!(
+            first,
+            vec![Interruption::SponsorshipAsked {
+                space: "ws_one".into(),
+                agent: "grok".into()
+            }]
+        );
+        app.absorb_context(context_with(vec![lait::control::SponsorshipAsk {
+            space: "ws_one".into(),
+            name: "grok".into(),
+            actor: None,
+            asked_at_ms: 1,
+        }]));
+        assert!(
+            app.take_unsaid().is_empty(),
+            "the same ask interrupted twice"
+        );
+        app.absorb_context(context_with(Vec::new()));
+        assert!(
+            app.take_unsaid().is_empty(),
+            "clearing an ask was reported as news"
+        );
     }
 }

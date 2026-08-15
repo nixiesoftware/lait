@@ -19,6 +19,7 @@ contract or operate a deployment.
 | Run the local web application | [`UI.md`](./UI.md#3-web) |
 | Diagnose joining and onboarding | [`UI.md`](./UI.md#7-joining) |
 | Give an agent its own identity | [`AGENT-EXPERIENCE.md`](./AGENT-EXPERIENCE.md) |
+| Reach Worlds this device serves | Astrolabe (`apps/astrolabe`) — library, launcher, identity; never a World |
 
 The normal product model is deliberately small:
 
@@ -29,7 +30,8 @@ The normal product model is deliberately small:
   Stations for addressed Orbits, shares one transport endpoint per device
   identity, and remains independent of any head.
 - `lait mcp` exposes the same request contract to agents over stdio, pinned to
-  one Orbit.
+  one Orbit and one World (`$LAIT_WORLD`, or the sole World this build hosts).
+  The World designs that tool list; Astrolabe authors the editor binding.
 - `lait --version` answers the one question that must be answerable with nothing
   running. Anything else exits 1.
 - Founding a Space and entering one from an invite are `host_space_found` and

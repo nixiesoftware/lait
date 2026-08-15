@@ -333,6 +333,26 @@ impl SseDecode for crate::api::ActionRequest {
                     suggestion: var_suggestion,
                 };
             }
+            23 => {
+                let mut var_client = <String>::sse_decode(deserializer);
+                let mut var_scope = <Option<String>>::sse_decode(deserializer);
+                let mut var_name = <String>::sse_decode(deserializer);
+                let mut var_agent = <Option<String>>::sse_decode(deserializer);
+                let mut var_noAgent = <bool>::sse_decode(deserializer);
+                let mut var_project = <String>::sse_decode(deserializer);
+                let mut var_world = <Option<String>>::sse_decode(deserializer);
+                let mut var_preview = <bool>::sse_decode(deserializer);
+                return crate::api::ActionRequest::InstallMcp {
+                    client: var_client,
+                    scope: var_scope,
+                    name: var_name,
+                    agent: var_agent,
+                    no_agent: var_noAgent,
+                    project: var_project,
+                    world: var_world,
+                    preview: var_preview,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -411,6 +431,7 @@ impl SseDecode for crate::api::ClientView {
         let mut var_notices = <Vec<crate::api::NoticeRow>>::sse_decode(deserializer);
         let mut var_failures = <Vec<crate::api::FailureRow>>::sse_decode(deserializer);
         let mut var_inFlight = <Vec<String>>::sse_decode(deserializer);
+        let mut var_mcp = <Option<crate::api::McpBindingRow>>::sse_decode(deserializer);
         return crate::api::ClientView {
             loading: var_loading,
             stale: var_stale,
@@ -425,6 +446,7 @@ impl SseDecode for crate::api::ClientView {
             notices: var_notices,
             failures: var_failures,
             in_flight: var_inFlight,
+            mcp: var_mcp,
         };
     }
 }
@@ -747,6 +769,28 @@ impl SseDecode for Vec<crate::api::WorldPersonRow> {
     }
 }
 
+impl SseDecode for crate::api::McpBindingRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_path = <String>::sse_decode(deserializer);
+        let mut var_detail = <String>::sse_decode(deserializer);
+        let mut var_note = <Option<String>>::sse_decode(deserializer);
+        let mut var_replaced = <bool>::sse_decode(deserializer);
+        let mut var_agent = <Option<String>>::sse_decode(deserializer);
+        let mut var_written = <bool>::sse_decode(deserializer);
+        let mut var_world = <Option<String>>::sse_decode(deserializer);
+        return crate::api::McpBindingRow {
+            path: var_path,
+            detail: var_detail,
+            note: var_note,
+            replaced: var_replaced,
+            agent: var_agent,
+            written: var_written,
+            world: var_world,
+        };
+    }
+}
+
 impl SseDecode for crate::api::MemberRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -825,6 +869,17 @@ impl SseDecode for Option<crate::api::HostFacts> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::HostFacts>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::McpBindingRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::McpBindingRow>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1198,6 +1253,27 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             crate::api::ActionRequest::BookDismiss { suggestion } => {
                 [22.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::ActionRequest::InstallMcp {
+                client,
+                scope,
+                name,
+                agent,
+                no_agent,
+                project,
+                world,
+                preview,
+            } => [
+                23.into_dart(),
+                client.into_into_dart().into_dart(),
+                scope.into_into_dart().into_dart(),
+                name.into_into_dart().into_dart(),
+                agent.into_into_dart().into_dart(),
+                no_agent.into_into_dart().into_dart(),
+                project.into_into_dart().into_dart(),
+                world.into_into_dart().into_dart(),
+                preview.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -1271,6 +1347,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::ClientView {
             self.notices.into_into_dart().into_dart(),
             self.failures.into_into_dart().into_dart(),
             self.in_flight.into_into_dart().into_dart(),
+            self.mcp.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1431,6 +1508,27 @@ impl flutter_rust_bridge::IntoDart for crate::api::LibraryRow {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::LibraryRow {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::LibraryRow> for crate::api::LibraryRow {
     fn into_into_dart(self) -> crate::api::LibraryRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::McpBindingRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.path.into_into_dart().into_dart(),
+            self.detail.into_into_dart().into_dart(),
+            self.note.into_into_dart().into_dart(),
+            self.replaced.into_into_dart().into_dart(),
+            self.agent.into_into_dart().into_dart(),
+            self.written.into_into_dart().into_dart(),
+            self.world.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::McpBindingRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::McpBindingRow> for crate::api::McpBindingRow {
+    fn into_into_dart(self) -> crate::api::McpBindingRow {
         self
     }
 }
@@ -1741,6 +1839,26 @@ impl SseEncode for crate::api::ActionRequest {
                 <i32>::sse_encode(22, serializer);
                 <String>::sse_encode(suggestion, serializer);
             }
+            crate::api::ActionRequest::InstallMcp {
+                client,
+                scope,
+                name,
+                agent,
+                no_agent,
+                project,
+                world,
+                preview,
+            } => {
+                <i32>::sse_encode(23, serializer);
+                <String>::sse_encode(client, serializer);
+                <Option<String>>::sse_encode(scope, serializer);
+                <String>::sse_encode(name, serializer);
+                <Option<String>>::sse_encode(agent, serializer);
+                <bool>::sse_encode(no_agent, serializer);
+                <String>::sse_encode(project, serializer);
+                <Option<String>>::sse_encode(world, serializer);
+                <bool>::sse_encode(preview, serializer);
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1799,6 +1917,7 @@ impl SseEncode for crate::api::ClientView {
         <Vec<crate::api::NoticeRow>>::sse_encode(self.notices, serializer);
         <Vec<crate::api::FailureRow>>::sse_encode(self.failures, serializer);
         <Vec<String>>::sse_encode(self.in_flight, serializer);
+        <Option<crate::api::McpBindingRow>>::sse_encode(self.mcp, serializer);
     }
 }
 
@@ -2046,6 +2165,19 @@ impl SseEncode for Vec<crate::api::WorldPersonRow> {
     }
 }
 
+impl SseEncode for crate::api::McpBindingRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.path, serializer);
+        <String>::sse_encode(self.detail, serializer);
+        <Option<String>>::sse_encode(self.note, serializer);
+        <bool>::sse_encode(self.replaced, serializer);
+        <Option<String>>::sse_encode(self.agent, serializer);
+        <bool>::sse_encode(self.written, serializer);
+        <Option<String>>::sse_encode(self.world, serializer);
+    }
+}
+
 impl SseEncode for crate::api::MemberRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2116,6 +2248,16 @@ impl SseEncode for Option<crate::api::HostFacts> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::HostFacts>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::McpBindingRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::McpBindingRow>::sse_encode(value, serializer);
         }
     }
 }

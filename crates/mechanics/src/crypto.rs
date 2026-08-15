@@ -75,7 +75,7 @@ pub fn device_from_seed(seed: &[u8; 32]) -> DeviceId {
 /// The `did:key` form of an ed25519 public key (the raw bytes a [`DeviceId`]
 /// *is*). A pure, offline, self-certifying function of the key — the interop
 /// lingua franca the agent-identity standards converge on (draft-duda / AIP /
-/// KERI, `docs/plans/09`): lait presents *any* member's identity outward as a
+/// KERI): lait presents *any* member's identity outward as a
 /// `did` with no registry and no network. The multicodec prefix `0xed01` marks
 /// ed25519-pub; the body is multibase base58btc (`z`-prefixed), per the W3C
 /// did:key spec, so every ed25519 did:key begins `z6Mk`.

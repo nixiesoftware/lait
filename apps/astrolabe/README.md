@@ -69,6 +69,9 @@ The tests drive real controls against `Client.canned` and read what each surface
 worth keeping from the retiring egui interface, and it is why the suite runs the
 same on either platform.
 
+The Library authors an MCP binding for the selected World (`LAIT_WORLD`).
+The editor parents `lait mcp`; this client never holds that process.
+
 ## What differs on macOS
 
 Ported deliberately, and stated here because the differences are decisions

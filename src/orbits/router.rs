@@ -573,6 +573,7 @@ pub struct Router {
     lifecycle: RwLock<()>,
     shutting_down: AtomicBool,
     book: Result<Arc<crate::daemon::address_book::AddressBookService>, String>,
+    asks: crate::daemon::sponsorship::SponsorshipAsks,
 }
 
 impl Router {
@@ -592,6 +593,7 @@ impl Router {
         let book = crate::daemon::address_book::AddressBookService::open(&identity)
             .map(Arc::new)
             .map_err(|error| error.to_string());
+        let asks = crate::daemon::sponsorship::SponsorshipAsks::open(&identity);
         Self {
             catalog,
             occupancy: OrbitOccupancy::default(),
@@ -601,6 +603,7 @@ impl Router {
             lifecycle: RwLock::new(()),
             shutting_down: AtomicBool::new(false),
             book,
+            asks,
         }
     }
 
@@ -610,6 +613,10 @@ impl Router {
 
     pub(crate) fn book(&self) -> Result<&crate::daemon::address_book::AddressBookService, String> {
         self.book.as_ref().map(Arc::as_ref).map_err(Clone::clone)
+    }
+
+    pub(crate) fn asks(&self) -> &crate::daemon::sponsorship::SponsorshipAsks {
+        &self.asks
     }
 
     /// Authored-handle snapshot of an *already placed* Orbit. Vacant, attached,
@@ -851,6 +858,24 @@ impl Router {
             placement.shutdown().await?;
         }
         Ok(vacancy)
+    }
+
+    /// Stop one Orbit's placement now, and hold the Orbit for nothing.
+    ///
+    /// [`Self::vacate`] with the guard released on the way out: the point is
+    /// the stop itself, not an exclusive operation behind it, so the next
+    /// routed request places the Orbit lazily as if it had never been placed.
+    ///
+    /// Answers whether anything was actually stopped, because "stopped" and
+    /// "was not placed" are different facts and the caller reports one of them.
+    pub async fn stop_placement(&self, orbit: &LocalOrbitId) -> Result<bool> {
+        let (vacancy, placement) = self.occupancy.vacate(orbit).await;
+        let stopped = placement.is_some();
+        if let Some(placement) = placement {
+            placement.shutdown().await?;
+        }
+        drop(vacancy);
+        Ok(stopped)
     }
 
     /// Stop and join every in-process placement. Externally attached

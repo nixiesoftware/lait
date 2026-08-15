@@ -25,6 +25,10 @@ use std::path::{Path, PathBuf};
 /// root, so mixed-root output is unrepresentable), and its per-issue parse
 /// memo is reusable across roots only under a reader-issued Body version
 /// stamp whose equality guarantees byte-equivalent Bodies.
+/// MCP 2026-07-28 `cacheScope` (rmcp `CacheScope` / `cache_scope`) is a
+/// listing annotation on `tools/list`, not a derived product projection.
+const NOT_A_PRODUCT_CACHE: &[&str] = &["cache_scope", "CacheScope"];
+
 const REGISTERED_CACHES: &[(&str, &str, &str)] = &[
     (
         "RootKeyedCache",
@@ -147,6 +151,9 @@ fn any_product_cache_must_register_with_a_mixed_root_proof() {
             .replace('\\', "/");
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         for ident in cache_identifiers(&text) {
+            if NOT_A_PRODUCT_CACHE.contains(&ident.as_str()) {
+                continue;
+            }
             let registered = REGISTERED_CACHES.iter().any(|(id, _, _)| *id == ident);
             if !registered {
                 unregistered.push(format!("{rel}: `{ident}`"));
@@ -224,4 +231,10 @@ fn the_detector_has_teeth() {
         "string literals are not code"
     );
     assert!(cache_identifiers("fn compute_rows() {}").is_empty());
+    assert!(
+        cache_identifiers("cache_scope: Some(CacheScope::Private)")
+            .iter()
+            .all(|ident| NOT_A_PRODUCT_CACHE.contains(&ident.as_str())),
+        "MCP listing annotations must stay off the product-cache registry"
+    );
 }

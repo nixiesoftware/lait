@@ -582,6 +582,16 @@ pub enum Request {
     /// partial-view signal — so neither a human nor an agent ever *infers* "who
     /// am I / what may I do / is my view complete."
     Whoami,
+    /// Watch the host-plane sponsorship wait for the acting agent.
+    ///
+    /// Exec Watch's comparison, not a live stream: pass the heads the last
+    /// reading returned; matching heads answer `WaitReply::Unchanged`. A
+    /// grant moves the heads. There is no Work `Start` here — the wait is
+    /// opened by `Whoami` as an unsponsored named agent.
+    SponsorWatch {
+        #[serde(default)]
+        heads: Vec<String>,
+    },
     /// Converge now and report what moved and what is still divergent — the
     /// request that supersedes a hand-aimed `Connect`. Surfaces missing-
     /// epoch / partial-read state **loudly** instead of silently showing fewer
@@ -841,6 +851,10 @@ pub enum Request {
         print: bool,
         /// The project directory for a project-scoped config.
         dir: String,
+        /// Mount of the World this binding pins (`issues`, `signage`, …).
+        /// `None` lets `lait mcp` take the sole World this build hosts.
+        #[serde(default)]
+        world: Option<String>,
     },
     /// Replace the installed binary with the latest published release.
     ///
@@ -1311,7 +1325,8 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::WorldActivate { .. }
         | Request::WorldsActive
         | Request::Id
-        | Request::Whoami => Mechanics,
+        | Request::Whoami
+        | Request::SponsorWatch { .. } => Mechanics,
 
         // ---- Work: Runtime-owned durable Run lifecycle ----
         Request::Work { .. } => Work,
@@ -1504,6 +1519,7 @@ pub fn representative_requests() -> Vec<Request> {
         },
         Request::Id,
         Request::Whoami,
+        Request::SponsorWatch { heads: vec![] },
         Request::Sync,
         Request::Invite {
             role: None,
@@ -1566,6 +1582,7 @@ pub fn representative_requests() -> Vec<Request> {
             no_agent: false,
             print: true,
             dir: s(),
+            world: None,
         },
         Request::HostUpdate,
         Request::HostRestart,
@@ -1820,6 +1837,8 @@ pub enum Response {
     },
     /// The one-shot identity + standing + view-completeness projection.
     Whoami(crate::dto::WhoamiDto),
+    /// Work-shaped sponsorship wait ([`Request::SponsorWatch`]).
+    Wait(WaitReply),
     /// The result of a `sync`: whether the view is now whole, and the same loud
     /// divergence lines `whoami` reports (empty when converged and complete).
     Sync {
@@ -1987,7 +2006,68 @@ pub enum HostReply {
         identities: Vec<String>,
         /// Every durable local Orbit known to this identity.
         orbits: Vec<crate::orbits::Entry>,
+        /// Unsponsored agents that have asked this identity to sponsor them.
+        ///
+        /// Host-plane state, not a World signal: the client samples it the
+        /// same way it samples orientation, and a second drain of `Signals`
+        /// never has to exist for this to reach the person who can approve.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        asks: Vec<SponsorshipAsk>,
     },
+}
+
+/// A co-located agent that attached without standing, waiting on a person.
+///
+/// Keyed by `(space, name)` — `name` is the local identity (`LAIT_AGENT`),
+/// which is what [`Request::AgentProvision`] takes. `actor` is filled in when
+/// the agent has already incepted and is still unsponsored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SponsorshipAsk {
+    pub space: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    pub asked_at_ms: u64,
+}
+
+/// A sponsorship that was approved and has not yet been delivered to the agent.
+///
+/// The counterpart of [`SponsorshipAsk`]: the ask is the person's decision,
+/// the wake is the agent's. [`Request::SponsorWatch`] consumes it the same
+/// way Work `Watch` consumes a head change — once, then it is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SponsorshipWake {
+    pub space: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    pub granted_at_ms: u64,
+}
+
+/// Work-shaped answer to [`Request::SponsorWatch`].
+///
+/// Same comparison Exec Watch uses: known heads in, `Unchanged` if they
+/// still match, otherwise the new state. Not a live stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "wait", rename_all = "snake_case")]
+pub enum WaitReply {
+    Unchanged {
+        heads: Vec<String>,
+    },
+    Waiting {
+        heads: Vec<String>,
+        space: String,
+        name: String,
+    },
+    Granted {
+        heads: Vec<String>,
+        space: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<String>,
+    },
+    /// Nothing is open for this caller.
+    Idle,
 }
 
 /// Classifies a [`Response::Error`] so the process exit code is

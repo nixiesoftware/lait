@@ -1306,6 +1306,9 @@ impl StationHost {
                 }
             }
             Request::Whoami => self.whoami(act_as),
+            // Identity-scoped; the daemon funnel answers this. A Station that
+            // sees it has been reached past that seam.
+            Request::SponsorWatch { .. } => Response::Wait(crate::control::WaitReply::Idle),
             Request::Invite {
                 role,
                 reusable,
@@ -1635,7 +1638,7 @@ impl StationHost {
     /// just-arrived sealed epoch envelopes) and report completeness **loudly**.
     /// The ambient Contact/Beacon plane exchanges peer material continuously;
     /// `sync` names the state so a missing epoch key is never inferred from a
-    /// short issue count (`docs/plans/09` §3.4). It supersedes `connect
+    /// short issue count. It supersedes `connect
     /// <device-id>` as the "am I caught up?" verb.
     fn sync(&self) -> Response {
         // Converge, then report — in that order, because this request is named
@@ -1713,7 +1716,7 @@ impl StationHost {
     /// (the MCP `whoami` tool, the viewer's identity panel). Every fact resolved once: actor,
     /// device, `did:key`, space, role, capabilities, sponsor, and the loud
     /// partial-view signal — so "who am I / what may I do / is my view complete"
-    /// is a glance, never a deduction (`docs/plans/09` §3.4).
+    /// is a glance, never a deduction. See `docs/AGENT-EXPERIENCE.md`.
     fn whoami(&self, act_as: Option<&str>) -> Response {
         let seed = match self.acting_seed(act_as) {
             Ok(s) => s,
@@ -1762,6 +1765,9 @@ impl StationHost {
             name,
             partial_view,
             divergence,
+            sponsorship_asked: false,
+            sponsorship_granted: false,
+            wait_heads: Vec::new(),
         })
     }
 

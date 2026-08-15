@@ -22,6 +22,7 @@
 //! Open" into a spurious snapshot-required.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc::{
     error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender,
@@ -355,8 +356,8 @@ pub struct Runtime {
 impl Runtime {
     /// Start the background half.
     ///
-    /// `wake` is called whenever an update is queued. In the real shell it is
-    /// `egui::Context::request_repaint`; in a test it can be a no-op, which is
+    /// `wake` is called whenever an update is queued. The Flutter pump uses
+    /// it to emit a fresh `ClientView`; in a test it can be a no-op, which is
     /// the reason it is a parameter rather than a captured context.
     pub fn start(config: Config, wake: impl Fn() + Send + Sync + 'static) -> ClientResult<Self> {
         let (updates_out, updates) = unbounded_channel();
@@ -482,9 +483,19 @@ async fn serve(
     drain(worker, signals, actions).await;
 }
 
+/// How often the host plane is re-read for pending sponsorship asks.
+///
+/// The workbench sampler already ticks at this cadence for devices; asks are
+/// host-plane state and would otherwise wait for F5 or an action.
+const HOST_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Consume the stream forever, re-reading whenever it says to, and carry out
 /// whatever a surface asks for while it does.
 async fn drain(worker: Arc<Worker>, mut signals: Signals, mut actions: UnboundedReceiver<Action>) {
+    let mut ticks = tokio::time::interval(HOST_SAMPLE_INTERVAL);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The first tick is immediate; refresh() already read the host plane.
+    ticks.tick().await;
     loop {
         tokio::select! {
             signal = signals.recv() => {
@@ -508,6 +519,10 @@ async fn drain(worker: Arc<Worker>, mut signals: Signals, mut actions: Unbounded
                 // of them — long enough to lag the consumer and produce a
                 // snapshot-required that nothing but the click caused.
                 tokio::spawn(async move { worker.carry_out(action).await });
+            }
+            _ = ticks.tick() => {
+                let worker = Arc::clone(&worker);
+                tokio::spawn(async move { worker.sample_host().await });
             }
         }
     }
@@ -555,6 +570,15 @@ impl Worker {
             what: what.to_owned(),
             error,
         });
+    }
+
+    /// Re-read orientation so a pending sponsorship ask reaches the model
+    /// without waiting for F5. A missed sample keeps the last context —
+    /// flooding a failure every second is not a sampling failure, it is noise.
+    async fn sample_host(&self) {
+        if let Ok(context) = self.client.host_context().await {
+            self.send(Update::Context(Box::new(context)));
+        }
     }
 
     async fn carry_out(&self, action: Action) {
@@ -1002,6 +1026,7 @@ mod tests {
                 agent: None,
                 no_agent: false,
                 project: ".".into(),
+                world: None,
             }),
             preview: true,
         }

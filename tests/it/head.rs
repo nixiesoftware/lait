@@ -376,6 +376,12 @@ impl Mcp {
             "{tool} was refused: {}",
             reply["error"]
         );
+        if reply["result"]["isError"] == true {
+            panic!("{tool} was a tool error: {reply}");
+        }
+        if !reply["result"]["structuredContent"].is_null() {
+            return reply["result"]["structuredContent"].clone();
+        }
         let text = reply["result"]["content"][0]["text"]
             .as_str()
             .unwrap_or_else(|| panic!("{tool} returned no text content: {reply}"));
