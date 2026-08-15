@@ -1881,6 +1881,17 @@ impl SpaceAuthority {
     /// Activate a World implementation id for this Space — an admin-authored
     /// authority effect. Idempotent (re-activation of the same id is a no-op
     /// commit through the ledger's batch idempotency).
+    /// Every World this Space has activated, in id order.
+    ///
+    /// The read counterpart [`Self::activate_implementation`] never had. It
+    /// answers *which* Worlds this Orbit serves — the Space's own record — and
+    /// deliberately nothing about how to draw or open one: that is a
+    /// declaration belonging to whichever build is asking, joined in by the
+    /// client that holds its own package registry.
+    pub fn activated_worlds(&self) -> Vec<String> {
+        self.lock().acl().activated_worlds()
+    }
+
     pub fn activate_implementation(
         &self,
         world: &str,

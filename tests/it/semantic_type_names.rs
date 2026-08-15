@@ -426,6 +426,85 @@ fn direct_public_modules(path: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+/// Public type declarations in one source file.
+///
+/// Exec's vocabulary is a public contract, so private parsing helpers and test
+/// fixtures are intentionally outside this inventory.
+#[derive(Default)]
+struct PublicTypes(BTreeSet<String>);
+
+impl PublicTypes {
+    fn note(&mut self, visibility: &syn::Visibility, ident: &syn::Ident) {
+        if matches!(visibility, syn::Visibility::Public(_)) {
+            self.0.insert(ident.to_string());
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for PublicTypes {
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.ident);
+            syn::visit::visit_item_struct(self, node);
+        }
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.ident);
+            syn::visit::visit_item_enum(self, node);
+        }
+    }
+
+    fn visit_item_union(&mut self, node: &'ast syn::ItemUnion) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.ident);
+            syn::visit::visit_item_union(self, node);
+        }
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.ident);
+            syn::visit::visit_item_trait(self, node);
+        }
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.ident);
+            syn::visit::visit_item_type(self, node);
+        }
+    }
+}
+
+fn public_type_names(text: &str) -> BTreeSet<String> {
+    let file = syn::parse_file(text).expect("parse public type inventory");
+    let mut types = PublicTypes::default();
+    types.visit_file(&file);
+    types.0
+}
+
+fn rejected_exec_type(name: &str) -> bool {
+    const REJECTED: &[&str] = &[
+        "ProviderAdvertisement",
+        "ControlTopology",
+        "PriorityContext",
+    ];
+    name.starts_with("Exec") || name.starts_with("Execution") || REJECTED.contains(&name)
+}
+
+fn rejected_find_type(name: &str) -> bool {
+    const REJECTED: &[&str] = &[
+        "Retrieval",
+        "Pipeline",
+        "QueryPlan",
+        "ContextEngine",
+        "TraversalProvider",
+    ];
+    name.starts_with("Find") || REJECTED.iter().any(|rejected| name.starts_with(rejected))
+}
+
 const RETIRED: &[&str] = &[
     "LaitDaemon",
     "LaitDaemonClient",
@@ -584,6 +663,14 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
             &[
                 "beacon",
                 "coordinates",
+                // World-declared durable Runs and their Attempts. The module
+                // supplies the context; its own naming gate below prevents
+                // public types from repeating Exec or Execution.
+                "exec",
+                // Bounded World-declared reads. Find owns the generic Query,
+                // Grant, vocabulary references, and work ceilings; product
+                // meanings remain in their Worlds.
+                "find",
                 // Immutable Orbit materializations. The namespace keeps the
                 // lifecycle sharp: Generation -> Build -> Verification ->
                 // Activation, without prefix-stuttering every public type.
@@ -612,6 +699,105 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
         let allowed: BTreeSet<String> = allowed.iter().map(|name| (*name).to_owned()).collect();
         assert_eq!(found, allowed, "{package} public module allowlist changed");
     }
+}
+
+#[test]
+fn exec_public_types_do_not_stutter_or_reintroduce_rejected_nouns() {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for file in production_sources() {
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel != "crates/runtime/src/exec.rs" && !rel.starts_with("crates/runtime/src/exec/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).expect("read runtime::exec source");
+        for name in public_type_names(&text) {
+            if rejected_exec_type(&name) {
+                found.push(format!("{rel}: `{name}`"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "runtime::exec public types repeat their module or reintroduce rejected nouns:\n  {}",
+        found.join("\n  ")
+    );
+}
+
+#[test]
+fn exec_naming_gate_has_teeth() {
+    let bad = r#"
+        pub struct ExecSpec;
+        pub enum ExecutionRun { Began }
+        pub type ProviderAdvertisement = ();
+        struct ExecPrivateHelper;
+        pub struct Spec;
+    "#;
+    let found: Vec<String> = public_type_names(bad)
+        .into_iter()
+        .filter(|name| rejected_exec_type(name))
+        .collect();
+    assert_eq!(found, ["ExecSpec", "ExecutionRun", "ProviderAdvertisement"]);
+}
+
+#[test]
+fn find_public_types_use_only_the_contextual_vocabulary() {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for file in production_sources() {
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel != "crates/runtime/src/find.rs" && !rel.starts_with("crates/runtime/src/find/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).expect("read runtime::find source");
+        for name in public_type_names(&text) {
+            if rejected_find_type(&name) {
+                found.push(format!("{rel}: `{name}`"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "runtime::find public types repeat their module or reintroduce rejected nouns:\n  {}",
+        found.join("\n  ")
+    );
+}
+
+#[test]
+fn find_naming_gate_has_teeth() {
+    let bad = r#"
+        pub struct FindQuery;
+        pub enum Retrieval { Exact }
+        pub type Pipeline = ();
+        pub struct QueryPlan;
+        pub struct ContextEngine;
+        pub trait TraversalProvider {}
+        struct FindPrivateHelper;
+        pub struct Query;
+    "#;
+    let found: Vec<String> = public_type_names(bad)
+        .into_iter()
+        .filter(|name| rejected_find_type(name))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "ContextEngine",
+            "FindQuery",
+            "Pipeline",
+            "QueryPlan",
+            "Retrieval",
+            "TraversalProvider"
+        ]
+    );
 }
 
 #[test]

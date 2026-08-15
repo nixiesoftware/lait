@@ -319,7 +319,7 @@ export function Inbox({
                 </span>
                 <span className="text-dim line-clamp-2 block">
                   {/* Only comments have an author to name. Anything else says so. */}
-                  {e.actor_nick || (e.actor && short(e.actor)) || (
+                  {e.authored_name || e.actor_nick || (e.actor && short(e.actor)) || (
                     <span className="text-mute italic">someone</span>
                   )}{" "}
                   {e.detail}

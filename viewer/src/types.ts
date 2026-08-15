@@ -133,6 +133,8 @@ export interface Row {
   assignee_summary: string;
   /** The keys behind that summary, for clients that draw faces instead. */
   assignees: string[];
+  /** Authored Card names for assignees, when the book could name them. */
+  assignee_names?: Record<string, string>;
   tombstone: boolean;
   provisional: boolean;
   /** Due date, unix seconds. Absent = none. */
@@ -221,10 +223,14 @@ export interface IssueView {
   status: string;
   priority: Priority;
   assignees: string[];
+  /** Authored Card names for assignees, when the book could name them. */
+  assignee_names?: Record<string, string>;
   labels: string[];
   label_names: string[];
   comments: CommentDto[];
   created_by: string;
+  /** Authored Card name for the creator, when the book could name them. */
+  created_by_name?: string;
   /** Unix seconds. */
   created_at: number;
   /** Due date, unix seconds. Absent = none. */
@@ -561,6 +567,8 @@ export interface ActivityEvent {
   changes: FieldChange[];
   actor: string | null;
   actor_nick: string;
+  /** Authored Card name, when the book could name `actor`. Absent is not empty. */
+  authored_name?: string | null;
   text: string;
   /** Unix seconds. */
   ts: number;
@@ -587,6 +595,8 @@ export interface InboxEntry {
   /** Comments only — the one in-doc field with a real author. `null` = actor unknown. */
   actor?: string | null;
   actor_nick?: string | null;
+  /** Authored Card name, when the book could name `actor`. */
+  authored_name?: string | null;
 }
 
 export interface MemberDto {
@@ -1149,7 +1159,6 @@ export type Request =
   | { cmd: "space_custody_import"; path: string; passphrase: string; force: boolean }
   | { cmd: "members" }
   | { cmd: "member_log" }
-  | { cmd: "member_alias"; who: string; name: string }
   | { cmd: "status" }
   /** Identity + standing + view-completeness, one shot — `dto.rs` `WhoamiDto`. */
   | { cmd: "whoami" }
@@ -1219,7 +1228,6 @@ export type SpaceRequest = Extract<
       | "key_rotate"
       | "members"
       | "member_log"
-      | "member_alias"
       | "device_invite"
       | "device_add"
       | "device_revoke"
@@ -1271,7 +1279,16 @@ export type HostRequest =
   /** Stops the daemon under this server once the reply is out. The server
    *  survives and stands a fresh one up on its next request — which is how a
    *  swapped binary or a raised control protocol takes effect. */
-  | { cmd: "host_restart" };
+  | { cmd: "host_restart" }
+  /** ── The identity-scoped address book: the one namer. Host plane — the
+   *  book belongs to the identity, never to a Space route. Trimmed to the
+   *  verbs the browser uses; Astrolabe's book window is the full surface. ── */
+  | { cmd: "book_lookup"; handle: string }
+  | { cmd: "book_put"; card?: string | null; name: string; note?: string | null }
+  | { cmd: "book_link"; card: string; handle: string }
+  /** Scoped decoration: an orbit this head already authorized plus handles
+   *  present in that answer. How the tracker resolves names and faces. */
+  | { cmd: "book_resolve"; orbit: string; handles: string[] };
 
 /** `control.rs` `HostReply`, tagged by `host` inside a `kind: "host"` response. */
 export type HostReply =
@@ -1313,6 +1330,33 @@ export type HostReply =
       identities: string[];
       orbits: OrbitEntry[];
     };
+
+/** One authored Card of the identity's address book (`BookCardView`). */
+export interface BookCardDto {
+  card: string;
+  name: string;
+  note: string;
+  handles: string[];
+  /** The phone-book reading of `handles`: addresses (`actor:` spellings),
+   *  devices (bare device ids), co-located agents (`agent:` spellings). */
+  addresses: string[];
+  devices: string[];
+  agents: string[];
+  /** The stored picture (`<mime>;base64,<data>`); absent means the default
+   *  face. */
+  picture?: string | null;
+  groups: string[];
+  self_claim: boolean;
+}
+
+/** One authored hit of a scoped resolution (`BookHitView`). */
+export interface BookHitDto {
+  card: string;
+  handle: string;
+  name: string;
+  /** The stored picture (`<mime>;base64,<data>`); absent means none authored. */
+  picture?: string | null;
+}
 
 /** One row of the local Orbit registry (`orbits::Entry`). */
 export interface OrbitEntry {
@@ -1360,6 +1404,10 @@ export type Response =
       size?: number;
     }
   | { kind: "labels"; labels: LabelDto[] }
+  /** `control.rs` `BookView`, trimmed to what the browser reads. */
+  | { kind: "book"; cards: BookCardDto[] }
+  /** `control.rs` `BookResolutionView` — authored hits for resolved handles. */
+  | { kind: "book_resolution"; hits: BookHitDto[]; coverage?: string | null }
   | { kind: "members"; members: MemberDto[] }
   | { kind: "assignments"; rows: AssignmentDto[] }
   | { kind: "member_log"; entries: MemberLogEntry[] }

@@ -18,6 +18,7 @@ lait                       # http://127.0.0.1:7717, prints a URL with a token
 lait --open                # …and open it in the default browser
 lait --port 0              # ephemeral port, when 7717 may be taken
 lait --orbit acme          # pin the head to one local Orbit
+lait --home <dir>          # serve one self-contained identity rather than the per-user one
 lait --json                # one machine-readable readiness line, then serve
 ```
 

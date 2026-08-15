@@ -42,12 +42,9 @@ use replica::body::WorldId;
 use runtime::world::call::{Call, Reply};
 use serde_json::Value;
 
-/// A typed client-surface failure.
-///
-/// Concrete adapter diagnostics are logged at conversion and are deliberately
-/// not retained in this public value.
+/// Stable classification of a client-surface failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Failure {
+pub enum FailureKind {
     /// A declaration, invocation, or returned value was invalid.
     Invalid,
     /// A valid operation was refused by the selected surface.
@@ -58,32 +55,72 @@ pub enum Failure {
     Interruption,
 }
 
+/// A typed client-surface failure.
+///
+/// Adapter diagnostics remain separate from the stable classification. Most
+/// boundaries deliberately render only the classification; an argument-owning
+/// surface such as MCP may explicitly preserve [`Self::diagnostic`] so callers
+/// can repair malformed input without depending on a tracing subscriber.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    kind: FailureKind,
+    diagnostic: Option<String>,
+}
+
 impl Failure {
     pub fn new(message: impl fmt::Display) -> Self {
-        tracing::warn!(diagnostic = %message, "World client adapter rejected an operation");
-        Self::Invalid
+        let diagnostic = message.to_string();
+        tracing::warn!(%diagnostic, "World client adapter rejected an operation");
+        Self {
+            kind: FailureKind::Invalid,
+            diagnostic: Some(diagnostic),
+        }
+    }
+
+    pub const fn invalid() -> Self {
+        Self {
+            kind: FailureKind::Invalid,
+            diagnostic: None,
+        }
     }
 
     pub const fn refusal() -> Self {
-        Self::Refusal
+        Self {
+            kind: FailureKind::Refusal,
+            diagnostic: None,
+        }
     }
 
     pub const fn operation() -> Self {
-        Self::Operation
+        Self {
+            kind: FailureKind::Operation,
+            diagnostic: None,
+        }
     }
 
     pub const fn interruption() -> Self {
-        Self::Interruption
+        Self {
+            kind: FailureKind::Interruption,
+            diagnostic: None,
+        }
+    }
+
+    pub const fn kind(&self) -> FailureKind {
+        self.kind
+    }
+
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.diagnostic.as_deref()
     }
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Invalid => "invalid client operation",
-            Self::Refusal => "client operation refused",
-            Self::Operation => "client operation failed",
-            Self::Interruption => "client operation interrupted",
+        f.write_str(match self.kind {
+            FailureKind::Invalid => "invalid client operation",
+            FailureKind::Refusal => "client operation refused",
+            FailureKind::Operation => "client operation failed",
+            FailureKind::Interruption => "client operation interrupted",
         })
     }
 }
@@ -277,6 +314,84 @@ pub struct HostAssignment {
 /// Boxed future used to keep the host interface dyn-compatible.
 pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> + Send + 'a>>;
 
+/// How many handles one decoration call may carry.
+///
+/// A board is one batch. Past this, the product is asking the identity plane
+/// to name a list it should have already scoped.
+pub const MAX_PRESENTATION_HANDLES: usize = 256;
+
+/// A handle a product already had in a decoded reply. Not a Card, not
+/// authority, and never a reason to place an Orbit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PresentationHandle {
+    Device(String),
+    Actor {
+        /// When absent, the host fills in the Orbit it already authorized.
+        space: Option<String>,
+        actor: String,
+    },
+}
+
+impl PresentationHandle {
+    pub fn device(id: impl Into<String>) -> Self {
+        Self::Device(id.into())
+    }
+
+    pub fn actor(actor: impl Into<String>) -> Self {
+        Self::Actor {
+            space: None,
+            actor: actor.into(),
+        }
+    }
+
+    /// Wire spelling the daemon's `BookResolve` accepts.
+    pub fn to_wire(&self, default_space: Option<&str>) -> String {
+        match self {
+            Self::Device(id) => id.clone(),
+            Self::Actor { space, actor } => {
+                let space = space.as_deref().or(default_space).unwrap_or("");
+                format!("actor:{space}:{actor}")
+            }
+        }
+    }
+}
+
+/// One authored label for an exact requested handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationLabel {
+    pub handle: PresentationHandle,
+    /// Absent is "no Card", not an empty name.
+    pub name: Option<String>,
+}
+
+/// Batched decoration. `coverage` is `Some("unavailable")` when the Orbit
+/// could not be asked — which is not the same as "these people have no names".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationResolution {
+    pub labels: Vec<PresentationLabel>,
+    pub coverage: Option<String>,
+}
+
+impl PresentationResolution {
+    pub fn unavailable() -> Self {
+        Self {
+            labels: Vec::new(),
+            coverage: Some("unavailable".into()),
+        }
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        self.coverage.as_deref() == Some("unavailable")
+    }
+
+    pub fn name_for_actor(&self, actor: &str) -> Option<&str> {
+        self.labels.iter().find_map(|label| match &label.handle {
+            PresentationHandle::Actor { actor: id, .. } if id == actor => label.name.as_deref(),
+            _ => None,
+        })
+    }
+}
+
 /// Facilities supplied by a trusted native client host to a World package.
 ///
 /// The package owns orchestration and product semantics. The implementation
@@ -285,6 +400,15 @@ pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> +
 pub trait ClientHost: Send + Sync {
     fn local_root(&self) -> &Path;
     fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply>;
+    /// Inspect or request product-neutral durable Run lifecycle transitions.
+    ///
+    /// The DTO is owned by Runtime Exec. Packages remain responsible for the
+    /// product vocabulary that decides when to call it, while the host binds
+    /// the acting identity, Orbit, transport, and common Exec validator. The
+    /// returned JSON is either a serialized `WorkReply` or the host's typed
+    /// `{kind, error_kind, message}` refusal, so package routing preserves the
+    /// reason a caller can act on.
+    fn call_work<'a>(&'a self, request: runtime::exec::WorkRequest) -> ClientFuture<'a, Value>;
     fn call_control<'a>(&'a self, request: HostControlRequest) -> ClientFuture<'a, Value>;
     /// Move bytes on and off the content plane.
     ///
@@ -293,6 +417,11 @@ pub trait ClientHost: Send + Sync {
     /// here — the package never holds an attachment in memory, whatever its
     /// size.
     fn call_content<'a>(&'a self, request: HostContentRequest) -> ClientFuture<'a, Value>;
+    /// Scoped, passive name decoration. Must never place an Orbit.
+    fn call_identity<'a>(
+        &'a self,
+        handles: Vec<PresentationHandle>,
+    ) -> ClientFuture<'a, PresentationResolution>;
 }
 
 pub type LocalInvocationHandler =
@@ -305,6 +434,14 @@ pub type LocalInvocationHandler =
 /// package read enough to name the thing itself before anyone is asked.
 pub type ConfirmationResolver =
     for<'a> fn(&'a dyn ClientHost, &'a ClientInvocation) -> ClientFuture<'a, Option<String>>;
+
+/// Decorate a decoded World reply with presentation labels.
+///
+/// Runs after decode, once, on the local HTTP/MCP response. It must not
+/// change authoritative ids, and its output is never committed or cached
+/// as World identity.
+pub type ReplyDecorator =
+    for<'a> fn(&'a dyn ClientHost, &'a Call, Value) -> ClientFuture<'a, Value>;
 
 /// One product-local MCP tool. The registry prefixes `name` with the package's
 /// mount, so independently developed Worlds cannot both publish a global `list`.
@@ -360,6 +497,129 @@ pub struct WorldClientPackage {
     local_handler: Option<LocalInvocationHandler>,
     web_parser: Option<WebParser>,
     confirmation: Option<ConfirmationResolver>,
+    decorator: Option<ReplyDecorator>,
+    display: Display,
+}
+
+/// What a client needs to draw a World as a row somebody can open.
+///
+/// Separate from the mount, and deliberately. A mount is a namespace key that
+/// prefixes tool names and route segments — it is published, it is machine
+/// input, and it must never change. A display name is for a person to read, and
+/// changing it breaks nothing. A seam that made one do both work would have to
+/// treat every rename as a compatibility event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Display {
+    /// What to call this World in a list. Falls back to the mount, which is at
+    /// least a real name rather than an id, but a World that means to be listed
+    /// should say what it is called.
+    name: &'static str,
+    /// A short glyph a row can draw without loading anything. Deliberately not
+    /// an image path: a Library that fetched an asset per row to draw itself
+    /// would make listing cost what opening costs, which is the same defect as
+    /// mounting a Station to list it.
+    icon: Option<&'static str>,
+    /// The path `Open` lands on, relative to the head's root for this World.
+    /// `None` means this World is not openable in a browser, which is a real
+    /// answer and not a missing one.
+    entry_path: Option<&'static str>,
+    /// One line saying what this World is for, drawn under the name.
+    ///
+    /// A line, not a paragraph: it sits under a title in a list and in a detail
+    /// pane, and a World that needs three sentences to say what it is has a
+    /// naming problem rather than a space problem.
+    tagline: Option<&'static str>,
+    /// The colour this World is drawn from, packed `0xRRGGBB`.
+    ///
+    /// A *seed*, not an asset, for exactly the reason [`Display::icon`] is a
+    /// glyph rather than an image path: a Library that fetched a banner per row
+    /// to draw itself would make listing cost what opening costs. A client
+    /// derives whatever it needs from this one number, and derives it locally.
+    accent: Option<u32>,
+    /// Named places inside this World somebody can go straight to.
+    ///
+    /// The World declares them because the World owns its own URL grammar; the
+    /// client knows only which Orbit it is opening. A path may carry the single
+    /// placeholder [`SPACE_PLACEHOLDER`], which the client replaces with the
+    /// space it is opening. That is the whole of the coupling, and it runs in
+    /// the direction that keeps a World's routes the World's business.
+    routes: &'static [Route],
+}
+
+/// One named place inside a World.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route {
+    label: &'static str,
+    path: &'static str,
+}
+
+impl Route {
+    pub const fn new(label: &'static str, path: &'static str) -> Self {
+        Self { label, path }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        self.label
+    }
+
+    /// The declared path, with [`SPACE_PLACEHOLDER`] still in it.
+    pub const fn path(&self) -> &'static str {
+        self.path
+    }
+
+    /// The path for one space.
+    pub fn resolve(&self, space: &str) -> String {
+        self.path.replace(SPACE_PLACEHOLDER, space)
+    }
+}
+
+/// The one substitution a declared route may ask for.
+pub const SPACE_PLACEHOLDER: &str = "{space}";
+
+/// How many routes a World may declare.
+///
+/// A strip of places, not a menu. Past this, a client is drawing navigation the
+/// World should be drawing on its own page, where it has the room.
+pub const MAX_ROUTES: usize = 8;
+
+impl Display {
+    /// The honest default for a World that has not said: named by its mount,
+    /// no icon, and *not openable* — because guessing an entry path produces a
+    /// row whose button leads somewhere nobody chose.
+    pub const fn unstated(mount: &'static str) -> Self {
+        Self {
+            name: mount,
+            icon: None,
+            entry_path: None,
+            tagline: None,
+            accent: None,
+            routes: &[],
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn icon(&self) -> Option<&'static str> {
+        self.icon
+    }
+
+    pub const fn entry_path(&self) -> Option<&'static str> {
+        self.entry_path
+    }
+
+    pub const fn tagline(&self) -> Option<&'static str> {
+        self.tagline
+    }
+
+    pub const fn accent(&self) -> Option<u32> {
+        self.accent
+    }
+
+    pub const fn routes(&self) -> &'static [Route] {
+        self.routes
+    }
 }
 
 impl WorldClientPackage {
@@ -399,7 +659,142 @@ impl WorldClientPackage {
             local_handler: None,
             web_parser: None,
             confirmation: None,
+            decorator: None,
+            display: Display::unstated(mount),
         })
+    }
+
+    /// Say how this World should be drawn and where `Open` lands.
+    ///
+    /// A World that does not call this is listed by its mount and is *not*
+    /// openable — see [`Display::unstated`]. That is the honest default: an
+    /// entry path invented on a World's behalf is a button that leads somewhere
+    /// nobody chose.
+    pub fn with_display(
+        mut self,
+        name: &'static str,
+        icon: Option<&'static str>,
+        entry_path: Option<&'static str>,
+    ) -> Result<Self, Failure> {
+        if name.trim().is_empty() {
+            return Err(Failure::new(format!(
+                "World '{}' declares an empty display name",
+                self.world
+            )));
+        }
+        // An entry path is joined onto a head's root, so a relative or
+        // traversing one would resolve somewhere the World does not own.
+        if let Some(path) = entry_path {
+            if !path.starts_with('/') || path.contains("..") {
+                return Err(Failure::new(format!(
+                    "World '{}' declares entry path '{path}', which must be absolute                      and must not traverse",
+                    self.world
+                )));
+            }
+        }
+        self.display = Display {
+            name,
+            icon,
+            entry_path,
+            ..self.display
+        };
+        Ok(self)
+    }
+
+    /// Say, in one line, what this World is for.
+    pub fn with_tagline(mut self, tagline: &'static str) -> Result<Self, Failure> {
+        let trimmed = tagline.trim();
+        if trimmed.is_empty() {
+            return Err(Failure::new(format!(
+                "World '{}' declares an empty tagline",
+                self.world
+            )));
+        }
+        // The bound is here rather than in a client, because a client that had
+        // to elide would be deciding what a World meant to say.
+        const LONGEST: usize = 96;
+        if trimmed.chars().count() > LONGEST {
+            return Err(Failure::new(format!(
+                "World '{}' declares a tagline of {} characters; a tagline is one line and stops at {LONGEST}",
+                self.world,
+                trimmed.chars().count()
+            )));
+        }
+        self.display = Display {
+            tagline: Some(tagline),
+            ..self.display
+        };
+        Ok(self)
+    }
+
+    /// Say which colour this World is drawn from, packed `0xRRGGBB`.
+    pub fn with_accent(mut self, accent: u32) -> Result<Self, Failure> {
+        if accent > 0x00FF_FFFF {
+            return Err(Failure::new(format!(
+                "World '{}' declares accent {accent:#08x}, which is not a 24-bit colour",
+                self.world
+            )));
+        }
+        self.display = Display {
+            accent: Some(accent),
+            ..self.display
+        };
+        Ok(self)
+    }
+
+    /// Say which places inside this World somebody can go straight to.
+    pub fn with_routes(mut self, routes: &'static [Route]) -> Result<Self, Failure> {
+        if routes.len() > MAX_ROUTES {
+            return Err(Failure::new(format!(
+                "World '{}' declares {} routes; a strip of places stops at {MAX_ROUTES}",
+                self.world,
+                routes.len()
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        for route in routes {
+            if route.label.trim().is_empty() {
+                return Err(Failure::new(format!(
+                    "World '{}' declares a route with no label",
+                    self.world
+                )));
+            }
+            if !seen.insert(route.label) {
+                return Err(Failure::new(format!(
+                    "World '{}' declares two routes labelled '{}'",
+                    self.world, route.label
+                )));
+            }
+            // The rule an entry path is held to, for the same reason: a route
+            // is joined onto a head's root, so a relative or traversing one
+            // resolves somewhere the World does not own.
+            if !route.path.starts_with('/') || route.path.contains("..") {
+                return Err(Failure::new(format!(
+                    "World '{}' declares route path '{}', which must be absolute and must not traverse",
+                    self.world, route.path
+                )));
+            }
+            // One placeholder, spelled one way. A path carrying any other brace
+            // expression is a World expecting a substitution no client makes,
+            // which opens a URL with a literal brace in it.
+            let without = route.path.replace(SPACE_PLACEHOLDER, "");
+            if without.contains('{') || without.contains('}') {
+                return Err(Failure::new(format!(
+                    "World '{}' declares route path '{}' with a placeholder other than {SPACE_PLACEHOLDER}",
+                    self.world, route.path
+                )));
+            }
+        }
+        self.display = Display {
+            routes,
+            ..self.display
+        };
+        Ok(self)
+    }
+
+    /// How a client should draw this World.
+    pub const fn display(&self) -> &Display {
+        &self.display
     }
 
     pub fn with_failure_classifier(mut self, classifier: FailureClassifier) -> Self {
@@ -419,6 +814,15 @@ impl WorldClientPackage {
 
     pub fn with_confirmation(mut self, confirmation: ConfirmationResolver) -> Self {
         self.confirmation = Some(confirmation);
+        self
+    }
+
+    /// Decorate decoded replies with identity-scoped presentation labels.
+    ///
+    /// Packages without a decorator keep byte-for-byte-equivalent decoded
+    /// JSON. The callback understands its own schema; this crate does not.
+    pub fn with_decorator(mut self, decorator: ReplyDecorator) -> Self {
+        self.decorator = Some(decorator);
         self
     }
 
@@ -486,7 +890,7 @@ impl WorldClientPackage {
     }
 
     /// Execute one invocation through its owning package and answer with the
-    /// decoded value — one decode per call, and nothing else.
+    /// decoded value — one decode per call, then optional presentation.
     ///
     /// It used to cost three. Every World call cloned the decoded value, handed
     /// the clone to a product presenter that parsed it back into a typed
@@ -509,7 +913,16 @@ impl WorldClientPackage {
             match invocation.into_kind() {
                 ClientInvocationKind::World(call) => {
                     let reply = host.call_world(call.clone()).await?;
-                    self.decode_reply(&call, reply)
+                    let decoded = self.decode_reply(&call, reply)?;
+                    let Some(decorate) = self.decorator else {
+                        return Ok(decoded);
+                    };
+                    // Presentation must not fail the product: a book that
+                    // could not be asked is an absence of names, not a
+                    // failed World call.
+                    Ok(decorate(host, &call, decoded.clone())
+                        .await
+                        .unwrap_or(decoded))
                 }
                 ClientInvocationKind::Local(local) => {
                     let handler = self.local_handler.ok_or_else(|| {
@@ -642,6 +1055,22 @@ fn validate_name(kind: &str, name: &str) -> Result<(), Failure> {
 
 #[cfg(test)]
 mod tests {
+    /// A World that says nothing is named by its mount and is *not* openable.
+    /// The alternative — defaulting the entry path to `/` — produces a row
+    /// whose button leads somewhere nobody chose, and nothing downstream can
+    /// tell that apart from a declared route.
+    #[test]
+    fn a_world_that_declares_no_display_is_named_by_its_mount_and_is_not_openable() {
+        let display = super::Display::unstated("issues");
+        assert_eq!(display.name(), "issues");
+        assert_eq!(display.icon(), None);
+        assert_eq!(
+            display.entry_path(),
+            None,
+            "an entry path was invented for a World that declared none"
+        );
+    }
+
     use super::*;
 
     fn empty_schema() -> Value {
@@ -773,5 +1202,132 @@ mod tests {
             None,
         );
         assert_eq!(local.access(), ClientAccess::Command);
+    }
+
+    fn block_on<T>(fut: impl Future<Output = T>) -> T {
+        let mut fut = std::pin::pin!(fut);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(&waker);
+        match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("test host must not pend"),
+        }
+    }
+
+    struct FakeHost {
+        payload: Value,
+        identity: PresentationResolution,
+        identity_calls: std::sync::Mutex<usize>,
+    }
+
+    impl ClientHost for FakeHost {
+        fn local_root(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply> {
+            let payload = self.payload.clone();
+            Box::pin(async move {
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|error| Failure::new(error.to_string()))?;
+                Ok(Reply::ok(&call, bytes))
+            })
+        }
+
+        fn call_control<'a>(&'a self, _request: HostControlRequest) -> ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_work<'a>(
+            &'a self,
+            _request: runtime::exec::WorkRequest,
+        ) -> ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_content<'a>(&'a self, _request: HostContentRequest) -> ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_identity<'a>(
+            &'a self,
+            _handles: Vec<PresentationHandle>,
+        ) -> ClientFuture<'a, PresentationResolution> {
+            *self.identity_calls.lock().expect("calls") += 1;
+            let identity = self.identity.clone();
+            Box::pin(async move { Ok(identity) })
+        }
+    }
+
+    fn decorate_actor<'a>(
+        host: &'a dyn ClientHost,
+        _call: &'a Call,
+        mut value: Value,
+    ) -> ClientFuture<'a, Value> {
+        Box::pin(async move {
+            let resolution = host
+                .call_identity(vec![PresentationHandle::actor("act_one")])
+                .await?;
+            if resolution.is_unavailable() {
+                return Ok(value);
+            }
+            if let Some(name) = resolution.name_for_actor("act_one") {
+                value["authored_name"] = Value::String(name.to_owned());
+            }
+            Ok(value)
+        })
+    }
+
+    #[test]
+    fn a_package_without_a_decorator_keeps_decoded_json() {
+        let host = FakeHost {
+            payload: serde_json::json!({"actor": "act_one"}),
+            identity: PresentationResolution::unavailable(),
+            identity_calls: std::sync::Mutex::new(0),
+        };
+        let package = package("com.example.files", "files");
+        let invocation = files_invocation(Value::Null).unwrap();
+        let value = block_on(package.execute(&host, invocation)).unwrap();
+        assert_eq!(value, serde_json::json!({"actor": "act_one"}));
+        assert_eq!(*host.identity_calls.lock().expect("calls"), 0);
+    }
+
+    #[test]
+    fn unavailable_resolution_does_not_write_empty_names() {
+        let host = FakeHost {
+            payload: serde_json::json!({"actor": "act_one", "actor_nick": ""}),
+            identity: PresentationResolution::unavailable(),
+            identity_calls: std::sync::Mutex::new(0),
+        };
+        let package = package("com.example.files", "files").with_decorator(decorate_actor);
+        let invocation = files_invocation(Value::Null).unwrap();
+        let value = block_on(package.execute(&host, invocation)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"actor": "act_one", "actor_nick": ""})
+        );
+        assert!(value.get("authored_name").is_none());
+        assert_eq!(*host.identity_calls.lock().expect("calls"), 1);
+    }
+
+    #[test]
+    fn a_live_hit_adds_only_a_presentation_field() {
+        let host = FakeHost {
+            payload: serde_json::json!({"actor": "act_one"}),
+            identity: PresentationResolution {
+                labels: vec![PresentationLabel {
+                    handle: PresentationHandle::actor("act_one"),
+                    name: Some("Ada".into()),
+                }],
+                coverage: None,
+            },
+            identity_calls: std::sync::Mutex::new(0),
+        };
+        let package = package("com.example.files", "files").with_decorator(decorate_actor);
+        let invocation = files_invocation(Value::Null).unwrap();
+        let value = block_on(package.execute(&host, invocation)).unwrap();
+        assert_eq!(value["actor"], "act_one");
+        assert_eq!(value["authored_name"], "Ada");
+        assert_eq!(*host.identity_calls.lock().expect("calls"), 1);
     }
 }

@@ -521,6 +521,7 @@ impl StationHost {
             .map_err(|e| anyhow!("acquire orbit: {e:?}"))?
             .open(Activation {
                 content: Default::default(),
+                find: Default::default(),
                 // Both planes on, which is what `lait/freight/1` being
                 // advertised has always implied and, until now, has not meant:
                 // the ALPN was registered and no driver owned it, so a peer
@@ -817,31 +818,10 @@ impl StationHost {
         };
         let device = mechanics::actor::device_from_seed(&seed);
 
-        // Hard partial-view guard (docs/plans/09 §10 finding 3): a *delegated*
-        // identity — a sponsored agent — must not AUTHOR against a view it knows
-        // is incomplete. "Close what's done" against a missing-epoch partial
-        // view could act on issues it cannot see. A human acting for themselves
-        // gets the loud `whoami`/`sync` signal and judges; an agent is stopped
-        // by construction. Reads are always allowed (that is how it re-syncs).
-        if access == Access::Command {
-            use runtime::world::AuthorityView;
-            if let Some(actor) = self.mechanics.resolve(&device).map(|r| r.actor) {
-                if self.mechanics.is_agent(&actor) {
-                    let divergence = self.mechanics.view_divergence();
-                    if !divergence.is_empty() {
-                        return Reply::error(
-                            call,
-                            Code::Denied,
-                            format!(
-                                "refusing to author against a partial view — {}. Run `sync` \
-                                 until whole first; a delegated agent must not act on World \
-                                 state it cannot see. Nothing was changed.",
-                                divergence.join("; ")
-                            ),
-                        );
-                    }
-                }
-            }
+        if let Some(message) =
+            self.delegated_partial_view_refusal(&device, access == Access::Command)
+        {
+            return Reply::error(call, Code::Denied, message);
         }
 
         // The primary (human) uses the World-keyed primary Session; a sponsored
@@ -1060,6 +1040,31 @@ impl StationHost {
         }
     }
 
+    /// Refuse delegated writes against a known-partial view on every authoring
+    /// seam, including product World actions and generic Work controls.
+    fn delegated_partial_view_refusal(
+        &self,
+        device: &mechanics::ids::DeviceId,
+        command: bool,
+    ) -> Option<String> {
+        if !command {
+            return None;
+        }
+        use runtime::world::AuthorityView;
+        let actor = self.mechanics.resolve(device)?.actor;
+        if !self.mechanics.is_agent(&actor) {
+            return None;
+        }
+        let divergence = self.mechanics.view_divergence();
+        (!divergence.is_empty()).then(|| {
+            format!(
+                "refusing to author against a partial view — {}. Run `sync` until whole first; \
+                 a delegated agent must not act on World state it cannot see. Nothing was changed.",
+                divergence.join("; ")
+            )
+        })
+    }
+
     /// Route one control request to its terminal owner — the value the
     /// PRODUCTION classifier returns. Tests and the generated routing table
     /// consume the same `control::classify`; there is no second table and no
@@ -1089,6 +1094,7 @@ impl StationHost {
                 response
             }
             RequestOwner::Station => self.dispatch_station(req),
+            RequestOwner::Work => self.dispatch_work(req, act_as),
             RequestOwner::Observation => self.dispatch_observation(req),
             RequestOwner::Lifecycle => self.dispatch_lifecycle(req),
         }
@@ -1277,6 +1283,15 @@ impl StationHost {
                     Err(e) => Response::err(format!("{e}")),
                 }
             }
+            // Which Worlds this Space activated — the read counterpart
+            // `WorldActivate` never had. A read of a record the ACL already
+            // holds, so answering costs nothing beyond what placement already
+            // paid; and it is Orbit-routed, so a caller reaches it through
+            // `request_if_running` and a vacant Orbit is never placed to
+            // produce a listing.
+            Request::WorldsActive => Response::Worlds {
+                worlds: self.mechanics.activated_worlds(),
+            },
             Request::Id => {
                 // First line: the device id (the stable, parseable form).
                 // Second line, when the actor plane resolves this device (a
@@ -1538,6 +1553,84 @@ impl StationHost {
         }
     }
 
+    /// Runtime-owned durable Run lifecycle requests from application packages
+    /// and generic engine clients.
+    fn dispatch_work(&self, req: Request, act_as: Option<&str>) -> Response {
+        let Request::Work { request, operation } = req else {
+            return Response::err("request is not a Work operation");
+        };
+        if let Err(error) = request.validate() {
+            return Response::invalid(format!("invalid Runtime Work request: {error}"));
+        }
+        let operation = match data_encoding::HEXLOWER
+            .decode(operation.trim().as_bytes())
+            .ok()
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes.as_slice()).ok())
+        {
+            Some(operation) => operation,
+            None => {
+                return Response::invalid("a Work operation id is 32 lowercase hex characters");
+            }
+        };
+        let world = request.world().clone();
+        if !self.worlds.contains(&world) {
+            return Response::not_found(format!("World '{world}' is not hosted"));
+        }
+        let seed = match self.acting_seed(act_as) {
+            Ok(seed) => seed,
+            Err(response) => return response,
+        };
+        let device = mechanics::actor::device_from_seed(&seed);
+        if let Some(message) = self.delegated_partial_view_refusal(&device, request.is_command()) {
+            return Response::denied(message);
+        }
+        let result = if act_as.is_none() {
+            if !self.ensure_world_session(&world) {
+                return Response::denied(
+                    "not admitted to this space yet — complete admission before operating Work",
+                );
+            }
+            self.worlds
+                .with_primary(&world, |session| session.work(request.clone(), operation))
+                .ok_or_else(|| runtime::exec::WorkError::Unsupported("World Session unavailable"))
+                .and_then(|result| result)
+        } else {
+            let identity = Runtime::identity_from_seed(&seed);
+            match self
+                .worlds
+                .with_agent(&self.station, &world, &identity, |session| {
+                    session.work(request, operation)
+                }) {
+                Ok(result) => result,
+                Err(_) => {
+                    return Response::denied(
+                        "this agent identity holds no standing in the space yet — a human member \
+                         must sponsor it before it can operate Work",
+                    );
+                }
+            }
+        };
+        match result {
+            Ok(reply) => Response::Work { reply },
+            Err(runtime::exec::WorkError::NotFound(run)) => Response::not_found(format!(
+                "no Runtime Run matches '{}'",
+                data_encoding::HEXLOWER.encode(&run.as_bytes())
+            )),
+            Err(runtime::exec::WorkError::Invalid(error)) => {
+                Response::invalid(format!("invalid Runtime Work request: {error}"))
+            }
+            Err(runtime::exec::WorkError::Unsupported(message)) => Response::invalid(message),
+            Err(runtime::exec::WorkError::Session(
+                runtime::world::Failure::Rejected(runtime::world::Rejection::Denied(_)),
+            )) => Response::denied(
+                "you don't hold the capability required to control this Run; ask an admin or your sponsor for the matching project work grant",
+            ),
+            Err(runtime::exec::WorkError::Session(error)) => {
+                Response::err(format!("Runtime Work failed: {error}"))
+            }
+        }
+    }
+
     /// Converge the keyring against the authority ledger (adopting any
     /// just-arrived sealed epoch envelopes) and report completeness **loudly**.
     /// The ambient Contact/Beacon plane exchanges peer material continuously;
@@ -1698,12 +1791,11 @@ impl StationHost {
             Ok(actor) => {
                 let device = mechanics::actor::device_from_seed(&seed);
                 let did = mechanics::actor::did_key_from_device(&device).unwrap_or_default();
-                // Name it here, where the name is already known. Without this the
-                // one command that creates an agent leaves it `unnamed` on the one
-                // surface built to show agents — and the browser draws a coding
-                // tool's brand mark off this petname, so an unnamed agent is also
-                // an unrecognisable one.
-                let _ = write_alias(&self.home, actor.as_str(), name);
+                // The NAME lands in the identity's address book, not here: the
+                // daemon funnel reads the `actor …` line below and authors a
+                // Card for the agent, because a Station has no reach into the
+                // identity-scoped book. The line's shape is therefore part of
+                // this reply's contract.
                 Response::Ok {
                     message: Some(format!(
                         "provisioned + sponsored agent '{name}'\nactor {}\n{did}\n\
@@ -1722,7 +1814,6 @@ impl StationHost {
     /// events, and Contact outcomes) projected into presence rows. The same
     /// truth `status.online_peers` counts — the two surfaces cannot disagree.
     fn who(&self) -> Vec<crate::control::PresenceEntry> {
-        let aliases = read_aliases(&self.home);
         let now = now_secs();
         self.station
             .neighbors()
@@ -1772,7 +1863,13 @@ impl StationHost {
                     None
                 };
                 crate::control::PresenceEntry {
-                    nick: aliases.get(&id).cloned().unwrap_or_default(),
+                    // Bare from the Station; the daemon decorates the row
+                    // from the identity's book, the one namer.
+                    nick: String::new(),
+                    // The person behind the device, when the authority view
+                    // resolves one — presence consumers join on this rather
+                    // than re-deriving the device→actor binding themselves.
+                    actor: self.actor_for(&n.station),
                     id,
                     state: state.to_string(),
                     online,
@@ -1922,6 +2019,26 @@ impl StationHost {
     fn dispatch_observation(&self, req: Request) -> Response {
         match req {
             Request::Status => self.status(),
+            // What this Orbit's store holds. Read from the Replica this
+            // activation already opened and from the bytes already sitting in
+            // the store directory, so answering costs nothing beyond what
+            // placement already paid; and it is Orbit-routed, so a caller
+            // reaches it through `request_if_running` and a vacant Orbit
+            // answers "not running" instead of being placed to produce a row.
+            //
+            // The figures pass through unchanged, absences included. A `None`
+            // here means nobody measured it — the walk could not finish, or
+            // nothing has ever verified this store — and it is forwarded as an
+            // absence rather than filled in with a zero, which would make the
+            // surface look populated and be wrong.
+            Request::Storage => {
+                let reading = self.station.storage();
+                Response::Storage {
+                    bytes_on_disk: reading.bytes_on_disk,
+                    object_count: reading.object_count,
+                    last_verified_ms: reading.last_verified_ms,
+                }
+            }
             // Subscribe is handled by the streaming connection path before
             // dispatch; a one-shot Subscribe cannot be answered on this plane.
             Request::Subscribe { .. } => Response::err("subscribe is a streaming request"),
@@ -1953,7 +2070,23 @@ impl StationHost {
             Request::SeedAdd { arg } => self.seed_add(arg.trim()),
             Request::SeedList => self.seed_list(),
             Request::SeedRemove { who } => self.seed_remove(who.trim()),
-            Request::MemberAlias { who, name } => self.set_alias(&who, &name),
+            Request::BookList
+            | Request::BookGet { .. }
+            | Request::BookPut { .. }
+            | Request::BookDelete { .. }
+            | Request::BookLink { .. }
+            | Request::BookUnlink { .. }
+            | Request::BookMerge { .. }
+            | Request::BookClaimSelf { .. }
+            | Request::BookLookup { .. }
+            | Request::BookResolve { .. }
+            | Request::BookMigrateStatus
+            | Request::BookMigrate
+            | Request::BookPropose { .. }
+            | Request::BookSuggestAccept { .. }
+            | Request::BookSuggestDismiss { .. } => {
+                Response::err("the address book is identity-scoped; send this on the daemon route")
+            }
             other => Response::err(format!("request is not a lifecycle operation: {other:?}")),
         }
     }
@@ -2003,28 +2136,29 @@ impl StationHost {
         }))
     }
 
-    fn members(&self) -> Response {
-        // Overlay this node's local petnames (`aliases.json`) into the roster so
-        // the CLI and the viewer both render a member's name, not a bare actor
-        // id. The alias is local, never synced (the trusted half of the identity
-        // model) — the daemon is this node, so it is the right place to apply it.
-        let mut members = self.mechanics.members();
-        let aliases = read_aliases(&self.home);
-        if !aliases.is_empty() {
-            for m in &mut members {
-                if let Some(name) = aliases.get(&m.key).or_else(|| {
-                    // Aliases may be keyed by a short `act_` prefix the operator
-                    // typed; match a stored key that prefixes this full actor id.
-                    aliases
-                        .iter()
-                        .find(|(k, _)| !k.is_empty() && m.key.starts_with(k.as_str()))
-                        .map(|(_, v)| v)
-                }) {
-                    m.alias = name.clone();
-                }
-            }
+    pub(crate) fn handle_snapshot(&self) -> crate::daemon::address_book::HandleSnapshot {
+        use mechanics::ids::ActorId;
+        let actors = self
+            .mechanics
+            .members()
+            .into_iter()
+            .filter_map(|member| ActorId::parse(&member.key))
+            .collect();
+        crate::daemon::address_book::HandleSnapshot {
+            space: self.address.space.clone(),
+            actors,
+            devices: self.mechanics.device_list(),
         }
-        Response::Members { members }
+    }
+
+    fn members(&self) -> Response {
+        // Bare actor rows. Naming is the identity's address book's job, and
+        // the daemon — which holds the book — decorates this reply on its way
+        // out. A Station never reads a name file of its own: `aliases.json`
+        // and the verb that wrote it are gone (2026-08-13).
+        Response::Members {
+            members: self.mechanics.members(),
+        }
     }
 
     /// Add a device to this actor from its hex-encoded consent blob (produced
@@ -2061,61 +2195,6 @@ impl StationHost {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    /// Set (or clear, with an empty name) a local petname for a key. Local to
-    /// this node, never broadcast, never part of the signed authority.
-    fn set_alias(&self, who: &str, name: &str) -> Response {
-        // Store the canonical actor id, never the fragment that was typed. The
-        // read path matches a stored key against the *full* `act_…` id, so an
-        // entry keyed by a bare hex prefix can never match anything: the write
-        // succeeds, the confirmation prints, and the name never appears. Resolve
-        // first, and say so when nothing answers.
-        let resolved = self.resolve_member_key(who);
-        let key = match (&resolved, name.trim().is_empty()) {
-            (Some(k), _) => k.clone(),
-            // Clearing may legitimately target an entry no longer backed by a
-            // member — including a dead one written before this resolved.
-            (None, true) => who.trim().to_string(),
-            (None, false) => {
-                return Response::err(format!(
-                    "no member here matches '{who}' — name one by its full actor id or a \
-                     prefix of it (the members view lists them)"
-                ))
-            }
-        };
-        match write_alias(&self.home, &key, name) {
-            Ok(()) if name.trim().is_empty() => Response::Ok {
-                message: Some(format!("cleared the local name for {who}")),
-            },
-            Ok(()) => Response::Ok {
-                message: Some(format!("{who} is now locally known as {name}")),
-            },
-            Err(e) => Response::err(format!("set alias: {e}")),
-        }
-    }
-
-    /// The full actor id for a who-ref: an exact key, a prefix of one (with or
-    /// without the `act_` namespace), or an existing petname.
-    fn resolve_member_key(&self, who: &str) -> Option<String> {
-        let who = who.trim();
-        if who.is_empty() {
-            return None;
-        }
-        let members = self.mechanics.members();
-        let bare = who.strip_prefix("act_").unwrap_or(who);
-        let prefixed = format!("act_{bare}");
-        if let Some(m) = members
-            .iter()
-            .find(|m| m.key == who || m.key.starts_with(who) || m.key.starts_with(&prefixed))
-        {
-            return Some(m.key.clone());
-        }
-        let aliases = read_aliases(&self.home);
-        aliases
-            .iter()
-            .find(|(_, v)| v.eq_ignore_ascii_case(who))
-            .map(|(k, _)| k.clone())
     }
 
     /// The guided-join verifier: project live daemon state into the ordered
@@ -2226,7 +2305,6 @@ impl StationHost {
             &self.home,
             SeedRecord {
                 id: id.clone(),
-                nick: String::new(),
                 space,
             },
         ) {
@@ -2269,7 +2347,9 @@ impl StationHost {
                         .unwrap_or(false);
                 crate::dto::SeedDto {
                     id: s.id.as_str().to_string(),
-                    nick: s.nick,
+                    // Bare from the Station; the daemon decorates seed rows
+                    // from the identity's book, the one namer.
+                    nick: String::new(),
                     space: s.space,
                     state: if is_online { "online" } else { "offline" }.to_string(),
                     online: is_online,
@@ -2279,10 +2359,10 @@ impl StationHost {
         Response::Seeds { seeds }
     }
 
-    /// Unpin seeds matching a full id, id-prefix, or nick.
+    /// Unpin seeds matching a full id or an id-prefix.
     fn seed_remove(&self, needle: &str) -> Response {
         match remove_seed(&self.home, needle) {
-            Ok(0) => Response::err("no pinned seed matched that id/nick"),
+            Ok(0) => Response::err("no pinned seed matched that id"),
             Ok(n) => Response::Ok {
                 message: Some(format!("unpinned {n} seed(s)")),
             },
@@ -3658,12 +3738,12 @@ async fn write_line_half<T: serde::Serialize>(
 }
 
 /// One pinned bootstrap seed — a deliberately-placed anchor a cold client
-/// converges through. The id is the identity; nick/space are advisory.
+/// converges through. The id is the identity; space is advisory. Naming is
+/// the address book's: a record carries no nick (an old file's `nick` key is
+/// ignored on read), and the daemon decorates seed rows from Cards.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SeedRecord {
     id: mechanics::ids::DeviceId,
-    #[serde(default)]
-    nick: String,
     #[serde(default)]
     space: String,
 }
@@ -3711,14 +3791,13 @@ fn save_seeds(home: &Path, seeds: &[SeedRecord]) {
     }
 }
 
-/// Upsert a seed keyed by id (nick/space refresh in place). Returns whether it
+/// Upsert a seed keyed by id (space refreshes in place). Returns whether it
 /// was newly pinned.
 fn upsert_seed(home: &Path, rec: SeedRecord) -> Result<bool, String> {
     // Refusing here is the point: pinning a seed must never be the operation
     // that silently unpins every other one.
     let mut seeds = load_seeds(home)?;
     if let Some(existing) = seeds.iter_mut().find(|s| s.id == rec.id) {
-        existing.nick = rec.nick;
         existing.space = rec.space;
         save_seeds(home, &seeds);
         Ok(false)
@@ -3729,46 +3808,21 @@ fn upsert_seed(home: &Path, rec: SeedRecord) -> Result<bool, String> {
     }
 }
 
-/// Unpin seeds matching a full id, a ≥6-char id prefix, or a nick. Returns the
-/// count removed.
+/// Unpin seeds matching a full id or a ≥6-char id prefix. Returns the count
+/// removed. A name never selects an authority target — the book's rule, held
+/// here too: unpinning goes by the id the pin is keyed on.
 fn remove_seed(home: &Path, needle: &str) -> Result<usize, String> {
     let mut seeds = load_seeds(home)?;
     let before = seeds.len();
     seeds.retain(|s| {
         let id = s.id.as_str();
-        !(id == needle || (needle.len() >= 6 && id.starts_with(needle)) || s.nick == needle)
+        !(id == needle || (needle.len() >= 6 && id.starts_with(needle)))
     });
     let removed = before - seeds.len();
     if removed > 0 {
         save_seeds(home, &seeds);
     }
     Ok(removed)
-}
-
-/// The local petname map (`aliases.json` beside the home).
-fn read_aliases(home: &Path) -> std::collections::BTreeMap<String, String> {
-    std::fs::read(home.join("aliases.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
-}
-
-/// Set or clear a **local** petname for a key in `aliases.json` beside the
-/// home. Local to this node, never synced; an empty `name` clears the entry.
-fn write_alias(home: &Path, who: &str, name: &str) -> Result<()> {
-    let path = home.join("aliases.json");
-    let mut map: std::collections::BTreeMap<String, String> = std::fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    let who = who.trim().to_string();
-    if name.trim().is_empty() {
-        map.remove(&who);
-    } else {
-        map.insert(who, name.trim().to_string());
-    }
-    std::fs::write(&path, serde_json::to_vec_pretty(&map)?)?;
-    Ok(())
 }
 
 /// Run one process-backed StationHost on `home`, holding the per-home lock for

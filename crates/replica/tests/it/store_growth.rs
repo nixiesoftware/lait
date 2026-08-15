@@ -204,3 +204,73 @@ fn collecting_returns_the_store_to_live_state() {
     );
     drop(reopened);
 }
+
+// ---- What the store can say about itself ----
+//
+// A storage surface asks three things: how much, how many, and when was any of
+// it last checked. The first two are reads over state the store already has;
+// the third has to be recorded by whatever does the checking. All three have
+// the same rule — a figure nobody measured is reported absent, never as a zero
+// that makes the surface look populated.
+
+/// The store knows how many Bodies it holds without being asked to list them,
+/// and a restart holds what it held.
+#[test]
+fn the_store_counts_the_bodies_it_holds_without_enumerating_them() {
+    let dir = temp_store("body-count");
+    let mut r = Replica::open(&dir, keys()).unwrap();
+    r.set_supported(supported());
+    assert_eq!(r.body_count(), 0, "a store with no commits holds no Bodies");
+
+    for n in 1..=3u8 {
+        edit(&mut r, u16::from(n), &body(n));
+    }
+    assert_eq!(r.body_count(), 3);
+    assert_eq!(
+        r.body_count(),
+        u64::try_from(r.body_keys().len()).unwrap(),
+        "the cheap count and the enumeration must not be able to disagree"
+    );
+
+    drop(r);
+    let reopened = Replica::open(&dir, keys()).unwrap();
+    assert_eq!(reopened.body_count(), 3, "a restart holds what it held");
+}
+
+/// A Replica that was never opened from a store has never been verified, and
+/// says so rather than reporting the epoch.
+#[test]
+fn a_replica_that_never_touched_a_store_reports_no_verification_at_all() {
+    // The distinction the whole `Option` exists for: this is not "verified at
+    // time zero", it is "nobody has ever checked". A surface that rendered the
+    // former would be stating an observation that never happened.
+    assert_eq!(Replica::loro().verified_at_ms(), None);
+}
+
+/// Opening a store from disk *is* the verification pass, so every open stamps
+/// the moment it completed — including the first, over an empty store.
+#[test]
+fn opening_a_store_records_the_verification_that_opening_performed() {
+    let dir = temp_store("verified-at");
+
+    // The first open has no commit point to read, but the journal still
+    // validated the required set it found. A store that has been checked and
+    // holds nothing is not the same as one nobody has checked.
+    let formed = {
+        let _clock = mechanics::wallclock::Frozen::at_millis(1_700_000_000_000);
+        let mut r = Replica::open(&dir, keys()).unwrap();
+        r.set_supported(supported());
+        edit(&mut r, 0, &body(1));
+        r.verified_at_ms()
+    };
+    assert_eq!(formed, Some(1_700_000_000_000));
+
+    // A later open re-reads every required object, re-derives its content
+    // address and re-verifies every signed transaction, so the stamp moves to
+    // when *that* pass ran. It is not the store's birthday.
+    let reopened = {
+        let _clock = mechanics::wallclock::Frozen::at_millis(1_700_000_060_000);
+        Replica::open(&dir, keys()).unwrap().verified_at_ms()
+    };
+    assert_eq!(reopened, Some(1_700_000_060_000));
+}

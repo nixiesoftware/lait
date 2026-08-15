@@ -274,6 +274,34 @@ impl Selection {
         }
     }
 
+    /// Resolve the store for the stdio agent head: everything
+    /// [`Self::resolve_existing_store`] accepts, then the Orbit registry when
+    /// the directory names none.
+    ///
+    /// An agent head runs wherever its harness spawned it, so "cd into a
+    /// space" is advice no agent config can follow — while the registry
+    /// already records every local Orbit this device serves. When it holds
+    /// exactly one whose store is really there, that Orbit is the only thing
+    /// the head could mean, and it binds. Zero, several, or a sole entry whose
+    /// store is gone stay the typed refusal: this is selection among what
+    /// exists, never a guess between candidates and never a creation.
+    pub fn resolve_for_agent(&self) -> Result<PathBuf> {
+        let miss = match self.resolve_existing_store() {
+            Ok(store) => return Ok(store),
+            Err(error) if error.downcast_ref::<NoStoreHere>().is_some() => error,
+            Err(error) => return Err(error),
+        };
+        let entries = crate::orbits::list();
+        let [entry] = entries.as_slice() else {
+            return Err(miss);
+        };
+        let store = PathBuf::from(&entry.path);
+        match crate::orbital::discover_space(&store) {
+            crate::orbital::SpaceStore::One(_) => Ok(canonical(&store)),
+            _ => Err(miss),
+        }
+    }
+
     /// The store directory a creation verb will populate under `dir`: this
     /// selection's self-contained home if it has one, else `<dir>/.lait`.
     pub fn store_dir_for_init(&self, dir: &Path) -> Result<PathBuf> {
@@ -710,19 +738,29 @@ fn secret_key_path(home: &Path) -> PathBuf {
 pub fn load_or_create_identity(home: &Path) -> Result<[u8; 32]> {
     let path = secret_key_path(home);
     if path.exists() {
-        let hex = fs::read_to_string(&path).context("read secret key")?;
-        let raw = data_encoding::HEXLOWER_PERMISSIVE
-            .decode(hex.trim().as_bytes())
-            .map_err(|e| anyhow::anyhow!("parse secret key: {e}"))?;
-        raw.as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("secret key must be 32 bytes"))
+        load_identity(home)
     } else {
         let seed = mechanics::actor::random_seed().context("generate secret key")?;
         let hex = data_encoding::HEXLOWER.encode(&seed);
         fs::write(&path, hex).context("write secret key")?;
         Ok(seed)
     }
+}
+
+/// Load the persistent identity seed without ever minting one.
+///
+/// An attributed write must name an identity that already exists: creating one
+/// as a side effect would let a bookkeeping call decide who this machine is.
+pub fn load_identity(home: &Path) -> Result<[u8; 32]> {
+    let path = secret_key_path(home);
+    let hex =
+        fs::read_to_string(&path).with_context(|| format!("no identity at {}", path.display()))?;
+    let raw = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(hex.trim().as_bytes())
+        .map_err(|e| anyhow::anyhow!("parse secret key: {e}"))?;
+    raw.as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("secret key must be 32 bytes"))
 }
 
 // ---- layered local settings (the `HostConfig*` requests) ----

@@ -41,8 +41,10 @@ pub use issues::{
 pub fn package() -> WorldPackage {
     let control = Arc::new(issues_app::IssuesCallHandler);
     let projector = Arc::new(IssuesProjector::default());
+    let exec = runtime::exec::Package::new().with_spec(issues::contract::verify_spec());
     WorldPackage::new(Arc::new(IssuesWorld::new()), implementation_id())
         .with_control(control)
+        .with_exec(exec)
         .with_projector(projector)
         .with_lifecycle(Arc::new(IssuesLifecycle))
 }

@@ -585,20 +585,50 @@ impl Listener {
         };
 
         if if_running {
-            let response = match (&route, &request) {
+            let space = match &route {
+                ControlRoute::Orbit { address } => Some(address.space.clone()),
+                _ => None,
+            };
+            let mut response = match (&route, &request) {
                 (
                     ControlRoute::Orbit { .. },
-                    Request::Status | Request::Id | Request::ConfigReload,
+                    Request::Status
+                    | Request::Id
+                    | Request::ConfigReload
+                    | Request::Who
+                    // Live sits here for the same reason Who does: it reads
+                    // the Station's own transient table — who is doing what
+                    // right now — and neither journals nor replays anything.
+                    // A glance at who has a World open must never be the act
+                    // that places one.
+                    | Request::Live { .. }
+                    | Request::Storage
+                    | Request::WorldsActive
+                    | Request::Diagnose { .. },
                 ) => self
                     .router
                     .request_running(route, &request)
                     .await
                     .unwrap_or_else(|error| Response::err(format!("{error:#}"))),
                 _ => Response::err(
-                    "passive dispatch is only available for status, id, or config reload through \
-                     an explicit Space route",
+                    "passive dispatch is only available for supported observation requests \
+                     through an explicit Space route",
                 ),
             };
+            // Presence sampled passively still carries names — the book
+            // decorates this path exactly as it does the placed one, or the
+            // client would read "no name" as a fact about the peer when it
+            // was a fact about the route.
+            if let Some(space) = &space {
+                if matches!(
+                    response,
+                    Response::Who { .. } | Response::Members { .. } | Response::Seeds { .. }
+                ) {
+                    if let Ok(book) = self.router.book() {
+                        book.decorate(space, &mut response);
+                    }
+                }
+            }
             let _ = write_line(&mut write_half, &response).await;
             return Flow::Next(reader, write_half);
         }
@@ -637,6 +667,16 @@ impl Listener {
             // served here rather than behind a Station because most of it runs
             // before a Station could exist — and because running it in this
             // process is what stops it racing this process for the store lock.
+            (ControlRoute::Daemon, request)
+                if crate::daemon::address_book::is_book_request(&request) =>
+            {
+                let response = match self.router.book() {
+                    Ok(book) => book.handle(request, &self.router).await,
+                    Err(error) => Response::err(error),
+                };
+                let _ = write_line(&mut write_half, &response).await;
+                Flow::Next(reader, write_half)
+            }
             (ControlRoute::Daemon, request) => {
                 let response = crate::orbits::bootstrap::dispatch(&self.router, request)
                     .await
@@ -669,11 +709,54 @@ impl Listener {
                 Flow::Next(reader, write_half)
             }
             (route, request) => {
-                let response = self
+                // The book is the one namer, and this funnel is where it
+                // speaks: a Station answers with bare ids, and the identity
+                // that owns the names decorates the reply on its way out. The
+                // same seam names a just-provisioned agent — the Station has
+                // no reach into the identity-scoped book, so it reports the
+                // actor and the daemon authors the Card.
+                let provisioned = match &request {
+                    Request::AgentProvision { name } => Some(name.clone()),
+                    _ => None,
+                };
+                let space = match &route {
+                    ControlRoute::Orbit { address } | ControlRoute::World { address, .. } => {
+                        Some(address.space.clone())
+                    }
+                    ControlRoute::Daemon => None,
+                };
+                let mut response = self
                     .router
                     .request_routed(route, &request, act_as.as_deref())
                     .await
                     .unwrap_or_else(|error| Response::err(format!("{error:#}")));
+                if let Some(space) = &space {
+                    if matches!(
+                        response,
+                        Response::Members { .. } | Response::Who { .. } | Response::Seeds { .. }
+                    ) {
+                        if let Ok(book) = self.router.book() {
+                            book.decorate(space, &mut response);
+                        }
+                    }
+                    if let (
+                        Some(name),
+                        Response::Ok {
+                            message: Some(message),
+                        },
+                    ) = (&provisioned, &response)
+                    {
+                        // The reply's `actor …` line is part of the provision
+                        // contract (see hosting's provision arm).
+                        if let Some(actor) =
+                            message.lines().find_map(|line| line.strip_prefix("actor "))
+                        {
+                            if let Ok(book) = self.router.book() {
+                                book.name_agent(space, actor.trim(), name);
+                            }
+                        }
+                    }
+                }
                 let _ = write_line(&mut write_half, &response).await;
                 Flow::Next(reader, write_half)
             }
@@ -901,6 +984,11 @@ pub async fn run_lait_daemon(
     selection: crate::config::Selection,
 ) -> Result<()> {
     let identity = selection.identity_dir()?;
+    // The daemon is the identity singleton, so the seed is minted here, at
+    // boot, deliberately — never as a side effect of a later write (the
+    // address book's author path is load-only by design).
+    std::fs::create_dir_all(&identity)?;
+    crate::config::load_or_create_identity(&identity)?;
     let config_root = crate::config::config_root()?;
     let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&config_root);
@@ -1331,8 +1419,29 @@ mod tests {
                 .expect("a passive status probe must not activate the Orbit"),
         );
         assert!(matches!(
-            client.request(route, &Request::Status, None).await.unwrap(),
+            client
+                .request_if_running(route.clone(), &Request::WorldsActive)
+                .await
+                .unwrap(),
+            Response::Error { .. }
+        ));
+        drop(
+            acquire_daemon_lock(&orbit_home)
+                .expect("a passive World probe must not activate the Orbit"),
+        );
+        assert!(matches!(
+            client
+                .request(route.clone(), &Request::Status, None)
+                .await
+                .unwrap(),
             Response::Status(_)
+        ));
+        assert!(matches!(
+            client
+                .request_if_running(route, &Request::WorldsActive)
+                .await
+                .unwrap(),
+            Response::Worlds { .. }
         ));
         let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
         let world_route = ControlRoute::World {

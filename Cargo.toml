@@ -3,6 +3,7 @@ members = [
     "crates/journal",
     "crates/mechanics",
     "crates/fabric",
+    "crates/addressbook",
     "crates/comms",
     "crates/relay",
     "crates/replica",
@@ -10,6 +11,8 @@ members = [
     "crates/world-interface",
     "products/issues",
     "products/issues-app",
+    "tools/workbench",
+    "tools/astrolabe",
 ]
 # Two packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.
@@ -61,6 +64,7 @@ exclude = [
     "ci/",
     "hooks/",
     "skills/",
+    "tools/",
     ".github/",
     ".githooks/",
     ".claude/",
@@ -106,6 +110,7 @@ mechanics = { path = "crates/mechanics" }
 # manifest, so `loro::*` cannot be named in the app layer. The seal is the
 # dependency edge.
 fabric = { path = "crates/fabric" }
+addressbook = { path = "crates/addressbook" }
 # The orbital runtime + Replica semantics. The product adopts the orbital
 # lifecycle through these — hosting a World, docking Sessions, and committing
 # through the Replica/Fabric path — the same public API any consumer uses. This
@@ -317,7 +322,13 @@ lto = "thin"
 # on RUSTFLAGS, so it reaches every crate in the graph, not just the one that
 # reads it — declaring it here rather than in `fabric` alone matches that. Its
 # only consumer is still `crates/fabric/src/op.rs`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lait_simulation)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(lait_simulation)',
+    # Set by `flutter_rust_bridge`'s `#[frb]` macro while it expands the bridge
+    # surface. Declared here rather than allowed at each call site: the flag is
+    # the generator's, and three local allows would be three copies of one fact.
+    'cfg(frb_expand)',
+] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

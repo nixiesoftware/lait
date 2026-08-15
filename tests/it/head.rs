@@ -360,11 +360,17 @@ impl Mcp {
 
     /// Call one tool and return its parsed JSON payload, failing loudly with the
     /// MCP error when the call was refused.
-    pub fn call(&mut self, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
-        let reply = self.request(
+    pub fn call_raw(&mut self, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+        self.request(
             "tools/call",
             serde_json::json!({ "name": tool, "arguments": arguments }),
-        );
+        )
+    }
+
+    /// Call one tool and return its parsed JSON payload, failing loudly with the
+    /// MCP error when the call was refused.
+    pub fn call(&mut self, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+        let reply = self.call_raw(tool, arguments);
         assert!(
             reply.get("error").is_none(),
             "{tool} was refused: {}",

@@ -19,12 +19,14 @@ use fabric::CollaborativeView;
 use serde::{Deserialize, Serialize};
 
 use crate::dto::{
-    BoardColumn, BoardView, CommentAnchorDto, CommentDto, IssueView, LabelDto, Priority,
-    ProjectDto, Row, StatusCategory, WorkflowState,
+    BoardColumn, BoardView, CheckDto, CommentAnchorDto, CommentDto, CorruptRecord, IssueView,
+    LabelDto, Priority, ProjectDto, Row, StatusCategory, WorkflowState,
 };
 use crate::ids::{ActorId, DocId, LabelId, ProjectId};
 
-use super::contract::{IssueEvent, StoredComment, DEFAULT_STATUS, VIEW_SCHEMA_VERSION};
+use super::contract::{
+    CheckRecord, IssueEvent, StoredComment, DEFAULT_STATUS, VIEW_SCHEMA_VERSION,
+};
 
 const CANONICAL_MIN: usize = 7;
 
@@ -757,6 +759,11 @@ pub struct IssueState {
     /// Body map and is served solely by the `Attachment` query, so the
     /// derived-snapshot cache never holds file bytes (CREATE-5).
     pub attachments: Vec<AttachmentMeta>,
+    /// Product-owned issue-to-Run bindings, sorted by Run id.
+    pub checks: Vec<(String, CheckRecord)>,
+    /// Malformed check records remain visible rather than raising the cap while
+    /// disappearing from the projection.
+    pub check_corrupt_records: Vec<CorruptRecord>,
     pub events: Vec<IssueEvent>,
     /// How many events this issue has ever recorded, including any the log has
     /// trimmed out of state. Never `events.len()` — that is what survived, and
@@ -813,6 +820,7 @@ impl IssueState {
     }
 
     pub fn from_view(view: &CollaborativeView) -> Self {
+        let (checks, check_corrupt_records) = read_checks(view);
         let mut assignees: Vec<ActorId> = view
             .sets
             .get("assignees")
@@ -881,10 +889,61 @@ impl IssueState {
             comments,
             reactions,
             attachments,
+            checks,
+            check_corrupt_records,
             events,
             events_recorded,
         }
     }
+}
+
+fn exact_lower_hex(raw: &str, bytes: usize) -> bool {
+    raw.len() == bytes.saturating_mul(2)
+        && data_encoding::HEXLOWER
+            .decode(raw.as_bytes())
+            .is_ok_and(|decoded| decoded.len() == bytes)
+}
+
+fn read_checks(view: &CollaborativeView) -> (Vec<(String, CheckRecord)>, Vec<CorruptRecord>) {
+    let mut checks = Vec::new();
+    let mut corrupt = Vec::new();
+    for (run, raw) in view.maps.get("checks").into_iter().flatten() {
+        let parsed = serde_json::from_slice::<CheckRecord>(raw).ok();
+        let valid = parsed.as_ref().is_some_and(|record| {
+            exact_lower_hex(run, 16)
+                && replica::body::SchemaId::parse(&record.spec).is_some()
+                && record.v > 0
+                && exact_lower_hex(&record.build, 32)
+                && exact_lower_hex(&record.source, 32)
+                && !record.state.is_empty()
+                && record.state.len() <= 32
+                && ActorId::parse(&record.by).is_some()
+                && record.ts > 0
+                && record
+                    .attempt
+                    .as_deref()
+                    .is_none_or(|attempt| exact_lower_hex(attempt, 16))
+                && record
+                    .report
+                    .as_deref()
+                    .is_none_or(|report| exact_lower_hex(report, 32))
+                && record
+                    .verdict
+                    .as_deref()
+                    .is_none_or(|verdict| matches!(verdict, "pass" | "fail"))
+        });
+        if valid {
+            checks.push((run.clone(), parsed.expect("validated present check")));
+        } else {
+            corrupt.push(
+                CorruptRecord::new(format!("checks[{run}]"), "invalid check record")
+                    .with_raw("run", run)
+                    .with_raw("value", String::from_utf8_lossy(raw)),
+            );
+        }
+    }
+    checks.sort_by(|left, right| left.0.cmp(&right.0));
+    (checks, corrupt)
 }
 
 /// The derived alias table for one catalog + doc set (deterministic; the
@@ -1174,8 +1233,25 @@ pub fn issue_view(
                 comment: a.comment.clone(),
             })
             .collect(),
+        checks: issue
+            .checks
+            .iter()
+            .map(|(run, check)| CheckDto {
+                run: run.clone(),
+                spec: check.spec.clone(),
+                version: check.v,
+                build: check.build.clone(),
+                source: check.source.clone(),
+                state: check.state.clone(),
+                by: check.by.clone(),
+                ts: check.ts,
+                attempt: check.attempt.clone(),
+                report: check.report.clone(),
+                verdict: check.verdict.clone(),
+            })
+            .collect(),
         provisional: false,
-        corrupt_records: Vec::new(),
+        corrupt_records: issue.check_corrupt_records.clone(),
     }
 }
 

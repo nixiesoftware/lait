@@ -4,8 +4,9 @@
 //! by a Station. This module owns the application-side half of that boundary:
 //! a compile-time [`WorldPackage`] for each product, and one [`WorldHost`] per
 //! package inside an active Space. A package carries the reviewed semantic
-//! implementation plus its optional product-neutral call handler; orbital code
-//! never needs to name the product behind either one.
+//! implementation plus its optional product-neutral call handler and its
+//! Runtime-validated Exec package; orbital code never needs to name the
+//! product behind any of them.
 //!
 //! A [`WorldRouter`] belongs to one active Station. It is not a process,
 //! does not own a listener, and has no autonomous background loop.
@@ -111,6 +112,7 @@ pub struct WorldPackage {
     implementation: Arc<dyn World>,
     reviewed_implementation: [u8; 32],
     control: Option<Arc<dyn Handler>>,
+    exec: runtime::exec::Package,
     projector: Option<Arc<dyn ObservationProjector>>,
     lifecycle: Option<Arc<dyn WorldLifecycle>>,
 }
@@ -124,6 +126,7 @@ impl std::fmt::Debug for WorldPackage {
                 &data_encoding::HEXLOWER.encode(&self.reviewed_implementation[..8]),
             )
             .field("has_call_handler", &self.control.is_some())
+            .field("exec", &self.exec)
             .finish()
     }
 }
@@ -136,6 +139,7 @@ impl WorldPackage {
             implementation,
             reviewed_implementation,
             control: None,
+            exec: runtime::exec::Package::new(),
             projector: None,
             lifecycle: None,
         }
@@ -154,6 +158,11 @@ impl WorldPackage {
 
     pub fn with_control(mut self, control: Arc<dyn Handler>) -> Self {
         self.control = Some(control);
+        self
+    }
+
+    pub fn with_exec(mut self, exec: runtime::exec::Package) -> Self {
+        self.exec = exec;
         self
     }
 
@@ -311,11 +320,24 @@ impl WorldPackages {
         let mut runtime = Builder::new();
         let mut hosts = Vec::with_capacity(self.packages.len());
         for package in &self.packages {
+            let descriptor = package.implementation.descriptor();
+            package
+                .exec
+                .validate(
+                    &package.world,
+                    &package.reviewed_implementation,
+                    &descriptor,
+                )
+                .map_err(|reason| RegistrationRefusal::InvalidExecPackage {
+                    world: package.world.clone(),
+                    reason,
+                })?;
             hosts.push((
                 package.world.clone(),
                 package.reviewed_implementation,
                 package.reviewed_version(),
                 package.control.clone(),
+                package.exec.clone(),
                 package.projector.clone(),
             ));
             runtime = runtime.register(package.implementation.clone());
@@ -326,10 +348,10 @@ impl WorldPackages {
             WorldRouter::new(
                 hosts
                     .into_iter()
-                    .map(|(world, reviewed, version, control, projector)| {
+                    .map(|(world, reviewed, version, control, exec, projector)| {
                         (
                             world.clone(),
-                            WorldHost::new(world, reviewed, version, control, projector),
+                            WorldHost::new(world, reviewed, version, control, exec, projector),
                         )
                     })
                     .collect(),
@@ -350,6 +372,7 @@ pub struct WorldHost {
     /// back to the descriptor to ask.
     reviewed_version: u32,
     control: Option<Arc<dyn Handler>>,
+    exec: runtime::exec::Package,
     projector: Option<Arc<dyn ObservationProjector>>,
     primary_session: Mutex<Option<Session>>,
     agent_sessions: Mutex<HashMap<DeviceId, Session>>,
@@ -369,6 +392,7 @@ impl WorldHost {
         reviewed_implementation: [u8; 32],
         reviewed_version: u32,
         control: Option<Arc<dyn Handler>>,
+        exec: runtime::exec::Package,
         projector: Option<Arc<dyn ObservationProjector>>,
     ) -> Self {
         Self {
@@ -376,6 +400,7 @@ impl WorldHost {
             reviewed_version,
             reviewed_implementation,
             control,
+            exec,
             projector,
             primary_session: Mutex::new(None),
             agent_sessions: Mutex::new(HashMap::new()),
@@ -397,6 +422,10 @@ impl WorldHost {
 
     pub fn control(&self) -> Option<&dyn Handler> {
         self.control.as_deref()
+    }
+
+    pub fn exec(&self) -> &runtime::exec::Package {
+        &self.exec
     }
 
     /// Ensure the Space's primary identity has a Session for this World.
@@ -608,6 +637,7 @@ mod tests {
     struct NoopWorld {
         id: WorldId,
         schemas: Vec<Schema>,
+        exec_specs: Vec<runtime::exec::Spec>,
     }
 
     struct ProjectControl;
@@ -638,6 +668,10 @@ mod tests {
             &self.schemas
         }
 
+        fn exec_specs(&self) -> &[runtime::exec::Spec] {
+            &self.exec_specs
+        }
+
         fn submit(
             &self,
             _ctx: &mut WorldContext<'_>,
@@ -658,7 +692,148 @@ mod tests {
     fn package(id: &str, marker: u8) -> (Arc<dyn World>, [u8; 32]) {
         let id = WorldId::parse(id).expect("test World id");
         let schemas = Vec::new();
-        (Arc::new(NoopWorld { id, schemas }), [marker; 32])
+        (
+            Arc::new(NoopWorld {
+                id,
+                schemas,
+                exec_specs: Vec::new(),
+            }),
+            [marker; 32],
+        )
+    }
+
+    fn exec_demand(capability: &str) -> Vec<u8> {
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("com.example.jobs", capability),
+            mechanics::authorization::Resource::root("com.example.jobs"),
+        )
+        .encode_canonical()
+        .unwrap()
+    }
+
+    fn exec_spec() -> runtime::exec::Spec {
+        let payload = |name: &str| runtime::exec::PayloadSpec {
+            schema: runtime::exec::SchemaRef {
+                name: replica::body::SchemaId::parse(name).unwrap(),
+                version: 1,
+            },
+            max_inline_bytes: 1_024,
+            max_content_refs: 0,
+            max_content_bytes: 0,
+            read: exec_demand("payload.read"),
+            max_additional_input_bytes: 0,
+        };
+        runtime::exec::Spec {
+            name: replica::body::SchemaId::parse("job").unwrap(),
+            version: 1,
+            access: runtime::exec::Access {
+                start: exec_demand("start"),
+                offer: exec_demand("offer"),
+                control: exec_demand("control"),
+                accept: exec_demand("accept"),
+            },
+            input: payload("job.input"),
+            output: payload("job.output"),
+            mode: runtime::exec::Mode::Unary,
+            resume: runtime::exec::Resume::Restart,
+            effects: runtime::exec::Effects::Pure,
+            accept: runtime::exec::AcceptRule::World,
+            queries: Vec::new(),
+            service: None,
+            links: Vec::new(),
+            limits: runtime::exec::Limits {
+                attempts: 2,
+                events: 32,
+                checkpoints: 0,
+                child_runs: 1,
+                progress_bytes: 1_024,
+                checkpoint_bytes: 0,
+                wall_millis: 30_000,
+            },
+        }
+    }
+
+    struct CheckHandler {
+        binding: runtime::exec::HandlerBinding,
+    }
+
+    impl runtime::exec::Handler for CheckHandler {
+        fn binding(&self) -> &runtime::exec::HandlerBinding {
+            &self.binding
+        }
+
+        fn handle(
+            &self,
+            _context: &mut runtime::exec::Context<'_>,
+        ) -> Result<runtime::exec::Candidate, runtime::exec::Failure> {
+            Ok(runtime::exec::Candidate {
+                output: runtime::exec::SchemaRef {
+                    name: replica::body::SchemaId::parse("job.output").unwrap(),
+                    version: 1,
+                },
+                inline: Vec::new(),
+                content: Vec::new(),
+                content_bytes: 0,
+                terminal: runtime::exec::TerminalClass::Succeeded,
+                usage: Vec::new(),
+                evidence: Vec::new(),
+            })
+        }
+    }
+
+    fn executable_package() -> (Arc<dyn World>, [u8; 32], runtime::exec::Package) {
+        let world = WorldId::parse("com.example.jobs").unwrap();
+        let reviewed = [0x77; 32];
+        let spec = exec_spec();
+        let seed = [0x78; 32];
+        let build = runtime::exec::Build {
+            id: runtime::exec::BuildId::from_bytes([0; 32]),
+            world: world.clone(),
+            world_build: reviewed,
+            spec: runtime::exec::SchemaRef {
+                name: spec.name.clone(),
+                version: spec.version,
+            },
+            handler: replica::content::ContentRef {
+                content_id: [0x79; 32],
+            },
+            dependencies: None,
+            environment: [0x7a; 32],
+            config: Vec::new(),
+            checkpoint: None,
+            replay_commands: None,
+            compatible_from: Vec::new(),
+            publisher: mechanics::ids::ActorId::from_incept_hash(&"a".repeat(64)),
+            signature: runtime::exec::Signature {
+                signer: mechanics::actor::device_from_seed(&seed),
+                algorithm: 1,
+                bytes: [0; 64],
+            },
+        }
+        .sign(&seed)
+        .unwrap();
+        let handler = Arc::new(CheckHandler {
+            binding: runtime::exec::HandlerBinding {
+                spec: build.spec.clone(),
+                build: build.id,
+                artifact: build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+        });
+        let exec = runtime::exec::Package::new()
+            .with_spec(spec.clone())
+            .with_build(build)
+            .with_handler(handler);
+        (
+            Arc::new(NoopWorld {
+                id: world,
+                schemas: Vec::new(),
+                exec_specs: vec![spec],
+            }),
+            reviewed,
+            exec,
+        )
     }
 
     #[test]
@@ -725,5 +900,37 @@ mod tests {
         let (_, hosts) = packages.build().unwrap();
         assert!(hosts.host(&files).unwrap().control().is_none());
         assert!(hosts.host(&notes).unwrap().control().is_some());
+    }
+
+    #[test]
+    fn executable_packages_are_validated_and_retained_by_the_world_host() {
+        let (world, reviewed, exec) = executable_package();
+        let world_id = world.id();
+        let (_, hosts) = WorldPackages::new()
+            .with_package(WorldPackage::new(world, reviewed).with_exec(exec))
+            .build()
+            .unwrap();
+
+        let installed = hosts.host(&world_id).unwrap().exec();
+        assert_eq!(installed.specs().len(), 1);
+        assert_eq!(installed.builds().len(), 1);
+        assert_eq!(installed.handlers().len(), 1);
+    }
+
+    #[test]
+    fn a_world_exec_declaration_without_its_application_package_is_refused() {
+        let (world, reviewed, _) = executable_package();
+        let err = WorldPackages::new()
+            .with_package(WorldPackage::new(world, reviewed))
+            .build()
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            RegistrationRefusal::InvalidExecPackage {
+                world: WorldId::parse("com.example.jobs").unwrap(),
+                reason: runtime::exec::PackageInvalid::SpecRegistrationMismatch,
+            }
+        );
     }
 }

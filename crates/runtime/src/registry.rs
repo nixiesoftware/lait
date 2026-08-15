@@ -10,14 +10,21 @@
 //! versions within a World, invalid limits, contradictory upgrade claims, and
 //! scope/signal declarations that repeat a name, bound it at zero, exceed the
 //! substrate ceiling they may only tighten, or carry demand bytes that are not
-//! canonical.
+//! canonical. Find declarations additionally require every Body source to
+//! exist and to have exactly one package extractor binding. Exec declarations
+//! must be canonical and every embedded Find Grant must be contained by those
+//! active Find declarations.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use replica::body::WorldId;
 
-use crate::world::{Descriptor, World};
+use crate::{
+    exec::{self, SchemaRef as ExecSchemaRef},
+    find::{Extractor, SchemaRef, SourceRef},
+    world::{Descriptor, World},
+};
 
 /// Which declaration list a registration failure is about.
 ///
@@ -41,6 +48,8 @@ pub enum Refusal {
         schema: String,
         version: u32,
     },
+    /// A World attempted to claim a Runtime-owned Exec Body schema.
+    ReservedSchema { world: WorldId, schema: String },
     /// A schema claims to read a predecessor version that is not strictly older
     /// than itself, or lists the same predecessor twice.
     ContradictoryUpgrade {
@@ -62,6 +71,50 @@ pub enum Refusal {
         world: WorldId,
         kind: Declaration,
         name: String,
+    },
+    /// Two Find declarations use the same Schema coordinate.
+    DuplicateFindSchema { world: WorldId, schema: SchemaRef },
+    /// A Find declaration is non-canonical, internally cross-wired, or names
+    /// an undeclared target Find Schema.
+    InvalidFindDeclaration { world: WorldId, schema: SchemaRef },
+    /// A Find Schema names a Body Schema version this World does not declare.
+    MissingFindSource {
+        world: WorldId,
+        schema: SchemaRef,
+        source: SourceRef,
+    },
+    /// Two package extractors claim the same exact coordinates.
+    DuplicateFindExtractor {
+        world: WorldId,
+        extractor: Extractor,
+    },
+    /// A declared source has no package extractor at the same coordinates.
+    MissingFindExtractor {
+        world: WorldId,
+        extractor: Extractor,
+    },
+    /// A package extractor has no declaration at the same coordinates.
+    ExtraFindExtractor {
+        world: WorldId,
+        extractor: Extractor,
+    },
+    /// The descriptor's reviewed Find declaration disagrees with the package
+    /// methods that supply it.
+    FindRegistrationMismatch(WorldId),
+    /// Two callable Exec Specs use the same exact coordinate.
+    DuplicateExecSpec { world: WorldId, spec: ExecSchemaRef },
+    /// The Exec Spec list cannot be represented by its canonical count word.
+    TooManyExecSpecs { world: WorldId, count: usize },
+    /// An Exec Spec is invalid or widens the active World Find declaration.
+    InvalidExecSpec { world: WorldId, spec: ExecSchemaRef },
+    /// The descriptor's reviewed Exec declaration disagrees with the package
+    /// method that supplies it.
+    ExecRegistrationMismatch(WorldId),
+    /// The application-owned executable package disagrees with the reviewed
+    /// World or contains an ambiguous local binding.
+    InvalidExecPackage {
+        world: WorldId,
+        reason: exec::PackageInvalid,
     },
 }
 
@@ -161,6 +214,15 @@ impl Builder {
         for hosted in self.pending {
             let id = hosted.descriptor.id.clone();
 
+            if hosted.world.find_schemas() != hosted.descriptor.find_schemas.as_slice()
+                || hosted.world.find_extractors() != hosted.descriptor.find_extractors.as_slice()
+            {
+                return Err(Refusal::FindRegistrationMismatch(id));
+            }
+            if hosted.world.exec_specs() != hosted.descriptor.exec_specs.as_slice() {
+                return Err(Refusal::ExecRegistrationMismatch(id));
+            }
+
             // Invalid limits (reserved shape; only the "max is expressible"
             // check applies until S1 freezes the bounds).
             // (No invalid limit is currently expressible; the branch stays for
@@ -170,6 +232,12 @@ impl Builder {
             let mut seen_versions: std::collections::BTreeSet<(String, u32)> =
                 std::collections::BTreeSet::new();
             for schema in &hosted.descriptor.schemas {
+                if crate::exec::is_reserved_schema(&schema.id) {
+                    return Err(Refusal::ReservedSchema {
+                        world: id,
+                        schema: schema.id.as_str().to_string(),
+                    });
+                }
                 let key = (schema.id.as_str().to_string(), schema.version);
                 if !seen_versions.insert(key) {
                     return Err(Refusal::DuplicateSchemaVersion {
@@ -267,6 +335,9 @@ impl Builder {
                 }
             }
 
+            validate_find(&id, &hosted.descriptor)?;
+            validate_exec(&id, &hosted.descriptor)?;
+
             if worlds.insert(id.clone(), Arc::new(hosted)).is_some() {
                 return Err(Refusal::DuplicateWorld(id));
             }
@@ -275,6 +346,115 @@ impl Builder {
             worlds: Arc::new(worlds),
         })
     }
+}
+
+fn validate_exec(world: &WorldId, descriptor: &Descriptor) -> Result<(), Refusal> {
+    if descriptor.exec_specs.len() > MAX_DECLARATIONS_PER_SECTION {
+        return Err(Refusal::TooManyExecSpecs {
+            world: world.clone(),
+            count: descriptor.exec_specs.len(),
+        });
+    }
+    let mut find_schemas: Vec<_> = descriptor
+        .find_schemas
+        .iter()
+        .map(crate::find::Schema::canonicalized)
+        .collect();
+    find_schemas.sort_by(|left, right| left.reference.cmp(&right.reference));
+
+    let mut seen = std::collections::BTreeSet::new();
+    for spec in &descriptor.exec_specs {
+        let reference = exec::SchemaRef {
+            name: spec.name.clone(),
+            version: spec.version,
+        };
+        if !seen.insert(reference.clone()) {
+            return Err(Refusal::DuplicateExecSpec {
+                world: world.clone(),
+                spec: reference,
+            });
+        }
+        if spec.validate_with_find(&find_schemas).is_err() {
+            return Err(Refusal::InvalidExecSpec {
+                world: world.clone(),
+                spec: reference,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_find(world: &WorldId, descriptor: &Descriptor) -> Result<(), Refusal> {
+    let body_sources: std::collections::BTreeSet<SourceRef> = descriptor
+        .schemas
+        .iter()
+        .map(|schema| SourceRef {
+            name: schema.id.clone(),
+            version: schema.version,
+        })
+        .collect();
+
+    let mut find_refs = std::collections::BTreeSet::new();
+    for schema in &descriptor.find_schemas {
+        if !find_refs.insert(schema.reference.clone()) {
+            return Err(Refusal::DuplicateFindSchema {
+                world: world.clone(),
+                schema: schema.reference.clone(),
+            });
+        }
+    }
+
+    let mut declared = std::collections::BTreeSet::new();
+    for schema in &descriptor.find_schemas {
+        let canonical = schema.canonicalized();
+        if canonical.validate().is_err()
+            || canonical
+                .edges
+                .iter()
+                .any(|edge| !find_refs.contains(&edge.target))
+        {
+            return Err(Refusal::InvalidFindDeclaration {
+                world: world.clone(),
+                schema: schema.reference.clone(),
+            });
+        }
+        for source in &canonical.sources {
+            if !body_sources.contains(source) {
+                return Err(Refusal::MissingFindSource {
+                    world: world.clone(),
+                    schema: canonical.reference.clone(),
+                    source: source.clone(),
+                });
+            }
+            declared.insert(Extractor {
+                schema: canonical.reference.clone(),
+                source: source.clone(),
+            });
+        }
+    }
+
+    let mut supplied = std::collections::BTreeSet::new();
+    for extractor in &descriptor.find_extractors {
+        if !supplied.insert(extractor.clone()) {
+            return Err(Refusal::DuplicateFindExtractor {
+                world: world.clone(),
+                extractor: extractor.clone(),
+            });
+        }
+        if !declared.contains(extractor) {
+            return Err(Refusal::ExtraFindExtractor {
+                world: world.clone(),
+                extractor: extractor.clone(),
+            });
+        }
+    }
+    if let Some(extractor) = declared.difference(&supplied).next() {
+        return Err(Refusal::MissingFindExtractor {
+            world: world.clone(),
+            extractor: extractor.clone(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -294,9 +474,39 @@ mod tests {
         schemas: Vec<Schema>,
         scope_schemas: Vec<ScopeSchema>,
         signal_schemas: Vec<SignalSchema>,
+        find_schemas: Vec<crate::find::Schema>,
+        find_extractors: Vec<crate::find::Extractor>,
+        exec_specs: Vec<crate::exec::Spec>,
+        hide_find_in_descriptor: bool,
+        hide_exec_in_descriptor: bool,
     }
 
     impl World for TestWorld {
+        fn descriptor(&self) -> Descriptor {
+            Descriptor {
+                id: self.id.clone(),
+                implementation_version: crate::world::Version(1),
+                schemas: self.schemas.clone(),
+                limits: crate::world::Limits::default(),
+                scope_schemas: self.scope_schemas.clone(),
+                signal_schemas: self.signal_schemas.clone(),
+                find_schemas: if self.hide_find_in_descriptor {
+                    Vec::new()
+                } else {
+                    self.find_schemas.clone()
+                },
+                find_extractors: if self.hide_find_in_descriptor {
+                    Vec::new()
+                } else {
+                    self.find_extractors.clone()
+                },
+                exec_specs: if self.hide_exec_in_descriptor {
+                    Vec::new()
+                } else {
+                    self.exec_specs.clone()
+                },
+            }
+        }
         fn id(&self) -> WorldId {
             self.id.clone()
         }
@@ -308,6 +518,15 @@ mod tests {
         }
         fn signal_schemas(&self) -> &[SignalSchema] {
             &self.signal_schemas
+        }
+        fn find_schemas(&self) -> &[crate::find::Schema] {
+            &self.find_schemas
+        }
+        fn find_extractors(&self) -> &[crate::find::Extractor] {
+            &self.find_extractors
+        }
+        fn exec_specs(&self) -> &[crate::exec::Spec] {
+            &self.exec_specs
         }
         fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
             Err(Rejection::InvalidRequest)
@@ -334,6 +553,176 @@ mod tests {
             schemas,
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
+            find_schemas: Vec::new(),
+            find_extractors: Vec::new(),
+            exec_specs: Vec::new(),
+            hide_find_in_descriptor: false,
+            hide_exec_in_descriptor: false,
+        })
+    }
+
+    fn find_bound() -> crate::find::Bound {
+        crate::find::Bound {
+            decoded_bodies: 10,
+            postings_read: 10,
+            edges_visited: 10,
+            nodes_visited: 10,
+            paths_retained: 10,
+            candidates_per_branch: 10,
+            score_evaluations: 10,
+            projected_bytes: 10,
+            packed_tokens: 10,
+            wall_millis: 10,
+        }
+    }
+
+    fn find_schema(name: &str, source: &str, source_version: u32) -> crate::find::Schema {
+        crate::find::Schema {
+            reference: crate::find::SchemaRef {
+                name: SchemaId::parse(name).unwrap(),
+                version: 1,
+            },
+            sources: vec![SourceRef {
+                name: SchemaId::parse(source).unwrap(),
+                version: source_version,
+            }],
+            fields: Vec::new(),
+            edges: Vec::new(),
+            gates: Vec::new(),
+            analyzers: Vec::new(),
+            features: Vec::new(),
+            ops: crate::find::OpSet::SEEK,
+            modes: crate::find::ModeSet::EXACT,
+            bound: find_bound(),
+        }
+    }
+
+    fn demand(capability: &str) -> Vec<u8> {
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("com.example.product", capability),
+            mechanics::authorization::Resource::root("com.example.product"),
+        )
+        .encode_canonical()
+        .unwrap()
+    }
+
+    fn exec_spec(name: &str, query_schema: Option<&str>) -> crate::exec::Spec {
+        let payload = |name: &str| crate::exec::PayloadSpec {
+            schema: crate::exec::SchemaRef {
+                name: SchemaId::parse(name).unwrap(),
+                version: 1,
+            },
+            max_inline_bytes: 1_024,
+            max_content_refs: 1,
+            max_content_bytes: 4_096,
+            read: demand("payload.read"),
+            max_additional_input_bytes: 0,
+        };
+        crate::exec::Spec {
+            name: SchemaId::parse(name).unwrap(),
+            version: 1,
+            access: crate::exec::Access {
+                start: demand("exec.start"),
+                offer: demand("exec.offer"),
+                control: demand("exec.control"),
+                accept: demand("exec.accept"),
+            },
+            input: payload("exec.input"),
+            output: payload("exec.output"),
+            mode: crate::exec::Mode::Unary,
+            resume: crate::exec::Resume::Restart,
+            effects: crate::exec::Effects::Pure,
+            accept: crate::exec::AcceptRule::World,
+            queries: query_schema
+                .map(|name| {
+                    vec![crate::find::Grant {
+                        schemas: vec![crate::find::SchemaRef {
+                            name: SchemaId::parse(name).unwrap(),
+                            version: 1,
+                        }],
+                        ops: crate::find::OpSet::SEEK,
+                        fields: Vec::new(),
+                        edges: Vec::new(),
+                        gates: Vec::new(),
+                        modes: crate::find::ModeSet::EXACT,
+                        features: Vec::new(),
+                        bound: find_bound(),
+                    }]
+                })
+                .unwrap_or_default(),
+            service: None,
+            links: Vec::new(),
+            limits: crate::exec::Limits {
+                attempts: 2,
+                events: 64,
+                checkpoints: 0,
+                child_runs: 2,
+                progress_bytes: 4_096,
+                checkpoint_bytes: 0,
+                wall_millis: 30_000,
+            },
+        }
+    }
+
+    fn exec_world(
+        declarations: Vec<crate::find::Schema>,
+        specs: Vec<crate::exec::Spec>,
+        hide_exec_in_descriptor: bool,
+    ) -> Arc<dyn World> {
+        let extractors = declarations
+            .iter()
+            .flat_map(|declaration| {
+                declaration.sources.iter().cloned().map(|source| Extractor {
+                    schema: declaration.reference.clone(),
+                    source,
+                })
+            })
+            .collect();
+        Arc::new(TestWorld {
+            id: WorldId::parse("com.example.product").unwrap(),
+            schemas: vec![schema("issue", 1, vec![])],
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
+            find_schemas: declarations,
+            find_extractors: extractors,
+            exec_specs: specs,
+            hide_find_in_descriptor: false,
+            hide_exec_in_descriptor,
+        })
+    }
+
+    fn find_world(
+        declarations: Vec<crate::find::Schema>,
+        extractors: Vec<crate::find::Extractor>,
+    ) -> Arc<dyn World> {
+        Arc::new(TestWorld {
+            id: WorldId::parse("com.example.product").unwrap(),
+            schemas: vec![schema("issue", 1, vec![])],
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
+            find_schemas: declarations,
+            find_extractors: extractors,
+            exec_specs: Vec::new(),
+            hide_find_in_descriptor: false,
+            hide_exec_in_descriptor: false,
+        })
+    }
+
+    fn hidden_find_world(declaration: crate::find::Schema) -> Arc<dyn World> {
+        let extractor = Extractor {
+            schema: declaration.reference.clone(),
+            source: declaration.sources[0].clone(),
+        };
+        Arc::new(TestWorld {
+            id: WorldId::parse("com.example.product").unwrap(),
+            schemas: vec![schema("issue", 1, vec![])],
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
+            find_schemas: vec![declaration],
+            find_extractors: vec![extractor],
+            exec_specs: Vec::new(),
+            hide_find_in_descriptor: true,
+            hide_exec_in_descriptor: false,
         })
     }
 
@@ -373,6 +762,23 @@ mod tests {
     }
 
     #[test]
+    fn runtime_exec_body_schemas_are_reserved_at_every_version() {
+        for (index, reserved) in crate::exec::RESERVED_SCHEMAS.iter().enumerate() {
+            let world = test_world(
+                "com.example.product",
+                vec![schema(reserved, u32::try_from(index + 7).unwrap(), vec![])],
+            );
+            assert_eq!(
+                Builder::new().register(world).build().unwrap_err(),
+                Refusal::ReservedSchema {
+                    world: WorldId::parse("com.example.product").unwrap(),
+                    schema: (*reserved).to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
     fn contradictory_upgrade_claim_is_rejected() {
         // A v1 schema cannot "read" predecessor v1 (not strictly older).
         let world = test_world("com.example.product", vec![schema("issue", 1, vec![1])]);
@@ -385,5 +791,177 @@ mod tests {
             vec![schema("issue", 1, vec![]), schema("issue", 2, vec![1])],
         );
         assert!(Builder::new().register(world).build().is_ok());
+    }
+
+    #[test]
+    fn find_sources_and_extractors_bind_one_to_one() {
+        let declaration = find_schema("records", "issue", 1);
+        let extractor = Extractor {
+            schema: declaration.reference.clone(),
+            source: declaration.sources[0].clone(),
+        };
+        assert!(Builder::new()
+            .register(find_world(
+                vec![declaration.clone()],
+                vec![extractor.clone()],
+            ))
+            .build()
+            .is_ok());
+
+        let missing = Builder::new()
+            .register(find_world(vec![declaration.clone()], Vec::new()))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            missing,
+            Refusal::MissingFindExtractor {
+                world: WorldId::parse("com.example.product").unwrap(),
+                extractor: extractor.clone(),
+            }
+        );
+
+        let extra = Extractor {
+            schema: crate::find::SchemaRef {
+                name: SchemaId::parse("other").unwrap(),
+                version: 1,
+            },
+            source: extractor.source.clone(),
+        };
+        assert!(matches!(
+            Builder::new()
+                .register(find_world(
+                    vec![declaration.clone()],
+                    vec![extractor, extra]
+                ))
+                .build(),
+            Err(Refusal::ExtraFindExtractor { .. })
+        ));
+
+        let duplicated = Extractor {
+            schema: declaration.reference.clone(),
+            source: declaration.sources[0].clone(),
+        };
+        assert!(matches!(
+            Builder::new()
+                .register(find_world(
+                    vec![declaration],
+                    vec![duplicated.clone(), duplicated],
+                ))
+                .build(),
+            Err(Refusal::DuplicateFindExtractor { .. })
+        ));
+    }
+
+    #[test]
+    fn find_composition_rejects_missing_sources_duplicates_and_cross_wiring() {
+        let missing_source = find_schema("records", "comment", 1);
+        assert!(matches!(
+            Builder::new()
+                .register(find_world(vec![missing_source], Vec::new()))
+                .build(),
+            Err(Refusal::MissingFindSource { .. })
+        ));
+
+        let declaration = find_schema("records", "issue", 1);
+        assert!(matches!(
+            Builder::new()
+                .register(find_world(
+                    vec![declaration.clone(), declaration.clone()],
+                    Vec::new(),
+                ))
+                .build(),
+            Err(Refusal::DuplicateFindSchema { .. })
+        ));
+
+        let mut cross_wired = declaration.clone();
+        cross_wired.fields.push(crate::find::Field {
+            reference: crate::find::FieldRef {
+                schema: crate::find::SchemaRef {
+                    name: SchemaId::parse("other").unwrap(),
+                    version: 1,
+                },
+                name: SchemaId::parse("title").unwrap(),
+            },
+            kind: crate::find::FieldKind::Text,
+            analyzer: None,
+        });
+        assert!(matches!(
+            Builder::new()
+                .register(find_world(vec![cross_wired], Vec::new()))
+                .build(),
+            Err(Refusal::InvalidFindDeclaration { .. })
+        ));
+
+        assert_eq!(
+            Builder::new()
+                .register(hidden_find_world(find_schema("records", "issue", 1)))
+                .build()
+                .unwrap_err(),
+            Refusal::FindRegistrationMismatch(WorldId::parse("com.example.product").unwrap())
+        );
+    }
+
+    #[test]
+    fn exec_specs_are_composed_with_the_active_find_declaration() {
+        let declaration = find_schema("records", "issue", 1);
+        let spec = exec_spec("summarize", Some("records"));
+        assert!(Builder::new()
+            .register(exec_world(
+                vec![declaration.clone()],
+                vec![spec.clone()],
+                false,
+            ))
+            .build()
+            .is_ok());
+
+        let duplicate = Builder::new()
+            .register(exec_world(
+                vec![declaration.clone()],
+                vec![spec.clone(), spec.clone()],
+                false,
+            ))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            duplicate,
+            Refusal::DuplicateExecSpec {
+                world: WorldId::parse("com.example.product").unwrap(),
+                spec: crate::exec::SchemaRef {
+                    name: SchemaId::parse("summarize").unwrap(),
+                    version: 1,
+                },
+            }
+        );
+
+        let mut widening = spec.clone();
+        widening.queries[0].bound.decoded_bodies += 1;
+        assert!(matches!(
+            Builder::new()
+                .register(exec_world(vec![declaration], vec![widening], false))
+                .build(),
+            Err(Refusal::InvalidExecSpec { .. })
+        ));
+
+        assert_eq!(
+            Builder::new()
+                .register(exec_world(Vec::new(), vec![spec.clone()], false))
+                .build()
+                .unwrap_err(),
+            Refusal::InvalidExecSpec {
+                world: WorldId::parse("com.example.product").unwrap(),
+                spec: crate::exec::SchemaRef {
+                    name: SchemaId::parse("summarize").unwrap(),
+                    version: 1,
+                },
+            }
+        );
+
+        assert_eq!(
+            Builder::new()
+                .register(exec_world(Vec::new(), vec![spec], true))
+                .build()
+                .unwrap_err(),
+            Refusal::ExecRegistrationMismatch(WorldId::parse("com.example.product").unwrap())
+        );
     }
 }

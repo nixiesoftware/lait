@@ -118,7 +118,15 @@ impl Endpoint {
 /// process reads the payload that follows as a malformed second request, which
 /// is precisely why this cannot be tolerated across the boundary: the failure
 /// would not be a decode error, it would be a desynchronised connection.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 10;
+/// v11: the identity-scoped address book — twelve `Book*` requests and the
+/// `Book`/`BookResolution` responses on the daemon route. Framing unchanged;
+/// the vocabulary grew, and a v10 daemon answers these verbs with "unknown
+/// variant" rather than a version complaint unless the handshake names it.
+///
+/// v12: card exchange stages rather than mutates — `BookPropose`,
+/// `BookSuggestAccept`, `BookSuggestDismiss`, and the suggestions carried on
+/// the Book view.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 12;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
 ///
@@ -199,11 +207,13 @@ impl BuildFingerprint {
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// Protocol v10 is a deliberate compatibility cutoff: a v9 process cannot read
-/// a framed World call, and connections are reused now, so a single
+/// Protocol v10 was a deliberate compatibility cutoff: a v9 process cannot
+/// read a framed World call, and connections are reused now, so a single
 /// misinterpreted payload would poison every request that followed it rather
-/// than failing once.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 10;
+/// than failing once. The minimum moves with the version rather than trailing
+/// it — a v10 daemon answers the book's verbs with "unknown variant" instead
+/// of a version complaint, which is a worse failure than being told to stop.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 12;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -292,6 +302,12 @@ pub struct WatchingTyping {
     pub issue: String,
     pub field: String,
 }
+
+/// The one canonical group an agent's card is filed under. Part of the
+/// book's wire vocabulary: the daemon stamps it at provisioning and heals it
+/// from rosters, and clients that part or mark agents key on this name — a
+/// contract, not a display string.
+pub const AGENT_GROUP: &str = "Agents";
 
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -417,11 +433,72 @@ pub enum Request {
     /// The membership audit log: the signed ACL DAG replayed in causal order
     /// with each op's authorization verdict (cryptographic provenance).
     MemberLog,
-    /// Set (or clear, with an empty name) a **local petname** for a key. Local to
-    /// this node, never broadcast, never part of the signed ACL.
-    MemberAlias {
-        who: String,
+
+    /// Identity-scoped address book. Daemon route only; never places an Orbit.
+    /// The book is the one namer: member and presence rows leave the Station
+    /// bare and the daemon decorates them from Cards — the `MemberAlias` verb
+    /// and `aliases.json` it wrote are gone (2026-08-13).
+    BookList,
+    BookGet {
+        card: String,
+    },
+    BookPut {
+        #[serde(default)]
+        card: Option<String>,
         name: String,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    BookDelete {
+        card: String,
+    },
+    /// Set (or clear, with an empty string) a card's picture, in the stored
+    /// `<mime>;base64,<data>` form. The engine validates shape and size; a
+    /// stored picture is always drawable.
+    BookSetPicture {
+        card: String,
+        picture: String,
+    },
+    BookLink {
+        card: String,
+        handle: String,
+    },
+    BookUnlink {
+        card: String,
+        handle: String,
+    },
+    BookMerge {
+        from: String,
+        into: String,
+    },
+    BookClaimSelf {
+        card: String,
+    },
+    BookLookup {
+        handle: String,
+    },
+    /// Scoped decoration: an Orbit this head already authorized, plus handles
+    /// present in that answer. The daemon re-filters independently.
+    BookResolve {
+        orbit: String,
+        handles: Vec<String>,
+    },
+    BookMigrateStatus,
+    BookMigrate,
+    /// Stage a card-exchange bundle as pending suggestions. The bundle is the
+    /// file's JSON, carried by the head that owns the file dialog — the daemon
+    /// never reads a caller-named path. Nothing imports without review.
+    BookPropose {
+        bundle: String,
+    },
+    /// Accept one staged suggestion: mint the Card, link its handles, retire
+    /// the suggestion. Refusal leaves the suggestion staged.
+    BookSuggestAccept {
+        suggestion: String,
+    },
+    /// Discard one staged suggestion without touching the book.
+    BookSuggestDismiss {
+        suggestion: String,
     },
 
     // ---- generic Space authority capabilities ----
@@ -447,6 +524,39 @@ pub enum Request {
     WorldActivate {
         world: String,
     },
+    /// Product-neutral durable Exec lifecycle facility.
+    ///
+    /// The root control protocol transports Runtime's exact type and never
+    /// interprets product payloads or invents product verbs.
+    Work {
+        #[schemars(with = "serde_json::Value")]
+        request: runtime::exec::WorkRequest,
+        /// Host-minted 128-bit persistent idempotency coordinate (32 hex).
+        operation: String,
+    },
+    /// Which Worlds this Orbit has activated, with what a client needs to draw
+    /// and open each one.
+    ///
+    /// The read counterpart [`Request::WorldActivate`] never had. It is routed
+    /// to an Orbit and answered only by one that is *already placed* — see
+    /// `request_if_running`. That is the whole design: listing what a device
+    /// serves must never place a Station, or a Library that draws ten rows
+    /// mounts ten stores to do it, and listing costs what opening costs.
+    WorldsActive,
+    /// What this Orbit's store is holding: bytes on disk, how many Bodies, and
+    /// when its integrity was last verified.
+    ///
+    /// Routed to an Orbit and answered only by one that is *already placed* —
+    /// the same rule [`Request::WorldsActive`] follows, and for the same reason.
+    /// A caller reaches it through `request_if_running`, so a vacant Orbit
+    /// answers "not running" instead of being placed; otherwise a surface
+    /// showing storage for ten Spaces would mount ten stores to draw a column,
+    /// and looking would cost what opening costs.
+    ///
+    /// Per-Orbit, never machine-wide: the figures are attributable to one
+    /// Space, because a person deciding what to keep is deciding about one
+    /// Space at a time.
+    Storage,
     /// Streaming dirty notifications for live clients. Turns the one-shot handler into a
     /// stream of [`Doorbell`] frames until the client disconnects.
     Subscribe {
@@ -1145,6 +1255,7 @@ impl ContentReply {
 pub enum RequestOwner {
     Mechanics,
     Station,
+    Work,
     Observation,
     Lifecycle,
 }
@@ -1155,6 +1266,7 @@ impl RequestOwner {
         match self {
             RequestOwner::Mechanics => "mechanics",
             RequestOwner::Station => "station",
+            RequestOwner::Work => "work",
             RequestOwner::Observation => "observation",
             RequestOwner::Lifecycle => "lifecycle",
         }
@@ -1197,8 +1309,12 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::AssignmentGrant { .. }
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
+        | Request::WorldsActive
         | Request::Id
         | Request::Whoami => Mechanics,
+
+        // ---- Work: Runtime-owned durable Run lifecycle ----
+        Request::Work { .. } => Work,
 
         // ---- Station: connect/neighbor/Contact ----
         // Live and Signals sit here for the same reason Who does: both read
@@ -1213,7 +1329,10 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Signals => Station,
 
         // ---- Observation: generic status and subscription surfaces ----
-        Request::Status | Request::Subscribe { .. } => Observation,
+        // Storage belongs here and not with Mechanics: it projects what the
+        // durable store already holds and signs, admits and changes nothing —
+        // the same kind of answer `Status` gives, about a different plane.
+        Request::Status | Request::Storage | Request::Subscribe { .. } => Observation,
 
         // ---- Lifecycle/deployment: daemon process + node-local config ----
         Request::Diagnose { .. }
@@ -1224,7 +1343,22 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::ConfigReload
         | Request::Stop
         | Request::Hello { .. }
-        | Request::MemberAlias { .. }
+        | Request::BookList
+        | Request::BookGet { .. }
+        | Request::BookPut { .. }
+        | Request::BookDelete { .. }
+        | Request::BookSetPicture { .. }
+        | Request::BookLink { .. }
+        | Request::BookUnlink { .. }
+        | Request::BookMerge { .. }
+        | Request::BookClaimSelf { .. }
+        | Request::BookLookup { .. }
+        | Request::BookResolve { .. }
+        | Request::BookMigrateStatus
+        | Request::BookMigrate
+        | Request::BookPropose { .. }
+        | Request::BookSuggestAccept { .. }
+        | Request::BookSuggestDismiss { .. }
         // The host plane is lifecycle by definition: node-local state and the
         // two verbs that bring a Space into existence on this machine. None of
         // them has a Station to be owned by — most run before one could exist.
@@ -1268,6 +1402,13 @@ pub fn representative_requests() -> Vec<Request> {
         },
         Request::AssignmentRevoke { grant_id: s() },
         Request::WorldActivate { world: s() },
+        Request::Work {
+            request: runtime::exec::WorkRequest::Inspect {
+                world: replica::body::WorldId::parse("com.example.work").unwrap(),
+                run: runtime::exec::RunId::from_bytes([0; 16]),
+            },
+            operation: s(),
+        },
         Request::MemberAdd {
             who: s(),
             admin: false,
@@ -1315,12 +1456,44 @@ pub fn representative_requests() -> Vec<Request> {
         Request::Recover,
         Request::Members,
         Request::MemberLog,
-        Request::MemberAlias {
-            who: s(),
+        Request::BookList,
+        Request::BookGet { card: s() },
+        Request::BookPut {
+            card: None,
             name: s(),
+            note: None,
         },
+        Request::BookDelete { card: s() },
+        Request::BookSetPicture {
+            card: s(),
+            picture: s(),
+        },
+        Request::BookLink {
+            card: s(),
+            handle: s(),
+        },
+        Request::BookUnlink {
+            card: s(),
+            handle: s(),
+        },
+        Request::BookMerge {
+            from: s(),
+            into: s(),
+        },
+        Request::BookClaimSelf { card: s() },
+        Request::BookLookup { handle: s() },
+        Request::BookResolve {
+            orbit: s(),
+            handles: vec![],
+        },
+        Request::BookMigrateStatus,
+        Request::BookMigrate,
+        Request::BookPropose { bundle: s() },
+        Request::BookSuggestAccept { suggestion: s() },
+        Request::BookSuggestDismiss { suggestion: s() },
         Request::Subscribe { since: 0 },
         Request::Status,
+        Request::Storage,
         Request::Diagnose {
             expected_space: None,
         },
@@ -1410,6 +1583,96 @@ pub fn routing_rows() -> Vec<(String, &'static str)> {
         .collect()
 }
 
+/// One live Card as the daemon reports it. Authored fields only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookCardView {
+    pub card: String,
+    pub name: String,
+    #[serde(default)]
+    pub note: String,
+    /// Every handle in its wire spelling, whatever its kind. The categorized
+    /// triplet below is the same set split the way a phone book reads —
+    /// add-only fields, so older clients keep reading this one.
+    #[serde(default)]
+    pub handles: Vec<String>,
+    /// `actor:<space>:<actor>` spellings — where this person is someone.
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    /// Bare device ids — the machines that answer as them.
+    #[serde(default)]
+    pub devices: Vec<String>,
+    /// `agent:<store>:<name>` spellings — co-located agents, never shared.
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// The stored picture (`<mime>;base64,<data>`), or `None` when the card
+    /// has none — in which case a client draws its default face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub self_claim: bool,
+}
+
+/// Alias-migration progress. `complete` is only true after every selector was
+/// resolved or discarded — not after the first pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BookMigrationView {
+    pub complete: bool,
+    pub pending: usize,
+    pub imported: usize,
+    pub files: usize,
+}
+
+/// One staged card-exchange suggestion, awaiting review. Never part of the
+/// book until accepted; carries only what the bundle was allowed to carry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookSuggestionView {
+    pub suggestion: String,
+    pub name: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub handles: Vec<String>,
+}
+
+/// The identity's book, plus how far legacy alias import has got.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookView {
+    #[serde(default)]
+    pub cards: Vec<BookCardView>,
+    #[serde(default)]
+    pub migration: BookMigrationView,
+    /// Staged card-exchange proposals. Review is the only way in.
+    #[serde(default)]
+    pub suggestions: Vec<BookSuggestionView>,
+}
+
+/// One authored hit that survived the daemon's independent Orbit filter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookHitView {
+    pub card: String,
+    pub handle: String,
+    /// Authored Card name. Empty only if the card id no longer projects,
+    /// which is not a name and must not be drawn as one.
+    #[serde(default)]
+    pub name: String,
+    /// The card's stored picture (`<mime>;base64,<data>`), or `None`. This is
+    /// how an application resolves a face for a handle: through the book,
+    /// never through its own name-matched table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+}
+
+/// Scoped decoration. `coverage` is `unavailable` when the Orbit is vacant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookResolutionView {
+    #[serde(default)]
+    pub hits: Vec<BookHitView>,
+    #[serde(default)]
+    pub coverage: Option<String>,
+}
+
 /// A response from the daemon or Space host. Internally tagged by `kind`;
 /// product response schemas are not members of this enum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1443,10 +1706,20 @@ pub enum Response {
     Assignments {
         rows: Vec<mechanics::assignment::AssignmentDto>,
     },
+    /// Runtime-owned lifecycle answer to [`Request::Work`]. Product packages
+    /// receive Runtime's exact type; no World payload crosses this route.
+    Work {
+        reply: runtime::exec::WorkReply,
+    },
     /// The membership audit log (reply to [`Request::MemberLog`]).
     MemberLog {
         entries: Vec<MemberLogEntry>,
     },
+    /// Identity-scoped address book (reply to the `Book*` requests).
+    Book(Box<BookView>),
+    /// Scoped handle decoration. Never a Card-existence bit for a handle
+    /// outside the named Orbit's non-placing snapshot.
+    BookResolution(Box<BookResolutionView>),
     /// Pinned seeds ("remotes") and their reachability.
     Seeds {
         seeds: Vec<SeedDto>,
@@ -1468,6 +1741,40 @@ pub enum Response {
     },
     Who {
         peers: Vec<PresenceEntry>,
+    },
+    /// Reply to [`Request::WorldsActive`]: the World ids this Space activated.
+    ///
+    /// Ids and nothing else, deliberately. *Which* Worlds an Orbit serves is
+    /// the Space's authority and is what the daemon can answer; how to draw and
+    /// open one is a declaration of whichever build is asking, and that build
+    /// has its own client registry to join in. A daemon that answered display
+    /// metadata would be answering for a package it does not hold.
+    Worlds {
+        worlds: Vec<String>,
+    },
+    /// Reply to [`Request::Storage`]: what this Orbit's store is holding.
+    ///
+    /// **Every figure is optional, and absent is a real answer.** A number
+    /// nobody measured is reported missing, never estimated and never defaulted
+    /// to zero — a synthesised figure that makes a surface look populated is
+    /// the observation-failure defect wearing different clothes, and it is
+    /// harder to spot because it looks like data. `null` here means "not
+    /// measured"; it never means "measured, and it is nothing".
+    Storage {
+        /// Bytes on disk for this Space, or `null` when the measurement could
+        /// not be taken. The whole store directory — Bodies, ledger, content
+        /// cache, superseded generations — because those are all bytes this
+        /// Space is occupying.
+        #[serde(default)]
+        bytes_on_disk: Option<u64>,
+        /// How many Bodies the store holds, interpreted and opaque alike.
+        #[serde(default)]
+        object_count: Option<u64>,
+        /// When integrity was last verified, in milliseconds since the unix
+        /// epoch, or `null` when it never has been. A store that has never been
+        /// checked says so; it does not report the epoch.
+        #[serde(default)]
+        last_verified_ms: Option<u64>,
     },
     /// The Live plane's transient table (reply to [`Request::Live`]).
     Live {
@@ -1687,6 +1994,9 @@ pub enum HostReply {
 pub enum ErrorKind {
     #[default]
     Error,
+    /// The request reached the right capability but its arguments or current
+    /// lifecycle state do not admit the requested operation.
+    Invalid,
     NotFound,
     /// The caller's identity lacks the standing this action needs (write access,
     /// admin, sponsorship). A **typed** authorization failure so a client — the
@@ -1709,6 +2019,13 @@ impl Response {
         Response::Error {
             message: msg.into(),
             error_kind: ErrorKind::NotFound,
+        }
+    }
+    /// A caller-correctable validation or lifecycle refusal (exit `1`).
+    pub fn invalid(msg: impl Into<String>) -> Self {
+        Response::Error {
+            message: msg.into(),
+            error_kind: ErrorKind::Invalid,
         }
     }
     /// The caller lacks the standing this action requires — an authorization
@@ -1787,6 +2104,14 @@ pub enum EventKind {
 pub struct PresenceEntry {
     pub id: String,
     pub nick: String,
+    /// The actor this device speaks for in the routed Space, resolved through
+    /// the Station's authority view — the same resolution [`LiveEntry::actor`]
+    /// rides on, carried here so a presence consumer can answer "is this
+    /// *person* reachable" without a second request. `None` when the Station
+    /// resolves no actor (a peer that lost standing, or one never admitted),
+    /// which is an absence and travels as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     /// Three-state presence: `online`, `away`, or `offline`.
     pub state: String,
     pub online: bool,
@@ -2632,7 +2957,29 @@ async fn connect_bounded(home: &Path) -> Result<Stream> {
     let name = control_name(home)?;
     match tokio::time::timeout(PROBE_TIMEOUT, Stream::connect(name)).await {
         Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(error)) => Err(Undelivered(format!("connect to daemon: {error}")).into()),
+        Ok(Err(error)) => Err(Undelivered(match error.kind() {
+            // A control channel exists only while a daemon is listening on it:
+            // a Windows named pipe and a unix socket both answer a connect with
+            // `NotFound` (or `ConnectionRefused`, for a socket file nobody is
+            // accepting on) when there is nobody there.
+            //
+            // Said in the daemon's own words rather than the OS's, because "the
+            // system cannot find the file specified" sends somebody looking for
+            // a missing *file* — and the daemon home they will go and inspect is
+            // full of files, all present and all irrelevant. The channel is not
+            // one of them.
+            //
+            // The home is named because the channel's identity is derived from
+            // it: two processes that disagree about `LAIT_HOME` derive two
+            // different channels and never see each other, with exactly this
+            // error and nothing on screen to say which home either one meant.
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => format!(
+                "no Lait daemon is running for this identity ({}) — start one with `lait daemon`",
+                home.display()
+            ),
+            _ => format!("connect to daemon: {error}"),
+        })
+        .into()),
         Err(_) => Err(Undelivered(format!(
             "the Lait daemon is not answering (no connection within {}s) — it may be \
              wedged or shutting down",
@@ -3173,6 +3520,48 @@ mod tests {
                 "the flattened request must survive: {json}"
             );
         }
+    }
+
+    /// An unmeasured storage figure stays unmeasured on the wire.
+    ///
+    /// This is the release-gate rule in its smallest form. If `None` encoded as
+    /// `0` — or decoded back as one — a Storage surface would draw a confident
+    /// `0 B / 0 objects / verified at the epoch` for a Space nobody managed to
+    /// measure, and there would be nothing in the reply to distrust.
+    #[test]
+    fn an_unmeasured_storage_figure_is_absent_on_the_wire_and_never_a_zero() {
+        let unmeasured = Response::Storage {
+            bytes_on_disk: None,
+            object_count: None,
+            last_verified_ms: None,
+        };
+        let json = serde_json::to_value(&unmeasured).unwrap();
+        assert_eq!(json["bytes_on_disk"], serde_json::Value::Null, "{json}");
+        assert_eq!(json["object_count"], serde_json::Value::Null, "{json}");
+        assert_eq!(json["last_verified_ms"], serde_json::Value::Null, "{json}");
+
+        // And the two states stay distinguishable in both directions: a store
+        // measured at zero bytes is a different claim from one nobody measured.
+        let measured_empty = serde_json::to_value(Response::Storage {
+            bytes_on_disk: Some(0),
+            object_count: Some(0),
+            last_verified_ms: Some(0),
+        })
+        .unwrap();
+        assert_ne!(json, measured_empty);
+
+        let back: Response = serde_json::from_value(json).unwrap();
+        let Response::Storage {
+            bytes_on_disk,
+            object_count,
+            last_verified_ms,
+        } = back
+        else {
+            panic!("a storage reply must decode as one");
+        };
+        assert_eq!(bytes_on_disk, None);
+        assert_eq!(object_count, None);
+        assert_eq!(last_verified_ms, None);
     }
 
     #[test]

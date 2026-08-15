@@ -1,0 +1,14 @@
+# The bridge between this interface and the Rust core.
+#
+# The core stays where it is — a workspace member under `tools/` — rather than
+# being moved inside this app. It is not the app's private engine: the same
+# crate carries the supervisor, the control-protocol client and the model, and
+# the workspace's own tests build it directly.
+#
+# Both generated halves are checked in and CI fails on drift. That check is what
+# makes the boundary revision 7 reintroduced safe to have: a stale binding
+# cannot pass review if the build refuses it.
+rust_input: crate::api
+rust_root: ../../tools/astrolabe
+dart_output: lib/src/bridge
+dart_entrypoint_class_name: Core

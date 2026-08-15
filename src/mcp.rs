@@ -28,9 +28,12 @@ use crate::{
     host_client::{client_as_scoped, scope_for_home},
 };
 
-/// The replica command tags (`Request` serde `cmd` values) an agent must be able
-/// to drive. `tests/mcp_parity.rs` asserts every one has a tool below, so adding
-/// a `Request` without an MCP tool fails the interface-parity build gate.
+/// The minimum complete tracker operations an agent must be able to drive.
+///
+/// This is an end-to-end usability gate, not a mirror of any one protocol enum:
+/// package-local capabilities and shell membership operations have different
+/// owners. Multi-tool workflows whose prerequisite ids cannot yet be minted or
+/// listed through MCP stay out until that complete slice exists.
 pub const REQUIRED_TRACKER_COMMANDS: &[&str] = &[
     "issues_new",
     "issues_edit",
@@ -105,6 +108,9 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "issues_start",
     "issues_done",
     "issues_stop",
+    "issues_work",
+    "issues_verify",
+    "issues_accept_check",
     "issues_inbox",
     "issues_edit",
     "issues_move",
@@ -172,7 +178,6 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "key_rotate",
     "members",
     "member_log",
-    "member_alias",
     // transport / presence
     "status",
     "doctor",
@@ -209,14 +214,6 @@ pub struct AgentAddArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MemberRemoveArgs {
     pub who: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MemberAliasArgs {
-    /// A who-ref: a key id-prefix, a full key, or an existing alias.
-    pub who: String,
-    /// The petname to assign (empty string clears it).
-    pub name: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -300,9 +297,15 @@ impl LaitMcp {
                     Box::pin(async move {
                         let input =
                             serde_json::Value::Object(context.arguments.unwrap_or_default());
-                        let invocation = tool
-                            .call(input)
-                            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+                        let invocation = tool.call(input).map_err(|error| {
+                            McpError::invalid_params(
+                                error
+                                    .diagnostic()
+                                    .unwrap_or("invalid tool arguments")
+                                    .to_owned(),
+                                None,
+                            )
+                        })?;
                         context.service.run_invocation(invocation).await
                     })
                 },
@@ -365,11 +368,12 @@ impl LaitMcp {
         // anything the caller can act on is `invalid_request` and keeps the
         // message that names the next step.
         if let Some((failure, message)) = package.classify_failure(&value) {
-            return Err(match failure {
-                world_interface::Failure::Invalid | world_interface::Failure::Refusal => {
+            return Err(match failure.kind() {
+                world_interface::FailureKind::Invalid | world_interface::FailureKind::Refusal => {
                     McpError::invalid_request(message, None)
                 }
-                world_interface::Failure::Operation | world_interface::Failure::Interruption => {
+                world_interface::FailureKind::Operation
+                | world_interface::FailureKind::Interruption => {
                     McpError::internal_error(message, None)
                 }
             });
@@ -385,7 +389,9 @@ impl LaitMcp {
                 message,
                 error_kind,
             }) => Err(match error_kind {
-                ErrorKind::Denied | ErrorKind::NotFound => McpError::invalid_request(message, None),
+                ErrorKind::Invalid | ErrorKind::Denied | ErrorKind::NotFound => {
+                    McpError::invalid_request(message, None)
+                }
                 ErrorKind::Error => McpError::internal_error(message, None),
             }),
             Ok(resp) => {
@@ -451,20 +457,6 @@ impl LaitMcp {
     )]
     async fn member_log(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::MemberLog).await
-    }
-
-    #[tool(
-        description = "Set (or clear, with an empty name) a local petname for a key. Local to this device, never synced or part of the signed ACL."
-    )]
-    async fn member_alias(
-        &self,
-        Parameters(a): Parameters<MemberAliasArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::MemberAlias {
-            who: a.who,
-            name: a.name,
-        })
-        .await
     }
 
     // ---- transport / presence ----

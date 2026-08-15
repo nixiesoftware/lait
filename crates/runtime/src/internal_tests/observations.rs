@@ -86,6 +86,7 @@ impl World for KvWorld {
         let body = self.body(key);
         Ok(Effect {
             content_refs: Vec::new(),
+            exec: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 body.clone(),
@@ -189,6 +190,7 @@ fn station_with_capacity(root: &std::path::Path, capacity: usize) -> Station {
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: None,
             observation_capacity: capacity,

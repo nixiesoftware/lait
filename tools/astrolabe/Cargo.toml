@@ -1,0 +1,91 @@
+[package]
+name = "astrolabe"
+version = "0.1.0"
+edition = "2021"
+# MSRV: the workspace figure. See the root manifest for what drives it.
+rust-version = "1.92"
+description = "The local client through which a person reaches the Worlds their device serves"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "astrolabe"
+path = "src/lib.rs"
+# `cdylib` is what the Flutter runner links; `rlib` is what the workspace's own
+# tests and the legacy binary link. Both, because the core is one thing with two
+# consumers and building it twice would let them disagree.
+crate-type = ["cdylib", "rlib"]
+
+# The egui interface, behind the feature that carries it.
+#
+# Revision 7 of the Plan moves the interface to Flutter. This binary is kept
+# until the Dart surfaces reach parity, because a client that cannot be launched
+# is a client nobody can compare against — but it is not built by default, so a
+# `cargo build` produces the core the bridge needs and nothing else.
+[[bin]]
+name = "astrolabe-egui"
+path = "src/main.rs"
+required-features = ["egui-ui"]
+
+[features]
+default = []
+# The retiring interface: egui, eframe, and the surfaces drawn on them.
+egui-ui = ["dep:eframe", "dep:egui"]
+
+[dependencies]
+lait = { path = "../.." }
+lait-workbench = { path = "../workbench" }
+addressbook = { path = "../../crates/addressbook" }
+mechanics = { path = "../../crates/mechanics" }
+anyhow = "1"
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+# The adopted UI substrate. All three are `MIT OR Apache-2.0`, which is what
+# keeps lait's own dual offer intact — see CLIENT-31.
+# `egui` depends on `accesskit` unconditionally and re-exports it, so the
+# semantic tree is always available; `eframe`'s `accesskit` feature is what
+# bridges that tree to the platform — Windows UI Automation, here.
+eframe = { version = "0.35", optional = true, default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }
+egui = { version = "0.35", optional = true }
+
+# The bridge to the Dart interface. `MIT`, so lait's dual offer is untouched.
+# The generated Dart and the generated Rust are both checked in, and CI fails on
+# drift — the boundary revision 7 reintroduced is only safe if a stale binding
+# cannot pass review.
+flutter_rust_bridge = "=2.12.0"
+
+[target.'cfg(windows)'.dependencies]
+# The single-instance mutex, the tray icon and the browser handoff. All three
+# are Windows shapes rather than portable ones — a kernel object rather than an
+# advisory file lock, a shell notification area, and `ShellExecuteW` rather than
+# a console-subsystem child that would flash a window. Reached directly because
+# a crate for each would be three more entries in a closure that a build-failing
+# licence audit and a generated notice file both have to carry.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
+# Saving what `Harness::render` produces. Already in the tree through
+# `egui_kittest`, and a dev-dependency, so it reaches neither a shipped binary
+# nor the generated third-party notices.
+image = { version = "0.25", default-features = false, features = ["png"] }
+tempfile = "3"

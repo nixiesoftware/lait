@@ -815,6 +815,7 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
     let activation = |transport: Arc<dyn comms::Transport>, seed: [u8; 32]| Activation {
         planes: Default::default(),
         content: Default::default(),
+        find: Default::default(),
         drain_deadline: Duration::from_secs(5),
         comms: Some(comms_options(transport, seed)),
         observation_capacity: 0,

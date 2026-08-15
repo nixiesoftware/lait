@@ -57,7 +57,9 @@ pub mod coordinates;
 #[cfg(test)]
 mod dispatch_tests;
 mod dto;
+pub mod exec;
 mod fetch;
+pub mod find;
 pub mod generation;
 mod implementation;
 #[cfg(test)]
@@ -85,6 +87,6 @@ extern crate self as runtime;
 pub use lifecycle::Failure as Error;
 pub use lifecycle::{
     Exit, ExitReason, Integrity, Interruption, Orbit, OrbitStatus, Persistence,
-    RemovalConfirmation, Runtime, Station,
+    RemovalConfirmation, Runtime, Station, StorageReading,
 };
 pub use session::{Session, WorldGeneration, WorldSnapshotId};

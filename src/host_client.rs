@@ -124,6 +124,11 @@ pub fn report_error(e: &anyhow::Error, json: bool) -> std::process::ExitCode {
 /// is empty") is gone by construction, not by guard — so the refusal has to
 /// carry the navigation state it refused on: which local Orbits exist, or, when
 /// none do, how a space comes into existence at all.
+///
+/// The stdio agent head only reaches this after
+/// [`crate::config::Selection::resolve_for_agent`]'s sole-Orbit fallback found
+/// nothing unambiguous to bind, so a listing with entries here means several
+/// Orbits (a choice), or one whose store is gone (a repair).
 pub fn no_store_here() -> String {
     use std::fmt::Write;
 
@@ -145,7 +150,9 @@ pub fn no_store_here() -> String {
         };
         let _ = writeln!(out, "  \u{2022} {name}  \u{2192}  {}", entry.path);
     }
-    out.push_str("\ncd into one, or run `lait` to see them all in the local app.");
+    out.push_str(
+        "\nset LAIT_STORE to one of these paths (an agent config cannot cd), or run `lait` to see them all in the local app.",
+    );
     out
 }
 
@@ -222,6 +229,22 @@ fn daemon_exited_error(status: std::process::ExitStatus, log_path: &Path) -> any
 /// returned: it used to license a re-send, and it is the wrong question — see
 /// [`control::Undelivered`], which answers the right one.
 pub async fn ensure_lait_daemon(selection: &crate::config::Selection) -> Result<()> {
+    let exe = std::env::current_exe().context("locate own executable")?;
+    ensure_lait_daemon_with_executable(selection, &exe).await
+}
+
+/// Ensure the selected identity's process-level Lait daemon is running, using
+/// `executable` when one has to be started.
+///
+/// This is the embedded-client counterpart to [`ensure_lait_daemon`]. A Lait
+/// head can self-exec, but a client such as Astrolabe is not the daemon binary:
+/// it resolves the fixed `lait` sidecar beside itself and hands that trusted
+/// path in here. Probing still comes first, so an already-running identity
+/// daemon is attached to without touching the sidecar or starting a competitor.
+pub async fn ensure_lait_daemon_with_executable(
+    selection: &crate::config::Selection,
+    executable: &Path,
+) -> Result<()> {
     let client = crate::daemon::Client::for_selection(selection)?;
     let daemon_home = client.home();
     match client.probe().await {
@@ -241,15 +264,14 @@ pub async fn ensure_lait_daemon(selection: &crate::config::Selection) -> Result<
         }
         control::Probe::Absent => {}
     }
-    let exe = std::env::current_exe().context("locate own executable")?;
     let log_path = daemon_log_path(daemon_home);
     let log = std::fs::File::create(&log_path).ok();
     // Passing the ordinary config root through `--home` would collapse the
     // global catalog into a self-contained identity, so pin only an explicitly
     // self-contained home — the one this invocation selected, or an ambient one.
     let identity = selection.self_contained_home();
-    let mut child =
-        crate::daemon_spawn::spawn(&exe, log, identity.as_deref()).context("spawn Lait daemon")?;
+    let mut child = crate::daemon_spawn::spawn(executable, log, identity.as_deref())
+        .context("spawn Lait daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if matches!(client.probe().await, control::Probe::Healthy) {
@@ -546,6 +568,40 @@ impl world_interface::ClientHost for PackageClientHost {
         })
     }
 
+    fn call_work<'a>(
+        &'a self,
+        request: runtime::exec::WorkRequest,
+    ) -> world_interface::ClientFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            let operation =
+                data_encoding::HEXLOWER.encode(&runtime::world::RequestId::mint().as_bytes());
+            let response = client_as_scoped(
+                &self.home,
+                Request::Work { request, operation },
+                &self.scope,
+                self.act_as.as_deref(),
+                &self.selection,
+            )
+            .await
+            .map_err(|error| world_interface::Failure::new(format!("{error:#}")))?;
+            match response {
+                Response::Work { reply } => serde_json::to_value(reply).map_err(|error| {
+                    world_interface::Failure::new(format!("encode Runtime Work reply: {error}"))
+                }),
+                response @ Response::Error { .. } => {
+                    serde_json::to_value(response).map_err(|error| {
+                        world_interface::Failure::new(format!(
+                            "encode Runtime Work refusal: {error}"
+                        ))
+                    })
+                }
+                other => Err(world_interface::Failure::new(format!(
+                    "Runtime Work request returned an unexpected response: {other:?}"
+                ))),
+            }
+        })
+    }
+
     fn call_control<'a>(
         &'a self,
         request: world_interface::HostControlRequest,
@@ -589,6 +645,44 @@ impl world_interface::ClientHost for PackageClientHost {
             serde_json::to_value(response).map_err(|error| {
                 world_interface::Failure::new(format!("encode host control response: {error}"))
             })
+        })
+    }
+
+    fn call_identity<'a>(
+        &'a self,
+        handles: Vec<world_interface::PresentationHandle>,
+    ) -> world_interface::ClientFuture<'a, world_interface::PresentationResolution> {
+        Box::pin(async move {
+            use world_interface::{PresentationResolution, MAX_PRESENTATION_HANDLES};
+
+            if handles.len() > MAX_PRESENTATION_HANDLES {
+                return Ok(PresentationResolution::unavailable());
+            }
+            if self.scope.authorize(&self.address).is_err() {
+                return Ok(PresentationResolution::unavailable());
+            }
+            let wires: Vec<String> = handles
+                .iter()
+                .map(|handle| handle.to_wire(Some(self.address.space.as_str())))
+                .collect();
+            let daemon = match crate::daemon::Client::for_selection(&self.selection) {
+                Ok(daemon) => daemon,
+                Err(_) => return Ok(PresentationResolution::unavailable()),
+            };
+            let response = match host_request(
+                &daemon,
+                &self.selection,
+                Request::BookResolve {
+                    orbit: self.address.orbit.to_string(),
+                    handles: wires,
+                },
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(_) => return Ok(PresentationResolution::unavailable()),
+            };
+            Ok(presentation_from_book(response))
         })
     }
 
@@ -654,6 +748,46 @@ impl PackageClientHost {
             }
         }
     }
+}
+
+/// Map a daemon book-resolution into presentation labels. Card ids stay
+/// behind this boundary — a product never sees one.
+fn presentation_from_book(response: Response) -> world_interface::PresentationResolution {
+    use world_interface::{PresentationLabel, PresentationResolution};
+
+    let Response::BookResolution(view) = response else {
+        return PresentationResolution::unavailable();
+    };
+    PresentationResolution {
+        coverage: view.coverage,
+        labels: view
+            .hits
+            .into_iter()
+            .filter_map(|hit| {
+                let handle = presentation_handle_from_wire(&hit.handle)?;
+                let name = (!hit.name.is_empty()).then_some(hit.name);
+                Some(PresentationLabel { handle, name })
+            })
+            .collect(),
+    }
+}
+
+fn presentation_handle_from_wire(raw: &str) -> Option<world_interface::PresentationHandle> {
+    use world_interface::PresentationHandle;
+    if let Some(rest) = raw.strip_prefix("actor:") {
+        let (space, actor) = rest.split_once(':')?;
+        if space.is_empty() || actor.is_empty() {
+            return None;
+        }
+        return Some(PresentationHandle::Actor {
+            space: Some(space.to_owned()),
+            actor: actor.to_owned(),
+        });
+    }
+    if raw.starts_with("dev_") {
+        return Some(PresentationHandle::device(raw));
+    }
+    None
 }
 
 /// Stream a local file onto the content plane.
@@ -931,5 +1065,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_book_resolution_crosses_as_labels_not_cards() {
+        let resolution = presentation_from_book(Response::BookResolution(Box::new(
+            crate::control::BookResolutionView {
+                hits: vec![crate::control::BookHitView {
+                    card: "crd_secret".into(),
+                    handle: "actor:ws_one:act_ada".into(),
+                    name: "Ada".into(),
+                    picture: None,
+                }],
+                coverage: None,
+            },
+        )));
+        assert!(!resolution.is_unavailable());
+        assert_eq!(resolution.name_for_actor("act_ada"), Some("Ada"));
+        assert!(
+            !format!("{resolution:?}").contains("crd_secret"),
+            "a Card id leaked into presentation: {resolution:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_or_wrong_variant_is_unavailable_not_empty_names() {
+        let resolution = presentation_from_book(Response::err("no"));
+        assert!(resolution.is_unavailable());
+        assert!(resolution.labels.is_empty());
+    }
+
+    #[test]
+    fn an_empty_card_name_stays_absent() {
+        let resolution = presentation_from_book(Response::BookResolution(Box::new(
+            crate::control::BookResolutionView {
+                hits: vec![crate::control::BookHitView {
+                    card: "crd_one".into(),
+                    handle: "actor:ws_one:act_ada".into(),
+                    name: String::new(),
+                    picture: None,
+                }],
+                coverage: None,
+            },
+        )));
+        assert_eq!(resolution.name_for_actor("act_ada"), None);
     }
 }

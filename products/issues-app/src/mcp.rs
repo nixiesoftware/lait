@@ -5,11 +5,14 @@
 //! Issues-owned MCP tools.
 
 use schemars::JsonSchema;
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{
+    de::{DeserializeOwned, Error as _},
+    Deserialize, Deserializer, Serialize,
+};
 use serde_json::{json, Value};
 use world_interface::{ClientInvocation, Failure, McpTool};
 
-use crate::host::{LOCAL_ACCESS, LOCAL_ATTACH, LOCAL_ATTACHMENT_GET, LOCAL_INBOX};
+use crate::host::{LOCAL_ACCESS, LOCAL_ATTACH, LOCAL_ATTACHMENT_GET, LOCAL_INBOX, LOCAL_WORK};
 use crate::{BoardPos, Filter, IssuesRequest};
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -43,6 +46,111 @@ struct InboxArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RefArgs {
     reff: String,
+}
+
+macro_rules! exact_hex {
+    ($name:ident, $bytes:expr, $encoded:expr, $pattern:literal) => {
+        #[derive(Debug, Serialize, JsonSchema)]
+        #[serde(transparent)]
+        struct $name(
+            #[schemars(length(min = $encoded, max = $encoded), regex(pattern = $pattern))] String,
+        );
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                let valid = value.len() == $encoded
+                    && data_encoding::HEXLOWER
+                        .decode(value.as_bytes())
+                        .is_ok_and(|bytes| bytes.len() == $bytes);
+                if !valid {
+                    return Err(D::Error::custom(format!(
+                        "expected {} lowercase hex characters",
+                        $encoded
+                    )));
+                }
+                Ok(Self(value))
+            }
+        }
+
+        impl $name {
+            fn into_string(self) -> String {
+                self.0
+            }
+        }
+    };
+}
+
+exact_hex!(Hex16Bytes, 16, 32, "^[0-9a-f]{32}$");
+exact_hex!(Hex32Bytes, 32, 64, "^[0-9a-f]{64}$");
+
+/// Issues-owned lifecycle controls. The tagged shape makes `checkpoint`
+/// required only for resume and keeps watch heads out of unrelated actions.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "lowercase")]
+enum WorkArgs {
+    Inspect {
+        run: Hex16Bytes,
+    },
+    Watch {
+        run: Hex16Bytes,
+        /// Causal heads from the preceding inspect/watch response.
+        #[serde(default)]
+        heads: Vec<Hex32Bytes>,
+    },
+    Cancel {
+        run: Hex16Bytes,
+    },
+    Continue {
+        run: Hex16Bytes,
+    },
+    Resume {
+        run: Hex16Bytes,
+        /// Content id of an exact committed checkpoint on this Run.
+        checkpoint: Hex32Bytes,
+    },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct VerifyArgs {
+    reff: String,
+    /// Pinned repository ContentRef (64 lowercase hex).
+    source: Hex32Bytes,
+    /// Exact caller-selected Build id. Execution begins only when that Build
+    /// is trusted and available in the selected Space.
+    build: Hex32Bytes,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum VerdictArg {
+    Pass,
+    Fail,
+}
+
+impl VerdictArg {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AcceptCheckArgs {
+    reff: String,
+    run: Hex16Bytes,
+    attempt: Hex16Bytes,
+    /// Returned report ContentRef (64 lowercase hex).
+    report: Hex32Bytes,
+    /// Product verdict: `pass` or `fail`.
+    verdict: VerdictArg,
+    #[serde(default)]
+    move_to_done: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -406,6 +514,21 @@ pub fn tools() -> Vec<McpTool> {
             "Return an issue to backlog and unassign yourself.",
             issue_stop,
         ),
+        tool::<WorkArgs>(
+            "work",
+            "Inspect or control durable Runtime work through the Issues-owned vocabulary. Starting work remains an Issues World action; this route has no raw Start operation.",
+            work,
+        ),
+        tool::<VerifyArgs>(
+            "verify",
+            "Start a durable issue verification against one pinned repository ContentRef. Returns the stable Run id; execution waits until the selected Build is trusted and available in the Space.",
+            verify,
+        ),
+        tool::<AcceptCheckArgs>(
+            "accept_check",
+            "Attach one returned verification report and accept its Runtime Outcome through the Issues World validator.",
+            accept_check,
+        ),
         tool::<InboxArgs>("inbox", "Read or clear the durable inbox.", inbox),
         tool::<IssueEditArgs>("edit", "Edit issue fields.", issue_edit),
         tool::<IssueMoveArgs>(
@@ -642,6 +765,53 @@ fn issue_done(input: Value) -> Result<ClientInvocation, Failure> {
 fn issue_stop(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueStop { reff: a.reff })
+}
+
+fn work(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: WorkArgs = args(input)?;
+    let input = match a {
+        WorkArgs::Inspect { run } => {
+            json!({"action": "inspect", "run": run.into_string()})
+        }
+        WorkArgs::Watch { run, heads } => json!({
+            "action": "watch",
+            "run": run.into_string(),
+            "heads": heads.into_iter().map(Hex32Bytes::into_string).collect::<Vec<_>>(),
+        }),
+        WorkArgs::Cancel { run } => {
+            json!({"action": "cancel", "run": run.into_string()})
+        }
+        WorkArgs::Continue { run } => {
+            json!({"action": "continue", "run": run.into_string()})
+        }
+        WorkArgs::Resume { run, checkpoint } => json!({
+            "action": "resume",
+            "run": run.into_string(),
+            "checkpoint": checkpoint.into_string(),
+        }),
+    };
+    local(LOCAL_WORK, input)
+}
+
+fn verify(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: VerifyArgs = args(input)?;
+    world(IssuesRequest::Verify {
+        reff: a.reff,
+        source: a.source.into_string(),
+        build: a.build.into_string(),
+    })
+}
+
+fn accept_check(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: AcceptCheckArgs = args(input)?;
+    world(IssuesRequest::AcceptCheck {
+        reff: a.reff,
+        run: a.run.into_string(),
+        attempt: a.attempt.into_string(),
+        report: a.report.into_string(),
+        verdict: a.verdict.as_str().to_owned(),
+        move_to_done: a.move_to_done,
+    })
 }
 
 fn inbox(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1179,7 +1349,13 @@ mod tests {
                 return object(root, variant);
             }
             match schema["type"].as_str() {
-                Some("string") => json!("x"),
+                Some("string") => {
+                    let length = schema["minLength"]
+                        .as_u64()
+                        .and_then(|length| usize::try_from(length).ok())
+                        .unwrap_or(1);
+                    json!("0".repeat(length))
+                }
                 Some("integer" | "number") => json!(0),
                 Some("boolean") => json!(false),
                 Some("array") => json!([]),
@@ -1188,7 +1364,11 @@ mod tests {
             }
         }
 
-        object(schema, schema)
+        let selected = schema["oneOf"]
+            .as_array()
+            .and_then(|variants| variants.first())
+            .unwrap_or(schema);
+        object(schema, selected)
     }
 
     /// The command tag every tool actually emits, taken from the call it makes.
@@ -1298,7 +1478,7 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 64);
+        assert_eq!(tools.len(), 67);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()
@@ -1310,5 +1490,66 @@ mod tests {
             invocation.into_kind(),
             world_interface::ClientInvocationKind::World(_)
         ));
+    }
+
+    #[test]
+    fn lifecycle_tool_schema_requires_action_specific_exact_ids() {
+        let tools = tools();
+        let work = tools.iter().find(|tool| tool.name() == "work").unwrap();
+        work.call(json!({
+            "action": "continue",
+            "run": "11".repeat(16),
+        }))
+        .expect("continue has no caller-supplied scheduling coordinates");
+
+        let missing_checkpoint = work
+            .call(json!({
+                "action": "resume",
+                "run": "11".repeat(16),
+            }))
+            .err()
+            .expect("resume must require a checkpoint");
+        assert!(
+            missing_checkpoint
+                .diagnostic()
+                .is_some_and(|message| message.contains("missing field `checkpoint`")),
+            "{missing_checkpoint:?}"
+        );
+
+        let malformed_head = work
+            .call(json!({
+                "action": "watch",
+                "run": "11".repeat(16),
+                "heads": ["short"],
+            }))
+            .err()
+            .expect("watch heads are exact event ids");
+        assert!(
+            malformed_head
+                .diagnostic()
+                .is_some_and(|message| message.contains("expected 64 lowercase hex characters")),
+            "{malformed_head:?}"
+        );
+
+        let accept = tools
+            .iter()
+            .find(|tool| tool.name() == "accept_check")
+            .unwrap();
+        let invalid_verdict = accept
+            .call(json!({
+                "reff": "ENG-1",
+                "run": "11".repeat(16),
+                "attempt": "22".repeat(16),
+                "report": "33".repeat(32),
+                "verdict": "maybe",
+            }))
+            .err()
+            .expect("verdict is pass or fail");
+        assert!(
+            invalid_verdict
+                .diagnostic()
+                .is_some_and(|message| message.contains("unknown variant `maybe`")),
+            "{invalid_verdict:?}"
+        );
     }
 }

@@ -22,6 +22,14 @@ pub fn is_read(req: &Request) -> bool {
         | Request::MemberLog
         | Request::DeviceInvite
         | Request::DeviceList
+        // Which Worlds this Orbit activated. A read of the ACL's own record,
+        // and one a Library needs before a person has done anything at all.
+        | Request::WorldsActive
+        // What the store is holding. A read in the strictest sense: it counts
+        // Bodies already in memory and stats files already on disk, and the
+        // one thing it could have written — a verification timestamp — is
+        // recorded by the placement that verified, not by the asking.
+        | Request::Storage
         | Request::Status
         | Request::Diagnose { .. }
         | Request::Id
@@ -40,14 +48,20 @@ pub fn is_read(req: &Request) -> bool {
         | Request::HostConfigList { .. }
         | Request::HostConfigGet { .. }
         | Request::HostContext
-        | Request::Hello { .. } => true,
+        | Request::Hello { .. }
+        | Request::BookList
+        | Request::BookGet { .. }
+        | Request::BookLookup { .. }
+        | Request::BookResolve { .. }
+        | Request::BookMigrateStatus => true,
+
+        Request::Work { request, .. } if !request.is_command() => true,
 
         Request::AgentAdd { .. }
         | Request::AgentProvision { .. }
         | Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
-        | Request::MemberAlias { .. }
         | Request::KeyRotate
         | Request::InviteRevoke { .. }
         | Request::DeviceAdd { .. }
@@ -89,6 +103,9 @@ pub fn is_read(req: &Request) -> bool {
         | Request::AssignmentGrant { .. }
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
+        // Runtime owns this classification. Product heads independently
+        // classify their app vocabulary before it reaches the typed seam.
+        | Request::Work { .. }
         // …draining signals, which empties a queue somebody else is waiting to
         // act on — the signals are addressed to that identity, not to whoever
         // has its space open in a browser…
@@ -112,7 +129,18 @@ pub fn is_read(req: &Request) -> bool {
         | Request::HostRestart
         // …and node control.
         | Request::ConfigReload
-        | Request::Stop => false,
+        | Request::Stop
+        | Request::BookPut { .. }
+        | Request::BookSetPicture { .. }
+        | Request::BookDelete { .. }
+        | Request::BookLink { .. }
+        | Request::BookUnlink { .. }
+        | Request::BookMerge { .. }
+        | Request::BookClaimSelf { .. }
+        | Request::BookMigrate
+        | Request::BookPropose { .. }
+        | Request::BookSuggestAccept { .. }
+        | Request::BookSuggestDismiss { .. } => false,
 
         // Not a one-shot at all — see `serve::rpc`, which refuses it with a
         // pointer to the endpoint that streams (`GET /api/events`).
@@ -192,14 +220,32 @@ pub fn is_host_plane(req: &Request) -> bool {
         // and not `Stop` is the whole distinction: this one names the daemon
         // *under* the server, which survives to stand a fresh one up.
         | Request::HostRestart
-        | Request::HostContext => true,
+        | Request::HostContext
+        | Request::BookList
+        | Request::BookGet { .. }
+        | Request::BookPut { .. }
+        | Request::BookSetPicture { .. }
+        | Request::BookDelete { .. }
+        | Request::BookLink { .. }
+        | Request::BookUnlink { .. }
+        | Request::BookMerge { .. }
+        | Request::BookClaimSelf { .. }
+        | Request::BookLookup { .. }
+        | Request::BookResolve { .. }
+        | Request::BookMigrateStatus
+        | Request::BookMigrate
+        | Request::BookPropose { .. }
+        | Request::BookSuggestAccept { .. }
+        | Request::BookSuggestDismiss { .. } => true,
 
         Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
-        | Request::MemberAlias { .. }
         | Request::Members
         | Request::MemberLog
+        // Orbit-routed, not host-routed: it reads one Space's activation record
+        // and therefore needs a Space to read.
+        | Request::WorldsActive
         | Request::AgentAdd { .. }
         | Request::AgentProvision { .. }
         | Request::KeyRotate
@@ -220,8 +266,14 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::AssignmentGrant { .. }
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
+        | Request::Work { .. }
         | Request::Subscribe { .. }
         | Request::Status
+        // Orbit-routed, not host-routed, for the same reason `WorldsActive` is:
+        // it reads one Space's own store and therefore needs a Space to read.
+        // A daemon-scoped total across every Orbit on the machine would be a
+        // different question, and not one this answers.
+        | Request::Storage
         | Request::Diagnose { .. }
         | Request::Id
         | Request::Whoami
@@ -266,12 +318,81 @@ mod tests {
     }
 
     #[test]
+    fn runtime_work_classifies_its_typed_operation_not_its_transport_envelope() {
+        let world = replica::body::WorldId::parse("com.example.work").unwrap();
+        let run = runtime::exec::RunId::from_bytes([0; 16]);
+        assert!(is_read(&Request::Work {
+            request: runtime::exec::WorkRequest::Inspect {
+                world: world.clone(),
+                run,
+            },
+            operation: String::new(),
+        }));
+        assert!(!is_read(&Request::Work {
+            request: runtime::exec::WorkRequest::Cancel { world, run },
+            operation: String::new(),
+        }));
+    }
+
+    /// Asking what a Space is storing reads one Space, so it takes the Space
+    /// route and not the daemon-scoped one.
+    #[test]
+    fn a_storage_read_is_a_read_and_belongs_to_a_space_not_to_the_host_plane() {
+        assert!(is_read(&Request::Storage));
+        assert!(!is_host_plane(&Request::Storage));
+    }
+
+    #[test]
     fn writes_are_not() {
         assert!(!is_read(&Request::KeyRotate));
         assert!(!is_read(&Request::Invite {
             role: None,
             reusable: false,
             ttl_hours: None,
+        }));
+    }
+
+    /// The book is identity-scoped: every Book verb rides the host plane, its
+    /// mutations are writes, and none of it belongs to a Space route. Named
+    /// here so a future read-only credential tier inherits a classified list
+    /// rather than a guess.
+    #[test]
+    fn the_address_book_is_host_plane_and_its_mutations_are_writes() {
+        assert!(is_host_plane(&Request::BookList));
+        assert!(is_host_plane(&Request::BookResolve {
+            orbit: String::new(),
+            handles: Vec::new(),
+        }));
+        assert!(is_host_plane(&Request::BookMigrate));
+        assert!(!is_read(&Request::BookPut {
+            card: None,
+            name: String::new(),
+            note: None,
+        }));
+        assert!(!is_read(&Request::BookDelete {
+            card: String::new(),
+        }));
+        assert!(!is_read(&Request::BookMerge {
+            from: String::new(),
+            into: String::new(),
+        }));
+        assert!(!is_read(&Request::BookMigrate));
+        assert!(!is_read(&Request::BookPropose {
+            bundle: String::new()
+        }));
+        assert!(!is_read(&Request::BookSuggestAccept {
+            suggestion: String::new()
+        }));
+        assert!(is_host_plane(&Request::BookPropose {
+            bundle: String::new()
+        }));
+        // BookGet and BookLookup stay reads; BookList is *labelled* a read but
+        // runs demand-driven alias import today — kept honest on the issue.
+        assert!(is_read(&Request::BookGet {
+            card: String::new(),
+        }));
+        assert!(is_read(&Request::BookLookup {
+            handle: String::new(),
         }));
     }
 }

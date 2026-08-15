@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "capturedAt": "2026-08-14",
+  "corpus": "benchmarks/issues-scan.json",
+  "environment": {
+    "platform": "windows",
+    "architecture": "x86_64",
+    "processor": "AMD Ryzen 7 7700X 8-Core Processor",
+    "rustc": "1.97.0 (2d8144b78 2026-07-07)",
+    "rustProfile": "release",
+    "node": "v22.15.1"
+  },
+  "measurementNotes": {
+    "cold": "One query family against a new IssuesWorld at a previously unseen Manifest root. Corpus construction is excluded.",
+    "warm": "Repeated query family against the exact World instance and Manifest root populated by cold. Rust records five samples; browser records twenty.",
+    "rustAllocation": "Gross successful allocation/reallocation calls and requested bytes on the measuring thread, observed by the test-only System allocator wrapper.",
+    "browserAllocation": "Deterministic source-level units in searchIssueRows: scored objects, array objects, and populated array slots. JavaScript exposes no stable exact allocator-byte contract.",
+    "returnedBytes": "Product projection JSON bytes. Browser Board fanout is the sum of twenty Board projections; browser client is JSON.stringify of the matching rows.",
+    "rawArtifacts": [
+      "target/perf/issues-scan-rust-report.log",
+      "target/perf/issues-scan-browser-report.json"
+    ]
+  },
+  "commands": {
+    "rust": "LAIT_ISSUES_SCAN_FULL=1 cargo test --release --locked -p lait-issues scan_baseline::current_issue_scan_work_is_measured_at_cold_and_warm_roots --lib -- --nocapture --exact",
+    "browser": "LAIT_ISSUES_SCAN_FULL=1 LAIT_BROWSER_SCAN_REPORT=target/perf/issues-scan-browser-report.json npm test -- src/core/issueSearch.test.ts"
+  },
+  "scales": [
+    {
+      "issues": 1000,
+      "projects": 20,
+      "edges": 999,
+      "list": {
+        "cold": {
+          "wallUs": 7337,
+          "allocationCalls": 57111,
+          "allocatedBytes": 5973581,
+          "parsedBodies": 1001,
+          "bodyScanVisits": 2002,
+          "graphEdgeVisits": 0,
+          "returnedBytes": 308894
+        },
+        "warm": {
+          "wallP50Us": 1170,
+          "wallP95Us": 1431,
+          "allocationCalls": 8038,
+          "allocatedBytes": 2549084,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "graphEdgeVisits": 0,
+          "returnedBytes": 308894
+        }
+      },
+      "graph": {
+        "cold": {
+          "wallUs": 6112,
+          "allocationCalls": 49117,
+          "allocatedBytes": 3429367,
+          "parsedBodies": 1001,
+          "bodyScanVisits": 2002,
+          "graphEdgeVisits": 1998,
+          "returnedBytes": 859
+        },
+        "warm": {
+          "wallP50Us": 13,
+          "wallP95Us": 18,
+          "allocationCalls": 44,
+          "allocatedBytes": 4870,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "graphEdgeVisits": 1998,
+          "returnedBytes": 859
+        }
+      },
+      "browserBoardFanout": {
+        "cold": {
+          "wallUs": 8364,
+          "allocationCalls": 59214,
+          "allocatedBytes": 5135890,
+          "parsedBodies": 1001,
+          "bodyScanVisits": 2002,
+          "returnedBytes": 318653
+        },
+        "warm": {
+          "wallP50Us": 2217,
+          "wallP95Us": 2222,
+          "allocationCalls": 10141,
+          "allocatedBytes": 1711393,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "returnedBytes": 318653
+        }
+      },
+      "browserClient": {
+        "warm": {
+          "wallP50Us": 313,
+          "wallP95Us": 731,
+          "candidateVisits": 1000,
+          "scoredRecordAllocations": 1000,
+          "observableAllocationUnits": 4003,
+          "returnedBytes": 308894
+        }
+      }
+    },
+    {
+      "issues": 10000,
+      "projects": 20,
+      "edges": 9999,
+      "list": {
+        "cold": {
+          "wallUs": 255876,
+          "allocationCalls": 566201,
+          "allocatedBytes": 62717977,
+          "parsedBodies": 10001,
+          "bodyScanVisits": 20002,
+          "graphEdgeVisits": 0,
+          "returnedBytes": 3098895
+        },
+        "warm": {
+          "wallP50Us": 18637,
+          "wallP95Us": 20361,
+          "allocationCalls": 80045,
+          "allocatedBytes": 29305813,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "graphEdgeVisits": 0,
+          "returnedBytes": 3098895
+        }
+      },
+      "graph": {
+        "cold": {
+          "wallUs": 255549,
+          "allocationCalls": 486200,
+          "allocatedBytes": 33417036,
+          "parsedBodies": 10001,
+          "bodyScanVisits": 20002,
+          "graphEdgeVisits": 19998,
+          "returnedBytes": 861
+        },
+        "warm": {
+          "wallP50Us": 112,
+          "wallP95Us": 354,
+          "allocationCalls": 44,
+          "allocatedBytes": 4872,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "graphEdgeVisits": 19998,
+          "returnedBytes": 861
+        }
+      },
+      "browserBoardFanout": {
+        "cold": {
+          "wallUs": 307587,
+          "allocationCalls": 578977,
+          "allocatedBytes": 52968878,
+          "parsedBodies": 10001,
+          "bodyScanVisits": 20002,
+          "returnedBytes": 3108654
+        },
+        "warm": {
+          "wallP50Us": 66495,
+          "wallP95Us": 74108,
+          "allocationCalls": 92821,
+          "allocatedBytes": 19556714,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "returnedBytes": 3108654
+        }
+      },
+      "browserClient": {
+        "warm": {
+          "wallP50Us": 3659,
+          "wallP95Us": 4158,
+          "candidateVisits": 10000,
+          "scoredRecordAllocations": 10000,
+          "observableAllocationUnits": 40003,
+          "returnedBytes": 3098895
+        }
+      }
+    },
+    {
+      "issues": 50000,
+      "projects": 20,
+      "edges": 49999,
+      "list": {
+        "cold": {
+          "wallUs": 4918089,
+          "allocationCalls": 2868892,
+          "allocatedBytes": 280317097,
+          "parsedBodies": 50001,
+          "bodyScanVisits": 100002,
+          "graphEdgeVisits": 0,
+          "returnedBytes": 15538895
+        },
+        "warm": {
+          "wallP50Us": 93120,
+          "wallP95Us": 111759,
+          "allocationCalls": 400049,
+          "allocatedBytes": 114457461,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "graphEdgeVisits": 0,
+          "returnedBytes": 15538895
+        }
+      },
+      "graph": {
+        "cold": {
+          "wallUs": 4779618,
+          "allocationCalls": 2468887,
+          "allocatedBytes": 165864510,
+          "parsedBodies": 50001,
+          "bodyScanVisits": 100002,
+          "graphEdgeVisits": 99998,
+          "returnedBytes": 863
+        },
+        "warm": {
+          "wallP50Us": 505,
+          "wallP95Us": 991,
+          "allocationCalls": 44,
+          "allocatedBytes": 4874,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "graphEdgeVisits": 99998,
+          "returnedBytes": 863
+        }
+      },
+      "browserBoardFanout": {
+        "cold": {
+          "wallUs": 5773394,
+          "allocationCalls": 2928504,
+          "allocatedBytes": 271430750,
+          "parsedBodies": 50001,
+          "bodyScanVisits": 100002,
+          "returnedBytes": 15548654
+        },
+        "warm": {
+          "wallP50Us": 977513,
+          "wallP95Us": 1034980,
+          "allocationCalls": 459661,
+          "allocatedBytes": 105571114,
+          "parsedBodies": 0,
+          "bodyScanVisits": 0,
+          "returnedBytes": 15548654
+        }
+      },
+      "browserClient": {
+        "warm": {
+          "wallP50Us": 19787,
+          "wallP95Us": 21623,
+          "candidateVisits": 50000,
+          "scoredRecordAllocations": 50000,
+          "observableAllocationUnits": 200003,
+          "returnedBytes": 15538895
+        }
+      }
+    }
+  ]
+}

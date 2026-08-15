@@ -232,6 +232,7 @@ impl World for MultiWorld {
         }
         Ok(Effect {
             content_refs: Vec::new(),
+            exec: Vec::new(),
             demand: any_demand(),
             operations,
             bodies,
@@ -439,6 +440,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: None,
             observation_capacity: 1, // force overruns for the backpressure case
@@ -620,6 +622,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(ta, STATION_A_SEED)),
             observation_capacity: 0,
@@ -641,6 +644,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb, STATION_B_SEED)),
             observation_capacity: 0,
@@ -662,6 +666,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tc, STATION_C_SEED)),
             observation_capacity: 0,
@@ -735,6 +740,7 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tc, STATION_C_SEED)),
             observation_capacity: 0,

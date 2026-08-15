@@ -34,3 +34,8 @@ viewer/package-lock.json text eol=lf
 # and say "coverage changed" when nothing had. The generator also pins its own
 # output to LF; this is the half that survives someone editing it by hand.
 ci/coverage-manifest.txt text eol=lf
+# Same trap, same fix: the notices are generated wherever a developer is and
+# diffed byte-for-byte on Linux CI. The generator writes LF through
+# `sys.stdout.buffer`; this is the half that survives a hand edit — which the
+# file's own header asks nobody to make.
+THIRD-PARTY-NOTICES.md text eol=lf

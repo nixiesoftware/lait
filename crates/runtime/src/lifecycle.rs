@@ -98,6 +98,7 @@ pub enum Failure {
     Persistence(Persistence),
     StationDormant,
     PrincipalDenied,
+    InvalidFindPolicy,
     UnknownWorld(WorldId),
 }
 
@@ -196,6 +197,8 @@ pub struct Activation {
     /// The content plane's local policy: how much disk it may hold, and how
     /// large a single content this Station will accept.
     pub content: ContentOptions,
+    /// Local ceilings for the Find evaluator.
+    pub find: crate::find::Policy,
     /// Which delivery planes this Station answers on.
     pub planes: PlaneOptions,
     /// The Station's Contact plane: transport, station identity, mechanics
@@ -213,6 +216,7 @@ impl Activation {
         Self {
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
             content: ContentOptions::default(),
+            find: crate::find::Policy::default(),
             planes: PlaneOptions::default(),
             comms: None,
             observation_capacity: 0,
@@ -534,6 +538,10 @@ impl Orbit {
     /// The durable Orbit remains the same participation. Valid offline; grants
     /// no new Space authority.
     fn open_station(self, options: Activation) -> Result<Station, Failure> {
+        options
+            .find
+            .validate()
+            .map_err(|_| Failure::InvalidFindPolicy)?;
         let drain_deadline = if options.drain_deadline.is_zero() {
             DEFAULT_DRAIN_DEADLINE
         } else {
@@ -570,6 +578,18 @@ impl Orbit {
                         schema.version,
                         schema.encoding.clone(),
                         model,
+                    );
+                }
+                // Exec truth is Runtime-owned under each World, so these exact
+                // schemas are interpretable even though package composition
+                // forbids the World from declaring or writing them itself.
+                for schema in crate::exec::body_schemas() {
+                    supported.declare(
+                        id.clone(),
+                        schema.id,
+                        schema.version,
+                        schema.encoding,
+                        replica::body::MUTATION_COLLABORATIVE,
                     );
                 }
             }
@@ -649,6 +669,7 @@ impl Orbit {
             content,
             live,
             max_content_len: options.content.max_content_len,
+            find_policy: options.find,
         };
         if let Some(comms) = options.comms {
             // Held before `comms` moves into the Contact driver's context: the
@@ -818,6 +839,29 @@ pub struct OrbitStatus {
     pub locked: bool,
 }
 
+/// What one Orbit's store is holding, as an **observation**.
+///
+/// Every figure is separately optional because they are separately measurable,
+/// and absent means *this was not measured* — never zero, never an estimate. A
+/// storage surface that drew an unmeasured footprint as `0 B`, or a store that
+/// has never been verified as verified at the epoch, would be making the same
+/// claim as one that drew a failed peer sample as "no peers": a confident
+/// number where there is no observation at all. Absent is the honest state and
+/// this type is shaped so it stays expressible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StorageReading {
+    /// Bytes on disk under this Orbit's store directory, or `None` when the
+    /// walk could not complete. Attributable to this Space alone — the store is
+    /// one directory per Space — rather than to the machine.
+    pub bytes_on_disk: Option<u64>,
+    /// How many Bodies the Replica holds, interpreted and opaque alike.
+    pub object_count: Option<u64>,
+    /// When the store's material was last verified end to end, in milliseconds
+    /// since the unix epoch, or `None` when it never has been. See
+    /// [`replica::Replica::verified_at_ms`] for what the verification is.
+    pub last_verified_ms: Option<u64>,
+}
+
 /// An activated Orbit: the exclusive Replica writer, live task graph, hosted
 /// Worlds, docks, and shutdown. **Not** cloneable; [`Station::vacate`] and
 /// [`Station::wait`] consume it.
@@ -862,6 +906,8 @@ pub struct Station {
     /// policy. Kept here because every local content call has to enforce it and
     /// the options struct does not outlive activation.
     max_content_len: u64,
+    /// Local ceilings inherited by every Session admitted here.
+    find_policy: crate::find::Policy,
 }
 
 impl std::fmt::Debug for Station {
@@ -1112,6 +1158,7 @@ impl Station {
             self.epoch,
             registration.limits,
             registration.schemas.clone(),
+            self.find_policy,
             self.alive.clone(),
             self.core.clone(),
             self.authority.clone(),
@@ -1132,6 +1179,37 @@ impl Station {
     /// The current committed Replica frontier (advances as Sessions submit).
     pub fn frontier(&self) -> replica::frontier::ReplicaFrontier {
         self.core.frontier()
+    }
+
+    /// What this Station's store is holding: bytes on disk, Bodies, and when
+    /// its material was last verified.
+    ///
+    /// **Passive.** Every figure comes from state this activation already
+    /// opened, or from the bytes already sitting in the store directory.
+    /// Nothing here places an Orbit, wakes a Station, dials a peer or takes the
+    /// store lock — asking what a Station holds must cost what looking costs,
+    /// not what opening costs, or a surface listing ten Orbits mounts ten
+    /// stores to draw itself.
+    pub fn storage(&self) -> StorageReading {
+        let (object_count, last_verified_ms) = self.core.storage();
+        let bytes_on_disk = match self.store.footprint_bytes() {
+            Ok(bytes) => Some(bytes),
+            // Absent — not partial, and emphatically not zero. A walk that
+            // could not finish measured nothing, and the caller is told that
+            // rather than handed a number it would have no way to distrust.
+            Err(failure) => {
+                tracing::warn!(
+                    ?failure,
+                    "the Orbit store's footprint could not be measured"
+                );
+                None
+            }
+        };
+        StorageReading {
+            bytes_on_disk,
+            object_count: Some(object_count),
+            last_verified_ms,
+        }
     }
 
     /// Known/discoverable Neighbors: a consistent snapshot of the persistent

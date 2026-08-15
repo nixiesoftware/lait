@@ -51,7 +51,7 @@ use tokio::net::TcpListener;
 use crate::control::{ErrorKind, Request};
 use crate::daemon::{Client, OrbitDoorbell};
 use crate::orbits::{Catalog, ResolvedOrbit, StationIdentity};
-use auth::{Guard, Refusal};
+use auth::{mint_token, Guard, Refusal};
 
 /// The default port. Fixed rather than ephemeral so the URL is predictable and
 /// the `Origin` allowlist has something stable to name; a collision is reported
@@ -81,6 +81,13 @@ struct App {
     selection: crate::config::Selection,
     doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
     cookie: String,
+    /// The launch credentials this run has minted and not yet seen spent.
+    ///
+    /// On `App` because redemption must *consume*, and a store built per
+    /// request could not: a ticket would answer as often as it was presented,
+    /// which is the whole property that makes putting a credential in a URL
+    /// defensible.
+    launch_tickets: auth::LaunchTickets,
     /// Latched when this server begins shutting down.
     ///
     /// On `App` rather than passed down, because every long-lived response has
@@ -152,6 +159,7 @@ pub async fn run(
         selection,
         doorbells: doorbells.clone(),
         cookie: cookie_name(bound.port()),
+        launch_tickets: auth::LaunchTickets::new(),
         stop: stop.clone(),
         content_permits: content::ContentStreamPermits::new(),
         socket: socket::Hub::new(),
@@ -186,7 +194,26 @@ pub async fn run(
         println!("(loopback only; this link carries a one-time token for this run)");
     }
     if open {
-        open_browser(&url);
+        // A launch ticket rather than the run token, and for the reason the
+        // ticket exists: this URL is handed to a browser, so it lands in
+        // history, in a synchronised profile, and in the shell's recent list.
+        // The run token would still be current in every one of those places
+        // tomorrow; a ticket is spent by the time the page has finished
+        // loading.
+        //
+        // Falling back to the token URL if minting fails is deliberate — this
+        // is a courtesy launch whose contract is "the URL is already on
+        // stdout", and refusing to open a window because entropy was briefly
+        // unavailable would be a worse trade than the one it protects against.
+        let launch = app
+            .launch_tickets
+            .mint(None, auth::LAUNCH_TICKET_LIFETIME, now_ms())
+            .map(|ticket| format!("http://127.0.0.1:{}/?ticket={}", bound.port(), ticket.secret))
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "could not mint a launch ticket; opening with the run token");
+                url.clone()
+            });
+        open_browser(&launch);
     }
 
     let serve_result = axum::serve(listener, router(app))
@@ -335,6 +362,10 @@ const ROUTES: &[Route] = &[
     // is the cookie — which is the credential that already rides a same-origin
     // handshake, and the one that does not end up in history.
     Route::no_query_token("/api/session", Method::Get),
+    // Minting a launch credential requires the run credential, and never a
+    // query one: a request that could ask for a ticket by URL would be a way to
+    // turn one link into an endless supply of them.
+    Route::no_query_token("/api/launch", Method::Post),
 ];
 
 /// One registered path: how to reach it, and whether it will take a credential
@@ -394,6 +425,7 @@ fn handler(route: &Route) -> Option<axum::routing::MethodRouter<Arc<App>>> {
         ("/api/spaces/{id}/content/{content}", Method::Head) => axum::routing::head(content::head),
         ("/api/spaces/{id}/content/{content}", _) => get(content::download),
         ("/api/session", _) => get(socket::session),
+        ("/api/launch", _) => post(mint_launch),
         _ => return None,
     })
 }
@@ -414,14 +446,6 @@ fn router(app: Arc<App>) -> Router {
         .fallback(get(static_asset))
         .layer(axum::middleware::from_fn_with_state(app.clone(), gate))
         .with_state(app)
-}
-
-/// A 32-byte hex token, minted per run and never persisted.
-fn mint_token() -> anyhow::Result<String> {
-    let mut buf = [0u8; 32];
-    getrandom::fill(&mut buf)
-        .map_err(|error| anyhow::anyhow!("system entropy unavailable: {error}"))?;
-    Ok(data_encoding::HEXLOWER.encode(&buf))
 }
 
 /// The gate every request passes: rebinding guard first, credential second.
@@ -466,11 +490,30 @@ async fn gate(State(app): State<Arc<App>>, req: axum::extract::Request, next: Ne
         .then_some(query)
         .flatten();
 
-    if let Err(r) = app
-        .guard
-        .check_token(resolve_token(bearer, query.as_deref(), cookie))
-    {
-        return refuse(r);
+    // A launch ticket is a credential in its own right, and a *better* one for
+    // the opening navigation than the run token it replaces: 32 bytes of
+    // entropy that stop being worth anything the first time they are presented.
+    // It is admitted only where the run token's query form is admitted — the
+    // opening navigation and nothing else — and `index` spends it there.
+    //
+    // Presence is enough to be let through; validity is decided by redemption,
+    // which is the only place it *can* be decided, because deciding it here
+    // would mean checking a single-use credential twice and spending it on the
+    // check.
+    let launching = accepts_query_token(req.uri().path())
+        && req
+            .uri()
+            .query()
+            .and_then(|q| query_param(q, "ticket"))
+            .is_some();
+
+    if !launching {
+        if let Err(r) = app
+            .guard
+            .check_token(resolve_token(bearer, query.as_deref(), cookie))
+        {
+            return refuse(r);
+        }
     }
     next.run(req).await
 }
@@ -555,6 +598,9 @@ fn query_param(query: &str, name: &str) -> Option<String> {
 #[derive(Deserialize)]
 struct IndexQuery {
     token: Option<String>,
+    /// A single-use launch credential minted by the client. See
+    /// [`crate::serve::auth::LaunchTickets`].
+    ticket: Option<String>,
 }
 
 /// The shell — and the one-time token handoff.
@@ -564,19 +610,150 @@ struct IndexQuery {
 /// history, and out of any `Referer` the page might later emit. `HttpOnly` keeps
 /// it out of reach of script in our own page; `SameSite=Strict` keeps the browser
 /// from attaching it to anyone else's request.
-async fn index(State(app): State<Arc<App>>, Query(q): Query<IndexQuery>) -> Response {
+async fn index(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<IndexQuery>,
+) -> Response {
+    // A launch ticket is the client's handoff: single-use, Orbit-scoped and
+    // short-lived, exchanged here for the ordinary session cookie. That
+    // exchange is what "no persistent token exists" means in practice — what
+    // travelled in the URL is spent by the time anybody reads it back out of
+    // history.
+    //
+    // It also marks this browser as one the client sent, which is what the
+    // overlay is gated on. A head somebody opened themselves has no client
+    // context to draw and does not pretend to.
+    if let Some(ticket) = q.ticket {
+        let Some(redeemed) = app.launch_tickets.redeem(&ticket, now_ms()) else {
+            // One answer for unknown, spent and expired. Telling them apart
+            // tells a caller which guess was closer.
+            return (
+                StatusCode::UNAUTHORIZED,
+                "this launch link has been used already, or has expired",
+            )
+                .into_response();
+        };
+        tracing::debug!(orbit = ?redeemed.orbit, "redeemed a launch ticket");
+        let session = format!(
+            "{}={}; Path=/; HttpOnly; SameSite=Strict",
+            app.cookie,
+            app.guard.token()
+        );
+        let launched = format!(
+            "{}=1; Path=/; HttpOnly; SameSite=Strict",
+            client_cookie(&app.cookie)
+        );
+        // Appended, not inserted: two `Set-Cookie` headers with the same name
+        // in an array would have the second replace the first, and the browser
+        // would arrive holding the marker with no session to go with it.
+        let mut cookies = axum::http::HeaderMap::new();
+        for value in [session, launched] {
+            match axum::http::HeaderValue::from_str(&value) {
+                Ok(value) => {
+                    cookies.append(header::SET_COOKIE, value);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "a launch cookie was not a header value");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "could not establish this session",
+                    )
+                        .into_response();
+                }
+            }
+        }
+        return (cookies, Redirect::to("/")).into_response();
+    }
     if let Some(token) = q.token {
         // Overwrites whatever this port's previous run left behind — the gate let
         // us here on the query token, so this is the credential that is current.
         let cookie = format!("{}={token}; Path=/; HttpOnly; SameSite=Strict", app.cookie);
         return ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response();
     }
-    shell::index()
+    shell::index(launched_by_client(&app, &headers))
 }
 
 /// Any non-`/api` path: an embedded asset, or the SPA entry.
-async fn static_asset(uri: axum::http::Uri) -> Response {
-    shell::asset(uri.path())
+async fn static_asset(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    shell::asset(uri.path(), launched_by_client(&app, &headers))
+}
+
+/// What a client asks for when it wants to open a World.
+#[derive(serde::Deserialize)]
+struct LaunchRequest {
+    orbit: String,
+}
+
+/// Mint one launch credential.
+///
+/// The tickets live here rather than in the client because redemption must
+/// *consume*, and only the process that will be presented with a ticket can
+/// spend it. A client minting its own would be issuing credentials against a
+/// store nothing checks.
+///
+/// The caller already holds the run token — the gate saw to that — so this
+/// grants nothing new. What it produces is *weaker* than what the caller has:
+/// single-use, one Orbit, thirty seconds. That is the whole point, because this
+/// is the one that travels in a URL.
+async fn mint_launch(State(app): State<Arc<App>>, Json(request): Json<LaunchRequest>) -> Response {
+    if request.orbit.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "a launch needs an orbit").into_response();
+    }
+    match app.launch_tickets.mint(
+        Some(request.orbit.trim().to_owned()),
+        auth::LAUNCH_TICKET_LIFETIME,
+        now_ms(),
+    ) {
+        Ok(ticket) => Json(serde_json::json!({
+            "ticket": ticket.secret,
+            "orbit": ticket.orbit,
+            "expiresAtMs": ticket.expires_at_ms,
+        }))
+        .into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not mint a launch ticket");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not mint a launch credential",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// The cookie that says "the client sent this browser here".
+///
+/// Derived from the session cookie's name so it is scoped to the same run and
+/// the same port, and two heads on one machine cannot read each other's.
+fn client_cookie(session: &str) -> String {
+    format!("{session}_client")
+}
+
+/// Whether this request belongs to a browser the client launched.
+///
+/// The overlay is *client context*. A head a person opened themselves has none
+/// to draw, and an overlay offering a route back to a client that is not there
+/// is a control that cannot work — worse than absent, because it looks like a
+/// feature.
+fn launched_by_client(app: &App, headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| auth::cookie_value(value, &client_cookie(&app.cookie)))
+        .is_some_and(|value| value == "1")
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 async fn list_spaces(State(app): State<Arc<App>>) -> Response {
@@ -1059,10 +1236,90 @@ mod tests {
             selection: crate::config::Selection::default(),
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
+            launch_tickets: auth::LaunchTickets::new(),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: content::ContentStreamPermits::new(),
             socket: socket::Hub::new(),
         }))
+    }
+
+    /// The same router, plus a handle on the run's launch tickets so a test can
+    /// mint one and then watch it be spent.
+    fn app_with_tickets(token: &str) -> (Router, Arc<App>) {
+        let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
+        let state = Arc::new(App {
+            guard: Guard::new(token.into(), 7717),
+            directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
+            daemon: Client::at(nowhere),
+            selection: crate::config::Selection::default(),
+            doorbells: tokio::sync::broadcast::channel(1).0,
+            cookie: cookie_name(7717),
+            launch_tickets: auth::LaunchTickets::new(),
+            stop: tokio::sync::watch::channel(false).0,
+            content_permits: content::ContentStreamPermits::new(),
+            socket: socket::Hub::new(),
+        });
+        (router(state.clone()), state)
+    }
+
+    /// A launch link is spent on arrival and exchanged for the ordinary session
+    /// cookie. That exchange is what "no persistent token exists" means: what
+    /// travelled in the URL — and therefore into history, into a synchronised
+    /// profile, and into the shell's recent list — is worth nothing by the time
+    /// anybody reads it back out.
+    #[tokio::test]
+    async fn a_launch_link_is_exchanged_for_a_session_and_then_is_worthless() {
+        let (router, state) = app_with_tickets("run-token");
+        let ticket = state
+            .launch_tickets
+            .mint(
+                Some("orb_one".into()),
+                auth::LAUNCH_TICKET_LIFETIME,
+                now_ms(),
+            )
+            .expect("mint");
+
+        let first = router
+            .clone()
+            .oneshot(req(
+                &[("host", "127.0.0.1:7717")],
+                &format!("/?ticket={}", ticket.secret),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            first.status().is_redirection(),
+            "a valid launch link did not land the browser on a clean URL: {}",
+            first.status()
+        );
+        let cookies: Vec<String> = first
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_owned))
+            .collect();
+        assert!(
+            cookies.iter().any(|cookie| cookie.contains("run-token")),
+            "the launch did not hand over a session: {cookies:?}"
+        );
+        assert!(
+            cookies.iter().any(|cookie| cookie.contains("_client=1")),
+            "the launch did not mark this browser as one the client sent: {cookies:?}"
+        );
+
+        // Replay from history, which is exactly where a launch URL ends up.
+        let again = router
+            .oneshot(req(
+                &[("host", "127.0.0.1:7717")],
+                &format!("/?ticket={}", ticket.secret),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            again.status(),
+            StatusCode::UNAUTHORIZED,
+            "a spent launch link was honoured a second time"
+        );
     }
 
     /// `GET /app.js` — the embedded bundle. Chosen because it proves the gate let
@@ -1265,6 +1522,7 @@ mod tests {
             selection: crate::config::Selection::default(),
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
+            launch_tickets: auth::LaunchTickets::new(),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: content::ContentStreamPermits::new(),
             socket: socket::Hub::new(),
@@ -1460,6 +1718,7 @@ mod gate_coverage {
             selection: crate::config::Selection::default(),
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
+            launch_tickets: auth::LaunchTickets::new(),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: content::ContentStreamPermits::new(),
             socket: socket::Hub::new(),
@@ -1623,6 +1882,7 @@ mod gate_coverage {
             selection: crate::config::Selection::default(),
             doorbells: doorbells.clone(),
             cookie: cookie_name(7717),
+            launch_tickets: auth::LaunchTickets::new(),
             stop: stop.clone(),
             content_permits: content::ContentStreamPermits::new(),
             socket: socket::Hub::new(),

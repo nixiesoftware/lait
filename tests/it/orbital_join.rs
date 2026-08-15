@@ -93,6 +93,7 @@ fn activate(
         .open(Activation {
             planes: Default::default(),
             content: Default::default(),
+            find: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_for(transport, seed, mech)),
             observation_capacity: 0,

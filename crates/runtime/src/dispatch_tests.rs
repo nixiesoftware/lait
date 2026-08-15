@@ -156,6 +156,7 @@ impl World for NoteWorld {
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([0u8; 16]));
         Ok(Effect {
             content_refs: Vec::new(),
+            exec: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
@@ -196,6 +197,9 @@ fn note_registration() -> (Descriptor, Arc<dyn World>) {
         limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
+        find_schemas: Vec::new(),
+        find_extractors: Vec::new(),
+        exec_specs: Vec::new(),
     };
     (reg, Arc::new(world))
 }
@@ -224,6 +228,18 @@ impl World for DescribedWorld {
 
     fn signal_schemas(&self) -> &[crate::world::SignalSchema] {
         self.inner.signal_schemas()
+    }
+
+    fn find_schemas(&self) -> &[crate::find::Schema] {
+        self.inner.find_schemas()
+    }
+
+    fn find_extractors(&self) -> &[crate::find::Extractor] {
+        self.inner.find_extractors()
+    }
+
+    fn exec_specs(&self) -> &[crate::exec::Spec] {
+        self.inner.exec_specs()
     }
 
     fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
@@ -260,6 +276,362 @@ fn station_with(reg: Descriptor, world: Arc<dyn World>) -> crate::lifecycle::Sta
 fn station() -> crate::lifecycle::Station {
     let (reg, world) = note_registration();
     station_with(reg, world)
+}
+
+fn exec_demand(capability: &str) -> Vec<u8> {
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("com.example.exec-atomic", capability),
+        mechanics::authorization::Resource::root("com.example.exec-atomic"),
+    )
+    .encode_canonical()
+    .unwrap()
+}
+
+fn exec_schema(name: &str) -> crate::exec::SchemaRef {
+    crate::exec::SchemaRef {
+        name: SchemaId::parse(name).unwrap(),
+        version: 1,
+    }
+}
+
+fn exec_limits() -> crate::exec::Limits {
+    crate::exec::Limits {
+        attempts: 1,
+        events: 16,
+        checkpoints: 0,
+        child_runs: 1,
+        progress_bytes: 4_096,
+        checkpoint_bytes: 0,
+        wall_millis: 30_000,
+    }
+}
+
+fn exec_spec() -> crate::exec::Spec {
+    let payload = |name| crate::exec::PayloadSpec {
+        schema: exec_schema(name),
+        max_inline_bytes: 1_024,
+        max_content_refs: 0,
+        max_content_bytes: 0,
+        read: exec_demand("payload.read"),
+        max_additional_input_bytes: 0,
+    };
+    crate::exec::Spec {
+        name: SchemaId::parse("agent.implement").unwrap(),
+        version: 1,
+        access: crate::exec::Access {
+            start: exec_demand("run.start"),
+            offer: exec_demand("run.offer"),
+            control: exec_demand("run.control"),
+            accept: exec_demand("run.accept"),
+        },
+        input: payload("agent.input"),
+        output: payload("agent.output"),
+        mode: crate::exec::Mode::Unary,
+        resume: crate::exec::Resume::Restart,
+        effects: crate::exec::Effects::Pure,
+        accept: crate::exec::AcceptRule::World,
+        queries: Vec::new(),
+        service: None,
+        links: Vec::new(),
+        limits: exec_limits(),
+    }
+}
+
+struct ExecAtomicWorld {
+    id: WorldId,
+    schemas: Vec<Schema>,
+    specs: Vec<crate::exec::Spec>,
+}
+
+impl ExecAtomicWorld {
+    fn new() -> Self {
+        Self {
+            id: WorldId::parse("com.example.exec-atomic").unwrap(),
+            schemas: vec![Schema {
+                id: SchemaId::parse("agent.request").unwrap(),
+                version: 1,
+                encoding: EncodingId::parse("bytes").unwrap(),
+                mutation: MutationModel::Atomic,
+                readable_predecessors: Vec::new(),
+            }],
+            specs: vec![exec_spec()],
+        }
+    }
+
+    fn product_body(&self) -> BodyKey {
+        BodyKey::new(self.id.clone(), BodyId::from_bytes([0x31; 16]))
+    }
+}
+
+impl World for ExecAtomicWorld {
+    fn id(&self) -> WorldId {
+        self.id.clone()
+    }
+
+    fn schemas(&self) -> &[Schema] {
+        &self.schemas
+    }
+
+    fn exec_specs(&self) -> &[crate::exec::Spec] {
+        &self.specs
+    }
+
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let spec = if intent.payload == b"invalid-spec" {
+            exec_schema("agent.missing")
+        } else {
+            exec_schema("agent.implement")
+        };
+        Ok(Effect {
+            content_refs: Vec::new(),
+            exec: vec![crate::exec::Cmd::Start(crate::exec::Start {
+                spec,
+                build: crate::exec::BuildId::from_bytes([0x32; 32]),
+                input: crate::exec::Input {
+                    inline: intent.payload.clone(),
+                    content: Vec::new(),
+                    content_bytes: 0,
+                },
+                parent: None,
+                source: None,
+                service: None,
+                resources: Vec::new(),
+                limits: exec_limits(),
+                queries: Vec::new(),
+            })],
+            operations: vec![(
+                self.product_body(),
+                Op::ReplaceAtomic {
+                    value: intent.payload.clone(),
+                },
+            )],
+            bodies: vec![self.product_body()],
+            effect: b"accepted".to_vec(),
+            declarations: Vec::new(),
+            demand: exec_demand("request.write"),
+        })
+    }
+
+    fn query(&self, ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Ok(Projection {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            bytes: ctx.read_body(&self.product_body()).unwrap_or_default(),
+            frontier: ReplicaFrontier::EMPTY,
+            demand: exec_demand("request.read"),
+        })
+    }
+}
+
+fn find_bound(value: u64) -> crate::find::Bound {
+    crate::find::Bound {
+        decoded_bodies: value,
+        postings_read: value,
+        edges_visited: value,
+        nodes_visited: value,
+        paths_retained: value,
+        candidates_per_branch: value,
+        score_evaluations: value,
+        projected_bytes: value,
+        packed_tokens: value,
+        wall_millis: value,
+    }
+}
+
+fn find_query(value: u64) -> crate::find::Query {
+    let schema = crate::find::SchemaRef {
+        name: SchemaId::parse("note").unwrap(),
+        version: 1,
+    };
+    crate::find::Query {
+        schema: schema.clone(),
+        root: None,
+        mode: crate::find::Mode::Exact,
+        steps: vec![crate::find::Step {
+            id: crate::find::StepId::new(1).unwrap(),
+            input: Vec::new(),
+            op: crate::find::Op::Seek(crate::find::Seek::Term {
+                field: crate::find::FieldRef {
+                    schema,
+                    name: SchemaId::parse("text").unwrap(),
+                },
+                text: "q".to_owned(),
+                kind: crate::find::Term::Token,
+            }),
+            bound: find_bound(value),
+        }],
+        output: crate::find::StepId::new(1).unwrap(),
+        bound: find_bound(value),
+        cursor: None,
+    }
+}
+
+#[test]
+fn world_mutation_and_started_run_commit_as_one_durable_effect() {
+    let world = Arc::new(ExecAtomicWorld::new());
+    let world_id = world.id();
+    let product_body = world.product_body();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0x44; 16]);
+    let payload = b"implement through the issue control seam".to_vec();
+    let action = identity
+        .sign_action(
+            &session,
+            request,
+            Intent {
+                schema: SchemaId::parse("agent.request").unwrap(),
+                schema_version: 1,
+                payload: payload.clone(),
+            },
+        )
+        .unwrap();
+
+    let replay = action.clone();
+    let committed = session.submit(action).unwrap();
+    let after_first = station.frontier();
+    let replayed = session.submit(replay).unwrap();
+    assert_eq!(replayed, committed);
+    assert_eq!(station.frontier(), after_first);
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let run_body = BodyKey::new(world_id.clone(), BodyId::from_bytes(run.as_bytes()));
+    assert_eq!(committed.effect, b"accepted");
+    let mut expected_bodies = vec![product_body.clone(), run_body.clone()];
+    expected_bodies.sort();
+    assert_eq!(committed.bodies, expected_bodies);
+    assert_ne!(committed.frontier, ReplicaFrontier::EMPTY);
+
+    let projection = session
+        .query(Query {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(projection.bytes, payload);
+
+    let protected = session.test_read_reserved_collaborative(&run_body).unwrap();
+    let events = protected.lists.get(crate::exec::RUN_EVENTS_PATH).unwrap();
+    assert_eq!(events.len(), 1);
+    let event = crate::exec::RunEvent::decode_canonical(&events[0].value).unwrap();
+    let started = event.as_started().unwrap();
+    assert_eq!(started.run, run);
+    assert_eq!(started.request, request.as_bytes());
+    assert_eq!(started.command, 0);
+    assert_eq!(started.input, exec_schema("agent.input"));
+    assert_eq!(
+        started.authority_frontier,
+        AuthorityFrontier::from_canonical_bytes(vec![1])
+    );
+
+    let command = protected.maps.get(crate::exec::RUN_COMMAND_PATH).unwrap();
+    let command_bytes = command.values().flatten().copied().collect::<Vec<_>>();
+    let decoded = crate::exec::Cmd::decode_canonical(&command_bytes).unwrap();
+    assert!(matches!(decoded, crate::exec::Cmd::Start(_)));
+    assert_eq!(decoded.digest().unwrap(), started.command_digest);
+
+    let inspected = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0x45; 16],
+        )
+        .unwrap();
+    let crate::exec::WorkReply::State(state) = inspected else {
+        panic!("an inspect returns lifecycle state");
+    };
+    assert_eq!(state.run, run);
+    assert_eq!(state.event_count, 1);
+    assert!(state.unresolved);
+    assert!(state.attempts.is_empty());
+    let encoded = serde_json::to_string(&state).unwrap();
+    assert!(!encoded.contains("input"));
+    assert!(!encoded.contains("output"));
+
+    assert!(matches!(
+        session
+            .work(
+                crate::exec::WorkRequest::Watch {
+                    world: world_id.clone(),
+                    run,
+                    known_heads: state.heads.clone(),
+                },
+                [0x46; 16],
+            )
+            .unwrap(),
+        crate::exec::WorkReply::Unchanged { run: unchanged, .. } if unchanged == run
+    ));
+
+    let cancelled = session
+        .work(
+            crate::exec::WorkRequest::Cancel {
+                world: world_id.clone(),
+                run,
+            },
+            [0x47; 16],
+        )
+        .unwrap();
+    let crate::exec::WorkReply::State(cancelled) = cancelled else {
+        panic!("a control returns the resulting lifecycle state");
+    };
+    assert_eq!(cancelled.cancel_asked.len(), 1);
+    // CancelAsked is durable intent, not a claim that the executor has
+    // stopped. Only a run-level Cancelled fact resolves the Run.
+    assert!(cancelled.unresolved);
+    assert_eq!(cancelled.event_count, 2);
+
+    assert!(matches!(
+        session.work(
+            crate::exec::WorkRequest::Retry {
+                world: world_id,
+                run,
+            },
+            [0x48; 16],
+        ),
+        Err(crate::exec::WorkError::Unsupported(_))
+    ));
+}
+
+#[test]
+fn invalid_start_rolls_back_the_companion_world_mutation() {
+    let world = Arc::new(ExecAtomicWorld::new());
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let before = station.frontier();
+
+    let result = submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"invalid-spec".to_vec(),
+        },
+    );
+    assert_eq!(
+        result,
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    );
+    assert_eq!(station.frontier(), before);
+    let projection = session
+        .query(Query {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: Vec::new(),
+        })
+        .unwrap();
+    assert!(projection.bytes.is_empty());
 }
 
 #[test]
@@ -407,8 +779,127 @@ impl World for PanicWorld {
         panic!("world callback panics")
     }
     fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
-        Err(Rejection::InvalidRequest)
+        panic!("generic Find must not enter a World callback")
     }
+}
+
+#[test]
+fn find_derives_ambient_coordinates_without_entering_the_world() {
+    let id = WorldId::parse("com.example.panic").unwrap();
+    let schemas = vec![Schema {
+        id: SchemaId::parse("note").unwrap(),
+        version: 1,
+        encoding: EncodingId::parse("text.utf8").unwrap(),
+        mutation: MutationModel::Atomic,
+        readable_predecessors: vec![],
+    }];
+    let reg = Descriptor {
+        id: id.clone(),
+        implementation_version: Version(1),
+        schemas: schemas.clone(),
+        limits: Limits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
+        find_schemas: Vec::new(),
+        find_extractors: Vec::new(),
+        exec_specs: Vec::new(),
+    };
+    let station = station_with(
+        reg,
+        Arc::new(PanicWorld {
+            id: id.clone(),
+            schemas,
+        }),
+    );
+    let session = station.dock(&id, &writer()).unwrap();
+    let before = station.frontier();
+
+    assert_eq!(
+        session.find(find_query(1)),
+        Err(crate::find::Failure::Unavailable)
+    );
+
+    let mut resumed = find_query(1);
+    let hostile_coordinates = crate::find::Coordinates {
+        epoch: mechanics::station::Epoch::from_u64(u64::MAX),
+        space: session.space_id().clone(),
+        world: id.clone(),
+        implementation: [7; 32],
+        root: [8; 32],
+        actor: ActorId::from_incept_hash(&"f".repeat(64)),
+        device: mechanics::actor::device_from_seed(&WRITER_SEED),
+        authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![9]),
+        query: resumed.digest().unwrap(),
+        schema: resumed.schema.clone(),
+    };
+    resumed.cursor = Some(
+        crate::find::Cursor::issue(&hostile_coordinates, &resumed, b"position".to_vec()).unwrap(),
+    );
+    assert_eq!(
+        session.find(resumed),
+        Err(crate::find::Failure::Invalid(
+            crate::find::Invalid::CursorMismatch("epoch")
+        ))
+    );
+    assert_eq!(station.frontier(), before, "Find committed nothing");
+}
+
+#[test]
+fn station_find_policy_can_only_tighten_a_query() {
+    let (reg, world) = note_registration();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: reg,
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
+    let station = rt
+        .create()
+        .unwrap()
+        .open(Activation {
+            find: crate::find::Policy {
+                bound: find_bound(1),
+            },
+            ..Activation::default()
+        })
+        .unwrap();
+    let session = station
+        .dock(&WorldId::parse("com.example.notes").unwrap(), &writer())
+        .unwrap();
+
+    assert_eq!(
+        session.find(find_query(2)),
+        Err(crate::find::Failure::PolicyExceeded)
+    );
+    assert_eq!(
+        session.find(find_query(1)),
+        Err(crate::find::Failure::Unavailable)
+    );
+}
+
+#[test]
+fn invalid_station_find_policy_refuses_activation() {
+    let (reg, world) = note_registration();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: reg,
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
+    let mut invalid = find_bound(1);
+    invalid.wall_millis = 0;
+
+    assert!(matches!(
+        rt.create().unwrap().open(Activation {
+            find: crate::find::Policy { bound: invalid },
+            ..Activation::default()
+        }),
+        Err(crate::lifecycle::Failure::InvalidFindPolicy)
+    ));
 }
 
 #[test]
@@ -428,6 +919,9 @@ fn a_world_panic_is_contained_and_does_not_end_the_station() {
         limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
+        find_schemas: Vec::new(),
+        find_extractors: Vec::new(),
+        exec_specs: Vec::new(),
     };
     let world: Arc<dyn World> = Arc::new(PanicWorld {
         id: id.clone(),
@@ -657,6 +1151,7 @@ impl World for RogueWorld {
         );
         Ok(Effect {
             content_refs: Vec::new(),
+            exec: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 foreign.clone(),
@@ -691,6 +1186,9 @@ fn a_world_cannot_write_outside_its_namespace() {
         limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
+        find_schemas: Vec::new(),
+        find_extractors: Vec::new(),
+        exec_specs: Vec::new(),
     };
     let world: Arc<dyn World> = Arc::new(RogueWorld {
         id: id.clone(),
@@ -849,6 +1347,7 @@ impl World for BoardWorld {
         let key = self.body();
         Ok(Effect {
             content_refs: Vec::new(),
+            exec: Vec::new(),
             demand: any_demand(),
             operations: vec![
                 (
@@ -960,6 +1459,7 @@ impl World for MixedWorld {
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([5u8; 16]));
         Ok(Effect {
             content_refs: Vec::new(),
+            exec: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
@@ -1004,6 +1504,9 @@ fn containment_is_bound_to_the_intent_schema_not_the_world() {
         limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
+        find_schemas: Vec::new(),
+        find_extractors: Vec::new(),
+        exec_specs: Vec::new(),
     };
     let world: Arc<dyn World> = Arc::new(MixedWorld {
         id: id.clone(),
@@ -1055,6 +1558,9 @@ fn an_identical_signed_replay_returns_the_original_result_without_reapplying() {
         limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
+        find_schemas: Vec::new(),
+        find_extractors: Vec::new(),
+        exec_specs: Vec::new(),
     };
     let station = station_with(reg, Arc::new(world));
     let session = station.dock(&id, &writer()).unwrap();

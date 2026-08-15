@@ -30,6 +30,26 @@ pub const LOCAL_ATTACH: &str = "issues.attach";
 pub const LOCAL_ATTACHMENT_GET: &str = "issues.attachment_get";
 pub const LOCAL_ACCESS: &str = "issues.access";
 pub const LOCAL_WORLD_UPGRADE: &str = "issues.world_upgrade";
+pub const LOCAL_WORK: &str = "issues.work";
+
+#[derive(Debug, Clone)]
+pub enum IssuesWorkAction {
+    Inspect,
+    Watch {
+        known_heads: Vec<runtime::exec::EventId>,
+    },
+    Cancel,
+    Continue,
+    Resume {
+        checkpoint: replica::content::ContentRef,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct IssuesWorkRequest {
+    pub run: runtime::exec::RunId,
+    pub action: IssuesWorkAction,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessRequest {
@@ -63,6 +83,7 @@ pub enum IssuesHostRequest {
         id: String,
         out: Option<String>,
     },
+    Work(IssuesWorkRequest),
 }
 
 impl IssuesHostRequest {
@@ -75,11 +96,16 @@ impl IssuesHostRequest {
             Self::Inbox { clear: false } | Self::Access(AccessRequest::List { .. }) => {
                 ClientAccess::Query
             }
+            Self::Work(IssuesWorkRequest {
+                action: IssuesWorkAction::Inspect | IssuesWorkAction::Watch { .. },
+                ..
+            }) => ClientAccess::Query,
             Self::Inbox { clear: true }
             | Self::WorldUpgrade
             | Self::Access(AccessRequest::Grant { .. } | AccessRequest::Revoke { .. })
             | Self::Attach { .. }
-            | Self::AttachmentGet { .. } => ClientAccess::Command,
+            | Self::AttachmentGet { .. }
+            | Self::Work(_) => ClientAccess::Command,
         }
     }
 }
@@ -164,6 +190,42 @@ pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Failur
             id: required(&input, "id")?,
             out: optional(&input, "out"),
         }),
+        LOCAL_WORK => {
+            let run = runtime::exec::RunId::from_bytes(hex::<16>(&required(&input, "run")?)?);
+            let action = match required(&input, "action")?.as_str() {
+                "inspect" => IssuesWorkAction::Inspect,
+                "watch" => {
+                    let mut known_heads = input
+                        .get("heads")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(|head| {
+                            head.as_str()
+                                .ok_or_else(|| Failure::new("Work heads must be strings"))
+                                .and_then(hex::<32>)
+                                .map(runtime::exec::EventId::from_bytes)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    known_heads.sort_unstable();
+                    known_heads.dedup();
+                    IssuesWorkAction::Watch { known_heads }
+                }
+                "cancel" => IssuesWorkAction::Cancel,
+                "continue" => IssuesWorkAction::Continue,
+                "resume" => IssuesWorkAction::Resume {
+                    checkpoint: replica::content::ContentRef {
+                        content_id: hex::<32>(&required(&input, "checkpoint")?)?,
+                    },
+                },
+                other => {
+                    return Err(Failure::new(format!(
+                        "unsupported Issues Work action '{other}'"
+                    )));
+                }
+            };
+            Ok(IssuesHostRequest::Work(IssuesWorkRequest { run, action }))
+        }
         other => Err(Failure::new(format!(
             "unsupported Issues host capability '{other}'"
         ))),
@@ -250,6 +312,7 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
         // exactly that at every open. A warning naming a remedy no surface
         // offers is worse than no warning.
         "world_upgrade" => invocation(LOCAL_WORLD_UPGRADE, json!({})),
+        "work" => invocation(LOCAL_WORK, input),
         _ => {
             let request: IssuesRequest = serde_json::from_value(input)
                 .map_err(|error| Failure::new(format!("bad Issues request: {error}")))?;
@@ -282,8 +345,108 @@ pub fn execute<'a>(
             IssuesHostRequest::AttachmentGet { reff, id, out } => {
                 run_attachment_get(host, reff, id, out).await
             }
+            IssuesHostRequest::Work(request) => run_work(host, request).await,
         }
     })
+}
+
+async fn run_work(host: &dyn ClientHost, request: IssuesWorkRequest) -> Result<Value, Failure> {
+    let world = issues::contract::world_id();
+    let request = match request.action {
+        IssuesWorkAction::Inspect => runtime::exec::WorkRequest::Inspect {
+            world,
+            run: request.run,
+        },
+        IssuesWorkAction::Watch { known_heads } => runtime::exec::WorkRequest::Watch {
+            world,
+            run: request.run,
+            known_heads,
+        },
+        IssuesWorkAction::Cancel => runtime::exec::WorkRequest::Cancel {
+            world,
+            run: request.run,
+        },
+        IssuesWorkAction::Continue => runtime::exec::WorkRequest::Retry {
+            world,
+            run: request.run,
+        },
+        IssuesWorkAction::Resume { checkpoint } => runtime::exec::WorkRequest::Resume {
+            world,
+            run: request.run,
+            checkpoint,
+        },
+    };
+    let value = host.call_work(request).await?;
+    if crate::classify_failure(&value).is_some() {
+        return Ok(value);
+    }
+    let reply = serde_json::from_value(value)
+        .map_err(|error| Failure::new(format!("decode Runtime Work reply: {error}")))?;
+    Ok(work_output(reply))
+}
+
+fn work_output(reply: runtime::exec::WorkReply) -> Value {
+    match reply {
+        runtime::exec::WorkReply::Unchanged { world, run, heads } => json!({
+            "kind": "work_unchanged",
+            "world": world.as_str(),
+            "run": hex_bytes(run.as_bytes()),
+            "heads": heads.into_iter().map(|head| hex_bytes(head.as_bytes())).collect::<Vec<_>>(),
+        }),
+        runtime::exec::WorkReply::State(state) => json!({
+            "kind": "work",
+            "world": state.world.as_str(),
+            "run": hex_bytes(state.run.as_bytes()),
+            "spec": { "name": state.spec.name.as_str(), "version": state.spec.version },
+            "build": hex_bytes(state.build.as_bytes()),
+            "heads": state.heads.into_iter().map(|head| hex_bytes(head.as_bytes())).collect::<Vec<_>>(),
+            "event_count": state.event_count,
+            "unresolved": state.unresolved,
+            "cancel_asked": state.cancel_asked.into_iter().map(|event| hex_bytes(event.as_bytes())).collect::<Vec<_>>(),
+            "attempts": state.attempts.into_iter().map(|attempt| json!({
+                "attempt": hex_bytes(attempt.attempt.as_bytes()),
+                "station": attempt.station.to_string(),
+                "build": hex_bytes(attempt.build.as_bytes()),
+                "began": attempt.began.into_iter().map(|event| hex_bytes(event.as_bytes())).collect::<Vec<_>>(),
+                "checkpoints": attempt.checkpoints.into_iter().map(|fact| json!({
+                    "event": hex_bytes(fact.event.as_bytes()),
+                    "content": hex_bytes(fact.checkpoint.content.content_id),
+                    "build": hex_bytes(fact.checkpoint.build.as_bytes()),
+                    "sequence": fact.checkpoint.sequence,
+                })).collect::<Vec<_>>(),
+                "returned": attempt.returned.into_iter().map(|fact| json!({
+                    "event": hex_bytes(fact.event.as_bytes()),
+                    "terminal": match fact.terminal {
+                        runtime::exec::TerminalClass::Succeeded => "succeeded",
+                        runtime::exec::TerminalClass::ApplicationFailed => "application_failed",
+                    },
+                })).collect::<Vec<_>>(),
+                "failed": attempt.failed.into_iter().map(|event| hex_bytes(event.as_bytes())).collect::<Vec<_>>(),
+                "cancelled": attempt.cancelled.into_iter().map(|event| hex_bytes(event.as_bytes())).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "accepted": state.accepted.into_iter().map(|fact| json!({
+                "event": hex_bytes(fact.event.as_bytes()),
+                "attempt": hex_bytes(fact.attempt.as_bytes()),
+            })).collect::<Vec<_>>(),
+            "rejected": state.rejected.into_iter().map(|fact| json!({
+                "event": hex_bytes(fact.event.as_bytes()),
+                "attempt": hex_bytes(fact.attempt.as_bytes()),
+            })).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn hex<const N: usize>(value: &str) -> Result<[u8; N], Failure> {
+    let encoded_len = N.saturating_mul(2);
+    data_encoding::HEXLOWER
+        .decode(value.as_bytes())
+        .ok()
+        .and_then(|bytes| <[u8; N]>::try_from(bytes.as_slice()).ok())
+        .ok_or_else(|| Failure::new(format!("expected {encoded_len} lowercase hex characters")))
+}
+
+fn hex_bytes<const N: usize>(value: [u8; N]) -> String {
+    data_encoding::HEXLOWER.encode(&value)
 }
 
 /// Name what a destructive Issues command would destroy.
@@ -641,8 +804,72 @@ fn optional(value: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::sync::Mutex;
 
     use super::*;
+
+    struct WorkHost {
+        request: Mutex<Option<runtime::exec::WorkRequest>>,
+    }
+
+    impl ClientHost for WorkHost {
+        fn local_root(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn call_world<'a>(
+            &'a self,
+            _call: runtime::world::call::Call,
+        ) -> world_interface::ClientFuture<'a, runtime::world::call::Reply> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_work<'a>(
+            &'a self,
+            request: runtime::exec::WorkRequest,
+        ) -> world_interface::ClientFuture<'a, Value> {
+            *self.request.lock().expect("request") = Some(request.clone());
+            Box::pin(async move {
+                serde_json::to_value(runtime::exec::WorkReply::Unchanged {
+                    world: request.world().clone(),
+                    run: request.run(),
+                    heads: Vec::new(),
+                })
+                .map_err(|error| Failure::new(error.to_string()))
+            })
+        }
+
+        fn call_control<'a>(
+            &'a self,
+            _request: HostControlRequest,
+        ) -> world_interface::ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_content<'a>(
+            &'a self,
+            _request: world_interface::HostContentRequest,
+        ) -> world_interface::ClientFuture<'a, Value> {
+            Box::pin(async { Err(Failure::refusal()) })
+        }
+
+        fn call_identity<'a>(
+            &'a self,
+            _handles: Vec<world_interface::PresentationHandle>,
+        ) -> world_interface::ClientFuture<'a, world_interface::PresentationResolution> {
+            Box::pin(async { Ok(world_interface::PresentationResolution::unavailable()) })
+        }
+    }
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("test Work host must not pend"),
+        }
+    }
 
     #[test]
     fn a_peer_named_attachment_is_saved_beside_us_not_wherever_it_asked() {
@@ -695,7 +922,7 @@ mod tests {
     #[test]
     fn rejects_incomplete_access_grants_before_the_host_sees_them() {
         let error = decode(LOCAL_ACCESS, json!({"action": "grant", "actor": "alice"})).unwrap_err();
-        assert_eq!(error, Failure::Invalid);
+        assert_eq!(error.kind(), world_interface::FailureKind::Invalid);
     }
 
     #[test]
@@ -732,6 +959,46 @@ mod tests {
     #[test]
     fn malformed_world_input_is_a_typed_invalid_operation() {
         let error = parse_web(json!({"cmd": "issue_new"})).unwrap_err();
-        assert_eq!(error, Failure::Invalid);
+        assert_eq!(error.kind(), world_interface::FailureKind::Invalid);
+    }
+
+    #[test]
+    fn issues_owns_the_control_vocabulary_and_calls_typed_work_without_root_protocol() {
+        let run = runtime::exec::RunId::from_bytes([0x71; 16]);
+        let host = WorkHost {
+            request: Mutex::new(None),
+        };
+        let output = block_on(run_work(
+            &host,
+            IssuesWorkRequest {
+                run,
+                action: IssuesWorkAction::Cancel,
+            },
+        ))
+        .unwrap();
+        assert_eq!(output["kind"], "work_unchanged");
+        assert!(matches!(
+            host.request.lock().expect("request").as_ref(),
+            Some(runtime::exec::WorkRequest::Cancel { world, run: actual })
+                if world == &issues::contract::world_id() && actual == &run
+        ));
+
+        let inspect = invocation(
+            LOCAL_WORK,
+            json!({"action": "inspect", "run": hex_bytes(run.as_bytes())}),
+        )
+        .unwrap();
+        assert_eq!(inspect.access(), ClientAccess::Query);
+        let cancel = invocation(
+            LOCAL_WORK,
+            json!({"action": "cancel", "run": hex_bytes(run.as_bytes())}),
+        )
+        .unwrap();
+        assert_eq!(cancel.access(), ClientAccess::Command);
+        assert!(decode(
+            LOCAL_WORK,
+            json!({"action": "start", "run": hex_bytes(run.as_bytes())})
+        )
+        .is_err());
     }
 }

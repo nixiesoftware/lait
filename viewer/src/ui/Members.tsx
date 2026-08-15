@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 
-import { ConfirmRequired, spaceRpc as rpc } from "../api";
+import { ConfirmRequired, hostRpc, spaceRpc as rpc } from "../api";
 import type { MemberDto, MemberLogEntry } from "../types";
 import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";
@@ -170,24 +170,42 @@ export function Members({
                 {isAdmin && !readOnly && (
                   <span className="flex shrink-0 gap-1">
                     <IconButton
-                      label="Set a local name"
+                      label="Name in your address book"
                       isDisabled={busy === m.key}
                       onClick={() =>
                         void act(m.key, async () => {
                           const name = await ask.prompt({
-                            title: "Local name",
-                            body: "Private to you, never synced. Empty clears it.",
+                            title: "Name in your address book",
+                            body: "Authors a Card in your identity's book — private to you, never synced. Manage Cards in the address book.",
                             label: "Name",
                             defaultValue: m.alias,
-                            allowEmpty: true,
                           });
-                          if (name === null) return;
-                          await rpc(spaceId, { cmd: "member_alias", who: m.key, name: name.trim() });
+                          if (name === null || !name.trim()) return;
+                          // The book is the one namer: find the Card this
+                          // member's handle is on, or author one and link it.
+                          const who = await rpc(spaceId, { cmd: "whoami" });
+                          if (who.kind !== "whoami" || !who.space) return;
+                          const handle = `actor:${who.space}:${m.key}`;
+                          const found = await hostRpc({ cmd: "book_lookup", handle });
+                          const existing =
+                            found.kind === "book" ? found.cards[0]?.card : undefined;
+                          if (existing) {
+                            await hostRpc({ cmd: "book_put", card: existing, name: name.trim() });
+                          } else {
+                            const put = await hostRpc({ cmd: "book_put", name: name.trim() });
+                            const card =
+                              put.kind === "book"
+                                ? put.cards.find(
+                                    (c) => c.name === name.trim() && c.handles.length === 0,
+                                  )?.card
+                                : undefined;
+                            if (card) await hostRpc({ cmd: "book_link", card, handle });
+                          }
                         })
                       }
                       variant="ghost"
                       size="sm"
-                      tooltip="Set a local name"
+                      tooltip="Name in your address book"
                       icon={<Pencil className="size-icon-sm" />}
                     />
                     {!m.me && (

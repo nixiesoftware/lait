@@ -1,0 +1,20 @@
+[package]
+name = "addressbook"
+version = "0.7.11"
+edition = "2021"
+rust-version = "1.92"
+description = "Identity-scoped address book: a typed projection over one Fabric Body. A leaf — it names fabric and mechanics, never daemon, Runtime, Replica, World, or a product."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+fabric = { path = "../fabric" }
+mechanics = { path = "../mechanics" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["use-std"] }
+blake3 = "1"
+data-encoding = "2.6"
+
+[lints]
+workspace = true

@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "description": "Focused diagnostic corpus for FIND-5. It complements, rather than replaces, benchmarks/issues-reference.json: the reference gate measures public-socket product p95, while this fixture names and counts the current scan work that produces it.",
+  "corpus": {
+    "scales": [1000, 10000, 50000],
+    "smokeScale": 100,
+    "projects": 20,
+    "edgePattern": "forward-relates-chain"
+  },
+  "measurement": {
+    "warmIterations": 5,
+    "browserWarmups": 5,
+    "browserIterations": 20,
+    "browserQuery": "issue"
+  },
+  "callPaths": {
+    "list": [
+      "runtime::world::World::query",
+      "lait_issues::IssuesWorld::derived_snapshot",
+      "lait_issues::catalog_state",
+      "lait_issues::issue_state",
+      "lait_issues::derive_aliases",
+      "lait_issues::IssueQuery::List",
+      "lait_issues::project_row",
+      "serde_json::to_vec"
+    ],
+    "graph": [
+      "runtime::world::World::query",
+      "lait_issues::IssuesWorld::derived_snapshot",
+      "lait_issues::catalog_state",
+      "lait_issues::issue_state",
+      "lait_issues::derive_aliases",
+      "lait_issues::IssueQuery::Graph",
+      "lait_issues::graph_view",
+      "serde_json::to_vec"
+    ],
+    "browserSearch": [
+      "viewer::IssueSearch::useEffect",
+      "viewer::rpc(board) per project",
+      "lait_issues::IssueQuery::Board",
+      "lait_issues::board_view",
+      "viewer::searchIssueRows",
+      "viewer::cmdkFilter"
+    ]
+  }
+}

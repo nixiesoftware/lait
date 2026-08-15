@@ -154,6 +154,14 @@ impl Placement {
     /// that flag when it cannot connect to the host at all. For an attached
     /// placement, whose host is in another process, that is the only liveness
     /// signal there is.
+    fn handle_snapshot(&self) -> Option<crate::daemon::address_book::HandleSnapshot> {
+        let host = match &self.mode {
+            PlacementMode::Owned { host, .. } => host.upgrade()?,
+            PlacementMode::Attached => return None,
+        };
+        Some(host.handle_snapshot())
+    }
+
     fn is_live(&self) -> bool {
         if !self.alive.load(Ordering::Acquire) {
             return false;
@@ -472,6 +480,16 @@ impl<T> Default for OrbitOccupancy<T> {
 }
 
 impl<T> OrbitOccupancy<T> {
+    /// Observe occupancy without creating a slot or placing.
+    async fn peek(&self, orbit: &LocalOrbitId) -> Option<Arc<T>> {
+        let slot = {
+            let slots = self.slots.lock_recovering();
+            slots.get(orbit)?.clone()
+        };
+        let placement = slot.lock().await.clone();
+        placement
+    }
+
     async fn get_or_try_place<F, Fut, E>(
         &self,
         orbit: LocalOrbitId,
@@ -554,6 +572,7 @@ pub struct Router {
     packages: WorldPackages,
     lifecycle: RwLock<()>,
     shutting_down: AtomicBool,
+    book: Result<Arc<crate::daemon::address_book::AddressBookService>, String>,
 }
 
 impl Router {
@@ -569,6 +588,10 @@ impl Router {
         // Doorbells are invalidations, not state. Lagging receivers rebaseline,
         // so a bounded fan-in is both sufficient and necessary.
         let (doorbells, _) = broadcast::channel(256);
+        let identity = catalog.identity().to_path_buf();
+        let book = crate::daemon::address_book::AddressBookService::open(&identity)
+            .map(Arc::new)
+            .map_err(|error| error.to_string());
         Self {
             catalog,
             occupancy: OrbitOccupancy::default(),
@@ -577,11 +600,35 @@ impl Router {
             packages,
             lifecycle: RwLock::new(()),
             shutting_down: AtomicBool::new(false),
+            book,
         }
     }
 
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
+    }
+
+    pub(crate) fn book(&self) -> Result<&crate::daemon::address_book::AddressBookService, String> {
+        self.book.as_ref().map(Arc::as_ref).map_err(Clone::clone)
+    }
+
+    /// Authored-handle snapshot of an *already placed* Orbit. Vacant, attached,
+    /// or draining placements return `None` and never call [`Self::place`].
+    pub(crate) async fn active_handle_snapshot(
+        &self,
+        orbit: &str,
+    ) -> Option<crate::daemon::address_book::HandleSnapshot> {
+        let resolved = self.resolve(orbit).ok()?;
+        // A named agent's home is a distinct identity: its Orbit must never
+        // decorate from — or leak existence bits into — this identity's book.
+        if resolved.identity != crate::orbits::StationIdentity::Own {
+            return None;
+        }
+        let placement = self.occupancy.peek(&resolved.address.orbit).await?;
+        if !placement.is_live() {
+            return None;
+        }
+        placement.handle_snapshot()
     }
 
     pub fn resolve(&self, id: &str) -> Result<ResolvedOrbit> {

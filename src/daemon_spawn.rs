@@ -28,8 +28,55 @@ use std::io;
 use std::path::Path;
 use std::process::ExitStatus;
 
+/// What can be proven about a process this run did not spawn.
+///
+/// A pid on its own proves nothing: pids are reused, and the process answering
+/// to one now may have started after the record that named it. The executable
+/// and the start time together make the identity checkable — a supervisor can
+/// insist that the process it is about to stop is the same one it recorded,
+/// rather than whatever inherited the number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    /// The image the process is running, as the OS reports it — not as anything
+    /// recorded earlier claims.
+    pub executable: std::path::PathBuf,
+    /// Milliseconds since the Unix epoch. The half of the identity that pid
+    /// reuse cannot forge.
+    pub started_at_ms: u64,
+}
+
+/// Ask the operating system what the process at `pid` actually is.
+///
+/// `ErrorKind::Unsupported` on a platform with no implementation, and that is a
+/// deliberate shape rather than a gap: every caller treats an unprovable
+/// identity as a refusal, so a platform that cannot answer never authorises
+/// stopping anything. Windows is the first-class target and the one that
+/// answers.
+pub fn identify(pid: u32) -> io::Result<ProcessIdentity> {
+    imp::identify(pid)
+}
+
+/// Terminate a process this run did not spawn, but only if it is still exactly
+/// the process described by `expected`.
+///
+/// The check happens *inside* this call, against the same handle that does the
+/// terminating. That is the whole point: a caller that identified a process,
+/// decided it matched, and then asked to kill the pid would leave a window in
+/// which the process could exit and the number be reused — and the kill would
+/// land on a stranger. A handle names a process object rather than a number, so
+/// verifying and terminating through one handle cannot be raced.
+///
+/// [`io::ErrorKind::PermissionDenied`] when the process no longer matches, which
+/// callers surface as a refusal rather than a failure: nothing is wrong, the
+/// evidence simply is not there.
+pub fn terminate_verified(expected: &ProcessIdentity) -> io::Result<()> {
+    imp::terminate_verified(expected)
+}
+
 /// A spawned daemon. Only what `ensure_daemon` needs: is it still alive?
 pub struct DaemonChild {
+    pid: u32,
     #[cfg(windows)]
     proc: std::os::windows::io::OwnedHandle,
     #[cfg(not(windows))]
@@ -56,6 +103,11 @@ pub fn spawn(
 }
 
 impl DaemonChild {
+    /// The process id returned by the spawn operation.
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
     /// `Some(status)` once the daemon has exited, `None` while it is running.
     ///
     /// A daemon that has already exited is never going to answer, so the spawn
@@ -63,6 +115,15 @@ impl DaemonChild {
     /// timeout.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         imp::try_wait(self)
+    }
+
+    /// Force this exact spawned child to exit and collect its status.
+    ///
+    /// This deliberately lives on the owned child handle rather than accepting
+    /// an arbitrary pid. Callers cannot race pid reuse and terminate a process
+    /// they did not spawn.
+    pub fn force_kill_and_wait(&mut self) -> io::Result<ExitStatus> {
+        imp::force_kill_and_wait(self)
     }
 
     /// Give up the handle to a reaper, so the daemon's *exit* is collected
@@ -110,11 +171,39 @@ mod imp {
             cmd.arg("--home").arg(identity);
         }
         let child = cmd.spawn()?;
-        Ok(DaemonChild { child })
+        let pid = child.id();
+        Ok(DaemonChild { pid, child })
     }
 
     pub fn try_wait(c: &mut DaemonChild) -> io::Result<Option<ExitStatus>> {
         c.child.try_wait()
+    }
+
+    pub fn force_kill_and_wait(c: &mut DaemonChild) -> io::Result<ExitStatus> {
+        if let Some(status) = c.child.try_wait()? {
+            return Ok(status);
+        }
+        c.child.kill()?;
+        c.child.wait()
+    }
+
+    /// Unimplemented off Windows, which callers read as "cannot be proven" and
+    /// therefore as a refusal. v1 targets Windows; adding a `/proc` reader here
+    /// would be the whole change, and until something needs it, an honest
+    /// `Unsupported` beats a second code path nobody exercises.
+    pub fn identify(_pid: u32) -> io::Result<ProcessIdentity> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "process identity is not implemented on this platform",
+        ))
+    }
+
+    /// Unprovable identity is a refusal, so this never terminates anything.
+    pub fn terminate_verified(_expected: &ProcessIdentity) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "process identity is not implemented on this platform, so no unowned process may be stopped",
+        ))
     }
 
     /// A plain OS thread, not a runtime task: `wait` is a blocking syscall, and
@@ -136,20 +225,24 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use std::ffi::{c_void, OsStr};
+    use std::ffi::{c_void, OsStr, OsString};
     use std::fs::{File, OpenOptions};
-    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
     use std::os::windows::process::ExitStatusExt;
+    use std::path::PathBuf;
     use std::ptr;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, SetHandleInformation, FILETIME, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-        InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
+        CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, GetProcessTimes,
+        InitializeProcThreadAttributeList, OpenProcess, QueryFullProcessImageNameW,
+        TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
         EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
 
     fn wide(s: &OsStr) -> Vec<u16> {
@@ -261,6 +354,18 @@ mod imp {
         // SAFETY: every pointer is valid for the call. `bInheritHandles` must be
         // TRUE for the attribute list to be consulted at all — it is what the
         // list narrows.
+        //
+        // `CREATE_NO_WINDOW` because the daemon is a console-subsystem image
+        // with nowhere to write: its three handles are `NUL` and a log file, so
+        // a console is never read and never typed into. Without the flag
+        // Windows gives a console child one anyway — inherited from the spawner
+        // when there is one, and *freshly allocated* when there is not. The
+        // second case is the visible one: a GUI parent (Astrolabe) starting a
+        // daemon flashes a black window on screen for as long as the process
+        // lives. The first is quieter and worse — sharing the spawner's console
+        // puts the daemon in that console's process group, so a Ctrl-C or a
+        // closed terminal delivers a control event to a process whose whole
+        // contract is to outlive the command that started it.
         let ok = unsafe {
             CreateProcessW(
                 app.as_ptr(),
@@ -268,7 +373,7 @@ mod imp {
                 ptr::null(),
                 ptr::null(),
                 1,
-                EXTENDED_STARTUPINFO_PRESENT,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
                 ptr::null(),
                 ptr::null(),
                 &si.StartupInfo,
@@ -282,12 +387,110 @@ mod imp {
         // the thread; the process handle becomes ours to own.
         unsafe { CloseHandle(pi.hThread) };
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as RawHandle) };
-        Ok(DaemonChild { proc })
+        Ok(DaemonChild {
+            pid: pi.dwProcessId,
+            proc,
+        })
     }
 
     /// Nothing to reap: Windows has no zombie, and the process object goes when
     /// the last handle to it closes — which is this drop.
     pub fn reap(_c: DaemonChild) {}
+
+    /// `PROCESS_QUERY_LIMITED_INFORMATION` is the least this can ask for and
+    /// still get both answers, and unlike `PROCESS_QUERY_INFORMATION` it is
+    /// granted for processes at a higher integrity level — so a daemon started
+    /// from an elevated shell can still be *identified* here, and refused for
+    /// the right reason rather than for a missing handle.
+    pub fn identify(pid: u32) -> io::Result<ProcessIdentity> {
+        // SAFETY: a null handle is returned as failure and never used.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // Owned so every path below closes it, including the error ones.
+        // SAFETY: `OpenProcess` returned a live handle we now own.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
+        describe(handle.as_raw_handle() as HANDLE, pid)
+    }
+
+    /// Read image and start time from a handle that already carries
+    /// `PROCESS_QUERY_LIMITED_INFORMATION`.
+    fn describe(raw: HANDLE, pid: u32) -> io::Result<ProcessIdentity> {
+        let mut buffer = [0u16; 32_768];
+        let mut length = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+        // SAFETY: `buffer` is valid for `length` u16s and `length` is updated
+        // to the count actually written.
+        if unsafe { QueryFullProcessImageNameW(raw, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let executable = PathBuf::from(OsString::from_wide(
+            buffer.get(..length as usize).unwrap_or(&[]),
+        ));
+
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: four out-parameters we own, and a live process handle.
+        if unsafe { GetProcessTimes(raw, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(ProcessIdentity {
+            pid,
+            executable,
+            started_at_ms: filetime_to_unix_ms(created),
+        })
+    }
+
+    pub fn terminate_verified(expected: &ProcessIdentity) -> io::Result<()> {
+        // TERMINATE alone cannot read the image name or the times, so the
+        // handle carries both rights and the verification runs on it.
+        // SAFETY: a null handle is returned as failure and never used.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                0,
+                expected.pid,
+            )
+        };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `OpenProcess` returned a live handle we now own.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
+        let actual = describe(handle.as_raw_handle() as HANDLE, expected.pid)?;
+        if &actual != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "process {} is not the one recorded ({} started {}), it is {} started {}",
+                    expected.pid,
+                    expected.executable.display(),
+                    expected.started_at_ms,
+                    actual.executable.display(),
+                    actual.started_at_ms
+                ),
+            ));
+        }
+        // SAFETY: the handle we verified through, and the same process object.
+        if unsafe { TerminateProcess(handle.as_raw_handle() as HANDLE, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// A `FILETIME` counts 100-nanosecond ticks from 1601-01-01; Unix counts
+    /// milliseconds from 1970-01-01. The constant is the gap between those two
+    /// epochs in ticks.
+    fn filetime_to_unix_ms(time: FILETIME) -> u64 {
+        const EPOCH_DELTA_TICKS: u64 = 116_444_736_000_000_000;
+        let ticks = (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        ticks
+            .saturating_sub(EPOCH_DELTA_TICKS)
+            .saturating_div(10_000)
+    }
 
     pub fn try_wait(c: &mut DaemonChild) -> io::Result<Option<ExitStatus>> {
         let h = c.proc.as_raw_handle() as HANDLE;
@@ -307,5 +510,22 @@ mod imp {
             WAIT_TIMEOUT => Ok(None),
             _ => Err(io::Error::last_os_error()),
         }
+    }
+
+    pub fn force_kill_and_wait(c: &mut DaemonChild) -> io::Result<ExitStatus> {
+        if let Some(status) = try_wait(c)? {
+            return Ok(status);
+        }
+        let h = c.proc.as_raw_handle() as HANDLE;
+        // SAFETY: `h` is the live process handle owned by `c`.
+        if unsafe { TerminateProcess(h, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A terminated process must become signalled; waiting here also makes
+        // the returned exit code stable before the handle is reused.
+        if unsafe { WaitForSingleObject(h, u32::MAX) } != WAIT_OBJECT_0 {
+            return Err(io::Error::last_os_error());
+        }
+        try_wait(c)?.ok_or_else(|| io::Error::other("terminated process is still running"))
     }
 }

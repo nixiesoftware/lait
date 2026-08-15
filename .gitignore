@@ -19,7 +19,13 @@ viewer/dist/
 # The coverage manifest check writes this beside the committed file so CI can
 # upload it as an artifact; it is the ANSWER, never the record.
 ci/coverage-manifest.txt.actual
+THIRD-PARTY-NOTICES.md.actual
 ci/coverage-manifest.txt.new
 
 # proptest saves shrunk counterexamples here and they SHOULD be committed —
 # but only when a real failure produced them, never a deliberate mutation.
+
+# Flutter build output for the client.
+apps/astrolabe/build/
+apps/astrolabe/.dart_tool/
+apps/astrolabe/windows/flutter/ephemeral/

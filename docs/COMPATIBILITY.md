@@ -32,6 +32,21 @@ bump means peers on different generations share no ALPN and never connect. There
 is no half-speaking pair and no in-band fallback, so this is the most expensive
 kind of bump and the one that needs feature bits to avoid.
 
+### MCP protocol
+
+The stdio server advertises and speaks MCP `2024-11-05`, matching the current
+`rmcp` 1.7 integration. Newer dates are not aliases for that implementation:
+LAIT does not yet provide the `2025-06-18`/`2025-11-25` structured tool results,
+output schemas, JSON Schema 2020-12 advertisement, and tool-execution validation
+errors, nor the `2026-07-28` discovery, handshake-less version metadata,
+required result types, and tool-list cache controls. A client that initializes
+with a newer supported date may negotiate down; a discovery-first,
+handshake-less client is not compatible.
+
+Moving the advertised date requires a dedicated `rmcp` 3.x protocol project
+that implements and tests those surfaces together. The date must not be bumped
+as a dependency-only change.
+
 ## 2. Durable formats
 
 | Surface | Constant | Value | Gate |
@@ -48,6 +63,110 @@ kind of bump and the one that needs feature bits to avoid.
 | Policy compiler | `mechanics::compile::COMPILER_VERSION` | 1 | leading field |
 | Ledger semantics | `mechanics::ledger::LEDGER_SEMANTICS_VERSION` | 1 | leading field |
 | World implementation descriptor | `runtime::implementation::DESCRIPTOR_VERSION_SECTIONED` | 2 | leading field |
+
+### Find F0 contract
+
+`find::Grant` standalone bytes are implemented at version 1. They carry a
+leading version field, have a 65,536-byte ceiling, and commit under the
+`lait/find/grant/1\0` BLAKE3 domain. Schema, Field, Edge, Gate, and Feature
+reference field order; the six operator bits; the two mode bits; and the ten
+`Bound` fields are fixture-frozen. Canonical sets are sorted and duplicate-free;
+unknown bits, absent or sentinel-unbounded ceilings, undeclared Schema
+references, trailing bytes, and widening composition reject.
+
+`find::Query` standalone bytes are also implemented at version 1. They have a
+262,144-byte ceiling and commit under the `lait/find/query/1\0` BLAKE3 domain.
+The Schema and optional requested root, mode, canonical topological Step order,
+typed inputs, six operator tags, output, per-Step and whole-Query Bounds, and
+optional cursor are fixture-frozen. Before corpus access, validation rejects
+cycles and forward inputs, non-contiguous or duplicate Step ids, missing and
+ill-typed inputs, unreachable Steps, unstable input or final output order,
+undeclared references, non-finite or widening Bounds, exact-mode feature use,
+unknown tags, trailing bytes, and non-canonical encodings. Query-to-Grant validation
+additionally proves Schema, mode, operator, reference, and budget containment.
+Every ranked producer has a total order whose final ascending tie-break is the
+canonical Node identity; unordered Nodes or Paths cannot be the final output.
+
+The optional implementation-descriptor Find section is implemented at section
+tag `0x0003`. It carries sorted, canonical version-1 `find::Schema` entries.
+That entry version is frozen as part of tag `0x0003`; changing the entry grammar
+requires a new descriptor section tag rather than teaching this tag a second
+meaning.
+Each entry commits its Body sources, Field scalar semantics, Edges and Gates,
+canonical Gate demands, analyzers and configuration, optional feature stamps,
+operator/mode sets, and finite Bound. Changing any of those bytes moves only a
+World that declares Find; declaring nothing omits the section and leaves its
+pre-Find implementation bytes and id unchanged. Unknown section tags, duplicate
+or cross-wired references, undeclared Body sources, and missing, extra, or
+duplicate extractor-coordinate bindings reject during package composition.
+
+`Session::find(Query)` is the implemented ordinary package seam. The caller
+supplies no ambient coordinates: Runtime derives the live Station epoch, Space,
+World, active implementation, fresh principal and authority frontier, retained
+Manifest root, and Station `find::Policy` through the same ambient helper used
+by `Session::submit`. The root is pinned under the Station writer, which is
+released before the one Runtime-owned Find path runs. F0 deliberately has no
+descriptor-declared evaluator, so a fully admitted request returns the typed
+`find::Failure::Unavailable` refusal rather than a fabricated empty Answer.
+World callbacks receive no Session or Find facade.
+
+These contracts do not claim that a working evaluator exists yet. The extractor
+list freezes package coordinates only; it is not a backend registry or an
+executable callback in F0. A change to standalone Grant or Query meaning requires
+a new leading version and digest domain; a versioned containing record may embed
+the same validated fields under its own generation.
+
+### Exec contracts and reservations
+
+`exec::Spec` now has a generation-1 canonical standalone encoding with strict
+validation for access demands, payloads, resume/effect/acceptance rules, bounded
+Find Grants, Services, Links, and Run limits. `exec::Build` also has a
+generation-1 canonical standalone publication envelope. The optional Exec
+descriptor section is implemented at tag `0x0004`: it carries sorted canonical
+Specs and composition refuses any embedded Find Grant that widens the active
+World Find declaration. Its Spec grammar is frozen by the tag; adding fields or
+changing meaning requires a new tag. An empty declaration is omitted, so Worlds
+that do not adopt Exec retain their existing descriptor bytes and implementation
+ids. E1 reserves the generation-1 Runtime Body schemas and implements the first
+atomic lowering: `Start` becomes a predecessor-free `Started` event plus the
+chunked canonical command in a protected Run Body.
+
+| Surface | Current status | Compatibility rule |
+|---|---|---|
+| Spec and Link descriptor section | implemented at tag `0x0004` | optional sorted canonical Specs; an empty declaration is omitted and preserves the existing World implementation id; embedded Find Grants must be contained by active Find declarations; unknown or replacement section tags reject |
+| Build publication envelope | standalone Build grammar implemented | `BuildId` commits to generation-1 executable material; publisher and device signature attest that identity but do not change it; unknown generations and algorithms reject |
+| Application Exec package | composition and host retention implemented | the application-owned `WorldPackage` carries `exec::Package`; its Specs must exactly equal the reviewed descriptor, every Build must name that World, implementation, and Spec with compatible resume material, and every local handler must bind the exact Build artifact plus only declared Roles and Links; ambiguous or cross-wired packages reject before a Station host is created |
+| Handler and Context seam | bounded in-process contract and completion staging implemented | a handler receives authenticated Run/Attempt coordinates, pinned input references, accepted resources, stated enforcement, Attempt limits, declared Links, and a cancellation watch through `exec::Context`; checkpoint references and child Starts can be staged only within the Attempt limits, child query grants remain unavailable until the Find delegation contract exists, and a validated `Completion` exposes typed material from which Runtime alone constructs canonical `Saved`/`Returned` events; unavailable capability facets grant no ambient Session, Replica, World, transport, or query access |
+| Exact local selection | implemented over projected Run and Attempt coordinates | `exec::Package::select` requires the Attempt Build to equal the Build bound by `Started`, then resolves the exact Spec coordinate, Build identity, artifact, and optional Role handler; multiple Builds for one Spec may coexist, package order has no meaning, and missing historical material fails instead of falling forward to a newer Build |
+| Trusted in-process backend | implemented with advisory enforcement | `exec::InProcess` reports `Enforcement::Advisory`, refuses an already-cancelled Context before entry, contains handler panics, and validates the candidate Outcome against the exact selected Spec; resource vectors remain scheduling/accounting evidence and this backend claims no process, container, or kernel isolation |
+| Committed local dispatcher | implemented over immutable Replica generations | both discovery and invocation re-project the Run from the supplied committed snapshot; invocation requires the exact nonterminal Attempt, its committed `Began` event directly following the selected lease, and exact package selection before constructing Context or entering a backend; callers provide only Run and Attempt ids, so a pre-commit in-memory projection, a root-only Run, or a terminal Attempt cannot cross the execution seam |
+| `exec::Cmd` and World command channel | semantic tags 0–7 implemented; World lowering supports Start, Try, Cancel, Accept, and Reject | canonical bytes have golden fixtures and every World effect producer must explicitly stage a command vector; Start pins a Spec and Build while Runtime derives ambient Run coordinates; Try pins a Run, Build, Offer, Station epoch, limits, and fence while Runtime derives a fresh Attempt id; Cancel records only `CancelAsked`; Accept/Reject validate one exact returned Attempt from the callback's pinned snapshot and append the product choice in the same transaction as ordinary World operations; Retry, Resume, and Drain reject until their missing scheduling/service coordinates exist rather than being ignored or guessed |
+| Application Work capability | typed package and root composition implemented for inspect, watch, cancel, continue, and checkpoint resume | `ClientHost::call_work` carries Runtime-owned `WorkRequest` plus a serialized `WorkReply` or typed host refusal, while each application owns the vocabulary and controls that compose it; Issues exposes inspect, watch, cancel, continue, and resume, has no raw Start, and depends on neither the daemon protocol nor Astrolabe; inspect/watch are reads and every mutation enters the same `lower_exec` validator and protected commit path as `World::submit`; continue derives a newly fenced Attempt only from a completed Attempt's committed coordinates in the same Station activation, while resume also requires an exact committed checkpoint and `Resume::Checkpoint`; the current Issues verification Spec is `Resume::Restart`, so it refuses resume with direction to use continue; Started-only, cross-activation, and service-leased work remain typed scheduling refusals rather than guessed transitions; lifecycle projections contain ids and facts but no product input/output payloads |
+| Issues verification adopter | semantic Start and acceptance transaction implemented; executable Build publication remains pending | `issue.verify/v1` is declared by IssuesWorld and exposed as `issues_verify`; the application derives the exact Runtime Run from its request coordinate, the World rechecks that binding, and the issue check plus protected `Started` event commit atomically; source is a committed ContentRef and the caller-supplied BuildId is pinned but is not yet publication-attested; `issues_accept_check` admits only an exactly-once matching Runtime Outcome and atomically attaches its report, records pass/fail, optionally enters an existing Done state, and stages `Accepted`; no generic `execute-plan` or Work `Start` surface is introduced |
+| World Outcome and acceptance seam | namespace-bound fact facade and atomic product choice implemented | a hosted World callback may call `Context::outcome(RunId, AttemptId)` for Runtime-decoded facts from the same pinned snapshot as its ordinary reads; the World id is ambient rather than caller-selectable and raw protected Bodies or output bytes are never exposed; exactly one returned Outcome, matching Spec/Build and a valid lease-to-return causal chain, is required before Accept/Reject lowering; Returned remains distinct from Accepted and two terminal choices cannot be staged from one stale snapshot |
+| Run, Build, and Service Bodies | schema ids, ownership boundary, and Start-to-Run lowering implemented | `lait.exec.run`, `lait.exec.build`, and `lait.exec.service`, each schema version 1 with encoding `lait.exec.body.v1`; package composition rejects a World declaration at any version, Runtime installs the schemas under every hosted World, and raw World snapshot reads hide them; a Run Body stores its `Started` event at `list:events` and its complete canonical command in ordered 64-KiB `map:command` chunks; the standalone Build envelope does not reserve its later Body schema |
+| Run and Attempt events | generation-1 lifecycle event DAG implemented | wire tags 0–9 are `Started`, `Leased`, `Began`, `Saved`, `Returned`, `Failed`, `CancelAsked`, `Cancelled`, `Accepted`, and `Rejected`; `Started` is the one predecessor-free root and binds the derived Run id, exact Spec and Build, active World implementation, invoker/device/frontier, parent Manifest, input and query commitments, request/ordinal, resources and limits, and complete command digest/geometry; Attempt admission and returned Outcomes bind their exact coordinates and evidence; event ids use `lait.exec.run-event.v1`; predecessor lists are bounded, sorted, and duplicate-free; concurrent heads stay visible until an event explicitly joins them; adding or changing event meaning requires an explicit schema or envelope generation |
+| Run, Attempt, and Outcome projections | implemented over protected events | `exec::Run::project` ignores collaborative-list order and rebuilds only Runtime-owned facts; it exposes separate sorted Attempts, Outcomes, cancellation facts, acceptance/rejection facts, and causal heads rather than a scalar LWW status; it refuses malformed DAGs, duplicate Attempt ids, unbound facts, repeated returns, coordinate contradictions, and Run/Attempt limit widening; output bytes remain opaque and only schema, digest, geometry, and ContentRefs enter the generic projection |
+| Local unresolved-Run scan | implemented over an immutable committed Replica generation | `exec::scan_unresolved` selects only exact generation-1 protected Run bindings for one World, validates the complete event DAG and Body-derived Run identity, reconstructs every exact ordered command chunk, verifies the canonical `Start` digest and duplicated coordinates, and returns Run projections sorted by `RunId`; returned/failed Attempts and Attempt-scoped cancellation remain unresolved, while a Run-level cancellation or any acceptance fact removes the Run from dispatch consideration; the scan is read-only and remote incorporation never invokes it or a handler |
+
+`RunId` is the first 128 bits of a domain-separated BLAKE3 commitment over the
+canonical Space, World, device, 128-bit request id, and command ordinal. It is
+therefore stable for an identical persistent-idempotency scope without using a
+caller-supplied request id directly as a Body identity. Runtime validates the
+ordinary World demand and every selected Spec's Start demand independently,
+canonicalizes their deduplicated conjunction, and binds that one `All` demand
+to the one transaction receipt. The World operations, protected Run operations,
+bindings, content reachability, observation Bodies, and receipt commit in that
+same Replica transaction; refusal leaves none of them visible.
+
+Compatible Builds may change executable material without moving the World
+implementation id only when their declared Spec meaning is unchanged. Changing
+payload meaning, demands, limits, effects, acceptance, resume behavior, Find
+Grants, or Links changes the descriptor identity. Build and content hashes are
+always verified; neither is runtime attestation. A Build signature proves only
+that its carried Device signed the canonical publication envelope. Mechanics
+separately decides whether that Device represented the publisher and whether
+publication satisfied the Spec's Build demand at the pinned authority frontier.
 
 The marker and the store manifest version different things and move
 independently: the marker identifies the *store layout* — what files exist and
@@ -226,6 +345,7 @@ old one.
 | `lait/neighbor-presence/1` | liveness probe | implemented |
 | `lait/freight/1` | Freight — reliable exact-object request and response | implemented and **mounted** |
 | `lait/session/1` | Live — transient collaboration and reliable signals | implemented and **mounted**, inbound and outbound; carries the control lane and the reliable-signal lane |
+| `lait/exec/1` | Exec — direct Station work and bounded lifecycle flows | reserved; not registered, advertised, or mounted |
 
 **What "implemented" means in this column.** It means a dial on that ALPN
 reaches a handler that reads the opening, judges it, and answers — not that
@@ -260,6 +380,14 @@ reading a bare refusal must not read it as a version problem.
 
 Gossip rides iroh's own ALPN inside `crates/comms` and is transport plumbing, not
 a LAIT protocol generation.
+
+`lait/exec/1` is a reservation, not a compatibility promise that code can dial.
+It becomes implemented only when a real opening is bounded and decoded, an
+admitted peer is independently authorized, and a mounted driver answers it.
+Advertising it earlier would repeat the false-positive service state described
+above. Additive optional behavior uses negotiated feature bits; a peer that
+would misinterpret changed command, flow, or refusal semantics requires a new
+ALPN generation.
 
 `PROTOCOL.md` — "Delivery planes" — has the full contract, including the frozen
 bounds and which of them are LAIT policy rather than observations of the pinned

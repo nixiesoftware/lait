@@ -100,7 +100,7 @@ Contributing? Enable the hooks once per clone
 
 ```console
 lait                                            # the local app, and the daemon under it
-  [--json] [--port N] [--orbit SEL] [--open]
+  [--json] [--port N] [--orbit SEL] [--open] [--home <dir>]
 
 lait daemon [--home <dir>]                      # the identity-scoped host, headless
 lait mcp                                        # the stdio head an agent speaks

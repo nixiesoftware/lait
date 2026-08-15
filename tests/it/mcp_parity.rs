@@ -146,6 +146,10 @@ fn response_dtos_round_trip() {
         Response::Ref {
             reff: "iss_3f9ab2c".into(),
         },
+        Response::Check {
+            reff: "iss_3f9ab2c".into(),
+            run: "71".repeat(16),
+        },
         Response::List {
             rows: vec![row.clone()],
         },
@@ -188,6 +192,7 @@ fn response_dtos_round_trip() {
             cycle: None,
             baseline: None,
             attachments: vec![],
+            checks: vec![],
             provisional: false,
             corrupt_records: vec![],
         })),
@@ -224,6 +229,82 @@ fn response_dtos_round_trip() {
     }
 }
 
+/// A generic Work lookup failure remains a caller-actionable not-found across
+/// the real stdio server. It must not be collapsed through the package adapter
+/// into JSON-RPC internal_error("invalid client operation").
+#[test]
+fn missing_work_run_is_not_an_internal_mcp_error() {
+    use crate::head::{temp_root, Head, Mcp};
+
+    let root = temp_root("work-missing");
+    let config = root.join("cfg");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let head = Head::start(&config, Some(&home));
+    let (status, founded) = head.host(serde_json::json!({
+        "cmd": "host_space_found",
+        "home": home.display().to_string(),
+        "name": "PROJ",
+        "nick": "Probe",
+    }));
+    assert_eq!(status, 200, "found: {founded}");
+
+    let mut mcp = Mcp::start(&config, &home, None);
+    let reply = mcp.call_raw(
+        "issues_work",
+        serde_json::json!({
+            "action": "inspect",
+            "run": "71".repeat(16),
+        }),
+    );
+    assert_eq!(reply["error"]["code"], -32600, "{reply}");
+    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("no Runtime Run matches"), "{reply}");
+    assert!(!message.contains("invalid client operation"), "{reply}");
+    assert_ne!(reply["error"]["code"], -32603, "{reply}");
+
+    mcp.stop();
+    head.stop();
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Package-owned exact-id parsing reports the repairable diagnostic over the
+/// dynamic package-tool route instead of the opaque Failure display string.
+#[test]
+fn package_tool_argument_diagnostic_survives_stdio() {
+    use crate::head::{temp_root, Head, Mcp};
+
+    let root = temp_root("work-argument");
+    let config = root.join("cfg");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let head = Head::start(&config, Some(&home));
+    let (status, founded) = head.host(serde_json::json!({
+        "cmd": "host_space_found",
+        "home": home.display().to_string(),
+        "name": "PROJ",
+        "nick": "Probe",
+    }));
+    assert_eq!(status, 200, "found: {founded}");
+
+    let mut mcp = Mcp::start(&config, &home, None);
+    let reply = mcp.call_raw(
+        "issues_work",
+        serde_json::json!({"action": "inspect", "run": "short"}),
+    );
+    assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("expected 32 lowercase hex characters"),
+        "{reply}"
+    );
+    assert!(!message.contains("invalid client operation"), "{reply}");
+
+    mcp.stop();
+    head.stop();
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// The `Issue` response carries its own `status` field alongside the `kind` tag
 /// without a serde collision (the bug that motivated the `kind` tag).
 #[test]
@@ -255,6 +336,7 @@ fn issue_response_status_field_survives_the_kind_tag() {
         cycle: None,
         baseline: None,
         attachments: vec![],
+        checks: vec![],
         provisional: false,
         corrupt_records: vec![],
     }));

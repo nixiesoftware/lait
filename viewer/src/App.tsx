@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import { ConfirmRequired, hostRpc, LaitError, rpc, spaces as fetchSpaces } from "./api";
+import { setFaceScope } from "./ui/faces";
 import { useDoorbell } from "./doorbell";
 import { runBounded, type BulkProgress } from "./core/bulk";
 import { filterNotice, groupRows, loadDisplay, saveDisplay, type DisplayState } from "./core/display";
@@ -204,6 +205,14 @@ export function App() {
    * machine-local store handle used by RPC. */
   const [routeSpace, setRouteSpace] = useState<string | null>(initialRoute.spaceId);
   const [current, setCurrent] = useState<string | null>(null);
+  // The faces cache resolves pictures through the address book, and its actor
+  // spelling needs the selected space's canonical `ws_…` id beside the orbit
+  // handle RPC uses. Scoped here because this component is the one that knows
+  // which space is current.
+  useEffect(() => {
+    const row = current ? spaces.find((s) => s.id === current) : undefined;
+    setFaceScope(row?.id ?? null, row?.space ?? null);
+  }, [current, spaces]);
   // Asked for the formation surface while other spaces already exist, and which
   // tab to open on. Without this the only way to reach `Welcome` would be having
   // no store at all, which makes founding *or entering* a second space
