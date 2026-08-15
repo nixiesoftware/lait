@@ -597,6 +597,19 @@ jobs:
           LAIT_RELEASE_ARCHIVES: release-archives
         run: cargo test --lib -- --ignored --exact update::tests::update_bin_path_is_a_real_entry_in_the_published_archives
 
+      # The other half of the contract, against the other half of the
+      # distribution: resolve the LIVE first-party feed — pointer, signature
+      # against the pinned key, manifest, floor — exactly as
+      # `Request::HostUpdate` does on an installed machine. This couples CI to
+      # the feed host being up, deliberately: a feed nobody can resolve is an
+      # outage for every installed machine, and this is where it gets loud.
+      # (The archive-entry assertion above stays on the GitHub mirror until the
+      # feed carries its first real release; then LAIT_RELEASE_ARCHIVES can be
+      # fetched from the feed instead and the mirror dependency goes.)
+      - name: Assert the live feed resolves with the pinned key
+        shell: bash
+        run: cargo test --lib -- --ignored --exact update::feed::tests::the_real_test_channel_resolves_with_the_pinned_key
+
   # Packaging manifests (Scoop + winget) are hand-maintained templates that the
   # release CD (publish-scoop / publish-winget) stamps with each release's real
   # version + hash. CI can't check the version/hash (they don't exist until a
