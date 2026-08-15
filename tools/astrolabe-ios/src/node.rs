@@ -147,7 +147,10 @@ fn start_inner() -> anyhow::Result<Node> {
             if matches!(control::probe(&daemon_home).await, Probe::Healthy) {
                 return Ok(());
             }
-            if let Some(reason) = daemon_failure.lock().expect("daemon failure slot").take() {
+            // Taken in its own statement so the guard drops before the bail —
+            // a lock alive across an early return is how deadlocks start.
+            let failed = daemon_failure.lock().expect("daemon failure slot").take();
+            if let Some(reason) = failed {
                 anyhow::bail!("the in-process daemon failed: {reason}");
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -157,7 +160,7 @@ fn start_inner() -> anyhow::Result<Node> {
 
     let (tx, rx) = mpsc::channel();
     {
-        let sel = selection.clone();
+        let sel = selection;
         rt.spawn(async move {
             let announce = move |ready: &serve::Ready| {
                 let _ = tx.send(ready.clone());
@@ -256,9 +259,9 @@ pub fn enter_space(link: String, nick: Option<String>) -> EnterOutcome {
     };
     let space = facts.space.to_string();
     let hint = if facts.display_name_hint.is_empty() {
-        facts.approach_nick_hint.clone()
+        facts.approach_nick_hint
     } else {
-        facts.display_name_hint.clone()
+        facts.display_name_hint
     };
     let home = config::spaces_root().join(slug(&hint, &space));
 
