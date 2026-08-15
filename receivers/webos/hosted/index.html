@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <meta name="theme-color" content="#0b1016">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://nixiesoftware.com; img-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+    <title>Astrolabe — Nixie Solutions LLC</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="receiver" id="receiver">
+      <header class="trust-chrome">
+        <div class="brand">
+          <img src="assets/astrolabe-mark.png" alt="" class="brand-mark">
+          <div>
+            <div class="brand-name">Astrolabe</div>
+            <div class="brand-owner">Nixie Solutions LLC</div>
+          </div>
+        </div>
+        <div class="status-row" aria-live="polite">
+          <span class="status-pill" id="transport-state" data-state="connecting">Connecting</span>
+          <span class="status-pill" id="source-state" data-state="none">No source</span>
+          <span class="status-pill status-stale" id="stale-state" hidden>Stale</span>
+        </div>
+      </header>
+
+      <main class="stage">
+        <section class="state-panel" id="booting-panel">
+          <div class="spinner" aria-hidden="true"></div>
+          <p class="eyebrow">Astrolabe Display</p>
+          <h1>Starting this receiver…</h1>
+          <p>Opening protected device state and contacting the approved coordinator.</p>
+        </section>
+
+        <section class="state-panel pairing-panel" id="pairing-panel" hidden>
+          <p class="eyebrow">Confirm this display</p>
+          <h1>Compare these words in Astrolabe</h1>
+          <div class="phrase" id="pairing-phrase" aria-label="Pairing confirmation phrase"></div>
+          <p class="instruction" id="pairing-instruction">
+            Open <strong>Displays</strong> in Astrolabe. Approve only if the words and fingerprint match.
+          </p>
+          <div class="fingerprint-row">
+            <span>Coordinator SHA-256</span>
+            <code id="pairing-fingerprint"></code>
+          </div>
+          <button class="primary-action" id="confirm-pairing" type="button">
+            <span class="key">OK</span>
+            Words match
+          </button>
+          <p class="pairing-state" id="pairing-state" aria-live="polite"></p>
+        </section>
+
+        <section class="state-panel" id="unassigned-panel" hidden>
+          <p class="eyebrow">Receiver enrolled</p>
+          <h1>Ready for an assignment</h1>
+          <p>This display is trusted, but no surface has been assigned. Choose it in Astrolabe Displays.</p>
+          <code class="device-id" id="device-id"></code>
+        </section>
+
+        <section class="frame-panel" id="frame-panel" hidden>
+          <img id="program-frame" alt="">
+        </section>
+
+        <section class="state-panel" id="message-panel" hidden>
+          <p class="eyebrow" id="message-eyebrow">Receiver state</p>
+          <h1 id="message-title"></h1>
+          <p id="message-body"></p>
+          <button class="primary-action" id="retry-action" type="button" hidden>
+            <span class="key">OK</span>
+            Try again
+          </button>
+        </section>
+      </main>
+
+      <aside class="detail-panel" id="detail-panel" hidden aria-label="Receiver details">
+        <p class="eyebrow">Receiver-owned status</p>
+        <dl>
+          <div><dt>Transport</dt><dd id="detail-transport">Connecting</dd></div>
+          <div><dt>Source</dt><dd id="detail-source">No source</dd></div>
+          <div><dt>Delivery</dt><dd id="detail-delivery">Current</dd></div>
+          <div><dt>Protocol</dt><dd>Astrolabe Display 1</dd></div>
+        </dl>
+      </aside>
+    </div>
+    <noscript><div class="noscript">JavaScript is required by the Astrolabe webOS receiver.</div></noscript>
+    <script type="module" src="app.mjs"></script>
+  </body>
+</html>

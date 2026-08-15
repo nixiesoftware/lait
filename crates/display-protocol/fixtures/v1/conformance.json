@@ -1,0 +1,120 @@
+{
+  "confirmation_phrase": {
+    "fingerprint": "6666666666666666666666666666666666666666666666666666666666666666",
+    "pairing": "77777777777777777777777777777777",
+    "receiver_nonce": "8888888888888888888888888888888888888888888888888888888888888888",
+    "words": [
+      "spruce",
+      "violet",
+      "quartz",
+      "coral",
+      "juniper",
+      "willow"
+    ]
+  },
+  "fixture_only_keys": {
+    "identifier_key_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+    "proof_key_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "negative_cases": [
+    {
+      "expected": "unsupported",
+      "name": "unknown_protocol_major"
+    },
+    {
+      "expected": "invalid_request",
+      "name": "unknown_required_field"
+    },
+    {
+      "expected": "integrity",
+      "name": "forged_program_revision"
+    },
+    {
+      "expected": "authentication_failed",
+      "name": "wrong_request_tag"
+    },
+    {
+      "expected": "challenge_consumed",
+      "name": "replayed_challenge"
+    },
+    {
+      "expected": "asset_digest",
+      "name": "asset_digest_mismatch"
+    },
+    {
+      "expected": "asset_length",
+      "name": "asset_length_mismatch"
+    },
+    {
+      "expected": "bound_exceeded",
+      "name": "oversized_asset"
+    },
+    {
+      "expected": "invalid_request",
+      "name": "external_asset_url"
+    },
+    {
+      "expected": "invalid_request",
+      "name": "receiver_world_coordinate"
+    }
+  ],
+  "pairing_complete": {
+    "authentication_tag": "d8a85ed4a54c510ab3b4837ac9152675dfd9169c77fec2bc06ac7a14df077287",
+    "challenge": "4444444444444444444444444444444444444444444444444444444444444444",
+    "device": "ffeeddccbbaa99887766554433221100",
+    "pairing": "33333333333333333333333333333333",
+    "proof_key_hex": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "program": {
+    "assignment": "00112233445566778899aabbccddeeff",
+    "freshness": {
+      "on_stale": "keep_with_native_banner",
+      "stale_after_ms": 60000
+    },
+    "items": [
+      {
+        "duration_ms": null,
+        "id": "0e089d8d262e20aeb998ad2f84300b5023d588746c00c01da9ddb1e146b069e8",
+        "scene": {
+          "asset": {
+            "encoded_len": 17,
+            "height": 1080,
+            "id": "cc047d1db314470fc60efdd5e58a1d09299198ae8947433a59117e7a6286b4a9",
+            "media_type": "image_png",
+            "sha256": "b79bc18a2cfb1d02f368985703ea98dbca4538df6dde116bd5504cb389102d80",
+            "width": 1920
+          },
+          "kind": "frame"
+        },
+        "source_state": {
+          "kind": "current"
+        },
+        "spoken_summary": "Astrolabe receiver fixture"
+      }
+    ],
+    "playback": {
+      "current_index": 0,
+      "cycle": "hold_last",
+      "elapsed_ms": 125
+    },
+    "program": "102132435465768798a9bacbdcedfe0f",
+    "program_state": {
+      "kind": "current"
+    },
+    "protocol_major": 1,
+    "revision": "4ed9867dfb8ea6fe645a70e9e16dc19d831602ed2ae9c534b5b0b86062aad6b0"
+  },
+  "program_changes_request": {
+    "authentication_tag": "3495896c7a9b3e562bf6ee5b6dc2553dd1ceaaec886d80dff4b9f4aaa2d55bdc",
+    "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "challenge": "1111111111111111111111111111111111111111111111111111111111111111",
+    "device": "ffeeddccbbaa99887766554433221100",
+    "elapsed_ms": 500,
+    "method": "GET",
+    "route": "program_changes",
+    "transcript_hex": "0000001c617374726f6c6162652d646973706c61792f726571756573742f76310000000400000001000000034745540000000f70726f6772616d5f6368616e6765730000002066666565646463636262616139393838373736363535343433333232313130300000002030303131323233333434353536363737383839396161626263636464656566660000002031303231333234333534363537363837393861396261636264636564666530660000004034656439383637646662386561366665363435613730653965313664633139643833313630326564326165396335333462356230623836303632616164366230000000403065303839643864323632653230616562393938616432663834333030623530323364353838373436633030633031646139646462316531343662303639653800000004000001f400000004000061a800000000000000000000000000000040313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131310000004065336230633434323938666331633134396166626634633839393666623932343237616534316534363439623933346361343935393931623738353262383535",
+    "wait_ms": 25000
+  },
+  "protocol_major": 1,
+  "schema": "astrolabe.display.conformance.v1"
+}

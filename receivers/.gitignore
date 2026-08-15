@@ -1,0 +1,16 @@
+# Every receiver here is built by a vendor toolchain that writes its output
+# beside the source: Gradle for Android TV, roku-deploy for Roku, npm for the
+# web-hosted shells. None of it is a deliverable -- the deliverables are the
+# source, the manifests and the fixtures -- and all of it is large enough that
+# committing it once buries the tree it was added to.
+node_modules/
+dist/
+build/
+out/
+.gradle/
+
+# Packaged receiver bundles, produced from the sources beside them.
+*.ipk
+*.wgt
+*.apk
+*.pkg

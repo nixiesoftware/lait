@@ -1,0 +1,35 @@
+//! Closed resource bounds for protocol major 1.
+
+pub const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
+pub const MAX_PAIRING_BODY_BYTES: usize = 16 * 1024;
+pub const MAX_CAPABILITY_BODY_BYTES: usize = 16 * 1024;
+pub const MAX_HEALTH_BODY_BYTES: usize = 16 * 1024;
+pub const MAX_PROGRAM_BODY_BYTES: usize = 64 * 1024;
+pub const MAX_PROGRAM_ITEMS: usize = 16;
+pub const MAX_PARTIAL_REASONS: usize = 4;
+pub const MAX_ASSET_BYTES: u32 = 16 * 1024 * 1024;
+pub const MAX_STAGED_BYTES: u32 = 48 * 1024 * 1024;
+pub const MAX_FRAME_WIDTH: u32 = 4_096;
+pub const MAX_FRAME_HEIGHT: u32 = 2_160;
+pub const MAX_FRAME_PIXELS: u64 = 8_847_360;
+pub const MAX_STAGING_HORIZON_MS: u32 = 86_400_000;
+pub const MIN_ITEM_DURATION_MS: u32 = 250;
+pub const MAX_ITEM_DURATION_MS: u32 = 86_400_000;
+pub const MIN_STALE_AFTER_MS: u32 = 30_000;
+pub const MAX_STALE_AFTER_MS: u32 = 86_400_000;
+pub const MAX_LONG_POLL_WAIT_MS: u32 = 25_000;
+pub const LONG_POLL_STALE_MARGIN_MS: u32 = 5_000;
+pub const CHALLENGE_BYTES: usize = 32;
+pub const PROOF_KEY_BYTES: usize = 32;
+pub const RANDOM_ID_BYTES: usize = 16;
+pub const DERIVED_ID_BYTES: usize = 32;
+pub const DIGEST_BYTES: usize = 32;
+pub const MAX_LABEL_BYTES: usize = 96;
+pub const MAX_BUILD_BYTES: usize = 64;
+pub const MAX_LOCALE_BYTES: usize = 35;
+pub const MAX_SUMMARY_BYTES: usize = 1_024;
+pub const MAX_ERROR_DETAIL_BYTES: usize = 160;
+pub const MAX_CONFIRMATION_PHRASE_WORDS: usize = 6;
+pub const MAX_PAIRING_LIFETIME_MS: u32 = 600_000;
+pub const MAX_CHALLENGE_LIFETIME_MS: u32 = 120_000;
+pub const MAX_RETRY_AFTER_MS: u32 = 60_000;

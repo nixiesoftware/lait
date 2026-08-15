@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="AstrolabeReceiverTask" extends="Task">
+  <interface>
+    <field id="viewModel" type="assocarray" alwaysNotify="true"/>
+    <field id="command" type="string" alwaysNotify="true"/>
+  </interface>
+  <script type="text/brightscript" uri="pkg:/source/Protocol.brs"/>
+  <script type="text/brightscript" uri="pkg:/source/Store.brs"/>
+  <script type="text/brightscript" uri="pkg:/components/ReceiverTask.brs"/>
+</component>

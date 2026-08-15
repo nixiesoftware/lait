@@ -1,0 +1,13 @@
+{
+  "name": "@nixie/astrolabe-roku-receiver",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production Roku receiver for Astrolabe Display",
+  "scripts": {
+    "check": "bsc --project bsconfig.json",
+    "test": "npm run check && node --test"
+  },
+  "devDependencies": {
+    "brighterscript": "0.70.4"
+  }
+}

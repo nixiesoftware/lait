@@ -1,0 +1,15 @@
+{
+  "name": "@nixie/astrolabe-webos-receiver",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production hosted webOS receiver for Astrolabe Display",
+  "scripts": {
+    "sync:runtime": "node scripts/sync-runtime.mjs",
+    "test": "npm run sync:runtime && node --test",
+    "check:webos": "npm run sync:runtime && ares-package --check package",
+    "package:webos": "npm run sync:runtime && ares-package package -o dist"
+  },
+  "devDependencies": {
+    "@webos-tools/cli": "3.2.5"
+  }
+}
