@@ -520,6 +520,87 @@ mod tests {
         }
     }
 
+    /// The env var the child half reads. Deliberately not `LAIT_`-prefixed:
+    /// this crate's test harness scrubs every ambient `LAIT_*` at process load,
+    /// before any test runs, so a `LAIT_`-named handoff would arrive empty in
+    /// the child and the parent would look like a silent no-op.
+    const SWAP_PROBE_PAYLOAD: &str = "SWAP_SELF_PROBE_PAYLOAD";
+
+    /// The child half of the self-replace proof. Inert unless invoked with the
+    /// payload variable set, so it costs nothing in a normal run.
+    ///
+    /// It replaces *itself* — the parent hands it a disposable copy of the test
+    /// binary to be, never the real one.
+    #[test]
+    fn swap_self_child_replaces_the_binary_it_is_running_from() {
+        let Ok(payload) = std::env::var(SWAP_PROBE_PAYLOAD) else {
+            return;
+        };
+        let bytes = std::fs::read(&payload).expect("child reads the staged payload");
+        super::swap_self(&bytes).expect("a running executable replaces itself");
+    }
+
+    /// `swap_self` replaces the executable of the process that is running it.
+    ///
+    /// Everything else in this module could be tested in-process; this could
+    /// not, which is exactly why it went unexercised. The consequence was that
+    /// the riskiest step in the whole update — the one that has to defeat a
+    /// live image lock on Windows, where this repository meets that lock so
+    /// often the build fails when a daemon is running — rested on the belief
+    /// that the library handles it.
+    ///
+    /// The proof spends a child process: copy this test binary somewhere
+    /// disposable, run the copy, and have it replace itself. The real binary is
+    /// never a candidate.
+    #[test]
+    fn a_running_executable_replaces_itself_with_the_staged_bytes() {
+        let workspace = std::env::temp_dir().join(format!(
+            "lait-swap-probe-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("probe workspace");
+
+        let victim = workspace.join(format!("victim{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(std::env::current_exe().unwrap(), &victim).expect("copy the test binary");
+        let before = std::fs::read(&victim).unwrap();
+
+        // Not a valid executable, deliberately: this asserts the *replacement*
+        // landed, and using real binary bytes would make "did it change?"
+        // unanswerable. Whether the result still loads is a separate claim and
+        // is not made here.
+        let payload_bytes = b"lait-swap-probe: these bytes replaced a running image";
+        let payload = workspace.join("payload.bin");
+        std::fs::write(&payload, payload_bytes).unwrap();
+
+        let output = std::process::Command::new(&victim)
+            .args([
+                "update::tests::swap_self_child_replaces_the_binary_it_is_running_from",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(SWAP_PROBE_PAYLOAD, &payload)
+            .output()
+            .expect("run the disposable copy");
+
+        assert!(
+            output.status.success(),
+            "the child failed to replace itself:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let after = std::fs::read(&victim).expect("the replaced binary is still at its path");
+        assert_ne!(before, after, "the image on disk did not change");
+        assert_eq!(
+            after, payload_bytes,
+            "the bytes on disk must be exactly what was staged"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     #[test]
     fn extract_binary_finds_the_flat_zip_and_the_nested_tar_layouts() {
         use std::io::Write;
