@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1752
+pr             1757
 pr-platform    1370
-nightly        1779
+nightly        1784
 mutants        98
 
 [gates]
@@ -132,6 +132,11 @@ astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe::launch a_head_comes_up_and_mints_a_credential_worth_exactly_one_use
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
+astrolabe::packaging the_dmg_refuses_a_bundle_missing_either_half_of_the_pair
+astrolabe::packaging the_dmg_refuses_a_non_distribution_signing_identity
+astrolabe::packaging the_dmg_ships_the_notices_inside_the_bundle
+astrolabe::packaging the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep
+astrolabe::packaging the_dmg_staples_assesses_and_keeps_identity_out_of_the_project
 astrolabe::packaging the_installer_asks_for_no_elevation
 astrolabe::packaging the_installer_carries_nothing_from_the_retired_stacks
 astrolabe::packaging the_installer_carries_the_c_runtime

@@ -297,6 +297,125 @@ fn the_installer_ships_the_third_party_notices() {
     );
 }
 
+// --- The macOS disk image ---------------------------------------------------
+//
+// packaging/macos/make-dmg.sh is the DMG counterpart of the NSIS script, and
+// gets the same treatment: release criteria asserted against the script
+// itself, on every push, on every platform. Reading the script is weaker than
+// notarizing it — and the regressions that actually happen are edits to the
+// script, which is exactly what a text scan catches.
+
+fn dmg_script() -> String {
+    let path = repo_root().join("packaging/macos/make-dmg.sh");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
+/// The script with its comment lines removed — the same move as
+/// [`directives`], for the same reason: the header prose *names* the
+/// properties being checked, so a scan that read it would pass on the
+/// documentation of the thing instead of the thing. Bash comments are
+/// stripped per whole line (not at any `#`) because `$#` is code.
+fn dmg_directives() -> String {
+    dmg_script()
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The pair ships together, macOS spelling: `sidecar::resolve` looks beside
+/// the executable, and `Contents/MacOS` is beside. A bundle missing either
+/// half — or carrying a sidecar that does not run — must be refused as a
+/// packaging input, not discovered at someone's first launch.
+#[test]
+fn the_dmg_refuses_a_bundle_missing_either_half_of_the_pair() {
+    let script = dmg_directives();
+    for binary in ["astrolabe", "lait", "libastrolabe.dylib"] {
+        assert!(
+            script.contains(binary),
+            "the packaging never checks for {binary}"
+        );
+    }
+    assert!(
+        script.contains(r#""$STAGED/Contents/MacOS/lait" --version"#),
+        "the staged sidecar is never run — presence is checked, execution is the claim"
+    );
+}
+
+/// Every executable is signed with the hardened runtime, nested code before
+/// the bundle that seals it, and never with `--deep`. Notarization requires
+/// the runtime flag on every executable; `--deep` is the deprecated way to
+/// half-do this sight unseen — an enumerated payload is the point, same as
+/// the NSIS file list.
+#[test]
+fn the_dmg_signs_inside_out_with_the_hardened_runtime_and_never_deep() {
+    let script = dmg_directives();
+    assert!(
+        script.contains("--options runtime"),
+        "signing without the hardened runtime notarizes nothing"
+    );
+    assert!(
+        !script.contains("--deep"),
+        "--deep signs every nesting level sight unseen; enumerate the payload instead"
+    );
+    for signed in [
+        r#"sign "$STAGED/Contents/MacOS/libastrolabe.dylib""#,
+        r#"sign "$STAGED/Contents/MacOS/lait""#,
+    ] {
+        assert!(script.contains(signed), "not signed explicitly: {signed}");
+    }
+}
+
+/// A signature from an "Apple Development" certificate succeeds locally and
+/// fails notarization minutes later, naming neither the certificate nor the
+/// script. The identity type is a precondition, checked where the mistake is
+/// made.
+#[test]
+fn the_dmg_refuses_a_non_distribution_signing_identity() {
+    assert!(
+        dmg_directives().contains(r#""Developer ID Application"*)"#),
+        "any codesigning identity is accepted; only Developer ID Application can be notarized"
+    );
+}
+
+/// A drag-install copies the .app and nothing else, so the notices ride
+/// inside the bundle — loose in the DMG they stay behind on an unmounted
+/// image, which is shipping the binaries and not the account of what is in
+/// them.
+#[test]
+fn the_dmg_ships_the_notices_inside_the_bundle() {
+    assert!(
+        dmg_directives().contains("Contents/Resources/THIRD-PARTY-NOTICES.md"),
+        "the notices are not placed inside the app bundle"
+    );
+}
+
+/// Notarization ends with the ticket stapled and Gatekeeper's own assessment
+/// run — the check a customer's machine makes, made first on the machine that
+/// can still do something about it. And the Xcode project stays out of it:
+/// distribution identity lives at package time, never in the repository.
+#[test]
+fn the_dmg_staples_assesses_and_keeps_identity_out_of_the_project() {
+    let script = dmg_directives();
+    assert!(
+        script.contains("stapler staple"),
+        "an unstapled DMG needs Apple reachable at first launch"
+    );
+    assert!(
+        script.contains("spctl --assess"),
+        "the customer's Gatekeeper assessment is never rehearsed here"
+    );
+    let project = std::fs::read_to_string(
+        repo_root().join("apps/astrolabe/macos/Runner.xcodeproj/project.pbxproj"),
+    )
+    .expect("the Runner project");
+    assert!(
+        !project.contains("DEVELOPMENT_TEAM"),
+        "a personal team identity is pinned into the repository's Xcode project"
+    );
+}
+
 /// The notices are generated, and the file says so where somebody about to edit
 /// it will read it. A hand-edited generated file is a file that silently stops
 /// matching the thing it describes.

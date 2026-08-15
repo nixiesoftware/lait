@@ -242,27 +242,52 @@ fn manifest(args: &[String]) -> Result<()> {
     artifacts.insert("lait".to_string(), lait);
 
     if let Some(astrolabe_version) = arg(args, "--astrolabe") {
-        let name = format!("astrolabe-{astrolabe_version}-setup.exe");
-        let path = dir.join(&name);
-        if !path.is_file() {
-            bail!(
-                "--astrolabe {astrolabe_version} given but {} is missing",
-                path.display()
-            );
-        }
-        let (digest, size) = hash_file(&path)?;
-        bundles.insert("astrolabe".to_string(), astrolabe_version);
-        artifacts.insert(
-            "astrolabe".to_string(),
-            BTreeMap::from([(
-                "x86_64-pc-windows-msvc".to_string(),
+        // One installer per platform: the NSIS setup.exe for Windows, the
+        // signed DMG for macOS (Apple silicon; the bundle is arm64-only by
+        // the AppInfo.xcconfig ARCHS decision). Each is included when the
+        // directory holds it; an absent platform is a loud note rather than
+        // a refusal, because the two installer jobs can succeed independently
+        // and a publisher must be able to ship the half that built. Refusing
+        // only when NEITHER exists keeps `--astrolabe` from sealing a bundle
+        // version no artifact backs. Once both platforms have shipped a
+        // release, tightening this to "both or refuse" is the LAIT_TARGETS
+        // rule and worth doing.
+        let platforms: &[(&str, String)] = &[
+            (
+                "x86_64-pc-windows-msvc",
+                format!("astrolabe-{astrolabe_version}-setup.exe"),
+            ),
+            (
+                "aarch64-apple-darwin",
+                format!("astrolabe-{astrolabe_version}.dmg"),
+            ),
+        ];
+        let mut astrolabe = BTreeMap::new();
+        for (target, name) in platforms {
+            let path = dir.join(name);
+            if !path.is_file() {
+                eprintln!("lait-feed: NOTE — no {name}; publishing astrolabe without {target}");
+                continue;
+            }
+            let (digest, size) = hash_file(&path)?;
+            astrolabe.insert(
+                target.to_string(),
                 Artifact {
                     url: format!("{base}/releases/{version}/{name}"),
                     blake3: digest,
                     size,
                 },
-            )]),
-        );
+            );
+        }
+        if astrolabe.is_empty() {
+            bail!(
+                "--astrolabe {astrolabe_version} given but {} holds neither \
+                 astrolabe-{astrolabe_version}-setup.exe nor astrolabe-{astrolabe_version}.dmg",
+                dir.display()
+            );
+        }
+        bundles.insert("astrolabe".to_string(), astrolabe_version);
+        artifacts.insert("astrolabe".to_string(), astrolabe);
     }
 
     let manifest = Manifest {

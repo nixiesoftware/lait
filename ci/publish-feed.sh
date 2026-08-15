@@ -59,13 +59,16 @@ if [ -n "$FROM_RELEASE" ]; then
   ARTIFACTS="$WORK/release-assets"
   mkdir -p "$ARTIFACTS"
   gh release download "$FROM_RELEASE" -D "$ARTIFACTS" \
-    -p 'lait-*.zip' -p 'lait-*.tar.gz' -p 'astrolabe-*-setup.exe'
-  # The installer names its own bundle version; read it off the asset rather
+    -p 'lait-*.zip' -p 'lait-*.tar.gz' -p 'astrolabe-*-setup.exe' -p 'astrolabe-*.dmg'
+  # The installers name their own bundle version; read it off an asset rather
   # than assuming — an absent installer publishes a lait-only release, loudly.
-  installer="$(cd "$ARTIFACTS" && ls astrolabe-*-setup.exe 2>/dev/null || true)"
+  # Windows setup.exe and macOS dmg carry the same version by construction
+  # (one gate job resolves the tag both build from), so either may name it.
+  installer="$(cd "$ARTIFACTS" && ls astrolabe-*-setup.exe astrolabe-*.dmg 2>/dev/null | head -1 || true)"
   if [ -n "$installer" ]; then
-    ASTROLABE="${installer#astrolabe-}"; ASTROLABE="${ASTROLABE%-setup.exe}"
-    echo "publish-feed: including installer $installer (astrolabe $ASTROLABE)"
+    ASTROLABE="${installer#astrolabe-}"
+    ASTROLABE="${ASTROLABE%-setup.exe}"; ASTROLABE="${ASTROLABE%.dmg}"
+    echo "publish-feed: including installer(s) for astrolabe $ASTROLABE"
   else
     echo "publish-feed: NOTE — no astrolabe installer on $FROM_RELEASE; publishing lait only" >&2
   fi
@@ -97,8 +100,13 @@ gcloud storage cp --cache-control="$IMMUTABLE" \
   "$ARTIFACTS"/lait-*.zip "$ARTIFACTS"/lait-*.tar.gz \
   "$BUCKET/releases/$VERSION/"
 if [ -n "$ASTROLABE" ]; then
-  gcloud storage cp --cache-control="$IMMUTABLE" \
-    "$ARTIFACTS/astrolabe-$ASTROLABE-setup.exe" "$BUCKET/releases/$VERSION/"
+  # Whichever platform installers exist; the manifest step already refused an
+  # $ASTROLABE with neither, and noted any absent platform loudly.
+  for installer in "$ARTIFACTS/astrolabe-$ASTROLABE-setup.exe" \
+                   "$ARTIFACTS/astrolabe-$ASTROLABE.dmg"; do
+    [ -f "$installer" ] && gcloud storage cp --cache-control="$IMMUTABLE" \
+      "$installer" "$BUCKET/releases/$VERSION/"
+  done
 fi
 gcloud storage cp --cache-control="$IMMUTABLE" \
   "$WORK/manifest.json" "$BUCKET/releases/$VERSION/manifest.json"
@@ -106,7 +114,7 @@ gcloud storage cp --cache-control="$IMMUTABLE" \
 # 4. Read the release back over the same door installed machines use, before
 #    the pointer moves. An upload that "succeeded" but does not serve is
 #    exactly the failure this ordering exists to keep out of the feed.
-for object in $(cd "$ARTIFACTS" && ls lait-*.zip lait-*.tar.gz astrolabe-*-setup.exe 2>/dev/null) manifest.json; do
+for object in $(cd "$ARTIFACTS" && ls lait-*.zip lait-*.tar.gz astrolabe-*-setup.exe astrolabe-*.dmg 2>/dev/null) manifest.json; do
   curl -fsSLo /dev/null "$BASE_URL/releases/$VERSION/$object" \
     || { echo "publish-feed: $object uploaded but not served; pointer NOT moved" >&2; exit 1; }
 done
