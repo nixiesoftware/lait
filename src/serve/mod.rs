@@ -686,7 +686,14 @@ async fn static_asset(
 /// What a client asks for when it wants to open a World.
 #[derive(serde::Deserialize)]
 struct LaunchRequest {
-    orbit: String,
+    /// The Orbit the launch is scoped to, when the caller is opening one in
+    /// particular. Optional: Astrolabe opens a World's head at its front page,
+    /// where selecting a Space is the person's act — the redeemed ticket's
+    /// orbit is informational (it is logged, never enforced; the path is what
+    /// scopes a request), so a launch with no Orbit named is not a launch with
+    /// something missing.
+    #[serde(default)]
+    orbit: Option<String>,
 }
 
 /// Mint one launch credential.
@@ -701,14 +708,17 @@ struct LaunchRequest {
 /// single-use, one Orbit, thirty seconds. That is the whole point, because this
 /// is the one that travels in a URL.
 async fn mint_launch(State(app): State<Arc<App>>, Json(request): Json<LaunchRequest>) -> Response {
-    if request.orbit.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "a launch needs an orbit").into_response();
-    }
-    match app.launch_tickets.mint(
-        Some(request.orbit.trim().to_owned()),
-        auth::LAUNCH_TICKET_LIFETIME,
-        now_ms(),
-    ) {
+    // An empty string and an absent field mean the same thing: no Orbit named.
+    let orbit = request
+        .orbit
+        .as_deref()
+        .map(str::trim)
+        .filter(|orbit| !orbit.is_empty())
+        .map(str::to_owned);
+    match app
+        .launch_tickets
+        .mint(orbit, auth::LAUNCH_TICKET_LIFETIME, now_ms())
+    {
         Ok(ticket) => Json(serde_json::json!({
             "ticket": ticket.secret,
             "orbit": ticket.orbit,

@@ -224,8 +224,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         return ActionRequest_Refresh();
       case 1:
         return ActionRequest_Open(
-          orbit: dco_decode_String(raw[1]),
-          entryPath: dco_decode_String(raw[2]),
+          entryPath: dco_decode_String(raw[1]),
         );
       case 2:
         return ActionRequest_StartDevice(
@@ -408,12 +407,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  Unopenable dco_decode_box_autoadd_unopenable(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_unopenable(raw);
-  }
-
-  @protected
   CardRow dco_decode_card_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -561,26 +554,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   LibraryRow dco_decode_library_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 17)
-      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return LibraryRow(
       key: dco_decode_String(arr[0]),
-      orbit: dco_decode_String(arr[1]),
-      space: dco_decode_String(arr[2]),
-      worldMount: dco_decode_String(arr[3]),
-      displayName: dco_decode_opt_String(arr[4]),
-      placement: dco_decode_placement_view(arr[5]),
-      opensAt: dco_decode_opt_String(arr[6]),
-      unopenable: dco_decode_opt_box_autoadd_unopenable(arr[7]),
-      lastOpened: dco_decode_opt_box_autoadd_u_64(arr[8]),
-      store: dco_decode_opt_String(arr[9]),
-      version: dco_decode_opt_box_autoadd_u_32(arr[10]),
-      syncState: dco_decode_opt_String(arr[11]),
-      syncDetail: dco_decode_opt_String(arr[12]),
-      tagline: dco_decode_opt_String(arr[13]),
-      accent: dco_decode_opt_box_autoadd_u_32(arr[14]),
-      routes: dco_decode_list_route_row(arr[15]),
-      people: dco_decode_opt_list_world_person_row(arr[16]),
+      worldMount: dco_decode_String(arr[1]),
+      displayName: dco_decode_String(arr[2]),
+      opensAt: dco_decode_opt_String(arr[3]),
+      version: dco_decode_opt_box_autoadd_u_32(arr[4]),
+      tagline: dco_decode_opt_String(arr[5]),
+      accent: dco_decode_opt_box_autoadd_u_32(arr[6]),
+      people: dco_decode_opt_list_world_person_row(arr[7]),
     );
   }
 
@@ -648,12 +632,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
-  }
-
-  @protected
-  List<RouteRow> dco_decode_list_route_row(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return (raw as List<dynamic>).map(dco_decode_route_row).toList();
   }
 
   @protected
@@ -767,12 +745,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  Unopenable? dco_decode_opt_box_autoadd_unopenable(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_unopenable(raw);
-  }
-
-  @protected
   List<String>? dco_decode_opt_list_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_list_String(raw);
@@ -805,27 +777,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  PlacementView dco_decode_placement_view(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return PlacementView.values[raw as int];
-  }
-
-  @protected
   PresenceView dco_decode_presence_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return PresenceView.values[raw as int];
-  }
-
-  @protected
-  RouteRow dco_decode_route_row(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
-    return RouteRow(
-      label: dco_decode_String(arr[0]),
-      path: dco_decode_String(arr[1]),
-    );
   }
 
   @protected
@@ -914,12 +868,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  Unopenable dco_decode_unopenable(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return Unopenable.values[raw as int];
-  }
-
-  @protected
   WorldPersonRow dco_decode_world_person_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -964,9 +912,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case 0:
         return ActionRequest_Refresh();
       case 1:
-        var var_orbit = sse_decode_String(deserializer);
         var var_entryPath = sse_decode_String(deserializer);
-        return ActionRequest_Open(orbit: var_orbit, entryPath: var_entryPath);
+        return ActionRequest_Open(entryPath: var_entryPath);
       case 2:
         var var_id = sse_decode_String(deserializer);
         return ActionRequest_StartDevice(id: var_id);
@@ -1135,12 +1082,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  Unopenable sse_decode_box_autoadd_unopenable(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_unopenable(deserializer));
-  }
-
-  @protected
   CardRow sse_decode_card_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_card = sse_decode_String(deserializer);
@@ -1302,39 +1243,21 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   LibraryRow sse_decode_library_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_key = sse_decode_String(deserializer);
-    var var_orbit = sse_decode_String(deserializer);
-    var var_space = sse_decode_String(deserializer);
     var var_worldMount = sse_decode_String(deserializer);
-    var var_displayName = sse_decode_opt_String(deserializer);
-    var var_placement = sse_decode_placement_view(deserializer);
+    var var_displayName = sse_decode_String(deserializer);
     var var_opensAt = sse_decode_opt_String(deserializer);
-    var var_unopenable = sse_decode_opt_box_autoadd_unopenable(deserializer);
-    var var_lastOpened = sse_decode_opt_box_autoadd_u_64(deserializer);
-    var var_store = sse_decode_opt_String(deserializer);
     var var_version = sse_decode_opt_box_autoadd_u_32(deserializer);
-    var var_syncState = sse_decode_opt_String(deserializer);
-    var var_syncDetail = sse_decode_opt_String(deserializer);
     var var_tagline = sse_decode_opt_String(deserializer);
     var var_accent = sse_decode_opt_box_autoadd_u_32(deserializer);
-    var var_routes = sse_decode_list_route_row(deserializer);
     var var_people = sse_decode_opt_list_world_person_row(deserializer);
     return LibraryRow(
         key: var_key,
-        orbit: var_orbit,
-        space: var_space,
         worldMount: var_worldMount,
         displayName: var_displayName,
-        placement: var_placement,
         opensAt: var_opensAt,
-        unopenable: var_unopenable,
-        lastOpened: var_lastOpened,
-        store: var_store,
         version: var_version,
-        syncState: var_syncState,
-        syncDetail: var_syncDetail,
         tagline: var_tagline,
         accent: var_accent,
-        routes: var_routes,
         people: var_people);
   }
 
@@ -1463,18 +1386,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
-  }
-
-  @protected
-  List<RouteRow> sse_decode_list_route_row(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    var len_ = sse_decode_i_32(deserializer);
-    var ans_ = <RouteRow>[];
-    for (var idx_ = 0; idx_ < len_; ++idx_) {
-      ans_.add(sse_decode_route_row(deserializer));
-    }
-    return ans_;
   }
 
   @protected
@@ -1660,18 +1571,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  Unopenable? sse_decode_opt_box_autoadd_unopenable(
-      SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_unopenable(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1721,25 +1620,10 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  PlacementView sse_decode_placement_view(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_i_32(deserializer);
-    return PlacementView.values[inner];
-  }
-
-  @protected
   PresenceView sse_decode_presence_view(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return PresenceView.values[inner];
-  }
-
-  @protected
-  RouteRow sse_decode_route_row(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_label = sse_decode_String(deserializer);
-    var var_path = sse_decode_String(deserializer);
-    return RouteRow(label: var_label, path: var_path);
   }
 
   @protected
@@ -1832,13 +1716,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  Unopenable sse_decode_unopenable(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_i_32(deserializer);
-    return Unopenable.values[inner];
-  }
-
-  @protected
   WorldPersonRow sse_decode_world_person_row(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_name = sse_decode_String(deserializer);
@@ -1886,9 +1763,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     switch (self) {
       case ActionRequest_Refresh():
         sse_encode_i_32(0, serializer);
-      case ActionRequest_Open(orbit: final orbit, entryPath: final entryPath):
+      case ActionRequest_Open(entryPath: final entryPath):
         sse_encode_i_32(1, serializer);
-        sse_encode_String(orbit, serializer);
         sse_encode_String(entryPath, serializer);
       case ActionRequest_StartDevice(id: final id):
         sse_encode_i_32(2, serializer);
@@ -2060,13 +1936,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  void sse_encode_box_autoadd_unopenable(
-      Unopenable self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_unopenable(self, serializer);
-  }
-
-  @protected
   void sse_encode_card_row(CardRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.card, serializer);
@@ -2174,21 +2043,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   void sse_encode_library_row(LibraryRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.key, serializer);
-    sse_encode_String(self.orbit, serializer);
-    sse_encode_String(self.space, serializer);
     sse_encode_String(self.worldMount, serializer);
-    sse_encode_opt_String(self.displayName, serializer);
-    sse_encode_placement_view(self.placement, serializer);
+    sse_encode_String(self.displayName, serializer);
     sse_encode_opt_String(self.opensAt, serializer);
-    sse_encode_opt_box_autoadd_unopenable(self.unopenable, serializer);
-    sse_encode_opt_box_autoadd_u_64(self.lastOpened, serializer);
-    sse_encode_opt_String(self.store, serializer);
     sse_encode_opt_box_autoadd_u_32(self.version, serializer);
-    sse_encode_opt_String(self.syncState, serializer);
-    sse_encode_opt_String(self.syncDetail, serializer);
     sse_encode_opt_String(self.tagline, serializer);
     sse_encode_opt_box_autoadd_u_32(self.accent, serializer);
-    sse_encode_list_route_row(self.routes, serializer);
     sse_encode_opt_list_world_person_row(self.people, serializer);
   }
 
@@ -2294,16 +2154,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
-  }
-
-  @protected
-  void sse_encode_list_route_row(
-      List<RouteRow> self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.length, serializer);
-    for (final item in self) {
-      sse_encode_route_row(item, serializer);
-    }
   }
 
   @protected
@@ -2466,17 +2316,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  void sse_encode_opt_box_autoadd_unopenable(
-      Unopenable? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_unopenable(self, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_opt_list_String(
       List<String>? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2519,22 +2358,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
-  void sse_encode_placement_view(PlacementView self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
   void sse_encode_presence_view(PresenceView self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
-  void sse_encode_route_row(RouteRow self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.label, serializer);
-    sse_encode_String(self.path, serializer);
   }
 
   @protected
@@ -2601,12 +2427,6 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   @protected
   void sse_encode_unit(void self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-  }
-
-  @protected
-  void sse_encode_unopenable(Unopenable self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.index, serializer);
   }
 
   @protected

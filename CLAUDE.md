@@ -45,78 +45,55 @@ project, reachable from **SUB-4** and **CLIENT-22**.
 
 ## Astrolabe — the client above all of it
 
-`tools/astrolabe` is a second program, `astrolabe.exe`: the local client through
-which a person reaches the Worlds their device serves. Reference shape is the
-Steam client — a library, a launcher, an identity — that **never draws a World**.
-`Open` is a handoff to the person's browser; `products/issues` ships its own head
-and stays the authority on its own presentation.
+Astrolabe is the local client through which a person reaches the Worlds their
+device serves — a **Flutter interface** (`apps/astrolabe`) over a **Rust core**
+(`tools/astrolabe`), joined by flutter_rust_bridge 2.12.0. Reference shape is
+the Steam client — a library, a launcher, an identity — that **never draws a
+World**. `Open` is a handoff to the person's browser; `products/issues` ships
+its own head and stays the authority on its own presentation. The egui
+interface that preceded revision 7 is deleted; the Flutter client is the only
+one.
 
 ```sh
-cargo run -p astrolabe          # the client (needs lait.exe beside it when packaged)
-cargo test -p astrolabe         # unit + interaction + packaging + presentation + launch
+cd apps/astrolabe
+flutter run -d macos            # or -d windows; builds + stages the Rust core
+flutter analyze && flutter test # the widget/interaction suite
+cargo test -p astrolabe         # the core: model, client, launch seam
 ```
 
-Three layers, and **no boundary between them** — no FFI, no local HTTP hop, no
-generated binding, no serialization on the path from what is observed to what is
-drawn:
+The core is layered, and the boundary is the bridge and nothing else:
 
 - `client/` is the reach: the supervisor library it embeds (`tools/workbench`)
   and the host, Space and World planes it speaks. It draws nothing, which is why
   its rules are testable without a window.
-- `model.rs` is the App-owned state — the *only* model of client state. It moves
-  in exactly two ways, snapshot and invalidation. There is no optimistic local
-  mutation, because that would be a second model disagreeing with the first
-  exactly when an action was refused.
-- `ui/` draws it and holds no logic.
+- `model.rs` is the App-owned state — the *only* model of client state. Dart
+  receives whole immutable `ClientView` projections and holds nothing but
+  drafts. There is no optimistic local mutation, because that would be a second
+  model disagreeing with the first exactly when an action was refused.
+- `api/mod.rs` is the whole boundary: one `ClientView` out, one `ActionRequest`
+  back. Both generated halves are checked in and CI fails on drift; regenerate
+  with `flutter_rust_bridge_codegen generate` from `apps/astrolabe` (slow — it
+  cargo-expands the workspace).
+- `lib/src/core/client.dart` is the only Dart file that may import the bridge.
+  The check: `grep -rn "import.*bridge/" lib/ | grep -v "^lib/src/bridge/"`
+  answers with that file and nothing else.
 
-`runtime.rs` is the one channel: supervision and sampling run on a Tokio runtime
-on their own thread and reach the frame loop as `Update`s drained at the top of
-each frame.
+### Dispatch returns the view; a surface never keeps an answer
 
-### Drawing returns actions; it never calls anything
+`Client.dispatch` applies the returned view on the frame the click happened, so
+a control is disabled the moment it is clicked. Widget tests press a real
+control against `Client.canned` and read what the surface asked for — no
+bridge, no core, no daemon, no window (`apps/astrolabe/test/`).
 
-```rust
-pub fn draw(ui: &mut Ui, app: &App, chrome: &mut Chrome) -> Vec<Action>
-```
+### The Library is the install list
 
-A surface that called the client would do network work on the frame thread. One
-that called it and *kept the answer* would be a second model of client state,
-disagreeing with the first in exactly the case that matters — when the action was
-refused. The shell dispatches what comes back and records it as in flight on the
-same frame, so a control is disabled the moment it is clicked.
-
-That is also what makes a click assertable: an interaction test presses a real
-control and reads what the surface asked for, with no daemon, no browser and no
-window. Seven surfaces — Library · Spaces · Members · Devices · Heads · Storage ·
-Diagnostics — reachable by `Ctrl+1`–`Ctrl+7`, with `F5` to re-read.
-
-### The UI substrate is adopted, not built
-
-`egui` + `eframe` + `accesskit`, all `MIT OR Apache-2.0`, as ordinary pinned
-dependencies. The Plan's revision 5 called for deriving one from "WarpUI"; that
-is GPUI with the names changed, it is Apache-2.0 with **no MIT grant**, its
-platform crates are unpublished, and it has **no headless rendering on Windows**
-— which the release gate requires. Revision 6 (issued `89b00354`) reverses it;
-the finding is a `clarifies` observation on the Plan Spec.
-
-Interaction tests use `egui_kittest`, which renders offscreen and queries the
-**AccessKit tree** — so they assert what a screen reader reads, not what pixels
-looked like. Four gotchas found the hard way:
-
-- A plain label's text lands in the node's `value`, not its `label`.
-- A selected tab is announced through the Toggle pattern: assert `toggled()`,
-  not `is_selected()`.
-- A surface heading carries the same text as its tab, so disambiguate with
-  `get_by_role_and_label`.
-- **A text field's contents are a `value` on a node with no label**, so a scan
-  over `query_all_by_label_contains("")` cannot see them. Assert on the draft the
-  box is bound to.
-
-Build the harness **bigger than the surface draws**
-(`Harness::builder().with_size([1_200.0, 2_000.0])`). egui culls interaction
-outside the clip rect, so a click on a control that fell off a too-small virtual
-screen registers as nothing at all — which reads exactly like the control being
-broken.
+One row per World this build bundles (`composition::bundled_client_packages`),
+with name, tagline, accent, entry path and version compiled in — no probe runs
+to draw it. Which Spaces serve a World, and whether any is up, are the
+destination's facts: the head's front page carries the Space selector, and
+selecting there is what attaches a daemon. Do not reintroduce Space rows or a
+placement badge here — a row whose kind depends on whether a daemon is up is
+the "Unnamed Space" defect.
 
 ### Rules that are tested, not documented
 
@@ -133,12 +110,9 @@ facts, and only one is worth acting on; folding them together is the
 false-disconnection defect one layer down. Same for a diagnosis that could not be
 taken, which is never "every gate passes".
 
-**Listing is passive; choosing is the act.** The Library and the Space list place
-nothing. `Open` places, and so does selecting a Space to administer.
-
-**Every accent clears 3∶1 against what is behind it** (`ui::theme::legible`).
-egui's light theme answers `warn_fg_color` at 2.79∶1 — asking the visuals is not
-the same as getting a readable answer.
+**Listing is passive; choosing is the act.** The Library reads only what is
+compiled in. `Open` starts the identity head; selecting a Space happens at the
+destination.
 
 ### The client-to-process seam has been wrong twice
 

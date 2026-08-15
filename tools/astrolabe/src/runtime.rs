@@ -54,7 +54,6 @@ pub enum Action {
     Refresh,
     /// Hand a World's own head to the person's browser.
     OpenWorld {
-        orbit: String,
         entry_path: String,
     },
     StartDevice(String),
@@ -183,7 +182,7 @@ impl Action {
     pub fn key(&self) -> String {
         match self {
             Self::Refresh => "refresh".into(),
-            Self::OpenWorld { orbit, entry_path } => format!("open:{orbit}{entry_path}"),
+            Self::OpenWorld { entry_path } => format!("open:{entry_path}"),
             Self::StartDevice(id) => format!("device.start:{id}"),
             Self::StopDevice(id) => format!("device.stop:{id}"),
             Self::RestartDevice(id) => format!("device.restart:{id}"),
@@ -235,7 +234,7 @@ impl Action {
     pub fn what(&self) -> String {
         match self {
             Self::Refresh => "re-read this machine".into(),
-            Self::OpenWorld { orbit, .. } => format!("open {orbit}"),
+            Self::OpenWorld { entry_path } => format!("open {entry_path}"),
             Self::StartDevice(id) => format!("start {id}"),
             Self::StopDevice(id) => format!("stop {id}"),
             Self::RestartDevice(id) => format!("restart {id}"),
@@ -525,10 +524,9 @@ impl Worker {
             self.client.supervisor().snapshot().await,
         )));
         self.send(Update::Heads(self.client.heads()));
-        match self.client.get_library().await {
-            Ok(entries) => self.send(Update::Library(entries)),
-            Err(error) => self.fail(None, "read the library", error),
-        }
+        // The Library is compiled in — the install list — so reading it can
+        // neither fail nor go stale against a daemon.
+        self.send(Update::Library(self.client.get_library()));
         match self.client.get_storage().await {
             Ok(facts) => self.send(Update::Storage(facts)),
             Err(error) => self.fail(None, "read storage", error),
@@ -583,24 +581,13 @@ impl Worker {
             // The re-read itself is the effect, and `rereads` is what
             // carries it out. Nothing to say beyond that it happened.
             Action::Refresh => Ok(Outcome::Silent),
-            Action::OpenWorld { orbit, entry_path } => {
-                let launch = client.open_world(orbit, entry_path).await?;
+            Action::OpenWorld { entry_path } => {
+                let launch = client.open_world(entry_path).await?;
                 // The browser is the person's, and this is the only place in
                 // the client that starts something it does not own. It happens
                 // last: a launch URL composed and never opened is recoverable,
                 // and a browser opened at a ticket that was never minted is not.
                 crate::browser::open(&launch.url)?;
-                // `last_opened` is application history, not Orbit uptime. Only
-                // advance it after the browser accepted the successful handoff.
-                match lait::orbits::touch(orbit) {
-                    Ok(true) => {}
-                    Ok(false) => tracing::warn!(orbit, "opened an Orbit absent from the registry"),
-                    Err(error) => tracing::warn!(
-                        orbit,
-                        error = %error,
-                        "could not update the Orbit's last-opened history"
-                    ),
-                }
                 Ok(Outcome::Launched(launch))
             }
             Action::StartDevice(id) => {
@@ -959,13 +946,11 @@ mod tests {
         );
         assert_ne!(
             Action::OpenWorld {
-                orbit: "orb_one".into(),
-                entry_path: "/".into(),
+                entry_path: "/issues".into(),
             }
             .key(),
             Action::OpenWorld {
-                orbit: "orb_two".into(),
-                entry_path: "/".into(),
+                entry_path: "/notes".into(),
             }
             .key()
         );

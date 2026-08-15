@@ -26,10 +26,6 @@ class WorldSettingsSnapshot {
   const WorldSettingsSnapshot({
     required this.key,
     required this.name,
-    required this.orbit,
-    required this.syncLabel,
-    required this.syncDetail,
-    required this.store,
     required this.worldMount,
     required this.entryPath,
     required this.version,
@@ -39,10 +35,6 @@ class WorldSettingsSnapshot {
 
   final String key;
   final String name;
-  final String orbit;
-  final String syncLabel;
-  final String syncDetail;
-  final String? store;
   final String worldMount;
   final String? entryPath;
   final int? version;
@@ -53,10 +45,6 @@ class WorldSettingsSnapshot {
     final json = jsonEncode({
       'key': key,
       'name': name,
-      'orbit': orbit,
-      'syncLabel': syncLabel,
-      'syncDetail': syncDetail,
-      'store': store,
       'worldMount': worldMount,
       'entryPath': entryPath,
       'version': version,
@@ -82,10 +70,6 @@ class WorldSettingsSnapshot {
       return WorldSettingsSnapshot(
         key: value['key'] as String,
         name: value['name'] as String,
-        orbit: value['orbit'] as String,
-        syncLabel: value['syncLabel'] as String,
-        syncDetail: value['syncDetail'] as String,
-        store: value['store'] as String?,
         worldMount: value['worldMount'] as String,
         entryPath: value['entryPath'] as String?,
         version: value['version'] as int?,
@@ -186,12 +170,6 @@ class WorldSettingsPage extends StatelessWidget {
         _SettingsSection(
           title: 'APPLICATION',
           children: [
-            _Setting(label: 'SYNC STATUS', value: snapshot.syncLabel),
-            _Setting(
-              label: 'SYNC DETAIL',
-              value: snapshot.syncDetail,
-              maxLines: 3,
-            ),
             _Setting(
               label: 'IMPLEMENTATION VERSION',
               value: snapshot.version == null
@@ -205,15 +183,8 @@ class WorldSettingsPage extends StatelessWidget {
           title: 'LOCATIONS',
           children: [
             _Setting(
-              label: 'STORE',
-              value: snapshot.store ?? 'Not reported',
-              mono: true,
-            ),
-            _Setting(
               label: 'WORLD MOUNT',
-              value: snapshot.worldMount.isEmpty
-                  ? 'Space front door'
-                  : snapshot.worldMount,
+              value: snapshot.worldMount,
               mono: true,
             ),
             _Setting(
@@ -227,7 +198,6 @@ class WorldSettingsPage extends StatelessWidget {
         _SettingsSection(
           title: 'ACTIVE INSTANCE',
           children: [
-            _Setting(label: 'ORBIT', value: snapshot.orbit, mono: true),
             _Setting(
               label: 'ORIGIN',
               value: snapshot.activeOrigin ?? 'Not reported',
@@ -275,13 +245,11 @@ class _Setting extends StatelessWidget {
     required this.label,
     required this.value,
     this.mono = false,
-    this.maxLines,
   });
 
   final String label;
   final String value;
   final bool mono;
-  final int? maxLines;
 
   @override
   Widget build(BuildContext context) {
@@ -293,7 +261,7 @@ class _Setting extends StatelessWidget {
         t.gap.y(Space.xxs),
         Text(
           value,
-          maxLines: maxLines ?? (mono ? 2 : 1),
+          maxLines: mono ? 2 : 1,
           overflow: TextOverflow.ellipsis,
           style: mono ? context.monoStyle : context.bodyStyle,
         ),

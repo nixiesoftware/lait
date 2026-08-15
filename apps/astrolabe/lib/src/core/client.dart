@@ -53,14 +53,11 @@ export '../bridge/api.dart'
         Missing,
         NoticeRow,
         OrbitRow,
-        PlacementView,
-        RouteRow,
         SpaceRow,
         Staleness,
         Staleness_NeverLoaded,
         Staleness_Signalled,
         StorageRow,
-        Unopenable,
         BookFacts,
         SuggestionRow,
         CardRow,
@@ -221,7 +218,7 @@ class ClientScope extends InheritedNotifier<ValueListenable<api.ClientView>> {
 /// than seven controls that quietly stop disabling themselves.
 abstract final class ActionKeys {
   static const String refresh = 'refresh';
-  static String open(String orbit, String entryPath) => 'open:$orbit$entryPath';
+  static String open(String entryPath) => 'open:$entryPath';
   static String startDevice(String id) => 'device.start:$id';
   static String stopDevice(String id) => 'device.stop:$id';
   static String restartDevice(String id) => 'device.restart:$id';

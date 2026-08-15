@@ -326,7 +326,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
     TResult Function()? refresh,
-    TResult Function(String orbit, String entryPath)? open,
+    TResult Function(String entryPath)? open,
     TResult Function(String id)? startDevice,
     TResult Function(String id)? stopDevice,
     TResult Function(String id)? restartDevice,
@@ -355,7 +355,7 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_Refresh() when refresh != null:
         return refresh();
       case ActionRequest_Open() when open != null:
-        return open(_that.orbit, _that.entryPath);
+        return open(_that.entryPath);
       case ActionRequest_StartDevice() when startDevice != null:
         return startDevice(_that.id);
       case ActionRequest_StopDevice() when stopDevice != null:
@@ -419,7 +419,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult when<TResult extends Object?>({
     required TResult Function() refresh,
-    required TResult Function(String orbit, String entryPath) open,
+    required TResult Function(String entryPath) open,
     required TResult Function(String id) startDevice,
     required TResult Function(String id) stopDevice,
     required TResult Function(String id) restartDevice,
@@ -447,7 +447,7 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_Refresh():
         return refresh();
       case ActionRequest_Open():
-        return open(_that.orbit, _that.entryPath);
+        return open(_that.entryPath);
       case ActionRequest_StartDevice():
         return startDevice(_that.id);
       case ActionRequest_StopDevice():
@@ -508,7 +508,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function()? refresh,
-    TResult? Function(String orbit, String entryPath)? open,
+    TResult? Function(String entryPath)? open,
     TResult? Function(String id)? startDevice,
     TResult? Function(String id)? stopDevice,
     TResult? Function(String id)? restartDevice,
@@ -536,7 +536,7 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_Refresh() when refresh != null:
         return refresh();
       case ActionRequest_Open() when open != null:
-        return open(_that.orbit, _that.entryPath);
+        return open(_that.entryPath);
       case ActionRequest_StartDevice() when startDevice != null:
         return startDevice(_that.id);
       case ActionRequest_StopDevice() when stopDevice != null:
@@ -608,10 +608,8 @@ class ActionRequest_Refresh extends ActionRequest {
 /// @nodoc
 
 class ActionRequest_Open extends ActionRequest {
-  const ActionRequest_Open({required this.orbit, required this.entryPath})
-      : super._();
+  const ActionRequest_Open({required this.entryPath}) : super._();
 
-  final String orbit;
   final String entryPath;
 
   /// Create a copy of ActionRequest
@@ -626,17 +624,16 @@ class ActionRequest_Open extends ActionRequest {
     return identical(this, other) ||
         (other.runtimeType == runtimeType &&
             other is ActionRequest_Open &&
-            (identical(other.orbit, orbit) || other.orbit == orbit) &&
             (identical(other.entryPath, entryPath) ||
                 other.entryPath == entryPath));
   }
 
   @override
-  int get hashCode => Object.hash(runtimeType, orbit, entryPath);
+  int get hashCode => Object.hash(runtimeType, entryPath);
 
   @override
   String toString() {
-    return 'ActionRequest.open(orbit: $orbit, entryPath: $entryPath)';
+    return 'ActionRequest.open(entryPath: $entryPath)';
   }
 }
 
@@ -647,7 +644,7 @@ abstract mixin class $ActionRequest_OpenCopyWith<$Res>
           ActionRequest_Open value, $Res Function(ActionRequest_Open) _then) =
       _$ActionRequest_OpenCopyWithImpl;
   @useResult
-  $Res call({String orbit, String entryPath});
+  $Res call({String entryPath});
 }
 
 /// @nodoc
@@ -662,14 +659,9 @@ class _$ActionRequest_OpenCopyWithImpl<$Res>
   /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   $Res call({
-    Object? orbit = null,
     Object? entryPath = null,
   }) {
     return _then(ActionRequest_Open(
-      orbit: null == orbit
-          ? _self.orbit
-          : orbit // ignore: cast_nullable_to_non_nullable
-              as String,
       entryPath: null == entryPath
           ? _self.entryPath
           : entryPath // ignore: cast_nullable_to_non_nullable

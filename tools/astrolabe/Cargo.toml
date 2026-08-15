@@ -19,22 +19,6 @@ path = "src/lib.rs"
 # consumers and building it twice would let them disagree.
 crate-type = ["cdylib", "rlib"]
 
-# The egui interface, behind the feature that carries it.
-#
-# Revision 7 of the Plan moves the interface to Flutter. This binary is kept
-# until the Dart surfaces reach parity, because a client that cannot be launched
-# is a client nobody can compare against — but it is not built by default, so a
-# `cargo build` produces the core the bridge needs and nothing else.
-[[bin]]
-name = "astrolabe-egui"
-path = "src/main.rs"
-required-features = ["egui-ui"]
-
-[features]
-default = []
-# The retiring interface: egui, eframe, and the surfaces drawn on them.
-egui-ui = ["dep:eframe", "dep:egui"]
-
 [dependencies]
 lait = { path = "../.." }
 lait-workbench = { path = "../workbench" }
@@ -46,18 +30,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-
-# The adopted UI substrate. All three are `MIT OR Apache-2.0`, which is what
-# keeps lait's own dual offer intact — see CLIENT-31.
-# `egui` depends on `accesskit` unconditionally and re-exports it, so the
-# semantic tree is always available; `eframe`'s `accesskit` feature is what
-# bridges that tree to the platform — Windows UI Automation, here.
-eframe = { version = "0.35", optional = true, default-features = false, features = [
-    "accesskit",
-    "default_fonts",
-    "wgpu",
-] }
-egui = { version = "0.35", optional = true }
 
 # The bridge to the Dart interface. `MIT`, so lait's dual offer is untouched.
 # The generated Dart and the generated Rust are both checked in, and CI fails on
@@ -83,9 +55,4 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
-# Saving what `Harness::render` produces. Already in the tree through
-# `egui_kittest`, and a dev-dependency, so it reaches neither a shipped binary
-# nor the generated third-party notices.
-image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"

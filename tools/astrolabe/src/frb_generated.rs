@@ -212,10 +212,8 @@ impl SseDecode for crate::api::ActionRequest {
                 return crate::api::ActionRequest::Refresh;
             }
             1 => {
-                let mut var_orbit = <String>::sse_decode(deserializer);
                 let mut var_entryPath = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::Open {
-                    orbit: var_orbit,
                     entry_path: var_entryPath,
                 };
             }
@@ -561,39 +559,21 @@ impl SseDecode for crate::api::LibraryRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_key = <String>::sse_decode(deserializer);
-        let mut var_orbit = <String>::sse_decode(deserializer);
-        let mut var_space = <String>::sse_decode(deserializer);
         let mut var_worldMount = <String>::sse_decode(deserializer);
-        let mut var_displayName = <Option<String>>::sse_decode(deserializer);
-        let mut var_placement = <crate::api::PlacementView>::sse_decode(deserializer);
+        let mut var_displayName = <String>::sse_decode(deserializer);
         let mut var_opensAt = <Option<String>>::sse_decode(deserializer);
-        let mut var_unopenable = <Option<crate::api::Unopenable>>::sse_decode(deserializer);
-        let mut var_lastOpened = <Option<u64>>::sse_decode(deserializer);
-        let mut var_store = <Option<String>>::sse_decode(deserializer);
         let mut var_version = <Option<u32>>::sse_decode(deserializer);
-        let mut var_syncState = <Option<String>>::sse_decode(deserializer);
-        let mut var_syncDetail = <Option<String>>::sse_decode(deserializer);
         let mut var_tagline = <Option<String>>::sse_decode(deserializer);
         let mut var_accent = <Option<u32>>::sse_decode(deserializer);
-        let mut var_routes = <Vec<crate::api::RouteRow>>::sse_decode(deserializer);
         let mut var_people = <Option<Vec<crate::api::WorldPersonRow>>>::sse_decode(deserializer);
         return crate::api::LibraryRow {
             key: var_key,
-            orbit: var_orbit,
-            space: var_space,
             world_mount: var_worldMount,
             display_name: var_displayName,
-            placement: var_placement,
             opens_at: var_opensAt,
-            unopenable: var_unopenable,
-            last_opened: var_lastOpened,
-            store: var_store,
             version: var_version,
-            sync_state: var_syncState,
-            sync_detail: var_syncDetail,
             tagline: var_tagline,
             accent: var_accent,
-            routes: var_routes,
             people: var_people,
         };
     }
@@ -726,18 +706,6 @@ impl SseDecode for Vec<u8> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<u8>::sse_decode(deserializer));
-        }
-        return ans_;
-    }
-}
-
-impl SseDecode for Vec<crate::api::RouteRow> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = Vec::with_capacity(len_ as usize);
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::RouteRow>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -929,17 +897,6 @@ impl SseDecode for Option<u64> {
     }
 }
 
-impl SseDecode for Option<crate::api::Unopenable> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::Unopenable>::sse_decode(deserializer));
-        } else {
-            return None;
-        }
-    }
-}
-
 impl SseDecode for Option<Vec<String>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -989,19 +946,6 @@ impl SseDecode for crate::api::OrbitRow {
     }
 }
 
-impl SseDecode for crate::api::PlacementView {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::PlacementView::Placed,
-            1 => crate::api::PlacementView::Vacant,
-            2 => crate::api::PlacementView::Unknown,
-            _ => unreachable!("Invalid variant for PlacementView: {}", inner),
-        };
-    }
-}
-
 impl SseDecode for crate::api::PresenceView {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1011,18 +955,6 @@ impl SseDecode for crate::api::PresenceView {
             1 => crate::api::PresenceView::Away,
             2 => crate::api::PresenceView::Offline,
             _ => unreachable!("Invalid variant for PresenceView: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::RouteRow {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_label = <String>::sse_decode(deserializer);
-        let mut var_path = <String>::sse_decode(deserializer);
-        return crate::api::RouteRow {
-            label: var_label,
-            path: var_path,
         };
     }
 }
@@ -1128,18 +1060,6 @@ impl SseDecode for () {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
 }
 
-impl SseDecode for crate::api::Unopenable {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::Unopenable::Unhosted,
-            1 => crate::api::Unopenable::Undeclared,
-            _ => unreachable!("Invalid variant for Unopenable: {}", inner),
-        };
-    }
-}
-
 impl SseDecode for crate::api::WorldPersonRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1194,12 +1114,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
             crate::api::ActionRequest::Refresh => [0.into_dart()].into_dart(),
-            crate::api::ActionRequest::Open { orbit, entry_path } => [
-                1.into_dart(),
-                orbit.into_into_dart().into_dart(),
-                entry_path.into_into_dart().into_dart(),
-            ]
-            .into_dart(),
+            crate::api::ActionRequest::Open { entry_path } => {
+                [1.into_dart(), entry_path.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::ActionRequest::StartDevice { id } => {
                 [2.into_dart(), id.into_into_dart().into_dart()].into_dart()
             }
@@ -1500,21 +1417,12 @@ impl flutter_rust_bridge::IntoDart for crate::api::LibraryRow {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.key.into_into_dart().into_dart(),
-            self.orbit.into_into_dart().into_dart(),
-            self.space.into_into_dart().into_dart(),
             self.world_mount.into_into_dart().into_dart(),
             self.display_name.into_into_dart().into_dart(),
-            self.placement.into_into_dart().into_dart(),
             self.opens_at.into_into_dart().into_dart(),
-            self.unopenable.into_into_dart().into_dart(),
-            self.last_opened.into_into_dart().into_dart(),
-            self.store.into_into_dart().into_dart(),
             self.version.into_into_dart().into_dart(),
-            self.sync_state.into_into_dart().into_dart(),
-            self.sync_detail.into_into_dart().into_dart(),
             self.tagline.into_into_dart().into_dart(),
             self.accent.into_into_dart().into_dart(),
-            self.routes.into_into_dart().into_dart(),
             self.people.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -1595,23 +1503,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::OrbitRow> for crate::api::Orb
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::PlacementView {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Placed => 0.into_dart(),
-            Self::Vacant => 1.into_dart(),
-            Self::Unknown => 2.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::PlacementView {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::PlacementView> for crate::api::PlacementView {
-    fn into_into_dart(self) -> crate::api::PlacementView {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::PresenceView {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
@@ -1625,22 +1516,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::PresenceView {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::PresenceView {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::PresenceView> for crate::api::PresenceView {
     fn into_into_dart(self) -> crate::api::PresenceView {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::RouteRow {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.label.into_into_dart().into_dart(),
-            self.path.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::RouteRow {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::RouteRow> for crate::api::RouteRow {
-    fn into_into_dart(self) -> crate::api::RouteRow {
         self
     }
 }
@@ -1723,22 +1598,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::SuggestionRow> for crate::api
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::Unopenable {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Unhosted => 0.into_dart(),
-            Self::Undeclared => 1.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::Unopenable {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::Unopenable> for crate::api::Unopenable {
-    fn into_into_dart(self) -> crate::api::Unopenable {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::WorldPersonRow {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1788,9 +1647,8 @@ impl SseEncode for crate::api::ActionRequest {
             crate::api::ActionRequest::Refresh => {
                 <i32>::sse_encode(0, serializer);
             }
-            crate::api::ActionRequest::Open { orbit, entry_path } => {
+            crate::api::ActionRequest::Open { entry_path } => {
                 <i32>::sse_encode(1, serializer);
-                <String>::sse_encode(orbit, serializer);
                 <String>::sse_encode(entry_path, serializer);
             }
             crate::api::ActionRequest::StartDevice { id } => {
@@ -2038,21 +1896,12 @@ impl SseEncode for crate::api::LibraryRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.key, serializer);
-        <String>::sse_encode(self.orbit, serializer);
-        <String>::sse_encode(self.space, serializer);
         <String>::sse_encode(self.world_mount, serializer);
-        <Option<String>>::sse_encode(self.display_name, serializer);
-        <crate::api::PlacementView>::sse_encode(self.placement, serializer);
+        <String>::sse_encode(self.display_name, serializer);
         <Option<String>>::sse_encode(self.opens_at, serializer);
-        <Option<crate::api::Unopenable>>::sse_encode(self.unopenable, serializer);
-        <Option<u64>>::sse_encode(self.last_opened, serializer);
-        <Option<String>>::sse_encode(self.store, serializer);
         <Option<u32>>::sse_encode(self.version, serializer);
-        <Option<String>>::sse_encode(self.sync_state, serializer);
-        <Option<String>>::sse_encode(self.sync_detail, serializer);
         <Option<String>>::sse_encode(self.tagline, serializer);
         <Option<u32>>::sse_encode(self.accent, serializer);
-        <Vec<crate::api::RouteRow>>::sse_encode(self.routes, serializer);
         <Option<Vec<crate::api::WorldPersonRow>>>::sse_encode(self.people, serializer);
     }
 }
@@ -2163,16 +2012,6 @@ impl SseEncode for Vec<u8> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <u8>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Vec<crate::api::RouteRow> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::RouteRow>::sse_encode(item, serializer);
         }
     }
 }
@@ -2341,16 +2180,6 @@ impl SseEncode for Option<u64> {
     }
 }
 
-impl SseEncode for Option<crate::api::Unopenable> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::Unopenable>::sse_encode(value, serializer);
-        }
-    }
-}
-
 impl SseEncode for Option<Vec<String>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2391,23 +2220,6 @@ impl SseEncode for crate::api::OrbitRow {
     }
 }
 
-impl SseEncode for crate::api::PlacementView {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::PlacementView::Placed => 0,
-                crate::api::PlacementView::Vacant => 1,
-                crate::api::PlacementView::Unknown => 2,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
 impl SseEncode for crate::api::PresenceView {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2422,14 +2234,6 @@ impl SseEncode for crate::api::PresenceView {
             },
             serializer,
         );
-    }
-}
-
-impl SseEncode for crate::api::RouteRow {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.label, serializer);
-        <String>::sse_encode(self.path, serializer);
     }
 }
 
@@ -2509,22 +2313,6 @@ impl SseEncode for u8 {
 impl SseEncode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
-}
-
-impl SseEncode for crate::api::Unopenable {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::Unopenable::Unhosted => 0,
-                crate::api::Unopenable::Undeclared => 1,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
 }
 
 impl SseEncode for crate::api::WorldPersonRow {

@@ -7,8 +7,8 @@
 /// reads what the surface asked for.
 ///
 /// The states covered are the ones that are easy to skip and expensive to get
-/// wrong: loading against empty, the two reasons a row cannot be opened, and
-/// the one that has to work — `Open` naming the row the pane is about.
+/// wrong: loading against empty, the row that cannot be opened, and the one
+/// that has to work — `Open` naming the row the pane is about.
 library;
 
 import 'package:astrolabe/src/core/client.dart';
@@ -39,39 +39,32 @@ ClientView _view({
     );
 
 LibraryRow _row({
-  required String orbit,
   String mount = 'issues',
-  String? name,
-  PlacementView placement = PlacementView.vacant,
+  String name = 'Issues',
   String? opensAt = '/',
-  Unopenable? unopenable,
   String? tagline,
-  BigInt? lastOpened,
-  String? store,
   int? version,
-  String? syncState,
-  String? syncDetail,
-  List<RouteRow> routes = const [],
   List<WorldPersonRow>? people,
 }) =>
     LibraryRow(
-      key: '$orbit/$mount',
-      orbit: orbit,
-      space: orbit,
+      key: mount,
       worldMount: mount,
       displayName: name,
-      placement: placement,
       opensAt: opensAt,
-      unopenable: unopenable,
-      lastOpened: lastOpened,
-      store: store,
       version: version,
-      syncState: syncState,
-      syncDetail: syncDetail,
       tagline: tagline,
-      routes: routes,
       people: people,
     );
+
+/// The one head an identity serves its Worlds through. `orbit` stays null —
+/// that is what marks it as the identity-wide browser head the Library reads
+/// "running" from.
+const HeadRow _identityHead = HeadRow(
+  id: 'identity:default',
+  kind: 'browser',
+  origin: 'http://127.0.0.1:52713/',
+  owned: true,
+);
 
 Future<List<ActionRequest>> _pump(
   WidgetTester tester,
@@ -127,7 +120,7 @@ void main() {
   testWidgets('Library rail and hero own the frame edges', (tester) async {
     await _pumpLibraryPage(
       tester,
-      _view(library: [_row(orbit: 'orb_one', name: 'IssueWorld')]),
+      _view(library: [_row(name: 'IssueWorld')]),
     );
 
     final rail = find.byKey(const ValueKey('library-rail'));
@@ -148,26 +141,23 @@ void main() {
   testWidgets('loading and empty are told apart on screen', (tester) async {
     await _pump(tester, _view());
     expect(
-      find.text('This device serves no Worlds yet.'),
+      find.text('This build installs no Worlds.'),
       findsNothing,
       reason: 'a client that has read nothing yet claimed the read was empty',
     );
 
     await _pump(tester, _view(library: []));
     expect(
-      find.text('This device serves no Worlds yet.'),
+      find.text('This build installs no Worlds.'),
       findsOneWidget,
       reason: 'an answered-and-empty read said nothing at all',
     );
   });
 
-  testWidgets('a Space that is not running is still openable', (tester) async {
-    // The defect the page shipped with: a vacant Orbit activates nothing, so
-    // every row is a Space row — and treating those as Worlds that failed to
-    // declare an entry path made every row unopenable on a fresh daemon.
+  testWidgets('Launch asks for the World-declared entry path', (tester) async {
     final asked = await _pump(
       tester,
-      _view(library: [_row(orbit: 'orb_one', mount: '', name: 'Work')]),
+      _view(library: [_row()]),
     );
 
     await tester.tap(find.text('LAUNCH'));
@@ -188,8 +178,8 @@ void main() {
     expect(asked, hasLength(1));
     expect(
       asked.single,
-      const ActionRequest.open(orbit: 'orb_one', entryPath: '/'),
-      reason: 'opening a Space asked for somewhere other than its front door',
+      const ActionRequest.open(entryPath: '/'),
+      reason: 'opening asked for somewhere other than the declared entry',
     );
   });
 
@@ -197,14 +187,7 @@ void main() {
       (tester) async {
     final asked = await _pump(
       tester,
-      _view(library: [
-        _row(
-          orbit: 'orb_one',
-          name: 'Issues',
-          opensAt: null,
-          unopenable: Unopenable.undeclared,
-        ),
-      ]),
+      _view(library: [_row(opensAt: null)]),
     );
 
     expect(find.text('LAUNCH'), findsNothing);
@@ -224,8 +207,8 @@ void main() {
     final asked = await _pump(
       tester,
       _view(library: [
-        _row(orbit: 'orb_one', name: 'First'),
-        _row(orbit: 'orb_two', name: 'Second', opensAt: '/spaces/two'),
+        _row(mount: 'issues', name: 'First'),
+        _row(mount: 'notes', name: 'Second', opensAt: '/notes'),
       ]),
     );
 
@@ -241,31 +224,9 @@ void main() {
     await tester.pump();
     expect(
       asked.single,
-      const ActionRequest.open(orbit: 'orb_two', entryPath: '/spaces/two'),
+      const ActionRequest.open(entryPath: '/notes'),
       reason: 'Open followed the page rather than the selection',
     );
-  });
-
-  testWidgets('a declared route draws no navigation — lifecycle only',
-      (tester) async {
-    // The template still declares its routes, and the client still refuses
-    // to surface them: Board/Issues/Specs are the World's own navigation,
-    // and drawing them here would cross the one boundary this client keeps.
-    // Open is the whole act.
-    await _pump(
-      tester,
-      _view(library: [
-        _row(
-          orbit: 'orb_one',
-          name: 'Issues',
-          routes: const [
-            RouteRow(label: 'Board', path: '/spaces/orb_one/board')
-          ],
-        ),
-      ]),
-    );
-
-    expect(find.text('Board'), findsNothing);
   });
 
   testWidgets('the glance is the book joined to this World', (tester) async {
@@ -277,11 +238,6 @@ void main() {
       tester,
       _view(library: [
         _row(
-          orbit: 'orb_one',
-          name: 'Issues',
-          // A reported sync gate, so the action band's own wording cannot
-          // collide with the presence labels this test is about.
-          syncState: 'pass',
           people: const [
             WorldPersonRow(
               name: 'Moon',
@@ -320,46 +276,27 @@ void main() {
   });
 
   testWidgets('the glance keeps its two absences apart', (tester) async {
-    // An unread book and a Space nobody in the book is addressed in are
+    // An unread book and a World nobody in the book is addressed near are
     // different facts, and the panel says which it is.
     await _pump(
       tester,
-      _view(library: [_row(orbit: 'orb_one', name: 'Issues')]),
+      _view(library: [_row()]),
     );
     expect(find.text('The book has not been read.'), findsOneWidget);
 
     await _pump(
       tester,
-      _view(library: [
-        _row(orbit: 'orb_one', name: 'Issues', people: const []),
-      ]),
+      _view(library: [_row(people: const [])]),
     );
     expect(find.text('Nobody in the book is addressed here.'), findsOneWidget);
-  });
-
-  testWidgets('a row with no template draws none of it', (tester) async {
-    // A Space row, and a World this build does not host, both arrive with an
-    // empty template. Nothing is invented to fill the space.
-    await _pump(
-      tester,
-      _view(library: [_row(orbit: 'orb_one', mount: '', name: 'Work')]),
-    );
-    expect(find.text('GO STRAIGHT TO'), findsNothing);
   });
 
   testWidgets('a head address is drawn without its credential', (tester) async {
     await _pump(
       tester,
       _view(
-        library: [_row(orbit: 'orb_one', name: 'Issues')],
-        heads: const [
-          HeadRow(
-            id: 'identity:default',
-            kind: 'browser',
-            origin: 'http://127.0.0.1:52713/',
-            owned: true,
-          ),
-        ],
+        library: [_row()],
+        heads: const [_identityHead],
       ),
     );
 
@@ -376,8 +313,8 @@ void main() {
     final asked = await _pump(
       tester,
       _view(
-        library: [_row(orbit: 'orb_one', name: 'Issues')],
-        inFlight: const ['open:orb_one/'],
+        library: [_row()],
+        inFlight: const ['open:/'],
       ),
     );
 
@@ -396,19 +333,17 @@ void main() {
     expect(asked, isEmpty);
   });
 
-  testWidgets('a running World is one solid split control, both halves Go to',
+  testWidgets('a serving head is one solid split control, both halves Go to',
       (tester) async {
+    // "Running" is the identity head's own liveness: the destination is up,
+    // and Open is a handoff rather than a start. There is no per-Orbit badge
+    // to read it from any more, deliberately — Space lifecycle belongs to the
+    // head's own front page.
     final asked = await _pump(
       tester,
       _view(
-        library: [
-          _row(
-            orbit: 'orb_one',
-            name: 'Issues',
-            placement: PlacementView.placed,
-            opensAt: '/spaces/orb_one',
-          ),
-        ],
+        library: [_row(opensAt: '/issues')],
+        heads: const [_identityHead],
       ),
     );
 
@@ -468,19 +403,19 @@ void main() {
     expect(
       asked,
       const [
-        ActionRequest.open(orbit: 'orb_one', entryPath: '/spaces/orb_one'),
-        ActionRequest.open(orbit: 'orb_one', entryPath: '/spaces/orb_one'),
+        ActionRequest.open(entryPath: '/issues'),
+        ActionRequest.open(entryPath: '/issues'),
       ],
       reason: 'a segment bypassed the World-declared entry path',
     );
   });
 
-  testWidgets('an in-flight vacant World is visibly starting', (tester) async {
+  testWidgets('an in-flight open is visibly launching', (tester) async {
     await _pump(
       tester,
       _view(
-        library: [_row(orbit: 'orb_one', name: 'Issues')],
-        inFlight: const ['open:orb_one/'],
+        library: [_row()],
+        inFlight: const ['open:/'],
       ),
     );
 
@@ -488,40 +423,19 @@ void main() {
     expect(find.text('Cancel'), findsNothing);
   });
 
-  testWidgets('the stable row reports runtime facts and settings',
+  testWidgets('the row reports its declaration and opens settings',
       (tester) async {
-    final opened = DateTime.now().toUtc().subtract(const Duration(minutes: 2));
     final settings = <WorldSettingsSnapshot>[];
     await _pump(
       tester,
       _view(
-        library: [
-          _row(
-            orbit: 'orb_one',
-            name: 'Issues',
-            placement: PlacementView.placed,
-            lastOpened: BigInt.from(opened.millisecondsSinceEpoch ~/ 1000),
-            store: r'D:\Worlds\issues',
-            version: 7,
-            syncState: 'pass',
-            syncDetail: '4 scopes, 28 items',
-          ),
-        ],
-        heads: const [
-          HeadRow(
-            id: 'identity:default',
-            kind: 'browser',
-            origin: 'http://127.0.0.1:52713/',
-            owned: true,
-          ),
-        ],
+        library: [_row(version: 7)],
+        heads: const [_identityHead],
       ),
       onSettings: (snapshot) async => settings.add(snapshot),
     );
 
-    expect(find.text('Up to date'), findsOneWidget);
     expect(find.text('v7'), findsOneWidget);
-    expect(find.text('2 minutes ago'), findsOneWidget);
 
     await tester.tap(find.byIcon(AppIcons.settings));
     await tester.pump(const Duration(milliseconds: 300));
@@ -529,21 +443,18 @@ void main() {
     expect(find.text('Issues settings'), findsNothing);
     expect(settings, hasLength(1));
     expect(settings.single.name, 'Issues');
-    expect(settings.single.store, r'D:\Worlds\issues');
-    expect(settings.single.syncDetail, '4 scopes, 28 items');
+    expect(settings.single.worldMount, 'issues');
+    expect(settings.single.entryPath, '/');
+    expect(settings.single.version, 7);
     expect(settings.single.activeOrigin, 'http://127.0.0.1:52713/');
   });
 
   testWidgets('World settings render as a standalone surface', (tester) async {
     const snapshot = WorldSettingsSnapshot(
-      key: 'orb_one/issues',
+      key: 'issues',
       name: 'Issues',
-      orbit: 'orb_one',
-      syncLabel: 'Up to date',
-      syncDetail: '4 scopes, 28 items',
-      store: r'D:\Worlds\issues',
       worldMount: 'issues',
-      entryPath: '/spaces/orb_one',
+      entryPath: '/',
       version: 7,
       activeOrigin: 'http://127.0.0.1:52713/',
       dark: true,
@@ -557,21 +468,16 @@ void main() {
     await tester.pump();
 
     expect(find.text('Issues settings'), findsOneWidget);
-    expect(find.text(r'D:\Worlds\issues'), findsOneWidget);
-    expect(find.text('4 scopes, 28 items'), findsOneWidget);
+    expect(find.text('v7'), findsOneWidget);
     expect(find.text('http://127.0.0.1:52713/'), findsOneWidget);
   });
 
   testWidgets('World settings own an Astrolabe window shell', (tester) async {
     const snapshot = WorldSettingsSnapshot(
-      key: 'orb_one/issues',
+      key: 'issues',
       name: 'Issues',
-      orbit: 'orb_one',
-      syncLabel: 'Up to date',
-      syncDetail: '4 scopes, 28 items',
-      store: r'D:\Worlds\issues',
       worldMount: 'issues',
-      entryPath: '/spaces/orb_one',
+      entryPath: '/',
       version: 7,
       activeOrigin: 'http://127.0.0.1:52713/',
       dark: true,
@@ -593,14 +499,10 @@ void main() {
 
   test('World settings survive the child-process argument crossing', () {
     const snapshot = WorldSettingsSnapshot(
-      key: 'orb_one/issues',
+      key: 'issues',
       name: 'Issues',
-      orbit: 'orb_one',
-      syncLabel: 'Up to date',
-      syncDetail: '4 scopes, 28 items',
-      store: r'D:\Worlds\issues',
       worldMount: 'issues',
-      entryPath: '/spaces/orb_one',
+      entryPath: '/',
       version: 7,
       activeOrigin: 'http://127.0.0.1:52713/',
       dark: true,
@@ -611,7 +513,7 @@ void main() {
       snapshot.toArgument(),
     ]);
     expect(decoded?.key, snapshot.key);
-    expect(decoded?.store, snapshot.store);
+    expect(decoded?.worldMount, snapshot.worldMount);
     expect(decoded?.activeOrigin, snapshot.activeOrigin);
     expect(decoded?.dark, isTrue);
   });
@@ -621,8 +523,8 @@ void main() {
       tester,
       _view(
         library: [
-          _row(orbit: 'orb_one', name: 'IssueWorld'),
-          _row(orbit: 'orb_two', name: 'Notes'),
+          _row(mount: 'issues', name: 'IssueWorld'),
+          _row(mount: 'notes', name: 'Notes'),
         ],
       ),
     );

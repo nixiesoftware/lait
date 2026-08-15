@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -55,7 +55,6 @@ sealed class ActionRequest with _$ActionRequest {
 
   /// Hand a World to the person's browser.
   const factory ActionRequest.open({
-    required String orbit,
     required String entryPath,
   }) = ActionRequest_Open;
   const factory ActionRequest.startDevice({
@@ -580,99 +579,61 @@ class HostFacts {
           orbitCount == other.orbitCount;
 }
 
-/// One row of the Library.
+/// One row of the Library: an installed World.
+///
+/// Everything here is declared by the bundled package and compiled in — no
+/// probe ran to produce it, and no daemon can make it stale. Which Spaces
+/// serve the World is the destination's fact: the head's own front page
+/// carries the Space selector, and this row deliberately does not pre-ask it.
 class LibraryRow {
-  /// Stable across re-reads: the Orbit and the World in it. A selection
-  /// keyed by index would silently follow whatever moved into that position.
+  /// Stable across re-reads: the mount. A selection keyed by index would
+  /// silently follow whatever moved into that position.
   final String key;
-  final String orbit;
-  final String space;
-
-  /// Empty when the row is the Space itself rather than a World in it.
   final String worldMount;
 
-  /// `None` means nothing authoritative names it. Drawn as unnamed rather
-  /// than as an id dressed up as a name.
-  final String? displayName;
-  final PlacementView placement;
+  /// What the World calls itself. Always present — an installed package
+  /// declares its name, so there is no unnamed row to draw.
+  final String displayName;
 
-  /// Where `Open` lands. `None` with [`Self::unopenable`] set is a row that
-  /// cannot be opened at all.
+  /// Where `Open` lands. `None` is a World that declared no entry path,
+  /// which cannot be opened: `/` is not a guess to make on its behalf.
   final String? opensAt;
-  final Unopenable? unopenable;
-
-  /// Wall-clock seconds. `None` is *never opened*, which a zero would
-  /// silently turn into 1 January 1970.
-  final BigInt? lastOpened;
-
-  /// Where the Orbit's store lives, when the registry could be read.
-  final String? store;
 
   /// Reviewed implementation version for the hosted World.
   final int? version;
 
-  /// The running Orbit's sync gate, kept as transport facts for Dart wording.
-  final String? syncState;
-  final String? syncDetail;
-
-  /// What the World says about how it should be drawn. Empty for a Space row
-  /// and for a World this build does not host — in both cases because nothing
-  /// has said anything, which is a fact rather than a blank.
+  /// One line saying what this World is for.
   final String? tagline;
 
   /// Packed `0xRRGGBB`. A seed the interface derives a plate from locally;
   /// there is no asset here and nothing to fetch.
   final int? accent;
 
-  /// Named places inside the World, already resolved for this Orbit.
-  ///
-  /// Declared facts, not drawn ones: the client surfaces lifecycle only,
-  /// so no surface renders these as navigation.
-  final List<RouteRow> routes;
-
-  /// People from the identity's book addressed in this row's Space.
-  /// `None` until the book has been read — which is not the same as a
-  /// Space nobody in the book is addressed in.
+  /// People from the identity's book addressed in any Space this World is
+  /// reachable in. `None` until the book has been read — which is not the
+  /// same as a World nobody in the book is addressed near.
   final List<WorldPersonRow>? people;
 
   const LibraryRow({
     required this.key,
-    required this.orbit,
-    required this.space,
     required this.worldMount,
-    this.displayName,
-    required this.placement,
+    required this.displayName,
     this.opensAt,
-    this.unopenable,
-    this.lastOpened,
-    this.store,
     this.version,
-    this.syncState,
-    this.syncDetail,
     this.tagline,
     this.accent,
-    required this.routes,
     this.people,
   });
 
   @override
   int get hashCode =>
       key.hashCode ^
-      orbit.hashCode ^
-      space.hashCode ^
       worldMount.hashCode ^
       displayName.hashCode ^
-      placement.hashCode ^
       opensAt.hashCode ^
-      unopenable.hashCode ^
-      lastOpened.hashCode ^
-      store.hashCode ^
       version.hashCode ^
-      syncState.hashCode ^
-      syncDetail.hashCode ^
       tagline.hashCode ^
       accent.hashCode ^
-      routes.hashCode ^
       people.hashCode;
 
   @override
@@ -681,21 +642,12 @@ class LibraryRow {
       other is LibraryRow &&
           runtimeType == other.runtimeType &&
           key == other.key &&
-          orbit == other.orbit &&
-          space == other.space &&
           worldMount == other.worldMount &&
           displayName == other.displayName &&
-          placement == other.placement &&
           opensAt == other.opensAt &&
-          unopenable == other.unopenable &&
-          lastOpened == other.lastOpened &&
-          store == other.store &&
           version == other.version &&
-          syncState == other.syncState &&
-          syncDetail == other.syncDetail &&
           tagline == other.tagline &&
           accent == other.accent &&
-          routes == other.routes &&
           people == other.people;
 }
 
@@ -794,20 +746,6 @@ class OrbitRow {
           lastOpened == other.lastOpened;
 }
 
-/// Whether an Orbit is currently up. Three states, because "not running" and
-/// "could not be asked" are different facts and only one is worth acting on.
-///
-/// Named apart from [`crate::client::library::Placement`] on purpose: the
-/// codegen flattens type names across the crate and picks between collisions at
-/// random, so a DTO that shared a name with a core type would be a coin toss
-/// nobody could see land.
-enum PlacementView {
-  placed,
-  vacant,
-  unknown,
-  ;
-}
-
 /// Measured reachability for the identity a Card names, from this device's
 /// vantage — the Neighbor registry's beacon-fed answer, never a default.
 enum PresenceView {
@@ -819,30 +757,6 @@ enum PresenceView {
   /// is "no Space that names it could be asked".
   offline,
   ;
-}
-
-/// One named place inside a World.
-class RouteRow {
-  final String label;
-
-  /// Absolute, and resolved: `Open` takes it as it stands.
-  final String path;
-
-  const RouteRow({
-    required this.label,
-    required this.path,
-  });
-
-  @override
-  int get hashCode => label.hashCode ^ path.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is RouteRow &&
-          runtimeType == other.runtimeType &&
-          label == other.label &&
-          path == other.path;
 }
 
 /// The Space somebody is administering, as it last answered.
@@ -982,22 +896,12 @@ class SuggestionRow {
           handles == other.handles;
 }
 
-/// Why a row cannot be opened. Two facts, not one.
-enum Unopenable {
-  /// This build hosts no head for that World.
-  unhosted,
-
-  /// The World is hosted here and has not declared where to open it.
-  undeclared,
-  ;
-}
-
-/// One person the book addresses in a World's Space — the at-a-glance join
-/// between the identity's own book and a Library row. Not the Space's
-/// roster: that is an authoritative read a person asks for by choosing the
-/// Space, and this panel never places anything to find out. My Card is
-/// excluded — the glance answers "who of mine is here", and you are not a
-/// contact of yourself.
+/// One person the book addresses near a World — the at-a-glance join between
+/// the identity's own book and a Library row, across every Space the card
+/// holds an address in. Not a roster: that is an authoritative read the
+/// World's own head answers for, and this panel never places anything to
+/// find out. My Card is excluded — the glance answers "who of mine is here",
+/// and you are not a contact of yourself.
 class WorldPersonRow {
   final String name;
 
@@ -1005,8 +909,9 @@ class WorldPersonRow {
   /// default face — the same canonical face the book draws.
   final String? picture;
 
-  /// Measured presence in THIS Space alone, or `None` when it could not
-  /// be asked. A person online somewhere else is not online here.
+  /// Best measured presence across the Spaces this card holds an address
+  /// in, or `None` when none of them could be asked. A person is as
+  /// present as their most reachable address.
   final PresenceView? presence;
 
   /// Filed under the canonical agent group.
