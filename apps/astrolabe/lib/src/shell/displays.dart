@@ -10,6 +10,7 @@ import 'dart:convert';
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart'
     show MaterialApp, Scaffold, SelectableText, ThemeMode;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
@@ -173,6 +174,16 @@ class _Coordinator extends StatelessWidget {
               Expanded(
                 child: Text(display.label, style: context.headingStyle),
               ),
+              Button(
+                label: 'Copy setup',
+                size: ButtonSize.sm,
+                variant: ButtonVariant.outline,
+                tooltip: 'Copy the pinned receiver bootstrap JSON.',
+                onPressed: () => Clipboard.setData(
+                  ClipboardData(text: _receiverBootstrap(display)),
+                ),
+              ),
+              t.gap.x(Space.sm),
               const Badge(label: 'SELF-HOSTED'),
             ],
           ),
@@ -188,6 +199,16 @@ class _Coordinator extends StatelessWidget {
     );
   }
 }
+
+String _receiverBootstrap(DisplayFacts display) => jsonEncode({
+      'protocol_major': 1,
+      'trust': {
+        'kind': 'pinned_certificate',
+        'origin': display.origin,
+        'sha256': display.certificateSha256,
+      },
+      'rendezvous': null,
+    });
 
 class _SectionTitle extends StatelessWidget {
   const _SectionTitle({required this.label, required this.count});

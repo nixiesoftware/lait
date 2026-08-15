@@ -30,6 +30,17 @@ pub enum CoordinatorTrust {
     },
 }
 
+/// Non-secret trust material handed to a receiver before it opens a network
+/// connection. Self-hosted coordinators use the pinned-certificate variant;
+/// hosted coordinators may use the platform Web PKI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverBootstrap {
+    pub protocol_major: u32,
+    pub trust: CoordinatorTrust,
+    pub rendezvous: Option<RendezvousId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinatorInstance {
@@ -124,6 +135,20 @@ fn valid_https_origin(origin: &str) -> bool {
         && authority.len() <= 255
         && authority.is_ascii()
         && !authority.contains(['/', '?', '#', '@'])
+}
+
+pub fn validate_bootstrap(bootstrap: &ReceiverBootstrap) -> Result<(), Refusal> {
+    if bootstrap.protocol_major != PROTOCOL_MAJOR {
+        return Err(Refusal::Unsupported("protocol major"));
+    }
+    let origin = match &bootstrap.trust {
+        CoordinatorTrust::PinnedCertificate { origin, .. }
+        | CoordinatorTrust::WebPkiOrigin { origin } => origin,
+    };
+    if !valid_https_origin(origin) {
+        return Err(Refusal::InvalidShape("coordinator HTTPS origin"));
+    }
+    Ok(())
 }
 
 pub fn validate_instance(instance: &CoordinatorInstance) -> Result<(), Refusal> {

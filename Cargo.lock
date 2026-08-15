@@ -376,6 +376,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrolabe-display-reference"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "display-protocol",
+ "getrandom 0.3.4",
+ "image",
+ "mechanics",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
+]
+
+[[package]]
 name = "astrolabe-ios"
 version = "0.1.0"
 dependencies = [

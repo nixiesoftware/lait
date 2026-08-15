@@ -14,6 +14,7 @@ members = [
     "products/issues-app",
     "products/signage",
     "products/signage-app",
+    "receivers/reference",
     "tools/workbench",
     "tools/astrolabe",
     "tools/astrolabe-ios",
