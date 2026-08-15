@@ -10,7 +10,16 @@ Windows `.zip` is flat with `lait.exe` at the root (the self-updater and
 `.sha256` sidecar; a unified `sha256.sum`, a build-provenance attestation, and a
 CycloneDX SBOM are published alongside the release.
 
-This directory holds the packaging definitions cargo-dist does **not** generate.
+This directory holds the packaging definitions cargo-dist does **not** generate,
+including Astrolabe's Windows NSIS installer, macOS DMG, and Linux relocatable
+Flutter bundle.
+
+Astrolabe is built by `.github/workflows/build-astrolabe.yml` from the same tag
+as the `lait` archives. Flutter is pinned there to 3.41.6; each platform build
+stages the exact core and sidecar pair before its packaging script accepts it.
+Linux currently publishes x86_64 only as
+`astrolabe-<version>-x86_64-unknown-linux-gnu.tar.gz`; the target in the name and
+feed leaves an unambiguous arm64 slot for a later native build.
 
 ## Channels & where they live
 
