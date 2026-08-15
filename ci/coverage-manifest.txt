@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1757
-pr-platform    1370
-nightly        1784
+pr             1759
+pr-platform    1372
+nightly        1786
 mutants        98
 
 [gates]
@@ -540,14 +540,16 @@ lait serve::tests::the_gate_refuses_and_admits_over_real_http
 lait serve::tests::the_origin_is_judged_before_the_credential
 lait serve::tests::unknown_paths_fall_back_to_the_app
 lait update::feed::tests::a_channel_resolves_to_the_release_its_pointer_names
+lait update::feed::tests::a_channel_resolves_when_a_successor_key_signed_it
 lait update::feed::tests::a_floor_is_carried_and_an_unsatisfiable_floor_is_ignored_and_flagged
 lait update::feed::tests::a_pointer_and_manifest_that_disagree_on_version_are_refused
 lait update::feed::tests::a_relocation_is_followed_once_and_a_chain_is_refused
 lait update::feed::tests::a_sealed_envelope_opens_and_a_tampered_one_is_a_verification_failure
 lait update::feed::tests::an_unreachable_pointer_stays_unreachable_never_up_to_date
+lait update::feed::tests::any_pinned_key_opens_an_envelope_which_is_what_makes_rotation_an_overlap
 lait update::feed::tests::channel_parse_accepts_exactly_the_two_channels
 lait update::feed::tests::garbage_is_invalid_not_a_verification_failure
-lait update::feed::tests::the_pinned_key_is_well_formed
+lait update::feed::tests::the_pinned_keys_are_well_formed_and_distinct
 lait update::feed::tests::the_real_test_channel_resolves_with_the_pinned_key
 lait update::feed::tests::the_stable_channel_refuses_a_prerelease_even_when_the_pointer_names_one
 lait update::tests::extract_binary_finds_the_flat_zip_and_the_nested_tar_layouts
