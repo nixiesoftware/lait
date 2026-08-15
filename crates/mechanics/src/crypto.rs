@@ -256,6 +256,114 @@ fn box_key(shared: &[u8], eph_pub: &[u8], recip_pub: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+/// The same box, with the caller's context mixed into the key.
+///
+/// [`seal_to`] binds the ephemeral key and the recipient and nothing else, so a
+/// sealed blob carries no statement about what it is *for* — its meaning comes
+/// entirely from where it happens to be filed, and a blob moved to the wrong
+/// file opens perfectly well. Every place this kernel seals something, the
+/// context matters: a space key belongs to one space and one epoch, a custody
+/// package to one ceremony and one leaf, a mailbox payload to one actor.
+///
+/// Binding turns misfiling from a policy question into a decrypt failure. That
+/// is the whole point: a check the caller can forget to write becomes one the
+/// arithmetic makes for them.
+///
+/// The wire format is unchanged — `eph_x_pub(32) || nonce(12) || ciphertext` —
+/// because the binding lives in the key rather than the bytes. So this is not a
+/// new envelope generation and needs no discriminator: an envelope sealed under
+/// the wrong context simply does not open, which is exactly the intended
+/// behaviour and is indistinguishable from any other failed decryption.
+fn bound_box_key(shared: &[u8], eph_pub: &[u8], recip_pub: &[u8], context: &[&[u8]]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(BOUND_SEALED_BOX_DOMAIN);
+    h.update(shared);
+    h.update(eph_pub);
+    h.update(recip_pub);
+    // Length-framed, count first, exactly as the signature preimages in this
+    // tree are framed. Concatenating the parts raw would make `["ab", "c"]` and
+    // `["a", "bc"]` the same binding, so two different contexts would open each
+    // other's envelopes — the binding would be decorative.
+    h.update(&(context.len() as u32).to_be_bytes());
+    for part in context {
+        h.update(&(part.len() as u32).to_be_bytes());
+        h.update(part);
+    }
+    *h.finalize().as_bytes()
+}
+
+/// Domain for the context-bound box. Distinct from the unbound one, so a bound
+/// envelope and an unbound envelope over the same plaintext never share a key
+/// and neither can be opened by the other's reader.
+const BOUND_SEALED_BOX_DOMAIN: &[u8] = b"lait/sealedbox/1";
+
+/// Seal `msg` to a member addressed by their ed25519 `DeviceId`, bound to
+/// `context`. See [`bound_box_key`] for what binding buys and why the wire
+/// format is unchanged. Returns `None` if the recipient key is invalid.
+pub fn seal_to_bound(
+    recipient: &DeviceId,
+    context: &[&[u8]],
+    msg: &[u8],
+) -> Result<Option<Vec<u8>>, Failure> {
+    let Some(recip_ed) = ed_pubkey_bytes(recipient) else {
+        return Ok(None);
+    };
+    let Some(recip_x) = ed_pk_to_x(&recip_ed) else {
+        return Ok(None);
+    };
+    let eph_seed = random_array()?;
+    let eph = StaticSecret::from(eph_seed);
+    let eph_pub = XPublic::from(&eph);
+    let shared = eph.diffie_hellman(&recip_x);
+    let key = bound_box_key(
+        shared.as_bytes(),
+        eph_pub.as_bytes(),
+        recip_x.as_bytes(),
+        context,
+    );
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    let nonce = random_nonce()?;
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce), msg)
+        .map_err(|_| Failure::Encryption)?;
+    let mut out = Vec::with_capacity(32 + NONCE_LEN + ct.len());
+    out.extend_from_slice(eph_pub.as_bytes());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(Some(out))
+}
+
+/// Open a context-bound sealed box addressed to us. `None` when the envelope is
+/// malformed, addressed elsewhere, **or sealed under a different context** —
+/// the three are deliberately indistinguishable to the caller, because a reader
+/// that could tell "wrong context" from "wrong recipient" would be an oracle
+/// over what a blob was for.
+pub fn open_sealed_bound(
+    my_seed: &[u8; 32],
+    me: &DeviceId,
+    context: &[&[u8]],
+    sealed: &[u8],
+) -> Option<Vec<u8>> {
+    if sealed.len() < 32 + NONCE_LEN {
+        return None;
+    }
+    let eph_pub = XPublic::from(<[u8; 32]>::try_from(&sealed[..32]).ok()?);
+    let nonce = &sealed[32..32 + NONCE_LEN];
+    let ct = &sealed[32 + NONCE_LEN..];
+    let my_x = ed_seed_to_x(my_seed);
+    let my_ed = ed_pubkey_bytes(me)?;
+    let my_x_pub = ed_pk_to_x(&my_ed)?;
+    let shared = my_x.diffie_hellman(&eph_pub);
+    let key = bound_box_key(
+        shared.as_bytes(),
+        eph_pub.as_bytes(),
+        my_x_pub.as_bytes(),
+        context,
+    );
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    cipher.decrypt(Nonce::from_slice(nonce), ct).ok()
+}
+
 /// The key-epoch id length prefixed to every protected Body envelope.
 pub const BODY_EPOCH_ID_LEN: usize = 16;
 /// The fixed protected-Body envelope overhead:
@@ -585,6 +693,104 @@ mod tests {
                 "a frozen v1 envelope stopped opening"
             );
         }
+    }
+
+    /// The property the binding exists for: the same recipient, the same
+    /// plaintext, a different context — and it does not open.
+    #[test]
+    fn a_bound_envelope_opens_only_under_the_context_it_was_sealed_for() {
+        let seed = [21u8; 32];
+        let me = device_from_seed(&seed);
+        let space = b"ws_example";
+        let epoch_three = 3u32.to_be_bytes();
+        let epoch_four = 4u32.to_be_bytes();
+
+        let sealed = seal_to_bound(&me, &[space, &epoch_three], b"the space key")
+            .expect("encrypt")
+            .expect("valid recipient");
+
+        assert_eq!(
+            open_sealed_bound(&seed, &me, &[space, &epoch_three], &sealed).as_deref(),
+            Some(&b"the space key"[..]),
+            "the sealing context must open it"
+        );
+
+        // The misfiling this exists to catch: right space, wrong epoch.
+        assert!(
+            open_sealed_bound(&seed, &me, &[space, &epoch_four], &sealed).is_none(),
+            "an envelope from another epoch must not open"
+        );
+        // And right epoch, wrong space.
+        assert!(
+            open_sealed_bound(&seed, &me, &[b"ws_other", &epoch_three], &sealed).is_none(),
+            "an envelope from another space must not open"
+        );
+        // A context of a different shape is a different context, not a prefix
+        // match.
+        assert!(
+            open_sealed_bound(&seed, &me, &[space], &sealed).is_none(),
+            "dropping a context element must not open it"
+        );
+    }
+
+    /// Framing is load-bearing, not tidiness.
+    ///
+    /// With the parts concatenated raw, `["ab", "c"]` and `["a", "bc"]` hash
+    /// identically, so two unrelated contexts would open each other's envelopes
+    /// and the binding would be decoration. This is the test that fails if the
+    /// length framing is ever removed as redundant.
+    #[test]
+    fn contexts_that_concatenate_alike_are_still_different_bindings() {
+        let seed = [22u8; 32];
+        let me = device_from_seed(&seed);
+        let sealed = seal_to_bound(&me, &[b"ab", b"c"], b"payload")
+            .expect("encrypt")
+            .expect("valid recipient");
+        assert!(open_sealed_bound(&seed, &me, &[b"ab", b"c"], &sealed).is_some());
+        assert!(
+            open_sealed_bound(&seed, &me, &[b"a", b"bc"], &sealed).is_none(),
+            "the framing must distinguish contexts that concatenate to the same bytes"
+        );
+    }
+
+    /// Bound and unbound envelopes never cross, even with an empty context,
+    /// because the domains differ. A bound reader must not be satisfiable by a
+    /// legacy envelope, or the binding could be stripped by re-filing.
+    #[test]
+    fn a_bound_envelope_and_an_unbound_one_never_open_each_other() {
+        let seed = [23u8; 32];
+        let me = device_from_seed(&seed);
+        let msg = b"same plaintext";
+
+        let bound = seal_to_bound(&me, &[], msg).unwrap().unwrap();
+        let unbound = seal_to(&me, msg).unwrap().unwrap();
+
+        assert!(open_sealed_bound(&seed, &me, &[], &bound).is_some());
+        assert!(open_sealed(&seed, &me, &unbound).is_some());
+
+        assert!(
+            open_sealed(&seed, &me, &bound).is_none(),
+            "the unbound reader must not open a bound envelope"
+        );
+        assert!(
+            open_sealed_bound(&seed, &me, &[], &unbound).is_none(),
+            "the bound reader must not open an unbound envelope"
+        );
+    }
+
+    #[test]
+    fn a_bound_envelope_still_refuses_the_wrong_recipient() {
+        let seed = [24u8; 32];
+        let me = device_from_seed(&seed);
+        let context: &[&[u8]] = &[b"ws_example"];
+        let sealed = seal_to_bound(&me, context, b"secret").unwrap().unwrap();
+
+        let other_seed = [25u8; 32];
+        let other = device_from_seed(&other_seed);
+        assert!(
+            open_sealed_bound(&other_seed, &other, context, &sealed).is_none(),
+            "the right context must not rescue the wrong recipient"
+        );
     }
 
     #[test]
