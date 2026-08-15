@@ -1504,12 +1504,20 @@ pub async fn serve_session(
                     )
                     .await
                     {
-                        Ok(Ok(group)) => handle.media.publish(media::Event {
-                            peer: station,
-                            connection_id,
-                            session: media_session,
-                            body: media::EventBody::Group(std::sync::Arc::new(group)),
-                        }),
+                        Ok(Ok(group)) => {
+                            if group.header.track_kind == media::TrackKind::Catalog
+                                && media_session.accept_catalog(&group).is_err()
+                            {
+                                recv.stop(media::RESET_MEDIA);
+                                return;
+                            }
+                            handle.media.publish(media::Event {
+                                peer: station,
+                                connection_id,
+                                session: media_session,
+                                body: media::EventBody::Group(std::sync::Arc::new(group)),
+                            });
+                        }
                         _ => recv.stop(media::RESET_MEDIA),
                     }
                 });

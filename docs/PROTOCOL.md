@@ -571,6 +571,8 @@ Native media adds narrower bounds at its own seam:
 | `MAX_MEDIA_FRAME_BYTES` | 16 MiB | one encoded access unit |
 | `MAX_FRAMES_PER_GROUP` | 512 | frame-table ceiling |
 | `MAX_MEDIA_GROUP_BYTES` | 32 MiB | materialized Group ceiling |
+| `MAX_CATALOG_BYTES` | 256 KiB | one full canonical `catalog.json` update |
+| `MAX_CATALOG_TRACKS` | 64 | advertised raw/CMAF/HLS variants |
 | `MAX_GROUP_DURATION_MS` | 10,000 ms | hard keyframe-recovery cap |
 | `MAX_LATENCY_MS` | 30,000 ms | hard negotiated delivery budget |
 | `MAX_SUBSCRIPTIONS_PER_SESSION` | 128 per direction | connection-lifetime id/churn ceiling |
@@ -663,6 +665,25 @@ connection-scoped event handle is the stateful publishing seam: it serializes
 control transitions, derives newer-Group QUIC priority, exposes current path
 quality for conservative encoder adaptation, and refuses a Group the peer did
 not subscribe to.
+
+`catalog.json` is the well-known catalog Track. Each update is one complete,
+canonical JSON document carried as the only key Frame in a new Group; lait does
+not use catalog deltas, so a late join never depends on an expired predecessor.
+The catalog carries WebCodecs codec strings and lowercase-hex decoder
+description bytes, timescale, bitrate, dimensions and frame rate or audio
+shape, render group, target latency, and a jitter hint. A generation-one
+catalog that advertises video must include an H.264 (`avc1.` or `avc3.` plus
+six hexadecimal profile characters) variant; one that advertises audio must
+include AAC-LC (`mp4a.40.2`, `mp4a.40.02`, or `mp4a.67`). AV1 (`av01.*`) is
+negotiated
+optional. The connection installs only increasing catalog Group sequences; the
+corresponding `TRACK_INFO` and every later media Group must match the latest
+selected catalog entry exactly.
+
+CMAF and HLS v3 availability is named by a small opaque rendition id. Catalogs
+cannot contain a URL or path. Astrolabe resolves that id inside the receiver's
+assignment-bound HTTP session and is the only component that mints CMAF/HLS;
+the peer Group payload remains raw encoded access units.
 
 Groups use reliable streams, not datagrams, and use no application FEC. An
 incomplete Group becomes reset-eligible only after a newer sequence exists.

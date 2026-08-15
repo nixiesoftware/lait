@@ -46,6 +46,14 @@ pub const MAX_TRACK_NAME_BYTES: usize = 128;
 pub const MAX_CODEC_NAME_BYTES: usize = 64;
 /// Codec extradata, bounded independently from a control message.
 pub const MAX_DECODER_CONFIG_BYTES: usize = 64 * 1024;
+/// One complete canonical `catalog.json` update. Catalogs are control-plane
+/// metadata even though they travel as a Track, so they stay far below a
+/// media-frame allocation.
+pub const MAX_CATALOG_BYTES: usize = 256 * 1024;
+/// A publisher cannot advertise an unbounded variant table.
+pub const MAX_CATALOG_TRACKS: usize = 64;
+/// Opaque coordinator HTTP rendition ids are identifiers, never URLs.
+pub const MAX_RENDITION_ID_BYTES: usize = 128;
 /// One Group header or Frame header.
 pub const MAX_MEDIA_HEADER_BYTES: usize = 4 * 1024;
 /// One encoded access unit. Checked before its payload is allocated.
@@ -63,6 +71,14 @@ pub const MAX_ACTIVE_GROUPS_PER_SESSION: usize = crate::plane::bounds::MAX_STREA
 const EVENT_QUEUE: usize = 8;
 /// Reset/stop code for a malformed or expired media flow.
 pub const RESET_MEDIA: u32 = 3;
+/// Well-known Track carrying full, canonical JSON catalog updates.
+pub const CATALOG_TRACK: &str = "catalog.json";
+/// TrackInfo codec marker for the non-media catalog Track.
+pub const CATALOG_CODEC: &str = "json";
+/// Catalog timestamps are expressed in milliseconds.
+pub const CATALOG_TIMESCALE: u32 = 1_000;
+/// This generation of the lait-owned catalog JSON contract.
+pub const CATALOG_VERSION: u16 = 1;
 
 mod control_kind {
     pub const SETUP: u8 = 0x01;
@@ -103,6 +119,10 @@ pub enum Invalid {
     WrongTrack,
     GoingAway,
     StaleGroup,
+    UnsupportedCodec,
+    BaselineRequired,
+    CatalogRequired,
+    TrackInfoMismatch,
 }
 
 impl std::fmt::Display for Invalid {
@@ -115,6 +135,7 @@ impl std::error::Error for Invalid {}
 
 /// The application meaning of a Track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TrackKind {
     Video,
     Audio,
@@ -123,6 +144,7 @@ pub enum TrackKind {
 
 /// Whether an encoded chunk can be decoded independently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FrameKind {
     Key,
     Delta,
@@ -342,13 +364,31 @@ impl Control {
             Self::Fetch(value) => validate_track(&value.track),
             Self::TrackInfo(value) => {
                 validate_track(&value.track)?;
-                validate_codec(&value.codec)?;
                 if value.timescale == 0
                     || value.decoder_config.len() > MAX_DECODER_CONFIG_BYTES
                     || value.max_group_duration_ms == 0
                     || value.max_group_duration_ms > MAX_GROUP_DURATION_MS
                 {
                     return Err(Invalid::Bounds);
+                }
+                match value.kind {
+                    TrackKind::Catalog => {
+                        if value.track != CATALOG_TRACK
+                            || value.codec != CATALOG_CODEC
+                            || value.timescale != CATALOG_TIMESCALE
+                            || !value.decoder_config.is_empty()
+                        {
+                            return Err(Invalid::Bounds);
+                        }
+                    }
+                    TrackKind::Video | TrackKind::Audio => {
+                        let codec = codec_family(value.kind, &value.codec)?;
+                        if value.track == CATALOG_TRACK
+                            || (codec != CodecFamily::Av1 && value.decoder_config.is_empty())
+                        {
+                            return Err(Invalid::Bounds);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -416,6 +456,12 @@ impl GroupHeader {
         {
             return Err(Invalid::Bounds);
         }
+        if (self.track_kind == TrackKind::Catalog
+            && (self.track != CATALOG_TRACK || self.timescale != CATALOG_TIMESCALE))
+            || (self.track_kind != TrackKind::Catalog && self.track == CATALOG_TRACK)
+        {
+            return Err(Invalid::Bounds);
+        }
         Ok(())
     }
 }
@@ -473,6 +519,262 @@ pub struct ReceivedGroup {
     pub frames: Vec<Frame>,
 }
 
+/// One full independent `catalog.json` update.
+///
+/// lait deliberately does not implement JSON Patch/delta catalogs: every
+/// update is one canonical document in one Group, so a late join never needs
+/// state that may already have expired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog {
+    pub version: u16,
+    pub jitter_hint_ms: u32,
+    pub tracks: Vec<CatalogTrack>,
+}
+
+/// Decoder and coordinator-edge information for one raw peer Track.
+///
+/// `decoder_config_hex` is exactly the WebCodecs decoder-description bytes.
+/// HTTP rendition ids are opaque assignment-bound names resolved by the
+/// coordinator; paths and URLs are never admitted to this protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogTrack {
+    pub track: String,
+    pub kind: TrackKind,
+    pub codec: String,
+    pub timescale: u32,
+    pub decoder_config_hex: String,
+    pub max_group_duration_ms: u32,
+    pub target_latency_ms: u32,
+    pub bitrate_bps: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate_milli: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmaf_rendition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hls_v3_rendition: Option<String>,
+}
+
+/// Generation-one decoder capability. H.264 and AAC are the mandatory
+/// baseline; AV1 is the only optional native codec in this generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DecoderSupport {
+    av1: bool,
+}
+
+impl DecoderSupport {
+    pub const fn baseline() -> Self {
+        Self { av1: false }
+    }
+
+    pub const fn with_av1(mut self) -> Self {
+        self.av1 = true;
+        self
+    }
+
+    pub fn supports(self, track: &CatalogTrack) -> bool {
+        match codec_family(track.kind, &track.codec) {
+            Ok(CodecFamily::H264 | CodecFamily::Aac) => true,
+            Ok(CodecFamily::Av1) => self.av1,
+            Err(_) => false,
+        }
+    }
+}
+
+impl Catalog {
+    pub fn encode_canonical(&self) -> Result<Vec<u8>, Invalid> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| Invalid::NonCanonical)?;
+        if bytes.len() > MAX_CATALOG_BYTES {
+            return Err(Invalid::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        if bytes.len() > MAX_CATALOG_BYTES {
+            return Err(Invalid::TooLarge);
+        }
+        let catalog: Self = serde_json::from_slice(bytes).map_err(|_| Invalid::NonCanonical)?;
+        catalog.validate()?;
+        if catalog.encode_canonical()?.as_slice() != bytes {
+            return Err(Invalid::NonCanonical);
+        }
+        Ok(catalog)
+    }
+
+    /// Decode an atomic catalog update from its one-Frame Group.
+    pub fn from_group(group: &ReceivedGroup) -> Result<Self, Invalid> {
+        if group.header.track != CATALOG_TRACK
+            || group.header.track_kind != TrackKind::Catalog
+            || group.header.timescale != CATALOG_TIMESCALE
+            || group.frames.len() != 1
+        {
+            return Err(Invalid::Bounds);
+        }
+        let frame = group.frames.first().ok_or(Invalid::Bounds)?;
+        if frame.header.kind != FrameKind::Key
+            || frame.header.duration.is_some()
+            || frame.header.timescale != CATALOG_TIMESCALE
+            || usize::try_from(frame.header.payload_len).ok() != Some(frame.payload.len())
+        {
+            return Err(Invalid::Bounds);
+        }
+        Self::decode_canonical(&frame.payload)
+    }
+
+    pub fn track(&self, name: &str) -> Option<&CatalogTrack> {
+        self.tracks.iter().find(|track| track.track == name)
+    }
+
+    fn validate(&self) -> Result<(), Invalid> {
+        if self.version != CATALOG_VERSION
+            || self.tracks.is_empty()
+            || self.tracks.len() > MAX_CATALOG_TRACKS
+            || self.jitter_hint_ms > MAX_LATENCY_MS
+        {
+            return Err(Invalid::Bounds);
+        }
+        let mut names = std::collections::BTreeSet::new();
+        let mut has_video = false;
+        let mut has_h264 = false;
+        let mut has_audio = false;
+        let mut has_aac = false;
+        for track in &self.tracks {
+            track.validate()?;
+            if !names.insert(track.track.as_str()) {
+                return Err(Invalid::Duplicate);
+            }
+            if self.jitter_hint_ms > track.target_latency_ms {
+                return Err(Invalid::Bounds);
+            }
+            match codec_family(track.kind, &track.codec)? {
+                CodecFamily::H264 => {
+                    has_video = true;
+                    has_h264 = true;
+                }
+                CodecFamily::Av1 => has_video = true,
+                CodecFamily::Aac => {
+                    has_audio = true;
+                    has_aac = true;
+                }
+            }
+        }
+        if (has_video && !has_h264) || (has_audio && !has_aac) {
+            return Err(Invalid::BaselineRequired);
+        }
+        Ok(())
+    }
+}
+
+impl CatalogTrack {
+    pub fn decoder_config(&self) -> Result<Vec<u8>, Invalid> {
+        data_encoding::HEXLOWER
+            .decode(self.decoder_config_hex.as_bytes())
+            .map_err(|_| Invalid::Bounds)
+    }
+
+    pub fn track_info(&self) -> Result<TrackInfo, Invalid> {
+        self.validate()?;
+        Ok(TrackInfo {
+            track: self.track.clone(),
+            kind: self.kind,
+            codec: self.codec.clone(),
+            timescale: self.timescale,
+            decoder_config: self.decoder_config()?,
+            max_group_duration_ms: self.max_group_duration_ms,
+        })
+    }
+
+    fn validate(&self) -> Result<(), Invalid> {
+        validate_track(&self.track)?;
+        if self.track == CATALOG_TRACK
+            || self.kind == TrackKind::Catalog
+            || self.timescale == 0
+            || self.decoder_config_hex.len() > MAX_DECODER_CONFIG_BYTES.saturating_mul(2)
+            || self.max_group_duration_ms == 0
+            || self.max_group_duration_ms > MAX_GROUP_DURATION_MS
+            || self.bitrate_bps == 0
+            || self.bitrate_bps > 1_000_000_000
+        {
+            return Err(Invalid::Bounds);
+        }
+        validate_latency(self.target_latency_ms)?;
+        let codec = codec_family(self.kind, &self.codec)?;
+        let decoder_config = self.decoder_config()?;
+        if decoder_config.len() > MAX_DECODER_CONFIG_BYTES
+            || (codec != CodecFamily::Av1 && decoder_config.is_empty())
+        {
+            return Err(Invalid::Bounds);
+        }
+        match self.kind {
+            TrackKind::Video => {
+                if !matches!(
+                    (self.width, self.height),
+                    (Some(1..=16_384), Some(1..=16_384))
+                ) || !matches!(self.frame_rate_milli, Some(1..=240_000))
+                    || self.sample_rate.is_some()
+                    || self.channels.is_some()
+                {
+                    return Err(Invalid::Bounds);
+                }
+            }
+            TrackKind::Audio => {
+                if self.width.is_some()
+                    || self.height.is_some()
+                    || self.frame_rate_milli.is_some()
+                    || !matches!(self.sample_rate, Some(8_000..=384_000))
+                    || !matches!(self.channels, Some(1..=32))
+                {
+                    return Err(Invalid::Bounds);
+                }
+            }
+            TrackKind::Catalog => return Err(Invalid::Bounds),
+        }
+        if let Some(group) = &self.render_group {
+            validate_opaque_id(group, 64)?;
+        }
+        if let Some(rendition) = &self.cmaf_rendition {
+            validate_opaque_id(rendition, MAX_RENDITION_ID_BYTES)?;
+        }
+        if let Some(rendition) = &self.hls_v3_rendition {
+            validate_opaque_id(rendition, MAX_RENDITION_ID_BYTES)?;
+            if codec == CodecFamily::Av1 {
+                return Err(Invalid::UnsupportedCodec);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TrackInfo {
+    pub fn matches_catalog(&self, track: &CatalogTrack) -> Result<(), Invalid> {
+        if self == &track.track_info()? {
+            Ok(())
+        } else {
+            Err(Invalid::TrackInfoMismatch)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodecFamily {
+    H264,
+    Aac,
+    Av1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
     Sent,
@@ -517,6 +819,12 @@ struct ActiveGroup {
     expiry: tokio::sync::watch::Sender<Option<Instant>>,
 }
 
+#[derive(Debug, Clone)]
+struct CatalogSnapshot {
+    sequence: u64,
+    catalog: Catalog,
+}
+
 #[derive(Default)]
 struct SessionState {
     sent_setup: Option<Setup>,
@@ -529,6 +837,8 @@ struct SessionState {
     inbound: std::collections::BTreeMap<u64, SubscriptionRecord>,
     sent_tracks: std::collections::BTreeMap<String, TrackInfo>,
     received_tracks: std::collections::BTreeMap<String, TrackInfo>,
+    sent_catalog: Option<CatalogSnapshot>,
+    received_catalog: Option<CatalogSnapshot>,
     active_groups: std::collections::BTreeMap<(u64, u64), ActiveGroup>,
     /// Highest sequence observed even after its stream completes. Without this,
     /// an older stream arriving just after the newer one finished would become
@@ -701,6 +1011,13 @@ impl SessionState {
                     return Err(Invalid::Bounds);
                 }
                 self.require_active_track(direction.opposite(), &info.track)?;
+                if info.kind != TrackKind::Catalog {
+                    let advertised = self
+                        .catalog(direction)
+                        .and_then(|catalog| catalog.catalog.track(&info.track))
+                        .ok_or(Invalid::CatalogRequired)?;
+                    info.matches_catalog(advertised)?;
+                }
                 match direction {
                     Direction::Sent => &mut self.sent_tracks,
                     Direction::Received => &mut self.received_tracks,
@@ -775,6 +1092,44 @@ impl SessionState {
         }
     }
 
+    fn catalog(&self, direction: Direction) -> Option<&CatalogSnapshot> {
+        match direction {
+            Direction::Sent => self.sent_catalog.as_ref(),
+            Direction::Received => self.received_catalog.as_ref(),
+        }
+    }
+
+    fn record_catalog(
+        &mut self,
+        direction: Direction,
+        group: &ReceivedGroup,
+    ) -> Result<(), Invalid> {
+        self.group_budget(direction.opposite(), &group.header)?;
+        let catalog = Catalog::from_group(group)?;
+        self.record_catalog_value(direction, group.header.group_sequence, catalog)
+    }
+
+    fn record_catalog_value(
+        &mut self,
+        direction: Direction,
+        sequence: u64,
+        catalog: Catalog,
+    ) -> Result<(), Invalid> {
+        catalog.validate()?;
+        let slot = match direction {
+            Direction::Sent => &mut self.sent_catalog,
+            Direction::Received => &mut self.received_catalog,
+        };
+        if slot
+            .as_ref()
+            .is_some_and(|current| current.sequence >= sequence)
+        {
+            return Err(Invalid::Duplicate);
+        }
+        *slot = Some(CatalogSnapshot { sequence, catalog });
+        Ok(())
+    }
+
     fn owner(&self, direction: Direction) -> &std::collections::BTreeMap<u64, SubscriptionRecord> {
         match direction {
             Direction::Sent => &self.outbound,
@@ -827,12 +1182,19 @@ impl SessionState {
         if record.request.track != header.track {
             return Err(Invalid::WrongTrack);
         }
-        let track = match owner {
-            Direction::Sent => &self.received_tracks,
-            Direction::Received => &self.sent_tracks,
+        let (tracks, catalog) = match owner {
+            Direction::Sent => (&self.received_tracks, self.received_catalog.as_ref()),
+            Direction::Received => (&self.sent_tracks, self.sent_catalog.as_ref()),
+        };
+        let track = tracks
+            .get(&header.track)
+            .ok_or(Invalid::TrackInfoRequired)?;
+        if header.track_kind != TrackKind::Catalog {
+            let advertised = catalog
+                .and_then(|catalog| catalog.catalog.track(&header.track))
+                .ok_or(Invalid::CatalogRequired)?;
+            track.matches_catalog(advertised)?;
         }
-        .get(&header.track)
-        .ok_or(Invalid::TrackInfoRequired)?;
         if track.kind != header.track_kind {
             return Err(Invalid::Bounds);
         }
@@ -1082,8 +1444,54 @@ impl Session {
         OutgoingGroup::begin(self.connection.as_ref(), header, priority).await
     }
 
+    /// Publish one full independent catalog update on the peer's active
+    /// `catalog.json` subscription. The catalog snapshot is spent when the
+    /// send begins; after an ambiguous transport failure callers reconnect.
+    pub async fn publish_catalog(
+        &self,
+        header: GroupHeader,
+        catalog: Catalog,
+    ) -> Result<(), Invalid> {
+        if !self.enabled {
+            return Err(Invalid::FeatureNotNegotiated);
+        }
+        if header.track != CATALOG_TRACK
+            || header.track_kind != TrackKind::Catalog
+            || header.timescale != CATALOG_TIMESCALE
+        {
+            return Err(Invalid::Bounds);
+        }
+        let payload = catalog.encode_canonical()?;
+        let frame = FrameHeader {
+            timestamp: header.published_at_micros.div_euclid(1_000),
+            duration: None,
+            timescale: CATALOG_TIMESCALE,
+            kind: FrameKind::Key,
+            payload_len: u32::try_from(payload.len()).map_err(|_| Invalid::TooLarge)?,
+        };
+        let sequence = header.group_sequence;
+        let priority = i32::try_from(sequence).unwrap_or(i32::MAX);
+        let _serial = self.send_lock.lock().await;
+        {
+            let mut state = self.lock_state();
+            state.group_budget(Direction::Received, &header)?;
+            state.record_catalog_value(Direction::Sent, sequence, catalog)?;
+        }
+        self.state_changed.notify_waiters();
+        let mut group = OutgoingGroup::begin(self.connection.as_ref(), header, priority).await?;
+        group.write_frame(frame, &payload).await?;
+        group.finish()
+    }
+
     pub(crate) fn accept_control(&self, control: &Control) -> Result<(), Invalid> {
         self.lock_state().record(Direction::Received, control)?;
+        self.state_changed.notify_waiters();
+        Ok(())
+    }
+
+    pub(crate) fn accept_catalog(&self, group: &ReceivedGroup) -> Result<(), Invalid> {
+        self.lock_state()
+            .record_catalog(Direction::Received, group)?;
         self.state_changed.notify_waiters();
         Ok(())
     }
@@ -1296,6 +1704,12 @@ impl OutgoingGroup {
         if self.frames == 0 && header.kind != FrameKind::Key {
             return Err(Invalid::FirstFrameNotKey);
         }
+        if self.header.track_kind == TrackKind::Catalog {
+            if self.frames != 0 || payload.len() > MAX_CATALOG_BYTES {
+                return Err(Invalid::TooLarge);
+            }
+            Catalog::decode_canonical(payload)?;
+        }
         validate_timestamp(
             self.first_timestamp,
             self.last_timestamp,
@@ -1323,7 +1737,7 @@ impl OutgoingGroup {
     }
 
     pub fn finish(mut self) -> Result<(), Invalid> {
-        if self.frames == 0 {
+        if self.frames == 0 || (self.header.track_kind == TrackKind::Catalog && self.frames != 1) {
             self.send.reset(RESET_MEDIA);
             return Err(Invalid::FirstFrameNotKey);
         }
@@ -1385,6 +1799,12 @@ pub async fn read_group_frames(
             header.max_group_duration_ms,
         )?;
         let payload_len = usize::try_from(frame_header.payload_len).map_err(|_| Invalid::Bounds)?;
+        if header.track_kind == TrackKind::Catalog
+            && (!frames.is_empty() || payload_len > MAX_CATALOG_BYTES)
+        {
+            flow.stop(RESET_MEDIA);
+            return Err(Invalid::TooLarge);
+        }
         let added = frame_bytes
             .len()
             .checked_add(payload_len)
@@ -1408,7 +1828,11 @@ pub async fn read_group_frames(
     if frames.is_empty() {
         return Err(Invalid::FirstFrameNotKey);
     }
-    Ok(ReceivedGroup { header, frames })
+    let group = ReceivedGroup { header, frames };
+    if group.header.track_kind == TrackKind::Catalog {
+        Catalog::from_group(&group)?;
+    }
+    Ok(group)
 }
 
 /// The two clocks used to decide whether an incomplete Group is now stale.
@@ -1455,7 +1879,51 @@ fn validate_codec(codec: &str) -> Result<(), Invalid> {
     if codec.is_empty()
         || codec.len() > MAX_CODEC_NAME_BYTES
         || !codec.is_ascii()
-        || codec.bytes().any(|byte| byte.is_ascii_control())
+        || codec
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'.'))
+    {
+        return Err(Invalid::Bounds);
+    }
+    Ok(())
+}
+
+fn codec_family(kind: TrackKind, codec: &str) -> Result<CodecFamily, Invalid> {
+    validate_codec(codec)?;
+    let family = match kind {
+        TrackKind::Video if is_avc_codec(codec) => CodecFamily::H264,
+        TrackKind::Video if has_codec_suffix(codec, "av01.") => CodecFamily::Av1,
+        TrackKind::Audio if matches!(codec, "mp4a.40.2" | "mp4a.40.02" | "mp4a.67") => {
+            CodecFamily::Aac
+        }
+        TrackKind::Video | TrackKind::Audio | TrackKind::Catalog => {
+            return Err(Invalid::UnsupportedCodec)
+        }
+    };
+    Ok(family)
+}
+
+fn is_avc_codec(codec: &str) -> bool {
+    ["avc1.", "avc3."].iter().any(|prefix| {
+        codec.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    })
+}
+
+fn has_codec_suffix(codec: &str, prefix: &str) -> bool {
+    codec
+        .strip_prefix(prefix)
+        .is_some_and(|suffix| !suffix.is_empty())
+}
+
+fn validate_opaque_id(value: &str, max: usize) -> Result<(), Invalid> {
+    if value.is_empty()
+        || value.len() > max
+        || !value.is_ascii()
+        || value.bytes().any(|byte| {
+            !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-'))
+        })
     {
         return Err(Invalid::Bounds);
     }
@@ -1613,6 +2081,18 @@ mod tests {
         }
     }
 
+    fn catalog_subscribe() -> Subscribe {
+        Subscribe {
+            subscription_id: 2,
+            track: CATALOG_TRACK.into(),
+            priority: u8::MAX,
+            ordered: false,
+            max_latency_ms: DEFAULT_MAX_LATENCY_MS,
+            start_group: None,
+            end_group: None,
+        }
+    }
+
     fn track_info() -> TrackInfo {
         TrackInfo {
             track: "screen/main".into(),
@@ -1621,6 +2101,105 @@ mod tests {
             timescale: 90_000,
             decoder_config: vec![1, 100, 0, 40],
             max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+        }
+    }
+
+    fn catalog_track_info() -> TrackInfo {
+        TrackInfo {
+            track: CATALOG_TRACK.into(),
+            kind: TrackKind::Catalog,
+            codec: CATALOG_CODEC.into(),
+            timescale: CATALOG_TIMESCALE,
+            decoder_config: Vec::new(),
+            max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+        }
+    }
+
+    fn catalog() -> Catalog {
+        Catalog {
+            version: CATALOG_VERSION,
+            jitter_hint_ms: 250,
+            tracks: vec![
+                CatalogTrack {
+                    track: "screen/main".into(),
+                    kind: TrackKind::Video,
+                    codec: "avc1.640028".into(),
+                    timescale: 90_000,
+                    decoder_config_hex: "01640028".into(),
+                    max_group_duration_ms: 2_000,
+                    target_latency_ms: 2_000,
+                    bitrate_bps: 4_000_000,
+                    width: Some(1_920),
+                    height: Some(1_080),
+                    frame_rate_milli: Some(60_000),
+                    sample_rate: None,
+                    channels: None,
+                    render_group: Some("main".into()),
+                    cmaf_rendition: Some("main_h264".into()),
+                    hls_v3_rendition: Some("main_h264".into()),
+                },
+                CatalogTrack {
+                    track: "audio/aac".into(),
+                    kind: TrackKind::Audio,
+                    codec: "mp4a.40.2".into(),
+                    timescale: 48_000,
+                    decoder_config_hex: "1190".into(),
+                    max_group_duration_ms: 2_000,
+                    target_latency_ms: 2_000,
+                    bitrate_bps: 128_000,
+                    width: None,
+                    height: None,
+                    frame_rate_milli: None,
+                    sample_rate: Some(48_000),
+                    channels: Some(2),
+                    render_group: Some("main".into()),
+                    cmaf_rendition: Some("main_aac".into()),
+                    hls_v3_rendition: Some("main_aac".into()),
+                },
+                CatalogTrack {
+                    track: "video/av1".into(),
+                    kind: TrackKind::Video,
+                    codec: "av01.0.08M.10.0.110.09".into(),
+                    timescale: 90_000,
+                    decoder_config_hex: String::new(),
+                    max_group_duration_ms: 2_000,
+                    target_latency_ms: 2_000,
+                    bitrate_bps: 2_500_000,
+                    width: Some(1_920),
+                    height: Some(1_080),
+                    frame_rate_milli: Some(60_000),
+                    sample_rate: None,
+                    channels: None,
+                    render_group: Some("main".into()),
+                    cmaf_rendition: Some("main_av1".into()),
+                    hls_v3_rendition: None,
+                },
+            ],
+        }
+    }
+
+    fn catalog_group(sequence: u64) -> ReceivedGroup {
+        let payload = catalog().encode_canonical().expect("catalog");
+        ReceivedGroup {
+            header: GroupHeader {
+                subscription_id: 2,
+                track: CATALOG_TRACK.into(),
+                track_kind: TrackKind::Catalog,
+                group_sequence: sequence,
+                published_at_micros: 1_000_000,
+                timescale: CATALOG_TIMESCALE,
+                max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+            },
+            frames: vec![Frame {
+                header: FrameHeader {
+                    timestamp: 1_000,
+                    duration: None,
+                    timescale: CATALOG_TIMESCALE,
+                    kind: FrameKind::Key,
+                    payload_len: u32::try_from(payload.len()).expect("bounded"),
+                },
+                payload,
+            }],
         }
     }
 
@@ -1774,6 +2353,82 @@ mod tests {
         assert_eq!(hex(&frame), "a0fe0a01b81790bf05000f");
     }
 
+    #[test]
+    fn catalog_json_is_canonical_bounded_and_codec_selectable() {
+        let catalog = catalog();
+        let encoded = catalog.encode_canonical().expect("catalog");
+        assert_eq!(Catalog::decode_canonical(&encoded), Ok(catalog.clone()));
+        assert_eq!(
+            std::str::from_utf8(&encoded).expect("utf8"),
+            concat!(
+                r#"{"version":1,"jitter_hint_ms":250,"tracks":["#,
+                r#"{"track":"screen/main","kind":"video","codec":"avc1.640028","timescale":90000,"decoder_config_hex":"01640028","max_group_duration_ms":2000,"target_latency_ms":2000,"bitrate_bps":4000000,"width":1920,"height":1080,"frame_rate_milli":60000,"render_group":"main","cmaf_rendition":"main_h264","hls_v3_rendition":"main_h264"},"#,
+                r#"{"track":"audio/aac","kind":"audio","codec":"mp4a.40.2","timescale":48000,"decoder_config_hex":"1190","max_group_duration_ms":2000,"target_latency_ms":2000,"bitrate_bps":128000,"sample_rate":48000,"channels":2,"render_group":"main","cmaf_rendition":"main_aac","hls_v3_rendition":"main_aac"},"#,
+                r#"{"track":"video/av1","kind":"video","codec":"av01.0.08M.10.0.110.09","timescale":90000,"decoder_config_hex":"","max_group_duration_ms":2000,"target_latency_ms":2000,"bitrate_bps":2500000,"width":1920,"height":1080,"frame_rate_milli":60000,"render_group":"main","cmaf_rendition":"main_av1"}]}"#
+            )
+        );
+        let mut padded = encoded;
+        padded.push(b'\n');
+        assert_eq!(
+            Catalog::decode_canonical(&padded),
+            Err(Invalid::NonCanonical)
+        );
+
+        let baseline = DecoderSupport::baseline();
+        assert!(baseline.supports(&catalog.tracks[0]));
+        assert!(baseline.supports(&catalog.tracks[1]));
+        assert!(!baseline.supports(&catalog.tracks[2]));
+        assert!(baseline.with_av1().supports(&catalog.tracks[2]));
+
+        let info = catalog.tracks[0].track_info().expect("track info");
+        info.matches_catalog(&catalog.tracks[0])
+            .expect("exact decoder configuration");
+        let mut changed = info;
+        changed.timescale = 1_000;
+        assert_eq!(
+            changed.matches_catalog(&catalog.tracks[0]),
+            Err(Invalid::TrackInfoMismatch)
+        );
+    }
+
+    #[test]
+    fn catalog_requires_baseline_tracks_and_opaque_http_renditions() {
+        let mut no_h264 = catalog();
+        no_h264.tracks.remove(0);
+        assert_eq!(no_h264.encode_canonical(), Err(Invalid::BaselineRequired));
+
+        let mut external = catalog();
+        external.tracks[0].cmaf_rendition = Some("https://media.invalid/live".into());
+        assert_eq!(external.encode_canonical(), Err(Invalid::Bounds));
+
+        let mut av1_hls = catalog();
+        av1_hls.tracks[2].hls_v3_rendition = Some("main_av1".into());
+        assert_eq!(av1_hls.encode_canonical(), Err(Invalid::UnsupportedCodec));
+
+        let mut incomplete_video = catalog();
+        incomplete_video.tracks[0].frame_rate_milli = None;
+        assert_eq!(incomplete_video.encode_canonical(), Err(Invalid::Bounds));
+        assert_eq!(
+            SessionState::default().record_catalog_value(Direction::Received, 1, incomplete_video),
+            Err(Invalid::Bounds)
+        );
+    }
+
+    #[test]
+    fn a_catalog_update_is_exactly_one_key_frame_in_one_group() {
+        let group = catalog_group(9);
+        assert_eq!(Catalog::from_group(&group), Ok(catalog()));
+
+        let mut duplicate = group;
+        let frame = duplicate.frames.first().expect("one Frame").clone();
+        duplicate.frames.push(frame);
+        assert_eq!(Catalog::from_group(&duplicate), Err(Invalid::Bounds));
+
+        let mut duration = catalog_group(10);
+        duration.frames[0].header.duration = Some(1);
+        assert_eq!(Catalog::from_group(&duration), Err(Invalid::Bounds));
+    }
+
     #[allow(clippy::format_collect, reason = "small test-only wire fixture")]
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1859,6 +2514,15 @@ mod tests {
             )
             .expect("publisher accepted");
         state
+            .record_catalog_value(Direction::Received, 1, catalog())
+            .expect("catalog");
+        let mut mismatch = track_info();
+        mismatch.decoder_config.push(0);
+        assert_eq!(
+            state.record(Direction::Received, &Control::TrackInfo(mismatch)),
+            Err(Invalid::TrackInfoMismatch)
+        );
+        state
             .record(Direction::Received, &Control::TrackInfo(track_info()))
             .expect("decoder configuration");
         assert_eq!(
@@ -1929,6 +2593,11 @@ mod tests {
                 }),
             )
             .expect("narrow response");
+        let mut offered = catalog();
+        offered.tracks[0].max_group_duration_ms = 1_000;
+        state
+            .record_catalog_value(Direction::Received, 1, offered)
+            .expect("catalog");
         let mut info = track_info();
         info.max_group_duration_ms = 1_000;
         state
@@ -2009,6 +2678,9 @@ mod tests {
                     }),
                 )
                 .expect("active");
+            locked
+                .record_catalog_value(Direction::Received, 1, catalog())
+                .expect("catalog");
             locked
                 .record(Direction::Received, &Control::TrackInfo(track_info()))
                 .expect("decoder configuration");
@@ -2129,6 +2801,72 @@ mod tests {
                         setup_event.body,
                         EventBody::Control(Control::Setup(_))
                     ));
+
+                    session
+                        .send(Control::Subscribe(catalog_subscribe()))
+                        .await
+                        .expect("subscribe catalog");
+                    assert_eq!(
+                        accept_media_control(dialer.as_ref()).await,
+                        Control::Subscribe(catalog_subscribe())
+                    );
+                    send_control(
+                        dialer.as_ref(),
+                        &Control::SubscribeOk(SubscribeOk {
+                            subscription_id: 2,
+                            publisher_priority: u8::MAX,
+                            publisher_max_latency_ms: DEFAULT_MAX_LATENCY_MS,
+                            start_group: None,
+                            end_group: None,
+                        }),
+                    )
+                    .await
+                    .expect("catalog subscription accepted");
+                    let accepted = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                        .await
+                        .expect("catalog accept event in time")
+                        .expect("catalog accept event");
+                    assert!(matches!(
+                        accepted.body,
+                        EventBody::Control(Control::SubscribeOk(_))
+                    ));
+                    send_control(dialer.as_ref(), &Control::TrackInfo(catalog_track_info()))
+                        .await
+                        .expect("catalog track info");
+                    let track = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                        .await
+                        .expect("catalog track event in time")
+                        .expect("catalog track event");
+                    assert!(matches!(
+                        track.body,
+                        EventBody::Control(Control::TrackInfo(TrackInfo {
+                            kind: TrackKind::Catalog,
+                            ..
+                        }))
+                    ));
+
+                    let catalog_group = catalog_group(1);
+                    let catalog_frame = catalog_group.frames.first().expect("one Frame");
+                    let mut sending_catalog = OutgoingGroup::begin(
+                        dialer.as_ref(),
+                        catalog_group.header.clone(),
+                        u8::MAX.into(),
+                    )
+                    .await
+                    .expect("begin catalog");
+                    sending_catalog
+                        .write_frame(catalog_frame.header.clone(), &catalog_frame.payload)
+                        .await
+                        .expect("catalog Frame");
+                    sending_catalog.finish().expect("finish catalog");
+                    let catalog_event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                        .await
+                        .expect("catalog event in time")
+                        .expect("catalog event");
+                    let EventBody::Group(received_catalog) = catalog_event.body else {
+                        panic!("catalog Group event");
+                    };
+                    assert_eq!(Catalog::from_group(&received_catalog), Ok(catalog()));
 
                     session
                         .send(Control::Subscribe(subscribe()))

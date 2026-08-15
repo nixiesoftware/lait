@@ -8,7 +8,8 @@ use comms::policy::Network;
 use comms::{Alpn, Connection, DefaultTransport, Protocols, Transport};
 use mechanics::actor::device_from_seed;
 use runtime::plane::live::media::{
-    self, Control, FrameHeader, FrameKind, GroupHeader, OutgoingGroup, Setup, TrackKind,
+    self, Catalog, CatalogTrack, Control, FrameHeader, FrameKind, GroupHeader, OutgoingGroup,
+    Setup, TrackKind,
 };
 use runtime::plane::stream_kind;
 
@@ -115,6 +116,31 @@ fn frame(timestamp: i64, kind: FrameKind, payload: &[u8]) -> FrameHeader {
     }
 }
 
+fn catalog() -> Catalog {
+    Catalog {
+        version: media::CATALOG_VERSION,
+        jitter_hint_ms: 250,
+        tracks: vec![CatalogTrack {
+            track: "screen/main".into(),
+            kind: TrackKind::Video,
+            codec: "avc1.640028".into(),
+            timescale: 90_000,
+            decoder_config_hex: "01640028".into(),
+            max_group_duration_ms: media::DEFAULT_MAX_GROUP_DURATION_MS,
+            target_latency_ms: 2_000,
+            bitrate_bps: 4_000_000,
+            width: Some(1_920),
+            height: Some(1_080),
+            frame_rate_milli: Some(60_000),
+            sample_rate: None,
+            channels: None,
+            render_group: Some("main".into()),
+            cmaf_rendition: Some("main_h264".into()),
+            hls_v3_rendition: Some("main_h264".into()),
+        }],
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_is_one_ordered_uni_stream_on_mem_and_real_quic() {
     on_both("media Group", async |pair: Pair| {
@@ -156,6 +182,60 @@ async fn a_group_is_one_ordered_uni_stream_on_mem_and_real_quic() {
         assert_eq!(received.frames[0].payload, key);
         assert_eq!(received.frames[1].header.kind, FrameKind::Delta);
         assert_eq!(received.frames[1].payload, delta);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_catalog_update_is_one_canonical_group_on_mem_and_real_quic() {
+    on_both("media catalog", async |pair: Pair| {
+        let expected = catalog();
+        let payload = expected.encode_canonical().expect("catalog");
+        let header = GroupHeader {
+            subscription_id: 2,
+            track: media::CATALOG_TRACK.into(),
+            track_kind: TrackKind::Catalog,
+            group_sequence: 3,
+            published_at_micros: 7_000_000,
+            timescale: media::CATALOG_TIMESCALE,
+            max_group_duration_ms: media::DEFAULT_MAX_GROUP_DURATION_MS,
+        };
+        let sending = async {
+            let mut group = OutgoingGroup::begin(pair.dialer.as_ref(), header.clone(), 3)
+                .await
+                .expect("begin catalog Group");
+            group
+                .write_frame(
+                    FrameHeader {
+                        timestamp: 7_000,
+                        duration: None,
+                        timescale: media::CATALOG_TIMESCALE,
+                        kind: FrameKind::Key,
+                        payload_len: u32::try_from(payload.len()).expect("bounded catalog"),
+                    },
+                    &payload,
+                )
+                .await
+                .expect("catalog Frame");
+            group.finish().expect("finish catalog Group");
+        };
+        let receiving = async {
+            let mut recv = pair
+                .accepter
+                .accept_uni()
+                .await
+                .expect("accept")
+                .expect("catalog flow");
+            assert_eq!(
+                recv.read_exact(1).await.expect("lane"),
+                [stream_kind::MEDIA_GROUP]
+            );
+            media::read_group_body(recv.as_mut())
+                .await
+                .expect("valid catalog Group")
+        };
+        let ((), received) = tokio::join!(sending, receiving);
+        assert_eq!(Catalog::from_group(&received), Ok(expected));
     })
     .await;
 }
