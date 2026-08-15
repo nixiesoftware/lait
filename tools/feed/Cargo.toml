@@ -1,0 +1,29 @@
+[package]
+name = "lait-feed"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "Publish-side tool for the lait release feed: keygen, manifest, pointer, verify"
+# The publish half of the update seam (SUB-13). The consume half lives in the
+# root crate's `src/update/`; the two share the envelope and payload shapes by
+# construction — this tool seals exactly what `update::feed` opens, and the
+# round-trip is tested there. Never published: it exists for CI and the
+# maintainer's shell.
+publish = false
+
+[[bin]]
+name = "lait-feed"
+path = "src/main.rs"
+
+[dependencies]
+# Key operations only ever through the kernel: the feed signing key is an
+# ordinary ed25519 seed, sealed and verified by the same primitives every other
+# lait signature uses.
+mechanics = { path = "../../crates/mechanics" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+data-encoding = "2.6"
+blake3 = "1"
+semver = "1"

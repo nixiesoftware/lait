@@ -13,6 +13,7 @@ members = [
     "products/issues-app",
     "tools/workbench",
     "tools/astrolabe",
+    "tools/feed",
 ]
 # Two packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.
@@ -166,7 +167,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # The local app's HTTP surface (docs/SERVE.md), which bare `lait` launches. axum
 # is a thin router over hyper + tower + http, all three already in the tree
-# transitively (iroh, self_update), so the adapter buys routing and SSE not a new
+# transitively (iroh), so the adapter buys routing and SSE not a new
 # stack. `tokio-stream`'s `sync` feature is the `broadcast::Receiver` -> `Stream`
 # multiplex the doorbell stream needs.
 # `ws` is on for the browser socket (`src/serve/socket.rs`). It pulls
@@ -190,11 +191,24 @@ rmcp = { version = "3.1", features = ["server", "macros", "transport-io"] }
 # trusting it. Same "generate/check, don't hand-maintain twice" rule as
 # `mcp_parity.rs`.
 schemars = "1"
-# The self-updater behind `Request::HostUpdate` (`src/update.rs`): a
-# GitHub-release fetch + atomic self-replace. `ureq` backend + `rustls` keeps it
-# pure-Rust (no reqwest/native-tls/OpenSSL C dep); gzip/zip extraction only (no
-# xz), matching the `.tar.gz` release archives.
-self_update = { version = "0.44.0", default-features = false, features = ["ureq", "rustls", "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate"] }
+# The self-updater behind `Request::HostUpdate` (`src/update/`). It resolves
+# the signed first-party release feed (SUB-13) — never a forge API — so the
+# pieces are owned directly instead of through `self_update`'s GitHub backend:
+# `ureq` + rustls fetches (pure Rust, no reqwest/native-tls/OpenSSL C dep),
+# `semver` orders releases (and lets a `-dev.<sha>` build heal onto stable),
+# flate2/tar/zip open exactly the archive shapes cargo-dist publishes, and
+# `self-replace` performs the rename-out-of-the-way swap that works on a live
+# executable. Envelope verification is `mechanics::actor` — the feed signature
+# is an ordinary ed25519 detached signature, and the kernel stays the only
+# place that names the primitive.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+semver = "1"
+self-replace = "1"
+flate2 = "1"
+tar = "0.4"
+# `deflate` only — the codec every cargo-dist zip uses. The default feature set
+# drags in aes/bzip2/zstd/lzma for codecs no release archive contains.
+zip = { version = "6", default-features = false, features = ["deflate"] }
 
 # windows-only: keep our handles ours. `CreateProcess` inherits all-or-nothing,
 # so the daemon we spawn would otherwise come up holding a captured caller's
@@ -273,19 +287,13 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # ordering and precedence are tested through the thing that implements them
 # rather than a copy of it. No port, no daemon.
 tower = { version = "0.5", features = ["util"] }
-# Ground truth for the self-updater's archive layout: the `#[ignore]`d
-# `update_bin_path_is_a_real_entry_in_the_published_archives` reads the REAL
-# published release archives (CI downloads them; see the `updater-contract` job),
-# so the path handed to self_update is checked against the bytes users actually
-# download rather than against our own model of cargo-dist's conventions — the
-# model is what was wrong in v0.4.8/v0.5.0. All three already build as part of
-# `self_update`, so they add no meaningful compile cost.
-flate2 = "1"
-tar = "0.4"
-# `deflate` only — the same codec `self_update`'s `compression-zip-deflate`
-# turns on, and all cargo-dist's zip uses. The default feature set drags in
-# aes/bzip2/zstd/lzma for codecs no release archive contains.
-zip = { version = "6", default-features = false, features = ["deflate"] }
+# (flate2/tar/zip moved to [dependencies]: the updater extracts release
+# archives itself now that `self_update` is gone. The `#[ignore]`d
+# `update_bin_path_is_a_real_entry_in_the_published_archives` still reads the
+# REAL published release archives in CI's `updater-contract` job — the model of
+# cargo-dist's layout is what was wrong in v0.4.8/v0.5.0.)
+# `zip::write` is used by the updater's own extraction tests to build
+# archive fixtures; it ships in the same crate feature set.
 
 # The profile that 'dist' will build with
 # Tests build with the `test` profile, which inherits `dev` — i.e. unoptimized.

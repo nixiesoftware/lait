@@ -56,6 +56,13 @@ fn main() {
 
     println!("cargo:rustc-env=LAIT_VERSION_LONG={long}");
     println!("cargo:rustc-env=LAIT_VERSION_SEMVER={semver}");
+
+    // The target triple this binary is FOR (cross-compile aware: TARGET, not
+    // HOST). The self-updater addresses the release manifest's artifact table
+    // by it, instead of a `#[cfg]` split that can only ever be tested on the
+    // platform it selects.
+    let target = env::var("TARGET").expect("cargo always sets TARGET for build scripts");
+    println!("cargo:rustc-env=LAIT_TARGET={target}");
 }
 
 /// Tell cargo that `src/serve/assets` is a source input.

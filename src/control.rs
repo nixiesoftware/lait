@@ -856,12 +856,14 @@ pub enum Request {
         #[serde(default)]
         world: Option<String>,
     },
-    /// Replace the installed binary with the latest published release.
+    /// Replace the installed binary with the release this node's channel
+    /// points at, resolved from the signed first-party feed (`src/update/`),
+    /// never a forge API.
     ///
     /// Node maintenance, not a command: the daemon is the process that knows
-    /// which build it is running, and `self_update`'s atomic self-replace works
-    /// on a live executable (it renames rather than overwrites), so the swap
-    /// lands and takes effect at the next restart.
+    /// which build it is running, and the atomic self-replace works on a live
+    /// executable (it renames rather than overwrites), so the swap lands and
+    /// takes effect at the next restart.
     HostUpdate,
     /// Stop this daemon once the reply is on the wire, so the next request
     /// starts a fresh one.
@@ -1973,14 +1975,26 @@ pub enum HostReply {
         #[serde(default)]
         agent: Option<String>,
     },
-    /// The outcome of a self-update.
+    /// The outcome of a self-update, and the channel facts learned resolving
+    /// it — the readable surface SUB-13 names, which is what a client's update
+    /// facts sample rather than asking the feed themselves.
     Updated {
         /// The version this node was running.
         from: String,
         /// The version now on disk (equal to `from` when already current).
         to: String,
-        /// False when the node was already on the latest release.
+        /// False when the node was already on the channel's release.
         replaced: bool,
+        /// The channel this node follows (`stable` unless it opted in).
+        #[serde(default)]
+        channel: String,
+        /// The newest release the channel points at.
+        #[serde(default)]
+        available: Option<String>,
+        /// The published compatibility floor — the lowest version still
+        /// permitted to run — when the release declares a satisfiable one.
+        #[serde(default)]
+        floor: Option<String>,
     },
     /// The daemon accepted the reply's own last instruction and is stopping.
     Restarting {
