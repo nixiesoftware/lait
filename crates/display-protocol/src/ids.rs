@@ -5,7 +5,7 @@ use std::fmt;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::ProtocolError;
+use crate::Refusal;
 
 fn is_lower_hex(value: &str, expected_chars: usize) -> bool {
     value.len() == expected_chars
@@ -20,10 +20,10 @@ macro_rules! hex_id {
         pub struct $name(String);
 
         impl $name {
-            pub fn parse(value: impl Into<String>) -> Result<Self, ProtocolError> {
+            pub fn parse(value: impl Into<String>) -> Result<Self, Refusal> {
                 let value = value.into();
                 if !is_lower_hex(&value, $chars) {
-                    return Err(ProtocolError::InvalidIdentifier($error));
+                    return Err(Refusal::InvalidIdentifier($error));
                 }
                 Ok(Self(value))
             }
@@ -153,9 +153,9 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-pub(crate) fn decode_hex_32(value: &str) -> Result<[u8; 32], ProtocolError> {
+pub(crate) fn decode_hex_32(value: &str) -> Result<[u8; 32], Refusal> {
     if !is_lower_hex(value, 64) {
-        return Err(ProtocolError::InvalidEncoding("32-byte lowercase hex"));
+        return Err(Refusal::InvalidEncoding("32-byte lowercase hex"));
     }
 
     let mut bytes = [0_u8; 32];
@@ -164,15 +164,15 @@ pub(crate) fn decode_hex_32(value: &str) -> Result<[u8; 32], ProtocolError> {
         let high = encoded
             .next()
             .and_then(hex_nibble)
-            .ok_or(ProtocolError::InvalidEncoding("32-byte lowercase hex"))?;
+            .ok_or(Refusal::InvalidEncoding("32-byte lowercase hex"))?;
         let low = encoded
             .next()
             .and_then(hex_nibble)
-            .ok_or(ProtocolError::InvalidEncoding("32-byte lowercase hex"))?;
+            .ok_or(Refusal::InvalidEncoding("32-byte lowercase hex"))?;
         *slot = (high << 4) | low;
     }
     if encoded.next().is_some() {
-        return Err(ProtocolError::InvalidEncoding("32-byte lowercase hex"));
+        return Err(Refusal::InvalidEncoding("32-byte lowercase hex"));
     }
     Ok(bytes)
 }

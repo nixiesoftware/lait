@@ -12,6 +12,7 @@ import {
   requestTranscript,
   verifyProgram,
 } from "../shared/web/protocol.mjs";
+import { DisplayReceiverClient } from "../shared/web/client.mjs";
 
 const fixtureUrl = new URL("../../crates/display-protocol/fixtures/v1/conformance.json", import.meta.url);
 const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -102,4 +103,85 @@ test("forged revisions fail before becoming eligible", async () => {
     assert.equal(error.code, "integrity");
     return true;
   });
+});
+
+function receiverHarness(program = structuredClone(fixture.program)) {
+  const events = [];
+  const ui = {
+    setStaleState: (value) => events.push(["stale", value]),
+    setSourceState: (value) => events.push(["source", value]),
+    showBlank: (reason) => events.push(["blank", reason]),
+    showFrame: (url) => events.push(["frame", url]),
+  };
+  const receiver = new DisplayReceiverClient({
+    origin: "https://nixiesoftware.com",
+    capabilities: {},
+    ui,
+  });
+  receiver.program = program;
+  const asset = program.items[program.playback.current_index].scene.asset;
+  receiver.staged.set(asset.id, { url: "verified-frame", asset });
+  return { receiver, events };
+}
+
+test("a no-change response cannot refresh the wrong revision", async () => {
+  const { receiver } = receiverHarness();
+  await assert.rejects(
+    () => receiver.handleProgramResponse({
+      kind: "no_change",
+      revision: "f".repeat(64),
+      playback: structuredClone(receiver.program.playback),
+    }),
+    (error) => error instanceof ProtocolError && error.code === "invalid_revision",
+  );
+  assert.equal(receiver.program.revision, fixture.program.revision);
+  assert.equal(receiver.lastProgramDeliveryAt, 0);
+});
+
+test("a no-change cursor must remain inside the current item", () => {
+  const { receiver } = receiverHarness();
+  const current = receiver.program.items[receiver.program.playback.current_index];
+  assert.throws(
+    () => receiver.adoptCursor({
+      ...receiver.program.playback,
+      elapsed_ms: current.duration_ms,
+    }, true),
+    (error) => error instanceof ProtocolError && error.code === "invalid_cursor",
+  );
+  assert.equal(receiver.lastProgramDeliveryAt, 0);
+});
+
+test("API errors reject unknown fields before changing receiver state", () => {
+  const { receiver } = receiverHarness();
+  receiver.credential = { mode: "paired", device: "0".repeat(32), proofKey: "1".repeat(64) };
+  assert.throws(
+    () => receiver.handleApiError({
+      protocol_major: 1,
+      code: "revoked",
+      retry_after_ms: null,
+      next_challenge: null,
+      world: "forbidden",
+    }, 403),
+    (error) => error instanceof ProtocolError && error.code === "unknown_field",
+  );
+  assert.equal(receiver.credential.mode, "paired");
+});
+
+test("fresh delivery atomically replaces a stale-sensitive blank", async () => {
+  const program = structuredClone(fixture.program);
+  program.freshness.on_stale = "blank";
+  const { receiver, events } = receiverHarness(program);
+  receiver.lastProgramDeliveryAt = performance.now() - program.freshness.stale_after_ms - 1;
+  receiver.renderCurrent();
+  assert.deepEqual(events.at(-2), ["blank", "host_unavailable"]);
+
+  events.length = 0;
+  await receiver.handleProgramResponse({
+    kind: "no_change",
+    revision: program.revision,
+    playback: structuredClone(program.playback),
+  });
+  assert.ok(events.some(([kind]) => kind === "frame"));
+  assert.deepEqual(events.find(([kind]) => kind === "stale"), ["stale", false]);
+  clearTimeout(receiver.playbackTimer);
 });

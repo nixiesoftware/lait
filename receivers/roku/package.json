@@ -5,6 +5,7 @@
   "description": "Production Roku receiver for Astrolabe Display",
   "scripts": {
     "check": "bsc --project bsconfig.json",
+    "package:roku": "bsc --project bsconfig.json --create-package --out-file dist/astrolabe-roku.zip",
     "test": "npm run check && node --test"
   },
   "devDependencies": {

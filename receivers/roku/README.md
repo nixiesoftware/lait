@@ -14,11 +14,12 @@ decoder reports the authenticated dimensions.
 
 ## Build, sideload, and publish
 
-1. Run `npm install` and `npm test` here for BrightScript/XML compilation and
-   receiver static checks.
+1. Run `npm install`, `npm test`, and `npm run package:roku` here for
+   BrightScript/XML compilation, receiver checks, and a sideloadable
+   `dist/astrolabe-roku.zip`.
 2. Enable developer mode on a Roku OS 12.5+ TV, create its developer password,
-   and zip this directory excluding `node_modules`, `test`, and build output.
-3. Upload the zip through the device development web server for qualification.
+   then upload that zip through the device development web server.
+3. Run the physical-device qualification matrix.
 4. Package it with the Nixie Solutions LLC Roku developer ID and complete
    `../QUALIFICATION.md` before creating a Store release.
 

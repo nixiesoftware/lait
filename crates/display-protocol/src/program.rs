@@ -16,7 +16,7 @@ use crate::ids::{
     ProgramRevision, Sha256Digest,
 };
 use crate::wire::Transcript;
-use crate::{ProtocolError, PROTOCOL_MAJOR};
+use crate::{Refusal, PROTOCOL_MAJOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -240,25 +240,26 @@ pub enum ProgramChange {
     RePair,
 }
 
-fn validate_bounded_text(
-    text: &str,
-    maximum: usize,
-    name: &'static str,
-) -> Result<(), ProtocolError> {
+fn validate_bounded_text(text: &str, maximum: usize, name: &'static str) -> Result<(), Refusal> {
     if text.is_empty() || text.len() > maximum || text.chars().any(char::is_control) {
-        return Err(ProtocolError::BoundExceeded(name));
+        return Err(Refusal::BoundExceeded(name));
     }
     Ok(())
 }
 
-fn validate_source_state(state: &SourceState) -> Result<(), ProtocolError> {
+fn validate_source_state(state: &SourceState) -> Result<(), Refusal> {
     if let SourceState::Partial { reasons } = state {
         if reasons.is_empty() || reasons.len() > MAX_PARTIAL_REASONS {
-            return Err(ProtocolError::InvalidShape("partial source state"));
+            return Err(Refusal::InvalidShape("partial source state"));
         }
-        let unique: BTreeSet<_> = reasons.iter().copied().collect();
-        if unique.len() != reasons.len() || unique.iter().copied().ne(reasons.iter().copied()) {
-            return Err(ProtocolError::InvalidShape(
+        let unique: BTreeSet<_> = reasons.iter().map(|reason| reason.wire_name()).collect();
+        if unique.len() != reasons.len()
+            || unique
+                .iter()
+                .copied()
+                .ne(reasons.iter().map(|reason| reason.wire_name()))
+        {
+            return Err(Refusal::InvalidShape(
                 "partial reasons must be sorted and unique",
             ));
         }
@@ -266,34 +267,34 @@ fn validate_source_state(state: &SourceState) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-pub fn validate_asset(asset: &DisplayAsset) -> Result<(), ProtocolError> {
+pub fn validate_asset(asset: &DisplayAsset) -> Result<(), Refusal> {
     if asset.encoded_len == 0 || asset.encoded_len > MAX_ASSET_BYTES {
-        return Err(ProtocolError::BoundExceeded("asset encoded length"));
+        return Err(Refusal::BoundExceeded("asset encoded length"));
     }
     if asset.media_type.is_image() {
         let (Some(width), Some(height)) = (asset.width, asset.height) else {
-            return Err(ProtocolError::InvalidShape("image dimensions"));
+            return Err(Refusal::InvalidShape("image dimensions"));
         };
         if width == 0 || width > MAX_FRAME_WIDTH || height == 0 || height > MAX_FRAME_HEIGHT {
-            return Err(ProtocolError::BoundExceeded("image dimensions"));
+            return Err(Refusal::BoundExceeded("image dimensions"));
         }
         let pixels = u64::from(width)
             .checked_mul(u64::from(height))
-            .ok_or(ProtocolError::BoundExceeded("decoded image pixels"))?;
+            .ok_or(Refusal::BoundExceeded("decoded image pixels"))?;
         if pixels > MAX_FRAME_PIXELS {
-            return Err(ProtocolError::BoundExceeded("decoded image pixels"));
+            return Err(Refusal::BoundExceeded("decoded image pixels"));
         }
     } else if asset.width.is_some() || asset.height.is_some() {
-        return Err(ProtocolError::InvalidShape("manifest dimensions"));
+        return Err(Refusal::InvalidShape("manifest dimensions"));
     }
     Ok(())
 }
 
-fn validate_scene(scene: &DisplayScene) -> Result<(), ProtocolError> {
+fn validate_scene(scene: &DisplayScene) -> Result<(), Refusal> {
     match scene {
         DisplayScene::Frame { asset } => {
             if !asset.media_type.is_image() {
-                return Err(ProtocolError::InvalidShape("frame asset media type"));
+                return Err(Refusal::InvalidShape("frame asset media type"));
             }
             validate_asset(asset)
         }
@@ -306,7 +307,7 @@ fn validate_scene(scene: &DisplayScene) -> Result<(), ProtocolError> {
                     | (MediaProtocol::Dash, DisplayAssetMediaType::DashManifest)
             );
             if !matches {
-                return Err(ProtocolError::InvalidShape("media manifest protocol"));
+                return Err(Refusal::InvalidShape("media manifest protocol"));
             }
             validate_asset(manifest)
         }
@@ -314,36 +315,36 @@ fn validate_scene(scene: &DisplayScene) -> Result<(), ProtocolError> {
     }
 }
 
-fn validate_program_shape(program: &DisplayProgram) -> Result<(), ProtocolError> {
+fn validate_program_shape(program: &DisplayProgram) -> Result<(), Refusal> {
     if program.protocol_major != PROTOCOL_MAJOR {
-        return Err(ProtocolError::Unsupported("protocol major"));
+        return Err(Refusal::Unsupported("protocol major"));
     }
     if program.items.is_empty() || program.items.len() > MAX_PROGRAM_ITEMS {
-        return Err(ProtocolError::BoundExceeded("program item count"));
+        return Err(Refusal::BoundExceeded("program item count"));
     }
     if program.freshness.stale_after_ms < MIN_STALE_AFTER_MS
         || program.freshness.stale_after_ms > MAX_STALE_AFTER_MS
     {
-        return Err(ProtocolError::BoundExceeded("stale interval"));
+        return Err(Refusal::BoundExceeded("stale interval"));
     }
     let poll_and_margin = MAX_LONG_POLL_WAIT_MS
         .checked_add(LONG_POLL_STALE_MARGIN_MS)
-        .ok_or(ProtocolError::BoundExceeded("long-poll margin"))?;
+        .ok_or(Refusal::BoundExceeded("long-poll margin"))?;
     if program.freshness.stale_after_ms <= poll_and_margin {
-        return Err(ProtocolError::InvalidShape("stale interval margin"));
+        return Err(Refusal::InvalidShape("stale interval margin"));
     }
     validate_source_state(&program.program_state)?;
 
     let current = usize::from(program.playback.current_index);
     if current >= program.items.len() {
-        return Err(ProtocolError::InvalidShape("playback current index"));
+        return Err(Refusal::InvalidShape("playback current index"));
     }
 
     let mut item_ids = BTreeSet::new();
     let mut horizon = 0_u32;
     for (index, item) in program.items.iter().enumerate() {
         if !item_ids.insert(item.id.as_str()) {
-            return Err(ProtocolError::InvalidShape("duplicate program item"));
+            return Err(Refusal::InvalidShape("duplicate program item"));
         }
         validate_source_state(&item.source_state)?;
         validate_scene(&item.scene)?;
@@ -354,59 +355,56 @@ fn validate_program_shape(program: &DisplayProgram) -> Result<(), ProtocolError>
         match item.duration_ms {
             Some(duration) => {
                 if !(MIN_ITEM_DURATION_MS..=MAX_ITEM_DURATION_MS).contains(&duration) {
-                    return Err(ProtocolError::BoundExceeded("item duration"));
+                    return Err(Refusal::BoundExceeded("item duration"));
                 }
                 horizon = horizon
                     .checked_add(duration)
-                    .ok_or(ProtocolError::BoundExceeded("staging horizon"))?;
+                    .ok_or(Refusal::BoundExceeded("staging horizon"))?;
             }
             None => {
                 let last = index
                     .checked_add(1)
                     .is_some_and(|position| position == program.items.len());
                 if !last || program.playback.cycle != ProgramCycle::HoldLast {
-                    return Err(ProtocolError::InvalidShape("open-ended item"));
+                    return Err(Refusal::InvalidShape("open-ended item"));
                 }
             }
         }
     }
 
     if horizon > MAX_STAGING_HORIZON_MS {
-        return Err(ProtocolError::BoundExceeded("staging horizon"));
+        return Err(Refusal::BoundExceeded("staging horizon"));
     }
     let current_item = program
         .items
         .get(current)
-        .ok_or(ProtocolError::InvalidShape("playback current item"))?;
+        .ok_or(Refusal::InvalidShape("playback current item"))?;
     match current_item.duration_ms {
         Some(duration) if program.playback.elapsed_ms >= duration => {
-            return Err(ProtocolError::InvalidShape("playback elapsed position"));
+            return Err(Refusal::InvalidShape("playback elapsed position"));
         }
         _ => {}
     }
     Ok(())
 }
 
-pub fn validate_program(program: &DisplayProgram) -> Result<(), ProtocolError> {
+pub fn validate_program(program: &DisplayProgram) -> Result<(), Refusal> {
     validate_program_shape(program)?;
     let expected = canonical_program_revision(program)?;
     if expected != program.revision {
-        return Err(ProtocolError::Integrity("program revision"));
+        return Err(Refusal::Integrity("program revision"));
     }
     Ok(())
 }
 
-fn encode_source_state(
-    transcript: &mut Transcript,
-    state: &SourceState,
-) -> Result<(), ProtocolError> {
+fn encode_source_state(transcript: &mut Transcript, state: &SourceState) -> Result<(), Refusal> {
     match state {
         SourceState::Current => transcript.text("current"),
         SourceState::Unavailable => transcript.text("unavailable"),
         SourceState::Partial { reasons } => {
             transcript.text("partial")?;
             let count = u32::try_from(reasons.len())
-                .map_err(|_| ProtocolError::BoundExceeded("partial reason count"))?;
+                .map_err(|_| Refusal::BoundExceeded("partial reason count"))?;
             transcript.u32(count)?;
             for reason in reasons {
                 transcript.text(reason.wire_name())?;
@@ -416,7 +414,7 @@ fn encode_source_state(
     }
 }
 
-fn encode_asset(transcript: &mut Transcript, asset: &DisplayAsset) -> Result<(), ProtocolError> {
+fn encode_asset(transcript: &mut Transcript, asset: &DisplayAsset) -> Result<(), Refusal> {
     transcript.text(asset.media_type.wire_name())?;
     transcript.u32(asset.encoded_len)?;
     transcript.text(asset.sha256.as_str())?;
@@ -424,7 +422,7 @@ fn encode_asset(transcript: &mut Transcript, asset: &DisplayAsset) -> Result<(),
     transcript.optional_u32(asset.height)
 }
 
-pub fn program_semantics_transcript(program: &DisplayProgram) -> Result<Vec<u8>, ProtocolError> {
+pub fn program_semantics_transcript(program: &DisplayProgram) -> Result<Vec<u8>, Refusal> {
     validate_program_shape(program)?;
     let mut transcript = Transcript::new(b"astrolabe-display/program-semantics/v1")?;
     transcript.u32(program.protocol_major)?;
@@ -435,7 +433,7 @@ pub fn program_semantics_transcript(program: &DisplayProgram) -> Result<Vec<u8>,
     transcript.text(program.freshness.on_stale.wire_name())?;
     transcript.text(program.playback.cycle.wire_name())?;
     let count = u32::try_from(program.items.len())
-        .map_err(|_| ProtocolError::BoundExceeded("program item count"))?;
+        .map_err(|_| Refusal::BoundExceeded("program item count"))?;
     transcript.u32(count)?;
     for item in &program.items {
         transcript.text(item.id.as_str())?;
@@ -466,9 +464,7 @@ pub fn program_semantics_transcript(program: &DisplayProgram) -> Result<Vec<u8>,
     Ok(transcript.finish())
 }
 
-pub fn canonical_program_revision(
-    program: &DisplayProgram,
-) -> Result<ProgramRevision, ProtocolError> {
+pub fn canonical_program_revision(program: &DisplayProgram) -> Result<ProgramRevision, Refusal> {
     let bytes = program_semantics_transcript(program)?;
     let digest = Sha256::digest(bytes);
     ProgramRevision::parse(encode_hex(&digest))

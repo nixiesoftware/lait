@@ -86,9 +86,20 @@ function AstrolabeHmacSha256(keyHex as string, bytes as object) as string
 end function
 
 function AstrolabeIsHex(value as dynamic, characters as integer) as boolean
-    if value = invalid or Len(value) <> characters then return false
+    if not AstrolabeIsString(value) then return false
+    if Len(value) <> characters then return false
     matcher = CreateObject("roRegex", "^[0-9a-f]+$", "")
     return matcher.IsMatch(value)
+end function
+
+function AstrolabeIsString(value as dynamic) as boolean
+    if value = invalid then return false
+    return GetInterface(value, "ifString") <> invalid
+end function
+
+function AstrolabeIsArray(value as dynamic) as boolean
+    if value = invalid then return false
+    return GetInterface(value, "ifArray") <> invalid
 end function
 
 function AstrolabeRandomHex() as string
@@ -165,6 +176,7 @@ end function
 
 function AstrolabeExactFields(value as dynamic, expected as object) as boolean
     if value = invalid then return false
+    if GetInterface(value, "ifAssociativeArray") = invalid then return false
     keys = value.Keys()
     if keys.Count() <> expected.Count() then return false
     for each name in expected
@@ -175,23 +187,49 @@ end function
 
 function AstrolabeIntegerIn(value as dynamic, minimum as dynamic, maximum as dynamic) as boolean
     if value = invalid then return false
-    return value = Int(value) and value >= minimum and value <= maximum
+    if GetInterface(value, "ifInt") = invalid and GetInterface(value, "ifLongInt") = invalid then return false
+    return value >= minimum and value <= maximum
+end function
+
+function AstrolabeValidApiError(value as dynamic) as boolean
+    if not AstrolabeExactFields(value, ["protocol_major", "code", "retry_after_ms", "next_challenge"]) then return false
+    if value.protocol_major <> 1 or not AstrolabeIsString(value.code) then return false
+    allowed = {
+        invalid_request: true,
+        authentication_failed: true,
+        challenge_expired: true,
+        challenge_consumed: true,
+        not_enrolled: true,
+        unassigned: true,
+        revoked: true,
+        re_pair_required: true,
+        unsupported_protocol: true,
+        bound_exceeded: true,
+        temporarily_unavailable: true
+    }
+    if not allowed.DoesExist(value.code) then return false
+    if value.retry_after_ms <> invalid and not AstrolabeIntegerIn(value.retry_after_ms, 1, 60000) then return false
+    if value.next_challenge <> invalid and not AstrolabeIsHex(value.next_challenge, 64) then return false
+    return true
 end function
 
 function AstrolabeEncodeSourceState(bytes as object, state as dynamic) as boolean
-    if state = invalid or not state.DoesExist("kind") then return false
+    if not AstrolabeExactFields(state, ["kind"]) and not AstrolabeExactFields(state, ["kind", "reasons"]) then return false
+    if not AstrolabeIsString(state.kind) then return false
     if state.kind = "current" or state.kind = "unavailable"
         if not AstrolabeExactFields(state, ["kind"]) then return false
         AstrolabeTextField(bytes, state.kind)
         return true
     end if
     if state.kind <> "partial" or not AstrolabeExactFields(state, ["kind", "reasons"]) then return false
+    if not AstrolabeIsArray(state.reasons) then return false
     if state.reasons.Count() < 1 or state.reasons.Count() > 8 then return false
-    allowed = { data_missing: true, source_timeout: true, access_limited: true, render_degraded: true }
+    allowed = { corrupt_records: true, degraded_source: true, incomplete_projection: true, provisional_data: true }
     previous = ""
     AstrolabeTextField(bytes, "partial")
     AstrolabeU32Field(bytes, state.reasons.Count())
     for each reason in state.reasons
+        if not AstrolabeIsString(reason) then return false
         if not allowed.DoesExist(reason) or (previous <> "" and reason <= previous) then return false
         AstrolabeTextField(bytes, reason)
         previous = reason
@@ -202,6 +240,7 @@ end function
 function AstrolabeEncodeAsset(bytes as object, asset as dynamic) as boolean
     if not AstrolabeExactFields(asset, ["id", "media_type", "encoded_len", "sha256", "width", "height"]) then return false
     if not AstrolabeIsHex(asset.id, 64) or not AstrolabeIsHex(asset.sha256, 64) then return false
+    if not AstrolabeIsString(asset.media_type) then return false
     if asset.media_type <> "image_jpeg" and asset.media_type <> "image_png" and asset.media_type <> "image_webp" then return false
     if not AstrolabeIntegerIn(asset.encoded_len, 1, 16777216) then return false
     if not AstrolabeIntegerIn(asset.width, 1, 4096) or not AstrolabeIntegerIn(asset.height, 1, 2160) then return false
@@ -219,11 +258,14 @@ function AstrolabeProgramTranscript(program as dynamic) as dynamic
     if program.protocol_major <> 1 or not AstrolabeIsHex(program.assignment, 32) or not AstrolabeIsHex(program.program, 32) or not AstrolabeIsHex(program.revision, 64) then return invalid
     if not AstrolabeExactFields(program.freshness, ["stale_after_ms", "on_stale"]) then return invalid
     if not AstrolabeIntegerIn(program.freshness.stale_after_ms, 30001, 86400000) then return invalid
+    if not AstrolabeIsString(program.freshness.on_stale) then return invalid
     if program.freshness.on_stale <> "keep_with_native_banner" and program.freshness.on_stale <> "blank" then return invalid
     if not AstrolabeExactFields(program.playback, ["current_index", "elapsed_ms", "cycle"]) then return invalid
+    if not AstrolabeIsString(program.playback.cycle) then return invalid
     if program.playback.cycle <> "loop" and program.playback.cycle <> "hold_last" and program.playback.cycle <> "blank_at_end" and program.playback.cycle <> "poll_at_end" then return invalid
+    if not AstrolabeIsArray(program.items) then return invalid
     if program.items.Count() < 1 or program.items.Count() > 16 then return invalid
-    if not AstrolabeIntegerIn(program.playback.current_index, 0, program.items.Count() - 1) or not AstrolabeIntegerIn(program.playback.elapsed_ms, 0, 2147483647) then return invalid
+    if not AstrolabeIntegerIn(program.playback.current_index, 0, program.items.Count() - 1) or not AstrolabeIntegerIn(program.playback.elapsed_ms, 0, 4294967295) then return invalid
 
     bytes = AstrolabeTranscript("astrolabe-display/program-semantics/v1")
     AstrolabeU32Field(bytes, 1)
@@ -251,7 +293,8 @@ function AstrolabeProgramTranscript(program as dynamic) as dynamic
         end if
         AstrolabeOptionalU32Field(bytes, item.duration_ms)
         if not AstrolabeEncodeSourceState(bytes, item.source_state) then return invalid
-        if item.scene = invalid or not item.scene.DoesExist("kind") then return invalid
+        if not AstrolabeExactFields(item.scene, ["kind", "asset"]) and not AstrolabeExactFields(item.scene, ["kind", "reason"]) then return invalid
+        if not AstrolabeIsString(item.scene.kind) then return invalid
         if item.scene.kind = "frame"
             if not AstrolabeExactFields(item.scene, ["kind", "asset"]) then return invalid
             AstrolabeTextField(bytes, "frame")
@@ -259,6 +302,7 @@ function AstrolabeProgramTranscript(program as dynamic) as dynamic
         else if item.scene.kind = "blank"
             if not AstrolabeExactFields(item.scene, ["kind", "reason"]) then return invalid
             allowedBlank = { unassigned: true, host_unavailable: true, source_unavailable: true, unsupported: true, revoked: true, program_ended: true }
+            if not AstrolabeIsString(item.scene.reason) then return invalid
             if not allowedBlank.DoesExist(item.scene.reason) then return invalid
             AstrolabeTextField(bytes, "blank")
             AstrolabeTextField(bytes, item.scene.reason)
@@ -266,6 +310,7 @@ function AstrolabeProgramTranscript(program as dynamic) as dynamic
             return invalid
         end if
         if item.spoken_summary <> invalid
+            if not AstrolabeIsString(item.spoken_summary) then return invalid
             summaryBytes = AstrolabeByteArray(item.spoken_summary)
             if summaryBytes.Count() < 1 or summaryBytes.Count() > 1024 then return invalid
         end if
@@ -279,4 +324,37 @@ end function
 function AstrolabeVerifyProgram(program as dynamic) as boolean
     bytes = AstrolabeProgramTranscript(program)
     return bytes <> invalid and AstrolabeSha256(bytes) = program.revision
+end function
+
+function AstrolabeConformanceCheck() as boolean
+    context = {
+        method: "GET",
+        route: "program_changes",
+        device: "ffeeddccbbaa99887766554433221100",
+        assignment: "00112233445566778899aabbccddeeff",
+        program: "102132435465768798a9bacbdcedfe0f",
+        revision: "4ed9867dfb8ea6fe645a70e9e16dc19d831602ed2ae9c534b5b0b86062aad6b0",
+        currentItem: "0e089d8d262e20aeb998ad2f84300b5023d588746c00c01da9ddb1e146b069e8",
+        elapsedMs: 500,
+        waitMs: 25000,
+        asset: invalid,
+        range: invalid,
+        challenge: "1111111111111111111111111111111111111111111111111111111111111111",
+        bodySha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+    requestTag = AstrolabeRequestTag("0000000000000000000000000000000000000000000000000000000000000000", context)
+    if requestTag <> "3495896c7a9b3e562bf6ee5b6dc2553dd1ceaaec886d80dff4b9f4aaa2d55bdc" then return false
+    completeTag = AstrolabePairingCompleteTag(
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "33333333333333333333333333333333",
+        "ffeeddccbbaa99887766554433221100",
+        "4444444444444444444444444444444444444444444444444444444444444444"
+    )
+    if completeTag <> "d8a85ed4a54c510ab3b4837ac9152675dfd9169c77fec2bc06ac7a14df077287" then return false
+    phrase = AstrolabeConfirmationPhrase(
+        "6666666666666666666666666666666666666666666666666666666666666666",
+        "77777777777777777777777777777777",
+        "8888888888888888888888888888888888888888888888888888888888888888"
+    )
+    return phrase.Count() = 6 and phrase[0] = "spruce" and phrase[1] = "violet" and phrase[2] = "quartz" and phrase[3] = "coral" and phrase[4] = "juniper" and phrase[5] = "willow"
 end function

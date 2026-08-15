@@ -42,7 +42,7 @@ pub const PROTOCOL_MAJOR: u32 = 1;
 
 /// A stable refusal class suitable for a receiver's native error chrome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProtocolError {
+pub enum Refusal {
     InvalidIdentifier(&'static str),
     InvalidEncoding(&'static str),
     InvalidShape(&'static str),
@@ -51,7 +51,7 @@ pub enum ProtocolError {
     Integrity(&'static str),
 }
 
-impl fmt::Display for ProtocolError {
+impl fmt::Display for Refusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidIdentifier(name) => write!(formatter, "invalid {name}"),
@@ -64,4 +64,4 @@ impl fmt::Display for ProtocolError {
     }
 }
 
-impl Error for ProtocolError {}
+impl Error for Refusal {}

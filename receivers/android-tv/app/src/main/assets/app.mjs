@@ -124,7 +124,7 @@ const capabilities = {
     height: Math.min(window.screen.height || 1080, 2160),
     scale_milli: 1000,
   },
-  image_types: ["image_png", "image_jpeg", "image_webp"],
+  image_types: ["image_jpeg", "image_png", "image_webp"],
   max_asset_bytes: 16777216,
   max_staged_bytes: 50331648,
   max_program_items: 16,

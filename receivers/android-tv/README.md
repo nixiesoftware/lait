@@ -13,9 +13,9 @@ and device transfer are disabled for receiver identity.
 
 ## Build and qualify
 
-Run `gradle :app:assembleDebug` (or the generated Gradle wrapper) in this
+Run `./gradlew :app:assembleDebug` (`gradlew.bat` on Windows) in this
 directory. For release, configure the Nixie Solutions LLC signing key outside
-the repository and run `:app:bundleRelease`. Install on Android TV API 26 or
+the repository and run `./gradlew :app:bundleRelease`. Install on Android TV API 26 or
 newer, then complete `../QUALIFICATION.md`, including DPAD-only operation,
 process death, network loss, certificate failure, rotation, and revocation.
 

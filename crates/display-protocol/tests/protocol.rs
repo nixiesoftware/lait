@@ -21,7 +21,7 @@ use display_protocol::receiver::{
     PlaybackCapabilities, PlaybackTier, ReceiverCapabilities, ReceiverPlatform, SyncClass,
     Viewport,
 };
-use display_protocol::{ProtocolError, PROTOCOL_MAJOR};
+use display_protocol::{Refusal, PROTOCOL_MAJOR};
 
 fn repeated(character: char, count: usize) -> String {
     std::iter::repeat_n(character, count).collect()
@@ -113,8 +113,8 @@ fn fixture_capabilities() -> ReceiverCapabilities {
             scale_milli: 1000,
         },
         image_types: vec![
-            DisplayAssetMediaType::ImagePng,
             DisplayAssetMediaType::ImageJpeg,
+            DisplayAssetMediaType::ImagePng,
         ],
         max_asset_bytes: MAX_ASSET_BYTES,
         max_staged_bytes: MAX_STAGED_BYTES,
@@ -179,7 +179,7 @@ fn a_forged_program_revision_is_refused() {
     program.revision = ProgramRevision::parse(repeated('f', 64)).unwrap();
     assert_eq!(
         validate_program(&program),
-        Err(ProtocolError::Integrity("program revision"))
+        Err(Refusal::Integrity("program revision"))
     );
 }
 
@@ -189,7 +189,7 @@ fn open_ended_items_exist_only_at_hold_last_end() {
     program.playback.cycle = ProgramCycle::Loop;
     assert_eq!(
         canonical_program_revision(&program),
-        Err(ProtocolError::InvalidShape("open-ended item"))
+        Err(Refusal::InvalidShape("open-ended item"))
     );
 }
 
@@ -204,10 +204,28 @@ fn source_partial_reasons_are_bounded_sorted_and_unique() {
     };
     assert_eq!(
         canonical_program_revision(&program),
-        Err(ProtocolError::InvalidShape(
+        Err(Refusal::InvalidShape(
             "partial reasons must be sorted and unique"
         ))
     );
+}
+
+#[test]
+fn cross_language_lists_use_wire_string_order() {
+    let mut program = fixture_program();
+    program.program_state = SourceState::Partial {
+        reasons: vec![
+            DisplayPartialReason::CorruptRecords,
+            DisplayPartialReason::DegradedSource,
+            DisplayPartialReason::IncompleteProjection,
+            DisplayPartialReason::ProvisionalData,
+        ],
+    };
+    program.revision = canonical_program_revision(&program).expect("wire-sorted partial reasons");
+    assert_eq!(validate_program(&program), Ok(()));
+
+    let capabilities = fixture_capabilities();
+    assert_eq!(validate_capabilities(&capabilities), Ok(()));
 }
 
 #[test]
@@ -219,7 +237,7 @@ fn frame_metadata_cannot_smuggle_a_manifest_or_unbounded_decode() {
     }
     assert_eq!(
         canonical_program_revision(&program),
-        Err(ProtocolError::BoundExceeded("image dimensions"))
+        Err(Refusal::BoundExceeded("image dimensions"))
     );
 
     if let DisplayScene::Frame { asset } = &mut program.items[0].scene {
@@ -229,7 +247,7 @@ fn frame_metadata_cannot_smuggle_a_manifest_or_unbounded_decode() {
     }
     assert_eq!(
         canonical_program_revision(&program),
-        Err(ProtocolError::InvalidShape("frame asset media type"))
+        Err(Refusal::InvalidShape("frame asset media type"))
     );
 }
 
@@ -242,7 +260,7 @@ fn receiver_capabilities_can_only_reduce_server_bounds() {
     oversized.max_asset_bytes = MAX_ASSET_BYTES + 1;
     assert_eq!(
         validate_capabilities(&oversized),
-        Err(ProtocolError::BoundExceeded("receiver asset bytes"))
+        Err(Refusal::BoundExceeded("receiver asset bytes"))
     );
 }
 
@@ -253,7 +271,7 @@ fn playback_tier_degradation_is_explicit() {
     capabilities.playback.sync_class = SyncClass::Boundary;
     assert_eq!(
         validate_capabilities(&capabilities),
-        Err(ProtocolError::InvalidShape("native HLS tier"))
+        Err(Refusal::InvalidShape("native HLS tier"))
     );
 }
 
@@ -289,7 +307,7 @@ fn request_authentication_commits_every_route_coordinate() {
     };
     assert_eq!(
         verify_request(&proof_key, &altered, &tag),
-        Err(ProtocolError::Integrity("request authentication tag"))
+        Err(Refusal::Integrity("request authentication tag"))
     );
 }
 
@@ -319,9 +337,7 @@ fn route_shape_refuses_an_asset_request_without_an_asset() {
     };
     assert_eq!(
         request_transcript(&context),
-        Err(ProtocolError::InvalidShape(
-            "request authentication context"
-        ))
+        Err(Refusal::InvalidShape("request authentication context"))
     );
 }
 
@@ -363,7 +379,7 @@ fn confirmation_words_outside_the_frozen_dictionary_are_refused() {
     };
     assert_eq!(
         validate_pairing_start_response(&response),
-        Err(ProtocolError::InvalidShape("confirmation phrase"))
+        Err(Refusal::InvalidShape("confirmation phrase"))
     );
 }
 

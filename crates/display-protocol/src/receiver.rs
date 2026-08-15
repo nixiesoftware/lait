@@ -12,7 +12,7 @@ use crate::ids::{
     Challenge, DisplayAssetId, DisplayDeviceId, DisplayProgramItemId, ProgramRevision, Sha256Digest,
 };
 use crate::program::DisplayAssetMediaType;
-use crate::{ProtocolError, PROTOCOL_MAJOR};
+use crate::{Refusal, PROTOCOL_MAJOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,9 +103,9 @@ pub struct ReceiverCapabilities {
     pub playback: PlaybackCapabilities,
 }
 
-pub fn validate_capabilities(capabilities: &ReceiverCapabilities) -> Result<(), ProtocolError> {
+pub fn validate_capabilities(capabilities: &ReceiverCapabilities) -> Result<(), Refusal> {
     if capabilities.protocol_major != PROTOCOL_MAJOR {
-        return Err(ProtocolError::Unsupported("protocol major"));
+        return Err(Refusal::Unsupported("protocol major"));
     }
     if capabilities.build.is_empty()
         || capabilities.build.len() > MAX_BUILD_BYTES
@@ -115,13 +115,13 @@ pub fn validate_capabilities(capabilities: &ReceiverCapabilities) -> Result<(), 
             .bytes()
             .any(|byte| byte.is_ascii_control())
     {
-        return Err(ProtocolError::BoundExceeded("receiver build"));
+        return Err(Refusal::BoundExceeded("receiver build"));
     }
     if capabilities.locale.is_empty()
         || capabilities.locale.len() > MAX_LOCALE_BYTES
         || !capabilities.locale.is_ascii()
     {
-        return Err(ProtocolError::BoundExceeded("receiver locale"));
+        return Err(Refusal::BoundExceeded("receiver locale"));
     }
     let viewport = &capabilities.viewport;
     if viewport.width == 0
@@ -130,53 +130,57 @@ pub fn validate_capabilities(capabilities: &ReceiverCapabilities) -> Result<(), 
         || viewport.height > MAX_FRAME_HEIGHT
         || !(500..=4_000).contains(&viewport.scale_milli)
     {
-        return Err(ProtocolError::BoundExceeded("receiver viewport"));
+        return Err(Refusal::BoundExceeded("receiver viewport"));
     }
     let pixels = u64::from(viewport.width)
         .checked_mul(u64::from(viewport.height))
-        .ok_or(ProtocolError::BoundExceeded("receiver viewport pixels"))?;
+        .ok_or(Refusal::BoundExceeded("receiver viewport pixels"))?;
     if pixels > MAX_FRAME_PIXELS {
-        return Err(ProtocolError::BoundExceeded("receiver viewport pixels"));
+        return Err(Refusal::BoundExceeded("receiver viewport pixels"));
     }
 
     if capabilities.image_types.is_empty() || capabilities.image_types.len() > 3 {
-        return Err(ProtocolError::BoundExceeded("receiver image types"));
+        return Err(Refusal::BoundExceeded("receiver image types"));
     }
     if capabilities
         .image_types
         .iter()
         .any(|media_type| !media_type.is_image())
     {
-        return Err(ProtocolError::InvalidShape("receiver image types"));
+        return Err(Refusal::InvalidShape("receiver image types"));
     }
-    let unique: BTreeSet<_> = capabilities.image_types.iter().copied().collect();
+    let unique: BTreeSet<_> = capabilities
+        .image_types
+        .iter()
+        .map(|media_type| media_type.wire_name())
+        .collect();
     if unique.len() != capabilities.image_types.len()
-        || unique
+        || unique.iter().copied().ne(capabilities
+            .image_types
             .iter()
-            .copied()
-            .ne(capabilities.image_types.iter().copied())
+            .map(|media_type| media_type.wire_name()))
     {
-        return Err(ProtocolError::InvalidShape(
+        return Err(Refusal::InvalidShape(
             "receiver image types must be sorted and unique",
         ));
     }
     if capabilities.max_asset_bytes == 0 || capabilities.max_asset_bytes > MAX_ASSET_BYTES {
-        return Err(ProtocolError::BoundExceeded("receiver asset bytes"));
+        return Err(Refusal::BoundExceeded("receiver asset bytes"));
     }
     if capabilities.max_staged_bytes < capabilities.max_asset_bytes
         || capabilities.max_staged_bytes > MAX_STAGED_BYTES
     {
-        return Err(ProtocolError::BoundExceeded("receiver staged bytes"));
+        return Err(Refusal::BoundExceeded("receiver staged bytes"));
     }
     if capabilities.max_program_items == 0
         || usize::from(capabilities.max_program_items) > MAX_PROGRAM_ITEMS
     {
-        return Err(ProtocolError::BoundExceeded("receiver program items"));
+        return Err(Refusal::BoundExceeded("receiver program items"));
     }
     if capabilities.max_staging_horizon_ms == 0
         || capabilities.max_staging_horizon_ms > MAX_STAGING_HORIZON_MS
     {
-        return Err(ProtocolError::BoundExceeded("receiver staging horizon"));
+        return Err(Refusal::BoundExceeded("receiver staging horizon"));
     }
 
     let playback = &capabilities.playback;
@@ -186,7 +190,7 @@ pub fn validate_capabilities(capabilities: &ReceiverCapabilities) -> Result<(), 
                 || playback.rate_control_probed
                 || playback.latency_class != LatencyClass::Snapshot
             {
-                return Err(ProtocolError::InvalidShape("frame playback tier"));
+                return Err(Refusal::InvalidShape("frame playback tier"));
             }
         }
         PlaybackTier::NativeHls => {
@@ -194,12 +198,12 @@ pub fn validate_capabilities(capabilities: &ReceiverCapabilities) -> Result<(), 
                 || playback.rate_control_probed
                 || playback.health_granularity != HealthGranularity::Coarse
             {
-                return Err(ProtocolError::InvalidShape("native HLS tier"));
+                return Err(Refusal::InvalidShape("native HLS tier"));
             }
         }
         PlaybackTier::MseLive => {
             if playback.sync_class != SyncClass::PositionalB {
-                return Err(ProtocolError::InvalidShape("MSE live tier"));
+                return Err(Refusal::InvalidShape("MSE live tier"));
             }
         }
         PlaybackTier::NativeFull => {}
@@ -229,7 +233,7 @@ pub enum PlaybackState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReceiverError {
+pub enum Fault {
     None,
     Network,
     Authentication,
@@ -274,7 +278,7 @@ pub struct ReceiverHealth {
     pub last_displayed_asset: Option<DisplayedAsset>,
     pub connection: ConnectionState,
     pub playback: PlaybackState,
-    pub last_error: ReceiverError,
+    pub last_error: Fault,
     pub staged_items: u16,
     pub staged_bytes: u32,
     pub decode_latency: LatencyBucket,
@@ -284,25 +288,25 @@ pub struct ReceiverHealth {
     pub pipeline_unobservable: bool,
 }
 
-pub fn validate_health(health: &ReceiverHealth) -> Result<(), ProtocolError> {
+pub fn validate_health(health: &ReceiverHealth) -> Result<(), Refusal> {
     if health.protocol_major != PROTOCOL_MAJOR {
-        return Err(ProtocolError::Unsupported("protocol major"));
+        return Err(Refusal::Unsupported("protocol major"));
     }
     if health.build.is_empty()
         || health.build.len() > MAX_BUILD_BYTES
         || !health.build.is_ascii()
         || health.build.bytes().any(|byte| byte.is_ascii_control())
     {
-        return Err(ProtocolError::BoundExceeded("receiver build"));
+        return Err(Refusal::BoundExceeded("receiver build"));
     }
     if usize::from(health.staged_items) > MAX_PROGRAM_ITEMS {
-        return Err(ProtocolError::BoundExceeded("health staged item count"));
+        return Err(Refusal::BoundExceeded("health staged item count"));
     }
     if health.staged_bytes > MAX_STAGED_BYTES {
-        return Err(ProtocolError::BoundExceeded("health staged bytes"));
+        return Err(Refusal::BoundExceeded("health staged bytes"));
     }
     if !(-60_000..=60_000).contains(&health.drift_residual_ms) {
-        return Err(ProtocolError::BoundExceeded("health drift residual"));
+        return Err(Refusal::BoundExceeded("health drift residual"));
     }
     Ok(())
 }
@@ -324,7 +328,7 @@ pub struct ChallengeResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ApiErrorCode {
+pub enum ApiRefusalCode {
     InvalidRequest,
     AuthenticationFailed,
     ChallengeExpired,
@@ -340,9 +344,9 @@ pub enum ApiErrorCode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ApiError {
+pub struct ApiRefusal {
     pub protocol_major: u32,
-    pub code: ApiErrorCode,
+    pub code: ApiRefusalCode,
     pub retry_after_ms: Option<u32>,
     pub next_challenge: Option<Challenge>,
 }

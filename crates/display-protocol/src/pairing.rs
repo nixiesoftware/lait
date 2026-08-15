@@ -14,7 +14,7 @@ use crate::ids::{
 };
 use crate::receiver::ReceiverCapabilities;
 use crate::wire::Transcript;
-use crate::{ProtocolError, PROTOCOL_MAJOR};
+use crate::{Refusal, PROTOCOL_MAJOR};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -126,9 +126,9 @@ fn valid_https_origin(origin: &str) -> bool {
         && !authority.contains(['/', '?', '#', '@'])
 }
 
-pub fn validate_instance(instance: &CoordinatorInstance) -> Result<(), ProtocolError> {
+pub fn validate_instance(instance: &CoordinatorInstance) -> Result<(), Refusal> {
     if instance.protocol_major != PROTOCOL_MAJOR {
-        return Err(ProtocolError::Unsupported("protocol major"));
+        return Err(Refusal::Unsupported("protocol major"));
     }
     if instance.instance.len() != 32
         || !instance
@@ -136,32 +136,32 @@ pub fn validate_instance(instance: &CoordinatorInstance) -> Result<(), ProtocolE
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err(ProtocolError::InvalidIdentifier("coordinator instance"));
+        return Err(Refusal::InvalidIdentifier("coordinator instance"));
     }
     if instance.label.is_empty()
         || instance.label.len() > MAX_LABEL_BYTES
         || instance.label.chars().any(char::is_control)
     {
-        return Err(ProtocolError::BoundExceeded("coordinator label"));
+        return Err(Refusal::BoundExceeded("coordinator label"));
     }
     let origin = match &instance.trust {
         CoordinatorTrust::PinnedCertificate { origin, .. }
         | CoordinatorTrust::WebPkiOrigin { origin } => origin,
     };
     if !valid_https_origin(origin) {
-        return Err(ProtocolError::InvalidShape("coordinator HTTPS origin"));
+        return Err(Refusal::InvalidShape("coordinator HTTPS origin"));
     }
     Ok(())
 }
 
-fn mac_tag(key: &[u8; 32], transcript: &[u8]) -> Result<AuthenticationTag, ProtocolError> {
+fn mac_tag(key: &[u8; 32], transcript: &[u8]) -> Result<AuthenticationTag, Refusal> {
     let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|_| ProtocolError::InvalidEncoding("HMAC-SHA-256 key"))?;
+        .map_err(|_| Refusal::InvalidEncoding("HMAC-SHA-256 key"))?;
     mac.update(transcript);
     AuthenticationTag::parse(encode_hex(&mac.finalize().into_bytes()))
 }
 
-pub fn pairing_status_transcript(pairing: &DisplayPairingId) -> Result<Vec<u8>, ProtocolError> {
+pub fn pairing_status_transcript(pairing: &DisplayPairingId) -> Result<Vec<u8>, Refusal> {
     let mut transcript = Transcript::new(b"astrolabe-display/pairing-status/v1")?;
     transcript.u32(PROTOCOL_MAJOR)?;
     transcript.text(pairing.as_str())?;
@@ -171,7 +171,7 @@ pub fn pairing_status_transcript(pairing: &DisplayPairingId) -> Result<Vec<u8>, 
 pub fn authenticate_pairing_status(
     poll_key: &PollKey,
     pairing: &DisplayPairingId,
-) -> Result<AuthenticationTag, ProtocolError> {
+) -> Result<AuthenticationTag, Refusal> {
     let key = decode_hex_32(poll_key.as_str())?;
     mac_tag(&key, &pairing_status_transcript(pairing)?)
 }
@@ -180,7 +180,7 @@ pub fn pairing_complete_transcript(
     pairing: &DisplayPairingId,
     device: &DisplayDeviceId,
     challenge: &Challenge,
-) -> Result<Vec<u8>, ProtocolError> {
+) -> Result<Vec<u8>, Refusal> {
     let mut transcript = Transcript::new(b"astrolabe-display/pairing-complete/v1")?;
     transcript.u32(PROTOCOL_MAJOR)?;
     transcript.text(pairing.as_str())?;
@@ -194,7 +194,7 @@ pub fn authenticate_pairing_complete(
     pairing: &DisplayPairingId,
     device: &DisplayDeviceId,
     challenge: &Challenge,
-) -> Result<AuthenticationTag, ProtocolError> {
+) -> Result<AuthenticationTag, Refusal> {
     let key = decode_hex_32(proof_key.as_str())?;
     mac_tag(
         &key,
@@ -213,7 +213,7 @@ pub fn confirmation_phrase(
     fingerprint: &CoordinatorFingerprint,
     pairing: &DisplayPairingId,
     receiver_nonce: &ReceiverNonce,
-) -> Result<Vec<String>, ProtocolError> {
+) -> Result<Vec<String>, Refusal> {
     let mut transcript = Transcript::new(b"astrolabe-display/confirmation-phrase/v1")?;
     transcript.u32(PROTOCOL_MAJOR)?;
     transcript.text(fingerprint.as_str())?;
@@ -228,24 +228,22 @@ pub fn confirmation_phrase(
             CONFIRMATION_WORDS
                 .get(index)
                 .copied()
-                .ok_or(ProtocolError::InvalidShape("confirmation word index"))
+                .ok_or(Refusal::InvalidShape("confirmation word index"))
                 .map(str::to_owned)
         })
         .collect::<Result<Vec<_>, _>>()?;
     if words.len() != MAX_CONFIRMATION_PHRASE_WORDS {
-        return Err(ProtocolError::InvalidShape("confirmation phrase"));
+        return Err(Refusal::InvalidShape("confirmation phrase"));
     }
     Ok(words)
 }
 
-pub fn validate_pairing_start_response(
-    response: &PairingStartResponse,
-) -> Result<(), ProtocolError> {
+pub fn validate_pairing_start_response(response: &PairingStartResponse) -> Result<(), Refusal> {
     if response.protocol_major != PROTOCOL_MAJOR {
-        return Err(ProtocolError::Unsupported("protocol major"));
+        return Err(Refusal::Unsupported("protocol major"));
     }
     if response.expires_in_ms == 0 || response.expires_in_ms > MAX_PAIRING_LIFETIME_MS {
-        return Err(ProtocolError::BoundExceeded("pairing lifetime"));
+        return Err(Refusal::BoundExceeded("pairing lifetime"));
     }
     if response.confirmation_phrase.len() != MAX_CONFIRMATION_PHRASE_WORDS
         || response.confirmation_phrase.iter().any(|word| {
@@ -254,23 +252,23 @@ pub fn validate_pairing_start_response(
                 || !word.bytes().all(|byte| byte.is_ascii_lowercase())
         })
     {
-        return Err(ProtocolError::InvalidShape("confirmation phrase"));
+        return Err(Refusal::InvalidShape("confirmation phrase"));
     }
     Ok(())
 }
 
-pub fn validate_pairing_status(status: &PairingStatus) -> Result<(), ProtocolError> {
+pub fn validate_pairing_status(status: &PairingStatus) -> Result<(), Refusal> {
     if let PairingStatus::Pending { retry_after_ms } = status {
         if *retry_after_ms == 0 || *retry_after_ms > MAX_RETRY_AFTER_MS {
-            return Err(ProtocolError::BoundExceeded("pairing retry interval"));
+            return Err(Refusal::BoundExceeded("pairing retry interval"));
         }
     }
     Ok(())
 }
 
-pub fn validate_challenge_lifetime(expires_in_ms: u32) -> Result<(), ProtocolError> {
+pub fn validate_challenge_lifetime(expires_in_ms: u32) -> Result<(), Refusal> {
     if expires_in_ms == 0 || expires_in_ms > MAX_CHALLENGE_LIFETIME_MS {
-        return Err(ProtocolError::BoundExceeded("challenge lifetime"));
+        return Err(Refusal::BoundExceeded("challenge lifetime"));
     }
     Ok(())
 }

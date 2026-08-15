@@ -50,6 +50,14 @@ function AstrolabeTransfer(path as string, method as string, body as string, hea
     while clock.TotalMilliseconds() < timeoutMs
         event = Wait(100, m.port)
         AstrolabeTickPlayback()
+        if m.credential <> invalid
+            if m.credential.mode = "pairing" and Left(m.top.command, 7) = "cancel:"
+                transfer.AsyncCancel()
+                AstrolabeClearCredential()
+                m.credential = invalid
+                return invalid
+            end if
+        end if
         if event <> invalid and Type(event) = "roUrlEvent" and event.GetSourceIdentity() = transfer.GetIdentity()
             result = { status: event.GetResponseCode(), event: event, body: "" }
             if targetFile = invalid then result.body = event.GetString()
@@ -207,7 +215,6 @@ function AstrolabeAuthorizedJson(route as string, method as string, path as stri
     if not AstrolabeIsHex(nextChallenge, 64) then return invalid
     m.challenge = nextChallenge
     m.transport = "online"
-    m.lastDelivery.Mark()
     if AstrolabeByteArray(result.body).Count() > 65536 then return invalid
     result.json = ParseJson(result.body)
     return result
@@ -243,6 +250,8 @@ function AstrolabeAuthorizedAsset(asset as object, program as object) as dynamic
         m.challenge = nextChallenge
         contentType = AstrolabeHeader(result.event, "Content-Type")
         if contentType = invalid or LCase(contentType) <> AstrolabeMediaType(asset.media_type) then return invalid
+        expectedRange = "bytes " + start.ToStr() + "-" + (start + length - 1).ToStr() + "/" + asset.encoded_len.ToStr()
+        if AstrolabeHeader(result.event, "Content-Range") <> expectedRange then return invalid
         stat = CreateObject("roFileSystem").Stat(chunkPath)
         if stat = invalid or stat.size <> length then return invalid
         chunk = CreateObject("roByteArray")
@@ -251,7 +260,6 @@ function AstrolabeAuthorizedAsset(asset as object, program as object) as dynamic
         if complete.Count() > asset.encoded_len or complete.Count() > 16777216 then return invalid
         start = start + length
         m.transport = "online"
-        m.lastDelivery.Mark()
     end while
     if complete.Count() <> asset.encoded_len or AstrolabeSha256(complete) <> asset.sha256 then return invalid
     extension = ".bin"
@@ -281,6 +289,8 @@ sub AstrolabePair()
         AstrolabePublish({ kind: "message", title: "Coordinator refused", body: "The endpoint does not speak Astrolabe Display 1." })
         return
     end if
+    if not AstrolabeIsHex(offer.instance, 32) or not AstrolabeIsString(offer.label) then return
+    if Len(offer.label) < 1 or Len(offer.label) > 96 then return
     if not AstrolabeExactFields(offer.trust, ["kind", "origin"]) or offer.trust.kind <> "web_pki_origin" or offer.trust.origin <> m.origin
         AstrolabePublish({ kind: "message", title: "Trust profile unsupported", body: "This Roku build requires the named Web PKI coordinator." })
         return
@@ -298,6 +308,7 @@ sub AstrolabePair()
     if response = invalid or response.status <> 200 or response.json = invalid then return
     pairing = response.json
     if not AstrolabeExactFields(pairing, ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint"]) then return
+    if pairing.protocol_major <> 1 or not AstrolabeIntegerIn(pairing.expires_in_ms, 1, 600000) then return
     if not AstrolabeIsHex(pairing.pairing, 32) or not AstrolabeIsHex(pairing.coordinator_fingerprint, 64) then return
     phrase = AstrolabeConfirmationPhrase(pairing.coordinator_fingerprint, pairing.pairing, nonce)
     if FormatJson(phrase) <> FormatJson(pairing.confirmation_phrase) then return
@@ -344,14 +355,18 @@ sub AstrolabeContinuePairing()
             pairing: m.credential.pairing,
             proof: AstrolabePairingStatusTag(m.credential.pollKey, m.credential.pairing)
         })
-        if status = invalid
+        if m.credential = invalid then return
+        if status = invalid or status.json = invalid or not status.json.DoesExist("kind")
             Sleep(3000)
         else if status.json.kind = "pending"
+            if not AstrolabeExactFields(status.json, ["kind", "retry_after_ms"]) then return
+            if not AstrolabeIntegerIn(status.json.retry_after_ms, 1, 60000) then return
             delayMs = status.json.retry_after_ms
             if delayMs < 1000 then delayMs = 1000
             if delayMs > 60000 then delayMs = 60000
             Sleep(delayMs)
         else if status.json.kind = "approved"
+            if not AstrolabeExactFields(status.json, ["kind", "device", "proof_key", "enrollment_challenge"]) then return
             if not AstrolabeIsHex(status.json.device, 32) or not AstrolabeIsHex(status.json.proof_key, 64) or not AstrolabeIsHex(status.json.enrollment_challenge, 64) then return
             m.credential = {
                 mode: "enrolling",
@@ -362,9 +377,18 @@ sub AstrolabeContinuePairing()
                 enrollmentChallenge: status.json.enrollment_challenge
             }
             if not AstrolabeSaveCredential(m.credential) then return
+            AstrolabePublish({ kind: "message", title: "Enrolling this display", body: "Completing authenticated receiver enrollment…" })
             AstrolabeFinishEnrollment()
-        else
+        else if status.json.kind = "rejected"
+            if not AstrolabeExactFields(status.json, ["kind", "reason"]) then return
+            if status.json.reason <> "user_rejected" and status.json.reason <> "controller_unavailable" and status.json.reason <> "policy_refused" and status.json.reason <> "fingerprint_mismatch" then return
+            AstrolabePublish({ kind: "message", title: "Pairing stopped", body: "Approval was rejected. Press Back and relaunch to begin again." })
+            return
+        else if status.json.kind = "expired"
+            if not AstrolabeExactFields(status.json, ["kind"]) then return
             AstrolabePublish({ kind: "message", title: "Pairing stopped", body: "Approval was rejected or expired. Press Back and relaunch to begin again." })
+            return
+        else
             return
         end if
     end while
@@ -379,6 +403,7 @@ sub AstrolabeFinishEnrollment()
         proof: AstrolabePairingCompleteTag(m.credential.proofKey, m.credential.pairing, m.credential.device, m.credential.enrollmentChallenge)
     })
     if response = invalid or response.status <> 200 or response.json = invalid then return
+    if not AstrolabeExactFields(response.json, ["kind", "device", "next_challenge"]) then return
     if response.json.kind <> "enrolled" and response.json.kind <> "already_enrolled" then return
     if response.json.device <> m.credential.device or not AstrolabeIsHex(response.json.next_challenge, 64) then return
     m.challenge = response.json.next_challenge
@@ -410,15 +435,20 @@ sub AstrolabeRetireStage(stage as dynamic)
     end for
 end sub
 
-sub AstrolabeAdoptCursor(playback as object)
-    if m.program = invalid or playback.current_index < 0 or playback.current_index >= m.program.items.Count() then return
-    if playback.cycle <> m.program.playback.cycle then return
+function AstrolabeAdoptCursor(playback as object, programDelivery = false as boolean) as boolean
+    if m.program = invalid or not AstrolabeExactFields(playback, ["current_index", "elapsed_ms", "cycle"]) then return false
+    if playback.current_index < 0 or playback.current_index >= m.program.items.Count() or playback.elapsed_ms < 0 then return false
+    if playback.cycle <> m.program.playback.cycle then return false
+    current = m.program.items[playback.current_index]
+    if current.duration_ms <> invalid and playback.elapsed_ms >= current.duration_ms then return false
     m.program.playback.current_index = playback.current_index
     m.program.playback.elapsed_ms = playback.elapsed_ms
     m.elapsedBase = playback.elapsed_ms
     m.playbackClock.Mark()
+    if programDelivery then m.lastProgramDelivery.Mark()
     AstrolabeRenderCurrent()
-end sub
+    return true
+end function
 
 sub AstrolabeRenderCurrent()
     if m.program = invalid then return
@@ -431,7 +461,8 @@ sub AstrolabeRenderCurrent()
     else
         source = "current"
     end if
-    stale = m.lastDelivery.TotalMilliseconds() >= m.program.freshness.stale_after_ms
+    stale = m.lastProgramDelivery.TotalMilliseconds() >= m.program.freshness.stale_after_ms
+    m.lastRenderedStale = stale
     if stale and m.program.freshness.on_stale = "blank"
         AstrolabePublish({ kind: "message", title: "Coordinator unavailable", body: "The assigned content is no longer eligible to remain on screen.", source: source, stale: true })
         return
@@ -454,6 +485,8 @@ end sub
 
 sub AstrolabeTickPlayback()
     if m.program = invalid then return
+    staleNow = m.lastProgramDelivery.TotalMilliseconds() >= m.program.freshness.stale_after_ms
+    if m.lastRenderedStale = invalid or staleNow <> m.lastRenderedStale then AstrolabeRenderCurrent()
     item = m.program.items[m.program.playback.current_index]
     if item.duration_ms = invalid then return
     if AstrolabeCurrentPlayback().elapsedMs < item.duration_ms then return
@@ -485,9 +518,10 @@ sub AstrolabeHandleProgramResponse(response as dynamic)
     body = response.json
     if body.kind = "snapshot"
         if not AstrolabeExactFields(body, ["kind", "program"]) then return
+        if not AstrolabeVerifyProgram(body.program) then return
         if m.program <> invalid and m.program.revision = body.program.revision
             m.program = body.program
-            AstrolabeAdoptCursor(body.program.playback)
+            AstrolabeAdoptCursor(body.program.playback, true)
             return
         end if
         staged = AstrolabeStageProgram(body.program)
@@ -498,26 +532,35 @@ sub AstrolabeHandleProgramResponse(response as dynamic)
         previous = m.stage
         m.stage = staged
         m.program = body.program
-        AstrolabeAdoptCursor(body.program.playback)
+        AstrolabeAdoptCursor(body.program.playback, true)
         AstrolabeRetireStage(previous)
     else if body.kind = "no_change"
-        if m.program <> invalid and body.revision = m.program.revision then AstrolabeAdoptCursor(body.playback)
+        if not AstrolabeExactFields(body, ["kind", "revision", "playback"]) then return
+        if m.program <> invalid and body.revision = m.program.revision
+            AstrolabeAdoptCursor(body.playback, true)
+        end if
     else if body.kind = "unassigned"
+        if not AstrolabeExactFields(body, ["kind"]) then return
         AstrolabeRetireStage(m.stage)
         m.program = invalid
         m.stage = {}
         AstrolabePublish({ kind: "unassigned", device: m.credential.device })
+        m.lastProgramDelivery.Mark()
     else if body.kind = "reset"
+        if not AstrolabeExactFields(body, ["kind", "reason"]) then return
         AstrolabeRetireStage(m.stage)
         m.program = invalid
         m.stage = {}
     else if body.kind = "revoked"
+        if not AstrolabeExactFields(body, ["kind"]) then return
         AstrolabeRetireStage(m.stage)
         m.program = invalid
         m.stage = {}
         m.challenge = invalid
+        m.credential.mode = "revoked"
         AstrolabePublish({ kind: "message", title: "This display was revoked", body: "Staged content has been cleared." })
     else if body.kind = "re_pair"
+        if not AstrolabeExactFields(body, ["kind"]) then return
         AstrolabeRetireStage(m.stage)
         AstrolabeClearCredential()
         m.credential = invalid
@@ -527,9 +570,69 @@ sub AstrolabeHandleProgramResponse(response as dynamic)
     end if
 end sub
 
+sub AstrolabeReportHealth()
+    if m.program = invalid then return
+    playback = AstrolabeCurrentPlayback()
+    item = m.program.items[playback.currentIndex]
+    displayed = invalid
+    if item.scene.kind = "frame"
+        displayed = { id: item.scene.asset.id, sha256: item.scene.asset.sha256 }
+    end if
+    stagedBytes = 0
+    for each id in m.stage
+        stagedBytes = stagedBytes + m.stage[id].bytes
+    end for
+    playbackState = "blank"
+    if item.scene.kind = "frame" then playbackState = "displaying"
+    response = AstrolabeAuthorizedJson("health", "POST", "/head/v1/health", {
+        protocol_major: 1,
+        platform: "roku",
+        build: "astrolabe-roku/0.1.0",
+        revision: m.program.revision,
+        current_item: item.id,
+        elapsed_ms: playback.elapsedMs,
+        last_displayed_asset: displayed,
+        connection: "online",
+        playback: playbackState,
+        last_error: "none",
+        staged_items: m.stage.Count(),
+        staged_bytes: stagedBytes,
+        decode_latency: "unobserved",
+        swap_latency: "unobserved",
+        drift_residual_ms: 0,
+        correction_events: 0,
+        pipeline_unobservable: true
+    })
+    if response <> invalid and response.status >= 200 and response.status < 300
+        m.lastHealth.Mark()
+    end if
+end sub
+
 sub AstrolabeProgramLoop()
-    capabilities = AstrolabeAuthorizedJson("capabilities", "POST", "/head/v1/capabilities", AstrolabeCapabilities())
-    if capabilities = invalid or capabilities.status < 200 or capabilities.status >= 300 then return
+    capabilityBackoff = 1000
+    while m.credential <> invalid and m.credential.mode = "paired"
+        capabilities = AstrolabeAuthorizedJson("capabilities", "POST", "/head/v1/capabilities", AstrolabeCapabilities())
+        if capabilities <> invalid and capabilities.status >= 200 and capabilities.status < 300
+            if capabilities.json = invalid then return
+            if not AstrolabeExactFields(capabilities.json, ["kind"]) or capabilities.json.kind <> "accepted" then return
+            exit while
+        end if
+        if capabilities <> invalid
+            if AstrolabeValidApiError(capabilities.json)
+                if capabilities.json.code = "revoked"
+                    AstrolabeHandleProgramResponse({ json: { kind: "revoked" } })
+                    return
+                else if capabilities.json.code = "re_pair_required"
+                    AstrolabeHandleProgramResponse({ json: { kind: "re_pair" } })
+                    return
+                end if
+            end if
+        end if
+        m.transport = "offline"
+        Sleep(capabilityBackoff)
+        capabilityBackoff = capabilityBackoff * 2
+        if capabilityBackoff > 30000 then capabilityBackoff = 30000
+    end while
     while m.credential <> invalid and m.credential.mode = "paired"
         if m.program = invalid
             response = AstrolabeAuthorizedJson("program_snapshot", "GET", "/head/v1/program", invalid)
@@ -541,7 +644,18 @@ sub AstrolabeProgramLoop()
             AstrolabeTickPlayback()
             Sleep(1000)
         else
-            AstrolabeHandleProgramResponse(response)
+            if response.status < 200 or response.status >= 300
+                if AstrolabeValidApiError(response.json)
+                    if response.json.code = "revoked"
+                        AstrolabeHandleProgramResponse({ json: { kind: "revoked" } })
+                    else if response.json.code = "re_pair_required"
+                        AstrolabeHandleProgramResponse({ json: { kind: "re_pair" } })
+                    end if
+                end if
+            else
+                AstrolabeHandleProgramResponse(response)
+            end if
+            if m.program <> invalid and m.lastHealth.TotalMilliseconds() >= 30000 then AstrolabeReportHealth()
             if m.program = invalid then Sleep(5000)
         end if
     end while
@@ -555,11 +669,18 @@ sub AstrolabeRun()
     m.program = invalid
     m.stage = {}
     m.elapsedBase = 0
+    m.lastRenderedStale = invalid
     m.playbackClock = CreateObject("roTimespan")
-    m.lastDelivery = CreateObject("roTimespan")
+    m.lastProgramDelivery = CreateObject("roTimespan")
+    m.lastHealth = CreateObject("roTimespan")
     m.playbackClock.Mark()
-    m.lastDelivery.Mark()
+    m.lastProgramDelivery.Mark()
+    m.lastHealth.Mark()
     AstrolabePublish({ kind: "booting" })
+    if not AstrolabeConformanceCheck()
+        AstrolabePublish({ kind: "message", title: "Protocol self-check failed", body: "This package cannot reproduce Astrolabe Display protocol major 1." })
+        return
+    end if
     m.credential = AstrolabeLoadCredential()
     if m.credential <> invalid and m.credential.origin <> m.origin
         AstrolabePublish({ kind: "message", title: "Coordinator changed", body: "Stored receiver identity belongs to a different origin." })

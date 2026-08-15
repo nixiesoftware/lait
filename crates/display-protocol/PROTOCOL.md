@@ -17,6 +17,8 @@ JSON bodies are UTF-8 and reject unknown fields. HTTP adapters apply the body
 bounds in `src/bounds.rs` before parsing. Fixed byte strings are lowercase hex
 without prefixes: random IDs are 32 characters; SHA-256 values, challenges,
 proof keys, request tags, derived item IDs, and derived asset IDs are 64.
+Every list described as sorted and unique is ordered by its serialized
+snake-case wire string, never by a language's enum declaration order.
 
 The receiver-facing routes are closed:
 

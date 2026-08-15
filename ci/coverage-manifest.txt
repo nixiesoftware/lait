@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1768
-pr-platform    1381
-nightly        1795
+pr             1793
+pr-platform    1384
+nightly        1820
 mutants        98
 
 [gates]
@@ -144,6 +144,9 @@ astrolabe::packaging the_installer_carries_the_whole_flutter_bundle
 astrolabe::packaging the_installer_places_both_binaries_in_one_directory
 astrolabe::packaging the_installer_registers_the_lait_url_scheme
 astrolabe::packaging the_installer_ships_the_third_party_notices
+astrolabe::packaging the_linux_bundle_refuses_a_missing_or_mismatched_pair
+astrolabe::packaging the_linux_package_carries_the_whole_flutter_bundle_and_notices
+astrolabe::packaging the_linux_package_names_its_target_and_refuses_unresolved_libraries
 astrolabe::packaging the_notices_say_they_are_generated_and_name_what_generates_them
 astrolabe::packaging uninstalling_removes_the_program_and_never_the_persons_data
 comms iroh::tests::framing_golden_bytes
@@ -189,6 +192,25 @@ comms::it transport_capabilities::a_datagram_larger_than_the_path_allows_is_refu
 comms::it transport_capabilities::a_reset_stream_surfaces_its_code_rather_than_a_short_read
 comms::it transport_capabilities::record_transport_capabilities
 comms::it transport_capabilities::the_upgrade_posture_is_written_down
+display-protocol::protocol a_blank_is_a_closed_native_reason_not_a_url_or_message
+display-protocol::protocol a_forged_program_revision_is_refused
+display-protocol::protocol a_program_revision_commits_semantics_but_not_cursor_position
+display-protocol::protocol confirmation_phrase_commits_fingerprint_pairing_and_receiver_nonce
+display-protocol::protocol confirmation_words_outside_the_frozen_dictionary_are_refused
+display-protocol::protocol cross_language_lists_use_wire_string_order
+display-protocol::protocol frame_metadata_cannot_smuggle_a_manifest_or_unbounded_decode
+display-protocol::protocol language_neutral_fixture_matches_rust_transcripts_and_json
+display-protocol::protocol malformed_authentication_tags_are_refused_before_comparison
+display-protocol::protocol open_ended_items_exist_only_at_hold_last_end
+display-protocol::protocol pairing_completion_proof_changes_with_the_enrolled_device
+display-protocol::protocol playback_tier_degradation_is_explicit
+display-protocol::protocol random_and_derived_identifier_domains_are_exact
+display-protocol::protocol receiver_capabilities_can_only_reduce_server_bounds
+display-protocol::protocol request_authentication_commits_every_route_coordinate
+display-protocol::protocol route_shape_refuses_an_asset_request_without_an_asset
+display-protocol::protocol secret_debug_output_never_contains_secret_material
+display-protocol::protocol source_partial_reasons_are_bounded_sorted_and_unique
+display-protocol::protocol unknown_program_fields_are_not_best_effort_interpreted
 fabric algebra_reservation_tests::a_body_without_a_future_type_still_projects
 fabric algebra_reservation_tests::an_unknown_tag_refuses_the_projection
 fabric algebra_reservation_tests::an_unprojectable_body_still_exports_and_converges
@@ -1827,8 +1849,11 @@ world-interface tests::a_reserved_collision_is_scoped_to_the_package_being_mount
 world-interface tests::a_second_world_mounts_without_host_specific_code
 world-interface tests::a_tagged_union_tool_schema_declares_its_implied_object_type
 world-interface tests::a_world_that_declares_no_display_is_named_by_its_mount_and_is_not_openable
+world-interface tests::a_world_that_ships_no_artwork_declares_none
 world-interface tests::an_unset_pin_takes_the_sole_world_and_refuses_when_there_are_two
+world-interface tests::artwork_is_held_to_its_bounds_at_declaration
 world-interface tests::coverage_requires_every_command_to_be_a_tool_or_an_omission
 world-interface tests::every_invocation_declares_an_access_class
 world-interface tests::mount_and_reserved_name_collisions_fail_at_composition
+world-interface tests::png_dimensions_are_read_from_the_header_alone
 world-interface tests::unavailable_resolution_does_not_write_empty_names

@@ -10,7 +10,7 @@ use crate::ids::{
 };
 use crate::program::DisplayAssetMediaType;
 use crate::wire::Transcript;
-use crate::{ProtocolError, PROTOCOL_MAJOR};
+use crate::{Refusal, PROTOCOL_MAJOR};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -101,9 +101,9 @@ pub struct RequestContext<'a> {
     pub body_sha256: &'a Sha256Digest,
 }
 
-fn validate_context(context: &RequestContext<'_>) -> Result<(), ProtocolError> {
+fn validate_context(context: &RequestContext<'_>) -> Result<(), Refusal> {
     if context.protocol_major != PROTOCOL_MAJOR {
-        return Err(ProtocolError::Unsupported("protocol major"));
+        return Err(Refusal::Unsupported("protocol major"));
     }
     let valid = match context.route {
         RequestRoute::Capabilities => {
@@ -158,17 +158,15 @@ fn validate_context(context: &RequestContext<'_>) -> Result<(), ProtocolError> {
         }
     };
     if !valid {
-        return Err(ProtocolError::InvalidShape(
-            "request authentication context",
-        ));
+        return Err(Refusal::InvalidShape("request authentication context"));
     }
     if context.assignment.is_some() != context.program.is_some() {
-        return Err(ProtocolError::InvalidShape("assignment/program pair"));
+        return Err(Refusal::InvalidShape("assignment/program pair"));
     }
     Ok(())
 }
 
-pub fn request_transcript(context: &RequestContext<'_>) -> Result<Vec<u8>, ProtocolError> {
+pub fn request_transcript(context: &RequestContext<'_>) -> Result<Vec<u8>, Refusal> {
     validate_context(context)?;
     let mut transcript = Transcript::new(b"astrolabe-display/request/v1")?;
     transcript.u32(context.protocol_major)?;
@@ -189,17 +187,14 @@ pub fn request_transcript(context: &RequestContext<'_>) -> Result<Vec<u8>, Proto
     Ok(transcript.finish())
 }
 
-pub fn sha256(bytes: &[u8]) -> Result<Sha256Digest, ProtocolError> {
+pub fn sha256(bytes: &[u8]) -> Result<Sha256Digest, Refusal> {
     let digest = Sha256::digest(bytes);
     Sha256Digest::parse(encode_hex(&digest))
 }
 
-pub(crate) fn hmac_tag(
-    key: &[u8; 32],
-    transcript: &[u8],
-) -> Result<AuthenticationTag, ProtocolError> {
+pub(crate) fn hmac_tag(key: &[u8; 32], transcript: &[u8]) -> Result<AuthenticationTag, Refusal> {
     let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|_| ProtocolError::InvalidEncoding("HMAC-SHA-256 key"))?;
+        .map_err(|_| Refusal::InvalidEncoding("HMAC-SHA-256 key"))?;
     mac.update(transcript);
     AuthenticationTag::parse(encode_hex(&mac.finalize().into_bytes()))
 }
@@ -207,7 +202,7 @@ pub(crate) fn hmac_tag(
 pub fn authenticate_request(
     proof_key: &ProofKey,
     context: &RequestContext<'_>,
-) -> Result<AuthenticationTag, ProtocolError> {
+) -> Result<AuthenticationTag, Refusal> {
     let key = decode_hex_32(proof_key.as_str())?;
     let transcript = request_transcript(context)?;
     hmac_tag(&key, &transcript)
@@ -217,22 +212,22 @@ pub fn verify_request(
     proof_key: &ProofKey,
     context: &RequestContext<'_>,
     tag: &AuthenticationTag,
-) -> Result<(), ProtocolError> {
+) -> Result<(), Refusal> {
     let key = decode_hex_32(proof_key.as_str())?;
     let expected = decode_hex_32(tag.as_str())?;
     let transcript = request_transcript(context)?;
     let mut mac = HmacSha256::new_from_slice(&key)
-        .map_err(|_| ProtocolError::InvalidEncoding("HMAC-SHA-256 key"))?;
+        .map_err(|_| Refusal::InvalidEncoding("HMAC-SHA-256 key"))?;
     mac.update(&transcript);
     mac.verify_slice(&expected)
-        .map_err(|_| ProtocolError::Integrity("request authentication tag"))
+        .map_err(|_| Refusal::Integrity("request authentication tag"))
 }
 
 fn identifier_hmac(
     identifier_key: &[u8; 32],
     domain: &'static [u8],
     fields: &[&[u8]],
-) -> Result<String, ProtocolError> {
+) -> Result<String, Refusal> {
     let mut transcript = Transcript::new(domain)?;
     for field in fields {
         transcript.field(field)?;
@@ -245,9 +240,9 @@ pub fn derive_program_item_id(
     identifier_key: &[u8; 32],
     assignment: &DisplayAssignmentId,
     package_item_id: &str,
-) -> Result<DisplayProgramItemId, ProtocolError> {
+) -> Result<DisplayProgramItemId, Refusal> {
     if package_item_id.is_empty() || package_item_id.len() > 128 {
-        return Err(ProtocolError::BoundExceeded("package item id"));
+        return Err(Refusal::BoundExceeded("package item id"));
     }
     let derived = identifier_hmac(
         identifier_key,
@@ -265,7 +260,7 @@ pub fn derive_asset_id(
     sha256: &Sha256Digest,
     width: Option<u32>,
     height: Option<u32>,
-) -> Result<DisplayAssetId, ProtocolError> {
+) -> Result<DisplayAssetId, Refusal> {
     let encoded_len = encoded_len.to_be_bytes();
     let width = width.map(u32::to_be_bytes);
     let height = height.map(u32::to_be_bytes);

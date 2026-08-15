@@ -134,7 +134,8 @@ enum DisplayProtocolV1 {
               (30_001...86_400_000).contains(program.freshness.staleAfterMs),
               ["keep_with_native_banner", "blank"].contains(program.freshness.onStale),
               ["loop", "hold_last", "blank_at_end", "poll_at_end"].contains(program.playback.cycle),
-              program.items.indices.contains(program.playback.currentIndex), program.playback.elapsedMs >= 0
+              program.items.indices.contains(program.playback.currentIndex),
+              (0...Int(UInt32.max)).contains(program.playback.elapsedMs)
         else { throw refusal("invalid_shape", "program envelope") }
 
         var transcript = try Transcript(domain: "astrolabe-display/program-semantics/v1")
@@ -197,7 +198,7 @@ enum DisplayProtocolV1 {
         case "partial":
             guard let reasons = state.reasons, (1...8).contains(reasons.count),
                   reasons == reasons.sorted(), Set(reasons).count == reasons.count,
-                  reasons.allSatisfy({ ["access_limited", "data_missing", "render_degraded", "source_timeout"].contains($0) })
+                  reasons.allSatisfy({ ["corrupt_records", "degraded_source", "incomplete_projection", "provisional_data"].contains($0) })
             else { throw refusal("invalid_shape", "partial source state") }
             try transcript.text("partial")
             try transcript.u32(reasons.count)

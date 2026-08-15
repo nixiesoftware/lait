@@ -102,9 +102,12 @@ export class DisplayReceiverClient {
     this.elapsedBase = 0;
     this.playbackTimer = null;
     this.staleTimer = null;
-    this.lastDeliveryAt = 0;
+    this.lastProgramDeliveryAt = 0;
+    this.lastHealthAt = 0;
+    this.deliveryStale = false;
     this.running = false;
     this.pairingPoll = null;
+    this.pairingGeneration = 0;
   }
 
   async start() {
@@ -139,6 +142,7 @@ export class DisplayReceiverClient {
 
   stop() {
     this.running = false;
+    this.pairingGeneration += 1;
     clearTimeout(this.playbackTimer);
     clearInterval(this.staleTimer);
     this.releaseStage(this.staged);
@@ -170,7 +174,12 @@ export class DisplayReceiverClient {
   async fetchInstance() {
     const instance = await this.publicJson("/head/v1/instance");
     exactFields(instance, ["protocol_major", "instance", "label", "trust"], "coordinator instance");
-    if (instance.protocol_major !== PROTOCOL_MAJOR || !isLowerHex(instance.instance, 32)) {
+    if (instance.protocol_major !== PROTOCOL_MAJOR
+      || !isLowerHex(instance.instance, 32)
+      || typeof instance.label !== "string"
+      || new TextEncoder().encode(instance.label).byteLength < 1
+      || new TextEncoder().encode(instance.label).byteLength > 96
+      || /[\u0000-\u001f\u007f-\u009f]/u.test(instance.label)) {
       throw new ProtocolError("unsupported", "Coordinator does not speak protocol major 1");
     }
     exactFields(instance.trust, ["kind", "origin"], "coordinator trust");
@@ -249,6 +258,8 @@ export class DisplayReceiverClient {
 
   async cancelPairing() {
     if (!this.credential || this.credential.mode !== "pairing") return;
+    this.pairingGeneration += 1;
+    this.pairingPoll = null;
     await this.vault.clear();
     this.credential = null;
     await this.startPairing();
@@ -256,32 +267,59 @@ export class DisplayReceiverClient {
 
   pollPairing() {
     if (this.pairingPoll) return this.pairingPoll;
-    this.pairingPoll = this.pollPairingLoop().finally(() => {
-      this.pairingPoll = null;
+    const generation = this.pairingGeneration;
+    let poll;
+    poll = this.pollPairingLoop(generation).finally(() => {
+      if (this.pairingPoll === poll) this.pairingPoll = null;
     });
-    return this.pairingPoll;
+    this.pairingPoll = poll;
+    return poll;
   }
 
-  async pollPairingLoop() {
-    while (this.running && this.credential && this.credential.mode === "pairing") {
+  async pollPairingLoop(generation) {
+    while (this.running
+      && generation === this.pairingGeneration
+      && this.credential
+      && this.credential.mode === "pairing") {
       try {
+        const current = this.credential;
         const proof = await authenticatePairingStatus(
-          this.credential.pollKey,
-          this.credential.pairing,
+          current.pollKey,
+          current.pairing,
         );
         const response = await this.publicJson("/head/v1/pairings/status", "POST", {
           protocol_major: PROTOCOL_MAJOR,
-          pairing: this.credential.pairing,
+          pairing: current.pairing,
           proof,
         });
+        if (!this.running
+          || generation !== this.pairingGeneration
+          || !this.credential
+          || this.credential.mode !== "pairing"
+          || this.credential.pairing !== current.pairing
+          || this.credential.pollKey !== current.pollKey) return;
         if (response.kind === "pending") {
           exactFields(response, ["kind", "retry_after_ms"], "pending pairing status");
+          if (!Number.isSafeInteger(response.retry_after_ms)
+            || response.retry_after_ms < 1
+            || response.retry_after_ms > 60_000) {
+            throw new ProtocolError("invalid_pairing", "Pairing retry interval is outside protocol bounds");
+          }
           this.ui.showPairingWaiting();
-          await delay(Math.min(Math.max(response.retry_after_ms, 1000), 60_000));
+          await delay(Math.max(response.retry_after_ms, 1000));
           continue;
         }
-        if (response.kind === "rejected" || response.kind === "expired") {
+        if (response.kind === "rejected") {
+          exactFields(response, ["kind", "reason"], "rejected pairing status");
+          if (!["user_rejected", "controller_unavailable", "policy_refused", "fingerprint_mismatch"].includes(response.reason)) {
+            throw new ProtocolError("invalid_pairing", "Unknown pairing rejection reason");
+          }
           this.ui.showPairingRejected(response.kind, response.reason || null);
+          return;
+        }
+        if (response.kind === "expired") {
+          exactFields(response, ["kind"], "expired pairing status");
+          this.ui.showPairingRejected(response.kind, null);
           return;
         }
         if (response.kind !== "approved") {
@@ -300,7 +338,7 @@ export class DisplayReceiverClient {
         this.credential = {
           mode: "enrolling",
           origin: this.origin,
-          pairing: this.credential.pairing,
+          pairing: current.pairing,
           device: response.device,
           proofKey: response.proof_key,
           enrollmentChallenge: response.enrollment_challenge,
@@ -310,8 +348,8 @@ export class DisplayReceiverClient {
         this.runProgramLoop();
         return;
       } catch (error) {
+        if (!this.running || generation !== this.pairingGeneration) return;
         this.ui.showPairingNetworkError();
-        if (!this.running) return;
         await delay(3000);
         if (!(error instanceof ProtocolError) || !["network", "timeout"].includes(error.code)) {
           throw error;
@@ -438,7 +476,6 @@ export class DisplayReceiverClient {
       if (!this.challenge) {
         throw new ProtocolError("invalid_challenge", "Authenticated response omitted its next challenge");
       }
-      this.lastDeliveryAt = performance.now();
       this.ui.setTransportState("online");
       return response.body;
     } catch (error) {
@@ -450,6 +487,19 @@ export class DisplayReceiverClient {
   }
 
   handleApiError(body, status) {
+    exactFields(body, ["protocol_major", "code", "retry_after_ms", "next_challenge"], "API error");
+    const codes = [
+      "invalid_request", "authentication_failed", "challenge_expired", "challenge_consumed",
+      "not_enrolled", "unassigned", "revoked", "re_pair_required", "unsupported_protocol",
+      "bound_exceeded", "temporarily_unavailable",
+    ];
+    if (body.protocol_major !== PROTOCOL_MAJOR
+      || !codes.includes(body.code)
+      || (body.retry_after_ms !== null
+        && (!Number.isSafeInteger(body.retry_after_ms) || body.retry_after_ms < 1 || body.retry_after_ms > 60_000))
+      || (body.next_challenge !== null && !isLowerHex(body.next_challenge, 64))) {
+      throw new ProtocolError("invalid_api_error", `Malformed coordinator error at HTTP ${status}`);
+    }
     if (body && body.code === "re_pair_required") {
       this.rePair("Coordinator requires a new trust ceremony");
       throw new ProtocolError("re_pair_required", "Coordinator requires re-pairing");
@@ -500,7 +550,6 @@ export class DisplayReceiverClient {
       if (digest !== asset.sha256) {
         throw new ProtocolError("asset_digest", "Asset SHA-256 does not match the snapshot");
       }
-      this.lastDeliveryAt = performance.now();
       this.ui.setTransportState("online");
       return decodeFrame(response.body, asset);
     } catch (error) {
@@ -528,15 +577,14 @@ export class DisplayReceiverClient {
     this.ui.showConnecting();
     this.startStaleMonitor();
     let backoff = 1000;
-    try {
-      await this.negotiateCapabilities();
-    } catch (error) {
-      if (error.code === "re_pair_required" || error.code === "revoked") return;
-      this.ui.showRecovering(error.code || "network");
-    }
+    let capabilitiesAccepted = false;
 
     while (this.running && this.credential.mode === "paired") {
       try {
+        if (!capabilitiesAccepted) {
+          await this.negotiateCapabilities();
+          capabilitiesAccepted = true;
+        }
         const response = this.program
           ? await this.authorizedJson({
             route: "program_changes",
@@ -551,6 +599,9 @@ export class DisplayReceiverClient {
             path: "/head/v1/program",
           });
         await this.handleProgramResponse(response);
+        if (this.program && performance.now() - this.lastHealthAt >= 30_000) {
+          await this.reportHealth();
+        }
         backoff = 1000;
         if (!this.program) await delay(5000);
       } catch (error) {
@@ -574,10 +625,9 @@ export class DisplayReceiverClient {
       case "no_change":
         exactFields(response, ["kind", "revision", "playback"], "program no-change response");
         if (!this.program || response.revision !== this.program.revision) {
-          this.program = null;
-          return;
+          throw new ProtocolError("invalid_revision", "No-change cursor does not name the current program");
         }
-        this.adoptCursor(response.playback);
+        this.adoptCursor(response.playback, true);
         return;
       case "reset":
         exactFields(response, ["kind", "reason"], "program reset response");
@@ -587,6 +637,7 @@ export class DisplayReceiverClient {
         exactFields(response, ["kind"], "unassigned response");
         this.clearProgram();
         this.ui.showUnassigned(this.credential.device);
+        this.lastProgramDeliveryAt = performance.now();
         return;
       case "revoked":
         exactFields(response, ["kind"], "revoked response");
@@ -605,14 +656,14 @@ export class DisplayReceiverClient {
     await verifyProgram(program);
     if (this.program && this.program.revision === program.revision) {
       this.program = program;
-      this.adoptCursor(program.playback);
+      this.adoptCursor(program.playback, true);
       return;
     }
     const staged = await this.stageProgram(program);
     const previous = this.staged;
     this.staged = staged;
     this.program = program;
-    this.adoptCursor(program.playback);
+    this.adoptCursor(program.playback, true);
     requestAnimationFrame(() => this.releaseStage(previous));
   }
 
@@ -644,6 +695,8 @@ export class DisplayReceiverClient {
     this.releaseStage(this.staged);
     this.staged = new Map();
     this.program = null;
+    this.deliveryStale = false;
+    this.ui.setStaleState(false);
   }
 
   currentPlayback() {
@@ -652,7 +705,7 @@ export class DisplayReceiverClient {
     return { currentIndex: this.program.playback.current_index, elapsedMs: Math.min(elapsed, 0xffffffff) };
   }
 
-  adoptCursor(playback) {
+  adoptCursor(playback, programDelivery = false) {
     exactFields(playback, ["current_index", "elapsed_ms", "cycle"], "playback cursor");
     if (!this.program
       || !Number.isSafeInteger(playback.current_index)
@@ -660,9 +713,12 @@ export class DisplayReceiverClient {
       || playback.current_index >= this.program.items.length
       || !Number.isSafeInteger(playback.elapsed_ms)
       || playback.elapsed_ms < 0
-      || playback.cycle !== this.program.playback.cycle) {
+      || playback.cycle !== this.program.playback.cycle
+      || (this.program.items[playback.current_index].duration_ms != null
+        && playback.elapsed_ms >= this.program.items[playback.current_index].duration_ms)) {
       throw new ProtocolError("invalid_cursor", "Coordinator cursor is outside the current program");
     }
+    if (programDelivery) this.lastProgramDeliveryAt = performance.now();
     this.program.playback.current_index = playback.current_index;
     this.program.playback.elapsed_ms = playback.elapsed_ms;
     this.elapsedBase = playback.elapsed_ms;
@@ -676,6 +732,15 @@ export class DisplayReceiverClient {
     const index = this.program.playback.current_index;
     const item = this.program.items[index];
     const state = sourceKind(this.program);
+    const stale = Boolean(this.lastProgramDeliveryAt)
+      && performance.now() - this.lastProgramDeliveryAt >= this.program.freshness.stale_after_ms;
+    this.deliveryStale = stale;
+    this.ui.setStaleState(stale);
+    if (stale && this.program.freshness.on_stale === "blank") {
+      this.ui.showBlank("host_unavailable", state);
+      this.ui.setSourceState(state);
+      return;
+    }
     if (item.scene.kind === "frame") {
       const staged = this.staged.get(item.scene.asset.id);
       if (!staged) {
@@ -726,18 +791,61 @@ export class DisplayReceiverClient {
   startStaleMonitor() {
     clearInterval(this.staleTimer);
     this.staleTimer = setInterval(() => {
-      if (!this.program || !this.lastDeliveryAt) return;
-      const stale = performance.now() - this.lastDeliveryAt >= this.program.freshness.stale_after_ms;
+      if (!this.program || !this.lastProgramDeliveryAt) return;
+      const stale = performance.now() - this.lastProgramDeliveryAt >= this.program.freshness.stale_after_ms;
+      const wasStale = this.deliveryStale;
+      this.deliveryStale = stale;
       this.ui.setStaleState(stale);
       if (stale && this.program.freshness.on_stale === "blank") {
         this.ui.showBlank("host_unavailable", sourceKind(this.program));
+      } else if (wasStale && !stale) {
+        this.renderCurrent();
       }
     }, 1000);
+  }
+
+  async reportHealth() {
+    if (!this.program) return;
+    const playback = this.currentPlayback();
+    const item = this.program.items[playback.currentIndex];
+    const displayed = item.scene.kind === "frame" ? item.scene.asset : null;
+    let stagedBytes = 0;
+    for (const entry of this.staged.values()) stagedBytes += entry.asset.encoded_len;
+    const response = await this.authorizedJson({
+      route: "health",
+      method: "POST",
+      path: "/head/v1/health",
+      body: {
+        protocol_major: PROTOCOL_MAJOR,
+        platform: this.capabilities.platform,
+        build: this.capabilities.build,
+        revision: this.program.revision,
+        current_item: item.id,
+        elapsed_ms: playback.elapsedMs,
+        last_displayed_asset: displayed ? { id: displayed.id, sha256: displayed.sha256 } : null,
+        connection: "online",
+        playback: displayed ? "displaying" : "blank",
+        last_error: "none",
+        staged_items: this.staged.size,
+        staged_bytes: stagedBytes,
+        decode_latency: "unobserved",
+        swap_latency: "unobserved",
+        drift_residual_ms: 0,
+        correction_events: 0,
+        pipeline_unobservable: true,
+      },
+    });
+    exactFields(response, ["kind"], "health response");
+    if (response.kind !== "accepted") {
+      throw new ProtocolError("health_refused", "Coordinator refused bounded receiver health");
+    }
+    this.lastHealthAt = performance.now();
   }
 
   async handleRevoked() {
     this.clearProgram();
     this.challenge = null;
+    if (this.credential) this.credential = { ...this.credential, mode: "revoked" };
     this.ui.showRevoked();
   }
 

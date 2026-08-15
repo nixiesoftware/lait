@@ -28,7 +28,11 @@ targets:
     type: bundle.unit-test
     platform: tvOS
     sources:
-      - AstrolabeReceiverTests
+      - path: AstrolabeReceiverTests
+        excludes:
+          - Fixtures
+      - path: AstrolabeReceiverTests/Fixtures
+        buildPhase: resources
     dependencies:
       - target: AstrolabeReceiver
     settings:
