@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1762
-pr-platform    1375
-nightly        1789
+pr             1765
+pr-platform    1378
+nightly        1792
 mutants        98
 
 [gates]
@@ -555,8 +555,11 @@ lait update::feed::tests::garbage_is_invalid_not_a_verification_failure
 lait update::feed::tests::the_pinned_keys_are_well_formed_and_distinct
 lait update::feed::tests::the_real_test_channel_resolves_with_the_pinned_key
 lait update::feed::tests::the_stable_channel_refuses_a_prerelease_even_when_the_pointer_names_one
+lait update::tests::a_channel_offering_nothing_newer_stages_nothing_and_is_not_an_error
+lait update::tests::a_tampered_artifact_fails_the_digest_and_never_reaches_the_swap
 lait update::tests::extract_binary_finds_the_flat_zip_and_the_nested_tar_layouts
 lait update::tests::the_build_target_is_a_shipped_release_target_or_at_least_a_triple
+lait update::tests::the_update_chain_holds_from_signed_pointer_to_extracted_binary
 lait update::tests::update_bin_path_is_a_real_entry_in_the_published_archives
 lait update::tests::update_bin_path_matches_the_published_archive_layout_for_every_target
 lait update::tests::update_bin_path_never_doubles_the_exe_suffix
