@@ -860,24 +860,6 @@ impl Router {
         Ok(vacancy)
     }
 
-    /// Stop one Orbit's placement now, and hold the Orbit for nothing.
-    ///
-    /// [`Self::vacate`] with the guard released on the way out: the point is
-    /// the stop itself, not an exclusive operation behind it, so the next
-    /// routed request places the Orbit lazily as if it had never been placed.
-    ///
-    /// Answers whether anything was actually stopped, because "stopped" and
-    /// "was not placed" are different facts and the caller reports one of them.
-    pub async fn stop_placement(&self, orbit: &LocalOrbitId) -> Result<bool> {
-        let (vacancy, placement) = self.occupancy.vacate(orbit).await;
-        let stopped = placement.is_some();
-        if let Some(placement) = placement {
-            placement.shutdown().await?;
-        }
-        drop(vacancy);
-        Ok(stopped)
-    }
-
     /// Stop and join every in-process placement. Externally attached
     /// compatibility daemons are left running.
     pub async fn shutdown(&self) -> Result<()> {
