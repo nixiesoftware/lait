@@ -147,10 +147,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         "one identity acquired more than one head"
     );
 
-    let minted = client
-        .mint(&head, "orb_test")
-        .await
-        .expect("a launch credential");
+    let minted = client.mint(&head).await.expect("a launch credential");
     assert!(!minted.secret.is_empty());
     assert!(
         minted.expires_at_ms
@@ -173,10 +170,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     // Two tickets are two credentials. A head that answered the same secret
     // twice would make "single-use" a property of the first launch only.
-    let second = client
-        .mint(&head, "orb_test")
-        .await
-        .expect("a second credential");
+    let second = client.mint(&head).await.expect("a second credential");
     assert_ne!(
         second.secret, minted.secret,
         "a head minted the same credential twice"

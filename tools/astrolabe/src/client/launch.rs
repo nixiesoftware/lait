@@ -18,7 +18,6 @@
 use super::http::{post_json, Head};
 use super::library::LaunchTicket;
 use super::{Client, ClientError, ClientResult};
-use lait::control::{ControlRoute, Request, Response};
 
 impl Client {
     /// The head this client opens Worlds through, started if it is not up.
@@ -54,10 +53,7 @@ impl Client {
     /// Returns what it launched rather than nothing: a surface that says *where*
     /// it sent the browser is the difference between "did that work" and a
     /// window that may or may not have appeared behind another one.
-    pub async fn open_world(&self, orbit: &str, entry_path: &str) -> ClientResult<LaunchTicket> {
-        if orbit.trim().is_empty() {
-            return Err(ClientError::invalid("an open needs an Orbit"));
-        }
+    pub async fn open_world(&self, entry_path: &str) -> ClientResult<LaunchTicket> {
         if !entry_path.starts_with('/') {
             // The declared entry path is a World's own statement about itself.
             // A relative one is a declaration this client cannot act on, and
@@ -67,65 +63,24 @@ impl Client {
                 "'{entry_path}' is not an entry path this client can open"
             )));
         }
-        // Opening is the active edge of the passive Library: place (or attach
-        // to) this Orbit before handing a browser a URL. Waiting for the web
-        // shell to make its first World call left Astrolabe saying Ready after
-        // a successful launch, and opening `/` for a Space row might never make
-        // that call at all.
-        self.place_orbit(orbit).await?;
+        // No Orbit is named and none is placed. Selecting a Space is the
+        // destination's act — the head's front page carries the selector, and
+        // choosing there is what attaches a daemon. A client that placed an
+        // Orbit here would be pre-answering a question the person is about to
+        // be asked.
         let head = self.head().await?;
-        let ticket = self.mint(&head, orbit).await?;
+        let ticket = self.mint(&head).await?;
         Self::launch_url(&head.base, entry_path, &ticket.secret, ticket.expires_at_ms)
     }
 
-    async fn place_orbit(&self, orbit: &str) -> ClientResult<()> {
-        let context = self.host_context().await?;
-        let registered = context
-            .orbits
-            .iter()
-            .find(|entry| entry.space == orbit)
-            .ok_or_else(|| ClientError::invalid(format!("Orbit '{orbit}' is not registered")))?;
-        let space = mechanics::ids::SpaceId::parse(&registered.space).ok_or_else(|| {
-            ClientError::internal(format!(
-                "Orbit '{}' has an invalid Space id",
-                registered.space
-            ))
-        })?;
-        let route = ControlRoute::Orbit {
-            address: lait::control::OrbitAddress::for_store(
-                std::path::Path::new(&registered.path),
-                space,
-            ),
-        };
-        match self
-            .daemon()?
-            .request(route, &Request::WorldsActive, None)
-            .await
-        {
-            Ok(Response::Worlds { .. }) => Ok(()),
-            Ok(Response::Error { message, .. }) => Err(ClientError::refused(message)),
-            Ok(other) => Err(ClientError::internal(format!(
-                "unexpected Orbit placement reply: {other:?}"
-            ))),
-            Err(error) => Err(ClientError::unreachable(format!(
-                "place Orbit '{orbit}': {error:#}"
-            ))),
-        }
-    }
-
-    /// Ask the head for one launch credential, scoped to `orbit`.
+    /// Ask the head for one launch credential.
     ///
     /// Public because it is the half of `Open` that can be driven without
     /// starting a browser, and therefore the half a test can prove end to end
     /// against a real head. `open_world` is the same thing with the handoff on
     /// the end.
-    pub async fn mint(&self, head: &Head, orbit: &str) -> ClientResult<Minted> {
-        let reply = post_json(
-            head,
-            "/api/launch",
-            &serde_json::json!({ "orbit": orbit.trim() }),
-        )
-        .await?;
+    pub async fn mint(&self, head: &Head) -> ClientResult<Minted> {
+        let reply = post_json(head, "/api/launch", &serde_json::json!({})).await?;
         let secret = reply
             .get("ticket")
             .and_then(serde_json::Value::as_str)
@@ -170,7 +125,7 @@ mod tests {
         Client::over(supervisor, Some(root.to_path_buf()))
     }
 
-    /// Both refusals happen before anything is placed. Starting a head and
+    /// The refusal happens before anything is started. Starting a head and
     /// *then* discovering there was nowhere to send it would leave a process
     /// running for a click that could never have worked — and the executable
     /// this supervisor would spawn does not exist, so a guard that ran late
@@ -181,20 +136,15 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let client = client(directory.path());
 
-        for (orbit, entry) in [
-            ("", "/"),
-            ("   ", "/"),
-            ("orb_one", "issues"),
-            ("orb_one", ""),
-        ] {
+        for entry in ["issues", ""] {
             let refused = client
-                .open_world(orbit, entry)
+                .open_world(entry)
                 .await
                 .expect_err("a launch with nothing to land on was accepted");
             assert_eq!(
                 refused.code,
                 super::super::error::ErrorCode::Invalid,
-                "'{orbit}' at '{entry}' failed for the wrong reason: {refused}"
+                "'{entry}' failed for the wrong reason: {refused}"
             );
         }
 

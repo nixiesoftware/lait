@@ -14,9 +14,9 @@
 //!
 //! ## Facts go out; words do not
 //!
-//! The view carries *what is true*, not what to say about it. A placement is
-//! [`Placement::Vacant`], never "not running"; a row that cannot be opened
-//! carries [`Unopenable::Undeclared`], never the sentence explaining it. That
+//! The view carries *what is true*, not what to say about it. A presence is
+//! [`PresenceView::Offline`], never "not reachable"; a row that cannot be
+//! opened carries an absent entry path, never the sentence explaining it. That
 //! split is what keeps the fifth lockdown rule honest: Dart owns wording and
 //! layout, and cannot own a fact because it is never sent one it could have
 //! derived differently.
@@ -44,7 +44,6 @@ use flutter_rust_bridge::frb;
 // where the codegen puts the concrete codec.
 use crate::frb_generated::StreamSink;
 
-use crate::client::library::{Opens, Placement as CorePlacement};
 use crate::model::{App, StaleReason};
 use crate::runtime::{Action, Runtime};
 use crate::Config;
@@ -92,74 +91,52 @@ pub enum Staleness {
     Signalled(String),
 }
 
-/// One row of the Library.
+/// One row of the Library: an installed World.
+///
+/// Everything here is declared by the bundled package and compiled in — no
+/// probe ran to produce it, and no daemon can make it stale. Which Spaces
+/// serve the World is the destination's fact: the head's own front page
+/// carries the Space selector, and this row deliberately does not pre-ask it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryRow {
-    /// Stable across re-reads: the Orbit and the World in it. A selection
-    /// keyed by index would silently follow whatever moved into that position.
+    /// Stable across re-reads: the mount. A selection keyed by index would
+    /// silently follow whatever moved into that position.
     pub key: String,
-    pub orbit: String,
-    pub space: String,
-    /// Empty when the row is the Space itself rather than a World in it.
     pub world_mount: String,
-    /// `None` means nothing authoritative names it. Drawn as unnamed rather
-    /// than as an id dressed up as a name.
-    pub display_name: Option<String>,
-    pub placement: PlacementView,
-    /// Where `Open` lands. `None` with [`Self::unopenable`] set is a row that
-    /// cannot be opened at all.
+    /// What the World calls itself. Always present — an installed package
+    /// declares its name, so there is no unnamed row to draw.
+    pub display_name: String,
+    /// Where `Open` lands. `None` is a World that declared no entry path,
+    /// which cannot be opened: `/` is not a guess to make on its behalf.
     pub opens_at: Option<String>,
-    pub unopenable: Option<Unopenable>,
-    /// Wall-clock seconds. `None` is *never opened*, which a zero would
-    /// silently turn into 1 January 1970.
-    pub last_opened: Option<u64>,
-    /// Where the Orbit's store lives, when the registry could be read.
-    pub store: Option<String>,
     /// Reviewed implementation version for the hosted World.
     pub version: Option<u32>,
-    /// The running Orbit's sync gate, kept as transport facts for Dart wording.
-    pub sync_state: Option<String>,
-    pub sync_detail: Option<String>,
-    /// What the World says about how it should be drawn. Empty for a Space row
-    /// and for a World this build does not host — in both cases because nothing
-    /// has said anything, which is a fact rather than a blank.
+    /// One line saying what this World is for.
     pub tagline: Option<String>,
     /// Packed `0xRRGGBB`. A seed the interface derives a plate from locally;
     /// there is no asset here and nothing to fetch.
     pub accent: Option<u32>,
-    /// Named places inside the World, already resolved for this Orbit.
-    ///
-    /// Declared facts, not drawn ones: the client surfaces lifecycle only,
-    /// so no surface renders these as navigation.
-    pub routes: Vec<RouteRow>,
-    /// People from the identity's book addressed in this row's Space.
-    /// `None` until the book has been read — which is not the same as a
-    /// Space nobody in the book is addressed in.
+    /// People from the identity's book addressed in any Space this World is
+    /// reachable in. `None` until the book has been read — which is not the
+    /// same as a World nobody in the book is addressed near.
     pub people: Option<Vec<WorldPersonRow>>,
 }
 
-/// One named place inside a World.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RouteRow {
-    pub label: String,
-    /// Absolute, and resolved: `Open` takes it as it stands.
-    pub path: String,
-}
-
-/// One person the book addresses in a World's Space — the at-a-glance join
-/// between the identity's own book and a Library row. Not the Space's
-/// roster: that is an authoritative read a person asks for by choosing the
-/// Space, and this panel never places anything to find out. My Card is
-/// excluded — the glance answers "who of mine is here", and you are not a
-/// contact of yourself.
+/// One person the book addresses near a World — the at-a-glance join between
+/// the identity's own book and a Library row, across every Space the card
+/// holds an address in. Not a roster: that is an authoritative read the
+/// World's own head answers for, and this panel never places anything to
+/// find out. My Card is excluded — the glance answers "who of mine is here",
+/// and you are not a contact of yourself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorldPersonRow {
     pub name: String,
     /// The stored picture (`<mime>;base64,<data>`), or `None` for the
     /// default face — the same canonical face the book draws.
     pub picture: Option<String>,
-    /// Measured presence in THIS Space alone, or `None` when it could not
-    /// be asked. A person online somewhere else is not online here.
+    /// Best measured presence across the Spaces this card holds an address
+    /// in, or `None` when none of them could be asked. A person is as
+    /// present as their most reachable address.
     pub presence: Option<PresenceView>,
     /// Filed under the canonical agent group.
     pub agent: bool,
@@ -167,29 +144,6 @@ pub struct WorldPersonRow {
     /// them when the Space was asked. The panel's nearest liveness — a
     /// launched World, not merely a reachable device.
     pub here: bool,
-}
-
-/// Whether an Orbit is currently up. Three states, because "not running" and
-/// "could not be asked" are different facts and only one is worth acting on.
-///
-/// Named apart from [`crate::client::library::Placement`] on purpose: the
-/// codegen flattens type names across the crate and picks between collisions at
-/// random, so a DTO that shared a name with a core type would be a coin toss
-/// nobody could see land.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementView {
-    Placed,
-    Vacant,
-    Unknown,
-}
-
-/// Why a row cannot be opened. Two facts, not one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unopenable {
-    /// This build hosts no head for that World.
-    Unhosted,
-    /// The World is hosted here and has not declared where to open it.
-    Undeclared,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -417,7 +371,6 @@ pub enum ActionRequest {
     Refresh,
     /// Hand a World to the person's browser.
     Open {
-        orbit: String,
         entry_path: String,
     },
     StartDevice {
@@ -502,7 +455,7 @@ impl ActionRequest {
     fn into_action(self) -> Action {
         match self {
             Self::Refresh => Action::Refresh,
-            Self::Open { orbit, entry_path } => Action::OpenWorld { orbit, entry_path },
+            Self::Open { entry_path } => Action::OpenWorld { entry_path },
             Self::StartDevice { id } => Action::StartDevice(id),
             Self::StopDevice { id } => Action::StopDevice(id),
             Self::RestartDevice { id } => Action::RestartDevice(id),
@@ -804,53 +757,15 @@ fn project(app: &App) -> ClientView {
         library: app.library().map(|entries| {
             entries
                 .iter()
-                .map(|entry| {
-                    let registered = orbits
-                        .and_then(|orbits| orbits.iter().find(|orbit| orbit.space == entry.orbit));
-                    LibraryRow {
-                        key: format!("{}/{}", entry.orbit, entry.world_mount),
-                        orbit: entry.orbit.clone(),
-                        space: entry.space.clone(),
-                        world_mount: entry.world_mount.clone(),
-                        display_name: entry.display_name.clone(),
-                        placement: match entry.placement {
-                            CorePlacement::Placed => PlacementView::Placed,
-                            CorePlacement::Vacant => PlacementView::Vacant,
-                            CorePlacement::Unknown => PlacementView::Unknown,
-                        },
-                        opens_at: entry.opens.entry_path().map(str::to_owned),
-                        unopenable: match entry.opens {
-                            Opens::Unhosted => Some(Unopenable::Unhosted),
-                            Opens::Undeclared => Some(Unopenable::Undeclared),
-                            Opens::Declared(_) | Opens::Front => None,
-                        },
-                        // Zero is the registry saying it has never recorded an
-                        // opening, which is an absence and travels as one.
-                        last_opened: registered
-                            .map(|orbit| orbit.last_opened)
-                            .filter(|seconds| *seconds > 0),
-                        store: registered.map(|orbit| orbit.path.clone()),
-                        version: entry.template.version,
-                        sync_state: entry.template.sync.as_ref().map(|sync| sync.state.clone()),
-                        sync_detail: entry.template.sync.as_ref().map(|sync| sync.detail.clone()),
-                        tagline: entry.template.tagline.clone(),
-                        accent: entry.template.accent,
-                        routes: entry
-                            .template
-                            .routes
-                            .iter()
-                            .map(|route| RouteRow {
-                                label: route.label.clone(),
-                                path: route.path.clone(),
-                            })
-                            .collect(),
-                        people: world_people(
-                            app.book(),
-                            app.presence(),
-                            &entry.space,
-                            &entry.world,
-                        ),
-                    }
+                .map(|entry| LibraryRow {
+                    key: entry.world_mount.clone(),
+                    world_mount: entry.world_mount.clone(),
+                    display_name: entry.display_name.clone(),
+                    opens_at: entry.entry_path.clone(),
+                    version: entry.version,
+                    tagline: entry.tagline.clone(),
+                    accent: entry.accent,
+                    people: world_people(app.book(), app.presence(), &entry.world),
                 })
                 .collect()
         }),
@@ -1082,7 +997,6 @@ fn view_of(reach: crate::client::presence::Reach) -> PresenceView {
 fn world_people(
     book: Option<&crate::client::book::BookSnapshot>,
     presence: Option<&crate::client::presence::PresenceMap>,
-    space: &str,
     world: &str,
 ) -> Option<Vec<WorldPersonRow>> {
     use crate::client::presence::Reach;
@@ -1092,34 +1006,35 @@ fn world_people(
             .iter()
             .filter(|card| !card.self_claim)
             .filter_map(|card| {
-                let actors: Vec<&str> = card
+                // Every Space this card holds an address in. The row is a
+                // World across all of them, so the glance aggregates: a person
+                // is as present as their most reachable address, anywhere.
+                let addresses: Vec<(&str, &str)> = card
                     .addresses
                     .iter()
                     .filter_map(|address| actor_address(address))
-                    .filter(|(there, _)| *there == space)
-                    .map(|(_, actor)| actor)
                     .collect();
-                if actors.is_empty() {
+                if addresses.is_empty() {
                     return None;
                 }
                 let mut best: Option<Reach> = None;
                 let mut here = false;
                 if let Some(map) = presence {
-                    for actor in &actors {
+                    for (space, actor) in &addresses {
                         let reach = map
                             .actors
-                            .get(&(space.to_owned(), (*actor).to_owned()))
+                            .get(&((*space).to_owned(), (*actor).to_owned()))
                             .copied()
-                            .or_else(|| map.asked.contains(space).then_some(Reach::Offline));
+                            .or_else(|| map.asked.contains(*space).then_some(Reach::Offline));
                         if let Some(reach) = reach {
                             best = Some(best.map_or(reach, |held| held.max(reach)));
                         }
-                        // The Space front row (an empty world) stands for
-                        // whatever the Space serves: an actor in any of its
-                        // Worlds is here.
-                        here |= map.in_world.iter().any(|(s, w, a)| {
-                            s == space && a == *actor && (world.is_empty() || w == world)
-                        });
+                        // In THIS World, in any Space that serves it. A person
+                        // with a different World open is holding, not here.
+                        here |= map
+                            .in_world
+                            .iter()
+                            .any(|(s, w, a)| s == space && a == actor && w == world);
                     }
                 }
                 Some(WorldPersonRow {
@@ -1157,98 +1072,46 @@ mod tests {
     use super::*;
     use crate::client::library::LibraryEntry;
 
-    /// The rule that has to survive the crossing: an absence stays an absence.
-    /// A registry that has never recorded an opening sends `None`, not a zero
-    /// that the other side would render as 1 January 1970.
+    /// The install list crosses the bridge as it stands: the compiled-in
+    /// declaration, keyed by mount, with an undeclared entry path travelling
+    /// as absent rather than as a guessed `/`.
     #[test]
-    fn never_opened_crosses_as_absent_rather_than_as_zero() {
-        let mut app = App::new();
-        app.absorb_library(vec![LibraryEntry {
-            orbit: "orb_one".into(),
-            space: "ws_one".into(),
-            world_mount: "issues".into(),
-            world: String::new(),
-            display_name: Some("Issues".into()),
-            opens: Opens::Declared("/".into()),
-            template: crate::client::library::Template::default(),
-            placement: CorePlacement::Vacant,
-        }]);
-        app.absorb_context(crate::client::host::HostContext {
-            version: "lait".into(),
-            identity_home: "home".into(),
-            spaces_root: "root".into(),
-            worlds: Vec::new(),
-            identities: Vec::new(),
-            orbits: vec![crate::client::host::OrbitEntry {
-                space: "orb_one".into(),
-                name: "Issues".into(),
-                path: "D:/store".into(),
-                last_opened: 0,
-            }],
-        });
-
-        let view = project(&app);
-        let row = &view.library.expect("a library was read")[0];
-        assert_eq!(
-            row.last_opened, None,
-            "a never-opened Orbit crossed the bridge as a timestamp"
-        );
-        assert_eq!(row.store.as_deref(), Some("D:/store"));
-        assert_eq!(row.version, None);
-        assert_eq!(row.sync_state, None);
-        assert_eq!(row.sync_detail, None);
-    }
-
-    /// Facts cross; words do not. A row that cannot be opened says *which*
-    /// kind of cannot, and the sentence explaining it is Dart's business.
-    #[test]
-    fn a_row_that_cannot_be_opened_crosses_as_a_reason_not_a_sentence() {
+    fn the_library_crosses_as_the_declaration_keyed_by_mount() {
         let mut app = App::new();
         app.absorb_library(vec![
             LibraryEntry {
-                orbit: "a".into(),
-                space: "a".into(),
                 world_mount: "issues".into(),
-                world: String::new(),
-                display_name: None,
-                opens: Opens::Undeclared,
-                template: crate::client::library::Template::default(),
-                placement: CorePlacement::Placed,
+                world: "com.lait.issues".into(),
+                display_name: "Issues".into(),
+                entry_path: Some("/".into()),
+                tagline: Some("Track the work".into()),
+                accent: Some(0x00AA_66FF),
+                version: Some(7),
             },
             LibraryEntry {
-                orbit: "b".into(),
-                space: "b".into(),
-                world_mount: "other".into(),
-                world: String::new(),
-                display_name: None,
-                opens: Opens::Unhosted,
-                template: crate::client::library::Template::default(),
-                placement: CorePlacement::Placed,
-            },
-            LibraryEntry {
-                orbit: "c".into(),
-                space: "c".into(),
-                world_mount: String::new(),
-                world: String::new(),
-                display_name: None,
-                opens: Opens::Front,
-                template: crate::client::library::Template::default(),
-                placement: CorePlacement::Vacant,
+                world_mount: "notes".into(),
+                world: "com.lait.notes".into(),
+                display_name: "Notes".into(),
+                entry_path: None,
+                tagline: None,
+                accent: None,
+                version: None,
             },
         ]);
 
         let rows = project(&app).library.expect("a library was read");
-        assert_eq!(rows[0].unopenable, Some(Unopenable::Undeclared));
-        assert_eq!(rows[0].opens_at, None);
-        assert_eq!(rows[1].unopenable, Some(Unopenable::Unhosted));
+        assert_eq!(rows[0].key, "issues");
+        assert_eq!(rows[0].display_name, "Issues");
+        assert_eq!(rows[0].opens_at.as_deref(), Some("/"));
+        assert_eq!(rows[0].version, Some(7));
         assert_eq!(
-            rows[2].opens_at.as_deref(),
-            Some("/"),
-            "a Space that is not running crossed as unopenable"
+            rows[1].opens_at, None,
+            "`/` was guessed on a World's behalf"
         );
-        assert_eq!(rows[2].unopenable, None);
     }
 
+    /// Facts cross; words do not. A row that cannot be opened says *which*
+    /// kind of cannot, and the sentence explaining it is Dart's business.
     /// Loading is not empty, and it survives the crossing as its own fact.
     #[test]
     fn the_book_crosses_as_authored_cards_not_as_reachability() {
@@ -1401,12 +1264,13 @@ mod tests {
         assert_eq!(live_views.lock().expect("live").len(), 2);
     }
 
-    /// The at-a-glance panel is the book joined to one Space: self and other
-    /// Spaces excluded, presence measured in that Space alone, and the two
+    /// The at-a-glance panel is the book joined to one World across every
+    /// Space it is served in: self excluded, presence aggregated to a card's
+    /// most reachable address, `here` scoped to THIS World alone, and the two
     /// absences — an unread book and an unasked Space — kept apart from a
     /// measured Offline.
     #[test]
-    fn the_glance_is_the_book_joined_to_one_space() {
+    fn the_glance_is_the_book_joined_to_one_world() {
         fn card(
             id: &str,
             name: &str,
@@ -1473,9 +1337,13 @@ mod tests {
             .in_world
             .insert(("ws_one".into(), "wrl_issues".into(), "act_moon".into()));
 
-        let people = world_people(Some(&book), Some(&presence), "ws_one", "wrl_issues")
-            .expect("book was read");
-        assert_eq!(people.len(), 2, "self and the other Space are excluded");
+        let people =
+            world_people(Some(&book), Some(&presence), "wrl_issues").expect("book was read");
+        assert_eq!(
+            people.len(),
+            3,
+            "self is excluded; every addressed Space counts"
+        );
         let moon = people.iter().find(|p| p.name == "Moon").expect("moon");
         assert_eq!(moon.presence, Some(PresenceView::Online));
         assert!(!moon.agent);
@@ -1488,11 +1356,15 @@ mod tests {
             "asked and absent is a measurement"
         );
         assert!(!agent.here);
+        let far = people.iter().find(|p| p.name == "Far").expect("far");
+        assert_eq!(
+            far.presence, None,
+            "an unasked Space is unmeasured, never offline"
+        );
+        assert!(!far.here);
 
-        // A different World in the same Space is not this one; the Space
-        // front row (an empty world) stands for any of them.
-        let elsewhere =
-            world_people(Some(&book), Some(&presence), "ws_one", "wrl_other").expect("read");
+        // A different World is not this one, whichever Space serves it.
+        let elsewhere = world_people(Some(&book), Some(&presence), "wrl_other").expect("read");
         assert!(
             !elsewhere
                 .iter()
@@ -1500,17 +1372,10 @@ mod tests {
                 .expect("moon")
                 .here
         );
-        let front = world_people(Some(&book), Some(&presence), "ws_one", "").expect("read");
-        assert!(front.iter().find(|p| p.name == "Moon").expect("moon").here);
 
         assert!(
-            world_people(None, None, "ws_one", "").is_none(),
+            world_people(None, None, "wrl_issues").is_none(),
             "an unread book joins to nothing"
-        );
-        let unasked = world_people(Some(&book), None, "ws_two", "").expect("read");
-        assert_eq!(
-            unasked[0].presence, None,
-            "an unasked Space is unmeasured, never offline"
         );
     }
 }

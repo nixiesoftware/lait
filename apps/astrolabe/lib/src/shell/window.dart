@@ -4,11 +4,25 @@
 /// here. Keeping those halves together prevents a secondary surface from
 /// accidentally falling back to an operating-system title bar that disagrees
 /// with the active Astrolabe theme.
+///
+/// ## What the system already owns, this client does not draw
+///
+/// The frame is one shape on both platforms, but two facts about the host
+/// decide what fills it — [systemDrawsWindowControls] and
+/// [systemCarriesApplicationMenu]. Windows gives an undecorated window nothing
+/// at all, so the caption paints its own cluster at the trailing corner and
+/// carries the wordmark that opens the application menu. macOS keeps its
+/// traffic lights under `.fullSizeContentView` and gives every application a
+/// menu bar at the top of the screen; drawing either again in the window would
+/// be a second set of controls disagreeing with the first about what close
+/// means, and a second application menu disagreeing with the first about what
+/// the settings are.
 library;
 
 import 'dart:async';
 
 import 'package:covalence/covalence.dart' hide Surface;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:window_manager/window_manager.dart';
@@ -171,6 +185,36 @@ class NativeWindowControlHost implements WindowControlHost {
 /// The title band's Windows-sized height. It is chrome, not page spacing.
 const double kBarHeight = 48;
 
+/// Whether the operating system draws this window's own controls.
+///
+/// macOS does, at the leading edge, and keeps doing it when the title bar is
+/// merely hidden. Windows draws nothing on an undecorated window, which is why
+/// [CaptionControls] exists at all.
+bool get systemDrawsWindowControls =>
+    defaultTargetPlatform == TargetPlatform.macOS;
+
+/// Whether the operating system carries the application's own menu.
+///
+/// macOS puts it at the top of the screen, above every window and outside all
+/// of them; that is where this client's name and its settings belong, so the
+/// caption draws no wordmark. Windows has no such bar and the wordmark is the
+/// only application menu there is.
+bool get systemCarriesApplicationMenu =>
+    defaultTargetPlatform == TargetPlatform.macOS;
+
+/// What the system's own controls occupy at the leading edge.
+///
+/// AppKit lays the three buttons out from x=7 in 20-point steps at 14 points
+/// wide, so the cluster ends at 61; the rest is the gap the system's own
+/// windows leave before their first content. Nothing of ours may be drawn
+/// inside it — a control under a traffic light is a control nobody can press.
+const double kTrafficLightSpan = 78;
+
+/// The band those controls are centred in: the standard title bar's height,
+/// which is what AppKit keeps reserving once `.fullSizeContentView` has handed
+/// the window to us. Content that must clear them clears this.
+const double kTrafficLightBand = 28;
+
 enum AstrolabeWindowClosePolicy {
   /// Keep the owning process and its active Worlds available from the tray.
   hide,
@@ -201,6 +245,12 @@ WindowOptions astrolabeWindowOptions({
     center: center,
     title: title,
     titleBarStyle: TitleBarStyle.hidden,
+    // macOS keeps its traffic lights when the title bar is merely hidden, and
+    // they are the set this window shows: at the leading edge, where every
+    // other window on the machine keeps them, drawn by the system that owns
+    // them. The caption draws none opposite them, so there is still exactly
+    // one. Ignored on Windows, which has no such buttons to keep.
+    windowButtonVisibility: systemDrawsWindowControls,
   );
 }
 
@@ -328,6 +378,17 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
     super.initState();
     if (widget.chrome is ManagerWindowControlHost) {
       windowManager.addListener(this);
+      // A close this client never drew still has to mean what the drawn one
+      // means. The red traffic light and `⌘W` arrive at the system's close,
+      // and a window whose policy is `hide` would otherwise be stopped by them
+      // while the drawn control merely put it away — one window with two
+      // closes that disagree. Only where the system draws a close: on Windows
+      // there is none to intercept, and refusing `Alt+F4` there would put the
+      // window away with nothing yet built to bring it back.
+      if (systemDrawsWindowControls &&
+          widget.closePolicy == AstrolabeWindowClosePolicy.hide) {
+        unawaited(windowManager.setPreventClose(true));
+      }
     }
     widget.chrome.isMaximized().then((maximised) {
       if (mounted) setState(() => _maximised = maximised);
@@ -346,6 +407,15 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
       windowManager.removeListener(this);
     }
     super.dispose();
+  }
+
+  /// The system's close, refused above, arrives here instead. It applies the
+  /// same policy [_close] does, because it is the same act.
+  @override
+  void onWindowClose() {
+    if (widget.closePolicy == AstrolabeWindowClosePolicy.hide) {
+      unawaited(widget.chrome.hide());
+    }
   }
 
   @override
@@ -372,7 +442,23 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
         color: context.surface.l50,
         child: Stack(
           children: [
-            Positioned.fill(child: widget.body),
+            Positioned.fill(
+              child: systemDrawsWindowControls
+                  // The traffic lights float over the body's leading corner,
+                  // and the body's first content is the canonical card — so
+                  // the card starts below the band they are centred in rather
+                  // than beneath them. Nothing else moves: the merge is still
+                  // a merge, one band shorter.
+                  //
+                  // reason: the inset is the system's own title-bar height,
+                  // not a step in this app's rhythm.
+                  ? Padding(
+                      padding:
+                          TokenEscape.rawPadding(top: kTrafficLightBand),
+                      child: widget.body,
+                    )
+                  : widget.body,
+            ),
             // The drag region lies over the body's top strip but stays
             // translucent and claims only the pan (and the double-click,
             // where maximise exists), so the content beneath keeps every
@@ -389,20 +475,22 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
                 onDoubleTap: widget.maximisable ? _toggleMaximise : null,
               ),
             ),
-            Positioned(
-              top: 0,
-              right: 0,
-              child: CaptionControls(
-                height: widget.captionHeight,
-                maximised: _maximised,
-                onMinimise: widget.chrome.minimize,
-                onToggleMaximise: widget.maximisable ? _toggleMaximise : null,
-                onClose: _close,
-                closeTooltip: widget.closePolicy == AstrolabeWindowClosePolicy.hide
-                    ? 'Close (it keeps serving in the tray)'
-                    : 'Close window',
+            if (!systemDrawsWindowControls)
+              Positioned(
+                top: 0,
+                right: 0,
+                child: CaptionControls(
+                  height: widget.captionHeight,
+                  maximised: _maximised,
+                  onMinimise: widget.chrome.minimize,
+                  onToggleMaximise: widget.maximisable ? _toggleMaximise : null,
+                  onClose: _close,
+                  closeTooltip:
+                      widget.closePolicy == AstrolabeWindowClosePolicy.hide
+                          ? 'Close (it keeps serving in the tray)'
+                          : 'Close window',
+                ),
               ),
-            ),
           ],
         ),
       );
@@ -429,24 +517,35 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
           else
             WindowChrome.secondary(
               title: widget.title!,
+              // The system's controls sit in the band's leading corner, so the
+              // title starts clear of them instead of under them. On Windows
+              // there is nothing there and nothing is ceded.
+              //
+              // reason: the reserve is AppKit's own cluster width, not a step
+              // in this app's rhythm.
+              leading: systemDrawsWindowControls
+                  ? TokenEscape.rawGap(width: kTrafficLightSpan)
+                  : null,
               dragRegionBuilder: (context, child) => GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onPanStart: (_) => widget.chrome.startDragging(),
                 onDoubleTap: widget.maximisable ? _toggleMaximise : null,
                 child: child,
               ),
-              controlsBuilder: (context, policy) {
-                assert(policy == WindowChromeControlPolicy.standard);
-                return CaptionControls(
-                  height: kBarHeight,
-                  maximised: _maximised,
-                  onMinimise: widget.chrome.minimize,
-                  onToggleMaximise:
-                      widget.maximisable ? _toggleMaximise : null,
-                  onClose: _close,
-                  closeTooltip: 'Close window',
-                );
-              },
+              controlsBuilder: systemDrawsWindowControls
+                  ? null
+                  : (context, policy) {
+                      assert(policy == WindowChromeControlPolicy.standard);
+                      return CaptionControls(
+                        height: kBarHeight,
+                        maximised: _maximised,
+                        onMinimise: widget.chrome.minimize,
+                        onToggleMaximise:
+                            widget.maximisable ? _toggleMaximise : null,
+                        onClose: _close,
+                        closeTooltip: 'Close window',
+                      );
+                    },
             ),
           Expanded(child: widget.body),
         ],
@@ -510,11 +609,20 @@ class _PrimaryCaption extends StatelessWidget {
             ),
             LayoutBuilder(
               builder: (context, constraints) {
-                final showWordmark = wordmarkMinWidth == null ||
-                    constraints.maxWidth >= wordmarkMinWidth!;
+                // On macOS the application menu is the screen's own, so the
+                // window carries no wordmark to open one with — and the
+                // corner it used to start in belongs to the traffic lights.
+                final showWordmark = !systemCarriesApplicationMenu &&
+                    (wordmarkMinWidth == null ||
+                        constraints.maxWidth >= wordmarkMinWidth!);
                 return Row(
                   children: [
-                    t.gap.x(Space.xl3),
+                    if (systemDrawsWindowControls)
+                      // reason: the reserve is AppKit's own cluster width,
+                      // not a step in this app's rhythm.
+                      TokenEscape.rawGap(width: kTrafficLightSpan)
+                    else
+                      t.gap.x(Space.xl3),
                     if (showWordmark) ...[
                       wordmark ??
                           IgnorePointer(
@@ -549,17 +657,18 @@ class _PrimaryCaption extends StatelessWidget {
                         ),
                       ),
                     ],
-                    CaptionControls(
-                      height: height,
-                      maximised: maximised,
-                      onMinimise: chrome.minimize,
-                      onToggleMaximise: onToggleMaximise,
-                      onClose: onClose,
-                      closeTooltip:
-                          closePolicy == AstrolabeWindowClosePolicy.hide
-                              ? 'Close (it keeps serving in the tray)'
-                              : 'Close window',
-                    ),
+                    if (!systemDrawsWindowControls)
+                      CaptionControls(
+                        height: height,
+                        maximised: maximised,
+                        onMinimise: chrome.minimize,
+                        onToggleMaximise: onToggleMaximise,
+                        onClose: onClose,
+                        closeTooltip:
+                            closePolicy == AstrolabeWindowClosePolicy.hide
+                                ? 'Close (it keeps serving in the tray)'
+                                : 'Close window',
+                      ),
                   ],
                 );
               },

@@ -4,44 +4,42 @@ lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, ea
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-989 crates, under 51 distinct licence expressions.
+814 crates, under 47 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 438 |
-| `MIT` | 216 |
-| `Apache-2.0 OR MIT` | 96 |
-| `MIT/Apache-2.0` | 47 |
-| `Apache-2.0` | 32 |
+| `MIT OR Apache-2.0` | 383 |
+| `MIT` | 154 |
+| `Apache-2.0 OR MIT` | 77 |
+| `MIT/Apache-2.0` | 39 |
 | `Unicode-3.0` | 25 |
-| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 18 |
-| `Zlib OR Apache-2.0 OR MIT` | 17 |
+| `Apache-2.0` | 23 |
+| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 16 |
+| `Zlib OR Apache-2.0 OR MIT` | 11 |
 | `BSD-3-Clause` | 8 |
-| `MIT OR Apache-2.0 OR Zlib` | 8 |
-| `Apache-2.0/MIT` | 7 |
 | `MPL-2.0+` | 6 |
-| `Unlicense OR MIT` | 6 |
+| `Apache-2.0/MIT` | 5 |
+| `Unlicense OR MIT` | 5 |
 | `BSD-2-Clause` | 4 |
+| `MIT OR Apache-2.0 OR Zlib` | 4 |
 | `Unlicense/MIT` | 4 |
 | `Zlib` | 4 |
 | `Apache-2.0 OR ISC OR MIT` | 3 |
 | `BSD-3-Clause OR Apache-2.0` | 3 |
-| `BSL-1.0` | 3 |
-| `ISC` | 3 |
 | `Unlicense` | 3 |
 | `0BSD` | 2 |
 | `BSD-2-Clause OR Apache-2.0 OR MIT` | 2 |
 | `BSD-3-Clause OR MIT OR Apache-2.0` | 2 |
 | `CC0-1.0 OR MIT-0 OR Apache-2.0` | 2 |
 | `CDLA-Permissive-2.0` | 2 |
+| `ISC` | 2 |
 | `MIT OR Apache-2.0 OR BSD-1-Clause` | 2 |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 |
 | `MPL-2.0` | 2 |
 | `(Apache-2.0 OR MIT) AND BSD-3-Clause` | 1 |
 | `(MIT OR Apache-2.0) AND Apache-2.0` | 1 |
-| `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` | 1 |
 | `(MIT OR Apache-2.0) AND Unicode-3.0` | 1 |
 | `(see the crate source)` | 1 |
 | `0BSD OR Apache-2.0` | 1 |
@@ -49,11 +47,9 @@ Listed here is every crate reachable from this workspace through normal and buil
 | `0BSD OR MIT OR Apache-2.0` | 1 |
 | `Apache-2.0 / MIT` | 1 |
 | `Apache-2.0 AND ISC` | 1 |
-| `Apache-2.0 AND MIT` | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 |
-| `Apache-2.0 OR GPL-2.0-only` | 1 |
 | `Apache-2.0 WITH LLVM-exception` | 1 |
-| `CC0-1.0` | 1 |
+| `BSL-1.0` | 1 |
 | `CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception` | 1 |
 | `ISC AND (Apache-2.0 OR ISC)` | 1 |
 | `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)` | 1 |
@@ -66,15 +62,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 
 | Crate | Version | Licence | Source |
 | --- | --- | --- | --- |
-| accesskit | 0.24.1 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
-| accesskit_atspi_common | 0.18.1 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
-| accesskit_consumer | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
-| accesskit_consumer | 0.36.0 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
-| accesskit_consumer | 0.38.0 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
-| accesskit_macos | 0.26.3 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
-| accesskit_unix | 0.21.1 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
-| accesskit_windows | 0.32.1 | `MIT OR Apache-2.0` | <https://github.com/AccessKit/accesskit> |
-| accesskit_winit | 0.32.2 | `Apache-2.0` | <https://github.com/AccessKit/accesskit> |
 | addr2line | 0.25.1 | `Apache-2.0 OR MIT` | <https://github.com/gimli-rs/addr2line> |
 | adler2 | 2.0.1 | `0BSD OR MIT OR Apache-2.0` | <https://github.com/oyvindln/adler2> |
 | aead | 0.5.2 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/traits> |
@@ -84,8 +71,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | aho-corasick | 1.1.4 | `Unlicense OR MIT` | <https://github.com/BurntSushi/aho-corasick> |
 | allo-isolate | 0.1.27 | `(see the crate source)` | <https://github.com/sunshine-protocol/allo-isolate> |
 | allocator-api2 | 0.2.21 | `MIT OR Apache-2.0` | <https://github.com/zakarumych/allocator-api2> |
-| android-activity | 0.6.1 | `MIT OR Apache-2.0` | <https://github.com/rust-mobile/android-activity> |
-| android-properties | 0.2.2 | `MIT` | <https://github.com/miklelappo/android-properties> |
 | android_log-sys | 0.3.2 | `MIT OR Apache-2.0` | <https://github.com/rust-mobile/android_log-sys-rs> |
 | android_logger | 0.15.1 | `MIT OR Apache-2.0` | <https://github.com/rust-mobile/android_logger-rs> |
 | android_system_properties | 0.1.5 | `MIT/Apache-2.0` | <https://github.com/nical/android_system_properties> |
@@ -99,35 +84,20 @@ Listed here is every crate reachable from this workspace through normal and buil
 | approx | 0.5.1 | `Apache-2.0` | <https://github.com/brendanzab/approx> |
 | ar_archive_writer | 0.5.3 | `Apache-2.0 WITH LLVM-exception` | <https://github.com/rust-lang/ar_archive_writer> |
 | arbitrary | 1.4.2 | `MIT OR Apache-2.0` | <https://github.com/rust-fuzz/arbitrary/> |
-| arboard | 3.6.1 | `MIT OR Apache-2.0` | <https://github.com/1Password/arboard> |
 | arc-swap | 1.9.1 | `MIT OR Apache-2.0` | <https://github.com/vorner/arc-swap> |
 | archery | 1.2.3 | `MIT` | <https://github.com/orium/archery> |
 | argon2 | 0.5.3 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/password-hashes/tree/master/argon2> |
 | arrayref | 0.3.9 | `BSD-2-Clause` | <https://github.com/droundy/arrayref> |
 | arrayvec | 0.7.6 | `MIT OR Apache-2.0` | <https://github.com/bluss/arrayvec> |
 | arref | 0.1.0 | `MIT` | <https://github.com/zxch3n/arref> |
-| as-raw-xcb-connection | 1.0.1 | `MIT OR Apache-2.0` | <https://github.com/psychon/as-raw-xcb-connection> |
-| ash | 0.38.0+1.3.281 | `MIT OR Apache-2.0` | <https://github.com/ash-rs/ash> |
 | asn1-rs | 0.7.2 | `MIT OR Apache-2.0` | <https://github.com/rusticata/asn1-rs.git> |
 | asn1-rs-derive | 0.6.0 | `MIT OR Apache-2.0` | <https://github.com/rusticata/asn1-rs.git> |
 | asn1-rs-impl | 0.2.0 | `MIT/Apache-2.0` | <https://github.com/rusticata/asn1-rs.git> |
-| async-broadcast | 0.7.2 | `MIT OR Apache-2.0` | <https://github.com/smol-rs/async-broadcast> |
-| async-channel | 2.5.0 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/async-channel> |
-| async-executor | 1.14.0 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/async-executor> |
-| async-io | 2.6.0 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/async-io> |
-| async-lock | 3.4.2 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/async-lock> |
-| async-process | 2.5.0 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/async-process> |
-| async-recursion | 1.1.1 | `MIT OR Apache-2.0` | <https://github.com/dcchut/async-recursion> |
-| async-signal | 0.2.14 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/async-signal> |
-| async-task | 4.7.1 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/async-task> |
 | async-trait | 0.1.89 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/async-trait> |
 | async_io_stream | 0.3.3 | `Unlicense` | <https://github.com/najamelan/async_io_stream> |
 | atomic | 0.5.3 | `Apache-2.0/MIT` | <https://github.com/Amanieu/atomic-rs> |
 | atomic-polyfill | 1.0.3 | `MIT OR Apache-2.0` | <https://github.com/embassy-rs/atomic-polyfill> |
 | atomic-waker | 1.1.2 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/atomic-waker> |
-| atspi | 0.29.0 | `Apache-2.0 OR MIT` | <https://github.com/odilia-app/atspi> |
-| atspi-common | 0.13.0 | `Apache-2.0 OR MIT` | <https://github.com/odilia-app/atspi> |
-| atspi-proxies | 0.13.0 | `Apache-2.0 OR MIT` | <https://github.com/odilia-app/atspi> |
 | attohttpc | 0.30.1 | `MPL-2.0` | <https://github.com/sbstp/attohttpc> |
 | autocfg | 1.5.1 | `Apache-2.0 OR MIT` | <https://github.com/cuviper/autocfg> |
 | aws-lc-rs | 1.17.1 | `ISC AND (Apache-2.0 OR ISC)` | <https://github.com/aws/aws-lc-rs> |
@@ -144,10 +114,8 @@ Listed here is every crate reachable from this workspace through normal and buil
 | biblatex | 0.12.0 | `MIT OR Apache-2.0` | <https://github.com/typst/biblatex> |
 | bincode | 1.3.3 | `MIT` | <https://github.com/servo/bincode> |
 | bit-set | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/contain-rs/bit-set> |
-| bit-set | 0.9.1 | `Apache-2.0 OR MIT` | <https://github.com/contain-rs/bit-set> |
 | bit-vec | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/contain-rs/bit-vec> |
 | bit-vec | 0.9.1 | `Apache-2.0 OR MIT` | <https://github.com/contain-rs/bit-vec> |
-| bitflags | 1.3.2 | `MIT/Apache-2.0` | <https://github.com/bitflags/bitflags> |
 | bitflags | 2.13.0 | `MIT OR Apache-2.0` | <https://github.com/bitflags/bitflags> |
 | bitmaps | 2.1.0 | `MPL-2.0+` | <https://github.com/bodil/bitmaps> |
 | bitmaps | 3.2.1 | `MPL-2.0+` | <https://github.com/bodil/bitmaps> |
@@ -155,9 +123,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | blake3 | 1.8.6 | `CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception` | <https://github.com/BLAKE3-team/BLAKE3> |
 | block-buffer | 0.10.4 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
 | block-buffer | 0.12.0 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
-| block2 | 0.5.1 | `MIT` | <https://github.com/madsmtm/objc2> |
 | block2 | 0.6.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| blocking | 1.6.2 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/blocking> |
 | build-target | 0.4.0 | `MIT` | <https://github.com/OpenByteDev/build-target> |
 | bumpalo | 3.20.3 | `MIT OR Apache-2.0` | <https://github.com/fitzgen/bumpalo> |
 | by_address | 1.2.1 | `MIT OR Apache-2.0` | <https://github.com/mbrubeck/by_address> |
@@ -166,10 +132,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | byteorder | 1.5.0 | `Unlicense OR MIT` | <https://github.com/BurntSushi/byteorder> |
 | byteorder-lite | 0.1.0 | `Unlicense OR MIT` | <https://github.com/image-rs/byteorder-lite> |
 | bytes | 1.11.1 | `MIT` | <https://github.com/tokio-rs/bytes> |
-| calloop | 0.13.0 | `MIT` | <https://github.com/Smithay/calloop> |
-| calloop | 0.14.4 | `MIT` | <https://github.com/Smithay/calloop> |
-| calloop-wayland-source | 0.3.0 | `MIT` | <https://github.com/smithay/calloop-wayland-source> |
-| calloop-wayland-source | 0.4.1 | `MIT` | <https://github.com/smithay/calloop-wayland-source> |
 | cc | 1.2.63 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cc-rs> |
 | cfg-if | 1.0.4 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cfg-if> |
 | cfg_aliases | 0.2.1 | `MIT` | <https://github.com/katharostech/cfg_aliases> |
@@ -188,11 +150,9 @@ Listed here is every crate reachable from this workspace through normal and buil
 | clap_builder | 4.6.0 | `MIT OR Apache-2.0` | <https://github.com/clap-rs/clap> |
 | clap_derive | 4.6.1 | `MIT OR Apache-2.0` | <https://github.com/clap-rs/clap> |
 | clap_lex | 1.1.0 | `MIT OR Apache-2.0` | <https://github.com/clap-rs/clap> |
-| clipboard-win | 5.4.1 | `BSL-1.0` | <https://github.com/DoumanAsh/clipboard-win> |
 | cmake | 0.1.58 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cmake-rs> |
 | cmov | 0.5.4 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/utils> |
 | cobs | 0.3.0 | `MIT OR Apache-2.0` | <https://github.com/jamesmunns/cobs.rs> |
-| codespan-reporting | 0.13.1 | `Apache-2.0` | <https://github.com/brendanzab/codespan> |
 | codex | 0.3.0 | `Apache-2.0` | <https://github.com/typst/codex> |
 | color | 0.3.3 | `Apache-2.0 OR MIT` | <https://github.com/linebender/color> |
 | color_quant | 1.1.0 | `MIT` | <https://github.com/image-rs/color_quant.git> |
@@ -200,7 +160,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | combine | 4.6.7 | `MIT` | <https://github.com/Marwes/combine> |
 | comemo | 0.5.1 | `MIT OR Apache-2.0` | <https://github.com/typst/comemo> |
 | comemo-macros | 0.5.1 | `MIT OR Apache-2.0` | <https://github.com/typst/comemo> |
-| concurrent-queue | 2.5.0 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/concurrent-queue> |
 | console | 0.16.4 | `MIT` | <https://github.com/console-rs/console> |
 | console_error_panic_hook | 0.1.7 | `Apache-2.0/MIT` | <https://github.com/rustwasm/console_error_panic_hook> |
 | const-crc32-nostd | 1.3.1 | `MIT` | <https://git.shipyard.rs/jstrong/const-crc32> |
@@ -214,8 +173,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | core-foundation | 0.10.1 | `MIT OR Apache-2.0` | <https://github.com/servo/core-foundation-rs> |
 | core-foundation | 0.9.4 | `MIT OR Apache-2.0` | <https://github.com/servo/core-foundation-rs> |
 | core-foundation-sys | 0.8.7 | `MIT OR Apache-2.0` | <https://github.com/servo/core-foundation-rs> |
-| core-graphics | 0.23.2 | `MIT OR Apache-2.0` | <https://github.com/servo/core-foundation-rs> |
-| core-graphics-types | 0.1.3 | `MIT OR Apache-2.0` | <https://github.com/servo/core-foundation-rs> |
 | core_maths | 0.1.1 | `MIT` | <https://github.com/robertbastian/core_maths> |
 | cpufeatures | 0.2.17 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
 | cpufeatures | 0.3.0 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
@@ -232,7 +189,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | csv-core | 0.1.13 | `Unlicense/MIT` | <https://github.com/BurntSushi/rust-csv> |
 | ctr | 0.9.2 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/block-modes> |
 | ctutils | 0.4.2 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/utils> |
-| cursor-icon | 1.2.0 | `MIT OR Apache-2.0 OR Zlib` | <https://github.com/rust-windowing/cursor-icon> |
 | curve25519-dalek | 4.1.3 | `BSD-3-Clause` | <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek> |
 | curve25519-dalek | 5.0.0-pre.6 | `BSD-3-Clause` | <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek> |
 | curve25519-dalek-derive | 0.1.1 | `MIT/Apache-2.0` | <https://github.com/dalek-cryptography/curve25519-dalek> |
@@ -267,34 +223,23 @@ Listed here is every crate reachable from this workspace through normal and buil
 | digest | 0.11.3 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/traits> |
 | directories | 5.0.1 | `MIT OR Apache-2.0` | <https://github.com/soc/directories-rs> |
 | dirs-sys | 0.4.1 | `MIT OR Apache-2.0` | <https://github.com/dirs-dev/dirs-sys-rs> |
-| dispatch | 0.2.0 | `MIT` | <http://github.com/SSheldon/rust-dispatch> |
 | dispatch2 | 0.3.1 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
 | displaydoc | 0.2.6 | `MIT OR Apache-2.0` | <https://github.com/yaahc/displaydoc> |
-| dlib | 0.5.3 | `MIT` | <https://github.com/elinorbgr/dlib> |
 | dlopen2 | 0.8.2 | `MIT` | <https://github.com/OpenByteDev/dlopen2> |
 | doctest-file | 1.1.1 | `0BSD` | <https://codeberg.org/Goat7658/doctest-file> |
 | document-features | 0.2.12 | `MIT OR Apache-2.0` | <https://github.com/slint-ui/document-features> |
-| downcast-rs | 1.2.1 | `MIT/Apache-2.0` | <https://github.com/marcianx/downcast-rs> |
-| dpi | 0.1.2 | `Apache-2.0 AND MIT` | <https://github.com/rust-windowing/winit> |
 | dunce | 1.0.5 | `CC0-1.0 OR MIT-0 OR Apache-2.0` | <https://gitlab.com/kornelski/dunce> |
 | dyn-clone | 1.0.20 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/dyn-clone> |
-| ecolor | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/emilk/egui> |
 | ecow | 0.2.6 | `MIT OR Apache-2.0` | <https://github.com/typst/ecow> |
 | ed25519 | 2.2.3 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/signatures/tree/master/ed25519> |
 | ed25519 | 3.0.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/signatures> |
 | ed25519-dalek | 2.2.0 | `BSD-3-Clause` | <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek> |
 | ed25519-dalek | 3.0.0-pre.7 | `BSD-3-Clause` | <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek> |
-| eframe | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/emilk/egui/tree/main/crates/eframe> |
-| egui | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/emilk/egui> |
-| egui-wgpu | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/emilk/egui/tree/main/crates/egui-wgpu> |
-| egui-winit | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/emilk/egui/tree/main/crates/egui-winit> |
 | either | 1.16.0 | `MIT OR Apache-2.0` | <https://github.com/rayon-rs/either> |
-| emath | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/emilk/egui/tree/main/crates/emath> |
 | embedded-io | 0.4.0 | `MIT OR Apache-2.0` | <https://github.com/embassy-rs/embedded-io> |
 | embedded-io | 0.6.1 | `MIT OR Apache-2.0` | <https://github.com/rust-embedded/embedded-hal> |
 | encode_unicode | 1.0.0 | `Apache-2.0 OR MIT` | <https://github.com/tormol/encode_unicode> |
 | encoding_rs | 0.8.35 | `(Apache-2.0 OR MIT) AND BSD-3-Clause` | <https://github.com/hsivonen/encoding_rs> |
-| endi | 1.1.1 | `MIT` | <https://github.com/zeenix/endi> |
 | ensure-cov | 0.1.0 | `MIT OR Apache-2.0` | <https://github.com/zxch3n/ensure-cov> |
 | enum-as-inner | 0.5.1 | `MIT/Apache-2.0` | <https://github.com/bluejekyll/enum-as-inner> |
 | enum-as-inner | 0.6.1 | `MIT/Apache-2.0` | <https://github.com/bluejekyll/enum-as-inner> |
@@ -302,20 +247,12 @@ Listed here is every crate reachable from this workspace through normal and buil
 | enum-ordinalize | 4.4.2 | `MIT` | <https://github.com/magiclen/enum-ordinalize> |
 | enum-ordinalize-derive | 4.4.2 | `MIT` | <https://github.com/magiclen/enum-ordinalize> |
 | enum_dispatch | 0.3.13 | `MIT OR Apache-2.0` | <https://gitlab.com/antonok/enum_dispatch> |
-| enumflags2 | 0.7.12 | `MIT OR Apache-2.0` | <https://github.com/meithecatte/enumflags2> |
-| enumflags2_derive | 0.7.12 | `MIT OR Apache-2.0` | <https://github.com/meithecatte/enumflags2> |
 | env_filter | 0.1.4 | `MIT OR Apache-2.0` | <https://github.com/rust-cli/env_logger> |
-| epaint | 0.35.0 | `MIT OR Apache-2.0` | <https://github.com/emilk/egui/tree/main/crates/epaint> |
-| epaint_default_fonts | 0.35.0 | `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` | <https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts> |
 | equivalent | 1.0.2 | `Apache-2.0 OR MIT` | <https://github.com/indexmap-rs/equivalent> |
 | errno | 0.3.14 | `MIT OR Apache-2.0` | <https://github.com/lambda-fairy/rust-errno> |
-| error-code | 3.3.2 | `BSL-1.0` | <https://github.com/DoumanAsh/error-code> |
 | euclid | 0.22.14 | `MIT OR Apache-2.0` | <https://github.com/servo/euclid> |
-| event-listener | 5.4.2 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/event-listener> |
-| event-listener-strategy | 0.5.4 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/event-listener-strategy> |
 | fancy-regex | 0.16.2 | `MIT` | <https://github.com/fancy-regex/fancy-regex> |
 | fastrand | 2.4.1 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/fastrand> |
-| fax | 0.2.7 | `MIT` | <https://github.com/pdf-rs/fax> |
 | fdeflate | 0.3.7 | `MIT OR Apache-2.0` | <https://github.com/image-rs/fdeflate> |
 | fearless_simd | 0.4.1 | `Apache-2.0 OR MIT` | <https://github.com/linebender/fearless_simd> |
 | fiat-crypto | 0.2.9 | `MIT OR Apache-2.0 OR BSD-1-Clause` | <https://github.com/mit-plv/fiat-crypto> |
@@ -332,9 +269,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | foldhash | 0.2.0 | `Zlib` | <https://github.com/orlp/foldhash> |
 | font-types | 0.11.3 | `MIT OR Apache-2.0` | <https://github.com/googlefonts/fontations> |
 | fontdb | 0.23.0 | `MIT` | <https://github.com/RazrFalcon/fontdb> |
-| foreign-types | 0.5.0 | `MIT/Apache-2.0` | <https://github.com/sfackler/foreign-types> |
-| foreign-types-macros | 0.2.4 | `MIT/Apache-2.0` | <https://github.com/sfackler/foreign-types> |
-| foreign-types-shared | 0.3.1 | `MIT/Apache-2.0` | <https://github.com/sfackler/foreign-types> |
 | form_urlencoded | 1.2.2 | `MIT OR Apache-2.0` | <https://github.com/servo/rust-url> |
 | frost-core | 3.0.0 | `MIT OR Apache-2.0` | <https://github.com/ZcashFoundation/frost> |
 | frost-ed25519 | 3.0.0 | `MIT OR Apache-2.0` | <https://github.com/ZcashFoundation/frost> |
@@ -356,26 +290,18 @@ Listed here is every crate reachable from this workspace through normal and buil
 | generator | 0.8.9 | `MIT/Apache-2.0` | <https://github.com/Xudong-Huang/generator-rs.git> |
 | generic-array | 0.14.7 | `MIT` | <https://github.com/fizyk20/generic-array.git> |
 | generic-btree | 0.10.7 | `MIT` | <https://github.com/loro-dev/generic-btree> |
-| gethostname | 1.1.0 | `Apache-2.0` | <https://codeberg.org/swsnr/gethostname.rs.git> |
 | getrandom | 0.2.17 | `MIT OR Apache-2.0` | <https://github.com/rust-random/getrandom> |
 | getrandom | 0.3.4 | `MIT OR Apache-2.0` | <https://github.com/rust-random/getrandom> |
 | getrandom | 0.4.2 | `MIT OR Apache-2.0` | <https://github.com/rust-random/getrandom> |
 | ghash | 0.5.1 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/universal-hashes> |
 | gif | 0.14.2 | `MIT OR Apache-2.0` | <https://github.com/image-rs/image-gif> |
 | gimli | 0.32.3 | `MIT OR Apache-2.0` | <https://github.com/gimli-rs/gimli> |
-| gl_generator | 0.14.0 | `Apache-2.0` | <https://github.com/brendanzab/gl-rs/> |
 | glidesort | 0.1.2 | `MIT OR Apache-2.0` | <https://github.com/orlp/glidesort> |
 | glifo | 0.1.1 | `Apache-2.0 OR MIT` | <https://github.com/linebender/vello> |
 | gloo-timers | 0.3.0 | `MIT OR Apache-2.0` | <https://github.com/rustwasm/gloo/tree/master/crates/timers> |
-| glow | 0.17.0 | `MIT OR Apache-2.0 OR Zlib` | <https://github.com/grovesNL/glow> |
-| glutin_wgl_sys | 0.6.1 | `Apache-2.0` | <https://github.com/rust-windowing/glutin> |
-| gpu-allocator | 0.28.0 | `MIT OR Apache-2.0` | <https://github.com/Traverse-Research/gpu-allocator> |
-| gpu-descriptor | 0.3.2 | `MIT OR Apache-2.0` | <https://github.com/zakarumych/gpu-descriptor> |
-| gpu-descriptor-types | 0.2.0 | `MIT OR Apache-2.0` | <https://github.com/zakarumych/gpu-descriptor> |
 | guillotiere | 0.7.0 | `MIT/Apache-2.0` | <https://github.com/nical/guillotiere> |
 | h2 | 0.4.14 | `MIT` | <https://github.com/hyperium/h2> |
 | half | 2.7.1 | `MIT OR Apache-2.0` | <https://github.com/VoidStarKat/half-rs> |
-| harfrust | 0.7.0 | `MIT` | <https://github.com/harfbuzz/harfrust> |
 | hash32 | 0.2.1 | `MIT OR Apache-2.0` | <https://github.com/japaric/hash32> |
 | hash32 | 0.3.1 | `MIT OR Apache-2.0` | <https://github.com/japaric/hash32> |
 | hashbrown | 0.14.5 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/hashbrown> |
@@ -399,7 +325,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | heck | 0.5.0 | `MIT OR Apache-2.0` | <https://github.com/withoutboats/heck> |
 | hermit-abi | 0.5.2 | `MIT OR Apache-2.0` | <https://github.com/hermit-os/hermit-rs> |
 | hex | 0.4.3 | `MIT OR Apache-2.0` | <https://github.com/KokaKiwi/rust-hex> |
-| hexf-parse | 0.2.1 | `CC0-1.0` | <https://github.com/lifthrasiir/hexf> |
 | hickory-net | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
 | hickory-proto | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
 | hickory-resolver | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
@@ -465,26 +390,21 @@ Listed here is every crate reachable from this workspace through normal and buil
 | itoa | 1.0.18 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/itoa> |
 | jni | 0.22.4 | `MIT OR Apache-2.0` | <https://github.com/jni-rs/jni-rs> |
 | jni-macros | 0.22.4 | `MIT OR Apache-2.0` | <https://github.com/jni-rs/jni-rs> |
-| jni-sys | 0.3.1 | `MIT OR Apache-2.0` | <https://github.com/jni-rs/jni-sys> |
 | jni-sys | 0.4.1 | `MIT OR Apache-2.0` | <https://github.com/jni-rs/jni-sys> |
 | jni-sys-macros | 0.4.1 | `MIT OR Apache-2.0` | <https://github.com/jni-rs/jni-sys> |
 | jobserver | 0.1.35 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/jobserver-rs> |
 | js-sys | 0.3.99 | `MIT OR Apache-2.0` | <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys> |
 | kamadak-exif | 0.6.1 | `BSD-2-Clause` | <https://github.com/kamadak/exif-rs> |
-| khronos-egl | 6.0.0 | `MIT/Apache-2.0` | <https://github.com/timothee-haudebourg/khronos-egl> |
-| khronos_api | 3.1.0 | `Apache-2.0` | <https://github.com/brendanzab/gl-rs/> |
 | kurbo | 0.13.1 | `Apache-2.0 OR MIT` | <https://github.com/linebender/kurbo> |
 | lazy_static | 1.5.0 | `MIT OR Apache-2.0` | <https://github.com/rust-lang-nursery/lazy-static.rs> |
 | leb128 | 0.2.7 | `MIT OR Apache-2.0` | <https://github.com/gimli-rs/leb128> |
 | leb128fmt | 0.1.0 | `MIT OR Apache-2.0` | <https://github.com/bluk/leb128fmt> |
 | libc | 0.2.186 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/libc> |
-| libloading | 0.8.9 | `ISC` | <https://github.com/nagisa/rust_libloading/> |
 | libm | 0.2.16 | `MIT` | <https://github.com/rust-lang/compiler-builtins> |
 | libredox | 0.1.17 | `MIT` | <https://gitlab.redox-os.org/redox-os/libredox.git> |
 | linebender_resource_handle | 0.1.1 | `Apache-2.0 OR MIT` | <https://github.com/linebender/raw_resource_handle> |
 | linked-hash-map | 0.5.6 | `MIT/Apache-2.0` | <https://github.com/contain-rs/linked-hash-map> |
 | linux-raw-sys | 0.12.1 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/sunfishcode/linux-raw-sys> |
-| linux-raw-sys | 0.4.15 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/sunfishcode/linux-raw-sys> |
 | lipsum | 0.9.1 | `MIT` | <https://github.com/mgeisler/lipsum/> |
 | litemap | 0.8.2 | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
 | litrs | 1.0.0 | `MIT OR Apache-2.0` | <https://github.com/LukasKalbertodt/litrs> |
@@ -508,8 +428,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | md-5 | 0.10.6 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/hashes> |
 | md5 | 0.7.0 | `Apache-2.0/MIT` | <https://github.com/stainless-steel/md5> |
 | memchr | 2.8.1 | `Unlicense OR MIT` | <https://github.com/BurntSushi/memchr> |
-| memmap2 | 0.9.11 | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/memmap2-rs> |
-| memoffset | 0.9.1 | `MIT` | <https://github.com/Gilnaa/memoffset> |
 | mime | 0.3.17 | `MIT OR Apache-2.0` | <https://github.com/hyperium/mime> |
 | minimal-lexical | 0.2.1 | `MIT/Apache-2.0` | <https://github.com/Alexhuszagh/minimal-lexical> |
 | miniz_oxide | 0.8.9 | `MIT OR Zlib OR Apache-2.0` | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
@@ -521,10 +439,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | n0-error-macros | 1.0.0-rc.0 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/n0-error> |
 | n0-future | 0.3.2 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/n0-future> |
 | n0-watcher | 1.0.0-rc.0 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/n0-watcher> |
-| naga | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| ndk | 0.9.0 | `MIT OR Apache-2.0` | <https://github.com/rust-mobile/ndk> |
 | ndk-context | 0.1.1 | `MIT OR Apache-2.0` | <https://github.com/rust-windowing/android-ndk-rs> |
-| ndk-sys | 0.6.0+11769913 | `MIT OR Apache-2.0` | <https://github.com/rust-mobile/ndk> |
 | netdev | 0.43.0 | `MIT` | <https://github.com/shellrow/netdev> |
 | netlink-packet-core | 0.8.1 | `MIT` | <https://github.com/rust-netlink/netlink-packet-core> |
 | netlink-packet-route | 0.29.0 | `MIT` | <https://github.com/rust-netlink/netlink-packet-route> |
@@ -532,7 +447,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | netlink-proto | 0.12.0 | `MIT` | <https://github.com/rust-netlink/netlink-proto> |
 | netlink-sys | 0.8.8 | `MIT` | <https://github.com/rust-netlink/netlink-sys> |
 | netwatch | 0.18.0 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/net-tools> |
-| nohash-hasher | 0.2.0 | `Apache-2.0 OR MIT` | <https://github.com/paritytech/nohash-hasher> |
 | nom | 7.1.3 | `MIT` | <https://github.com/Geal/nom> |
 | nonmax | 0.5.5 | `MIT OR Apache-2.0` | <https://github.com/LPGhatguy/nonmax> |
 | noq | 1.0.0-rc.1 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/noq> |
@@ -551,36 +465,14 @@ Listed here is every crate reachable from this workspace through normal and buil
 | num_enum | 0.7.6 | `BSD-3-Clause OR MIT OR Apache-2.0` | <https://github.com/illicitonion/num_enum> |
 | num_enum_derive | 0.7.6 | `BSD-3-Clause OR MIT OR Apache-2.0` | <https://github.com/illicitonion/num_enum> |
 | num_threads | 0.1.7 | `MIT OR Apache-2.0` | <https://github.com/jhpratt/num_threads> |
-| objc-sys | 0.3.5 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2 | 0.5.2 | `MIT` | <https://github.com/madsmtm/objc2> |
 | objc2 | 0.6.4 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-app-kit | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-app-kit | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-cloud-kit | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-contacts | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-core-data | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-core-foundation | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-core-graphics | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-core-image | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-core-location | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-core-wlan | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-encode | 4.1.0 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-foundation | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-foundation | 0.3.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-io-surface | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-link-presentation | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-metal | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-metal | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-quartz-core | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-quartz-core | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-security | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-security-foundation | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-symbols | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
 | objc2-system-configuration | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-ui-kit | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-ui-kit | 0.3.2 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-uniform-type-identifiers | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
-| objc2-user-notifications | 0.2.2 | `MIT` | <https://github.com/madsmtm/objc2> |
 | object | 0.37.3 | `Apache-2.0 OR MIT` | <https://github.com/gimli-rs/object> |
 | object | 0.39.1 | `Apache-2.0 OR MIT` | <https://github.com/gimli-rs/object> |
 | oid-registry | 0.8.1 | `MIT OR Apache-2.0` | <https://github.com/rusticata/oid-registry.git> |
@@ -589,9 +481,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | opaque-debug | 0.3.1 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/utils> |
 | openssl-probe | 0.2.1 | `MIT OR Apache-2.0` | <https://github.com/rustls/openssl-probe> |
 | option-ext | 0.2.0 | `MPL-2.0` | <https://github.com/soc/option-ext.git> |
-| orbclient | 0.3.55 | `MIT` | <https://gitlab.redox-os.org/redox-os/orbclient> |
-| ordered-float | 5.3.0 | `MIT` | <https://github.com/reem/rust-ordered-float> |
-| ordered-stream | 0.2.0 | `MIT OR Apache-2.0` | <https://github.com/danieldg/ordered-stream> |
 | oslog | 0.2.0 | `MIT` | <https://github.com/steven-joruk/oslog> |
 | palette | 0.7.7 | `MIT OR Apache-2.0` | <https://github.com/Ogeon/palette> |
 | palette_derive | 0.7.7 | `MIT OR Apache-2.0` | <https://github.com/Ogeon/palette> |
@@ -621,20 +510,15 @@ Listed here is every crate reachable from this workspace through normal and buil
 | pin-project | 1.1.13 | `Apache-2.0 OR MIT` | <https://github.com/taiki-e/pin-project> |
 | pin-project-internal | 1.1.13 | `Apache-2.0 OR MIT` | <https://github.com/taiki-e/pin-project> |
 | pin-project-lite | 0.2.17 | `Apache-2.0 OR MIT` | <https://github.com/taiki-e/pin-project-lite> |
-| piper | 0.2.5 | `MIT OR Apache-2.0` | <https://github.com/smol-rs/piper> |
 | pkcs8 | 0.10.2 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats/tree/master/pkcs8> |
 | pkcs8 | 0.11.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
 | pkg-config | 0.3.33 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/pkg-config-rs> |
-| plain | 0.2.3 | `MIT/Apache-2.0` | <https://github.com/randomites/plain> |
 | plist | 1.9.0 | `MIT` | <https://github.com/ebarnard/rust-plist/> |
 | png | 0.18.1 | `MIT OR Apache-2.0` | <https://github.com/image-rs/image-png> |
-| polling | 3.11.0 | `Apache-2.0 OR MIT` | <https://github.com/smol-rs/polling> |
-| pollster | 0.4.0 | `Apache-2.0/MIT` | <https://github.com/zesterer/pollster> |
 | poly1305 | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/universal-hashes> |
 | polycool | 0.4.0 | `MIT OR Apache-2.0` | <https://github.com/linebender/kurbo> |
 | polyval | 0.6.2 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/universal-hashes> |
 | portable-atomic | 1.13.1 | `Apache-2.0 OR MIT` | <https://github.com/taiki-e/portable-atomic> |
-| portable-atomic-util | 0.2.7 | `Apache-2.0 OR MIT` | <https://github.com/taiki-e/portable-atomic-util> |
 | portmapper | 0.18.0 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/net-tools> |
 | postcard | 1.1.3 | `MIT OR Apache-2.0` | <https://github.com/jamesmunns/postcard> |
 | postcard-derive | 0.2.2 | `MIT OR Apache-2.0` | <https://github.com/jamesmunns/postcard> |
@@ -642,19 +526,16 @@ Listed here is every crate reachable from this workspace through normal and buil
 | powerfmt | 0.2.0 | `MIT OR Apache-2.0` | <https://github.com/jhpratt/powerfmt> |
 | ppv-lite86 | 0.2.21 | `MIT OR Apache-2.0` | <https://github.com/cryptocorrosion/cryptocorrosion> |
 | prefix-trie | 0.8.4 | `MIT OR Apache-2.0` | <https://github.com/tiborschneider/prefix-trie> |
-| presser | 0.3.1 | `MIT OR Apache-2.0` | <https://github.com/EmbarkStudios/presser> |
 | pretty_assertions | 1.4.1 | `MIT OR Apache-2.0` | <https://github.com/rust-pretty-assertions/rust-pretty-assertions> |
 | prettyplease | 0.2.37 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/prettyplease> |
 | proc-macro-crate | 3.5.0 | `MIT OR Apache-2.0` | <https://github.com/bkchr/proc-macro-crate> |
 | proc-macro-hack | 0.5.20+deprecated | `MIT OR Apache-2.0` | <https://github.com/dtolnay/proc-macro-hack> |
 | proc-macro2 | 1.0.106 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/proc-macro2> |
-| profiling | 1.0.18 | `MIT OR Apache-2.0` | <https://github.com/aclysma/profiling> |
 | psm | 0.1.32 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/stacker/> |
 | pxfm | 0.1.30 | `BSD-3-Clause OR Apache-2.0` | <https://github.com/awxkee/pxfm> |
 | quick-error | 2.0.1 | `MIT/Apache-2.0` | <http://github.com/tailhook/quick-error> |
 | quick-xml | 0.38.4 | `MIT` | <https://github.com/tafia/quick-xml> |
 | quick-xml | 0.39.4 | `MIT` | <https://github.com/tafia/quick-xml> |
-| quick-xml | 0.41.0 | `MIT` | <https://github.com/tafia/quick-xml> |
 | quick_cache | 0.6.24 | `MIT` | <https://github.com/arthurprs/quick-cache> |
 | quinn | 0.11.11 | `MIT OR Apache-2.0` | <https://github.com/quinn-rs/quinn> |
 | quinn-proto | 0.11.16 | `MIT OR Apache-2.0` | <https://github.com/quinn-rs/quinn> |
@@ -673,17 +554,12 @@ Listed here is every crate reachable from this workspace through normal and buil
 | rand_pcg | 0.10.2 | `MIT OR Apache-2.0` | <https://github.com/rust-random/rngs> |
 | rand_xoshiro | 0.6.0 | `MIT OR Apache-2.0` | <https://github.com/rust-random/rngs> |
 | rand_xoshiro | 0.7.0 | `MIT OR Apache-2.0` | <https://github.com/rust-random/rngs> |
-| range-alloc | 0.1.5 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/range-alloc> |
-| raw-window-handle | 0.6.2 | `MIT OR Apache-2.0 OR Zlib` | <https://github.com/rust-windowing/raw-window-handle> |
-| raw-window-metal | 1.1.0 | `MIT OR Apache-2.0` | <https://github.com/rust-windowing/raw-window-metal> |
 | rayon | 1.12.0 | `MIT OR Apache-2.0` | <https://github.com/rayon-rs/rayon> |
 | rayon-core | 1.13.0 | `MIT OR Apache-2.0` | <https://github.com/rayon-rs/rayon> |
 | rcgen | 0.14.8 | `MIT OR Apache-2.0` | <https://github.com/rustls/rcgen> |
 | read-fonts | 0.39.2 | `MIT OR Apache-2.0` | <https://github.com/googlefonts/fontations> |
 | recvmsg | 1.0.0 | `0BSD` | — |
-| redox_syscall | 0.4.1 | `MIT` | <https://gitlab.redox-os.org/redox-os/syscall> |
 | redox_syscall | 0.5.18 | `MIT` | <https://gitlab.redox-os.org/redox-os/syscall> |
-| redox_syscall | 0.8.1 | `MIT` | <https://gitlab.redox-os.org/redox-os/syscall> |
 | redox_users | 0.4.6 | `MIT` | <https://gitlab.redox-os.org/redox-os/users> |
 | ref-cast | 1.0.25 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/ref-cast> |
 | ref-cast-impl | 1.0.25 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/ref-cast> |
@@ -692,7 +568,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | regex-syntax | 0.8.11 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/regex> |
 | reloadable-core | 0.1.0 | `MIT` | <https://github.com/MOZGIII/rustls-cert-utils> |
 | reloadable-state | 0.1.0 | `MIT` | <https://github.com/MOZGIII/rustls-cert-utils> |
-| renderdoc-sys | 1.1.0 | `MIT OR Apache-2.0` | <https://github.com/ebkalderon/renderdoc-rs> |
 | reqwest | 0.13.4 | `MIT OR Apache-2.0` | <https://github.com/seanmonstar/reqwest> |
 | resolv-conf | 0.7.6 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/resolv-conf> |
 | ring | 0.17.14 | `Apache-2.0 AND ISC` | <https://github.com/briansmith/ring> |
@@ -702,11 +577,9 @@ Listed here is every crate reachable from this workspace through normal and buil
 | roxmltree | 0.21.1 | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/roxmltree> |
 | rust_decimal | 1.42.1 | `MIT` | <https://github.com/paupino/rust-decimal> |
 | rustc-demangle | 0.1.28 | `MIT/Apache-2.0` | <https://github.com/rust-lang/rustc-demangle> |
-| rustc-hash | 1.1.0 | `Apache-2.0/MIT` | <https://github.com/rust-lang-nursery/rustc-hash> |
 | rustc-hash | 2.1.2 | `Apache-2.0 OR MIT` | <https://github.com/rust-lang/rustc-hash> |
 | rustc_version | 0.4.1 | `MIT OR Apache-2.0` | <https://github.com/djc/rustc-version-rs> |
 | rusticata-macros | 4.1.0 | `MIT/Apache-2.0` | <https://github.com/rusticata/rusticata-macros.git> |
-| rustix | 0.38.44 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/rustix> |
 | rustix | 1.1.4 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/rustix> |
 | rustls | 0.23.40 | `Apache-2.0 OR ISC OR MIT` | <https://github.com/rustls/rustls> |
 | rustls-cert-file-reader | 0.4.2 | `MIT` | <https://github.com/MOZGIII/rustls-cert-utils> |
@@ -731,7 +604,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | security-framework-sys | 2.17.0 | `MIT OR Apache-2.0` | <https://github.com/kornelski/rust-security-framework> |
 | seize | 0.5.1 | `MIT` | <https://github.com/ibraheemdev/seize> |
 | self-replace | 1.5.0 | `Apache-2.0` | <https://github.com/mitsuhiko/self-replace> |
-| self_cell | 1.3.0 | `Apache-2.0 OR GPL-2.0-only` | <https://github.com/Voultapher/self_cell> |
 | self_update | 0.44.0 | `MIT` | <https://github.com/jaemk/self_update> |
 | semver | 1.0.28 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/semver> |
 | send_wrapper | 0.6.0 | `MIT/Apache-2.0` | <https://github.com/thk1/send_wrapper> |
@@ -745,7 +617,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | serde_derive_internals | 0.29.1 | `MIT OR Apache-2.0` | <https://github.com/serde-rs/serde> |
 | serde_json | 1.0.150 | `MIT OR Apache-2.0` | <https://github.com/serde-rs/json> |
 | serde_path_to_error | 0.1.20 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/path-to-error> |
-| serde_repr | 0.1.21 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/serde-repr> |
 | serde_spanned | 0.6.9 | `MIT OR Apache-2.0` | <https://github.com/toml-rs/toml> |
 | serde_spanned | 1.1.1 | `MIT OR Apache-2.0` | <https://github.com/toml-rs/toml> |
 | serde_urlencoded | 0.7.1 | `MIT/Apache-2.0` | <https://github.com/nox/serde_urlencoded> |
@@ -773,22 +644,16 @@ Listed here is every crate reachable from this workspace through normal and buil
 | slab | 0.4.12 | `MIT` | <https://github.com/tokio-rs/slab> |
 | slotmap | 1.1.1 | `Zlib` | <https://github.com/orlp/slotmap> |
 | smallvec | 1.15.1 | `MIT OR Apache-2.0` | <https://github.com/servo/rust-smallvec> |
-| smithay-client-toolkit | 0.19.2 | `MIT` | <https://github.com/smithay/client-toolkit> |
-| smithay-client-toolkit | 0.20.0 | `MIT` | <https://github.com/smithay/client-toolkit> |
-| smithay-clipboard | 0.7.3 | `MIT` | <https://github.com/smithay/smithay-clipboard> |
-| smol_str | 0.2.2 | `MIT OR Apache-2.0` | <https://github.com/rust-analyzer/smol_str> |
 | socket2 | 0.6.4 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/socket2> |
 | socks | 0.3.4 | `MIT/Apache-2.0` | <https://github.com/sfackler/rust-socks> |
 | sorted-index-buffer | 0.2.1 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/iroh> |
 | spez | 0.1.2 | `BSD-2-Clause` | <https://github.com/m-ou-se/spez> |
 | spin | 0.10.0 | `MIT` | <https://github.com/mvdnes/spin-rs.git> |
 | spin | 0.9.8 | `MIT` | <https://github.com/mvdnes/spin-rs.git> |
-| spirv | 0.4.0+sdk-1.4.341.0 | `Apache-2.0` | <https://github.com/gfx-rs/rspirv> |
 | spki | 0.7.3 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats/tree/master/spki> |
 | spki | 0.8.0 | `Apache-2.0 OR MIT` | <https://github.com/RustCrypto/formats> |
 | stable_deref_trait | 1.2.1 | `MIT OR Apache-2.0` | <https://github.com/storyyeller/stable_deref_trait> |
 | stacker | 0.1.25 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/stacker> |
-| static_assertions | 1.1.0 | `MIT OR Apache-2.0` | <https://github.com/nvzqz/static-assertions-rs> |
 | strict-num | 0.1.1 | `MIT` | <https://github.com/RazrFalcon/strict-num> |
 | strsim | 0.11.1 | `MIT` | <https://github.com/rapidfuzz/strsim-rs> |
 | strum | 0.27.2 | `MIT` | <https://github.com/Peternator7/strum> |
@@ -808,7 +673,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | tagptr | 0.2.0 | `MIT/Apache-2.0` | <https://github.com/oliver-giersch/tagptr.git> |
 | tar | 0.4.46 | `MIT OR Apache-2.0` | <https://github.com/composefs/tar-rs> |
 | tempfile | 3.27.0 | `MIT OR Apache-2.0` | <https://github.com/Stebalien/tempfile> |
-| termcolor | 1.4.1 | `Unlicense OR MIT` | <https://github.com/BurntSushi/termcolor> |
 | thin-vec | 0.2.19 | `MIT OR Apache-2.0` | <https://github.com/mozilla/thin-vec> |
 | thiserror | 1.0.69 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/thiserror> |
 | thiserror | 2.0.18 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/thiserror> |
@@ -816,7 +680,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | thiserror-impl | 2.0.18 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/thiserror> |
 | thread_local | 1.1.9 | `MIT OR Apache-2.0` | <https://github.com/Amanieu/thread_local-rs> |
 | threadpool | 1.8.1 | `MIT/Apache-2.0` | <https://github.com/rust-threadpool/rust-threadpool> |
-| tiff | 0.11.3 | `MIT` | <https://github.com/image-rs/image-tiff> |
 | time | 0.3.47 | `MIT OR Apache-2.0` | <https://github.com/time-rs/time> |
 | time-core | 0.1.8 | `MIT OR Apache-2.0` | <https://github.com/time-rs/time> |
 | time-macros | 0.2.27 | `MIT OR Apache-2.0` | <https://github.com/time-rs/time> |
@@ -855,7 +718,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | tungstenite | 0.29.0 | `MIT OR Apache-2.0` | <https://github.com/snapview/tungstenite-rs> |
 | two-face | 0.4.5 | `MIT OR Apache-2.0` | <https://github.com/CosmicHorrorDev/two-face> |
 | twox-hash | 2.1.2 | `MIT` | <https://github.com/shepmaster/twox-hash> |
-| type-map | 0.5.1 | `MIT/Apache-2.0` | <https://github.com/kardeiz/type-map> |
 | typed-arena | 2.0.2 | `MIT` | <https://github.com/SimonSapin/rust-typed-arena> |
 | typenum | 1.20.1 | `MIT OR Apache-2.0` | <https://github.com/paholg/typenum> |
 | typst | 0.15.1 | `Apache-2.0` | <https://github.com/typst/typst> |
@@ -871,7 +733,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | typst-timing | 0.15.1 | `Apache-2.0` | <https://github.com/typst/typst> |
 | typst-utils | 0.15.1 | `Apache-2.0` | <https://github.com/typst/typst> |
 | ucd-trie | 0.1.7 | `MIT OR Apache-2.0` | <https://github.com/BurntSushi/ucd-generate> |
-| uds_windows | 1.2.1 | `MIT` | <https://github.com/haraldh/rust_uds_windows> |
 | unic-langid | 0.9.6 | `MIT OR Apache-2.0` | <https://github.com/zbraniecki/unic-locale> |
 | unic-langid-impl | 0.9.6 | `MIT OR Apache-2.0` | <https://github.com/zbraniecki/unic-locale> |
 | unic-langid-macros | 0.9.6 | `MIT OR Apache-2.0` | <https://github.com/zbraniecki/unic-locale> |
@@ -879,7 +740,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | unicode-bidi | 0.3.18 | `MIT OR Apache-2.0` | <https://github.com/servo/unicode-bidi> |
 | unicode-bidi-mirroring | 0.4.0 | `MIT/Apache-2.0` | <https://github.com/RazrFalcon/unicode-bidi-mirroring> |
 | unicode-ccc | 0.4.0 | `MIT/Apache-2.0` | <https://github.com/RazrFalcon/unicode-ccc> |
-| unicode-general-category | 1.1.0 | `Apache-2.0` | <https://github.com/yeslogic/unicode-general-category> |
 | unicode-ident | 1.0.24 | `(MIT OR Apache-2.0) AND Unicode-3.0` | <https://github.com/dtolnay/unicode-ident> |
 | unicode-math-class | 0.1.0 | `MIT OR Apache-2.0` | <https://github.com/typst/unicode-math-class> |
 | unicode-normalization | 0.1.25 | `MIT OR Apache-2.0` | <https://github.com/unicode-rs/unicode-normalization> |
@@ -908,7 +768,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | vello_common | 0.0.8 | `Apache-2.0 OR MIT` | <https://github.com/linebender/vello> |
 | vello_common | 0.0.9 | `Apache-2.0 OR MIT` | <https://github.com/linebender/vello> |
 | vello_cpu | 0.0.8 | `Apache-2.0 OR MIT` | <https://github.com/linebender/vello> |
-| vello_cpu | 0.0.9 | `Apache-2.0 OR MIT` | <https://github.com/linebender/vello> |
 | vergen | 9.1.0 | `MIT OR Apache-2.0` | <https://github.com/rustyhorde/vergen> |
 | vergen-gitcl | 9.1.0 | `MIT OR Apache-2.0` | <https://github.com/rustyhorde/vergen> |
 | vergen-lib | 9.1.0 | `MIT OR Apache-2.0` | <https://github.com/rustyhorde/vergen> |
@@ -933,32 +792,11 @@ Listed here is every crate reachable from this workspace through normal and buil
 | wasmi_ir | 1.1.0 | `MIT/Apache-2.0` | <https://github.com/wasmi-labs/wasmi> |
 | wasmparser | 0.239.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser> |
 | wasmparser | 0.244.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser> |
-| wayland-backend | 0.3.16 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-client | 0.31.15 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-csd-frame | 0.3.0 | `MIT` | <https://github.com/rust-windowing/wayland-csd-frame> |
-| wayland-cursor | 0.31.14 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-protocols | 0.32.13 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-protocols-experimental | 20250721.0.1 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-protocols-misc | 0.3.12 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-protocols-plasma | 0.3.12 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-protocols-wlr | 0.3.12 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-scanner | 0.31.11 | `MIT` | <https://github.com/smithay/wayland-rs> |
-| wayland-sys | 0.31.11 | `MIT` | <https://github.com/smithay/wayland-rs> |
 | web-sys | 0.3.99 | `MIT OR Apache-2.0` | <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys> |
 | web-time | 1.1.0 | `MIT OR Apache-2.0` | <https://github.com/daxpedda/web-time> |
-| webbrowser | 1.2.4 | `MIT OR Apache-2.0` | <https://github.com/amodm/webbrowser-rs> |
 | webpki-root-certs | 1.0.7 | `CDLA-Permissive-2.0` | <https://github.com/rustls/webpki-roots> |
 | webpki-roots | 1.0.7 | `CDLA-Permissive-2.0` | <https://github.com/rustls/webpki-roots> |
 | weezl | 0.1.12 | `MIT OR Apache-2.0` | <https://github.com/image-rs/weezl> |
-| wgpu | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| wgpu-core | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| wgpu-core-deps-apple | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| wgpu-core-deps-emscripten | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| wgpu-core-deps-wasm | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| wgpu-core-deps-windows-linux-android | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| wgpu-hal | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| wgpu-naga-bridge | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
-| wgpu-types | 29.0.4 | `MIT OR Apache-2.0` | <https://github.com/gfx-rs/wgpu> |
 | wide | 0.7.33 | `Zlib OR Apache-2.0 OR MIT` | <https://github.com/Lokathor/wide> |
 | widestring | 1.2.1 | `MIT OR Apache-2.0` | <https://github.com/VoidStarKat/widestring-rs> |
 | winapi | 0.3.9 | `MIT/Apache-2.0` | <https://github.com/retep998/winapi-rs> |
@@ -997,7 +835,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | windows_x86_64_gnullvm | 0.52.6 | `MIT OR Apache-2.0` | <https://github.com/microsoft/windows-rs> |
 | windows_x86_64_msvc | 0.48.5 | `MIT OR Apache-2.0` | <https://github.com/microsoft/windows-rs> |
 | windows_x86_64_msvc | 0.52.6 | `MIT OR Apache-2.0` | <https://github.com/microsoft/windows-rs> |
-| winit | 0.30.13 | `Apache-2.0` | <https://github.com/rust-windowing/winit> |
 | winnow | 0.7.15 | `MIT` | <https://github.com/winnow-rs/winnow> |
 | winnow | 1.0.3 | `MIT` | <https://github.com/winnow-rs/winnow> |
 | wit-bindgen | 0.51.0 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/wit-bindgen> |
@@ -1011,15 +848,9 @@ Listed here is every crate reachable from this workspace through normal and buil
 | write16 | 1.0.0 | `Apache-2.0 OR MIT` | <https://github.com/hsivonen/write16> |
 | writeable | 0.6.3 | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
 | ws_stream_wasm | 0.7.5 | `Unlicense` | <https://github.com/najamelan/ws_stream_wasm> |
-| x11-dl | 2.21.0 | `MIT` | <https://github.com/AltF02/x11-rs.git> |
-| x11rb | 0.13.2 | `MIT OR Apache-2.0` | <https://github.com/psychon/x11rb> |
-| x11rb-protocol | 0.13.2 | `MIT OR Apache-2.0` | <https://github.com/psychon/x11rb> |
 | x25519-dalek | 2.0.1 | `BSD-3-Clause` | <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/x25519-dalek> |
 | x509-parser | 0.18.1 | `MIT OR Apache-2.0` | <https://github.com/rusticata/x509-parser.git> |
 | xattr | 1.6.1 | `MIT OR Apache-2.0` | <https://github.com/Stebalien/xattr> |
-| xcursor | 0.3.11 | `MIT` | <https://github.com/esposm03/xcursor-rs> |
-| xkbcommon-dl | 0.4.2 | `MIT` | <https://github.com/rust-windowing/xkbcommon-dl> |
-| xkeysym | 0.2.1 | `MIT OR Apache-2.0 OR Zlib` | <https://github.com/notgull/xkeysym> |
 | xml-rs | 0.8.28 | `MIT` | <https://github.com/kornelski/xml-rs> |
 | xmltree | 0.10.3 | `MIT` | <https://github.com/eminence/xmltree-rs> |
 | xmlwriter | 0.1.0 | `MIT` | <https://github.com/RazrFalcon/xmlwriter> |
@@ -1029,13 +860,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | yasna | 0.6.0 | `MIT OR Apache-2.0` | <https://github.com/qnighy/yasna.rs> |
 | yoke | 0.8.3 | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
 | yoke-derive | 0.8.2 | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
-| zbus | 5.19.0 | `MIT` | <https://github.com/z-galaxy/zbus/> |
-| zbus-lockstep | 0.5.2 | `MIT` | <https://github.com/luukvanderduim/zbus-lockstep> |
-| zbus-lockstep-macros | 0.5.2 | `MIT` | <https://github.com/luukvanderduim/zbus-lockstep> |
-| zbus_macros | 5.19.0 | `MIT` | <https://github.com/z-galaxy/zbus/> |
-| zbus_names | 4.3.4 | `MIT` | <https://github.com/z-galaxy/zbus/> |
-| zbus_xml | 5.2.1 | `MIT` | <https://github.com/z-galaxy/zbus/> |
-| zcheapstr | 1.1.0 | `MIT` | <https://github.com/z-galaxy/zcheapstr/> |
 | zerocopy | 0.8.54 | `BSD-2-Clause OR Apache-2.0 OR MIT` | <https://github.com/google/zerocopy> |
 | zerocopy-derive | 0.8.54 | `BSD-2-Clause OR Apache-2.0 OR MIT` | <https://github.com/google/zerocopy> |
 | zerofrom | 0.1.8 | `Unicode-3.0` | <https://github.com/unicode-org/icu4x> |
@@ -1052,6 +876,3 @@ Listed here is every crate reachable from this workspace through normal and buil
 | zopfli | 0.8.3 | `Apache-2.0` | <https://github.com/zopfli-rs/zopfli> |
 | zune-core | 0.5.3 | `MIT OR Apache-2.0 OR Zlib` | <https://github.com/etemesi254/zune-image> |
 | zune-jpeg | 0.5.15 | `MIT OR Apache-2.0 OR Zlib` | <https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg> |
-| zvariant | 5.14.0 | `MIT` | <https://github.com/z-galaxy/zbus/> |
-| zvariant_derive | 5.14.0 | `MIT` | <https://github.com/z-galaxy/zbus/> |
-| zvariant_utils | 4.0.0 | `MIT` | <https://github.com/z-galaxy/zbus/> |

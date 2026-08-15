@@ -1,11 +1,15 @@
 /// The window's own controls: minimise, maximise/restore, close — and the bar
 /// itself, which is what you drag.
 ///
-/// The window has no system title bar, so nothing draws these but this file.
-/// What that buys is one surface at the top of the window instead of two in
-/// colours the theme never agreed on; what it costs is the system menu on
-/// `Alt+Space`, and Windows 11's snap-layout flyout, which needs a hit-test
-/// reply no Flutter window plugin offers.
+/// **Windows only.** The window has no system title bar there, so nothing
+/// draws these but this file. What that buys is one surface at the top of the
+/// window instead of two in colours the theme never agreed on; what it costs
+/// is the system menu on `Alt+Space`, and Windows 11's snap-layout flyout,
+/// which needs a hit-test reply no Flutter window plugin offers.
+///
+/// macOS keeps its traffic lights under a hidden title bar and they are the
+/// controls that window shows, so the frame draws none of this there — see
+/// `systemDrawsWindowControls` in `window.dart`.
 ///
 /// ## The marks are painted, not typed
 ///

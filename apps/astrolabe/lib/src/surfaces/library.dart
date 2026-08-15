@@ -1,9 +1,12 @@
 /// The front page: a passive Library rail and one selected World.
 ///
-/// Steam supplies the durable library spine; GOG supplies the selected-item
-/// hierarchy. Astrolabe keeps both honest: selection only changes what is
-/// drawn, while `Open` or a World-declared route is the act that can place an
-/// Orbit and hand it to the browser.
+/// One row per installed World — the install list, compiled into the binary.
+/// Which Spaces serve a World is the destination's fact: the head's own front
+/// page carries the Space selector, and this surface deliberately does not
+/// pre-ask it. Steam supplies the durable library spine; GOG supplies the
+/// selected-item hierarchy. Astrolabe keeps both honest: selection only
+/// changes what is drawn, while `Open` is the act that starts the head and
+/// hands it to the browser.
 library;
 
 import 'package:covalence/covalence.dart' hide Surface;
@@ -55,7 +58,6 @@ class _LibrarySurfaceState extends State<LibrarySurface> {
         : rows
             .where((row) =>
                 _name(row).toLowerCase().contains(needle) ||
-                row.space.toLowerCase().contains(needle) ||
                 row.worldMount.toLowerCase().contains(needle))
             .toList();
 
@@ -150,14 +152,15 @@ class _Empty extends StatelessWidget {
         children: [
           Text('Library', style: context.titleStyle),
           t.gap.y(Space.xl5),
-          Text('This device serves no Worlds yet.', style: context.bodyStyle),
+          Text('This build installs no Worlds.', style: context.bodyStyle),
           t.gap.y(Space.xs),
           Text(
-            // Founding and entering are not this client's flows yet; saying
-            // where they live beats pointing at a tab that no longer exists.
-            'Found a Space, or enter one from an invite, from a World '
-            'head\'s Welcome page — this client draws what the daemon '
-            'already serves.',
+            // The Library is the install list, compiled into this binary. An
+            // empty one is a build with no client packages — a builder's
+            // situation, not a person's, and nothing on this machine can
+            // change it.
+            'A World ships inside the client. This binary was built without '
+            'any, so there is nothing to open.',
             style: context.proseStyle,
           ),
         ],
@@ -206,14 +209,10 @@ class _Rail extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final running = rows
-        .where((row) =>
-            _opening(view, row) || row.placement == PlacementView.placed)
+        .where((row) => _opening(view, row) || _serving(view).isNotEmpty)
         .toList();
     final ready = rows
-        .where((row) =>
-            !_opening(view, row) &&
-            row.placement == PlacementView.vacant &&
-            row.unopenable == null)
+        .where((row) => !running.contains(row) && row.opensAt != null)
         .toList();
     final unavailable = rows
         .where((row) => !running.contains(row) && !ready.contains(row))
@@ -333,11 +332,6 @@ class _RailSection extends StatelessWidget {
                 title: Text(
                   _name(row),
                   overflow: TextOverflow.ellipsis,
-                  style: row.placement == PlacementView.unknown
-                      ? context.bodyStyle.copyWith(
-                          color: context.status.warning.l800,
-                        )
-                      : null,
                 ),
                 tooltip: '${_name(row)} — ${_lifecycleCopy(view, row).label}',
               ),
@@ -364,16 +358,14 @@ class _Mark extends StatelessWidget {
         color: _accent(context, row),
         borderRadius: TokenEscape.rawRadius(all: size / 4),
       ),
-      child: row.worldMount.isEmpty
-          ? null
-          : Text(
-              row.worldMount.substring(0, 1).toUpperCase(),
-              style: context.labelStyle.copyWith(
-                color: cv.Surface.onSolid.resolve(context),
-                fontWeight: FontWeight.w700,
-                fontSize: size * 0.55,
-              ),
-            ),
+      child: Text(
+        row.worldMount.substring(0, 1).toUpperCase(),
+        style: context.labelStyle.copyWith(
+          color: cv.Surface.onSolid.resolve(context),
+          fontWeight: FontWeight.w700,
+          fontSize: size * 0.55,
+        ),
+      ),
     );
   }
 }
@@ -443,7 +435,7 @@ class _Hero extends StatelessWidget {
           Row(
             children: [
               Text(
-                showing.worldMount.isEmpty ? 'SPACE' : 'WORLD',
+                'WORLD',
                 style: context.factLabelStyle.copyWith(
                   color: onHero,
                   fontWeight: FontWeight.w700,
@@ -495,10 +487,11 @@ class _ActionPanel extends StatelessWidget {
     final view = ClientScope.watch(context);
     final entryPath = showing.opensAt;
     final opening = _opening(view, showing);
-    final running = showing.placement == PlacementView.placed;
     final lifecycle = _lifecycleCopy(view, showing);
-    final sync = _syncCopy(context, showing);
-    final heads = _matchingHeads(view, showing);
+    // The head is per-identity and serves every installed World, so "running"
+    // is the head's own liveness: an owned browser head reporting an address.
+    final heads = _serving(view);
+    final running = !opening && heads.isNotEmpty;
     final activeOrigin = heads.isEmpty ? null : heads.first.origin;
 
     return Container(
@@ -525,16 +518,8 @@ class _ActionPanel extends StatelessWidget {
                   onOpen: entryPath == null || opening
                       ? null
                       : () => client.dispatch(
-                            ActionRequest.open(
-                              orbit: showing.orbit,
-                              entryPath: entryPath,
-                            ),
+                            ActionRequest.open(entryPath: entryPath),
                           ),
-                ),
-                _StatusReadout(
-                  icon: AppIcons.accessTime,
-                  label: 'LAST OPENED',
-                  value: _ago(showing.lastOpened),
                 ),
                 _StatusReadout(
                   icon: AppIcons.inventory2,
@@ -546,14 +531,6 @@ class _ActionPanel extends StatelessWidget {
               ],
             ),
           ),
-          t.gap.x(Space.xl3),
-          _StatusReadout(
-            icon: sync.icon,
-            label: 'SYNC STATUS',
-            value: sync.label,
-            tone: sync.tone,
-            tooltip: sync.detail,
-          ),
           t.gap.x(Space.md),
           Button(
             onPressed: () => WorldSettingsScope.open(
@@ -561,10 +538,6 @@ class _ActionPanel extends StatelessWidget {
               WorldSettingsSnapshot(
                 key: showing.key,
                 name: _name(showing),
-                orbit: showing.orbit,
-                syncLabel: sync.label,
-                syncDetail: sync.detail,
-                store: showing.store,
                 worldMount: showing.worldMount,
                 entryPath: showing.opensAt,
                 version: showing.version,
@@ -656,12 +629,8 @@ class _WorldAction extends StatelessWidget {
 
     return _LifecycleState(
       label: lifecycle.label,
-      icon: showing.placement == PlacementView.unknown
-          ? AppIcons.warningAmber
-          : AppIcons.info,
-      tone: showing.placement == PlacementView.unknown
-          ? context.status.warning.l800
-          : context.text.l700,
+      icon: AppIcons.info,
+      tone: context.text.l700,
     );
   }
 }
@@ -852,20 +821,16 @@ class _StatusReadout extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.value,
-    this.tone,
-    this.tooltip,
   });
 
   final IconData icon;
   final String label;
   final String value;
-  final Color? tone;
-  final String? tooltip;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final color = tone ?? context.text.l700;
+    final color = context.text.l700;
     final readout = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -890,9 +855,7 @@ class _StatusReadout extends StatelessWidget {
         ),
       ],
     );
-    return tooltip == null
-        ? readout
-        : Tooltip(message: tooltip, child: readout);
+    return readout;
   }
 }
 
@@ -904,7 +867,7 @@ class _Details extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final heads = _matchingHeads(ClientScope.watch(context), showing);
+    final heads = _serving(ClientScope.watch(context));
     final people = showing.people;
 
     // No head of its own: the tiers inside already say who is in the World
@@ -919,12 +882,6 @@ class _Details extends StatelessWidget {
           _Fact(
             label: 'OPENS AT',
             value: showing.opensAt ?? 'No entry path declared',
-            mono: true,
-          ),
-          t.gap.y(Space.xl3),
-          _Fact(
-            label: 'STORE',
-            value: showing.store ?? 'Not reported',
             mono: true,
           ),
         ],
@@ -1191,67 +1148,14 @@ class _Fact extends StatelessWidget {
   }
 }
 
-List<HeadRow> _matchingHeads(ClientView view, LibraryRow row) => view.heads
-    .where((head) => head.orbit == null || head.orbit == row.orbit)
-    .toList();
+/// The heads serving this identity — the browser heads bound to no one
+/// Orbit, because one identity head serves every installed World. What they
+/// answer is the head's own liveness, which is what "running" means on a
+/// World row: the destination is up and `Open` is a handoff, not a start.
+List<HeadRow> _serving(ClientView view) =>
+    view.heads.where((head) => head.orbit == null).toList();
 
-({String label, String detail, IconData icon, Color tone}) _syncCopy(
-  BuildContext context,
-  LibraryRow row,
-) {
-  final detail = row.syncDetail ??
-      switch (row.placement) {
-        PlacementView.placed => 'The running World did not report a sync gate.',
-        PlacementView.vacant => 'Sync is checked after the World is launched.',
-        PlacementView.unknown =>
-          'The Orbit could not be asked for sync status.',
-      };
-  return switch (row.syncState) {
-    'pass' => (
-        label: 'Up to date',
-        detail: detail,
-        icon: AppIcons.cloudDownload,
-        tone: context.status.success.l800,
-      ),
-    'wait' => (
-        label: 'Syncing',
-        detail: detail,
-        icon: AppIcons.refresh,
-        tone: context.text.l900,
-      ),
-    'fail' => (
-        label: 'Needs attention',
-        detail: detail,
-        icon: AppIcons.error,
-        tone: context.status.warning.l800,
-      ),
-    'warn' => (
-        label: 'Check sync',
-        detail: detail,
-        icon: AppIcons.warningAmber,
-        tone: context.status.warning.l800,
-      ),
-    'skip' => (
-        label: 'Not applicable',
-        detail: detail,
-        icon: AppIcons.info,
-        tone: context.text.l700,
-      ),
-    _ => (
-        label:
-            row.placement == PlacementView.vacant ? 'Offline' : 'Not reported',
-        detail: detail,
-        icon: row.placement == PlacementView.unknown
-            ? AppIcons.warningAmber
-            : AppIcons.cloudDownload,
-        tone: row.placement == PlacementView.unknown
-            ? context.status.warning.l800
-            : context.text.l700,
-      ),
-  };
-}
-
-enum _Lifecycle { opening, running, ready, unreachable, unavailable }
+enum _Lifecycle { opening, running, ready, unavailable }
 
 ({
   String label,
@@ -1263,13 +1167,13 @@ enum _Lifecycle { opening, running, ready, unreachable, unavailable }
   return switch (lifecycle) {
     _Lifecycle.opening => (
         label: 'Launching',
-        description: 'Placing this Orbit and preparing its World head.',
+        description: 'Starting this World\'s head and preparing the handoff.',
         variant: BadgeVariant.solid,
         dot: BadgeDotTone.brand,
       ),
     _Lifecycle.running => (
         label: 'Running',
-        description: 'This World is already placed and ready to view.',
+        description: 'This World\'s head is up and ready to view.',
         variant: BadgeVariant.success,
         dot: BadgeDotTone.success,
       ),
@@ -1279,21 +1183,9 @@ enum _Lifecycle { opening, running, ready, unreachable, unavailable }
         variant: BadgeVariant.outline,
         dot: BadgeDotTone.neutral,
       ),
-    _Lifecycle.unreachable => (
-        label: 'Could not ask',
-        description:
-            'The last good Library record is shown while the Space is unreachable.',
-        variant: BadgeVariant.warning,
-        dot: BadgeDotTone.warning,
-      ),
     _Lifecycle.unavailable => (
         label: 'Unavailable',
-        description: switch (row.unopenable) {
-          Unopenable.unhosted =>
-            'This build does not host a head for this World.',
-          Unopenable.undeclared => 'This World has not declared an entry path.',
-          null => 'This World cannot be opened from this device.',
-        },
+        description: 'This World has not declared an entry path.',
         variant: BadgeVariant.muted,
         dot: BadgeDotTone.neutral,
       ),
@@ -1301,36 +1193,26 @@ enum _Lifecycle { opening, running, ready, unreachable, unavailable }
 }
 
 _Lifecycle _lifecycle(ClientView view, LibraryRow row) {
-  // Once placed, a browser handoff never changes the World-level state. One
-  // person can have several Worlds running, so there is no cancel/stop state
-  // at this layer.
-  if (row.placement == PlacementView.placed) return _Lifecycle.running;
+  // A browser handoff to a head already up never changes the World-level
+  // state, so there is no cancel/stop state at this layer.
   if (_opening(view, row)) return _Lifecycle.opening;
-  if (row.unopenable != null || row.opensAt == null) {
-    return _Lifecycle.unavailable;
-  }
-  return switch (row.placement) {
-    PlacementView.placed => _Lifecycle.running,
-    PlacementView.vacant => _Lifecycle.ready,
-    PlacementView.unknown => _Lifecycle.unreachable,
-  };
+  if (row.opensAt == null) return _Lifecycle.unavailable;
+  if (_serving(view).isNotEmpty) return _Lifecycle.running;
+  return _Lifecycle.ready;
 }
 
 bool _opening(ClientView view, LibraryRow row) {
   final path = row.opensAt;
-  return path != null &&
-      view.inFlight.contains(ActionKeys.open(row.orbit, path));
+  return path != null && view.inFlight.contains(ActionKeys.open(path));
 }
 
 String _openTooltip(LibraryRow row, {required bool running}) {
-  return switch (row.unopenable) {
-    Unopenable.unhosted =>
-      'This build hosts no head for that World, so there is nothing to open.',
-    Unopenable.undeclared => 'This World has not declared where to open it.',
-    null => running
-        ? 'Take me to the running World'
-        : 'Start this World and hand it to my browser',
-  };
+  if (row.opensAt == null) {
+    return 'This World has not declared where to open it.';
+  }
+  return running
+      ? 'Take me to the running World'
+      : 'Start this World and hand it to my browser';
 }
 
 Color _accent(BuildContext context, LibraryRow row) => row.accent == null
@@ -1339,21 +1221,4 @@ Color _accent(BuildContext context, LibraryRow row) => row.accent == null
     // would replace a declaration with the client's opinion.
     : TokenEscape.rawColor(0xFF000000 | row.accent!.toInt());
 
-String _name(LibraryRow row) => row.displayName ?? 'Unnamed Space';
-
-String _ago(BigInt? lastOpened) {
-  if (lastOpened == null) return 'Never';
-  final then = DateTime.fromMillisecondsSinceEpoch(
-    lastOpened.toInt() * 1000,
-    isUtc: true,
-  );
-  final elapsed = DateTime.now().toUtc().difference(then);
-  if (elapsed.isNegative) return 'In the future';
-  if (elapsed.inMinutes < 1) return 'Just now';
-  if (elapsed.inHours < 1) return _plural(elapsed.inMinutes, 'minute');
-  if (elapsed.inDays < 1) return _plural(elapsed.inHours, 'hour');
-  return _plural(elapsed.inDays, 'day');
-}
-
-String _plural(int count, String unit) =>
-    count == 1 ? '1 $unit ago' : '$count ${unit}s ago';
+String _name(LibraryRow row) => row.displayName;

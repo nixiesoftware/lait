@@ -1404,7 +1404,12 @@ pub fn representative_requests() -> Vec<Request> {
         Request::WorldActivate { world: s() },
         Request::Work {
             request: runtime::exec::WorkRequest::Inspect {
-                world: replica::body::WorldId::parse("com.example.work").unwrap(),
+                #[allow(
+                    clippy::expect_used,
+                    reason = "a compile-time literal in canonical reverse-domain form"
+                )]
+                world: replica::body::WorldId::parse("com.example.work")
+                    .expect("a well-formed representative World id"),
                 run: runtime::exec::RunId::from_bytes([0; 16]),
             },
             operation: s(),

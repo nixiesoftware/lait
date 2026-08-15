@@ -597,7 +597,7 @@ fn world_mutation_and_started_run_commit_as_one_durable_effect() {
             },
             [0x48; 16],
         ),
-        Err(crate::exec::WorkError::Unsupported(_))
+        Err(crate::exec::WorkRefusal::Unsupported(_))
     ));
 }
 

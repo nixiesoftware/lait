@@ -1152,9 +1152,9 @@ fn lower_exec(
 fn work_reply(
     snapshot: &replica::ReadSnapshot,
     request: &crate::exec::WorkRequest,
-) -> Result<crate::exec::WorkReply, crate::exec::WorkError> {
+) -> Result<crate::exec::WorkReply, crate::exec::WorkRefusal> {
     let state = crate::exec::work_state(snapshot, request.world(), request.run())?
-        .ok_or_else(|| crate::exec::WorkError::NotFound(request.run()))?;
+        .ok_or_else(|| crate::exec::WorkRefusal::NotFound(request.run()))?;
     if matches!(
         request,
         crate::exec::WorkRequest::Watch { known_heads, .. } if known_heads == &state.heads
@@ -1182,30 +1182,30 @@ fn continuation_try(
     specs: &[crate::exec::Spec],
     ambient: &Ambient,
     request: &crate::exec::WorkRequest,
-) -> Result<crate::exec::Try, crate::exec::WorkError> {
+) -> Result<crate::exec::Try, crate::exec::WorkRefusal> {
     let run_id = request.run();
     let (run, _, _) = crate::exec::read_committed_run(snapshot, request.world(), run_id)?
-        .ok_or(crate::exec::WorkError::NotFound(run_id))?;
+        .ok_or(crate::exec::WorkRefusal::NotFound(run_id))?;
     if !run.is_unresolved() {
-        return Err(crate::exec::WorkError::Unsupported(
+        return Err(crate::exec::WorkRefusal::Unsupported(
             "this Run is already resolved",
         ));
     }
     if !run.cancel_asked.is_empty() {
-        return Err(crate::exec::WorkError::Unsupported(
+        return Err(crate::exec::WorkRefusal::Unsupported(
             "this Run has a committed cancellation request and cannot be continued",
         ));
     }
     let spec = specs
         .iter()
         .find(|spec| spec.name == run.started.spec.name && spec.version == run.started.spec.version)
-        .ok_or(crate::exec::WorkError::Unsupported(
+        .ok_or(crate::exec::WorkRefusal::Unsupported(
             "the Run's Spec is not available in this World implementation",
         ))?;
     let attempt_count = u32::try_from(run.attempts.len())
-        .map_err(|_| crate::exec::WorkError::Unsupported("the Run has too many Attempts"))?;
+        .map_err(|_| crate::exec::WorkRefusal::Unsupported("the Run has too many Attempts"))?;
     if attempt_count >= run.started.limits.attempts {
-        return Err(crate::exec::WorkError::Unsupported(
+        return Err(crate::exec::WorkRefusal::Unsupported(
             "this Run has exhausted its Attempt limit",
         ));
     }
@@ -1220,17 +1220,17 @@ fn continuation_try(
             match &spec.resume {
                 crate::exec::Resume::Restart => {}
                 crate::exec::Resume::Checkpoint { .. } => {
-                    return Err(crate::exec::WorkError::Unsupported(
+                    return Err(crate::exec::WorkRefusal::Unsupported(
                         "this Run requires a committed checkpoint; use resume",
                     ));
                 }
                 crate::exec::Resume::Replay { .. } => {
-                    return Err(crate::exec::WorkError::Unsupported(
+                    return Err(crate::exec::WorkRefusal::Unsupported(
                         "this Run requires replay scheduling, which is not available yet",
                     ));
                 }
                 crate::exec::Resume::Never => {
-                    return Err(crate::exec::WorkError::Unsupported(
+                    return Err(crate::exec::WorkRefusal::Unsupported(
                         "this Run's Spec does not permit another Attempt",
                     ));
                 }
@@ -1240,14 +1240,14 @@ fn continuation_try(
                 .iter()
                 .filter(terminal)
                 .max_by_key(|attempt| (attempt.fence, attempt.leased_event))
-                .ok_or(crate::exec::WorkError::Unsupported(
+                .ok_or(crate::exec::WorkRefusal::Unsupported(
                     "this Run has no completed Attempt whose scheduling coordinates can be continued",
                 ))?;
             (source, None)
         }
         crate::exec::WorkRequest::Resume { checkpoint, .. } => {
             if !matches!(spec.resume, crate::exec::Resume::Checkpoint { .. }) {
-                return Err(crate::exec::WorkError::Unsupported(
+                return Err(crate::exec::WorkRefusal::Unsupported(
                     "this Run restarts rather than resuming from a checkpoint; use continue",
                 ));
             }
@@ -1263,7 +1263,7 @@ fn continuation_try(
                         .map(move |fact| (attempt, fact))
                 })
                 .max_by_key(|(_, fact)| (fact.value.checkpoint.sequence, fact.event))
-                .ok_or(crate::exec::WorkError::Unsupported(
+                .ok_or(crate::exec::WorkRefusal::Unsupported(
                     "that checkpoint is not a committed checkpoint of a completed Attempt on this Run",
                 ))?;
             (source, Some(checkpoint.value.checkpoint.clone()))
@@ -1271,18 +1271,18 @@ fn continuation_try(
         crate::exec::WorkRequest::Inspect { .. }
         | crate::exec::WorkRequest::Watch { .. }
         | crate::exec::WorkRequest::Cancel { .. } => {
-            return Err(crate::exec::WorkError::Unsupported(
+            return Err(crate::exec::WorkRefusal::Unsupported(
                 "this Work action does not create an Attempt",
             ));
         }
     };
     if source.station != ambient.principal.station || source.station_epoch != ambient.epoch {
-        return Err(crate::exec::WorkError::Unsupported(
+        return Err(crate::exec::WorkRefusal::Unsupported(
             "the prior Attempt belongs to another Station activation; a fresh scheduler Offer is required",
         ));
     }
     if source.lease.is_some() {
-        return Err(crate::exec::WorkError::Unsupported(
+        return Err(crate::exec::WorkRefusal::Unsupported(
             "service-backed work requires a renewed Role lease before it can continue",
         ));
     }
@@ -1294,7 +1294,7 @@ fn continuation_try(
         .unwrap_or(0)
         .checked_add(1)
         .filter(|fence| *fence != 0)
-        .ok_or(crate::exec::WorkError::Unsupported(
+        .ok_or(crate::exec::WorkRefusal::Unsupported(
             "the Run's fencing epoch is exhausted",
         ))?;
     Ok(crate::exec::Try {
@@ -2155,11 +2155,11 @@ impl Session {
         &self,
         request: crate::exec::WorkRequest,
         operation: [u8; 16],
-    ) -> Result<crate::exec::WorkReply, crate::exec::WorkError> {
-        self.ensure_live().map_err(crate::exec::WorkError::from)?;
+    ) -> Result<crate::exec::WorkReply, crate::exec::WorkRefusal> {
+        self.ensure_live().map_err(crate::exec::WorkRefusal::from)?;
         request.validate()?;
         if request.world() != &self.world_id {
-            return Err(crate::exec::WorkError::Invalid(
+            return Err(crate::exec::WorkRefusal::Invalid(
                 crate::exec::Invalid::InvalidEvent("work world"),
             ));
         }
@@ -2167,11 +2167,11 @@ impl Session {
             crate::exec::WorkRequest::Inspect { .. } | crate::exec::WorkRequest::Watch { .. } => {
                 let inner = self.core.lock();
                 if inner.closed {
-                    return Err(crate::exec::WorkError::Session(Failure::Interrupted));
+                    return Err(crate::exec::WorkRefusal::Session(Failure::Interrupted));
                 }
                 self.fresh_principal()
                     .map_err(Failure::from)
-                    .map_err(crate::exec::WorkError::from)?;
+                    .map_err(crate::exec::WorkRefusal::from)?;
                 work_reply(&inner.snapshot, &request)
             }
             crate::exec::WorkRequest::Cancel { .. }
@@ -2180,12 +2180,12 @@ impl Session {
                 let digest = request.digest()?;
                 let mut inner = self.core.lock();
                 if inner.closed {
-                    return Err(crate::exec::WorkError::Session(Failure::Interrupted));
+                    return Err(crate::exec::WorkRefusal::Session(Failure::Interrupted));
                 }
                 let principal = self
                     .fresh_principal()
                     .map_err(Failure::from)
-                    .map_err(crate::exec::WorkError::from)?;
+                    .map_err(crate::exec::WorkRefusal::from)?;
                 match inner.replica.lookup_action(
                     &self.space,
                     &self.world_id,
@@ -2196,12 +2196,12 @@ impl Session {
                     Ok(None) => {}
                     Ok(Some(_)) => return work_reply(&inner.snapshot, &request),
                     Err(replica::transaction::commit::Failure::RequestIdConflict) => {
-                        return Err(crate::exec::WorkError::Session(Failure::Conflict(
+                        return Err(crate::exec::WorkRefusal::Session(Failure::Conflict(
                             Conflict::Request,
                         )));
                     }
                     Err(_) => {
-                        return Err(crate::exec::WorkError::Session(Failure::Persistence));
+                        return Err(crate::exec::WorkRefusal::Session(Failure::Persistence));
                     }
                 }
                 let ambient = self
@@ -2214,7 +2214,7 @@ impl Session {
                             Failure::AuthorityUnavailable(detail)
                         }
                     })
-                    .map_err(crate::exec::WorkError::from)?;
+                    .map_err(crate::exec::WorkRefusal::from)?;
                 let pinned = inner.replica.read_snapshot();
                 let (command, label) = match &request {
                     crate::exec::WorkRequest::Cancel { run, .. } => {
@@ -2240,7 +2240,7 @@ impl Session {
                     ),
                     crate::exec::WorkRequest::Inspect { .. }
                     | crate::exec::WorkRequest::Watch { .. } => {
-                        return Err(crate::exec::WorkError::Unsupported(
+                        return Err(crate::exec::WorkRefusal::Unsupported(
                             "a read-only Work action cannot commit a lifecycle event",
                         ));
                     }
@@ -2254,21 +2254,21 @@ impl Session {
                     &pinned,
                 )
                 .map_err(Failure::from)
-                .map_err(crate::exec::WorkError::from)?;
+                .map_err(crate::exec::WorkRefusal::from)?;
                 let current = self
                     .authority
                     .resolve(&principal.device)
                     .ok_or(Rejection::Denied(DeniedCause::NotAMember))
                     .map_err(Failure::from)
-                    .map_err(crate::exec::WorkError::from)?;
+                    .map_err(crate::exec::WorkRefusal::from)?;
                 if current.authority_frontier != principal.authority_frontier {
-                    return Err(crate::exec::WorkError::Session(Failure::Conflict(
+                    return Err(crate::exec::WorkRefusal::Session(Failure::Conflict(
                         Conflict::AuthorityChanged,
                     )));
                 }
                 let demand = combine_exec_demands(&runtime.demands)
                     .map_err(Failure::from)
-                    .map_err(crate::exec::WorkError::from)?;
+                    .map_err(crate::exec::WorkRefusal::from)?;
                 let commit = replica::transaction::CommitContext {
                     space: &self.space,
                     signer: &self.identity,
@@ -2310,7 +2310,7 @@ impl Session {
                         &runtime.content_refs,
                     )
                     .map_err(commit_failure)
-                    .map_err(crate::exec::WorkError::from)?;
+                    .map_err(crate::exec::WorkRefusal::from)?;
                 if let replica::transaction::ActionOutcome::Committed(receipt) = &outcome {
                     let prior = inner.snapshot.clone();
                     let snapshot =
@@ -3232,7 +3232,7 @@ mod reservation_tests {
         };
         assert_eq!(
             continuation_try(&pinned, &[spec], &ambient, &resume),
-            Err(crate::exec::WorkError::Unsupported(
+            Err(crate::exec::WorkRefusal::Unsupported(
                 "this Run restarts rather than resuming from a checkpoint; use continue"
             ))
         );

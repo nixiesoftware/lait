@@ -17,6 +17,7 @@ import '../core/client.dart';
 import '../surfaces/library.dart';
 import 'host.dart';
 import 'lighting.dart';
+import 'menu.dart';
 import 'record.dart';
 import 'type.dart';
 import 'window.dart';
@@ -42,44 +43,57 @@ class AstrolabeShell extends StatelessWidget {
     // The lighting workbench wraps the whole window: its scene is the one
     // every lit surface reads, and in debug builds its panel floats over
     // the corner so the rules can be tuned against the real controls.
-    return LightingWorkbench(
+    //
+    // The menu bar wraps that, because on macOS these settings are not in the
+    // window at all — they are on the screen above it. Off macOS it draws
+    // nothing and the wordmark below carries them.
+    return AstrolabeMenuBar(
+      themeMode: themeMode,
+      onToggleTheme: onToggleTheme,
+      child: LightingWorkbench(
         child: Shortcuts(
-      shortcuts: const <ShortcutActivator, Intent>{
-        SingleActivator(LogicalKeyboardKey.f5): _Reread(),
-      },
-      child: Actions(
-        actions: <Type, Action<Intent>>{
-          _Reread: CallbackAction<_Reread>(
-            onInvoke: (_) =>
-                ClientScope.of(context).dispatch(const ActionRequest.refresh()),
-          ),
-        },
-        child: Focus(
-          autofocus: true,
-          child: AstrolabeWindowFrame.primary(
-            closePolicy: AstrolabeWindowClosePolicy.hide,
-            chrome: chrome,
-            captionHeight: kUtilityBarHeight,
-            captionBottomBorder: false,
-            wordmark: _SettingsMenu(
-              themeMode: themeMode,
-              onToggleTheme: onToggleTheme,
-            ),
-            captionBuilder: (context, constraints) => const _UtilityCaption(),
-            body: const Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(child: LibrarySurface()),
-                // System truth stays visible. The bar carries the latest
-                // action or refusal without growing into a stack that steals
-                // height from the work above it.
-                OperationalBar(),
-              ],
+          shortcuts: const <ShortcutActivator, Intent>{
+            SingleActivator(LogicalKeyboardKey.f5): _Reread(),
+          },
+          child: Actions(
+            actions: <Type, Action<Intent>>{
+              _Reread: CallbackAction<_Reread>(
+                onInvoke: (_) => ClientScope.of(context)
+                    .dispatch(const ActionRequest.refresh()),
+              ),
+            },
+            child: Focus(
+              autofocus: true,
+              child: AstrolabeWindowFrame.primary(
+                closePolicy: AstrolabeWindowClosePolicy.hide,
+                chrome: chrome,
+                captionHeight: kUtilityBarHeight,
+                captionBottomBorder: false,
+                // Drawn only where the window carries the application menu;
+                // on macOS the frame leaves this slot alone and the screen's
+                // own bar holds what it opened.
+                wordmark: _SettingsMenu(
+                  themeMode: themeMode,
+                  onToggleTheme: onToggleTheme,
+                ),
+                captionBuilder: (context, constraints) =>
+                    const _UtilityCaption(),
+                body: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(child: LibrarySurface()),
+                    // System truth stays visible. The bar carries the latest
+                    // action or refusal without growing into a stack that
+                    // steals height from the work above it.
+                    OperationalBar(),
+                  ],
+                ),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
   }
 }
 

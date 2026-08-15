@@ -1592,7 +1592,7 @@ impl StationHost {
             }
             self.worlds
                 .with_primary(&world, |session| session.work(request.clone(), operation))
-                .ok_or_else(|| runtime::exec::WorkError::Unsupported("World Session unavailable"))
+                .ok_or_else(|| runtime::exec::WorkRefusal::Unsupported("World Session unavailable"))
                 .and_then(|result| result)
         } else {
             let identity = Runtime::identity_from_seed(&seed);
@@ -1612,20 +1612,20 @@ impl StationHost {
         };
         match result {
             Ok(reply) => Response::Work { reply },
-            Err(runtime::exec::WorkError::NotFound(run)) => Response::not_found(format!(
+            Err(runtime::exec::WorkRefusal::NotFound(run)) => Response::not_found(format!(
                 "no Runtime Run matches '{}'",
                 data_encoding::HEXLOWER.encode(&run.as_bytes())
             )),
-            Err(runtime::exec::WorkError::Invalid(error)) => {
+            Err(runtime::exec::WorkRefusal::Invalid(error)) => {
                 Response::invalid(format!("invalid Runtime Work request: {error}"))
             }
-            Err(runtime::exec::WorkError::Unsupported(message)) => Response::invalid(message),
-            Err(runtime::exec::WorkError::Session(
+            Err(runtime::exec::WorkRefusal::Unsupported(message)) => Response::invalid(message),
+            Err(runtime::exec::WorkRefusal::Session(
                 runtime::world::Failure::Rejected(runtime::world::Rejection::Denied(_)),
             )) => Response::denied(
                 "you don't hold the capability required to control this Run; ask an admin or your sponsor for the matching project work grant",
             ),
-            Err(runtime::exec::WorkError::Session(error)) => {
+            Err(runtime::exec::WorkRefusal::Session(error)) => {
                 Response::err(format!("Runtime Work failed: {error}"))
             }
         }
