@@ -6,6 +6,7 @@ import 'package:astrolabe/src/settings/window.dart';
 import 'package:astrolabe/src/shell/caption.dart';
 import 'package:astrolabe/src/shell/shell.dart';
 import 'package:astrolabe/src/shell/theme.dart';
+import 'package:astrolabe/src/surfaces/library.dart';
 import 'package:astrolabe/src/shell/window.dart';
 import 'package:covalence/covalence.dart';
 import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
@@ -82,27 +83,21 @@ Future<List<ActionRequest>> _pump(
 }
 
 void main() {
-  testWidgets('primary header has distinct utility and navigation tiers',
+  testWidgets('the client is the Library alone — one tier, no navigation',
       (tester) async {
     await _pump(tester, onToggleTheme: () {});
 
     expect(
         tester.getSize(find.byType(CaptionControls)).height, kUtilityBarHeight);
-    expect(tester.getSize(find.byKey(kPrimaryNavigationKey)).height,
-        kPrimaryBarHeight);
-    // The current destination is a held-down fill on its button. It cannot be
-    // `Button.active`: this app registers `FocusRing.none`, under which that
-    // flag draws nothing at all.
-    expect(
-      tester.widget<Button>(find.widgetWithText(Button, 'Library'))
-          .backgroundColor,
-      isNotNull,
-    );
-    expect(
-      tester.widget<Button>(find.widgetWithText(Button, 'Spaces'))
-          .backgroundColor,
-      isNull,
-    );
+    // The destinations that no longer exist draw nothing: the client
+    // surfaces lifecycle, the address book is its own window, and each
+    // World carries its own settings.
+    expect(find.text('Spaces'), findsNothing);
+    expect(find.text('Members'), findsNothing);
+    expect(find.text('Operations'), findsNothing);
+    expect(find.byType(LibrarySurface), findsOneWidget);
+    // The address book stays one press away on the utility tier.
+    expect(find.bySemanticsLabel('Address book'), findsOneWidget);
     expect(find.text('Refresh local state'), findsNothing);
     expect(find.text('Use light theme'), findsNothing);
     expect(
@@ -154,29 +149,4 @@ void main() {
     expect(themeToggles, 1);
   });
 
-  testWidgets('the lower tier remains the primary surface navigation',
-      (tester) async {
-    await _pump(tester, onToggleTheme: () {});
-
-    await tester.tap(find.text('Operations'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('OPERATIONS'), findsOneWidget);
-    expect(find.text('Devices'), findsNWidgets(2));
-    expect(find.text('Heads'), findsOneWidget);
-    expect(find.text('Storage'), findsOneWidget);
-    expect(find.text('Diagnostics'), findsOneWidget);
-    // Both tiers mark the current item the same way: the Operations group
-    // button stays held down, and so does the operation now showing.
-    expect(
-      tester.widget<Button>(find.widgetWithText(Button, 'Operations'))
-          .backgroundColor,
-      isNotNull,
-    );
-    expect(
-      tester.widget<Button>(find.widgetWithText(Button, 'Devices'))
-          .backgroundColor,
-      isNotNull,
-    );
-  });
 }

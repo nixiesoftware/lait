@@ -1,11 +1,11 @@
-/// The window: a compact utility tier, primary navigation, and a page.
+/// The window: a compact utility tier over the Library.
 ///
-/// The upper tier is the draggable title bar: Astrolabe's identity block opens
-/// the application menu, while address-book access and the window controls stay
-/// flush with the opposite corner. The lower tier carries primary navigation as
-/// a menu bar of buttons — the current destination is a held-down fill, not an
-/// underline. This is deliberately the same hierarchy as a desktop client such
-/// as Steam rather than a web page toolbar.
+/// The utility tier is the draggable title bar: Astrolabe's identity block
+/// opens the application menu, while address-book access and the window
+/// controls stay flush with the opposite corner. There is no navigation
+/// tier beneath it — the client IS the Library, the address book is its own
+/// window, and each World carries its own settings. The client surfaces
+/// lifecycle; everything else was a destination it had no business being.
 library;
 
 import 'package:covalence/covalence.dart' hide Surface;
@@ -14,22 +14,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
-import '../surfaces/surfaces.dart';
+import '../surfaces/library.dart';
 import 'host.dart';
 import 'lighting.dart';
 import 'record.dart';
 import 'type.dart';
 import 'window.dart';
 
-/// The compact contextual band used by Operations.
-const double kOperationsBarHeight = 34;
-
-/// The two tiers of the primary client header. Secondary windows retain the
-/// roomier single 48-pixel caption supplied by [AstrolabeWindowFrame].
+/// The utility tier's height. Secondary windows retain the roomier single
+/// 48-pixel caption supplied by [AstrolabeWindowFrame].
 const double kUtilityBarHeight = 32;
-const double kPrimaryBarHeight = 40;
 
-class AstrolabeShell extends StatefulWidget {
+class AstrolabeShell extends StatelessWidget {
   const AstrolabeShell({
     super.key,
     required this.themeMode,
@@ -42,29 +38,17 @@ class AstrolabeShell extends StatefulWidget {
   final WindowControlHost chrome;
 
   @override
-  State<AstrolabeShell> createState() => _AstrolabeShellState();
-}
-
-class _AstrolabeShellState extends State<AstrolabeShell> {
-  Surface _surface = Surface.library;
-
-  @override
   Widget build(BuildContext context) {
     // The lighting workbench wraps the whole window: its scene is the one
     // every lit surface reads, and in debug builds its panel floats over
     // the corner so the rules can be tuned against the real controls.
     return LightingWorkbench(
         child: Shortcuts(
-      shortcuts: <ShortcutActivator, Intent>{
-        for (final (index, surface) in Surface.values.indexed)
-          SingleActivator(_digits[index], control: true): _ShowSurface(surface),
-        const SingleActivator(LogicalKeyboardKey.f5): const _Reread(),
+      shortcuts: const <ShortcutActivator, Intent>{
+        SingleActivator(LogicalKeyboardKey.f5): _Reread(),
       },
       child: Actions(
         actions: <Type, Action<Intent>>{
-          _ShowSurface: CallbackAction<_ShowSurface>(
-            onInvoke: (intent) => setState(() => _surface = intent.surface),
-          ),
           _Reread: CallbackAction<_Reread>(
             onInvoke: (_) =>
                 ClientScope.of(context).dispatch(const ActionRequest.refresh()),
@@ -74,31 +58,22 @@ class _AstrolabeShellState extends State<AstrolabeShell> {
           autofocus: true,
           child: AstrolabeWindowFrame.primary(
             closePolicy: AstrolabeWindowClosePolicy.hide,
-            chrome: widget.chrome,
+            chrome: chrome,
             captionHeight: kUtilityBarHeight,
             captionBottomBorder: false,
             wordmark: _SettingsMenu(
-              themeMode: widget.themeMode,
-              onToggleTheme: widget.onToggleTheme,
+              themeMode: themeMode,
+              onToggleTheme: onToggleTheme,
             ),
             captionBuilder: (context, constraints) => const _UtilityCaption(),
-            body: Column(
+            body: const Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _PrimaryNavigation(
-                  surface: _surface,
-                  onSurface: (surface) => setState(() => _surface = surface),
-                ),
-                if (_operationSurfaces.contains(_surface))
-                  _OperationsBar(
-                    surface: _surface,
-                    onSurface: (surface) => setState(() => _surface = surface),
-                  ),
-                Expanded(child: SurfacePage(surface: _surface)),
-                // System truth stays visible in every surface. The bar carries
-                // the latest action or refusal without growing into a stack
-                // that steals height from the work above it.
-                const OperationalBar(),
+                Expanded(child: LibrarySurface()),
+                // System truth stays visible. The bar carries the latest
+                // action or refusal without growing into a stack that steals
+                // height from the work above it.
+                OperationalBar(),
               ],
             ),
           ),
@@ -106,21 +81,6 @@ class _AstrolabeShellState extends State<AstrolabeShell> {
       ),
     ));
   }
-}
-
-const List<LogicalKeyboardKey> _digits = [
-  LogicalKeyboardKey.digit1,
-  LogicalKeyboardKey.digit2,
-  LogicalKeyboardKey.digit3,
-  LogicalKeyboardKey.digit4,
-  LogicalKeyboardKey.digit5,
-  LogicalKeyboardKey.digit6,
-  LogicalKeyboardKey.digit7,
-];
-
-class _ShowSurface extends Intent {
-  const _ShowSurface(this.surface);
-  final Surface surface;
 }
 
 class _Reread extends Intent {
@@ -248,131 +208,6 @@ class _UtilityCaption extends StatelessWidget {
         ),
         context.tokens.gap.x(Space.sm),
       ],
-    );
-  }
-}
-
-const Set<Surface> _operationSurfaces = {
-  Surface.devices,
-  Surface.heads,
-  Surface.storage,
-  Surface.diagnostics,
-};
-
-/// Locates the primary navigation tier from tests without exporting its type.
-const Key kPrimaryNavigationKey = ValueKey<String>('primary-navigation');
-
-class _PrimaryNavigation extends StatelessWidget {
-  const _PrimaryNavigation({required this.surface, required this.onSurface});
-
-  final Surface surface;
-  final ValueChanged<Surface> onSurface;
-
-  /// The four primary destinations. Operations fronts a family, so its button
-  /// stays held down while any of that family's surfaces is current.
-  static const List<(Surface, String)> _destinations = [
-    (Surface.library, 'Library'),
-    (Surface.spaces, 'Spaces'),
-    (Surface.members, 'Members'),
-    (Surface.devices, 'Operations'),
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final current =
-        _operationSurfaces.contains(surface) ? Surface.devices : surface;
-    return SizedBox(
-      height: kPrimaryBarHeight,
-      child: Container(
-        key: kPrimaryNavigationKey,
-        // A button carries its own horizontal padding (Space.xl at sm), so the
-        // bar contributes the remainder and the first label lands on the same
-        // 16px gutter as the wordmark above and OPERATIONS below.
-        padding: t.padding.symmetric(h: Space.xs),
-        decoration: BoxDecoration(
-          color: context.layer.bg,
-          border: t.stroke.edge(bottom: context.layer.border),
-        ),
-        child: Row(
-          children: [
-            for (final (candidate, label) in _destinations) ...[
-              _MenuBarButton(
-                label: label,
-                current: candidate == current,
-                size: ButtonSize.sm,
-                onPressed: () => onSurface(candidate),
-              ),
-              t.gap.x(Space.xs),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// One destination in a menu bar: a ghost button whose *current* state is a
-/// held-down fill. Not `Button.active` — this app opts out of focus rings
-/// (`FocusRing.none`), which leaves that flag drawing nothing at all.
-class _MenuBarButton extends StatelessWidget {
-  const _MenuBarButton({
-    required this.label,
-    required this.current,
-    required this.onPressed,
-    this.size = ButtonSize.xs,
-  });
-
-  final String label;
-  final bool current;
-  final VoidCallback onPressed;
-  final ButtonSize size;
-
-  @override
-  Widget build(BuildContext context) {
-    return Button(
-      onPressed: onPressed,
-      label: label,
-      variant: ButtonVariant.ghost,
-      size: size,
-      backgroundColor: current ? context.layer.bgActive : null,
-      style: current ? const Style([$Typo(weight: FontWeight.w600)]) : null,
-    );
-  }
-}
-
-class _OperationsBar extends StatelessWidget {
-  const _OperationsBar({required this.surface, required this.onSurface});
-
-  final Surface surface;
-  final ValueChanged<Surface> onSurface;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return t.box.height(
-      TokenEscape.rawSize(kOperationsBarHeight),
-      child: Container(
-        padding: t.padding.symmetric(h: Space.xl3),
-        decoration: BoxDecoration(
-          color: context.surface.l50,
-          border: t.stroke.edge(bottom: context.border.l500),
-        ),
-        child: Row(
-          children: [
-            Text('OPERATIONS', style: context.factLabelStyle),
-            t.gap.x(Space.xl3),
-            for (final candidate in _operationSurfaces) ...[
-              _MenuBarButton(
-                label: candidate.title,
-                current: candidate == surface,
-                onPressed: () => onSurface(candidate),
-              ),
-              t.gap.x(Space.xs),
-            ],
-          ],
-        ),
-      ),
     );
   }
 }

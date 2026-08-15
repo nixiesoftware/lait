@@ -15,7 +15,6 @@ import 'package:astrolabe/src/core/client.dart';
 import 'package:astrolabe/src/settings/window.dart';
 import 'package:astrolabe/src/shell/person.dart';
 import 'package:astrolabe/src/surfaces/library.dart';
-import 'package:astrolabe/src/surfaces/surfaces.dart' as astrolabe;
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold;
 import 'package:flutter/widgets.dart';
@@ -116,9 +115,7 @@ Future<void> _pumpLibraryPage(WidgetTester tester, ClientView view) async {
       home: ClientScope(
         client: Client.canned(view),
         child: const Scaffold(
-          body: astrolabe.SurfacePage(
-            surface: astrolabe.Surface.library,
-          ),
+          body: LibrarySurface(),
         ),
       ),
     ),

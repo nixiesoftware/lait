@@ -153,7 +153,11 @@ class _Empty extends StatelessWidget {
           Text('This device serves no Worlds yet.', style: context.bodyStyle),
           t.gap.y(Space.xs),
           Text(
-            'Found a Space, or enter one from an invite, on the Spaces tab.',
+            // Founding and entering are not this client's flows yet; saying
+            // where they live beats pointing at a tab that no longer exists.
+            'Found a Space, or enter one from an invite, from a World '
+            'head\'s Welcome page — this client draws what the daemon '
+            'already serves.',
             style: context.proseStyle,
           ),
         ],
