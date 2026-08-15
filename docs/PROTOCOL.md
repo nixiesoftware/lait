@@ -576,6 +576,7 @@ Native media adds narrower bounds at its own seam:
 | `MAX_GROUP_DURATION_MS` | 10,000 ms | hard keyframe-recovery cap |
 | `MAX_LATENCY_MS` | 30,000 ms | hard negotiated delivery budget |
 | `MAX_SUBSCRIPTIONS_PER_SESSION` | 128 per direction | connection-lifetime id/churn ceiling |
+| `MAX_FETCHES_PER_SESSION` | 128 per direction | one-use Fetch id/response-handle ceiling |
 | `MAX_ACTIVE_GROUPS_PER_SESSION` | 32 | incomplete Group/worker ceiling |
 
 `comms::MAX_FRAME` is 64 MiB, the framing guard for whole protocol messages on
@@ -665,6 +666,21 @@ connection-scoped event handle is the stateful publishing seam: it serializes
 control transitions, derives newer-Group QUIC priority, exposes current path
 quality for conservative encoder adaptation, and refuses a Group the peer did
 not subscribe to.
+
+`FETCH` is the one control record that is a transaction rather than a
+fire-and-forget event. The subscriber sends one request and a clean request FIN
+on a bidirectional media-control stream; the publisher returns the requested
+Group's length-framed Frames directly on that stream and FINs after the last
+Frame. Track and Group sequence are implicit in the request, so no Group header
+is repeated. A reset is the only refusal and an empty response is invalid.
+Fetch ids have separate directional ownership, remain spent for the connection
+lifetime, and are capped at 128 per direction. The request must resolve to
+TrackInfo already carried by the current catalog (or the well-known catalog
+Track itself), and the response has the same keyframe, timestamp, duration,
+codec, and allocation bounds as a subscribed Group. Generic control sending
+refuses `FETCH`; callers must use the transaction API so the response half
+cannot be discarded. Fetch priority uses the moq-lite ordering: zero is most
+important and is inverted only at the transport scheduling seam.
 
 `catalog.json` is the well-known catalog Track. Each update is one complete,
 canonical JSON document carried as the only key Frame in a new Group; lait does

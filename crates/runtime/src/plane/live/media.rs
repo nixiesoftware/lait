@@ -65,6 +65,9 @@ pub const MAX_MEDIA_GROUP_BYTES: usize = 32 * 1024 * 1024;
 /// A connection may mint only this many subscription ids in either direction.
 /// Ended ids remain spent, which bounds churn as well as concurrent work.
 pub const MAX_SUBSCRIPTIONS_PER_SESSION: usize = 128;
+/// A Fetch id is connection-lifetime unique; retaining this many spent ids per
+/// direction bounds both replay state and outstanding response handles.
+pub const MAX_FETCHES_PER_SESSION: usize = 128;
 /// At most the Live worker ceiling's worth of Groups may be incomplete.
 pub const MAX_ACTIVE_GROUPS_PER_SESSION: usize = crate::plane::bounds::MAX_STREAM_WORKERS;
 /// Bounded event fan-out from the plane to local consumers.
@@ -137,6 +140,7 @@ pub enum Invalid {
     BaselineRequired,
     CatalogRequired,
     TrackInfoMismatch,
+    FetchTransactionRequired,
 }
 
 impl std::fmt::Display for Invalid {
@@ -222,6 +226,7 @@ pub struct Fetch {
     pub fetch_id: u64,
     pub track: String,
     pub group_sequence: u64,
+    /// Subscriber priority; zero is most important.
     pub priority: u8,
 }
 
@@ -531,6 +536,98 @@ pub struct Frame {
 pub struct ReceivedGroup {
     pub header: GroupHeader,
     pub frames: Vec<Frame>,
+}
+
+/// The single Group returned by one Fetch transaction.
+///
+/// Its Track and sequence are implicit in the request on the same bidirectional
+/// stream, so it is intentionally distinct from a subscription Group carrying
+/// a wire `GroupHeader`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedGroup {
+    pub request: Fetch,
+    pub track_info: TrackInfo,
+    pub frames: Vec<Frame>,
+}
+
+impl FetchedGroup {
+    pub fn catalog(&self) -> Result<Option<Catalog>, Invalid> {
+        validate_fetch_frames(&self.track_info, &self.frames)?;
+        if self.track_info.kind != TrackKind::Catalog {
+            return Ok(None);
+        }
+        let frame = self.frames.first().ok_or(Invalid::FirstFrameNotKey)?;
+        Catalog::decode_canonical(&frame.payload).map(Some)
+    }
+}
+
+/// A one-use response half for an inbound Fetch event.
+///
+/// Clones share the same slot; exactly one may respond or refuse. If every
+/// clone is dropped, the transport response half is dropped as well and the
+/// requester observes a failed transaction rather than a fabricated empty
+/// Group.
+#[derive(Clone)]
+pub struct FetchResponder {
+    request: Fetch,
+    track_info: TrackInfo,
+    send: Arc<tokio::sync::Mutex<Option<Box<dyn comms::SendFlow>>>>,
+}
+
+impl std::fmt::Debug for FetchResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchResponder")
+            .field("request", &self.request)
+            .field("track_info", &self.track_info)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FetchResponder {
+    fn new(request: Fetch, track_info: TrackInfo, mut send: Box<dyn comms::SendFlow>) -> Self {
+        send.set_priority(fetch_priority(request.priority));
+        Self {
+            request,
+            track_info,
+            send: Arc::new(tokio::sync::Mutex::new(Some(send))),
+        }
+    }
+
+    pub fn request(&self) -> &Fetch {
+        &self.request
+    }
+
+    pub fn track_info(&self) -> &TrackInfo {
+        &self.track_info
+    }
+
+    pub async fn respond(&self, frames: &[Frame]) -> Result<(), Invalid> {
+        validate_fetch_frames(&self.track_info, frames)?;
+        let mut send = {
+            let mut slot = self.send.lock().await;
+            slot.take().ok_or(Invalid::Duplicate)?
+        };
+        let result = tokio::time::timeout(
+            crate::budget::deadline::MEDIA_GROUP_READ,
+            write_fetch_response(send.as_mut(), &self.track_info, frames),
+        )
+        .await
+        .map_err(|_| Invalid::Truncated)
+        .and_then(std::convert::identity);
+        if result.is_err() {
+            send.reset(RESET_MEDIA);
+        }
+        result
+    }
+
+    pub async fn refuse(&self) -> Result<(), Invalid> {
+        let mut send = {
+            let mut slot = self.send.lock().await;
+            slot.take().ok_or(Invalid::Duplicate)?
+        };
+        send.reset(RESET_MEDIA);
+        Ok(())
+    }
 }
 
 /// One full independent `catalog.json` update.
@@ -1120,6 +1217,10 @@ struct SessionState {
     received_tracks: std::collections::BTreeMap<String, TrackInfo>,
     sent_catalog: Option<CatalogSnapshot>,
     received_catalog: Option<CatalogSnapshot>,
+    /// Fetch ids this Station minted. Completed ids remain spent.
+    sent_fetches: std::collections::BTreeMap<u64, Fetch>,
+    /// Fetch ids the peer minted. Completed ids remain spent.
+    received_fetches: std::collections::BTreeMap<u64, Fetch>,
     active_groups: std::collections::BTreeMap<(u64, u64), ActiveGroup>,
     /// Highest sequence observed even after its stream completes. Without this,
     /// an older stream arriving just after the newer one finished would become
@@ -1315,6 +1416,24 @@ impl SessionState {
                 }
                 self.require_active_track(direction.opposite(), &target.track)
             }
+            Control::Fetch(fetch) => {
+                if self.going_away(direction.opposite()) {
+                    return Err(Invalid::GoingAway);
+                }
+                self.fetch_track_info(direction, &fetch.track)?;
+                let fetches = match direction {
+                    Direction::Sent => &mut self.sent_fetches,
+                    Direction::Received => &mut self.received_fetches,
+                };
+                if fetches.contains_key(&fetch.fetch_id) {
+                    return Err(Invalid::Duplicate);
+                }
+                if fetches.len() >= MAX_FETCHES_PER_SESSION {
+                    return Err(Invalid::TooLarge);
+                }
+                fetches.insert(fetch.fetch_id, fetch.clone());
+                Ok(())
+            }
             Control::GoAway(_) => {
                 let going_away = match direction {
                     Direction::Sent => &mut self.sent_go_away,
@@ -1326,7 +1445,7 @@ impl SessionState {
                 *going_away = true;
                 Ok(())
             }
-            Control::Fetch(_) | Control::ClockProbe(_) | Control::ClockReply(_) => Ok(()),
+            Control::ClockProbe(_) | Control::ClockReply(_) => Ok(()),
         }
     }
 
@@ -1378,6 +1497,42 @@ impl SessionState {
             Direction::Sent => self.sent_catalog.as_ref(),
             Direction::Received => self.received_catalog.as_ref(),
         }
+    }
+
+    fn fetch_track_info(
+        &self,
+        request_direction: Direction,
+        track: &str,
+    ) -> Result<TrackInfo, Invalid> {
+        let metadata_direction = request_direction.opposite();
+        let tracks = match metadata_direction {
+            Direction::Sent => &self.sent_tracks,
+            Direction::Received => &self.received_tracks,
+        };
+        if track == CATALOG_TRACK {
+            return tracks.get(track).cloned().map_or_else(
+                || {
+                    Ok(TrackInfo {
+                        track: CATALOG_TRACK.into(),
+                        kind: TrackKind::Catalog,
+                        codec: CATALOG_CODEC.into(),
+                        timescale: CATALOG_TIMESCALE,
+                        decoder_config: Vec::new(),
+                        max_group_duration_ms: self.negotiated_group_duration_ms()?,
+                    })
+                },
+                Ok,
+            );
+        }
+        let advertised = self
+            .catalog(metadata_direction)
+            .and_then(|snapshot| snapshot.catalog.track(track))
+            .ok_or(Invalid::CatalogRequired)?;
+        if let Some(info) = tracks.get(track) {
+            info.matches_catalog(advertised)?;
+            return Ok(info.clone());
+        }
+        advertised.track_info()
     }
 
     fn record_catalog(
@@ -1687,6 +1842,9 @@ impl Session {
         if !self.enabled {
             return Err(Invalid::FeatureNotNegotiated);
         }
+        if matches!(control, Control::Fetch(_)) {
+            return Err(Invalid::FetchTransactionRequired);
+        }
         control.validate()?;
         let _serial = self.send_lock.lock().await;
         self.lock_state().record(Direction::Sent, &control)?;
@@ -1723,6 +1881,24 @@ impl Session {
             .group_budget(Direction::Received, &header)?;
         let priority = i32::try_from(header.group_sequence).unwrap_or(i32::MAX);
         OutgoingGroup::begin(self.connection.as_ref(), header, priority).await
+    }
+
+    /// Fetch exactly one Group on one bidirectional request/response stream.
+    /// The id is spent before any transport operation and cannot be rebound
+    /// after an ambiguous failure on this connection.
+    pub async fn fetch(&self, request: Fetch) -> Result<FetchedGroup, Invalid> {
+        if !self.enabled {
+            return Err(Invalid::FeatureNotNegotiated);
+        }
+        Control::Fetch(request.clone()).validate()?;
+        let track_info = {
+            let _serial = self.send_lock.lock().await;
+            let mut state = self.lock_state();
+            state.record(Direction::Sent, &Control::Fetch(request.clone()))?;
+            state.fetch_track_info(Direction::Sent, &request.track)?
+        };
+        self.state_changed.notify_waiters();
+        fetch_group(self.connection.as_ref(), &request, &track_info).await
     }
 
     /// Publish one full independent catalog update on the peer's active
@@ -1765,9 +1941,39 @@ impl Session {
     }
 
     pub(crate) fn accept_control(&self, control: &Control) -> Result<(), Invalid> {
+        if matches!(control, Control::Fetch(_)) {
+            return Err(Invalid::FetchTransactionRequired);
+        }
         self.lock_state().record(Direction::Received, control)?;
         self.state_changed.notify_waiters();
         Ok(())
+    }
+
+    pub(crate) fn accept_fetch(
+        &self,
+        request: Fetch,
+        mut send: Box<dyn comms::SendFlow>,
+    ) -> Result<FetchResponder, Invalid> {
+        if !self.enabled {
+            send.reset(RESET_MEDIA);
+            return Err(Invalid::FeatureNotNegotiated);
+        }
+        let admitted = {
+            let mut state = self.lock_state();
+            state
+                .record(Direction::Received, &Control::Fetch(request.clone()))
+                .and_then(|()| state.fetch_track_info(Direction::Received, &request.track))
+        };
+        match admitted {
+            Ok(track_info) => {
+                self.state_changed.notify_waiters();
+                Ok(FetchResponder::new(request, track_info, send))
+            }
+            Err(error) => {
+                send.reset(RESET_MEDIA);
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn accept_catalog(&self, group: &ReceivedGroup) -> Result<(), Invalid> {
@@ -1876,6 +2082,7 @@ pub struct Event {
 pub enum EventBody {
     Control(Control),
     Group(Arc<ReceivedGroup>),
+    Fetch(FetchResponder),
 }
 
 /// Bounded local handoff from the Live driver to a product-neutral consumer.
@@ -1911,6 +2118,9 @@ pub async fn send_control(
     connection: &dyn comms::Connection,
     control: &Control,
 ) -> Result<(), Invalid> {
+    if matches!(control, Control::Fetch(_)) {
+        return Err(Invalid::FetchTransactionRequired);
+    }
     let body = control.encode()?;
     let (mut send, _recv) = connection.open_bi().await.map_err(|_| Invalid::Truncated)?;
     send.write_all(&[stream_kind::MEDIA_CONTROL])
@@ -1927,6 +2137,190 @@ pub async fn read_control_body(flow: &mut dyn comms::RecvFlow) -> Result<Control
             .await
             .map_err(|_| Invalid::Truncated)?;
     Control::decode_canonical(&body)
+}
+
+/// Execute one raw Fetch transaction. Connection-scoped callers should prefer
+/// [`Session::fetch`], which additionally spends and validates the Fetch id.
+pub async fn fetch_group(
+    connection: &dyn comms::Connection,
+    request: &Fetch,
+    track_info: &TrackInfo,
+) -> Result<FetchedGroup, Invalid> {
+    Control::Fetch(request.clone()).validate()?;
+    Control::TrackInfo(track_info.clone()).validate()?;
+    if track_info.track != request.track {
+        return Err(Invalid::WrongTrack);
+    }
+    let body = Control::Fetch(request.clone()).encode()?;
+    let (mut send, mut recv) = connection.open_bi().await.map_err(|_| Invalid::Truncated)?;
+    send.set_priority(fetch_priority(request.priority));
+    let request_result = async {
+        send.write_all(&[stream_kind::MEDIA_CONTROL])
+            .await
+            .map_err(|_| Invalid::Truncated)?;
+        write_framed(send.as_mut(), &body).await?;
+        send.finish().map_err(|_| Invalid::Truncated)
+    }
+    .await;
+    if let Err(error) = request_result {
+        send.reset(RESET_MEDIA);
+        recv.stop(RESET_MEDIA);
+        return Err(error);
+    }
+
+    let frames = tokio::time::timeout(
+        crate::budget::deadline::MEDIA_GROUP_READ,
+        read_fetch_response(recv.as_mut(), track_info),
+    )
+    .await
+    .map_err(|_| Invalid::Truncated)?;
+    match frames {
+        Ok(frames) => Ok(FetchedGroup {
+            request: request.clone(),
+            track_info: track_info.clone(),
+            frames,
+        }),
+        Err(error) => {
+            recv.stop(RESET_MEDIA);
+            Err(error)
+        }
+    }
+}
+
+/// Write the Frames returned on a Fetch stream. The request already supplied
+/// Track and Group identity, so no Group header is emitted.
+pub async fn write_fetch_response(
+    send: &mut dyn comms::SendFlow,
+    track_info: &TrackInfo,
+    frames: &[Frame],
+) -> Result<(), Invalid> {
+    validate_fetch_frames(track_info, frames)?;
+    for frame in frames {
+        let header = frame.header.encode()?;
+        write_framed(send, &header).await?;
+        send.write_all(&frame.payload)
+            .await
+            .map_err(|_| Invalid::Truncated)?;
+    }
+    send.finish().map_err(|_| Invalid::Truncated)
+}
+
+/// Read Frames returned directly on a Fetch stream until its clean FIN.
+pub async fn read_fetch_response(
+    flow: &mut dyn comms::RecvFlow,
+    track_info: &TrackInfo,
+) -> Result<Vec<Frame>, Invalid> {
+    Control::TrackInfo(track_info.clone()).validate()?;
+    let mut frames = Vec::new();
+    let mut bytes = 0usize;
+    let mut first_timestamp = None;
+    let mut last_timestamp = None;
+
+    loop {
+        let Some(header_bytes) = read_optional_framed(flow, MAX_MEDIA_HEADER_BYTES).await? else {
+            break;
+        };
+        if frames.len() >= MAX_FRAMES_PER_GROUP {
+            flow.stop(RESET_MEDIA);
+            return Err(Invalid::TooLarge);
+        }
+        let header = FrameHeader::decode_canonical(&header_bytes)?;
+        if header.timescale != track_info.timescale {
+            flow.stop(RESET_MEDIA);
+            return Err(Invalid::Bounds);
+        }
+        if frames.is_empty() && header.kind != FrameKind::Key {
+            flow.stop(RESET_MEDIA);
+            return Err(Invalid::FirstFrameNotKey);
+        }
+        validate_timestamp(
+            first_timestamp,
+            last_timestamp,
+            &header,
+            track_info.max_group_duration_ms,
+        )?;
+        let payload_len = usize::try_from(header.payload_len).map_err(|_| Invalid::Bounds)?;
+        if track_info.kind == TrackKind::Catalog
+            && (!frames.is_empty() || payload_len > MAX_CATALOG_BYTES)
+        {
+            flow.stop(RESET_MEDIA);
+            return Err(Invalid::TooLarge);
+        }
+        let added = header_bytes
+            .len()
+            .checked_add(payload_len)
+            .ok_or(Invalid::TooLarge)?;
+        if bytes.saturating_add(added) > MAX_MEDIA_GROUP_BYTES {
+            flow.stop(RESET_MEDIA);
+            return Err(Invalid::TooLarge);
+        }
+        let payload = flow
+            .read_exact(payload_len)
+            .await
+            .map_err(|_| Invalid::Truncated)?;
+        first_timestamp.get_or_insert(header.timestamp);
+        last_timestamp = Some(header.timestamp);
+        bytes = bytes.saturating_add(added);
+        frames.push(Frame { header, payload });
+    }
+    validate_fetch_frames(track_info, &frames)?;
+    Ok(frames)
+}
+
+fn validate_fetch_frames(track_info: &TrackInfo, frames: &[Frame]) -> Result<(), Invalid> {
+    Control::TrackInfo(track_info.clone()).validate()?;
+    if frames.is_empty() {
+        return Err(Invalid::FirstFrameNotKey);
+    }
+    if frames.len() > MAX_FRAMES_PER_GROUP {
+        return Err(Invalid::TooLarge);
+    }
+    let mut bytes = 0usize;
+    let mut first_timestamp = None;
+    let mut last_timestamp = None;
+    for (index, frame) in frames.iter().enumerate() {
+        if frame.header.timescale != track_info.timescale {
+            return Err(Invalid::Bounds);
+        }
+        if index == 0 && frame.header.kind != FrameKind::Key {
+            return Err(Invalid::FirstFrameNotKey);
+        }
+        let payload_len = usize::try_from(frame.header.payload_len).map_err(|_| Invalid::Bounds)?;
+        if payload_len != frame.payload.len() {
+            return Err(Invalid::PayloadLength);
+        }
+        validate_timestamp(
+            first_timestamp,
+            last_timestamp,
+            &frame.header,
+            track_info.max_group_duration_ms,
+        )?;
+        let header = frame.header.encode()?;
+        bytes = bytes
+            .checked_add(header.len())
+            .and_then(|bytes| bytes.checked_add(payload_len))
+            .ok_or(Invalid::TooLarge)?;
+        if bytes > MAX_MEDIA_GROUP_BYTES {
+            return Err(Invalid::TooLarge);
+        }
+        first_timestamp.get_or_insert(frame.header.timestamp);
+        last_timestamp = Some(frame.header.timestamp);
+    }
+    if track_info.kind == TrackKind::Catalog {
+        let frame = frames.first().ok_or(Invalid::FirstFrameNotKey)?;
+        if frames.len() != 1
+            || frame.header.duration.is_some()
+            || frame.payload.len() > MAX_CATALOG_BYTES
+        {
+            return Err(Invalid::Bounds);
+        }
+        Catalog::decode_canonical(&frame.payload)?;
+    }
+    Ok(())
+}
+
+fn fetch_priority(priority: u8) -> i32 {
+    i32::from(u8::MAX.saturating_sub(priority))
 }
 
 /// A Group being written to its own QUIC unidirectional stream.
@@ -2359,6 +2753,15 @@ mod tests {
             max_latency_ms: DEFAULT_MAX_LATENCY_MS,
             start_group: None,
             end_group: None,
+        }
+    }
+
+    fn fetch(fetch_id: u64) -> Fetch {
+        Fetch {
+            fetch_id,
+            track: "screen/main".into(),
+            group_sequence: 17,
+            priority: 9,
         }
     }
 
@@ -3163,6 +3566,117 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fetch_ids_are_directional_spent_and_catalog_bound() {
+        let mut state = SessionState::default();
+        assert_eq!(
+            state.record(Direction::Sent, &Control::Fetch(fetch(1))),
+            Err(Invalid::SetupRequired)
+        );
+        state
+            .record(Direction::Sent, &Control::Setup(setup()))
+            .expect("local setup");
+        state
+            .record(Direction::Received, &Control::Setup(setup()))
+            .expect("remote setup");
+        assert_eq!(
+            state.record(Direction::Sent, &Control::Fetch(fetch(1))),
+            Err(Invalid::CatalogRequired)
+        );
+        state
+            .record_catalog_value(Direction::Received, 1, catalog())
+            .expect("peer catalog");
+        state
+            .received_tracks
+            .insert("screen/main".into(), track_info());
+        state
+            .record(Direction::Sent, &Control::Fetch(fetch(1)))
+            .expect("outbound Fetch");
+        assert_eq!(
+            state.record(Direction::Sent, &Control::Fetch(fetch(1))),
+            Err(Invalid::Duplicate)
+        );
+
+        let mut changed = catalog();
+        changed.tracks[0].decoder_config_hex = "01640029".into();
+        state
+            .record_catalog_value(Direction::Received, 2, changed)
+            .expect("new peer catalog");
+        assert_eq!(
+            state.record(Direction::Sent, &Control::Fetch(fetch(2))),
+            Err(Invalid::TrackInfoMismatch)
+        );
+        state
+            .record_catalog_value(Direction::Received, 3, catalog())
+            .expect("restored peer catalog");
+
+        state
+            .record_catalog_value(Direction::Sent, 1, catalog())
+            .expect("local catalog");
+        state
+            .record(Direction::Received, &Control::Fetch(fetch(1)))
+            .expect("the peer owns its own id space");
+
+        for fetch_id in 2..=u64::try_from(MAX_FETCHES_PER_SESSION).expect("small bound") {
+            state
+                .record(Direction::Sent, &Control::Fetch(fetch(fetch_id)))
+                .expect("bounded Fetch");
+        }
+        assert_eq!(
+            state.record(
+                Direction::Sent,
+                &Control::Fetch(fetch(
+                    u64::try_from(MAX_FETCHES_PER_SESSION).expect("small bound") + 1
+                ))
+            ),
+            Err(Invalid::TooLarge)
+        );
+    }
+
+    #[test]
+    fn fetch_frames_are_one_bounded_keyframe_started_group() {
+        let frames = vec![
+            Frame {
+                header: FrameHeader {
+                    timestamp: 90_000,
+                    duration: Some(3_000),
+                    timescale: 90_000,
+                    kind: FrameKind::Key,
+                    payload_len: 3,
+                },
+                payload: b"key".to_vec(),
+            },
+            Frame {
+                header: FrameHeader {
+                    timestamp: 93_000,
+                    duration: Some(3_000),
+                    timescale: 90_000,
+                    kind: FrameKind::Delta,
+                    payload_len: 5,
+                },
+                payload: b"delta".to_vec(),
+            },
+        ];
+        validate_fetch_frames(&track_info(), &frames).expect("one fetched Group");
+        assert_eq!(
+            validate_fetch_frames(&track_info(), &[]),
+            Err(Invalid::FirstFrameNotKey)
+        );
+
+        let mut delta_first = frames.clone();
+        delta_first[0].header.kind = FrameKind::Delta;
+        assert_eq!(
+            validate_fetch_frames(&track_info(), &delta_first),
+            Err(Invalid::FirstFrameNotKey)
+        );
+        let mut wrong_track = frames;
+        wrong_track[1].header.timescale = 1_000;
+        assert_eq!(
+            validate_fetch_frames(&track_info(), &wrong_track),
+            Err(Invalid::Bounds)
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_newer_group_arms_the_older_groups_monotonic_deadline() {
         let state = Arc::new(std::sync::Mutex::new(SessionState::default()));
@@ -3360,11 +3874,11 @@ mod tests {
                         }))
                     ));
 
-                    let catalog_group = catalog_group(1);
-                    let catalog_frame = catalog_group.frames.first().expect("one Frame");
+                    let published_catalog = catalog_group(1);
+                    let catalog_frame = published_catalog.frames.first().expect("one Frame");
                     let mut sending_catalog = OutgoingGroup::begin(
                         dialer.as_ref(),
-                        catalog_group.header.clone(),
+                        published_catalog.header.clone(),
                         u8::MAX.into(),
                     )
                     .await
@@ -3449,6 +3963,85 @@ mod tests {
                         .await
                         .expect("event in time")
                         .expect("event");
+
+                    let catalog_request = Fetch {
+                        fetch_id: 11,
+                        track: CATALOG_TRACK.into(),
+                        group_sequence: 1,
+                        priority: u8::MAX,
+                    };
+                    let catalog_frames = catalog_group(1).frames;
+                    let catalog_info = catalog_track_info();
+                    let requesting_catalog =
+                        fetch_group(dialer.as_ref(), &catalog_request, &catalog_info);
+                    let answering_catalog = async {
+                        let fetch = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                            .await
+                            .expect("Fetch event in time")
+                            .expect("Fetch event");
+                        let EventBody::Fetch(responder) = fetch.body else {
+                            panic!("Fetch event");
+                        };
+                        assert_eq!(responder.request(), &catalog_request);
+                        responder
+                            .respond(&catalog_frames)
+                            .await
+                            .expect("catalog Fetch response");
+                    };
+                    let (fetched_catalog, ()) = tokio::join!(requesting_catalog, answering_catalog);
+                    assert_eq!(
+                        fetched_catalog
+                            .expect("fetched catalog")
+                            .catalog()
+                            .expect("canonical fetched catalog"),
+                        Some(catalog())
+                    );
+
+                    assert_eq!(
+                        session.send(Control::Fetch(fetch(10))).await,
+                        Err(Invalid::FetchTransactionRequired)
+                    );
+
+                    let media_request = fetch(12);
+                    let media_frames = vec![Frame {
+                        header: FrameHeader {
+                            timestamp: 90_000,
+                            duration: Some(3_000),
+                            timescale: 90_000,
+                            kind: FrameKind::Key,
+                            payload_len: 17,
+                        },
+                        payload: b"fetched-media-key".to_vec(),
+                    }];
+                    let requesting_media = session.fetch(media_request.clone());
+                    let answering_media = async {
+                        let (mut answer, mut request) = dialer
+                            .accept_bi()
+                            .await
+                            .expect("accept Fetch")
+                            .expect("Fetch flow");
+                        assert_eq!(
+                            request.read_exact(1).await.expect("Fetch lane"),
+                            [stream_kind::MEDIA_CONTROL]
+                        );
+                        assert_eq!(
+                            read_control_body(request.as_mut())
+                                .await
+                                .expect("Fetch body"),
+                            Control::Fetch(media_request)
+                        );
+                        assert!(request
+                            .read_chunk(1)
+                            .await
+                            .expect("Fetch request FIN")
+                            .is_none());
+                        write_fetch_response(answer.as_mut(), &track_info(), &media_frames)
+                            .await
+                            .expect("media Fetch response");
+                    };
+                    let (fetched_media, ()) = tokio::join!(requesting_media, answering_media);
+                    assert_eq!(fetched_media.expect("fetched media").frames, media_frames);
+
                     cancel.cancel();
                     dialer.close(0, b"done");
                     event

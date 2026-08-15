@@ -8,8 +8,8 @@ use comms::policy::Network;
 use comms::{Alpn, Connection, DefaultTransport, Protocols, Transport};
 use mechanics::actor::device_from_seed;
 use runtime::plane::live::media::{
-    self, Catalog, CatalogTrack, Control, FrameHeader, FrameKind, GroupHeader, OutgoingGroup,
-    Setup, TrackKind,
+    self, Catalog, CatalogTrack, Control, Fetch, Frame, FrameHeader, FrameKind, GroupHeader,
+    OutgoingGroup, Setup, TrackInfo, TrackKind,
 };
 use runtime::plane::stream_kind;
 
@@ -141,6 +141,17 @@ fn catalog() -> Catalog {
     }
 }
 
+fn track_info() -> TrackInfo {
+    TrackInfo {
+        track: "screen/main".into(),
+        kind: TrackKind::Video,
+        codec: "avc1.640028".into(),
+        timescale: 90_000,
+        decoder_config: vec![1, 100, 0, 40],
+        max_group_duration_ms: media::DEFAULT_MAX_GROUP_DURATION_MS,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_is_one_ordered_uni_stream_on_mem_and_real_quic() {
     on_both("media Group", async |pair: Pair| {
@@ -236,6 +247,58 @@ async fn a_catalog_update_is_one_canonical_group_on_mem_and_real_quic() {
         };
         let ((), received) = tokio::join!(sending, receiving);
         assert_eq!(Catalog::from_group(&received), Ok(expected));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetch_returns_one_group_on_its_request_stream_on_mem_and_real_quic() {
+    on_both("media fetch", async |pair: Pair| {
+        let request = Fetch {
+            fetch_id: 9,
+            track: "screen/main".into(),
+            group_sequence: 42,
+            priority: 7,
+        };
+        let info = track_info();
+        let frames = vec![
+            Frame {
+                header: frame(90_000, FrameKind::Key, b"fetched-key"),
+                payload: b"fetched-key".to_vec(),
+            },
+            Frame {
+                header: frame(93_000, FrameKind::Delta, b"fetched-delta"),
+                payload: b"fetched-delta".to_vec(),
+            },
+        ];
+        let requesting = media::fetch_group(pair.dialer.as_ref(), &request, &info);
+        let serving = async {
+            let (mut answer, mut recv) = pair
+                .accepter
+                .accept_bi()
+                .await
+                .expect("accept")
+                .expect("Fetch flow");
+            assert_eq!(
+                recv.read_exact(1).await.expect("lane"),
+                [stream_kind::MEDIA_CONTROL]
+            );
+            assert_eq!(
+                media::read_control_body(recv.as_mut())
+                    .await
+                    .expect("Fetch request"),
+                Control::Fetch(request.clone())
+            );
+            assert!(recv.read_chunk(1).await.expect("request FIN").is_none());
+            media::write_fetch_response(answer.as_mut(), &info, &frames)
+                .await
+                .expect("Fetch response");
+        };
+        let (fetched, ()) = tokio::join!(requesting, serving);
+        let fetched = fetched.expect("fetched Group");
+        assert_eq!(fetched.request, request);
+        assert_eq!(fetched.track_info, info);
+        assert_eq!(fetched.frames, frames);
     })
     .await;
 }

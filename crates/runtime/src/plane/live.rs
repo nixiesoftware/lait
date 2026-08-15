@@ -1671,19 +1671,50 @@ pub async fn serve_session(
                         crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
                         continue;
                     };
-                    if media_session.accept_control(&control).is_err() {
-                        crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
-                        continue;
+                    match control {
+                        media::Control::Fetch(request) => {
+                            if !matches!(
+                                tokio::time::timeout(
+                                    deadline::LIVE_FLOW_READ,
+                                    recv.read_chunk(1),
+                                )
+                                .await,
+                                Ok(Ok(None))
+                            ) {
+                                crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
+                                continue;
+                            }
+                            let Ok(responder) = media_session.accept_fetch(request, send) else {
+                                recv.stop(media::RESET_MEDIA);
+                                continue;
+                            };
+                            if let Some(handle) = &handle {
+                                handle.media.publish(media::Event {
+                                    peer: peer.station.clone(),
+                                    connection_id: peer.connection_id,
+                                    session: media_session.clone(),
+                                    body: media::EventBody::Fetch(responder),
+                                });
+                            } else {
+                                let _ = responder.refuse().await;
+                            }
+                        }
+                        control => {
+                            if media_session.accept_control(&control).is_err() {
+                                crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
+                                continue;
+                            }
+                            if let Some(handle) = &handle {
+                                handle.media.publish(media::Event {
+                                    peer: peer.station.clone(),
+                                    connection_id: peer.connection_id,
+                                    session: media_session.clone(),
+                                    body: media::EventBody::Control(control),
+                                });
+                            }
+                            let _ = send.finish();
+                        }
                     }
-                    if let Some(handle) = &handle {
-                        handle.media.publish(media::Event {
-                            peer: peer.station.clone(),
-                            connection_id: peer.connection_id,
-                            session: media_session.clone(),
-                            body: media::EventBody::Control(control),
-                        });
-                    }
-                    let _ = send.finish();
                     continue;
                 }
                 if kind != stream_kind::CONTROL {
