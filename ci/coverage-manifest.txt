@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1759
-pr-platform    1372
-nightly        1786
+pr             1762
+pr-platform    1375
+nightly        1789
 mutants        98
 
 [gates]
@@ -543,7 +543,10 @@ lait update::feed::tests::a_channel_resolves_to_the_release_its_pointer_names
 lait update::feed::tests::a_channel_resolves_when_a_successor_key_signed_it
 lait update::feed::tests::a_floor_is_carried_and_an_unsatisfiable_floor_is_ignored_and_flagged
 lait update::feed::tests::a_pointer_and_manifest_that_disagree_on_version_are_refused
+lait update::feed::tests::a_pointer_may_not_drop_its_stamp_once_one_has_been_seen
 lait update::feed::tests::a_relocation_is_followed_once_and_a_chain_is_refused
+lait update::feed::tests::a_replayed_pointer_is_stale_and_never_reads_as_no_new_release
+lait update::feed::tests::a_replayed_relocation_record_is_stale_too
 lait update::feed::tests::a_sealed_envelope_opens_and_a_tampered_one_is_a_verification_failure
 lait update::feed::tests::an_unreachable_pointer_stays_unreachable_never_up_to_date
 lait update::feed::tests::any_pinned_key_opens_an_envelope_which_is_what_makes_rotation_an_overlap
