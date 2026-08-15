@@ -18,6 +18,15 @@ export interface DocumentSplice {
   index: number;
   delete: number;
   insert: string;
+  /**
+   * Scalar length of the document `index` is an offset into.
+   *
+   * Carried to the World, which refuses the splice when it disagrees with what
+   * it holds. A positional offset says nothing without agreement about which
+   * document it indexes, and an editor addressing a re-serialized copy is how
+   * one gets silently overwritten.
+   */
+  base_len?: number;
 }
 
 export interface DocumentUpgrade {

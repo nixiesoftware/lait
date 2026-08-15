@@ -959,6 +959,7 @@ impl<'a> IssueRouter<'a> {
                 index,
                 delete,
                 insert,
+                base_len,
             } => {
                 let doc = self.resolve(&snapshot, &reff)?;
                 self.submit(&IssueIntent::IssueTextSplice {
@@ -966,6 +967,7 @@ impl<'a> IssueRouter<'a> {
                     index,
                     delete,
                     insert,
+                    base_len,
                 })
                 .map_err(Self::effect_err)?;
                 Ok((self.ref_response(&doc), true))

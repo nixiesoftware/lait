@@ -3,6 +3,15 @@ export interface TextSplice {
   index: number;
   delete: number;
   insert: string;
+  /**
+   * Scalar length of the document these offsets were measured against.
+   *
+   * The World refuses the splice when this disagrees with what it holds. A
+   * positional write with no such agreement overwrites whatever now sits at
+   * that offset — which is how an editor measuring a re-serialized copy of a
+   * document silently corrupted it.
+   */
+  base_len?: number;
 }
 
 /** The smallest contiguous splice between two Markdown strings. Array.from is

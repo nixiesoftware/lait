@@ -3093,6 +3093,7 @@ function Description({
     <MarkdownEditor
       value={authoritative}
       documentSchema={documentSchema}
+      onNotEditable={(reason) => report.current(reason)}
       placeholder="Add description…"
       className="min-h-ctl-xl py-2"
       remoteCursors={remoteCursors}

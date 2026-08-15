@@ -874,11 +874,21 @@ pub enum IssueIntent {
     },
     /// One editor-local operation against the issue description's text CRDT.
     /// Offsets count Unicode scalar values, matching [`fabric::Op::TextSplice`].
+    ///
+    /// `base_len` is the scalar length of the document the offsets were
+    /// computed against, and the World refuses when it disagrees with what it
+    /// holds. Without it this is a bare positional write with no agreement
+    /// about *which* document it applies to — and an editor whose coordinate
+    /// space had drifted would silently overwrite unrelated text, which is
+    /// exactly what happened to a document whose editor was measuring a
+    /// re-serialized copy.
     IssueTextSplice {
         doc: String,
         index: u64,
         delete: u64,
         insert: String,
+        #[serde(default)]
+        base_len: Option<u64>,
     },
     /// Atomically move one legacy issue body onto the current hidden document
     /// schema. `expected` is a compare-and-swap over the exact legacy source;

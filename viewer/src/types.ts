@@ -991,6 +991,14 @@ export interface DocumentSplice {
   index: number;
   delete: number;
   insert: string;
+  /**
+   * Scalar length of the document these offsets were measured against.
+   *
+   * The World refuses a splice whose base length disagrees with what it holds:
+   * positional offsets are meaningless without agreement about which document
+   * they index into.
+   */
+  base_len?: number;
 }
 
 export interface Filter {
@@ -1047,7 +1055,15 @@ export type Request =
    *  a number as a string, or `"none"` to clear. Absent = untouched. */
   | { cmd: "issue_edit"; reff: string; title?: string | null; status?: string | null; priority?: string | null; description?: string | null; due?: string | null; estimate?: string | null }
   /** Unicode-scalar offsets into the collaborative description text. */
-  | { cmd: "issue_text_splice"; reff: string; index: number; delete: number; insert: string }
+  | {
+      cmd: "issue_text_splice";
+      reff: string;
+      index: number;
+      delete: number;
+      insert: string;
+      /** Scalar length of the document the offsets were measured against. */
+      base_len?: number;
+    }
   /** Atomic upgrade from a legacy body into Lait's hidden document model. */
   | { cmd: "issue_document_upgrade"; reff: string; expected: string; splices: DocumentSplice[] }
   /** Group a burst of live splices into one activity entry. */
