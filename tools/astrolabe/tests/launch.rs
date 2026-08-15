@@ -396,10 +396,15 @@ async fn stop_daemon(home: &Path) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     let Some(executable) = sidecar() else {
-        // Not a silent pass: the suite that runs this always builds `lait`
-        // first, so an absent binary means somebody ran this alone.
-        eprintln!("no lait binary beside the test binary; skipping the real-head launch test");
-        return;
+        // A failure, not a skip. This is the one test that exercises the
+        // client-to-process seam against a real binary, and that seam has been
+        // wrong twice — both times with every component correct and the
+        // composition wrong. A run that cannot find `lait` has proven nothing,
+        // and reporting `ok` for it is how the guard comes to be trusted while
+        // guarding nothing.
+        panic!(
+            "no lait binary beside the test binary, so the launch seam was not exercised.              Build it first: `cargo build -p lait`, or run the suite that does              (`cargo nextest run --workspace`)."
+        );
     };
 
     let managed = tempfile::tempdir().expect("a managed root");
@@ -532,6 +537,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
+                sync: None,
                 expires_at_unix_ms: None,
             })
             .await

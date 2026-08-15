@@ -36,7 +36,7 @@ set -euo pipefail
 BUCKET="gs://the-foundation-dist"
 BASE_URL="https://storage.googleapis.com/the-foundation-dist"
 
-VERSION="" CHANNEL="" ARTIFACTS="" SEED="" FLOOR="" ASTROLABE="" FROM_RELEASE=""
+VERSION="" CHANNEL="" ARTIFACTS="" SEED="" FLOOR="" ASTROLABE="" FROM_RELEASE="" LAIT_ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -46,6 +46,7 @@ while [ $# -gt 0 ]; do
     --floor) FLOOR="$2"; shift 2 ;;
     --astrolabe) ASTROLABE="$2"; shift 2 ;;
     --from-release) FROM_RELEASE="$2"; shift 2 ;;
+    --lait-only) LAIT_ONLY=1; shift ;;
     *) echo "publish-feed: unknown argument $1" >&2; exit 1 ;;
   esac
 done
@@ -77,8 +78,29 @@ if [ -n "$FROM_RELEASE" ]; then
       *) echo "publish-feed: unrecognized Astrolabe artifact $installer" >&2; exit 1 ;;
     esac
     echo "publish-feed: including installer(s) for astrolabe $ASTROLABE"
+  elif [ -n "$LAIT_ONLY" ]; then
+    echo "publish-feed: no astrolabe installer on $FROM_RELEASE; publishing lait only, as asked" >&2
   else
-    echo "publish-feed: NOTE — no astrolabe installer on $FROM_RELEASE; publishing lait only" >&2
+    echo "publish-feed: $FROM_RELEASE carries no astrolabe installer." >&2
+    echo "  A release that ships the engine and not the client is a real thing to want —" >&2
+    echo "  lait is installed on its own by several paths — but it is not a thing to do by" >&2
+    echo "  ACCIDENT, which is what a note on stderr and a publish anyway amounts to." >&2
+    echo "  Pass --lait-only to say you meant it." >&2
+    exit 1
+  fi
+
+  # The stable pointer never moves at a release GitHub still calls a prerelease.
+  # The release page is the record of whether every declared bundle actually
+  # arrived; disagreeing with it here would make the feed the more optimistic of
+  # two accounts of the same release.
+  if [ "$CHANNEL" = "stable" ]; then
+    prerelease="$(gh release view "$FROM_RELEASE" --json isPrerelease --jq .isPrerelease 2>/dev/null || echo unknown)"
+    if [ "$prerelease" != "false" ]; then
+      echo "publish-feed: $FROM_RELEASE is marked isPrerelease=$prerelease on GitHub." >&2
+      echo "  The stable pointer is what every installed machine follows by default." >&2
+      echo "  Promote the release first, or publish to --channel test." >&2
+      exit 1
+    fi
   fi
 fi
 
