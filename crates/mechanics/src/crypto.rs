@@ -41,6 +41,10 @@ const NONCE_LEN: usize = 12;
 pub(crate) enum Failure {
     Randomness,
     Encryption,
+    /// A device set produced no usable wrap, so the payload would be readable
+    /// by nobody. Sealing to an empty audience is a failure, never a success
+    /// with an empty result.
+    Unaddressable,
 }
 
 pub(crate) fn random_array<const N: usize>() -> Result<[u8; N], Failure> {
@@ -137,12 +141,11 @@ pub fn sign_detached(seed: &[u8; 32], preimage: &[u8]) -> [u8; 64] {
 /// malformed key or signature — a bad input is a failed verification, not a
 /// crash.
 pub fn verify_detached(public_key: &[u8; 32], preimage: &[u8], signature: &[u8; 64]) -> bool {
-    use ed25519_dalek::Verifier;
     let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(public_key) else {
         return false;
     };
     let sig = ed25519_dalek::Signature::from_bytes(signature);
-    vk.verify(preimage, &sig).is_ok()
+    vk.verify_strict(preimage, &sig).is_ok()
 }
 
 fn random_nonce() -> Result<[u8; NONCE_LEN], Failure> {
@@ -188,7 +191,41 @@ fn ed_pubkey_bytes(device: &DeviceId) -> Option<[u8; 32]> {
 /// ed25519 public → X25519 public (Edwards-Y → Montgomery-u).
 fn ed_pk_to_x(ed_pub: &[u8; 32]) -> Option<XPublic> {
     let ed = CompressedEdwardsY(*ed_pub).decompress()?;
+    // A small-order point is a valid encoding and a useless key: every one of
+    // them drives the Diffie-Hellman below to the all-zero secret, which makes
+    // the box key a function of public values alone. Refuse here so a caller
+    // never gets an envelope that looks sealed and is not.
+    if ed.is_small_order() {
+        return None;
+    }
     Some(XPublic::from(ed.to_montgomery().to_bytes()))
+}
+
+/// Record that a named device cannot be sealed to.
+///
+/// Every caller skips such a device and seals to the rest, which is the right
+/// behaviour — one unusable key must not stop a Space distributing its epoch key
+/// to everyone else. But a device that silently never receives a key looks
+/// exactly like a device that received one and stayed quiet, and the difference
+/// is the whole diagnosis. Say it once, here, where the reason is known.
+fn unusable_recipient(recipient: &DeviceId, why: &str) {
+    tracing::warn!(device = %recipient.as_str(), why, "cannot seal to this device");
+}
+
+/// The Diffie-Hellman both boxes rest on, with the check that makes it a secret.
+///
+/// A shared secret that is not contributory is the all-zero value, which means
+/// one side's key contributed nothing and every input to the key derivation is
+/// public. RFC 9180 makes rejecting it a MUST for exactly this reason, and it is
+/// the single check whose absence turns a sealed box into plaintext.
+///
+/// Checked on **both** sides deliberately. Refusing only bad recipients would
+/// still let an attacker put a small-order ephemeral key in an envelope and have
+/// it open, under a key they can compute, to any victim — a forgery needing no
+/// keys at all.
+fn agree(secret: &StaticSecret, public: &XPublic) -> Option<[u8; 32]> {
+    let shared = secret.diffie_hellman(public);
+    shared.was_contributory().then(|| *shared.as_bytes())
 }
 
 /// ed25519 secret seed → X25519 static secret (libsodium `sk_to_curve25519`).
@@ -207,16 +244,21 @@ fn ed_seed_to_x(seed: &[u8; 32]) -> StaticSecret {
 /// distribute the space key. Returns `None` if the recipient key is invalid.
 pub fn seal_to(recipient: &DeviceId, msg: &[u8]) -> Result<Option<Vec<u8>>, Failure> {
     let Some(recip_ed) = ed_pubkey_bytes(recipient) else {
+        unusable_recipient(recipient, "not a 32-byte hex ed25519 key");
         return Ok(None);
     };
     let Some(recip_x) = ed_pk_to_x(&recip_ed) else {
+        unusable_recipient(recipient, "not a usable curve point");
         return Ok(None);
     };
     let eph_seed = random_array()?;
     let eph = StaticSecret::from(eph_seed);
     let eph_pub = XPublic::from(&eph);
-    let shared = eph.diffie_hellman(&recip_x);
-    let key = box_key(shared.as_bytes(), eph_pub.as_bytes(), recip_x.as_bytes());
+    let Some(shared) = agree(&eph, &recip_x) else {
+        unusable_recipient(recipient, "agreement was not contributory");
+        return Ok(None);
+    };
+    let key = box_key(&shared, eph_pub.as_bytes(), recip_x.as_bytes());
     let cipher = ChaCha20Poly1305::new((&key).into());
     let nonce = random_nonce()?;
     let ct = cipher
@@ -240,8 +282,8 @@ pub fn open_sealed(my_seed: &[u8; 32], me: &DeviceId, sealed: &[u8]) -> Option<V
     let my_x = ed_seed_to_x(my_seed);
     let my_ed = ed_pubkey_bytes(me)?;
     let my_x_pub = ed_pk_to_x(&my_ed)?;
-    let shared = my_x.diffie_hellman(&eph_pub);
-    let key = box_key(shared.as_bytes(), eph_pub.as_bytes(), my_x_pub.as_bytes());
+    let shared = agree(&my_x, &eph_pub)?;
+    let key = box_key(&shared, eph_pub.as_bytes(), my_x_pub.as_bytes());
     let cipher = ChaCha20Poly1305::new((&key).into());
     cipher.decrypt(Nonce::from_slice(nonce), ct).ok()
 }
@@ -288,6 +330,12 @@ pub fn seal_to_devices(
         if let Some(wrapped) = seal_to_bound(device, context, &dek)? {
             wraps.push((device.clone(), wrapped));
         }
+    }
+    if wraps.is_empty() {
+        // Every candidate was unusable (or there were none). Returning a
+        // DeviceSealed here would hand the caller a payload nobody can open,
+        // wearing the shape of a successful seal.
+        return Err(Failure::Unaddressable);
     }
     wraps.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(DeviceSealed { ciphertext, wraps })
@@ -397,21 +445,21 @@ pub fn seal_to_bound(
     msg: &[u8],
 ) -> Result<Option<Vec<u8>>, Failure> {
     let Some(recip_ed) = ed_pubkey_bytes(recipient) else {
+        unusable_recipient(recipient, "not a 32-byte hex ed25519 key");
         return Ok(None);
     };
     let Some(recip_x) = ed_pk_to_x(&recip_ed) else {
+        unusable_recipient(recipient, "not a usable curve point");
         return Ok(None);
     };
     let eph_seed = random_array()?;
     let eph = StaticSecret::from(eph_seed);
     let eph_pub = XPublic::from(&eph);
-    let shared = eph.diffie_hellman(&recip_x);
-    let key = bound_box_key(
-        shared.as_bytes(),
-        eph_pub.as_bytes(),
-        recip_x.as_bytes(),
-        context,
-    );
+    let Some(shared) = agree(&eph, &recip_x) else {
+        unusable_recipient(recipient, "agreement was not contributory");
+        return Ok(None);
+    };
+    let key = bound_box_key(&shared, eph_pub.as_bytes(), recip_x.as_bytes(), context);
     let cipher = ChaCha20Poly1305::new((&key).into());
     let nonce = random_nonce()?;
     let ct = cipher
@@ -444,13 +492,8 @@ pub fn open_sealed_bound(
     let my_x = ed_seed_to_x(my_seed);
     let my_ed = ed_pubkey_bytes(me)?;
     let my_x_pub = ed_pk_to_x(&my_ed)?;
-    let shared = my_x.diffie_hellman(&eph_pub);
-    let key = bound_box_key(
-        shared.as_bytes(),
-        eph_pub.as_bytes(),
-        my_x_pub.as_bytes(),
-        context,
-    );
+    let shared = agree(&my_x, &eph_pub)?;
+    let key = bound_box_key(&shared, eph_pub.as_bytes(), my_x_pub.as_bytes(), context);
     let cipher = ChaCha20Poly1305::new((&key).into());
     cipher.decrypt(Nonce::from_slice(nonce), ct).ok()
 }
@@ -1020,5 +1063,127 @@ mod tests {
         let other_seed = [9u8; 32];
         let other = device_from_seed(&other_seed);
         assert!(open_sealed(&other_seed, &other, &sealed).is_none());
+    }
+
+    /// The ed25519 identity element: `y = 1`, sign bit clear. A well-formed
+    /// point encoding of order one — `VerifyingKey::from_bytes` accepts it, and
+    /// every Diffie-Hellman against it yields the all-zero secret.
+    fn identity_point_bytes() -> [u8; 32] {
+        let mut pk = [0u8; 32];
+        pk[0] = 1;
+        pk
+    }
+
+    fn device_of(pubkey: &[u8; 32]) -> DeviceId {
+        DeviceId::from_key_string(data_encoding::HEXLOWER.encode(pubkey))
+    }
+
+    #[test]
+    fn sealing_to_a_small_order_key_is_refused_not_performed() {
+        let key = random_key().expect("random key");
+        // Nothing about this id is malformed: it is 64 hex characters that
+        // decompress to a real curve point. What it is not is a key — the
+        // agreement below would be a function of public values alone, so an
+        // observer could recompute the box key and read the space key out of
+        // an envelope that looks sealed.
+        let dud = device_of(&identity_point_bytes());
+        assert!(
+            ed25519_dalek::VerifyingKey::from_bytes(&identity_point_bytes()).is_ok(),
+            "the premise: this is a valid ed25519 key encoding, so nothing upstream rejects it"
+        );
+        assert!(
+            seal_to(&dud, &key)
+                .expect("no randomness failure")
+                .is_none(),
+            "the unbound sealed box must refuse a small-order recipient"
+        );
+        assert!(
+            seal_to_bound(&dud, &[b"ctx"], &key)
+                .expect("no randomness failure")
+                .is_none(),
+            "the bound sealed box must refuse a small-order recipient"
+        );
+        // And the fan-out refuses rather than quietly sealing to nobody.
+        assert!(
+            seal_to_devices(&[dud], &[b"ctx"], &key).is_err(),
+            "a device set that yields no usable wrap is a failure, not an empty success"
+        );
+    }
+
+    #[test]
+    fn opening_an_envelope_with_a_small_order_ephemeral_is_refused() {
+        let seed = [11u8; 32];
+        let me = device_from_seed(&seed);
+        let key = random_key().expect("random key");
+        let good = seal_to(&me, &key)
+            .expect("encrypt")
+            .expect("valid recipient");
+
+        // Replace the ephemeral public with u = 0 — the Montgomery small-order
+        // point an attacker picks precisely because it forces the shared secret
+        // to a constant the recipient does not contribute to.
+        let mut hostile = good.clone();
+        hostile[..32].copy_from_slice(&[0u8; 32]);
+        assert!(
+            open_sealed(&seed, &me, &hostile).is_none(),
+            "a non-contributory agreement must not produce a box key"
+        );
+
+        let bound = seal_to_bound(&me, &[b"ctx"], &key)
+            .expect("encrypt")
+            .expect("valid recipient");
+        let mut hostile_bound = bound.clone();
+        hostile_bound[..32].copy_from_slice(&[0u8; 32]);
+        assert!(
+            open_sealed_bound(&seed, &me, &[b"ctx"], &hostile_bound).is_none(),
+            "the bound box refuses the same way"
+        );
+    }
+
+    #[test]
+    fn a_signature_forged_under_the_identity_key_does_not_verify() {
+        use curve25519_dalek::{constants::ED25519_BASEPOINT_TABLE, scalar::Scalar};
+
+        // Under the cofactorless equation `[s]B == R + [k]A`, a public key of
+        // order one makes `[k]A` vanish for every message and every challenge.
+        // So any `(R = [s]B, s)` is a signature on *anything* — pick one.
+        let s = Scalar::from(12_345u64);
+        let r = ED25519_BASEPOINT_TABLE * &s;
+        let mut forged = [0u8; 64];
+        forged[..32].copy_from_slice(r.compress().as_bytes());
+        forged[32..].copy_from_slice(s.as_bytes());
+        let pk = identity_point_bytes();
+
+        // The premise, asserted rather than assumed: this forgery is real, and
+        // the permissive verifier accepts it on messages nobody signed.
+        {
+            use ed25519_dalek::Verifier;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).expect("a valid encoding");
+            let sig = ed25519_dalek::Signature::from_bytes(&forged);
+            assert!(
+                vk.verify(b"admit this device", &sig).is_ok(),
+                "premise: non-strict verification accepts a forgery under a small-order key"
+            );
+        }
+
+        assert!(
+            !verify_detached(&pk, b"admit this device", &forged),
+            "strict verification must reject a small-order public key"
+        );
+        assert!(
+            !verify_detached(&pk, b"a different message entirely", &forged),
+            "the same forgery must not verify on any message"
+        );
+    }
+
+    #[test]
+    fn honest_signatures_still_verify_strictly() {
+        // The other half of the change: tightening verification must not have
+        // invalidated anything a lait identity actually produces.
+        let seed = [3u8; 32];
+        let sig = sign_detached(&seed, b"a real preimage");
+        let pk = ed_pubkey_bytes(&device_from_seed(&seed)).expect("a seed device is a valid key");
+        assert!(verify_detached(&pk, b"a real preimage", &sig));
+        assert!(!verify_detached(&pk, b"a tampered preimage", &sig));
     }
 }

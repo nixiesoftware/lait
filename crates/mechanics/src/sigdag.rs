@@ -20,7 +20,7 @@
 //! is byte-identical — every op signed before this module existed still
 //! verifies.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::DeviceId;
@@ -115,7 +115,7 @@ impl SignedNode {
             return false;
         };
         let payload = signing_payload(domain, &self.op, &self.author, &self.parents, space_id);
-        vk.verify(&payload, &sig).is_ok()
+        vk.verify_strict(&payload, &sig).is_ok()
     }
 }
 
@@ -191,7 +191,8 @@ pub fn verify_message(
         return false;
     };
     let payload = message_payload(domain, space_id, author, msg);
-    vk.verify(&payload, &Signature::from_bytes(sig)).is_ok()
+    vk.verify_strict(&payload, &Signature::from_bytes(sig))
+        .is_ok()
 }
 
 /// Transitive causal ancestors of each node, over present parents only.

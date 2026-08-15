@@ -23,6 +23,8 @@ pub mod receipt {
 pub enum Failure {
     Randomness,
     Encryption,
+    /// The recipients named produced no usable path to the payload.
+    Unaddressable,
 }
 
 impl std::fmt::Display for Failure {
@@ -37,6 +39,7 @@ fn map_failure(failure: crate::crypto::Failure) -> Failure {
     match failure {
         crate::crypto::Failure::Randomness => Failure::Randomness,
         crate::crypto::Failure::Encryption => Failure::Encryption,
+        crate::crypto::Failure::Unaddressable => Failure::Unaddressable,
     }
 }
 

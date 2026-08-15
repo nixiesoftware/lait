@@ -82,7 +82,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{ActorId, DeviceId, SpaceId};
@@ -295,7 +295,7 @@ pub fn consent_verify(space: &str, binding: &DeviceBinding, ctx: &ConsentCtx) ->
         return false;
     };
     let payload = consent_payload(space, &binding.device, &binding.nonce, ctx);
-    vk.verify(&payload, &sig).is_ok()
+    vk.verify_strict(&payload, &sig).is_ok()
 }
 
 fn hex_key(s: &str) -> Option<[u8; 32]> {

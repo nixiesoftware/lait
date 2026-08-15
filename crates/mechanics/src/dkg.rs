@@ -1569,8 +1569,8 @@ mod tests {
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).unwrap();
         let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
         assert!(
-            vk.verify(message, &sig).is_ok(),
-            "the DKG group signature verifies as a plain Ed25519 signature"
+            vk.verify_strict(message, &sig).is_ok(),
+            "the DKG group signature verifies as a plain Ed25519 signature, strictly"
         );
     }
 
