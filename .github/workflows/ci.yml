@@ -18,47 +18,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The Astrolabe interface: `flutter analyze` and the widget suite.
+  # NOTE: the Astrolabe interface job (`flutter analyze` + the widget suite) is
+  # not here yet, and it is one secret away.
   #
-  # These ran on developer machines and on no machine else — not because nobody
-  # wired them up, but because until the design-system dependencies moved from
-  # relative paths to pinned git refs, `pub get` could only resolve on a machine
-  # holding the sibling checkouts. The Rust half of this client was gated every
-  # push while the half a person actually looks at could not be gated at all.
+  # `apps/astrolabe` now takes covalence, lit_ui and covalence_lints from git at
+  # pinned commits rather than by relative path, so a clean checkout can resolve
+  # them. Both repositories are **private** (gitlab.com/onnixi/…), so a runner
+  # needs a credential before `pub get` will do anything but ask for a username.
   #
-  # Cheap enough to gate because of how the suite was built: the widget tests
-  # need no bridge, no core, no daemon and no window. They press real controls
-  # against `Client.canned` and assert the ActionRequest that comes out, so this
-  # job needs the Flutter SDK and nothing else.
-  astrolabe-interface:
-    name: astrolabe interface
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      # SHA-pinned, and the version pinned to the same constant the release
-      # build uses: an interface checked by one Flutter and shipped by another
-      # is two different programs.
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
-        with:
-          flutter-version: '3.41.6'
-          channel: stable
-          cache: true
-
-      # No credentials: both design-system repositories are public reads. If
-      # that ever changes, this is the step that will say so plainly rather than
-      # failing somewhere further down.
-      - name: Resolve dependencies
-        run: flutter pub get
-        working-directory: apps/astrolabe
-
-      - name: Analyze
-        run: flutter analyze
-        working-directory: apps/astrolabe
-
-      - name: Widget and interaction suite
-        run: flutter test
-        working-directory: apps/astrolabe
+  # To turn it on: add a GitLab token with read_repository as a secret, then a
+  # job with these steps —
+  #
+  #   - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+  #     with: { flutter-version: '3.41.6', channel: stable, cache: true }
+  #   - run: git config --global url."https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/".insteadOf "https://gitlab.com/"
+  #   - run: flutter pub get      # working-directory: apps/astrolabe
+  #   - run: flutter analyze      # working-directory: apps/astrolabe
+  #   - run: flutter test         # working-directory: apps/astrolabe
+  #
+  # and add it to orbital-complete's needs. The suite is green — 58 tests and a
+  # clean analyze — and it is cheap: the widget tests press real controls against
+  # `Client.canned`, so they need the Flutter SDK and nothing else.
+  #
+  # Left as a comment rather than a disabled job on purpose. A job that cannot
+  # pass trains people to ignore red, which costs more than the check catches.
 
   # The web client (the UI bare `lait` serves). Its build output is COMMITTED under
   # src/serve/assets because `include_dir!` embeds it at compile time and
@@ -512,15 +495,7 @@ jobs:
   orbital-complete:
     name: orbital-complete
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs:
-      [
-        test,
-        platform,
-        viewer,
-        astrolabe-interface,
-        coverage-manifest,
-        schema-contract,
-      ]
+    needs: [test, platform, viewer, coverage-manifest, schema-contract]
     if: always()
     steps:
       - name: Assert every dependency succeeded
