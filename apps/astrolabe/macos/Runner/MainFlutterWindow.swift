@@ -23,6 +23,13 @@ class MainFlutterWindow: NSWindow {
     }
     AstrolabeWindowChrome.registerHost(flutterViewController)
 
+    // The client does not maximise, and here that has to be said to the
+    // button. `window_manager`'s `setMaximizable` stores the flag on macOS and
+    // reads it back — nothing else — so a Dart-side refusal would leave the
+    // system's own zoom control live and working. The traffic lights are the
+    // system's to draw; this disables the one of the three we refuse.
+    self.standardWindowButton(.zoomButton)?.isEnabled = false
+
     super.awakeFromNib()
   }
 

@@ -237,11 +237,16 @@ WindowOptions astrolabeWindowOptions({
   required Size size,
   required Size minimumSize,
   required String title,
+  Size? maximumSize,
   bool center = true,
 }) {
   return WindowOptions(
     size: size,
     minimumSize: minimumSize,
+    // Windows clamps `ptMaxTrackSize` from this, so the ceiling holds against
+    // a corner drag and not merely against the maximise the window already
+    // refuses.
+    maximumSize: maximumSize,
     center: center,
     title: title,
     titleBarStyle: TitleBarStyle.hidden,
@@ -254,12 +259,33 @@ WindowOptions astrolabeWindowOptions({
   );
 }
 
+/// Whether the client window may ever be maximised. It may not: it is a
+/// launcher, and a launcher filling a 4K display is a window of empty page
+/// around one card.
+///
+/// One constant, read by both halves — the native configuration in `main` and
+/// the chrome in the shell. Two literals would be two places to disagree, and
+/// a caption offering maximise over a window that refuses it is the same
+/// defect as the reverse.
+const bool kClientMaximisable = false;
+
 /// Shows a configured Astrolabe window without repeating platform setup at
 /// each process entrypoint.
-Future<void> showAstrolabeWindow(WindowOptions options) {
+///
+/// [maximisable] is applied before the window is ever shown, so no frame is
+/// drawn wearing a control the window then loses.
+Future<void> showAstrolabeWindow(
+  WindowOptions options, {
+  bool maximisable = true,
+}) {
   return windowManager.waitUntilReadyToShow(
     options,
     () async {
+      // On Windows this drops WS_MAXIMIZEBOX, which disarms Win+Up and
+      // snap-assist's maximise tile as well as the button. On macOS
+      // `window_manager` only records the flag, so the zoom control is
+      // refused where it is drawn instead — see `MainFlutterWindow`.
+      if (!maximisable) await windowManager.setMaximizable(false);
       await windowManager.show();
       await windowManager.focus();
     },
@@ -280,11 +306,11 @@ class AstrolabeWindowFrame extends StatefulWidget {
     this.wordmarkMinWidth,
     this.captionHeight = kBarHeight,
     this.captionBottomBorder = true,
+    this.maximisable = true,
     this.chrome = const ManagerWindowControlHost(),
   })  : assert(title != null || captionBuilder != null),
         assert(captionHeight > 0),
         role = WindowChromeRole.primary,
-        maximisable = true,
         mergedCaption = false,
         ownedConfiguration = null;
 
@@ -510,7 +536,7 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
               bottomBorder: widget.captionBottomBorder,
               maximised: _maximised,
               chrome: widget.chrome,
-              onToggleMaximise: _toggleMaximise,
+              onToggleMaximise: widget.maximisable ? _toggleMaximise : null,
               closePolicy: widget.closePolicy,
               onClose: _close,
             )
@@ -577,7 +603,12 @@ class _PrimaryCaption extends StatelessWidget {
   final bool bottomBorder;
   final bool maximised;
   final WindowControlHost chrome;
-  final Future<void> Function() onToggleMaximise;
+
+  /// `null` where this window cannot maximise: the control is not drawn and
+  /// the band's double-click does nothing. The primary caption reached its
+  /// own maximise unconditionally while every primary window could, which
+  /// left the flag true in the only place it was not read.
+  final Future<void> Function()? onToggleMaximise;
   final AstrolabeWindowClosePolicy closePolicy;
   final Future<void> Function() onClose;
 

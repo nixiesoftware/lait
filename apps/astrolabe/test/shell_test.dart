@@ -4,6 +4,7 @@ library;
 import 'package:astrolabe/src/core/client.dart';
 import 'package:astrolabe/src/settings/window.dart';
 import 'package:astrolabe/src/shell/caption.dart';
+import 'package:astrolabe/src/shell/record.dart';
 import 'package:astrolabe/src/shell/shell.dart';
 import 'package:astrolabe/src/shell/theme.dart';
 import 'package:astrolabe/src/surfaces/library.dart';
@@ -45,8 +46,10 @@ class _WindowControlHost implements WindowControlHost {
   @override
   Future<void> startDragging() async {}
 
+  int maximizeToggles = 0;
+
   @override
-  Future<void> toggleMaximize() async {}
+  Future<void> toggleMaximize() async => maximizeToggles++;
 }
 
 /// What one pump produced: what the shell asked the core for, and what it
@@ -102,6 +105,7 @@ Future<_Pumped> _pump(
   WidgetTester tester, {
   required VoidCallback onToggleTheme,
   ClientView view = _view,
+  _WindowControlHost? chrome,
 }) async {
   tester.view.physicalSize = const Size(1040, 720);
   tester.view.devicePixelRatio = 1;
@@ -137,7 +141,7 @@ Future<_Pumped> _pump(
             body: AstrolabeShell(
               themeMode: ThemeMode.dark,
               onToggleTheme: onToggleTheme,
-              chrome: _WindowControlHost(),
+              chrome: chrome ?? _WindowControlHost(),
             ),
           ),
         ),
@@ -175,8 +179,16 @@ void _drawnChrome() {
     expect(find.text('Members'), findsNothing);
     expect(find.text('Operations'), findsNothing);
     expect(find.byType(LibrarySurface), findsOneWidget);
-    // The address book stays one press away on the utility tier.
-    expect(find.bySemanticsLabel('Address book'), findsOneWidget);
+    // The address book stays one press away, at the right end of the
+    // operational bar — the caption's middle carries nothing now.
+    final book = find.bySemanticsLabel('Address book');
+    expect(book, findsOneWidget);
+    expect(
+      find.descendant(of: find.byType(OperationalBar), matching: book),
+      findsOneWidget,
+    );
+    final bar = tester.getRect(find.byType(OperationalBar));
+    expect(tester.getRect(book).right, greaterThan(bar.center.dx));
     expect(find.text('Refresh local state'), findsNothing);
     expect(find.text('Use light theme'), findsNothing);
     expect(
@@ -230,6 +242,27 @@ void _drawnChrome() {
     // Nothing was sent to a platform menu bar: there is none to send to.
     expect(pumped.menus, isEmpty);
   }, variant: _windows);
+
+  testWidgets('the client window offers no maximise', (tester) async {
+    final chrome = _WindowControlHost();
+    await _pump(tester, onToggleTheme: () {}, chrome: chrome);
+
+    // One fact, read here by the caption and in `main` by the HWND: a
+    // launcher does not fill a display. The gesture follows the same flag,
+    // so a double-click on the band cannot zoom what the button refuses.
+    final frame =
+        tester.widget<AstrolabeWindowFrame>(find.byType(AstrolabeWindowFrame));
+    expect(frame.maximisable, isFalse);
+    expect(chrome.maximizeToggles, isZero);
+
+    // Absence, not a disabled control — a greyed button advertises a
+    // capability the window does not have. The other two are still drawn,
+    // so this cannot pass by the whole cluster having gone missing.
+    expect(find.bySemanticsLabel('Maximise'), findsNothing);
+    expect(find.bySemanticsLabel('Restore'), findsNothing);
+    expect(find.bySemanticsLabel('Minimise'), findsOneWidget);
+    expect(find.bySemanticsLabel('Close'), findsOneWidget);
+  }, variant: _windows);
 }
 
 /// macOS: the traffic lights are the window's controls and the screen's own
@@ -256,9 +289,18 @@ void _systemChrome() {
     expect(find.text('ASTROLABE'), findsNothing);
     expect(find.bySemanticsLabel('Astrolabe settings'), findsNothing);
 
-    // Nothing of ours starts before the cluster the system draws there.
+    // Nothing of ours is drawn in that corner at all: the caption's middle is
+    // empty and the one control it used to hold is on the bar at the bottom,
+    // which is below the traffic lights rather than beside them.
     final book = tester.getRect(find.bySemanticsLabel('Address book'));
     expect(book.left, greaterThanOrEqualTo(kTrafficLightSpan));
+    expect(
+      find.descendant(
+        of: find.byType(OperationalBar),
+        matching: find.bySemanticsLabel('Address book'),
+      ),
+      findsOneWidget,
+    );
   }, variant: _macOS);
 
   testWidgets('the settings the wordmark held are on the screen\'s own bar',
