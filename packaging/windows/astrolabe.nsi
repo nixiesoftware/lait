@@ -38,6 +38,12 @@
 !ifndef VERSION
   !error "VERSION must be passed: makensis -DVERSION=x.y.z"
 !endif
+; VIProductVersion demands a numeric x.y.z, which a test prerelease
+; (0.8.0-test.1) is not. The caller passes the numeric base separately; a plain
+; release needs nothing and gets VERSION back.
+!ifndef VERSION_NUMERIC
+  !define VERSION_NUMERIC "${VERSION}"
+!endif
 !ifndef STAGE
   !error "STAGE must be passed: the Flutter release bundle directory"
 !endif
@@ -54,7 +60,7 @@ InstallDir "$LOCALAPPDATA\Programs\Astrolabe"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${VERSION_NUMERIC}.0"
 VIAddVersionKey "ProductName" "Astrolabe"
 VIAddVersionKey "FileDescription" "The local client for served Worlds"
 VIAddVersionKey "FileVersion" "${VERSION}"
