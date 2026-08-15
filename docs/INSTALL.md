@@ -14,25 +14,6 @@ your channel works just as well.
 > **not yet independently audited** — don't trust it with sensitive data yet. See
 > [`THREAT-MODEL.md`](./THREAT-MODEL.md).
 
-## Astrolabe desktop client
-
-Astrolabe carries the Flutter interface, its Rust core, and the matching `lait`
-sidecar as one release bundle. The tagged installer workflow currently ships:
-
-| Platform | Release artifact | Installation shape |
-|---|---|---|
-| Windows x86_64 | `astrolabe-<version>-setup.exe` | per-user NSIS install |
-| macOS arm64 | `astrolabe-<version>.dmg` | signed, notarized drag install |
-| Linux x86_64 | `astrolabe-<version>-x86_64-unknown-linux-gnu.tar.gz` | relocatable directory |
-
-The Linux archive is the first distribution vehicle, deliberately not a claim
-that one distro package manager represents Linux. Extract it and run the
-`astrolabe` executable inside; keep its `lib/`, `data/`, `libastrolabe.so`, and
-`lait` siblings together. It is built and smoke-checked on Ubuntu 24.04, and
-requires the target system's GTK 3 and AppIndicator runtime libraries. The
-daemon-plus-browser path below remains supported on every Linux architecture,
-including arm64 while the desktop client artifact is x86_64-only.
-
 ## Quick pick
 
 | You have… | Use |
