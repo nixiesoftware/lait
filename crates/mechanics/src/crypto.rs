@@ -246,6 +246,97 @@ pub fn open_sealed(my_seed: &[u8; 32], me: &DeviceId, sealed: &[u8]) -> Option<V
     cipher.decrypt(Nonce::from_slice(nonce), ct).ok()
 }
 
+/// A payload encrypted once, with its key wrapped separately for each device
+/// permitted to read it.
+///
+/// The shape `custody.rs` already argues for, with device-of-the-actor
+/// substituted for unlock slot: one random data key encrypts the payload, and
+/// each wrap is an independent path to that key. Adding a reader adds a wrap and
+/// re-encrypts nothing, which is the property that makes a person's device set
+/// something that can grow without rewriting everything addressed to them.
+///
+/// A mailbox is the motivating case. Sealing to the Space epoch key would make
+/// every member's correspondence readable by every other member; sealing
+/// separately to each device would re-encrypt the payload per device and make
+/// adding a phone an O(mailbox) operation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeviceSealed {
+    /// The payload under the data key.
+    pub ciphertext: Vec<u8>,
+    /// The data key, wrapped once per reader. Sorted by device, so the same set
+    /// of readers always encodes the same way.
+    pub wraps: Vec<(DeviceId, Vec<u8>)>,
+}
+
+/// Seal `plaintext` so that exactly `devices` can read it, bound to `context`.
+///
+/// Duplicate devices collapse; an unusable device key is skipped rather than
+/// failing the whole seal, because one malformed entry in a device set must not
+/// make a person unreachable at every other device they hold.
+pub fn seal_to_devices(
+    devices: &[DeviceId],
+    context: &[&[u8]],
+    plaintext: &[u8],
+) -> Result<DeviceSealed, Failure> {
+    let dek = random_key()?;
+    let ciphertext = aead_encrypt(&dek, plaintext)?;
+    let mut wraps: Vec<(DeviceId, Vec<u8>)> = Vec::new();
+    for device in devices {
+        if wraps.iter().any(|(held, _)| held == device) {
+            continue;
+        }
+        if let Some(wrapped) = seal_to_bound(device, context, &dek)? {
+            wraps.push((device.clone(), wrapped));
+        }
+    }
+    wraps.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(DeviceSealed { ciphertext, wraps })
+}
+
+/// Read a payload as one of its devices. `None` when this device holds no wrap,
+/// the context differs, or the payload has been tampered with.
+pub fn open_as_device(
+    my_seed: &[u8; 32],
+    me: &DeviceId,
+    context: &[&[u8]],
+    sealed: &DeviceSealed,
+) -> Option<Vec<u8>> {
+    let (_, wrapped) = sealed.wraps.iter().find(|(device, _)| device == me)?;
+    let dek = open_sealed_bound(my_seed, me, context, wrapped)?;
+    let dek: SpaceKey = <[u8; KEY_LEN]>::try_from(dek.as_slice()).ok()?;
+    aead_decrypt(&dek, &sealed.ciphertext)
+}
+
+/// Add a reader, using a device that can already read it.
+///
+/// The data key is recovered through `me`'s wrap and wrapped again for
+/// `newcomer` — the ciphertext is never touched. Returns `false` when `me`
+/// cannot read the payload, which is the only way to learn the key, and
+/// therefore the only authority this operation can have.
+pub fn add_device_to_sealed(
+    my_seed: &[u8; 32],
+    me: &DeviceId,
+    context: &[&[u8]],
+    sealed: &mut DeviceSealed,
+    newcomer: &DeviceId,
+) -> Result<bool, Failure> {
+    let Some((_, wrapped)) = sealed.wraps.iter().find(|(device, _)| device == me) else {
+        return Ok(false);
+    };
+    let Some(dek) = open_sealed_bound(my_seed, me, context, wrapped) else {
+        return Ok(false);
+    };
+    if sealed.wraps.iter().any(|(held, _)| held == newcomer) {
+        return Ok(true);
+    }
+    let Some(fresh) = seal_to_bound(newcomer, context, &dek)? else {
+        return Ok(false);
+    };
+    sealed.wraps.push((newcomer.clone(), fresh));
+    sealed.wraps.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(true)
+}
+
 /// Derive the box AEAD key from the DH shared secret + both public keys.
 fn box_key(shared: &[u8], eph_pub: &[u8], recip_pub: &[u8]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -791,6 +882,129 @@ mod tests {
             open_sealed_bound(&other_seed, &other, context, &sealed).is_none(),
             "the right context must not rescue the wrong recipient"
         );
+    }
+
+    /// Every device a payload was sealed to reads it, and nothing else does.
+    #[test]
+    fn every_device_in_the_set_reads_the_payload_and_no_other_does() {
+        let seeds = [[31u8; 32], [32u8; 32], [33u8; 32]];
+        let devices: Vec<_> = seeds.iter().map(device_from_seed).collect();
+        let context: &[&[u8]] = &[b"act_example", b"ws_example"];
+
+        let sealed = seal_to_devices(&devices, context, b"a message").expect("seal");
+        assert_eq!(sealed.wraps.len(), 3, "one wrap per device");
+
+        for (seed, device) in seeds.iter().zip(&devices) {
+            assert_eq!(
+                open_as_device(seed, device, context, &sealed).as_deref(),
+                Some(&b"a message"[..]),
+                "each device in the set reads the same payload"
+            );
+        }
+
+        let stranger_seed = [34u8; 32];
+        let stranger = device_from_seed(&stranger_seed);
+        assert!(
+            open_as_device(&stranger_seed, &stranger, context, &sealed).is_none(),
+            "a device with no wrap holds nothing"
+        );
+    }
+
+    /// The property the whole shape exists for: gaining a device does not
+    /// re-encrypt what was already addressed to you.
+    ///
+    /// If it did, adding a phone would be an O(mailbox) rewrite, and every
+    /// correspondent's copy of those bytes would move.
+    #[test]
+    fn adding_a_device_adds_an_unlock_path_and_re_encrypts_nothing() {
+        let seed = [41u8; 32];
+        let me = device_from_seed(&seed);
+        let context: &[&[u8]] = &[b"act_example"];
+
+        let mut sealed = seal_to_devices(&[me.clone()], context, b"kept").expect("seal");
+        let ciphertext_before = sealed.ciphertext.clone();
+        let wrap_before = sealed.wraps.clone();
+
+        let phone_seed = [42u8; 32];
+        let phone = device_from_seed(&phone_seed);
+        assert!(
+            add_device_to_sealed(&seed, &me, context, &mut sealed, &phone).expect("add"),
+            "a device that can read may add another"
+        );
+
+        assert_eq!(
+            sealed.ciphertext, ciphertext_before,
+            "the payload must not be re-encrypted"
+        );
+        assert_eq!(sealed.wraps.len(), 2, "exactly one wrap was added");
+        assert!(
+            wrap_before.iter().all(|old| sealed.wraps.contains(old)),
+            "existing wraps are untouched"
+        );
+        assert_eq!(
+            open_as_device(&phone_seed, &phone, context, &sealed).as_deref(),
+            Some(&b"kept"[..]),
+            "the new device reads it"
+        );
+        assert_eq!(
+            open_as_device(&seed, &me, context, &sealed).as_deref(),
+            Some(&b"kept"[..]),
+            "and the old one still does"
+        );
+    }
+
+    /// Only a device that can already read may extend the reader set. Knowing
+    /// the ciphertext is not authority over it.
+    #[test]
+    fn a_device_that_cannot_read_cannot_add_a_reader() {
+        let seed = [51u8; 32];
+        let me = device_from_seed(&seed);
+        let context: &[&[u8]] = &[b"act_example"];
+        let mut sealed = seal_to_devices(&[me], context, b"secret").expect("seal");
+
+        let outsider_seed = [52u8; 32];
+        let outsider = device_from_seed(&outsider_seed);
+        let accomplice = device_from_seed(&[53u8; 32]);
+        assert!(
+            !add_device_to_sealed(&outsider_seed, &outsider, context, &mut sealed, &accomplice)
+                .expect("add"),
+            "an outsider must not be able to enrol anybody"
+        );
+        assert_eq!(sealed.wraps.len(), 1, "the reader set is unchanged");
+    }
+
+    /// The binding reaches the wraps, not merely the payload: the whole item is
+    /// unreadable under the wrong context.
+    #[test]
+    fn a_sealed_payload_is_unreadable_under_a_different_context() {
+        let seed = [61u8; 32];
+        let me = device_from_seed(&seed);
+        let sealed = seal_to_devices(&[me.clone()], &[b"act_one"], b"private").expect("seal");
+        assert!(
+            open_as_device(&seed, &me, &[b"act_two"], &sealed).is_none(),
+            "another actor's context must not open it"
+        );
+    }
+
+    #[test]
+    fn a_repeated_device_is_wrapped_once_and_the_order_is_stable() {
+        let seed = [71u8; 32];
+        let me = device_from_seed(&seed);
+        let other = device_from_seed(&[72u8; 32]);
+        let context: &[&[u8]] = &[b"act_example"];
+
+        let sealed = seal_to_devices(
+            &[other.clone(), me.clone(), other.clone()],
+            context,
+            b"once",
+        )
+        .expect("seal");
+        assert_eq!(sealed.wraps.len(), 2, "a duplicate device collapses");
+
+        let devices: Vec<_> = sealed.wraps.iter().map(|(d, _)| d.clone()).collect();
+        let mut sorted = devices.clone();
+        sorted.sort();
+        assert_eq!(devices, sorted, "wraps are sorted, so encoding is stable");
     }
 
     #[test]
