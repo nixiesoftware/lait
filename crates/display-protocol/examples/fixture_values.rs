@@ -9,8 +9,8 @@ use display_protocol::ids::{
 use display_protocol::pairing::{authenticate_pairing_complete, confirmation_phrase};
 use display_protocol::program::{
     canonical_program_revision, DisplayAsset, DisplayAssetMediaType, DisplayPlayback,
-    DisplayProgram, DisplayProgramItem, DisplayScene, FreshnessPolicy, ProgramCycle, SourceState,
-    StaleAction,
+    DisplayProgram, DisplayProgramItem, DisplayScene, DisplaySyncMode, DisplaySyncTarget,
+    FreshnessPolicy, ProgramCycle, SourceState, StaleAction,
 };
 use display_protocol::PROTOCOL_MAJOR;
 use serde_json::json;
@@ -51,6 +51,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             current_index: 0,
             elapsed_ms: 125,
             cycle: ProgramCycle::HoldLast,
+            sync: Some(DisplaySyncTarget {
+                group: "lobby".into(),
+                mode: DisplaySyncMode::Positional,
+                sampled_at_unix_ms: 1_786_744_181_000,
+            }),
         },
         items: vec![DisplayProgramItem {
             id: item,

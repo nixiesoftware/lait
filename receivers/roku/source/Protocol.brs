@@ -45,6 +45,16 @@ sub AstrolabeU32Field(bytes as object, value as dynamic)
     AstrolabeField(bytes, encoded)
 end sub
 
+sub AstrolabeBooleanField(bytes as object, value as boolean)
+    encoded = CreateObject("roByteArray")
+    if value
+        encoded.Push(1)
+    else
+        encoded.Push(0)
+    end if
+    AstrolabeField(bytes, encoded)
+end sub
+
 sub AstrolabeOptionalU32Field(bytes as object, value as dynamic)
     if value = invalid
         AstrolabeField(bytes, CreateObject("roByteArray"))
@@ -240,6 +250,17 @@ function AstrolabeIntegerIn(value as dynamic, minimum as dynamic, maximum as dyn
     return value >= minimum and value <= maximum
 end function
 
+function AstrolabeValidSyncTarget(value as dynamic) as boolean
+    if value = invalid then return true
+    if not AstrolabeExactFields(value, ["group", "mode", "sampled_at_unix_ms"]) then return false
+    if not AstrolabeIsString(value.group) or Len(value.group) < 1 or Len(value.group) > 64 then return false
+    matcher = CreateObject("roRegex", "^[a-z0-9_-]+$", "")
+    if not matcher.IsMatch(value.group) then return false
+    if not AstrolabeIsString(value.mode) then return false
+    if value.mode <> "stay_in_sync" and value.mode <> "positional" then return false
+    return AstrolabeIntegerIn(value.sampled_at_unix_ms, 1, 9007199254740991)
+end function
+
 function AstrolabeValidApiError(value as dynamic) as boolean
     if not AstrolabeExactFields(value, ["protocol_major", "code", "retry_after_ms", "next_challenge"]) then return false
     if value.protocol_major <> 1 or not AstrolabeIsString(value.code) then return false
@@ -309,14 +330,15 @@ function AstrolabeProgramTranscript(program as dynamic) as dynamic
     if not AstrolabeIntegerIn(program.freshness.stale_after_ms, 30001, 86400000) then return invalid
     if not AstrolabeIsString(program.freshness.on_stale) then return invalid
     if program.freshness.on_stale <> "keep_with_native_banner" and program.freshness.on_stale <> "blank" then return invalid
-    if not AstrolabeExactFields(program.playback, ["current_index", "elapsed_ms", "cycle"]) then return invalid
+    if not AstrolabeExactFields(program.playback, ["current_index", "elapsed_ms", "cycle", "sync"]) then return invalid
     if not AstrolabeIsString(program.playback.cycle) then return invalid
     if program.playback.cycle <> "loop" and program.playback.cycle <> "hold_last" and program.playback.cycle <> "blank_at_end" and program.playback.cycle <> "poll_at_end" then return invalid
+    if not AstrolabeValidSyncTarget(program.playback.sync) then return invalid
     if not AstrolabeIsArray(program.items) then return invalid
     if program.items.Count() < 1 or program.items.Count() > 16 then return invalid
     if not AstrolabeIntegerIn(program.playback.current_index, 0, program.items.Count() - 1) or not AstrolabeIntegerIn(program.playback.elapsed_ms, 0, 4294967295) then return invalid
 
-    bytes = AstrolabeTranscript("astrolabe-display/program-semantics/v1")
+    bytes = AstrolabeTranscript("astrolabe-display/program-semantics/v2")
     AstrolabeU32Field(bytes, 1)
     AstrolabeTextField(bytes, program.assignment)
     AstrolabeTextField(bytes, program.program)
@@ -324,6 +346,11 @@ function AstrolabeProgramTranscript(program as dynamic) as dynamic
     AstrolabeU32Field(bytes, program.freshness.stale_after_ms)
     AstrolabeTextField(bytes, program.freshness.on_stale)
     AstrolabeTextField(bytes, program.playback.cycle)
+    AstrolabeBooleanField(bytes, program.playback.sync <> invalid)
+    if program.playback.sync <> invalid
+        AstrolabeTextField(bytes, program.playback.sync.group)
+        AstrolabeTextField(bytes, program.playback.sync.mode)
+    end if
     AstrolabeU32Field(bytes, program.items.Count())
     ids = {}
     horizon = 0
@@ -382,7 +409,7 @@ function AstrolabeConformanceCheck() as boolean
         device: "ffeeddccbbaa99887766554433221100",
         assignment: "00112233445566778899aabbccddeeff",
         program: "102132435465768798a9bacbdcedfe0f",
-        revision: "4ed9867dfb8ea6fe645a70e9e16dc19d831602ed2ae9c534b5b0b86062aad6b0",
+        revision: "5e6875a23ca08a49904655923c15c113e7918c73b1d623a6c3df193ee5fa5ee5",
         currentItem: "0e089d8d262e20aeb998ad2f84300b5023d588746c00c01da9ddb1e146b069e8",
         elapsedMs: 500,
         waitMs: 25000,
@@ -392,7 +419,7 @@ function AstrolabeConformanceCheck() as boolean
         bodySha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     }
     requestTag = AstrolabeRequestTag("0000000000000000000000000000000000000000000000000000000000000000", context)
-    if requestTag <> "3495896c7a9b3e562bf6ee5b6dc2553dd1ceaaec886d80dff4b9f4aaa2d55bdc" then return false
+    if requestTag <> "130ed97e77f7751b21fe524e1d48f49f40129342cdfcce26ef3c12ce56a7ff0d" then return false
     completeTag = AstrolabePairingCompleteTag(
         "2222222222222222222222222222222222222222222222222222222222222222",
         "33333333333333333333333333333333",

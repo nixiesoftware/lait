@@ -17,6 +17,7 @@ export const BOUNDS = Object.freeze({
   maxLongPollWaitMs: 25000,
   longPollStaleMarginMs: 5000,
   maxSummaryBytes: 1024,
+  maxSyncGroupBytes: 64,
 });
 
 const CONFIRMATION_WORDS = Object.freeze([
@@ -363,6 +364,7 @@ function encodeAsset(transcript, asset) {
 }
 
 const CYCLES = Object.freeze(["blank_at_end", "hold_last", "loop", "poll_at_end"]);
+const SYNC_MODES = Object.freeze(["stay_in_sync", "positional"]);
 const STALE_ACTIONS = Object.freeze(["blank", "keep_with_native_banner"]);
 const BLANK_REASONS = Object.freeze([
   "host_unavailable", "program_ended", "revoked", "source_unavailable", "unassigned", "unsupported",
@@ -417,8 +419,22 @@ export function validateProgram(program, verifyRevision = false) {
     refuse("invalid_shape", "stale interval has no long-poll margin");
   }
   if (!STALE_ACTIONS.includes(program.freshness.on_stale)) refuse("unsupported", "unknown stale action");
-  requireFields(program.playback, ["current_index", "elapsed_ms", "cycle"], "playback cursor");
+  requireFields(program.playback, ["current_index", "elapsed_ms", "cycle", "sync"], "playback cursor");
   if (!CYCLES.includes(program.playback.cycle)) refuse("unsupported", "unknown program cycle");
+  if (program.playback.sync !== null) {
+    requireFields(program.playback.sync, ["group", "mode", "sampled_at_unix_ms"], "sync target");
+    requireText(program.playback.sync.group, BOUNDS.maxSyncGroupBytes, "sync group");
+    if (!/^[a-z0-9_-]+$/.test(program.playback.sync.group)) {
+      refuse("invalid_identifier", "sync group is not canonical");
+    }
+    if (!SYNC_MODES.includes(program.playback.sync.mode)) refuse("unsupported", "unknown sync mode");
+    requireInteger(
+      program.playback.sync.sampled_at_unix_ms,
+      1,
+      Number.MAX_SAFE_INTEGER,
+      "sync target sample time",
+    );
+  }
   if (!Array.isArray(program.items) || program.items.length === 0 || program.items.length > BOUNDS.maxProgramItems) {
     refuse("bound_exceeded", "program item count is outside its bound");
   }
@@ -459,7 +475,7 @@ export function validateProgram(program, verifyRevision = false) {
 
 export function programSemanticsTranscript(program) {
   validateProgram(program);
-  const transcript = new Transcript("astrolabe-display/program-semantics/v1");
+  const transcript = new Transcript("astrolabe-display/program-semantics/v2");
   transcript.u32(program.protocol_major);
   transcript.text(program.assignment);
   transcript.text(program.program);
@@ -467,6 +483,11 @@ export function programSemanticsTranscript(program) {
   transcript.u32(program.freshness.stale_after_ms);
   transcript.text(program.freshness.on_stale);
   transcript.text(program.playback.cycle);
+  transcript.boolean(program.playback.sync !== null);
+  if (program.playback.sync !== null) {
+    transcript.text(program.playback.sync.group);
+    transcript.text(program.playback.sync.mode);
+  }
   transcript.u32(program.items.length);
   for (const item of program.items) {
     transcript.text(item.id);

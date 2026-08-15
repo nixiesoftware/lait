@@ -61,11 +61,23 @@ struct PlaybackCursor: Codable, Equatable {
     let currentIndex: Int
     let elapsedMs: Int
     let cycle: String
+    let sync: SyncTarget?
 
     enum CodingKeys: String, CodingKey {
         case currentIndex = "current_index"
         case elapsedMs = "elapsed_ms"
-        case cycle
+        case cycle, sync
+    }
+}
+
+struct SyncTarget: Codable, Equatable {
+    let group: String
+    let mode: String
+    let sampledAtUnixMs: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case group, mode
+        case sampledAtUnixMs = "sampled_at_unix_ms"
     }
 }
 

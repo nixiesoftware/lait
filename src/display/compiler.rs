@@ -9,8 +9,8 @@ use display_protocol::ids::{
 };
 use display_protocol::program::{
     canonical_program_revision, validate_program, BlankReason, DisplayAsset, DisplayAssetMediaType,
-    DisplayPlayback, DisplayProgram, DisplayProgramItem, DisplayScene, FreshnessPolicy,
-    ProgramCycle, SourceState,
+    DisplayPlayback, DisplayProgram, DisplayProgramItem, DisplayScene, DisplaySyncMode,
+    DisplaySyncTarget, FreshnessPolicy, ProgramCycle, SourceState,
 };
 use world_interface::display::{
     DisplayAssessment, DisplayPartialReason, DisplayProjection, FrameMediaType, RenderedScene,
@@ -44,6 +44,16 @@ pub struct ProgramCompiler {
     identifier_key: [u8; 32],
 }
 
+pub struct PlaybackAlignment {
+    pub group: String,
+    pub mode: DisplaySyncMode,
+    pub epoch_unix_ms: u64,
+    pub sampled_at_unix_ms: u64,
+    /// Positive values advance the logical cursor to compensate for a
+    /// receiver's measured presentation latency.
+    pub static_delay_ms: i32,
+}
+
 impl ProgramCompiler {
     pub fn new(identifier_key: [u8; 32]) -> Result<Self> {
         if identifier_key == [0; 32] {
@@ -58,8 +68,9 @@ impl ProgramCompiler {
         program: &DisplayProgramId,
         freshness: FreshnessPolicy,
         projection: DisplayProjection,
+        alignment: Option<&PlaybackAlignment>,
     ) -> Result<CompiledProgram> {
-        let refresh_after_ms = projection.program.refresh_after_ms;
+        let mut refresh_after_ms = projection.program.refresh_after_ms;
         let mut assets = BTreeMap::new();
         let mut items = Vec::with_capacity(projection.program.items.len());
         for item in projection.program.items {
@@ -125,6 +136,26 @@ impl ProgramCompiler {
         }
         let placeholder = ProgramRevision::parse("0".repeat(64))
             .context("construct receiver program revision placeholder")?;
+        let program_cycle = cycle(projection.program.cycle);
+        let (playback, alignment_refresh) = if let Some(alignment) = alignment {
+            aligned_playback(&items, program_cycle, alignment)?
+        } else {
+            (
+                DisplayPlayback {
+                    current_index: 0,
+                    elapsed_ms: 0,
+                    cycle: program_cycle,
+                    sync: None,
+                },
+                None,
+            )
+        };
+        if let Some(alignment_refresh) = alignment_refresh {
+            refresh_after_ms = Some(
+                refresh_after_ms
+                    .map_or(alignment_refresh, |package| package.min(alignment_refresh)),
+            );
+        }
         let mut wire = DisplayProgram {
             protocol_major: display_protocol::PROTOCOL_MAJOR,
             assignment: assignment.clone(),
@@ -132,11 +163,7 @@ impl ProgramCompiler {
             revision: placeholder,
             program_state: source_state(&projection.assessment),
             freshness,
-            playback: DisplayPlayback {
-                current_index: 0,
-                elapsed_ms: 0,
-                cycle: cycle(projection.program.cycle),
-            },
+            playback,
             items,
         };
         wire.revision = canonical_program_revision(&wire).context("revise receiver program")?;
@@ -147,6 +174,92 @@ impl ProgramCompiler {
             assets,
         })
     }
+}
+
+fn aligned_playback(
+    items: &[DisplayProgramItem],
+    cycle: ProgramCycle,
+    alignment: &PlaybackAlignment,
+) -> Result<(DisplayPlayback, Option<u32>)> {
+    let elapsed = i128::from(alignment.sampled_at_unix_ms)
+        .checked_sub(i128::from(alignment.epoch_unix_ms))
+        .and_then(|value| value.checked_add(i128::from(alignment.static_delay_ms)))
+        .ok_or_else(|| anyhow!("display sync position overflowed"))?
+        .max(0);
+    let mut position = u64::try_from(elapsed).context("convert display sync position")?;
+    if cycle == ProgramCycle::Loop {
+        let total = items.iter().try_fold(0_u64, |total, item| {
+            let duration = item
+                .duration_ms
+                .ok_or_else(|| anyhow!("looping display sync item is open-ended"))?;
+            total
+                .checked_add(u64::from(duration))
+                .ok_or_else(|| anyhow!("display sync loop duration overflowed"))
+        })?;
+        if total == 0 {
+            return Err(anyhow!("display sync loop is empty"));
+        }
+        position = position
+            .checked_rem(total)
+            .ok_or_else(|| anyhow!("display sync loop duration is zero"))?;
+    }
+
+    for (index, item) in items.iter().enumerate() {
+        let Some(duration) = item.duration_ms else {
+            return playback_at(index, position, None, cycle, alignment);
+        };
+        if position < u64::from(duration) {
+            let remaining = u64::from(duration).saturating_sub(position).max(1);
+            let remaining = u32::try_from(remaining).context("convert display sync boundary")?;
+            return playback_at(index, position, Some(remaining), cycle, alignment);
+        }
+        position = position.saturating_sub(u64::from(duration));
+    }
+
+    let index = items
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("display sync program is empty"))?;
+    let duration = items
+        .get(index)
+        .and_then(|item| item.duration_ms)
+        .ok_or_else(|| anyhow!("display sync terminal item is invalid"))?;
+    playback_at(
+        index,
+        u64::from(duration.saturating_sub(1)),
+        None,
+        cycle,
+        alignment,
+    )
+}
+
+fn playback_at(
+    index: usize,
+    elapsed_ms: u64,
+    next_boundary_ms: Option<u32>,
+    cycle: ProgramCycle,
+    alignment: &PlaybackAlignment,
+) -> Result<(DisplayPlayback, Option<u32>)> {
+    let current_index = u16::try_from(index).context("convert display sync item index")?;
+    let elapsed_ms = u32::try_from(elapsed_ms.min(u64::from(u32::MAX)))
+        .context("convert display sync elapsed time")?;
+    let refresh = match alignment.mode {
+        DisplaySyncMode::StayInSync => next_boundary_ms,
+        DisplaySyncMode::Positional => Some(next_boundary_ms.unwrap_or(1_000).min(1_000)),
+    };
+    Ok((
+        DisplayPlayback {
+            current_index,
+            elapsed_ms,
+            cycle,
+            sync: Some(DisplaySyncTarget {
+                group: alignment.group.clone(),
+                mode: alignment.mode,
+                sampled_at_unix_ms: alignment.sampled_at_unix_ms,
+            }),
+        },
+        refresh,
+    ))
 }
 
 fn cycle(cycle: world_interface::display::ProgramCycle) -> ProgramCycle {
@@ -224,11 +337,51 @@ mod tests {
                     stale_after_ms: 60_000,
                     on_stale: StaleAction::Blank,
                 },
-                projection,
+                projection.clone(),
+                None,
             )
             .unwrap();
         assert_eq!(compiled.asset_count(), 1);
         assert_eq!(compiled.refresh_after_ms, Some(500));
         validate_program(&compiled.program).unwrap();
+
+        let alignment = PlaybackAlignment {
+            group: "lobby".into(),
+            mode: DisplaySyncMode::Positional,
+            epoch_unix_ms: 1_000,
+            sampled_at_unix_ms: 2_000,
+            static_delay_ms: 250,
+        };
+        let first = compiler
+            .compile(
+                &DisplayAssignmentId::parse("33".repeat(16)).unwrap(),
+                &DisplayProgramId::parse("44".repeat(16)).unwrap(),
+                FreshnessPolicy {
+                    stale_after_ms: 60_000,
+                    on_stale: StaleAction::Blank,
+                },
+                projection.clone(),
+                Some(&alignment),
+            )
+            .unwrap();
+        let second = compiler
+            .compile(
+                &DisplayAssignmentId::parse("55".repeat(16)).unwrap(),
+                &DisplayProgramId::parse("66".repeat(16)).unwrap(),
+                FreshnessPolicy {
+                    stale_after_ms: 60_000,
+                    on_stale: StaleAction::Blank,
+                },
+                projection,
+                Some(&alignment),
+            )
+            .unwrap();
+        assert_eq!(first.program.playback.current_index, 0);
+        assert_eq!(first.program.playback.elapsed_ms, 1_250);
+        assert_eq!(first.program.playback, second.program.playback);
+        assert_eq!(
+            first.program.playback.sync.as_ref().map(|sync| sync.mode),
+            Some(DisplaySyncMode::Positional)
+        );
     }
 }

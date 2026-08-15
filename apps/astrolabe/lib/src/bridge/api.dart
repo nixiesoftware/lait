@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -196,6 +196,9 @@ sealed class ActionRequest with _$ActionRequest {
     required DisplayTheme theme,
     required int staleAfterMs,
     required DisplayStaleAction onStale,
+    String? syncGroup,
+    required DisplaySyncMode syncMode,
+    required int staticDelayMs,
     BigInt? expiresAtUnixMs,
   }) = ActionRequest_DisplayAssignmentPut;
   const factory ActionRequest.displayAssignmentRevoke({
@@ -522,6 +525,9 @@ class DisplayAssignmentRow {
   final String surface;
   final String controller;
   final DisplayTheme theme;
+  final String? syncGroup;
+  final DisplaySyncMode? syncMode;
+  final int staticDelayMs;
   final BigInt? expiresAtUnixMs;
   final BigInt? revokedAtUnixMs;
 
@@ -535,6 +541,9 @@ class DisplayAssignmentRow {
     required this.surface,
     required this.controller,
     required this.theme,
+    this.syncGroup,
+    this.syncMode,
+    required this.staticDelayMs,
     this.expiresAtUnixMs,
     this.revokedAtUnixMs,
   });
@@ -550,6 +559,9 @@ class DisplayAssignmentRow {
       surface.hashCode ^
       controller.hashCode ^
       theme.hashCode ^
+      syncGroup.hashCode ^
+      syncMode.hashCode ^
+      staticDelayMs.hashCode ^
       expiresAtUnixMs.hashCode ^
       revokedAtUnixMs.hashCode;
 
@@ -567,6 +579,9 @@ class DisplayAssignmentRow {
           surface == other.surface &&
           controller == other.controller &&
           theme == other.theme &&
+          syncGroup == other.syncGroup &&
+          syncMode == other.syncMode &&
+          staticDelayMs == other.staticDelayMs &&
           expiresAtUnixMs == other.expiresAtUnixMs &&
           revokedAtUnixMs == other.revokedAtUnixMs;
 }
@@ -809,6 +824,12 @@ class DisplaySurfaceRow {
           title == other.title &&
           contractVersion == other.contractVersion &&
           outputs == other.outputs;
+}
+
+enum DisplaySyncMode {
+  stayInSync,
+  positional,
+  ;
 }
 
 enum DisplayTheme {

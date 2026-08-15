@@ -1,8 +1,8 @@
 //! Native Astrolabe control of the self-hosted display coordinator.
 
 use lait::control::{
-    ControlRoute, DisplayCoordinatorView, DisplayStaleActionSetting, DisplayThemeSetting, Request,
-    Response,
+    ControlRoute, DisplayAssignmentSyncSetting, DisplayCoordinatorView, DisplayStaleActionSetting,
+    DisplayThemeSetting, Request, Response,
 };
 
 use super::{Client, ClientError, ClientResult};
@@ -17,6 +17,7 @@ pub struct DisplayAssignmentInput {
     pub theme: DisplayThemeSetting,
     pub stale_after_ms: u32,
     pub on_stale: DisplayStaleActionSetting,
+    pub sync: Option<DisplayAssignmentSyncSetting>,
     pub expires_at_unix_ms: Option<u64>,
 }
 
@@ -68,6 +69,7 @@ impl Client {
             theme: assignment.theme,
             stale_after_ms: assignment.stale_after_ms,
             on_stale: assignment.on_stale,
+            sync: assignment.sync,
             expires_at_unix_ms: assignment.expires_at_unix_ms,
         })
         .await

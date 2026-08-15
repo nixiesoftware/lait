@@ -138,6 +138,8 @@ export class DisplayReceiverClient {
     this.staleTimer = null;
     this.lastProgramDeliveryAt = 0;
     this.lastHealthAt = 0;
+    this.lastSyncResidualMs = 0;
+    this.correctionEvents = 0;
     this.deliveryStale = false;
     this.running = false;
     this.pairingPoll = null;
@@ -746,7 +748,18 @@ export class DisplayReceiverClient {
   }
 
   adoptCursor(playback, programDelivery = false) {
-    exactFields(playback, ["current_index", "elapsed_ms", "cycle"], "playback cursor");
+    exactFields(playback, ["current_index", "elapsed_ms", "cycle", "sync"], "playback cursor");
+    if (playback.sync !== null) {
+      exactFields(playback.sync, ["group", "mode", "sampled_at_unix_ms"], "sync target");
+      if (typeof playback.sync.group !== "string"
+        || !/^[a-z0-9_-]+$/.test(playback.sync.group)
+        || encoder.encode(playback.sync.group).length > BOUNDS.maxSyncGroupBytes
+        || !["stay_in_sync", "positional"].includes(playback.sync.mode)
+        || !Number.isSafeInteger(playback.sync.sampled_at_unix_ms)
+        || playback.sync.sampled_at_unix_ms < 1) {
+        throw new ProtocolError("invalid_cursor", "Coordinator sync target is invalid");
+      }
+    }
     if (!this.program
       || !Number.isSafeInteger(playback.current_index)
       || playback.current_index < 0
@@ -758,9 +771,22 @@ export class DisplayReceiverClient {
         && playback.elapsed_ms >= this.program.items[playback.current_index].duration_ms)) {
       throw new ProtocolError("invalid_cursor", "Coordinator cursor is outside the current program");
     }
+    const previous = this.currentPlayback();
+    if (playback.sync !== null) {
+      const residual = previous.currentIndex === playback.current_index
+        ? playback.elapsed_ms - previous.elapsedMs
+        : 0;
+      this.lastSyncResidualMs = Math.max(-60_000, Math.min(60_000, residual));
+      if (previous.currentIndex !== playback.current_index || residual !== 0) {
+        this.correctionEvents = Math.min(0xffffffff, this.correctionEvents + 1);
+      }
+    } else {
+      this.lastSyncResidualMs = 0;
+    }
     if (programDelivery) this.lastProgramDeliveryAt = performance.now();
     this.program.playback.current_index = playback.current_index;
     this.program.playback.elapsed_ms = playback.elapsed_ms;
+    this.program.playback.sync = playback.sync;
     this.elapsedBase = playback.elapsed_ms;
     this.itemStartedAt = performance.now();
     this.renderCurrent();
@@ -870,8 +896,8 @@ export class DisplayReceiverClient {
         staged_bytes: stagedBytes,
         decode_latency: "unobserved",
         swap_latency: "unobserved",
-        drift_residual_ms: 0,
-        correction_events: 0,
+        drift_residual_ms: this.lastSyncResidualMs,
+        correction_events: this.correctionEvents,
         pipeline_unobservable: true,
       },
     });

@@ -442,13 +442,28 @@ sub AstrolabeRetireStage(stage as dynamic)
 end sub
 
 function AstrolabeAdoptCursor(playback as object, programDelivery = false as boolean) as boolean
-    if m.program = invalid or not AstrolabeExactFields(playback, ["current_index", "elapsed_ms", "cycle"]) then return false
+    if m.program = invalid or not AstrolabeExactFields(playback, ["current_index", "elapsed_ms", "cycle", "sync"]) then return false
+    if not AstrolabeValidSyncTarget(playback.sync) then return false
     if playback.current_index < 0 or playback.current_index >= m.program.items.Count() or playback.elapsed_ms < 0 then return false
     if playback.cycle <> m.program.playback.cycle then return false
     current = m.program.items[playback.current_index]
     if current.duration_ms <> invalid and playback.elapsed_ms >= current.duration_ms then return false
+    previous = AstrolabeCurrentPlayback()
+    if playback.sync <> invalid
+        residual = 0
+        if previous.currentIndex = playback.current_index then residual = playback.elapsed_ms - previous.elapsedMs
+        if residual < -60000 then residual = -60000
+        if residual > 60000 then residual = 60000
+        m.lastSyncResidualMs = residual
+        if previous.currentIndex <> playback.current_index or residual <> 0
+            if m.correctionEvents < 2147483647 then m.correctionEvents = m.correctionEvents + 1
+        end if
+    else
+        m.lastSyncResidualMs = 0
+    end if
     m.program.playback.current_index = playback.current_index
     m.program.playback.elapsed_ms = playback.elapsed_ms
+    m.program.playback.sync = playback.sync
     m.elapsedBase = playback.elapsed_ms
     m.playbackClock.Mark()
     if programDelivery then m.lastProgramDelivery.Mark()
@@ -605,8 +620,8 @@ sub AstrolabeReportHealth()
         staged_bytes: stagedBytes,
         decode_latency: "unobserved",
         swap_latency: "unobserved",
-        drift_residual_ms: 0,
-        correction_events: 0,
+        drift_residual_ms: m.lastSyncResidualMs,
+        correction_events: m.correctionEvents,
         pipeline_unobservable: true
     })
     if response <> invalid and response.status >= 200 and response.status < 300
@@ -684,6 +699,8 @@ sub AstrolabeRun()
     m.program = invalid
     m.stage = {}
     m.elapsedBase = 0
+    m.lastSyncResidualMs = 0
+    m.correctionEvents = 0
     m.lastRenderedStale = invalid
     m.playbackClock = CreateObject("roTimespan")
     m.lastProgramDelivery = CreateObject("roTimespan")

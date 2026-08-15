@@ -14,7 +14,7 @@ use display_protocol::pairing::{
 use display_protocol::program::{
     canonical_program_revision, validate_program, BlankReason, DisplayAsset, DisplayAssetMediaType,
     DisplayPartialReason, DisplayPlayback, DisplayProgram, DisplayProgramItem, DisplayScene,
-    FreshnessPolicy, ProgramCycle, SourceState, StaleAction,
+    DisplaySyncMode, DisplaySyncTarget, FreshnessPolicy, ProgramCycle, SourceState, StaleAction,
 };
 use display_protocol::receiver::{
     validate_capabilities, AccessibilityCapabilities, HealthGranularity, LatencyClass,
@@ -80,6 +80,11 @@ fn fixture_program() -> DisplayProgram {
             current_index: 0,
             elapsed_ms: 125,
             cycle: ProgramCycle::HoldLast,
+            sync: Some(DisplaySyncTarget {
+                group: "lobby".into(),
+                mode: DisplaySyncMode::Positional,
+                sampled_at_unix_ms: 1_786_744_181_000,
+            }),
         },
         items: vec![DisplayProgramItem {
             id: item,
@@ -160,6 +165,9 @@ fn a_program_revision_commits_semantics_but_not_cursor_position() {
 
     let mut moved = program.clone();
     moved.playback.elapsed_ms = 200;
+    if let Some(sync) = &mut moved.playback.sync {
+        sync.sampled_at_unix_ms = sync.sampled_at_unix_ms.saturating_add(1_000);
+    }
     assert_eq!(
         canonical_program_revision(&moved).unwrap(),
         program.revision
@@ -169,6 +177,15 @@ fn a_program_revision_commits_semantics_but_not_cursor_position() {
     changed.program_state = SourceState::Unavailable;
     assert_ne!(
         canonical_program_revision(&changed).unwrap(),
+        program.revision
+    );
+
+    let mut regrouped = program.clone();
+    if let Some(sync) = &mut regrouped.playback.sync {
+        sync.group = "atrium".into();
+    }
+    assert_ne!(
+        canonical_program_revision(&regrouped).unwrap(),
         program.revision
     );
 }

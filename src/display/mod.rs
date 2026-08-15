@@ -12,12 +12,14 @@ mod runtime;
 mod store;
 mod tls;
 
-pub use compiler::{CompiledProgram, ProgramCompiler};
+pub use compiler::{CompiledProgram, PlaybackAlignment, ProgramCompiler};
 pub use coordinator::DisplayCoordinator;
 pub use http::{display_http_router, serve_display_https, DisplayHttpState};
 pub use pairing::{
     AuthorizedDevice, DisplayAuthorizationError, DisplayPairingService, PendingPairingView,
 };
 pub use runtime::DisplayRuntime;
-pub use store::{AssignmentRecord, CoordinatorState, CoordinatorStore, DeviceRecord, SourceGrant};
+pub use store::{
+    AssignmentRecord, AssignmentSync, CoordinatorState, CoordinatorStore, DeviceRecord, SourceGrant,
+};
 pub use tls::{DisplayTlsIdentity, DEFAULT_DISPLAY_PORT};

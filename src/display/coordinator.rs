@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use display_protocol::ids::{DisplayAssetId, DisplayDeviceId};
-use display_protocol::program::{DisplayProgram, DisplayScene};
-use display_protocol::receiver::{validate_capabilities, ReceiverCapabilities};
+use display_protocol::program::{DisplayProgram, DisplayScene, DisplaySyncMode};
+use display_protocol::receiver::{validate_capabilities, ReceiverCapabilities, SyncClass};
 use replica::body::WorldId;
 use runtime::world::call::{Call, Reply};
 use serde_json::Value;
@@ -23,7 +23,10 @@ use world_interface::{
 use crate::control::ControlRoute;
 use crate::orbits::Router;
 
-use super::{AssignmentRecord, CompiledProgram, CoordinatorStore, ProgramCompiler};
+use super::{
+    AssignmentRecord, CompiledProgram, CoordinatorState, CoordinatorStore, PlaybackAlignment,
+    ProgramCompiler,
+};
 
 /// Product-neutral, self-hosted display coordination.
 ///
@@ -187,11 +190,13 @@ impl DisplayCoordinator {
         projection
             .validate_for(&surface.descriptor, &request)
             .map_err(adapter_failure)?;
+        let alignment = playback_alignment(&state, &assignment, now_unix_ms)?;
         let compiled = Arc::new(self.compiler.compile(
             &assignment.id,
             &assignment.program,
             assignment.freshness,
             projection,
+            alignment.as_ref(),
         )?);
         validate_receiver_fit(compiled.as_ref(), capabilities)?;
         self.compiled
@@ -285,6 +290,48 @@ impl DisplayCoordinator {
             .and_then(|compiled| compiled.asset(asset))
             .map(<[u8]>::to_vec))
     }
+}
+
+fn playback_alignment(
+    state: &CoordinatorState,
+    assignment: &AssignmentRecord,
+    sampled_at_unix_ms: u64,
+) -> Result<Option<PlaybackAlignment>> {
+    let Some(sync) = &assignment.sync else {
+        return Ok(None);
+    };
+    let mut effective_mode = sync.mode;
+    if effective_mode == DisplaySyncMode::Positional {
+        for member in state.assignments.values().filter(|member| {
+            member.revoked_at_unix_ms.is_none()
+                && member
+                    .expires_at_unix_ms
+                    .is_none_or(|expires| sampled_at_unix_ms < expires)
+                && member
+                    .sync
+                    .as_ref()
+                    .is_some_and(|member| member.group == sync.group)
+        }) {
+            let device = state
+                .devices
+                .get(member.device.as_str())
+                .ok_or_else(|| anyhow!("display sync group member is not enrolled"))?;
+            if !matches!(
+                device.capabilities.playback.sync_class,
+                SyncClass::PositionalA | SyncClass::PositionalB
+            ) {
+                effective_mode = DisplaySyncMode::StayInSync;
+                break;
+            }
+        }
+    }
+    Ok(Some(PlaybackAlignment {
+        group: sync.group.clone(),
+        mode: effective_mode,
+        epoch_unix_ms: sync.epoch_unix_ms,
+        sampled_at_unix_ms,
+        static_delay_ms: sync.static_delay_ms,
+    }))
 }
 
 fn validate_assignment(assignment: &AssignmentRecord, now_unix_ms: u64) -> Result<()> {
@@ -470,6 +517,7 @@ mod tests {
                 stale_after_ms: 10_000,
                 on_stale: StaleAction::Blank,
             },
+            sync: None,
             expires_at_unix_ms: None,
             revoked_at_unix_ms: None,
         };

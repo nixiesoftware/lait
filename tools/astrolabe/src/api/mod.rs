@@ -251,6 +251,9 @@ pub struct DisplayAssignmentRow {
     pub surface: String,
     pub controller: String,
     pub theme: DisplayTheme,
+    pub sync_group: Option<String>,
+    pub sync_mode: Option<DisplaySyncMode>,
+    pub static_delay_ms: i32,
     pub expires_at_unix_ms: Option<u64>,
     pub revoked_at_unix_ms: Option<u64>,
 }
@@ -277,6 +280,12 @@ pub enum DisplayTheme {
 pub enum DisplayStaleAction {
     KeepWithNativeBanner,
     Blank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplaySyncMode {
+    StayInSync,
+    Positional,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -612,6 +621,9 @@ pub enum ActionRequest {
         theme: DisplayTheme,
         stale_after_ms: u32,
         on_stale: DisplayStaleAction,
+        sync_group: Option<String>,
+        sync_mode: DisplaySyncMode,
+        static_delay_ms: i32,
         expires_at_unix_ms: Option<u64>,
     },
     DisplayAssignmentRevoke {
@@ -682,6 +694,9 @@ impl ActionRequest {
                 theme,
                 stale_after_ms,
                 on_stale,
+                sync_group,
+                sync_mode,
+                static_delay_ms,
                 expires_at_unix_ms,
             } => Action::DisplayAssignmentPut(Box::new(
                 crate::client::display::DisplayAssignmentInput {
@@ -707,6 +722,18 @@ impl ActionRequest {
                             lait::control::DisplayStaleActionSetting::Blank
                         }
                     },
+                    sync: sync_group.map(|group| lait::control::DisplayAssignmentSyncSetting {
+                        group,
+                        mode: match sync_mode {
+                            DisplaySyncMode::StayInSync => {
+                                lait::control::DisplaySyncModeSetting::StayInSync
+                            }
+                            DisplaySyncMode::Positional => {
+                                lait::control::DisplaySyncModeSetting::Positional
+                            }
+                        },
+                        static_delay_ms,
+                    }),
                     expires_at_unix_ms,
                 },
             )),
@@ -1132,6 +1159,19 @@ fn project(app: &App) -> ClientView {
                             DisplayTheme::HighContrast
                         }
                     },
+                    sync_group: assignment.sync.as_ref().map(|sync| sync.group.clone()),
+                    sync_mode: assignment.sync.as_ref().map(|sync| match sync.mode {
+                        lait::control::DisplaySyncModeSetting::StayInSync => {
+                            DisplaySyncMode::StayInSync
+                        }
+                        lait::control::DisplaySyncModeSetting::Positional => {
+                            DisplaySyncMode::Positional
+                        }
+                    }),
+                    static_delay_ms: assignment
+                        .sync
+                        .as_ref()
+                        .map_or(0, |sync| sync.static_delay_ms),
                     expires_at_unix_ms: assignment.expires_at_unix_ms,
                     revoked_at_unix_ms: assignment.revoked_at_unix_ms,
                 })

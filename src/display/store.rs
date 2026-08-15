@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
+use display_protocol::bounds::MAX_STATIC_DELAY_MS;
 use display_protocol::ids::{DisplayAssignmentId, DisplayDeviceId, DisplayProgramId, ProofKey};
-use display_protocol::program::FreshnessPolicy;
+use display_protocol::program::{validate_sync_group, DisplaySyncMode, FreshnessPolicy};
 use display_protocol::receiver::{validate_capabilities, ReceiverCapabilities};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -74,8 +75,18 @@ pub struct AssignmentRecord {
     pub protocol_major: u32,
     pub theme: DisplayTheme,
     pub freshness: FreshnessPolicy,
+    #[serde(default)]
+    pub sync: Option<AssignmentSync>,
     pub expires_at_unix_ms: Option<u64>,
     pub revoked_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignmentSync {
+    pub group: String,
+    pub mode: DisplaySyncMode,
+    pub epoch_unix_ms: u64,
+    pub static_delay_ms: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +125,12 @@ impl CoordinatorState {
                 || assignment.protocol_major != display_protocol::PROTOCOL_MAJOR
                 || assignment.source.input_sha256
                     != <[u8; 32]>::from(Sha256::digest(assignment.source.input.as_bytes()))
+                || assignment.sync.as_ref().is_some_and(|sync| {
+                    validate_sync_group(&sync.group).is_err()
+                        || sync.epoch_unix_ms == 0
+                        || !(-MAX_STATIC_DELAY_MS..=MAX_STATIC_DELAY_MS)
+                            .contains(&sync.static_delay_ms)
+                })
             {
                 return Err(anyhow!("invalid display assignment record"));
             }

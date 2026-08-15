@@ -50,6 +50,7 @@ export '../bridge/api.dart'
         DisplayReceiverRow,
         DisplayStaleAction,
         DisplaySurfaceRow,
+        DisplaySyncMode,
         DisplayTheme,
         FailureRow,
         GateRow,

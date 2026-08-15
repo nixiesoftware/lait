@@ -22,6 +22,8 @@ final class ReceiverCoordinator: ObservableObject {
     private var elapsedBase = 0
     private var lastProgramDelivery = ProcessInfo.processInfo.systemUptime
     private var lastHealth = ProcessInfo.processInfo.systemUptime
+    private var lastSyncResidualMs = 0
+    private var correctionEvents = 0
     private var playbackTask: Task<Void, Never>?
     private var staleTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
@@ -330,7 +332,7 @@ final class ReceiverCoordinator: ObservableObject {
             guard response["revision"] as? String == program?.revision,
                   let object = response["playback"] as? [String: Any]
             else { throw DisplayProtocolV1.refusal("invalid_revision", "no-change cursor") }
-            try StrictJSON.fields(object, exactly: ["current_index", "elapsed_ms", "cycle"], name: "cursor")
+            try StrictJSON.playback(object)
             let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
             guard adoptCursor(try JSONDecoder().decode(PlaybackCursor.self, from: data), programDelivery: true) else {
                 throw DisplayProtocolV1.refusal("invalid_cursor", "no-change cursor")
@@ -394,6 +396,22 @@ final class ReceiverCoordinator: ObservableObject {
               cursor.cycle == program.playback.cycle,
               program.items[cursor.currentIndex].durationMs.map({ cursor.elapsedMs < $0 }) ?? true
         else { return false }
+        if let sync = cursor.sync {
+            let bytes = Array(sync.group.utf8)
+            guard !bytes.isEmpty, bytes.count <= 64,
+                  bytes.allSatisfy({ (48...57).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }),
+                  ["stay_in_sync", "positional"].contains(sync.mode), sync.sampledAtUnixMs > 0
+            else { return false }
+            if let previous = currentPlayback() {
+                let residual = previous.currentIndex == cursor.currentIndex ? cursor.elapsedMs - previous.elapsedMs : 0
+                lastSyncResidualMs = min(60_000, max(-60_000, residual))
+                if previous.currentIndex != cursor.currentIndex || residual != 0 {
+                    correctionEvents = min(Int(UInt32.max), correctionEvents + 1)
+                }
+            }
+        } else {
+            lastSyncResidualMs = 0
+        }
         program.playback = cursor
         self.program = program
         if programDelivery { lastProgramDelivery = ProcessInfo.processInfo.systemUptime }
@@ -406,7 +424,7 @@ final class ReceiverCoordinator: ObservableObject {
     private func currentPlayback() -> PlaybackCursor? {
         guard let program else { return nil }
         let additional = max(0, Int((ProcessInfo.processInfo.systemUptime - playbackStarted) * 1_000))
-        return PlaybackCursor(currentIndex: program.playback.currentIndex, elapsedMs: min(Int(UInt32.max), elapsedBase + additional), cycle: program.playback.cycle)
+        return PlaybackCursor(currentIndex: program.playback.currentIndex, elapsedMs: min(Int(UInt32.max), elapsedBase + additional), cycle: program.playback.cycle, sync: program.playback.sync)
     }
 
     private func renderCurrent() {
@@ -448,7 +466,7 @@ final class ReceiverCoordinator: ObservableObject {
             default: return
             }
         }
-        program.playback = PlaybackCursor(currentIndex: next, elapsedMs: 0, cycle: program.playback.cycle)
+        program.playback = PlaybackCursor(currentIndex: next, elapsedMs: 0, cycle: program.playback.cycle, sync: program.playback.sync)
         self.program = program
         elapsedBase = 0
         playbackStarted = ProcessInfo.processInfo.systemUptime
@@ -647,8 +665,8 @@ final class ReceiverCoordinator: ObservableObject {
             "staged_bytes": stagedBytes,
             "decode_latency": "unobserved",
             "swap_latency": "unobserved",
-            "drift_residual_ms": 0,
-            "correction_events": 0,
+            "drift_residual_ms": lastSyncResidualMs,
+            "correction_events": correctionEvents,
             "pipeline_unobservable": false,
         ])
         try StrictJSON.fields(response, exactly: ["kind"], name: "health")
@@ -698,7 +716,7 @@ enum StrictJSON {
               let items = object["items"] as? [[String: Any]]
         else { throw DisplayProtocolV1.refusal("invalid_shape", "program members") }
         try fields(freshness, exactly: ["stale_after_ms", "on_stale"], name: "freshness")
-        try fields(playback, exactly: ["current_index", "elapsed_ms", "cycle"], name: "playback")
+        try Self.playback(playback)
         for item in items {
             try fields(item, exactly: ["id", "duration_ms", "source_state", "scene", "spoken_summary"], name: "item")
             try source(item["source_state"], name: "item source")
@@ -711,6 +729,15 @@ enum StrictJSON {
                 try fields(scene, exactly: ["kind", "reason"], name: "blank")
             } else { throw DisplayProtocolV1.refusal("unsupported", "scene") }
         }
+    }
+
+    static func playback(_ playback: [String: Any]) throws {
+        try fields(playback, exactly: ["current_index", "elapsed_ms", "cycle", "sync"], name: "playback")
+        if playback["sync"] is NSNull { return }
+        guard let sync = playback["sync"] as? [String: Any] else {
+            throw DisplayProtocolV1.refusal("invalid_shape", "sync target")
+        }
+        try fields(sync, exactly: ["group", "mode", "sampled_at_unix_ms"], name: "sync target")
     }
 
     private static func source(_ value: Any?, name: String) throws {

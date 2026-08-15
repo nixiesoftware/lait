@@ -115,6 +115,26 @@ async fn wait_for_receiver(client: &Client) -> String {
     panic!("reference receiver did not complete enrollment within ten seconds");
 }
 
+async fn wait_for_new_receiver(client: &Client, existing: &str) -> String {
+    for _ in 0..100 {
+        let display = client
+            .display_status()
+            .await
+            .expect("read enrolled display status");
+        if let Some(device) = display
+            .devices
+            .iter()
+            .find(|device| device.device != existing)
+        {
+            if display.pending_pairings.is_empty() {
+                return device.device.clone();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("second reference receiver did not complete enrollment within ten seconds");
+}
+
 async fn wait_for_unassigned(path: &Path, device: &str) {
     for _ in 0..150 {
         if let Ok(bytes) = std::fs::read(path) {
@@ -194,7 +214,10 @@ async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &s
             assert_eq!(health.connection, "online");
             assert_eq!(health.playback, "displaying");
             assert_eq!(health.last_error, "none");
-            assert_eq!(health.staged_items, 1);
+            assert!(
+                (1..=2).contains(&health.staged_items),
+                "receiver staged an unexpected number of Signage frames"
+            );
             assert!(health.staged_bytes > 0);
             assert!(health.pipeline_unobservable);
             return;
@@ -202,6 +225,67 @@ async fn wait_for_health(client: &Client, device: &str, revision: &str, item: &s
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("coordinator never observed health for the presented Signage revision");
+}
+
+async fn wait_for_group_boundary(first: &Path, second: &Path, group: &str) {
+    let read = |path: &Path| {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    };
+    let first_frame = first.with_file_name("frame.png");
+    let second_frame = second.with_file_name("frame.png");
+    let mut initial = None;
+    for _ in 0..400 {
+        if let (Some(first), Some(second)) = (read(first), read(second)) {
+            let aligned = first["sync"]["group"] == group
+                && second["sync"]["group"] == group
+                && first["sync"]["mode"] == "stay_in_sync"
+                && second["sync"]["mode"] == "stay_in_sync";
+            if aligned {
+                if let (Ok(first_bytes), Ok(second_bytes)) =
+                    (std::fs::read(&first_frame), std::fs::read(&second_frame))
+                {
+                    if first_bytes == second_bytes {
+                        initial = Some(first_bytes);
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let initial = initial.expect("two receivers never adopted one boundary-sync target");
+
+    let observed = std::time::Instant::now();
+    let mut first_boundary = None;
+    let mut second_boundary = None;
+    for _ in 0..400 {
+        let first_bytes = std::fs::read(&first_frame).ok();
+        let second_bytes = std::fs::read(&second_frame).ok();
+        if first_boundary.is_none() && first_bytes.as_ref().is_some_and(|bytes| bytes != &initial) {
+            first_boundary = Some(observed.elapsed());
+        }
+        if second_boundary.is_none() && second_bytes.as_ref().is_some_and(|bytes| bytes != &initial)
+        {
+            second_boundary = Some(observed.elapsed());
+        }
+        if let (Some(first_at), Some(second_at), Some(first_bytes), Some(second_bytes)) =
+            (first_boundary, second_boundary, first_bytes, second_bytes)
+        {
+            assert_eq!(
+                first_bytes, second_bytes,
+                "sync group advanced to different presented frames"
+            );
+            assert!(
+                first_at.abs_diff(second_at) <= Duration::from_millis(500),
+                "boundary-synced receivers drifted by more than 500 ms"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("two assigned receivers never crossed a shared program boundary");
 }
 
 async fn seed_signage_program(client: &Client, store: &Path) -> (String, String) {
@@ -231,14 +315,24 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
         id: replica::body::BodyId::from_bytes([9; 16]).render(),
         name: "Restart proof".into(),
         cycle: signage::ProgramCycle::Loop,
-        items: vec![signage::SignageItem {
-            id: "welcome".into(),
-            title: "Astrolabe is coordinating this display".into(),
-            body: "This frame came from the durable Signage World.".into(),
-            background: "102030".into(),
-            foreground: "ffffff".into(),
-            duration_ms: Some(60_000),
-        }],
+        items: vec![
+            signage::SignageItem {
+                id: "welcome".into(),
+                title: "Astrolabe is coordinating this display".into(),
+                body: "This frame came from the durable Signage World.".into(),
+                background: "102030".into(),
+                foreground: "ffffff".into(),
+                duration_ms: Some(2_000),
+            },
+            signage::SignageItem {
+                id: "coordinated".into(),
+                title: "Receivers share this program boundary".into(),
+                body: "Astrolabe supplied one group-aligned cursor.".into(),
+                background: "305010".into(),
+                foreground: "ffffff".into(),
+                duration_ms: Some(2_000),
+            },
+        ],
         windows: Vec::new(),
     };
     write_signage_program(client, store, &orbit.space, program.clone()).await;
@@ -497,7 +591,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             serde_json::to_vec_pretty(&bootstrap).expect("encode receiver bootstrap"),
         )
         .expect("write receiver bootstrap");
-        let child = Command::new(receiver_executable)
+        let child = Command::new(&receiver_executable)
             .arg("--bootstrap")
             .arg(&bootstrap_path)
             .arg("--state")
@@ -524,6 +618,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             .expect("approve the receiver in Astrolabe");
         let device = wait_for_receiver(&client).await;
         wait_for_unassigned(&output_path.join("active.json"), &device).await;
+        let sync_group = "lobby-wall";
         client
             .display_assignment_put(DisplayAssignmentInput {
                 device: device.clone(),
@@ -537,7 +632,11 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
                 theme: lait::control::DisplayThemeSetting::Dark,
                 stale_after_ms: 60_000,
                 on_stale: lait::control::DisplayStaleActionSetting::Blank,
-                sync: None,
+                sync: Some(lait::control::DisplayAssignmentSyncSetting {
+                    group: sync_group.into(),
+                    mode: lait::control::DisplaySyncModeSetting::Positional,
+                    static_delay_ms: 0,
+                }),
                 expires_at_unix_ms: None,
             })
             .await
@@ -568,6 +667,98 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         );
         wait_for_health(&client, &device, &revision, &item).await;
 
+        // A second independently paired process joins the same requested
+        // positional group. Both reference receivers declare boundary-only
+        // sync, so the coordinator must degrade the whole group to one shared
+        // boundary cursor rather than pretend positional guarantees exist.
+        let second_receiver_root = tempfile::tempdir().expect("second reference receiver root");
+        let second_bootstrap_path = second_receiver_root.path().join("bootstrap.json");
+        let second_state_path = second_receiver_root.path().join("state");
+        let second_output_path = second_receiver_root.path().join("output");
+        std::fs::write(
+            &second_bootstrap_path,
+            serde_json::to_vec_pretty(&bootstrap).expect("encode second receiver bootstrap"),
+        )
+        .expect("write second receiver bootstrap");
+        let second_child = Command::new(&receiver_executable)
+            .arg("--bootstrap")
+            .arg(&second_bootstrap_path)
+            .arg("--state")
+            .arg(&second_state_path)
+            .arg("--output")
+            .arg(&second_output_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("launch the second reference display receiver");
+        let mut second_receiver = OwnedReceiver(second_child);
+        let second_pairing = wait_for_pairing(&client).await;
+        second_receiver
+            .0
+            .stdin
+            .take()
+            .expect("second receiver confirmation input")
+            .write_all(b"yes\n")
+            .expect("confirm pairing at the second receiver");
+        client
+            .display_pairing_approve(second_pairing, "Synced receiver".to_owned())
+            .await
+            .expect("approve the second receiver in Astrolabe");
+        let second_device = wait_for_new_receiver(&client, &device).await;
+        wait_for_unassigned(&second_output_path.join("active.json"), &second_device).await;
+        client
+            .display_assignment_put(DisplayAssignmentInput {
+                device: second_device.clone(),
+                orbit: assignment.space.clone(),
+                world: signage::contract::PRODUCT_WORLD.into(),
+                surface: "signage.program".into(),
+                input: serde_json::json!({ "program": signage_program }),
+                theme: lait::control::DisplayThemeSetting::Dark,
+                stale_after_ms: 60_000,
+                on_stale: lait::control::DisplayStaleActionSetting::Blank,
+                sync: Some(lait::control::DisplayAssignmentSyncSetting {
+                    group: sync_group.into(),
+                    mode: lait::control::DisplaySyncModeSetting::Positional,
+                    static_delay_ms: 0,
+                }),
+                expires_at_unix_ms: None,
+            })
+            .await
+            .expect("assign the second receiver to the sync group");
+        let synced_status = client
+            .display_status()
+            .await
+            .expect("read the second committed display assignment");
+        let second_assignment = synced_status
+            .assignments
+            .iter()
+            .find(|row| row.device == second_device && row.revoked_at_unix_ms.is_none())
+            .expect("the second receiver has one active assignment");
+        assert_eq!(
+            second_assignment
+                .sync
+                .as_ref()
+                .map(|sync| sync.group.as_str()),
+            Some(sync_group),
+            "the second assignment lost its sync group"
+        );
+        let second_assignment_id = second_assignment.assignment.clone();
+        let second_receiver_program = second_assignment.program.clone();
+        let (second_revision, second_item) = wait_for_assigned(
+            &second_output_path.join("active.json"),
+            &second_assignment_id,
+            &second_receiver_program,
+        )
+        .await;
+        wait_for_health(&client, &second_device, &second_revision, &second_item).await;
+        wait_for_group_boundary(
+            &output_path.join("active.json"),
+            &second_output_path.join("active.json"),
+            sync_group,
+        )
+        .await;
+
         // One World write installs two civil-time windows. The invalidation
         // pushes the first semantic revision; after that, no actor or World
         // mutation occurs. The package's exact boundary deadline completes the
@@ -587,6 +778,14 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             "pre-boundary",
         )
         .await;
+        let (second_before_revision, _) = wait_for_revision_change(
+            &second_output_path.join("active.json"),
+            &second_assignment_id,
+            &second_receiver_program,
+            &second_revision,
+            "second pre-boundary",
+        )
+        .await;
         let before_frame =
             std::fs::read(output_path.join("frame.png")).expect("read pre-boundary frame");
         assert!(
@@ -601,6 +800,14 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             "post-boundary",
         )
         .await;
+        let (second_revision, second_item) = wait_for_revision_change(
+            &second_output_path.join("active.json"),
+            &second_assignment_id,
+            &second_receiver_program,
+            &second_before_revision,
+            "second post-boundary",
+        )
+        .await;
         assert!(
             mechanics::wallclock::now_millis() >= boundary,
             "the semantic revision changed before the schedule boundary"
@@ -612,6 +819,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             "the boundary revision did not change presented content"
         );
         wait_for_health(&client, &device, &revision, &item).await;
+        wait_for_health(&client, &second_device, &second_revision, &second_item).await;
 
         client.shutdown().await;
         drop(signals);
@@ -647,12 +855,30 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             }),
             "restarted daemon lost its active Signage assignment"
         );
+        assert!(
+            restarted_displays.assignments.iter().any(|row| {
+                row.assignment == second_assignment_id
+                    && row.program == second_receiver_program
+                    && row.revoked_at_unix_ms.is_none()
+                    && row
+                        .sync
+                        .as_ref()
+                        .is_some_and(|sync| sync.group == sync_group)
+            }),
+            "restarted daemon lost the second synchronized Signage assignment"
+        );
         wait_for_health(&restarted, &device, &revision, &item).await;
+        wait_for_health(&restarted, &second_device, &second_revision, &second_item).await;
         restarted
-            .display_device_revoke(device)
+            .display_device_revoke(device.clone())
             .await
             .expect("revoke the recovered receiver");
+        restarted
+            .display_device_revoke(second_device)
+            .await
+            .expect("revoke the recovered synchronized receiver");
         wait_for_receiver_exit(&mut receiver).await;
+        wait_for_receiver_exit(&mut second_receiver).await;
         (restarted, restarted_signals)
     } else {
         eprintln!(

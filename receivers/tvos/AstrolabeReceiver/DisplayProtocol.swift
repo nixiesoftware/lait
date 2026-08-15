@@ -138,7 +138,15 @@ enum DisplayProtocolV1 {
               (0...Int(UInt32.max)).contains(program.playback.elapsedMs)
         else { throw refusal("invalid_shape", "program envelope") }
 
-        var transcript = try Transcript(domain: "astrolabe-display/program-semantics/v1")
+        if let sync = program.playback.sync {
+            let bytes = Array(sync.group.utf8)
+            guard !bytes.isEmpty, bytes.count <= 64,
+                  bytes.allSatisfy({ (48...57).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }),
+                  ["stay_in_sync", "positional"].contains(sync.mode), sync.sampledAtUnixMs > 0
+            else { throw refusal("invalid_shape", "sync target") }
+        }
+
+        var transcript = try Transcript(domain: "astrolabe-display/program-semantics/v2")
         try transcript.u32(major)
         try transcript.text(program.assignment)
         try transcript.text(program.program)
@@ -146,6 +154,11 @@ enum DisplayProtocolV1 {
         try transcript.u32(program.freshness.staleAfterMs)
         try transcript.text(program.freshness.onStale)
         try transcript.text(program.playback.cycle)
+        try transcript.boolean(program.playback.sync != nil)
+        if let sync = program.playback.sync {
+            try transcript.text(sync.group)
+            try transcript.text(sync.mode)
+        }
         try transcript.u32(program.items.count)
 
         var seen = Set<String>()

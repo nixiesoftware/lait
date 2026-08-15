@@ -7,8 +7,8 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use display_protocol::ids::{DisplayAssetId, DisplayProgramItemId};
 use display_protocol::program::{
-    BlankReason, DisplayAsset, DisplayPlayback, DisplayProgram, DisplayScene, ProgramCycle,
-    StaleAction,
+    BlankReason, DisplayAsset, DisplayPlayback, DisplayProgram, DisplayScene, DisplaySyncTarget,
+    ProgramCycle, StaleAction,
 };
 use display_protocol::receiver::{DisplayedAsset, PlaybackState};
 use serde::Serialize;
@@ -27,6 +27,8 @@ pub struct Runtime {
     item_started_at: Instant,
     delivered_at: Instant,
     last_health_at: Option<Instant>,
+    last_sync_residual_ms: i32,
+    correction_events: u32,
     ended: bool,
 }
 
@@ -46,6 +48,8 @@ impl Runtime {
             // so the controller can observe a newly staged program without a
             // thirty-second blind window.
             last_health_at: None,
+            last_sync_residual_ms: 0,
+            correction_events: 0,
             ended: false,
         }
     }
@@ -68,7 +72,26 @@ impl Runtime {
         display_protocol::program::validate_program(&candidate)
             .context("validate no-change playback cursor")?;
         self.mark_delivered();
-        if response != sent {
+        let cursor_changed =
+            response.current_index != sent.current_index || response.elapsed_ms != sent.elapsed_ms;
+        if response.sync.is_some() {
+            let residual = if response.current_index == sent.current_index {
+                i64::from(response.elapsed_ms)
+                    .checked_sub(i64::from(sent.elapsed_ms))
+                    .context("calculate display sync residual")?
+            } else {
+                0
+            };
+            self.last_sync_residual_ms = i32::try_from(residual.clamp(-60_000, 60_000))
+                .context("convert display sync residual")?;
+            if cursor_changed {
+                self.correction_events = self.correction_events.saturating_add(1);
+            }
+        } else {
+            self.last_sync_residual_ms = 0;
+        }
+        self.program.playback.sync.clone_from(&response.sync);
+        if cursor_changed {
             self.current_index = usize::from(response.current_index);
             self.elapsed_base_ms = u64::from(response.elapsed_ms);
             self.item_started_at = Instant::now();
@@ -87,6 +110,7 @@ impl Runtime {
             current_index,
             elapsed_ms,
             cycle: self.program.playback.cycle,
+            sync: self.program.playback.sync.clone(),
         })
     }
 
@@ -125,6 +149,14 @@ impl Runtime {
     /// accepted sample is also evidence that reauthentication recovered.
     pub fn mark_health_due(&mut self) {
         self.last_health_at = None;
+    }
+
+    pub const fn last_sync_residual_ms(&self) -> i32 {
+        self.last_sync_residual_ms
+    }
+
+    pub const fn correction_events(&self) -> u32 {
+        self.correction_events
     }
 
     pub fn should_refresh_snapshot(&self) -> bool {
@@ -311,6 +343,7 @@ impl Presenter {
             revision: view.program.revision.as_str(),
             item: view.item.as_str(),
             elapsed_ms: view.playback.elapsed_ms,
+            sync: view.playback.sync.as_ref(),
             stale: view.stale,
             scene,
         };
@@ -347,6 +380,7 @@ struct PresentedStatus<'a> {
     revision: &'a str,
     item: &'a str,
     elapsed_ms: u32,
+    sync: Option<&'a DisplaySyncTarget>,
     stale: bool,
     scene: PresentedScene<'a>,
 }

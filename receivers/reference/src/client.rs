@@ -685,8 +685,8 @@ impl ReferenceReceiver {
             staged_bytes,
             decode_latency: LatencyBucket::Unobserved,
             swap_latency: LatencyBucket::Unobserved,
-            drift_residual_ms: 0,
-            correction_events: 0,
+            drift_residual_ms: runtime.last_sync_residual_ms(),
+            correction_events: runtime.correction_events(),
             pipeline_unobservable: true,
         };
         validate_health(&health).context("validate receiver health")?;

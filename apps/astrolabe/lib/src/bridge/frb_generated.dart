@@ -369,7 +369,10 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           theme: dco_decode_display_theme(raw[6]),
           staleAfterMs: dco_decode_u_32(raw[7]),
           onStale: dco_decode_display_stale_action(raw[8]),
-          expiresAtUnixMs: dco_decode_opt_box_autoadd_u_64(raw[9]),
+          syncGroup: dco_decode_opt_String(raw[9]),
+          syncMode: dco_decode_display_sync_mode(raw[10]),
+          staticDelayMs: dco_decode_i_32(raw[11]),
+          expiresAtUnixMs: dco_decode_opt_box_autoadd_u_64(raw[12]),
         );
       case 27:
         return ActionRequest_DisplayAssignmentRevoke(
@@ -439,6 +442,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   DisplayHealthRow dco_decode_box_autoadd_display_health_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_display_health_row(raw);
+  }
+
+  @protected
+  DisplaySyncMode dco_decode_box_autoadd_display_sync_mode(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_display_sync_mode(raw);
   }
 
   @protected
@@ -571,8 +580,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   DisplayAssignmentRow dco_decode_display_assignment_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 11)
-      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return DisplayAssignmentRow(
       assignment: dco_decode_String(arr[0]),
       device: dco_decode_String(arr[1]),
@@ -583,8 +592,11 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       surface: dco_decode_String(arr[6]),
       controller: dco_decode_String(arr[7]),
       theme: dco_decode_display_theme(arr[8]),
-      expiresAtUnixMs: dco_decode_opt_box_autoadd_u_64(arr[9]),
-      revokedAtUnixMs: dco_decode_opt_box_autoadd_u_64(arr[10]),
+      syncGroup: dco_decode_opt_String(arr[9]),
+      syncMode: dco_decode_opt_box_autoadd_display_sync_mode(arr[10]),
+      staticDelayMs: dco_decode_i_32(arr[11]),
+      expiresAtUnixMs: dco_decode_opt_box_autoadd_u_64(arr[12]),
+      revokedAtUnixMs: dco_decode_opt_box_autoadd_u_64(arr[13]),
     );
   }
 
@@ -681,6 +693,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       contractVersion: dco_decode_u_32(arr[3]),
       outputs: dco_decode_list_String(arr[4]),
     );
+  }
+
+  @protected
+  DisplaySyncMode dco_decode_display_sync_mode(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DisplaySyncMode.values[raw as int];
   }
 
   @protected
@@ -963,6 +981,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   DisplayHealthRow? dco_decode_opt_box_autoadd_display_health_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_display_health_row(raw);
+  }
+
+  @protected
+  DisplaySyncMode? dco_decode_opt_box_autoadd_display_sync_mode(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_display_sync_mode(raw);
   }
 
   @protected
@@ -1313,6 +1337,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         var var_theme = sse_decode_display_theme(deserializer);
         var var_staleAfterMs = sse_decode_u_32(deserializer);
         var var_onStale = sse_decode_display_stale_action(deserializer);
+        var var_syncGroup = sse_decode_opt_String(deserializer);
+        var var_syncMode = sse_decode_display_sync_mode(deserializer);
+        var var_staticDelayMs = sse_decode_i_32(deserializer);
         var var_expiresAtUnixMs = sse_decode_opt_box_autoadd_u_64(deserializer);
         return ActionRequest_DisplayAssignmentPut(
             device: var_device,
@@ -1323,6 +1350,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
             theme: var_theme,
             staleAfterMs: var_staleAfterMs,
             onStale: var_onStale,
+            syncGroup: var_syncGroup,
+            syncMode: var_syncMode,
+            staticDelayMs: var_staticDelayMs,
             expiresAtUnixMs: var_expiresAtUnixMs);
       case 27:
         var var_assignment = sse_decode_String(deserializer);
@@ -1396,6 +1426,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_display_health_row(deserializer));
+  }
+
+  @protected
+  DisplaySyncMode sse_decode_box_autoadd_display_sync_mode(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_display_sync_mode(deserializer));
   }
 
   @protected
@@ -1559,6 +1596,10 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_surface = sse_decode_String(deserializer);
     var var_controller = sse_decode_String(deserializer);
     var var_theme = sse_decode_display_theme(deserializer);
+    var var_syncGroup = sse_decode_opt_String(deserializer);
+    var var_syncMode =
+        sse_decode_opt_box_autoadd_display_sync_mode(deserializer);
+    var var_staticDelayMs = sse_decode_i_32(deserializer);
     var var_expiresAtUnixMs = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_revokedAtUnixMs = sse_decode_opt_box_autoadd_u_64(deserializer);
     return DisplayAssignmentRow(
@@ -1571,6 +1612,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         surface: var_surface,
         controller: var_controller,
         theme: var_theme,
+        syncGroup: var_syncGroup,
+        syncMode: var_syncMode,
+        staticDelayMs: var_staticDelayMs,
         expiresAtUnixMs: var_expiresAtUnixMs,
         revokedAtUnixMs: var_revokedAtUnixMs);
   }
@@ -1693,6 +1737,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         title: var_title,
         contractVersion: var_contractVersion,
         outputs: var_outputs);
+  }
+
+  @protected
+  DisplaySyncMode sse_decode_display_sync_mode(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DisplaySyncMode.values[inner];
   }
 
   @protected
@@ -2108,6 +2159,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_display_health_row(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DisplaySyncMode? sse_decode_opt_box_autoadd_display_sync_mode(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_display_sync_mode(deserializer));
     } else {
       return null;
     }
@@ -2540,6 +2603,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           theme: final theme,
           staleAfterMs: final staleAfterMs,
           onStale: final onStale,
+          syncGroup: final syncGroup,
+          syncMode: final syncMode,
+          staticDelayMs: final staticDelayMs,
           expiresAtUnixMs: final expiresAtUnixMs
         ):
         sse_encode_i_32(26, serializer);
@@ -2551,6 +2617,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         sse_encode_display_theme(theme, serializer);
         sse_encode_u_32(staleAfterMs, serializer);
         sse_encode_display_stale_action(onStale, serializer);
+        sse_encode_opt_String(syncGroup, serializer);
+        sse_encode_display_sync_mode(syncMode, serializer);
+        sse_encode_i_32(staticDelayMs, serializer);
         sse_encode_opt_box_autoadd_u_64(expiresAtUnixMs, serializer);
       case ActionRequest_DisplayAssignmentRevoke(assignment: final assignment):
         sse_encode_i_32(27, serializer);
@@ -2617,6 +2686,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       DisplayHealthRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_display_health_row(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_display_sync_mode(
+      DisplaySyncMode self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_display_sync_mode(self, serializer);
   }
 
   @protected
@@ -2743,6 +2819,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_String(self.surface, serializer);
     sse_encode_String(self.controller, serializer);
     sse_encode_display_theme(self.theme, serializer);
+    sse_encode_opt_String(self.syncGroup, serializer);
+    sse_encode_opt_box_autoadd_display_sync_mode(self.syncMode, serializer);
+    sse_encode_i_32(self.staticDelayMs, serializer);
     sse_encode_opt_box_autoadd_u_64(self.expiresAtUnixMs, serializer);
     sse_encode_opt_box_autoadd_u_64(self.revokedAtUnixMs, serializer);
   }
@@ -2820,6 +2899,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_String(self.title, serializer);
     sse_encode_u_32(self.contractVersion, serializer);
     sse_encode_list_String(self.outputs, serializer);
+  }
+
+  @protected
+  void sse_encode_display_sync_mode(
+      DisplaySyncMode self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -3149,6 +3235,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_display_health_row(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_display_sync_mode(
+      DisplaySyncMode? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_display_sync_mode(self, serializer);
     }
   }
 

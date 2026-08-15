@@ -4,11 +4,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use display_protocol::bounds::MAX_STATIC_DELAY_MS;
 use display_protocol::ids::{
     DisplayAssignmentId, DisplayDeviceId, DisplayPairingId, DisplayProgramId,
 };
 use display_protocol::pairing::{CoordinatorTrust, PairingRejectionReason};
-use display_protocol::program::{FreshnessPolicy, StaleAction};
+use display_protocol::program::{
+    validate_sync_group, DisplaySyncMode, FreshnessPolicy, StaleAction,
+};
 use replica::body::WorldId;
 use tokio::sync::watch;
 use world_interface::display::{DisplaySurfaceId, DisplayTheme};
@@ -18,7 +21,7 @@ use super::{
     serve_display_https, CoordinatorStore, DisplayCoordinator, DisplayHttpState,
     DisplayPairingService, DisplayTlsIdentity, DEFAULT_DISPLAY_PORT,
 };
-use super::{AssignmentRecord, SourceGrant};
+use super::{AssignmentRecord, AssignmentSync, SourceGrant};
 
 /// The display services owned by the identity-scoped daemon.
 pub struct DisplayRuntime {
@@ -102,6 +105,7 @@ impl DisplayRuntime {
                 theme,
                 stale_after_ms,
                 on_stale,
+                sync,
                 expires_at_unix_ms,
             } => self
                 .put_assignment(
@@ -113,6 +117,7 @@ impl DisplayRuntime {
                     *theme,
                     *stale_after_ms,
                     *on_stale,
+                    sync.clone(),
                     *expires_at_unix_ms,
                 )
                 .map(|(assignment, program)| Response::Ok {
@@ -209,6 +214,13 @@ impl DisplayRuntime {
                 surface: assignment.source.surface.as_str().to_string(),
                 controller: assignment.controller.clone(),
                 theme: control_theme(assignment.theme),
+                sync: assignment.sync.as_ref().map(|sync| {
+                    crate::control::DisplayAssignmentSyncView {
+                        group: sync.group.clone(),
+                        mode: control_sync_mode(sync.mode),
+                        static_delay_ms: sync.static_delay_ms,
+                    }
+                }),
                 expires_at_unix_ms: assignment.expires_at_unix_ms,
                 revoked_at_unix_ms: assignment.revoked_at_unix_ms,
             })
@@ -268,6 +280,7 @@ impl DisplayRuntime {
         theme: crate::control::DisplayThemeSetting,
         stale_after_ms: u32,
         on_stale: crate::control::DisplayStaleActionSetting,
+        sync: Option<crate::control::DisplayAssignmentSyncSetting>,
         expires_at_unix_ms: Option<u64>,
     ) -> Result<(DisplayAssignmentId, DisplayProgramId)> {
         let minimum = display_protocol::bounds::MAX_LONG_POLL_WAIT_MS
@@ -316,6 +329,64 @@ impl DisplayRuntime {
         let input = (surface.canonicalize_input)(input).map_err(|error| {
             anyhow::anyhow!(error.diagnostic().unwrap_or("invalid input").to_string())
         })?;
+        let source = SourceGrant::new(
+            world.as_str().to_string(),
+            reviewed,
+            surface_id,
+            surface.descriptor.contract_version,
+            surface.descriptor.contract_digest,
+            input,
+        );
+        let now_unix_ms = mechanics::wallclock::now_millis();
+        let sync = if let Some(setting) = sync {
+            validate_sync_group(&setting.group).context("validate display sync group")?;
+            if !(-MAX_STATIC_DELAY_MS..=MAX_STATIC_DELAY_MS).contains(&setting.static_delay_ms) {
+                anyhow::bail!("display static delay is outside its protocol bound");
+            }
+            let mode = wire_sync_mode(setting.mode);
+            let state = self.store.snapshot()?;
+            let mut epoch_unix_ms = None;
+            for existing in state.assignments.values().filter(|existing| {
+                existing.revoked_at_unix_ms.is_none()
+                    && existing
+                        .expires_at_unix_ms
+                        .is_none_or(|expires| now_unix_ms < expires)
+                    && existing
+                        .sync
+                        .as_ref()
+                        .is_some_and(|existing| existing.group == setting.group)
+            }) {
+                let existing_sync = existing
+                    .sync
+                    .as_ref()
+                    .context("display sync group member lost its policy")?;
+                if existing_sync.mode != mode {
+                    anyhow::bail!("display sync group already uses a different mode");
+                }
+                if existing.orbit != resolved.address.orbit.as_str()
+                    || existing.space != resolved.address.space.as_str()
+                    || existing.source.world != source.world
+                    || existing.source.implementation != source.implementation
+                    || existing.source.surface != source.surface
+                    || existing.source.surface_contract_version != source.surface_contract_version
+                    || existing.source.surface_contract_digest != source.surface_contract_digest
+                    || existing.source.input_sha256 != source.input_sha256
+                {
+                    anyhow::bail!(
+                        "display sync group members must pin the same surface and canonical input"
+                    );
+                }
+                epoch_unix_ms = Some(existing_sync.epoch_unix_ms);
+            }
+            Some(AssignmentSync {
+                group: setting.group,
+                mode,
+                epoch_unix_ms: epoch_unix_ms.unwrap_or(now_unix_ms.max(1)),
+                static_delay_ms: setting.static_delay_ms,
+            })
+        } else {
+            None
+        };
         let assignment = DisplayAssignmentId::parse(random_hex::<16>()?)?;
         let program = DisplayProgramId::parse(random_hex::<16>()?)?;
         let record = AssignmentRecord {
@@ -325,14 +396,7 @@ impl DisplayRuntime {
             orbit: resolved.address.orbit.as_str().to_string(),
             space: resolved.address.space.as_str().to_string(),
             program: program.clone(),
-            source: SourceGrant::new(
-                world.as_str().to_string(),
-                reviewed,
-                surface_id,
-                surface.descriptor.contract_version,
-                surface.descriptor.contract_digest,
-                input,
-            ),
+            source,
             controller: "astrolabe:local-primary".into(),
             coordinator_actor: "primary".into(),
             protocol_major: display_protocol::PROTOCOL_MAJOR,
@@ -346,11 +410,12 @@ impl DisplayRuntime {
                     crate::control::DisplayStaleActionSetting::Blank => StaleAction::Blank,
                 },
             },
+            sync,
             expires_at_unix_ms,
             revoked_at_unix_ms: None,
         };
         self.store
-            .replace_assignment_for_device(record, mechanics::wallclock::now_millis())?;
+            .replace_assignment_for_device(record, now_unix_ms)?;
         self.coordinator.notify_assignment_change();
         Ok((assignment, program))
     }
@@ -393,6 +458,20 @@ fn control_theme(theme: DisplayTheme) -> crate::control::DisplayThemeSetting {
         DisplayTheme::Light => crate::control::DisplayThemeSetting::Light,
         DisplayTheme::Dark => crate::control::DisplayThemeSetting::Dark,
         DisplayTheme::HighContrast => crate::control::DisplayThemeSetting::HighContrast,
+    }
+}
+
+fn wire_sync_mode(mode: crate::control::DisplaySyncModeSetting) -> DisplaySyncMode {
+    match mode {
+        crate::control::DisplaySyncModeSetting::StayInSync => DisplaySyncMode::StayInSync,
+        crate::control::DisplaySyncModeSetting::Positional => DisplaySyncMode::Positional,
+    }
+}
+
+fn control_sync_mode(mode: DisplaySyncMode) -> crate::control::DisplaySyncModeSetting {
+    match mode {
+        DisplaySyncMode::StayInSync => crate::control::DisplaySyncModeSetting::StayInSync,
+        DisplaySyncMode::Positional => crate::control::DisplaySyncModeSetting::Positional,
     }
 }
 

@@ -380,6 +380,16 @@ class _ReceiverCard extends StatelessWidget {
               '${_short(assignment!.program)}',
               style: context.monoStyle,
             ),
+            if (assignment!.syncGroup != null) ...[
+              t.gap.y(Space.xxs),
+              Text(
+                'Sync ${assignment!.syncGroup} · '
+                '${_syncMode(assignment!.syncMode!)} · '
+                '${assignment!.staticDelayMs >= 0 ? '+' : ''}'
+                '${assignment!.staticDelayMs} ms',
+                style: context.labelStyle,
+              ),
+            ],
           ],
           if (health != null) ...[
             t.gap.y(Space.sm),
@@ -388,6 +398,14 @@ class _ReceiverCard extends StatelessWidget {
               '${_short(health.currentItem)} · ${health.elapsedMs} ms',
               style: context.labelStyle,
             ),
+            if (assignment?.syncGroup != null) ...[
+              t.gap.y(Space.xxs),
+              Text(
+                'Residual ${health.driftResidualMs} ms · '
+                '${health.correctionEvents} corrections',
+                style: context.labelStyle,
+              ),
+            ],
             if (health.lastError != 'none') ...[
               t.gap.y(Space.xxs),
               Text(
@@ -535,8 +553,11 @@ Future<void> _assign(
   var chosen = surfaces.first;
   var theme = DisplayTheme.dark;
   var stale = DisplayStaleAction.keepWithNativeBanner;
+  var syncMode = DisplaySyncMode.stayInSync;
   final input = TextEditingController();
   final staleSeconds = TextEditingController(text: '120');
+  final syncGroup = TextEditingController();
+  final staticDelay = TextEditingController(text: '0');
   var valid = false;
 
   final assigned = await showAppDialog<bool>(
@@ -545,8 +566,14 @@ Future<void> _assign(
       builder: (ctx, setLocal) {
         final signage = chosen.world == 'com.lait.signage' &&
             chosen.surface == 'signage.program';
+        final group = syncGroup.text.trim();
+        final delay = int.tryParse(staticDelay.text.trim());
         valid = input.text.trim().isNotEmpty &&
-            (int.tryParse(staleSeconds.text.trim()) ?? 0) >= 31;
+            (int.tryParse(staleSeconds.text.trim()) ?? 0) >= 31 &&
+            (group.isEmpty || RegExp(r'^[a-z0-9_-]{1,64}$').hasMatch(group)) &&
+            delay != null &&
+            delay >= -60000 &&
+            delay <= 60000;
         return DialogContent(
           children: [
             DialogHeader(
@@ -645,6 +672,33 @@ Future<void> _assign(
               name: _staleAction,
               onChanged: (value) => setLocal(() => stale = value),
             ),
+            Input(
+              controller: syncGroup,
+              label: 'Sync group (optional)',
+              mono: true,
+              onChanged: (_) => setLocal(() {}),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: _Choice<DisplaySyncMode>(
+                    label: 'SYNC MODE',
+                    value: syncMode,
+                    options: DisplaySyncMode.values,
+                    name: _syncMode,
+                    onChanged: (value) => setLocal(() => syncMode = value),
+                  ),
+                ),
+                context.tokens.gap.x(Space.md),
+                Expanded(
+                  child: Input(
+                    controller: staticDelay,
+                    label: 'Static delay (ms, + advances)',
+                    onChanged: (_) => setLocal(() {}),
+                  ),
+                ),
+              ],
+            ),
             DialogFooter(
               children: [
                 Button(
@@ -666,11 +720,16 @@ Future<void> _assign(
 
   final value = input.text.trim();
   final seconds = int.tryParse(staleSeconds.text.trim());
+  final group = syncGroup.text.trim();
+  final delay = int.tryParse(staticDelay.text.trim());
   input.dispose();
   staleSeconds.dispose();
+  syncGroup.dispose();
+  staticDelay.dispose();
   if (assigned != true ||
       value.isEmpty ||
       seconds == null ||
+      delay == null ||
       !context.mounted) {
     return;
   }
@@ -686,6 +745,9 @@ Future<void> _assign(
       theme: theme,
       staleAfterMs: seconds * 1000,
       onStale: stale,
+      syncGroup: group.isEmpty ? null : group,
+      syncMode: syncMode,
+      staticDelayMs: delay,
     ),
   );
 }
@@ -830,6 +892,11 @@ String _theme(DisplayTheme value) => switch (value) {
 String _staleAction(DisplayStaleAction value) => switch (value) {
       DisplayStaleAction.keepWithNativeBanner => 'Keep with native banner',
       DisplayStaleAction.blank => 'Blank',
+    };
+
+String _syncMode(DisplaySyncMode value) => switch (value) {
+      DisplaySyncMode.stayInSync => 'Stay in sync',
+      DisplaySyncMode.positional => 'Positional',
     };
 
 String _words(String value) => value

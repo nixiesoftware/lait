@@ -406,6 +406,9 @@ impl SseDecode for crate::api::ActionRequest {
                 let mut var_theme = <crate::api::DisplayTheme>::sse_decode(deserializer);
                 let mut var_staleAfterMs = <u32>::sse_decode(deserializer);
                 let mut var_onStale = <crate::api::DisplayStaleAction>::sse_decode(deserializer);
+                let mut var_syncGroup = <Option<String>>::sse_decode(deserializer);
+                let mut var_syncMode = <crate::api::DisplaySyncMode>::sse_decode(deserializer);
+                let mut var_staticDelayMs = <i32>::sse_decode(deserializer);
                 let mut var_expiresAtUnixMs = <Option<u64>>::sse_decode(deserializer);
                 return crate::api::ActionRequest::DisplayAssignmentPut {
                     device: var_device,
@@ -416,6 +419,9 @@ impl SseDecode for crate::api::ActionRequest {
                     theme: var_theme,
                     stale_after_ms: var_staleAfterMs,
                     on_stale: var_onStale,
+                    sync_group: var_syncGroup,
+                    sync_mode: var_syncMode,
+                    static_delay_ms: var_staticDelayMs,
                     expires_at_unix_ms: var_expiresAtUnixMs,
                 };
             }
@@ -581,6 +587,9 @@ impl SseDecode for crate::api::DisplayAssignmentRow {
         let mut var_surface = <String>::sse_decode(deserializer);
         let mut var_controller = <String>::sse_decode(deserializer);
         let mut var_theme = <crate::api::DisplayTheme>::sse_decode(deserializer);
+        let mut var_syncGroup = <Option<String>>::sse_decode(deserializer);
+        let mut var_syncMode = <Option<crate::api::DisplaySyncMode>>::sse_decode(deserializer);
+        let mut var_staticDelayMs = <i32>::sse_decode(deserializer);
         let mut var_expiresAtUnixMs = <Option<u64>>::sse_decode(deserializer);
         let mut var_revokedAtUnixMs = <Option<u64>>::sse_decode(deserializer);
         return crate::api::DisplayAssignmentRow {
@@ -593,6 +602,9 @@ impl SseDecode for crate::api::DisplayAssignmentRow {
             surface: var_surface,
             controller: var_controller,
             theme: var_theme,
+            sync_group: var_syncGroup,
+            sync_mode: var_syncMode,
+            static_delay_ms: var_staticDelayMs,
             expires_at_unix_ms: var_expiresAtUnixMs,
             revoked_at_unix_ms: var_revokedAtUnixMs,
         };
@@ -726,6 +738,18 @@ impl SseDecode for crate::api::DisplaySurfaceRow {
             title: var_title,
             contract_version: var_contractVersion,
             outputs: var_outputs,
+        };
+    }
+}
+
+impl SseDecode for crate::api::DisplaySyncMode {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::DisplaySyncMode::StayInSync,
+            1 => crate::api::DisplaySyncMode::Positional,
+            _ => unreachable!("Invalid variant for DisplaySyncMode: {}", inner),
         };
     }
 }
@@ -1180,6 +1204,17 @@ impl SseDecode for Option<crate::api::DisplayHealthRow> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::DisplayHealthRow>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::DisplaySyncMode> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::DisplaySyncMode>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1645,6 +1680,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
                 theme,
                 stale_after_ms,
                 on_stale,
+                sync_group,
+                sync_mode,
+                static_delay_ms,
                 expires_at_unix_ms,
             } => [
                 26.into_dart(),
@@ -1656,6 +1694,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
                 theme.into_into_dart().into_dart(),
                 stale_after_ms.into_into_dart().into_dart(),
                 on_stale.into_into_dart().into_dart(),
+                sync_group.into_into_dart().into_dart(),
+                sync_mode.into_into_dart().into_dart(),
+                static_delay_ms.into_into_dart().into_dart(),
                 expires_at_unix_ms.into_into_dart().into_dart(),
             ]
             .into_dart(),
@@ -1803,6 +1844,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::DisplayAssignmentRow {
             self.surface.into_into_dart().into_dart(),
             self.controller.into_into_dart().into_dart(),
             self.theme.into_into_dart().into_dart(),
+            self.sync_group.into_into_dart().into_dart(),
+            self.sync_mode.into_into_dart().into_dart(),
+            self.static_delay_ms.into_into_dart().into_dart(),
             self.expires_at_unix_ms.into_into_dart().into_dart(),
             self.revoked_at_unix_ms.into_into_dart().into_dart(),
         ]
@@ -1958,6 +2002,24 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::DisplaySurfaceRow>
     for crate::api::DisplaySurfaceRow
 {
     fn into_into_dart(self) -> crate::api::DisplaySurfaceRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::DisplaySyncMode {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::StayInSync => 0.into_dart(),
+            Self::Positional => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::DisplaySyncMode {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::DisplaySyncMode>
+    for crate::api::DisplaySyncMode
+{
+    fn into_into_dart(self) -> crate::api::DisplaySyncMode {
         self
     }
 }
@@ -2473,6 +2535,9 @@ impl SseEncode for crate::api::ActionRequest {
                 theme,
                 stale_after_ms,
                 on_stale,
+                sync_group,
+                sync_mode,
+                static_delay_ms,
                 expires_at_unix_ms,
             } => {
                 <i32>::sse_encode(26, serializer);
@@ -2484,6 +2549,9 @@ impl SseEncode for crate::api::ActionRequest {
                 <crate::api::DisplayTheme>::sse_encode(theme, serializer);
                 <u32>::sse_encode(stale_after_ms, serializer);
                 <crate::api::DisplayStaleAction>::sse_encode(on_stale, serializer);
+                <Option<String>>::sse_encode(sync_group, serializer);
+                <crate::api::DisplaySyncMode>::sse_encode(sync_mode, serializer);
+                <i32>::sse_encode(static_delay_ms, serializer);
                 <Option<u64>>::sse_encode(expires_at_unix_ms, serializer);
             }
             crate::api::ActionRequest::DisplayAssignmentRevoke { assignment } => {
@@ -2593,6 +2661,9 @@ impl SseEncode for crate::api::DisplayAssignmentRow {
         <String>::sse_encode(self.surface, serializer);
         <String>::sse_encode(self.controller, serializer);
         <crate::api::DisplayTheme>::sse_encode(self.theme, serializer);
+        <Option<String>>::sse_encode(self.sync_group, serializer);
+        <Option<crate::api::DisplaySyncMode>>::sse_encode(self.sync_mode, serializer);
+        <i32>::sse_encode(self.static_delay_ms, serializer);
         <Option<u64>>::sse_encode(self.expires_at_unix_ms, serializer);
         <Option<u64>>::sse_encode(self.revoked_at_unix_ms, serializer);
     }
@@ -2680,6 +2751,22 @@ impl SseEncode for crate::api::DisplaySurfaceRow {
         <String>::sse_encode(self.title, serializer);
         <u32>::sse_encode(self.contract_version, serializer);
         <Vec<String>>::sse_encode(self.outputs, serializer);
+    }
+}
+
+impl SseEncode for crate::api::DisplaySyncMode {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::DisplaySyncMode::StayInSync => 0,
+                crate::api::DisplaySyncMode::Positional => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -3053,6 +3140,16 @@ impl SseEncode for Option<crate::api::DisplayHealthRow> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::DisplayHealthRow>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::DisplaySyncMode> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::DisplaySyncMode>::sse_encode(value, serializer);
         }
     }
 }

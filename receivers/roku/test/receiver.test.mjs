@@ -22,7 +22,7 @@ test("protocol implementation uses Roku production cryptography", async () => {
   assert.match(protocol, /roHMAC/);
   assert.match(protocol, /roEVPDigest/);
   assert.match(protocol, /GetRandomUUID/);
-  assert.match(protocol, /3495896c7a9b3e562bf6ee5b6dc2553dd1ceaaec886d80dff4b9f4aaa2d55bdc/);
+  assert.match(protocol, /130ed97e77f7751b21fe524e1d48f49f40129342cdfcce26ef3c12ce56a7ff0d/);
   assert.match(store, /roDeviceCrypto/);
   assert.match(store, /\.Flush\(\)/);
   assert.doesNotMatch(`${protocol}\n${store}`, /Rnd\(/);

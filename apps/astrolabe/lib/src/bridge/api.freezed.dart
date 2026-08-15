@@ -439,6 +439,9 @@ extension ActionRequestPatterns on ActionRequest {
             DisplayTheme theme,
             int staleAfterMs,
             DisplayStaleAction onStale,
+            String? syncGroup,
+            DisplaySyncMode syncMode,
+            int staticDelayMs,
             BigInt? expiresAtUnixMs)?
         displayAssignmentPut,
     TResult Function(String assignment)? displayAssignmentRevoke,
@@ -513,6 +516,9 @@ extension ActionRequestPatterns on ActionRequest {
             _that.theme,
             _that.staleAfterMs,
             _that.onStale,
+            _that.syncGroup,
+            _that.syncMode,
+            _that.staticDelayMs,
             _that.expiresAtUnixMs);
       case ActionRequest_DisplayAssignmentRevoke()
           when displayAssignmentRevoke != null:
@@ -584,6 +590,9 @@ extension ActionRequestPatterns on ActionRequest {
             DisplayTheme theme,
             int staleAfterMs,
             DisplayStaleAction onStale,
+            String? syncGroup,
+            DisplaySyncMode syncMode,
+            int staticDelayMs,
             BigInt? expiresAtUnixMs)
         displayAssignmentPut,
     required TResult Function(String assignment) displayAssignmentRevoke,
@@ -654,6 +663,9 @@ extension ActionRequestPatterns on ActionRequest {
             _that.theme,
             _that.staleAfterMs,
             _that.onStale,
+            _that.syncGroup,
+            _that.syncMode,
+            _that.staticDelayMs,
             _that.expiresAtUnixMs);
       case ActionRequest_DisplayAssignmentRevoke():
         return displayAssignmentRevoke(_that.assignment);
@@ -713,6 +725,9 @@ extension ActionRequestPatterns on ActionRequest {
             DisplayTheme theme,
             int staleAfterMs,
             DisplayStaleAction onStale,
+            String? syncGroup,
+            DisplaySyncMode syncMode,
+            int staticDelayMs,
             BigInt? expiresAtUnixMs)?
         displayAssignmentPut,
     TResult? Function(String assignment)? displayAssignmentRevoke,
@@ -786,6 +801,9 @@ extension ActionRequestPatterns on ActionRequest {
             _that.theme,
             _that.staleAfterMs,
             _that.onStale,
+            _that.syncGroup,
+            _that.syncMode,
+            _that.staticDelayMs,
             _that.expiresAtUnixMs);
       case ActionRequest_DisplayAssignmentRevoke()
           when displayAssignmentRevoke != null:
@@ -2532,6 +2550,9 @@ class ActionRequest_DisplayAssignmentPut extends ActionRequest {
       required this.theme,
       required this.staleAfterMs,
       required this.onStale,
+      this.syncGroup,
+      required this.syncMode,
+      required this.staticDelayMs,
       this.expiresAtUnixMs})
       : super._();
 
@@ -2543,6 +2564,9 @@ class ActionRequest_DisplayAssignmentPut extends ActionRequest {
   final DisplayTheme theme;
   final int staleAfterMs;
   final DisplayStaleAction onStale;
+  final String? syncGroup;
+  final DisplaySyncMode syncMode;
+  final int staticDelayMs;
   final BigInt? expiresAtUnixMs;
 
   /// Create a copy of ActionRequest
@@ -2569,17 +2593,35 @@ class ActionRequest_DisplayAssignmentPut extends ActionRequest {
             (identical(other.staleAfterMs, staleAfterMs) ||
                 other.staleAfterMs == staleAfterMs) &&
             (identical(other.onStale, onStale) || other.onStale == onStale) &&
+            (identical(other.syncGroup, syncGroup) ||
+                other.syncGroup == syncGroup) &&
+            (identical(other.syncMode, syncMode) ||
+                other.syncMode == syncMode) &&
+            (identical(other.staticDelayMs, staticDelayMs) ||
+                other.staticDelayMs == staticDelayMs) &&
             (identical(other.expiresAtUnixMs, expiresAtUnixMs) ||
                 other.expiresAtUnixMs == expiresAtUnixMs));
   }
 
   @override
-  int get hashCode => Object.hash(runtimeType, device, orbit, world, surface,
-      inputJson, theme, staleAfterMs, onStale, expiresAtUnixMs);
+  int get hashCode => Object.hash(
+      runtimeType,
+      device,
+      orbit,
+      world,
+      surface,
+      inputJson,
+      theme,
+      staleAfterMs,
+      onStale,
+      syncGroup,
+      syncMode,
+      staticDelayMs,
+      expiresAtUnixMs);
 
   @override
   String toString() {
-    return 'ActionRequest.displayAssignmentPut(device: $device, orbit: $orbit, world: $world, surface: $surface, inputJson: $inputJson, theme: $theme, staleAfterMs: $staleAfterMs, onStale: $onStale, expiresAtUnixMs: $expiresAtUnixMs)';
+    return 'ActionRequest.displayAssignmentPut(device: $device, orbit: $orbit, world: $world, surface: $surface, inputJson: $inputJson, theme: $theme, staleAfterMs: $staleAfterMs, onStale: $onStale, syncGroup: $syncGroup, syncMode: $syncMode, staticDelayMs: $staticDelayMs, expiresAtUnixMs: $expiresAtUnixMs)';
   }
 }
 
@@ -2600,6 +2642,9 @@ abstract mixin class $ActionRequest_DisplayAssignmentPutCopyWith<$Res>
       DisplayTheme theme,
       int staleAfterMs,
       DisplayStaleAction onStale,
+      String? syncGroup,
+      DisplaySyncMode syncMode,
+      int staticDelayMs,
       BigInt? expiresAtUnixMs});
 }
 
@@ -2623,6 +2668,9 @@ class _$ActionRequest_DisplayAssignmentPutCopyWithImpl<$Res>
     Object? theme = null,
     Object? staleAfterMs = null,
     Object? onStale = null,
+    Object? syncGroup = freezed,
+    Object? syncMode = null,
+    Object? staticDelayMs = null,
     Object? expiresAtUnixMs = freezed,
   }) {
     return _then(ActionRequest_DisplayAssignmentPut(
@@ -2658,6 +2706,18 @@ class _$ActionRequest_DisplayAssignmentPutCopyWithImpl<$Res>
           ? _self.onStale
           : onStale // ignore: cast_nullable_to_non_nullable
               as DisplayStaleAction,
+      syncGroup: freezed == syncGroup
+          ? _self.syncGroup
+          : syncGroup // ignore: cast_nullable_to_non_nullable
+              as String?,
+      syncMode: null == syncMode
+          ? _self.syncMode
+          : syncMode // ignore: cast_nullable_to_non_nullable
+              as DisplaySyncMode,
+      staticDelayMs: null == staticDelayMs
+          ? _self.staticDelayMs
+          : staticDelayMs // ignore: cast_nullable_to_non_nullable
+              as int,
       expiresAtUnixMs: freezed == expiresAtUnixMs
           ? _self.expiresAtUnixMs
           : expiresAtUnixMs // ignore: cast_nullable_to_non_nullable

@@ -113,9 +113,19 @@ range fields and by one syntactically matching HTTP `Range` header.
 `DisplayProgram` is always a complete bounded snapshot. Its revision is the
 SHA-256 of `program_semantics_transcript`: assignment/program IDs, source state,
 freshness policy, cycle, ordered item IDs, durations, scenes, asset semantic
-metadata, and spoken summaries. The revision excludes playback position, asset
-handles, and asset bytes. Cursor-only correction therefore does not manufacture
-a content revision.
+metadata, spoken summaries, and the optional sync group plus effective sync
+mode. The revision excludes playback position, sync sample time, asset handles,
+and asset bytes. Cursor-only correction therefore does not manufacture a
+content revision.
+
+An optional playback `sync` target has exactly `group`, `mode`, and
+`sampled_at_unix_ms`. Group names are 1–64 bytes of lowercase ASCII letters,
+digits, `_`, or `-`. The only modes are `stay_in_sync`, which aligns item
+boundaries, and `positional`, which also aligns the position within an item.
+The coordinator derives all members' cursors from one persisted group epoch and
+degrades a positional group to boundary alignment when any active member lacks
+positional capability. Static per-receiver delay belongs to coordinator-local
+assignment policy and is never exposed to receivers.
 
 The receiver validates the full snapshot before replacing eligible state. It
 fetches current, next, then later frame assets. Each transfer is authenticated
@@ -126,12 +136,14 @@ within declared dimensions, and only then made displayable. Revision replacement
 is atomic; reassignment, revocation, normal exit, and startup sweep retire
 ineligible staged material.
 
-Playback uses monotonic relative time. TV wall-clock time never chooses authored
-content. Transport liveness, source state, and delivery staleness remain separate
-native states. A valid no-change response clears offline delivery state without
-upgrading partial or unavailable source truth. Unknown majors, fields, scenes,
-media kinds, or broken integrity produce native refusal chrome—never HTML or a
-best-effort fallback.
+Playback uses monotonic relative time. A sync value is a sampled target, never a
+command: receivers adopt it according to their negotiated tier, continue on a
+monotonic clock, and report bounded residual drift and correction counts. TV
+wall-clock time never chooses authored content. Transport liveness, source
+state, and delivery staleness remain separate native states. A valid no-change
+response clears offline delivery state without upgrading partial or unavailable
+source truth. Unknown majors, fields, scenes, media kinds, or broken integrity
+produce native refusal chrome—never HTML or a best-effort fallback.
 
 ## Conformance
 

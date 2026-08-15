@@ -9,7 +9,7 @@ use crate::bounds::{
     LONG_POLL_STALE_MARGIN_MS, MAX_ASSET_BYTES, MAX_FRAME_HEIGHT, MAX_FRAME_PIXELS,
     MAX_FRAME_WIDTH, MAX_ITEM_DURATION_MS, MAX_LONG_POLL_WAIT_MS, MAX_PARTIAL_REASONS,
     MAX_PROGRAM_ITEMS, MAX_STAGING_HORIZON_MS, MAX_STALE_AFTER_MS, MAX_SUMMARY_BYTES,
-    MIN_ITEM_DURATION_MS, MIN_STALE_AFTER_MS,
+    MAX_SYNC_GROUP_BYTES, MIN_ITEM_DURATION_MS, MIN_STALE_AFTER_MS,
 };
 use crate::ids::{
     encode_hex, DisplayAssetId, DisplayAssignmentId, DisplayProgramId, DisplayProgramItemId,
@@ -198,6 +198,35 @@ pub struct DisplayPlayback {
     pub current_index: u16,
     pub elapsed_ms: u32,
     pub cycle: ProgramCycle,
+    pub sync: Option<DisplaySyncTarget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplaySyncMode {
+    StayInSync,
+    Positional,
+}
+
+impl DisplaySyncMode {
+    const fn wire_name(self) -> &'static str {
+        match self {
+            Self::StayInSync => "stay_in_sync",
+            Self::Positional => "positional",
+        }
+    }
+}
+
+/// A correction target sampled on the coordinator's shared time base.
+///
+/// It is a target, never a playback command. Receivers retain monotonic-clock
+/// discipline and apply the best correction their declared tier supports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplaySyncTarget {
+    pub group: String,
+    pub mode: DisplaySyncMode,
+    pub sampled_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +272,26 @@ pub enum ProgramChange {
 fn validate_bounded_text(text: &str, maximum: usize, name: &'static str) -> Result<(), Refusal> {
     if text.is_empty() || text.len() > maximum || text.chars().any(char::is_control) {
         return Err(Refusal::BoundExceeded(name));
+    }
+    Ok(())
+}
+
+pub fn validate_sync_group(group: &str) -> Result<(), Refusal> {
+    if group.is_empty()
+        || group.len() > MAX_SYNC_GROUP_BYTES
+        || !group.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(Refusal::InvalidIdentifier("sync group"));
+    }
+    Ok(())
+}
+
+fn validate_sync_target(target: &DisplaySyncTarget) -> Result<(), Refusal> {
+    validate_sync_group(&target.group)?;
+    if target.sampled_at_unix_ms == 0 {
+        return Err(Refusal::InvalidShape("sync target shared time"));
     }
     Ok(())
 }
@@ -339,6 +388,9 @@ fn validate_program_shape(program: &DisplayProgram) -> Result<(), Refusal> {
     if current >= program.items.len() {
         return Err(Refusal::InvalidShape("playback current index"));
     }
+    if let Some(target) = &program.playback.sync {
+        validate_sync_target(target)?;
+    }
 
     let mut item_ids = BTreeSet::new();
     let mut horizon = 0_u32;
@@ -424,7 +476,7 @@ fn encode_asset(transcript: &mut Transcript, asset: &DisplayAsset) -> Result<(),
 
 pub fn program_semantics_transcript(program: &DisplayProgram) -> Result<Vec<u8>, Refusal> {
     validate_program_shape(program)?;
-    let mut transcript = Transcript::new(b"astrolabe-display/program-semantics/v1")?;
+    let mut transcript = Transcript::new(b"astrolabe-display/program-semantics/v2")?;
     transcript.u32(program.protocol_major)?;
     transcript.text(program.assignment.as_str())?;
     transcript.text(program.program.as_str())?;
@@ -432,6 +484,14 @@ pub fn program_semantics_transcript(program: &DisplayProgram) -> Result<Vec<u8>,
     transcript.u32(program.freshness.stale_after_ms)?;
     transcript.text(program.freshness.on_stale.wire_name())?;
     transcript.text(program.playback.cycle.wire_name())?;
+    match &program.playback.sync {
+        Some(target) => {
+            transcript.boolean(true)?;
+            transcript.text(&target.group)?;
+            transcript.text(target.mode.wire_name())?;
+        }
+        None => transcript.boolean(false)?,
+    }
     let count = u32::try_from(program.items.len())
         .map_err(|_| Refusal::BoundExceeded("program item count"))?;
     transcript.u32(count)?;

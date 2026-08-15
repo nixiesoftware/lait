@@ -60,6 +60,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DisplayHealthRow dco_decode_box_autoadd_display_health_row(dynamic raw);
 
   @protected
+  DisplaySyncMode dco_decode_box_autoadd_display_sync_mode(dynamic raw);
+
+  @protected
   HostFacts dco_decode_box_autoadd_host_facts(dynamic raw);
 
   @protected
@@ -115,6 +118,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplaySurfaceRow dco_decode_display_surface_row(dynamic raw);
+
+  @protected
+  DisplaySyncMode dco_decode_display_sync_mode(dynamic raw);
 
   @protected
   DisplayTheme dco_decode_display_theme(dynamic raw);
@@ -221,6 +227,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayHealthRow? dco_decode_opt_box_autoadd_display_health_row(dynamic raw);
+
+  @protected
+  DisplaySyncMode? dco_decode_opt_box_autoadd_display_sync_mode(dynamic raw);
 
   @protected
   HostFacts? dco_decode_opt_box_autoadd_host_facts(dynamic raw);
@@ -339,6 +348,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  DisplaySyncMode sse_decode_box_autoadd_display_sync_mode(
+      SseDeserializer deserializer);
+
+  @protected
   HostFacts sse_decode_box_autoadd_host_facts(SseDeserializer deserializer);
 
   @protected
@@ -401,6 +414,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   DisplaySurfaceRow sse_decode_display_surface_row(
       SseDeserializer deserializer);
+
+  @protected
+  DisplaySyncMode sse_decode_display_sync_mode(SseDeserializer deserializer);
 
   @protected
   DisplayTheme sse_decode_display_theme(SseDeserializer deserializer);
@@ -515,6 +531,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayHealthRow? sse_decode_opt_box_autoadd_display_health_row(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplaySyncMode? sse_decode_opt_box_autoadd_display_sync_mode(
       SseDeserializer deserializer);
 
   @protected
@@ -642,6 +662,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       DisplayHealthRow self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_display_sync_mode(
+      DisplaySyncMode self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_host_facts(
       HostFacts self, SseSerializer serializer);
 
@@ -708,6 +732,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_display_surface_row(
       DisplaySurfaceRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_sync_mode(
+      DisplaySyncMode self, SseSerializer serializer);
 
   @protected
   void sse_encode_display_theme(DisplayTheme self, SseSerializer serializer);
@@ -830,6 +858,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_opt_box_autoadd_display_health_row(
       DisplayHealthRow? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_display_sync_mode(
+      DisplaySyncMode? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_host_facts(

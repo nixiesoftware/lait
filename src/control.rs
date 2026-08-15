@@ -382,8 +382,16 @@ pub struct DisplayAssignmentView {
     pub surface: String,
     pub controller: String,
     pub theme: DisplayThemeSetting,
+    pub sync: Option<DisplayAssignmentSyncView>,
     pub expires_at_unix_ms: Option<u64>,
     pub revoked_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayAssignmentSyncView {
+    pub group: String,
+    pub mode: DisplaySyncModeSetting,
+    pub static_delay_ms: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -412,6 +420,20 @@ pub enum DisplayStaleActionSetting {
     Blank,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplaySyncModeSetting {
+    StayInSync,
+    Positional,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayAssignmentSyncSetting {
+    pub group: String,
+    pub mode: DisplaySyncModeSetting,
+    pub static_delay_ms: i32,
+}
+
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -438,6 +460,8 @@ pub enum Request {
         theme: DisplayThemeSetting,
         stale_after_ms: u32,
         on_stale: DisplayStaleActionSetting,
+        #[serde(default)]
+        sync: Option<DisplayAssignmentSyncSetting>,
         #[serde(default)]
         expires_at_unix_ms: Option<u64>,
     },
@@ -1568,6 +1592,7 @@ pub fn representative_requests() -> Vec<Request> {
             theme: DisplayThemeSetting::Dark,
             stale_after_ms: 0,
             on_stale: DisplayStaleActionSetting::Blank,
+            sync: None,
             expires_at_unix_ms: None,
         },
         Request::DisplayAssignmentRevoke { assignment: s() },

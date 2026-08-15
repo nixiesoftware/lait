@@ -445,13 +445,19 @@ async fn program_changes(
                 authorized.next_challenge,
             );
         };
-        ProgramChange::NoChange {
-            revision: compiled.program.revision.clone(),
-            playback: DisplayPlayback {
+        let playback = if compiled.program.playback.sync.is_some() {
+            compiled.program.playback.clone()
+        } else {
+            DisplayPlayback {
                 current_index: index,
                 elapsed_ms: parsed.elapsed_ms.unwrap_or(0),
                 cycle: compiled.program.playback.cycle,
-            },
+                sync: None,
+            }
+        };
+        ProgramChange::NoChange {
+            revision: compiled.program.revision.clone(),
+            playback,
         }
     };
     with_challenge(json(StatusCode::OK, &change), authorized.next_challenge)
