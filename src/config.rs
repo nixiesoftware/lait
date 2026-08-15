@@ -479,6 +479,22 @@ pub fn socket_path(home: &Path) -> PathBuf {
         return direct;
     }
 
+    // On iOS every writable path lives under the app container, so even the
+    // temp dir barely fits sun_path. Two rescues, both iOS-only: `/private/var`
+    // and `/var` are the same file (a firmlink), and the shorter spelling buys
+    // eight bytes; and the hash drops to eight hex — 32 bits is plenty to keep
+    // the handful of homes one sandbox can hold apart.
+    #[cfg(target_os = "ios")]
+    {
+        let tmp = std::env::temp_dir();
+        let tmp = match tmp.strip_prefix("/private") {
+            Ok(rest) => Path::new("/").join(rest),
+            Err(_) => tmp,
+        };
+        return tmp.join(format!("gc-{}.sock", &home_hash(home)[..8]));
+    }
+
+    #[cfg(not(target_os = "ios"))]
     std::env::temp_dir().join(format!("gc-{}.sock", home_hash(home)))
 }
 

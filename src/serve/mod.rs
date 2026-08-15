@@ -127,6 +127,51 @@ pub async fn run(
     json: bool,
     selection: crate::config::Selection,
 ) -> Result<()> {
+    run_announced(port, open, selection, move |ready| {
+        if json {
+            // One line, then keep serving — the same shape `watch` has: a
+            // long-running command whose first output is the fact you were
+            // waiting for. Rust's stdout is a `LineWriter`, so the newline
+            // flushes it to a piped parent without an explicit flush.
+            println!(
+                "{}",
+                serde_json::json!({ "url": ready.url, "token": ready.token, "port": ready.port })
+            );
+        } else {
+            println!("lait — your spaces at:\n  {}", ready.url);
+            println!("(loopback only; this link carries a one-time token for this run)");
+        }
+    })
+    .await
+}
+
+/// The readiness fact: the launch URL carrying the run token, the token
+/// itself, and the bound port.
+///
+/// [`run`] prints it — stdout is the launcher's readiness contract, and
+/// `viewer/scripts/dev.mjs` and `ci/smoke-p0.sh` both read that line. An
+/// embedder that has no stdout to scrape — the iOS client is one process, and
+/// a phone cannot read its own console — receives the same fact through
+/// [`run_announced`]'s callback instead. Same moment, same guarantee: the
+/// announcement lands **before** the listener starts accepting.
+#[derive(Clone)]
+pub struct Ready {
+    pub url: String,
+    pub token: String,
+    pub port: u16,
+}
+
+/// [`run`], with the readiness line replaced by a callback.
+///
+/// This is the embedder's entry: everything `run` does, with the one
+/// process-shaped assumption (stdout as the readiness channel) handed to the
+/// caller instead. `run` is this function plus a `println!`.
+pub async fn run_announced(
+    port: u16,
+    open: bool,
+    selection: crate::config::Selection,
+    announce: impl FnOnce(&Ready) + Send,
+) -> Result<()> {
     // Identity scoping, resolved once at startup from the invocation's own
     // selection rather than from a process-wide environment.
     let identity = selection.identity_dir()?;
@@ -180,19 +225,11 @@ pub async fn run(
     tasks.spawn(socket::pump_transient(app.clone(), stop.subscribe()));
 
     let url = format!("http://127.0.0.1:{}/?token={}", bound.port(), token);
-    if json {
-        // One line, then keep serving — the same shape `watch` has: a long-running
-        // command whose first output is the fact you were waiting for. Rust's
-        // stdout is a `LineWriter`, so the newline flushes it to a piped parent
-        // without an explicit flush.
-        println!(
-            "{}",
-            serde_json::json!({ "url": url, "token": token, "port": bound.port() })
-        );
-    } else {
-        println!("lait — your spaces at:\n  {url}");
-        println!("(loopback only; this link carries a one-time token for this run)");
-    }
+    announce(&Ready {
+        url: url.clone(),
+        token: token.clone(),
+        port: bound.port(),
+    });
     if open {
         // A launch ticket rather than the run token, and for the reason the
         // ticket exists: this URL is handed to a browser, so it lands in
