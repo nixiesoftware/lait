@@ -79,6 +79,20 @@ pub const CATALOG_CODEC: &str = "json";
 pub const CATALOG_TIMESCALE: u32 = 1_000;
 /// This generation of the lait-owned catalog JSON contract.
 pub const CATALOG_VERSION: u16 = 1;
+/// A healthy path must remain stable this long before the encoder may raise
+/// its target again. Backoff is immediate.
+pub const RATE_INCREASE_INTERVAL: Duration = Duration::from_secs(3);
+/// Queue growth over the best RTT observed on this path that triggers an
+/// immediate encoder backoff, before packet loss has to reveal bufferbloat.
+pub const RATE_QUEUE_DELAY_THRESHOLD: Duration = Duration::from_millis(150);
+
+const RATE_HEADROOM_NUMERATOR: u128 = 3;
+const RATE_HEADROOM_DENOMINATOR: u128 = 4;
+const RATE_INCREASE_NUMERATOR: u32 = 5;
+const RATE_INCREASE_DENOMINATOR: u32 = 4;
+const RATE_BACKOFF_NUMERATOR: u32 = 3;
+const RATE_BACKOFF_DENOMINATOR: u32 = 4;
+const RATE_LOSS_THRESHOLD_PER_MILLE: u128 = 20;
 
 mod control_kind {
     pub const SETUP: u8 = 0x01;
@@ -590,6 +604,273 @@ impl DecoderSupport {
             Err(_) => false,
         }
     }
+}
+
+/// The video encoder's safe operating range for one rendition.
+///
+/// The preferred maxima come from the selected catalog entry. The minima are
+/// encoder/product constraints: this controller never invents an unusable
+/// bitrate or frame rate merely because a path is poor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderLimits {
+    pub min_bitrate_bps: u32,
+    pub max_bitrate_bps: u32,
+    pub min_frame_rate_milli: u32,
+    pub max_frame_rate_milli: u32,
+}
+
+impl EncoderLimits {
+    pub fn from_catalog(
+        track: &CatalogTrack,
+        min_bitrate_bps: u32,
+        min_frame_rate_milli: u32,
+    ) -> Result<Self, Invalid> {
+        track.validate()?;
+        if track.kind != TrackKind::Video {
+            return Err(Invalid::Bounds);
+        }
+        let limits = Self {
+            min_bitrate_bps,
+            max_bitrate_bps: track.bitrate_bps,
+            min_frame_rate_milli,
+            max_frame_rate_milli: track.frame_rate_milli.ok_or(Invalid::Bounds)?,
+        };
+        limits.validate()?;
+        Ok(limits)
+    }
+
+    fn validate(self) -> Result<(), Invalid> {
+        if self.min_bitrate_bps == 0
+            || self.min_bitrate_bps > self.max_bitrate_bps
+            || self.max_bitrate_bps > 1_000_000_000
+            || self.min_frame_rate_milli == 0
+            || self.min_frame_rate_milli > self.max_frame_rate_milli
+            || self.max_frame_rate_milli > 240_000
+        {
+            return Err(Invalid::Bounds);
+        }
+        Ok(())
+    }
+
+    fn minimum(self) -> EncoderTarget {
+        EncoderTarget {
+            bitrate_bps: self.min_bitrate_bps,
+            frame_rate_milli: self.min_frame_rate_milli,
+        }
+    }
+
+    fn target_for_bitrate(self, bitrate_bps: u32) -> EncoderTarget {
+        let bitrate_bps = bitrate_bps.clamp(self.min_bitrate_bps, self.max_bitrate_bps);
+        let bitrate_span = self.max_bitrate_bps - self.min_bitrate_bps;
+        let frame_span = self.max_frame_rate_milli - self.min_frame_rate_milli;
+        let frame_rate_milli = if bitrate_span == 0 {
+            self.max_frame_rate_milli
+        } else {
+            let position = u64::from(bitrate_bps - self.min_bitrate_bps);
+            let scaled = position
+                .saturating_mul(u64::from(frame_span))
+                .checked_div(u64::from(bitrate_span))
+                .unwrap_or(0);
+            self.min_frame_rate_milli
+                .saturating_add(u32::try_from(scaled).unwrap_or(frame_span))
+        };
+        EncoderTarget {
+            bitrate_bps,
+            frame_rate_milli,
+        }
+    }
+}
+
+/// One encoder setting selected from transport evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderTarget {
+    pub bitrate_bps: u32,
+    pub frame_rate_milli: u32,
+}
+
+/// Choose the setting every receiver in a shared encode can sustain.
+///
+/// A source encoding once for several viewers must obey the slowest viewer;
+/// returning `None` for an empty set keeps "no viewers" distinct from an
+/// invented target.
+pub fn common_encoder_target(
+    targets: impl IntoIterator<Item = EncoderTarget>,
+) -> Option<EncoderTarget> {
+    targets.into_iter().reduce(|left, right| EncoderTarget {
+        bitrate_bps: left.bitrate_bps.min(right.bitrate_bps),
+        frame_rate_milli: left.frame_rate_milli.min(right.frame_rate_milli),
+    })
+}
+
+/// Stateful adapter from QUIC path observations to encoder settings.
+///
+/// This is not a second congestion controller. It only keeps encoded media
+/// below the transport's current `cwnd / RTT` estimate, with 25% headroom.
+/// Congestion and capacity loss reduce the target immediately; recovery is
+/// limited to one 25% step every three seconds. Unknown or reset telemetry
+/// returns to the configured floor.
+#[derive(Debug, Clone)]
+pub struct EncoderRateController {
+    limits: EncoderLimits,
+    target: EncoderTarget,
+    previous: Option<PathCounters>,
+    min_rtt: Option<Duration>,
+    next_increase: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PathCounters {
+    via: comms::PathKind,
+    lost_packets: Option<u64>,
+    sent_packets: Option<u64>,
+    congestion_events: Option<u64>,
+}
+
+impl EncoderRateController {
+    pub fn new(limits: EncoderLimits) -> Result<Self, Invalid> {
+        limits.validate()?;
+        Ok(Self {
+            target: limits.minimum(),
+            limits,
+            previous: None,
+            min_rtt: None,
+            next_increase: None,
+        })
+    }
+
+    pub fn target(&self) -> EncoderTarget {
+        self.target
+    }
+
+    /// Read fresh evidence from this exact admitted media session.
+    pub fn observe_session(&mut self, session: &Session) -> EncoderTarget {
+        self.observe_at(Instant::now(), session.quality())
+    }
+
+    fn observe_at(&mut self, now: Instant, quality: comms::PathQuality) -> EncoderTarget {
+        let current = PathCounters::from(quality);
+        let previous = self.previous.replace(current);
+        let reset = previous.is_none_or(|old| old.reset_by(current));
+        let unknown = quality.via == comms::PathKind::Unknown;
+        let desired = sustainable_bitrate(quality)
+            .map(|bitrate| bitrate.clamp(self.limits.min_bitrate_bps, self.limits.max_bitrate_bps))
+            .unwrap_or(self.limits.min_bitrate_bps);
+
+        if reset || unknown {
+            self.target = self.limits.minimum();
+            self.min_rtt = if unknown { None } else { quality.rtt };
+            self.next_increase = now.checked_add(RATE_INCREASE_INTERVAL);
+            return self.target;
+        }
+
+        let queue_delayed = self
+            .min_rtt
+            .zip(quality.rtt)
+            .is_some_and(|(minimum, current)| {
+                current.saturating_sub(minimum) >= RATE_QUEUE_DELAY_THRESHOLD
+            });
+        if let Some(rtt) = quality.rtt {
+            self.min_rtt = Some(self.min_rtt.map_or(rtt, |minimum| minimum.min(rtt)));
+        }
+        let congested = queue_delayed || previous.is_some_and(|old| old.congested_by(current));
+        if congested {
+            let backed_off = self
+                .target
+                .bitrate_bps
+                .saturating_mul(RATE_BACKOFF_NUMERATOR)
+                .checked_div(RATE_BACKOFF_DENOMINATOR)
+                .unwrap_or(self.limits.min_bitrate_bps);
+            self.target = self
+                .limits
+                .target_for_bitrate(desired.min(backed_off).max(self.limits.min_bitrate_bps));
+            self.next_increase = now.checked_add(RATE_INCREASE_INTERVAL);
+            return self.target;
+        }
+
+        if desired < self.target.bitrate_bps {
+            self.target = self.limits.target_for_bitrate(desired);
+            self.next_increase = now.checked_add(RATE_INCREASE_INTERVAL);
+            return self.target;
+        }
+
+        if desired > self.target.bitrate_bps
+            && self
+                .next_increase
+                .is_none_or(|not_before| now >= not_before)
+        {
+            let raised = self
+                .target
+                .bitrate_bps
+                .saturating_mul(RATE_INCREASE_NUMERATOR)
+                .checked_div(RATE_INCREASE_DENOMINATOR)
+                .unwrap_or(self.limits.max_bitrate_bps)
+                .max(self.target.bitrate_bps.saturating_add(1));
+            self.target = self.limits.target_for_bitrate(desired.min(raised));
+            self.next_increase = now.checked_add(RATE_INCREASE_INTERVAL);
+        }
+        self.target
+    }
+}
+
+impl From<comms::PathQuality> for PathCounters {
+    fn from(value: comms::PathQuality) -> Self {
+        Self {
+            via: value.via,
+            lost_packets: value.lost_packets,
+            sent_packets: value.sent_packets,
+            congestion_events: value.congestion_events,
+        }
+    }
+}
+
+impl PathCounters {
+    fn reset_by(self, current: Self) -> bool {
+        self.via != current.via
+            || counter_reset(self.lost_packets, current.lost_packets)
+            || counter_reset(self.sent_packets, current.sent_packets)
+            || counter_reset(self.congestion_events, current.congestion_events)
+    }
+
+    fn congested_by(self, current: Self) -> bool {
+        if counter_increased(self.congestion_events, current.congestion_events) {
+            return true;
+        }
+        let (Some(old_lost), Some(lost), Some(old_sent), Some(sent)) = (
+            self.lost_packets,
+            current.lost_packets,
+            self.sent_packets,
+            current.sent_packets,
+        ) else {
+            return false;
+        };
+        let sent = sent.saturating_sub(old_sent);
+        let lost = lost.saturating_sub(old_lost);
+        sent > 0
+            && u128::from(lost).saturating_mul(1_000)
+                >= u128::from(sent).saturating_mul(RATE_LOSS_THRESHOLD_PER_MILLE)
+    }
+}
+
+fn counter_reset(previous: Option<u64>, current: Option<u64>) -> bool {
+    matches!((previous, current), (Some(previous), Some(current)) if current < previous)
+}
+
+fn counter_increased(previous: Option<u64>, current: Option<u64>) -> bool {
+    matches!((previous, current), (Some(previous), Some(current)) if current > previous)
+}
+
+fn sustainable_bitrate(quality: comms::PathQuality) -> Option<u32> {
+    let rtt_nanos = quality.rtt?.as_nanos();
+    if rtt_nanos == 0 {
+        return None;
+    }
+    let bits_per_second = u128::from(quality.congestion_window?)
+        .saturating_mul(8)
+        .saturating_mul(1_000_000_000)
+        .checked_div(rtt_nanos)?
+        .saturating_mul(RATE_HEADROOM_NUMERATOR)
+        .checked_div(RATE_HEADROOM_DENOMINATOR)?;
+    Some(u32::try_from(bits_per_second).unwrap_or(u32::MAX))
 }
 
 impl Catalog {
@@ -2427,6 +2708,240 @@ mod tests {
         let mut duration = catalog_group(10);
         duration.frames[0].header.duration = Some(1);
         assert_eq!(Catalog::from_group(&duration), Err(Invalid::Bounds));
+    }
+
+    fn path_quality(
+        via: comms::PathKind,
+        congestion_window: Option<u64>,
+        lost_packets: Option<u64>,
+        sent_packets: Option<u64>,
+        congestion_events: Option<u64>,
+    ) -> comms::PathQuality {
+        comms::PathQuality {
+            via,
+            open_paths: usize::from(via != comms::PathKind::Unknown),
+            rtt: congestion_window.map(|_| Duration::from_millis(100)),
+            congestion_window,
+            lost_packets,
+            sent_packets,
+            congestion_events,
+        }
+    }
+
+    fn encoder_limits() -> EncoderLimits {
+        EncoderLimits::from_catalog(&catalog().tracks[0], 1_000_000, 15_000).expect("video ladder")
+    }
+
+    #[test]
+    fn encoder_rate_rises_slowly_and_falls_immediately() {
+        let now = Instant::now();
+        let healthy = path_quality(
+            comms::PathKind::Direct,
+            Some(100_000),
+            Some(0),
+            Some(100),
+            Some(0),
+        );
+        let mut controller = EncoderRateController::new(encoder_limits()).expect("controller");
+
+        assert_eq!(
+            controller.observe_at(now, healthy),
+            EncoderTarget {
+                bitrate_bps: 1_000_000,
+                frame_rate_milli: 15_000,
+            }
+        );
+        assert_eq!(
+            controller
+                .observe_at(
+                    now + RATE_INCREASE_INTERVAL - Duration::from_millis(1),
+                    healthy
+                )
+                .bitrate_bps,
+            1_000_000
+        );
+
+        assert_eq!(
+            controller.observe_at(now + RATE_INCREASE_INTERVAL, healthy),
+            EncoderTarget {
+                bitrate_bps: 1_250_000,
+                frame_rate_milli: 18_750,
+            }
+        );
+
+        let constrained = path_quality(
+            comms::PathKind::Direct,
+            Some(20_000),
+            Some(0),
+            Some(110),
+            Some(0),
+        );
+        assert_eq!(
+            controller
+                .observe_at(
+                    now + RATE_INCREASE_INTERVAL + Duration::from_millis(1),
+                    constrained
+                )
+                .bitrate_bps,
+            1_200_000
+        );
+    }
+
+    #[test]
+    fn encoder_rate_backs_off_on_loss_or_congestion() {
+        let now = Instant::now();
+        let mut controller = EncoderRateController::new(encoder_limits()).expect("controller");
+        let baseline = path_quality(
+            comms::PathKind::Direct,
+            Some(100_000),
+            Some(0),
+            Some(100),
+            Some(0),
+        );
+        controller.observe_at(now, baseline);
+        controller.observe_at(now + RATE_INCREASE_INTERVAL, baseline);
+
+        let mut delayed_controller =
+            EncoderRateController::new(encoder_limits()).expect("controller");
+        delayed_controller.observe_at(now, baseline);
+        delayed_controller.observe_at(now + RATE_INCREASE_INTERVAL, baseline);
+        let mut queued = baseline;
+        queued.rtt = Some(Duration::from_millis(250));
+        assert_eq!(
+            delayed_controller
+                .observe_at(
+                    now + RATE_INCREASE_INTERVAL + Duration::from_millis(1),
+                    queued,
+                )
+                .bitrate_bps,
+            1_000_000
+        );
+
+        let loss = path_quality(
+            comms::PathKind::Direct,
+            Some(100_000),
+            Some(2),
+            Some(200),
+            Some(0),
+        );
+        assert_eq!(
+            controller
+                .observe_at(
+                    now + RATE_INCREASE_INTERVAL + Duration::from_millis(1),
+                    loss
+                )
+                .bitrate_bps,
+            1_000_000
+        );
+
+        controller.observe_at(now + RATE_INCREASE_INTERVAL * 2, loss);
+        let event = path_quality(
+            comms::PathKind::Direct,
+            Some(100_000),
+            Some(2),
+            Some(210),
+            Some(1),
+        );
+        assert_eq!(
+            controller
+                .observe_at(
+                    now + RATE_INCREASE_INTERVAL * 2 + Duration::from_millis(1),
+                    event
+                )
+                .bitrate_bps,
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn unknown_changed_or_reset_paths_return_to_the_floor() {
+        let now = Instant::now();
+        let mut controller = EncoderRateController::new(encoder_limits()).expect("controller");
+        let direct = path_quality(
+            comms::PathKind::Direct,
+            Some(100_000),
+            Some(10),
+            Some(1_000),
+            Some(2),
+        );
+        controller.observe_at(now, direct);
+        controller.observe_at(now + RATE_INCREASE_INTERVAL, direct);
+
+        let relay = path_quality(
+            comms::PathKind::Relay,
+            Some(100_000),
+            Some(10),
+            Some(1_000),
+            Some(2),
+        );
+        assert_eq!(
+            controller.observe_at(
+                now + RATE_INCREASE_INTERVAL + Duration::from_millis(1),
+                relay
+            ),
+            encoder_limits().minimum()
+        );
+
+        let reset = path_quality(
+            comms::PathKind::Relay,
+            Some(100_000),
+            Some(0),
+            Some(0),
+            Some(0),
+        );
+        assert_eq!(
+            controller.observe_at(now + RATE_INCREASE_INTERVAL * 2, reset),
+            encoder_limits().minimum()
+        );
+        assert_eq!(
+            controller.observe_at(
+                now + RATE_INCREASE_INTERVAL * 3,
+                comms::PathQuality::unknown()
+            ),
+            encoder_limits().minimum()
+        );
+    }
+
+    #[test]
+    fn one_shared_encode_obeys_the_slowest_viewer() {
+        assert_eq!(
+            common_encoder_target([
+                EncoderTarget {
+                    bitrate_bps: 4_000_000,
+                    frame_rate_milli: 60_000,
+                },
+                EncoderTarget {
+                    bitrate_bps: 1_500_000,
+                    frame_rate_milli: 30_000,
+                },
+                EncoderTarget {
+                    bitrate_bps: 2_000_000,
+                    frame_rate_milli: 24_000,
+                },
+            ]),
+            Some(EncoderTarget {
+                bitrate_bps: 1_500_000,
+                frame_rate_milli: 24_000,
+            })
+        );
+        assert_eq!(common_encoder_target([]), None);
+    }
+
+    #[test]
+    fn encoder_limits_are_video_only_and_cannot_exceed_the_catalog() {
+        let catalog = catalog();
+        assert_eq!(
+            EncoderLimits::from_catalog(&catalog.tracks[1], 64_000, 15_000),
+            Err(Invalid::Bounds)
+        );
+        assert_eq!(
+            EncoderLimits::from_catalog(&catalog.tracks[0], 5_000_000, 15_000),
+            Err(Invalid::Bounds)
+        );
+        assert_eq!(
+            EncoderLimits::from_catalog(&catalog.tracks[0], 1_000_000, 61_000),
+            Err(Invalid::Bounds)
+        );
     }
 
     #[allow(clippy::format_collect, reason = "small test-only wire fixture")]

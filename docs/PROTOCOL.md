@@ -680,6 +680,17 @@ optional. The connection installs only increasing catalog Group sequences; the
 corresponding `TRACK_INFO` and every later media Group must match the latest
 selected catalog entry exactly.
 
+Encoder adaptation is connection-scoped and reads fresh QUIC path evidence; it
+does not replace or configure QUIC congestion control. A video rendition starts
+at its configured bitrate/frame-rate floor. The controller keeps 25% headroom
+under `cwnd / RTT`, reduces immediately when capacity falls, queue delay grows
+150 ms over the best RTT seen on that path, loss reaches 2%, or QUIC reports a
+congestion event, and raises at most 25% once per three seconds. A path change,
+counter reset, or unknown telemetry returns to the floor. When one encode feeds
+several receivers, the source uses the minimum bitrate and frame rate across
+their independent controllers. No padding, FEC, or duplicate media is
+synthesized to probe an application-limited path.
+
 CMAF and HLS v3 availability is named by a small opaque rendition id. Catalogs
 cannot contain a URL or path. Astrolabe resolves that id inside the receiver's
 assignment-bound HTTP session and is the only component that mints CMAF/HLS;
