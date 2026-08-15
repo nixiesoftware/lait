@@ -10,6 +10,12 @@
 //!   unsatisfiable floor would force every installed machine forever), and
 //! - a stable pointer may never name a prerelease.
 //!
+//! Every pointer is stamped with `published_at` at seal time. Clients keep the
+//! newest stamp they have believed and refuse anything older, which is what
+//! makes the one mutable object in the feed un-replayable. The stamp is not
+//! optional going forward: once a client has seen one, an unstamped pointer is
+//! refused, so publishing must never regress to a tool that omits it.
+//!
 //! Subcommands:
 //!
 //! ```text
@@ -68,7 +74,13 @@ struct Manifest {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PointerPayload {
-    Release { version: String, manifest: String },
+    Release {
+        version: String,
+        manifest: String,
+        /// Unix seconds at seal time. The client's replay ratchet compares
+        /// against it; see `lait::update::feed::check_freshness`.
+        published_at: u64,
+    },
 }
 
 fn main() {
@@ -344,12 +356,31 @@ fn pointer(args: &[String]) -> Result<()> {
         }
     }
 
+    // Stamp the moment of publication inside the signed payload. This is what
+    // makes the one mutable object in the feed un-replayable: a client records
+    // the newest stamp it has believed and refuses anything older, so putting
+    // an old correctly-signed pointer back in place becomes a refusal rather
+    // than a silent freeze at that release.
+    //
+    // Taken from the clock rather than a flag, so no operator has to remember
+    // it and no two publishes can share a value by mistake. A clock far behind
+    // the last publish would emit a pointer clients refuse — an outage, not a
+    // compromise, and cleared by publishing again with the clock fixed.
+    let published_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the unix epoch")?
+        .as_secs();
+
     let payload = PointerPayload::Release {
         version,
         manifest: manifest_url,
+        published_at,
     };
     fs::write(&out, seal(&payload, &seed)?).with_context(|| format!("write {}", out.display()))?;
-    println!("pointer sealed to {}", out.display());
+    println!(
+        "pointer sealed to {} (published_at {published_at})",
+        out.display()
+    );
     Ok(())
 }
 

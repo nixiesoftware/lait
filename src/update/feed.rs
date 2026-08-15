@@ -20,10 +20,19 @@
 //! instead carry a signed *relocation* ("this channel moved"), followed
 //! exactly once, so the pointer URL itself is never a permanent commitment.
 //!
+//! A signature proves who wrote a pointer and not *when*, so every pointer
+//! carries `published_at` and a node refuses one older than the newest it has
+//! already believed. Without that, anyone able to replace the object with an
+//! older correctly-signed copy freezes this machine at that release while
+//! every other check still passes. Freshness ratchets: once a stamped pointer
+//! has been seen, an unstamped one is refused too, so the defence cannot be
+//! stepped back off by replaying something from before it shipped.
+//!
 //! Error shape is load-bearing: [`Failure::Unreachable`] is "the channel
 //! could not be asked", [`Failure::Verification`] is a signature that failed,
-//! and neither may ever be rendered as "up to date". The distinction is the
-//! same absence law the client's surfaces hold everywhere else.
+//! [`Failure::Stale`] is a pointer older than one already seen, and none of
+//! them may ever be rendered as "up to date". The distinction is the same
+//! absence law the client's surfaces hold everywhere else.
 //!
 //! The publish half — sealing these envelopes, and the publish-time rules that
 //! refuse an unsatisfiable floor or a stable pointer naming a prerelease —
@@ -162,6 +171,16 @@ pub enum Failure {
     /// stable pointer naming a prerelease, a relocation chain, a
     /// pointer/manifest version disagreement.
     Invalid(String),
+    /// A verified pointer older than one this node has already seen, or one
+    /// that dropped the freshness stamp after a stamped pointer was seen.
+    ///
+    /// Its own outcome because it is the only failure here that a *signature*
+    /// cannot catch. Anyone able to replace the pointer object with an older
+    /// correctly-signed copy they kept freezes this node at that release, and
+    /// every other check passes: the envelope verifies, the manifest agrees,
+    /// the version parses. Folded into any other arm it would read as "no new
+    /// release", which is exactly the silence the attack buys.
+    Stale(String),
 }
 
 impl std::fmt::Display for Failure {
@@ -174,6 +193,7 @@ impl std::fmt::Display for Failure {
                 write!(f, "feed signature verification failed: {detail}")
             }
             Failure::Invalid(detail) => write!(f, "feed object invalid: {detail}"),
+            Failure::Stale(detail) => write!(f, "feed answered with a stale pointer: {detail}"),
         }
     }
 }
@@ -187,13 +207,68 @@ struct Envelope {
 }
 
 /// What a channel pointer says, once its envelope has verified.
+///
+/// `published_at` (unix seconds, stamped by `lait-feed pointer`) is what makes
+/// a pointer un-replayable. It is optional because pointers published before
+/// it existed carry no stamp, and refusing those outright would strand every
+/// machine now installed. See [`check_freshness`] for how absence ratchets
+/// into refusal rather than staying a permanent hole.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PointerPayload {
     /// The channel points at exactly one release.
-    Release { version: String, manifest: String },
+    Release {
+        version: String,
+        manifest: String,
+        #[serde(default)]
+        published_at: Option<u64>,
+    },
     /// The channel moved. Followed exactly once; a chain is refused.
-    Moved { to: String },
+    Moved {
+        to: String,
+        #[serde(default)]
+        published_at: Option<u64>,
+    },
+}
+
+impl PointerPayload {
+    fn published_at(&self) -> Option<u64> {
+        match self {
+            PointerPayload::Release { published_at, .. } => *published_at,
+            PointerPayload::Moved { published_at, .. } => *published_at,
+        }
+    }
+}
+
+/// The freshness ratchet: a pointer may never be older than the newest one
+/// this node has already believed.
+///
+/// The rule has three cases and the third is the one that matters. Having seen
+/// no stamp, anything is accepted — that is the unavoidable state of a machine
+/// installed before stamping existed, and it is honest rather than safe.
+/// Having seen a stamp, an older stamp is refused. And having seen a stamp, a
+/// pointer carrying *no* stamp is also refused, because otherwise the whole
+/// defence is bypassed by replaying something from before it shipped.
+///
+/// So protection engages permanently the first time a node sees a stamped
+/// pointer, and cannot be walked back off.
+fn check_freshness(
+    pointer: &PointerPayload,
+    seen: Option<u64>,
+    what: &str,
+) -> Result<Option<u64>, Failure> {
+    let stamped = pointer.published_at();
+    match (seen, stamped) {
+        (Some(seen), None) => Err(Failure::Stale(format!(
+            "{what} carries no publish time, but this node has already believed \
+             one published at {seen}; a pointer cannot lose its stamp"
+        ))),
+        (Some(seen), Some(now)) if now < seen => Err(Failure::Stale(format!(
+            "{what} was published at {now}, older than the {seen} already seen \
+             on this channel"
+        ))),
+        _ => Ok(stamped),
+    }
 }
 
 /// A release manifest: the versions and artifacts of one immutable release.
@@ -293,25 +368,79 @@ pub struct Resolved {
     /// defect the publish step exists to make impossible. The floor is ignored
     /// (never obeyed, never looped on) and this flag says so.
     pub floor_defect: bool,
+    /// When the pointer that produced this answer was published, if it was
+    /// stamped. `None` means a feed that predates stamping — no replay
+    /// protection is in force yet on this channel, and that is worth surfacing
+    /// rather than assuming.
+    pub published_at: Option<u64>,
+}
+
+/// The file holding the newest publish time believed on a channel. Beside the
+/// identity, one per channel, because following stable and test are different
+/// histories and a node may switch between them.
+fn seen_path(channel: Channel) -> Option<std::path::PathBuf> {
+    crate::config::identity_dir()
+        .ok()
+        .map(|dir| dir.join(format!("update-pointer-{}", channel.as_str())))
+}
+
+/// The newest publish time already believed on this channel, if any. A missing
+/// or unreadable record is `None` — the conservative direction is to accept and
+/// re-arm, never to refuse every update because a file went missing.
+fn seen_published_at(channel: Channel) -> Option<u64> {
+    let text = std::fs::read_to_string(seen_path(channel)?).ok()?;
+    text.trim().parse().ok()
+}
+
+/// Record a publish time as believed. Advances only; a failure to write is
+/// loud, because a node that silently cannot persist this has no replay
+/// protection while looking exactly like one that does.
+fn record_published_at(channel: Channel, at: u64) {
+    let Some(path) = seen_path(channel) else {
+        return;
+    };
+    if seen_published_at(channel).is_some_and(|seen| seen >= at) {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(error) = std::fs::write(&path, at.to_string()) {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "could not record the feed's publish time; this node cannot detect a replayed pointer"
+        );
+    }
 }
 
 /// Resolve a channel against the real feed.
 pub fn resolve(channel: Channel) -> Result<Resolved, Failure> {
-    resolve_with(
+    let resolved = resolve_with(
         |url| http_fetch(url, MAX_FEED_OBJECT),
         channel,
         FEED_BASE_URL,
         &pinned_pubkeys()?,
-    )
+        seen_published_at(channel),
+    )?;
+    if let Some(at) = resolved.published_at {
+        record_published_at(channel, at);
+    }
+    Ok(resolved)
 }
 
 /// [`resolve`] with the fetch injected, which is what makes every rule below
 /// testable without a socket.
+///
+/// `seen` is the newest publish time this node has already believed on this
+/// channel, which is what the ratchet compares against. Persisting it is the
+/// caller's job so this function stays pure.
 pub fn resolve_with<F>(
     fetch: F,
     channel: Channel,
     base: &str,
     pubkeys: &[[u8; 32]],
+    seen: Option<u64>,
 ) -> Result<Resolved, Failure>
 where
     F: Fn(&str) -> Result<Vec<u8>, Failure>,
@@ -325,14 +454,24 @@ where
     let pointer: PointerPayload = serde_json::from_slice(&payload)
         .map_err(|e| Failure::Invalid(format!("pointer payload: {e}")))?;
 
+    // Every pointer on the path is ratcheted, not just the last one. A
+    // relocation record is an object an attacker can replace too, so leaving
+    // it unchecked would move the replay one hop upstream rather than close it.
+    let mut freshest = check_freshness(&pointer, seen, "the channel pointer")?;
+
     let (version, manifest) = match pointer {
-        PointerPayload::Release { version, manifest } => (version, manifest),
-        PointerPayload::Moved { to } => {
+        PointerPayload::Release {
+            version, manifest, ..
+        } => (version, manifest),
+        PointerPayload::Moved { to, .. } => {
             let payload = open_envelope(&fetch(&to)?, pubkeys)?;
             let relocated: PointerPayload = serde_json::from_slice(&payload)
                 .map_err(|e| Failure::Invalid(format!("relocated pointer payload: {e}")))?;
+            freshest = freshest.max(check_freshness(&relocated, seen, "the relocated pointer")?);
             match relocated {
-                PointerPayload::Release { version, manifest } => (version, manifest),
+                PointerPayload::Release {
+                    version, manifest, ..
+                } => (version, manifest),
                 // One hop is a migration; two is a publish mistake or bait.
                 PointerPayload::Moved { .. } => {
                     return Err(Failure::Invalid("relocation chain refused".into()))
@@ -386,6 +525,7 @@ where
         manifest,
         floor,
         floor_defect,
+        published_at: freshest,
     })
 }
 
@@ -478,6 +618,27 @@ pub(crate) mod tests {
             "version": version,
             "manifest": format!("https://feed.example/releases/{version}/manifest.json"),
         })
+    }
+
+    fn stamped_pointer_json(version: &str, published_at: u64) -> serde_json::Value {
+        let mut pointer = pointer_json(version);
+        pointer["published_at"] = published_at.into();
+        pointer
+    }
+
+    /// A feed whose pointer carries a publish time.
+    fn stamped_feed(
+        seed: &[u8; 32],
+        channel: &str,
+        version: &str,
+        published_at: u64,
+    ) -> HashMap<String, String> {
+        let mut objects = feed_with(seed, channel, version, None);
+        objects.insert(
+            format!("https://feed.example/channels/{channel}"),
+            seal(&stamped_pointer_json(version, published_at), seed),
+        );
+        objects
     }
 
     fn feed_with(
@@ -576,6 +737,7 @@ pub(crate) mod tests {
             Channel::Stable,
             "https://feed.example",
             &[old_pub, successor_pub],
+            None,
         )
         .unwrap();
         assert_eq!(resolved.version.to_string(), "0.9.0");
@@ -627,6 +789,7 @@ pub(crate) mod tests {
             Channel::Test,
             "https://feed.example",
             &[pubkey],
+            None,
         )
         .unwrap();
         assert_eq!(resolved.version.to_string(), "0.9.0-test.1");
@@ -646,6 +809,7 @@ pub(crate) mod tests {
             Channel::Stable,
             "https://feed.example",
             &[pubkey],
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, Failure::Invalid(_)), "{err}");
@@ -666,6 +830,7 @@ pub(crate) mod tests {
             Channel::Stable,
             "https://feed.example",
             &[pubkey],
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, Failure::Invalid(_)), "{err}");
@@ -695,6 +860,7 @@ pub(crate) mod tests {
             Channel::Stable,
             "https://feed.example",
             &[pubkey],
+            None,
         )
         .unwrap();
         assert_eq!(resolved.version.to_string(), "0.9.0");
@@ -713,6 +879,7 @@ pub(crate) mod tests {
             Channel::Stable,
             "https://feed.example",
             &[pubkey],
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, Failure::Invalid(_)), "{err}");
@@ -727,6 +894,7 @@ pub(crate) mod tests {
             Channel::Stable,
             "https://feed.example",
             &[pubkey],
+            None,
         )
         .unwrap();
         assert_eq!(resolved.floor.unwrap().to_string(), "0.8.0");
@@ -741,10 +909,108 @@ pub(crate) mod tests {
             Channel::Stable,
             "https://feed.example",
             &[pubkey],
+            None,
         )
         .unwrap();
         assert!(resolved.floor.is_none());
         assert!(resolved.floor_defect);
+    }
+
+    #[test]
+    fn a_replayed_pointer_is_stale_and_never_reads_as_no_new_release() {
+        // The attack the stamp exists for: an older, correctly-signed pointer
+        // put back in place. Every other check passes — the envelope verifies,
+        // the manifest agrees, the version parses — so without this rule the
+        // node concludes there is simply nothing newer, which is precisely the
+        // silence the attacker is buying.
+        let (seed, pubkey) = test_keypair();
+        let objects = stamped_feed(&seed, "stable", "0.9.0", 1_000);
+        let err = resolve_with(
+            feed_of(&objects),
+            Channel::Stable,
+            "https://feed.example",
+            &[pubkey],
+            Some(2_000),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Failure::Stale(_)), "{err}");
+
+        // The same pointer is fine for a node that has seen nothing newer.
+        let resolved = resolve_with(
+            feed_of(&objects),
+            Channel::Stable,
+            "https://feed.example",
+            &[pubkey],
+            Some(1_000),
+        )
+        .unwrap();
+        assert_eq!(resolved.published_at, Some(1_000));
+    }
+
+    #[test]
+    fn a_pointer_may_not_drop_its_stamp_once_one_has_been_seen() {
+        // Otherwise the whole defence is bypassed by replaying any pointer
+        // published before stamping existed.
+        let (seed, pubkey) = test_keypair();
+        let objects = feed_with(&seed, "stable", "0.9.0", None);
+        let err = resolve_with(
+            feed_of(&objects),
+            Channel::Stable,
+            "https://feed.example",
+            &[pubkey],
+            Some(1_000),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Failure::Stale(_)), "{err}");
+
+        // A node that has never seen a stamp still accepts an unstamped
+        // pointer: that is the machine installed before stamping shipped, and
+        // refusing it would strand the very fleet this protects.
+        let resolved = resolve_with(
+            feed_of(&objects),
+            Channel::Stable,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .unwrap();
+        assert!(resolved.published_at.is_none());
+    }
+
+    #[test]
+    fn a_replayed_relocation_record_is_stale_too() {
+        // The relocation is an object an attacker can replace as well, so
+        // ratcheting only the final pointer would move the replay one hop
+        // upstream rather than close it.
+        let (seed, pubkey) = test_keypair();
+        let mut objects = stamped_feed(&seed, "stable", "0.9.0", 5_000);
+        let real_pointer = objects
+            .remove("https://feed.example/channels/stable")
+            .unwrap();
+        objects.insert(
+            "https://feed.example/channels/stable".into(),
+            seal(
+                &serde_json::json!({
+                    "kind": "moved",
+                    "to": "https://newhost.example/channels/stable",
+                    "published_at": 1_000,
+                }),
+                &seed,
+            ),
+        );
+        objects.insert(
+            "https://newhost.example/channels/stable".into(),
+            real_pointer,
+        );
+        let err = resolve_with(
+            feed_of(&objects),
+            Channel::Stable,
+            "https://feed.example",
+            &[pubkey],
+            Some(4_000),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Failure::Stale(_)), "{err}");
     }
 
     #[test]
@@ -756,6 +1022,7 @@ pub(crate) mod tests {
             Channel::Stable,
             "https://feed.example",
             &[pubkey],
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, Failure::Unreachable(_)), "{err}");
