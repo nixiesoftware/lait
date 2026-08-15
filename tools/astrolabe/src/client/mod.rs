@@ -21,7 +21,7 @@ pub mod space;
 pub mod storage;
 
 pub use error::{ClientError, ClientResult};
-pub use library::{LaunchTicket, LibraryEntry};
+pub use library::{Artwork, LaunchTicket, LibraryEntry};
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -31,6 +31,20 @@ void start({String? stateRoot, String? sidecar}) =>
 /// times and see three refusals.
 ClientView dispatch({required ActionRequest action}) =>
     Core.instance.api.crateApiDispatch(action: action);
+
+/// The artwork one installed World ships, by mount.
+///
+/// The one thing that crosses this boundary without being part of
+/// [`ClientView`], and for a reason the view's own contract gives: the view is
+/// pushed whole to every attached surface on every pump, and artwork is a
+/// build constant that cannot change while the process runs. Riding in the view
+/// it would be re-marshalled on every presence sample to repeat itself. Asked
+/// for once and cached by the surface, it costs one copy for the life of the
+/// window.
+///
+/// An unknown mount answers with no artwork, not an error.
+WorldArtwork worldArtwork({required String mount}) =>
+    Core.instance.api.crateApiWorldArtwork(mount: mount);
 
 /// The view as it stands, for a surface that has just been built.
 ClientView current() => Core.instance.api.crateApiCurrent();
@@ -967,6 +981,37 @@ class SuggestionRow {
           name == other.name &&
           note == other.note &&
           handles == other.handles;
+}
+
+/// The artwork one World ships, as PNG bytes compiled into this build.
+///
+/// Not part of [`LibraryRow`], and the omission is the design: see
+/// [`world_artwork`]. Both halves are optional and their absence is a real
+/// answer — a World that ships neither is drawn from its accent, which is what
+/// every World was drawn from before any of them shipped art.
+///
+/// No `Default` derive: the codegen turns one into a `default_()` on the Dart
+/// class — an asynchronous round trip to the core to learn that two fields are
+/// null, which `const WorldArtwork()` already says on the Dart side for free.
+class WorldArtwork {
+  final Uint8List? mark;
+  final Uint8List? hero;
+
+  const WorldArtwork({
+    this.mark,
+    this.hero,
+  });
+
+  @override
+  int get hashCode => mark.hashCode ^ hero.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WorldArtwork &&
+          runtimeType == other.runtimeType &&
+          mark == other.mark &&
+          hero == other.hero;
 }
 
 /// One person the book addresses near a World — the at-a-glance join between

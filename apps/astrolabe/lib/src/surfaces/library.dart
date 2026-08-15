@@ -9,7 +9,10 @@
 /// hands it to the browser.
 library;
 
-import 'package:covalence/covalence.dart' hide Surface;
+// `Image` is hidden rather than prefixed: covalence's is a network component
+// over a `String src`, and every image on this surface is bytes the binary was
+// compiled with. There is nothing here for it to fetch.
+import 'package:covalence/covalence.dart' hide Surface, Image;
 import 'package:covalence/covalence.dart' as cv show Surface;
 import 'package:lit_ui/lit_ui.dart' show LightTheme, Lit;
 import 'package:covalence/listtile.dart';
@@ -57,7 +60,6 @@ class LibrarySurface extends StatefulWidget {
 
 class _LibrarySurfaceState extends State<LibrarySurface> {
   String? _selected;
-  String _query = '';
 
   @override
   Widget build(BuildContext context) {
@@ -68,21 +70,13 @@ class _LibrarySurfaceState extends State<LibrarySurface> {
     if (rows == null) return const _Loading();
     if (rows.isEmpty) return const _Empty();
 
-    final needle = _query.trim().toLowerCase();
-    final visible = needle.isEmpty
-        ? rows
-        : rows
-            .where((row) =>
-                _name(row).toLowerCase().contains(needle) ||
-                row.worldMount.toLowerCase().contains(needle))
-            .toList();
-
-    final showing = visible.isEmpty
-        ? null
-        : visible.firstWhere(
-            (row) => row.key == _selected,
-            orElse: () => visible.first,
-          );
+    // Every installed World is drawn, always. The rail is the install list a
+    // build compiles in — a handful of rows, never a corpus — so there is
+    // nothing here a search would find that the eye does not.
+    final showing = rows.firstWhere(
+      (row) => row.key == _selected,
+      orElse: () => rows.first,
+    );
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -90,18 +84,13 @@ class _LibrarySurfaceState extends State<LibrarySurface> {
         t.box.width(
           TokenEscape.rawSize(kRailWidth),
           child: _Rail(
-            rows: visible,
-            allCount: rows.length,
+            rows: rows,
             showing: showing,
             view: view,
-            onQuery: (query) => setState(() => _query = query),
             onSelect: (row) => setState(() => _selected = row.key),
           ),
         ),
-        Expanded(
-          child:
-              showing == null ? const _NoMatches() : _Detail(showing: showing),
-        ),
+        Expanded(child: _Detail(showing: showing)),
       ],
     );
   }
@@ -185,40 +174,17 @@ class _Empty extends StatelessWidget {
   }
 }
 
-class _NoMatches extends StatelessWidget {
-  const _NoMatches();
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(AppIcons.search, color: context.text.l700),
-          t.gap.y(Space.md),
-          Text('No Worlds match this search.', style: context.bodyStyle),
-        ],
-      ),
-    );
-  }
-}
-
 class _Rail extends StatelessWidget {
   const _Rail({
     required this.rows,
-    required this.allCount,
     required this.showing,
     required this.view,
-    required this.onQuery,
     required this.onSelect,
   });
 
   final List<LibraryRow> rows;
-  final int allCount;
   final LibraryRow? showing;
   final ClientView view;
-  final ValueChanged<String> onQuery;
   final ValueChanged<LibraryRow> onSelect;
 
   @override
@@ -239,71 +205,72 @@ class _Rail extends StatelessWidget {
       decoration: BoxDecoration(
         border: t.stroke.edge(right: context.border.l500),
       ),
+      // The rail keeps half the gutter and the rows carry the other half, so
+      // a row's selected plate bleeds past the text on both sides while the
+      // mark, the group labels and the header all start on the same line. The
+      // whole gutter here and a second one inside the tile is what put the
+      // rows an indent to the right of the word above them.
       padding: t.padding.fromLTRB(
-        Space.xl3,
+        Space.md,
         Space.xl,
-        Space.xl3,
+        Space.md,
         Space.xl3,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'LIBRARY',
-                  style: context.factLabelStyle.copyWith(
-                    color: context.text.l900,
-                    fontWeight: FontWeight.w700,
+          Padding(
+            padding: t.padding.symmetric(h: Space.md),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'LIBRARY',
+                    style: context.factLabelStyle.copyWith(
+                      color: context.text.l900,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
-              ),
-              Text('$allCount', style: context.labelStyle),
-            ],
-          ),
-          t.gap.y(Space.md),
-          Input(
-            key: const ValueKey('library-search'),
-            hint: 'Search Worlds',
-            semanticLabel: 'Search Library',
-            size: InputSize.sm,
-            search: true,
-            onChanged: onQuery,
+                Text('${rows.length}', style: context.labelStyle),
+              ],
+            ),
           ),
           t.gap.y(Space.xl3),
           Expanded(
-            child: rows.isEmpty
-                ? Text('No matches', style: context.labelStyle)
-                : ListView(
-                    padding: EdgeInsets.zero,
-                    children: [
-                      if (running.isNotEmpty)
-                        _RailSection(
-                          label: 'RUNNING',
-                          rows: running,
-                          showing: showing,
-                          view: view,
-                          onSelect: onSelect,
-                        ),
-                      if (ready.isNotEmpty)
-                        _RailSection(
-                          label: 'READY',
-                          rows: ready,
-                          showing: showing,
-                          view: view,
-                          onSelect: onSelect,
-                        ),
-                      if (unavailable.isNotEmpty)
-                        _RailSection(
-                          label: 'UNAVAILABLE',
-                          rows: unavailable,
-                          showing: showing,
-                          view: view,
-                          onSelect: onSelect,
-                        ),
-                    ],
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                if (running.isNotEmpty)
+                  _RailSection(
+                    label: 'RUNNING',
+                    rows: running,
+                    showing: showing,
+                    view: view,
+                    onSelect: onSelect,
                   ),
+                // Ready carries no heading: it is the ordinary state of an
+                // installed World, and a label over it names what every row
+                // would say if it said nothing. The two headings that remain
+                // are the ones worth reading — a World that is up, and one
+                // this build cannot open.
+                if (ready.isNotEmpty)
+                  _RailSection(
+                    rows: ready,
+                    showing: showing,
+                    view: view,
+                    onSelect: onSelect,
+                  ),
+                if (unavailable.isNotEmpty)
+                  _RailSection(
+                    label: 'UNAVAILABLE',
+                    rows: unavailable,
+                    showing: showing,
+                    view: view,
+                    onSelect: onSelect,
+                  ),
+              ],
+            ),
           ),
         ],
       ),
@@ -313,14 +280,16 @@ class _Rail extends StatelessWidget {
 
 class _RailSection extends StatelessWidget {
   const _RailSection({
-    required this.label,
+    this.label,
     required this.rows,
     required this.showing,
     required this.view,
     required this.onSelect,
   });
 
-  final String label;
+  /// The heading over the group, or null for a group that needs none — the
+  /// rows then start flush against the section above.
+  final String? label;
   final List<LibraryRow> rows;
   final LibraryRow? showing;
   final ClientView view;
@@ -334,18 +303,25 @@ class _RailSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: t.padding.only(left: Space.md, bottom: Space.sm),
-            child: Text(label, style: context.factLabelStyle),
-          ),
+          if (label != null)
+            Padding(
+              padding: t.padding.only(left: Space.md, bottom: Space.sm),
+              child: Text(label!, style: context.factLabelStyle),
+            ),
           for (final row in rows)
             Padding(
               padding: t.padding.only(bottom: Space.xxs),
               child: ListTile(
                 variant: ListTileVariant.dense,
+                // The rail's other half. Dense defaults to a full gutter,
+                // which on top of the rail's own put every row an indent
+                // right of the header it sits under.
+                contentPadding: t.padding.symmetric(h: Space.md, v: Space.xs),
                 selected: row.key == showing?.key,
                 onTap: () => onSelect(row),
-                leading: _Mark(row: row, size: 20),
+                // 24 rather than 20: a World's own mark has detail in it, and
+                // four pixels is the difference between a shape and a smudge.
+                leading: _Mark(row: row, size: 24),
                 title: Text(
                   _name(row),
                   overflow: TextOverflow.ellipsis,
@@ -359,6 +335,13 @@ class _RailSection extends StatelessWidget {
   }
 }
 
+/// A World's mark: its own artwork where it ships one, and a plate cut from
+/// its accent where it does not.
+///
+/// The fallback is not a placeholder. Every World was drawn this way before
+/// any of them shipped art, and a World that ships none is making a choice
+/// rather than missing a file — so the derived plate stays a first-class
+/// answer instead of a grey box waiting for something.
 class _Mark extends StatelessWidget {
   const _Mark({required this.row, required this.size});
 
@@ -367,13 +350,29 @@ class _Mark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final radius = TokenEscape.rawRadius(all: size / 4);
+    final mark = ClientScope.of(context).artworkFor(row.worldMount).mark;
+    if (mark != null) {
+      return ClipRRect(
+        borderRadius: radius,
+        child: Image.memory(
+          mark,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          // A mark is drawn an order below the size it ships at, so the
+          // filter is doing real work rather than nudging a pixel.
+          filterQuality: FilterQuality.medium,
+        ),
+      );
+    }
     return Container(
       width: size,
       height: size,
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: _accent(context, row),
-        borderRadius: TokenEscape.rawRadius(all: size / 4),
+        borderRadius: radius,
       ),
       child: Text(
         row.worldMount.substring(0, 1).toUpperCase(),
@@ -412,7 +411,12 @@ class _Detail extends StatelessWidget {
               // boundary it exists to keep. Astrolabe surfaces lifecycle;
               // `Open` is the one act, and everything past it is the
               // World's.
-              _Details(showing: showing),
+              //
+              // Nor the World's own facts: the entry path and the address of
+              // the head serving it are the destination's to state. The band
+              // above acts, the footer's launch notice carries the address it
+              // opened, and World settings holds the rest.
+              _Glance(showing: showing),
             ],
           ),
         ),
@@ -429,63 +433,62 @@ class _Hero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final view = ClientScope.watch(context);
     final seed = _accent(context, showing);
     final onHero = cv.Surface.onSolid.resolve(context);
-    final lifecycle = _lifecycleCopy(view, showing);
+
+    // The World's own frame, where it ships one. The accent gradient stays
+    // either way and goes over the top of it as a scrim: a title in white on
+    // bare artwork is legible until the day a World ships a pale one, and
+    // which day that is would not be this client's to find out. Translucent
+    // where there is art to show through, opaque where there is none — the
+    // artless case draws exactly what it drew before.
+    final art = ClientScope.of(context).artworkFor(showing.worldMount).hero;
+    final wash = Color.lerp(seed, context.surface.l950, 0.62)!;
+    final scrim = LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: art == null
+          ? [seed, wash]
+          : [seed.withValues(alpha: 0.72), wash.withValues(alpha: 0.88)],
+    );
 
     return Container(
       key: const ValueKey('library-hero'),
       height: kHeroHeight,
-      padding: t.padding.all(Space.xl5),
       decoration: BoxDecoration(
         border: t.stroke.edge(bottom: seed.withValues(alpha: 0.55)),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [seed, Color.lerp(seed, context.surface.l950, 0.62)!],
-        ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Stack(
+        fit: StackFit.expand,
         children: [
-          Row(
-            children: [
-              Text(
-                'WORLD',
-                style: context.factLabelStyle.copyWith(
-                  color: onHero,
-                  fontWeight: FontWeight.w700,
+          if (art != null)
+            Image.memory(art, fit: BoxFit.cover, filterQuality: FilterQuality.medium),
+          DecoratedBox(decoration: BoxDecoration(gradient: scrim)),
+          // The name, and nothing else. What sat around it said what the rest
+          // of the surface already says: the eyebrow named the kind of thing
+          // every row in this Library is, the badge repeated the state the
+          // band below acts on, and the tagline is a list's line — it earns
+          // its place where Worlds are being told apart, not on the one the
+          // person has already chosen.
+          Padding(
+            padding: t.padding.all(Space.xl5),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Text(
+                  _name(showing),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.titleStyle.copyWith(
+                    color: onHero,
+                    fontSize: context.font.xl3,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
-              ),
-              const Spacer(),
-              Badge(
-                label: lifecycle.label,
-                color: onHero,
-                radius: Space.xs,
-              ),
-            ],
-          ),
-          const Spacer(),
-          Text(
-            _name(showing),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: context.titleStyle.copyWith(
-              color: onHero,
-              fontSize: context.font.xl3,
-              fontWeight: FontWeight.w700,
+              ],
             ),
           ),
-          if (showing.tagline != null) ...[
-            t.gap.y(Space.xs),
-            Text(
-              showing.tagline!,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: context.bodyStyle.copyWith(color: onHero),
-            ),
-          ],
         ],
       ),
     );
@@ -521,7 +524,7 @@ class _ActionPanel extends StatelessWidget {
 
     return Container(
       key: const ValueKey('library-open-band'),
-      padding: t.padding.symmetric(h: Space.xl5, v: Space.xl3),
+      padding: t.padding.symmetric(h: Space.xl5, v: Space.xl2),
       decoration: BoxDecoration(
         color: context.surface.l100,
         border: t.stroke.edge(bottom: context.border.l500),
@@ -978,105 +981,31 @@ class _LifecycleState extends StatelessWidget {
   }
 }
 
-class _Details extends StatelessWidget {
-  const _Details({required this.showing});
+class _Glance extends StatelessWidget {
+  const _Glance({required this.showing});
 
   final LibraryRow showing;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final heads = _serving(ClientScope.watch(context));
-    final people = showing.people;
 
     // No head of its own: the tiers inside already say who is in the World
     // and who merely holds it, and a title above them would count what the
     // two lines beneath it count better.
-    final glance = _InfoPanel(child: _People(people: people));
-    final details = _InfoPanel(
-      title: 'WORLD DETAILS',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _Fact(
-            label: 'OPENS AT',
-            value: showing.opensAt ?? 'No entry path declared',
-            mono: true,
-          ),
-        ],
-      ),
-    );
-    final serving = _InfoPanel(
-      title: 'SERVING NOW',
-      child: heads.isEmpty
-          ? Text(
-              'No matching head has reported an address.',
-              style: context.proseStyle,
-            )
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final head in heads) ...[
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          head.origin ?? '${head.kind} head',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: context.monoStyle,
-                        ),
-                      ),
-                      t.gap.x(Space.md),
-                      Badge(
-                        label: head.owned ? 'local' : 'external',
-                        variant: head.owned
-                            ? BadgeVariant.success
-                            : BadgeVariant.outline,
-                        radius: Space.xs,
-                      ),
-                    ],
-                  ),
-                  t.gap.y(Space.sm),
-                ],
-              ],
-            ),
-    );
+    final glance = _InfoPanel(child: _People(people: showing.people));
 
-    // The glance card is its own column on the RIGHT — the reference
-    // client's sidebar, on the reference client's side — and the
-    // operational panels flow in the space to its left. Narrow panes stack,
-    // the operational panels first.
+    // It was the reference client's right-hand sidebar while operational
+    // panels flowed beside it; with those gone it flanks nothing, so it
+    // starts at the page's own margin instead of floating against the far
+    // edge. Kept at its designed width rather than stretched — the card is a
+    // column of people, and a column of people 700 wide is a table.
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < 620) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              details,
-              t.gap.y(Space.xl3),
-              serving,
-              t.gap.y(Space.xl3),
-              glance,
-            ],
-          );
-        }
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  details,
-                  t.gap.y(Space.xl3),
-                  serving,
-                ],
-              ),
-            ),
-            t.gap.x(Space.xl3),
-            t.box.width(TokenEscape.rawSize(kGlanceWidth), child: glance),
-          ],
+        if (constraints.maxWidth < 620) return glance;
+        return Align(
+          alignment: AlignmentDirectional.topStart,
+          child: t.box.width(TokenEscape.rawSize(kGlanceWidth), child: glance),
         );
       },
     );
@@ -1203,11 +1132,8 @@ class _People extends StatelessWidget {
 }
 
 class _InfoPanel extends StatelessWidget {
-  const _InfoPanel({this.title, required this.child});
+  const _InfoPanel({required this.child});
 
-  /// The panel's head, or none — a panel whose content already announces
-  /// itself carries no second name above it.
-  final String? title;
   final Widget child;
 
   @override
@@ -1222,47 +1148,7 @@ class _InfoPanel extends StatelessWidget {
         border: Border.all(color: context.border.l500, width: t.stroke.xxs),
         borderRadius: t.radius.all(Space.md),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (title != null) ...[
-            Text(title!, style: context.factLabelStyle),
-            t.gap.y(Space.xl3),
-          ],
-          child,
-        ],
-      ),
-    );
-  }
-}
-
-class _Fact extends StatelessWidget {
-  const _Fact({
-    required this.label,
-    required this.value,
-    this.mono = false,
-  });
-
-  final String label;
-  final String value;
-  final bool mono;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(label, style: context.factLabelStyle),
-        t.gap.y(Space.xxs),
-        Text(
-          value,
-          maxLines: mono ? 2 : 1,
-          overflow: TextOverflow.ellipsis,
-          style: mono ? context.monoStyle : context.bodyStyle,
-        ),
-      ],
+      child: child,
     );
   }
 }

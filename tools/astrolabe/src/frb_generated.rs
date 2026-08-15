@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1979473582;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 489796461;
 
 // Section: executor
 
@@ -171,6 +171,36 @@ fn wire__crate__api__watch_impl(
                     Ok(output_ok)
                 })())
             }
+        },
+    )
+}
+fn wire__crate__api__world_artwork_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "world_artwork",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_mount = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::world_artwork(api_mount))?;
+                Ok(output_ok)
+            })())
         },
     )
 }
@@ -974,6 +1004,17 @@ impl SseDecode for Option<Vec<crate::api::LibraryRow>> {
     }
 }
 
+impl SseDecode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<u8>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<Vec<crate::api::WorldPersonRow>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1115,6 +1156,18 @@ impl SseDecode for () {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
 }
 
+impl SseDecode for crate::api::WorldArtwork {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_mark = <Option<Vec<u8>>>::sse_decode(deserializer);
+        let mut var_hero = <Option<Vec<u8>>>::sse_decode(deserializer);
+        return crate::api::WorldArtwork {
+            mark: var_mark,
+            hero: var_hero,
+        };
+    }
+}
+
 impl SseDecode for crate::api::WorldPersonRow {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1158,6 +1211,7 @@ fn pde_ffi_dispatcher_sync_impl(
         2 => wire__crate__api__current_impl(ptr, rust_vec_len, data_len),
         3 => wire__crate__api__dispatch_impl(ptr, rust_vec_len, data_len),
         4 => wire__crate__api__start_impl(ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__world_artwork_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1692,6 +1746,22 @@ impl flutter_rust_bridge::IntoDart for crate::api::SuggestionRow {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::SuggestionRow {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::SuggestionRow> for crate::api::SuggestionRow {
     fn into_into_dart(self) -> crate::api::SuggestionRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::WorldArtwork {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.mark.into_into_dart().into_dart(),
+            self.hero.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::WorldArtwork {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::WorldArtwork> for crate::api::WorldArtwork {
+    fn into_into_dart(self) -> crate::api::WorldArtwork {
         self
     }
 }
@@ -2342,6 +2412,16 @@ impl SseEncode for Option<Vec<crate::api::LibraryRow>> {
     }
 }
 
+impl SseEncode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<u8>>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<Vec<crate::api::WorldPersonRow>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2455,6 +2535,14 @@ impl SseEncode for u8 {
 impl SseEncode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
+}
+
+impl SseEncode for crate::api::WorldArtwork {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<Vec<u8>>>::sse_encode(self.mark, serializer);
+        <Option<Vec<u8>>>::sse_encode(self.hero, serializer);
+    }
 }
 
 impl SseEncode for crate::api::WorldPersonRow {

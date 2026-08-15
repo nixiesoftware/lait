@@ -11,11 +11,16 @@
 /// that has to work — `Open` naming the row the pane is about.
 library;
 
+import 'dart:convert' show base64Decode;
+import 'dart:typed_data' show Uint8List;
+
 import 'package:astrolabe/src/core/client.dart';
 import 'package:astrolabe/src/settings/window.dart';
 import 'package:astrolabe/src/shell/person.dart';
 import 'package:astrolabe/src/surfaces/library.dart';
-import 'package:covalence/covalence.dart' hide Surface;
+// `Image` hidden for the reason the surface hides it: covalence's is a network
+// component, and the artwork under test is bytes.
+import 'package:covalence/covalence.dart' hide Surface, Image;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold;
 import 'package:flutter/widgets.dart';
 import 'package:lit_ui/lit_ui.dart' show Lit;
@@ -67,17 +72,27 @@ const HeadRow _identityHead = HeadRow(
   owned: true,
 );
 
+/// A real 1×1 PNG. `Image.memory` runs its bytes through the actual decoder,
+/// so a fixture that only looks like an image fails there rather than in the
+/// assertion it was written for.
+final Uint8List _png = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQ'
+  'GAhKmMIQAAAABJRU5ErkJggg==',
+);
+
 Future<List<ActionRequest>> _pump(
   WidgetTester tester,
   ClientView view, {
   OpenWorldSettings? onSettings,
+  Map<String, WorldArtwork> artwork = const {},
 }) async {
   final asked = <ActionRequest>[];
   await tester.pumpWidget(
     MaterialApp(
       theme: covalenceTheme(const ThemeConfig()),
       home: ClientScope(
-        client: Client.canned(view, onDispatch: asked.add),
+        client:
+            Client.canned(view, onDispatch: asked.add, artwork: artwork),
         child: WorldSettingsScope(
           onOpen: onSettings ?? (_) async {},
           child: const Scaffold(
@@ -97,7 +112,11 @@ Future<List<ActionRequest>> _pump(
   return asked;
 }
 
-Future<void> _pumpLibraryPage(WidgetTester tester, ClientView view) async {
+Future<void> _pumpLibraryPage(
+  WidgetTester tester,
+  ClientView view, {
+  Map<String, WorldArtwork> artwork = const {},
+}) async {
   tester.view.physicalSize = const Size(1040, 720);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
@@ -107,7 +126,7 @@ Future<void> _pumpLibraryPage(WidgetTester tester, ClientView view) async {
     MaterialApp(
       theme: covalenceTheme(const ThemeConfig()),
       home: ClientScope(
-        client: Client.canned(view),
+        client: Client.canned(view, artwork: artwork),
         child: const Scaffold(
           body: LibrarySurface(),
         ),
@@ -348,7 +367,8 @@ void main() {
     expect(find.text('Nobody in the book is addressed here.'), findsOneWidget);
   });
 
-  testWidgets('a head address is drawn without its credential', (tester) async {
+  testWidgets('a head address is not the front page\'s to state',
+      (tester) async {
     await _pump(
       tester,
       _view(
@@ -357,7 +377,10 @@ void main() {
       ),
     );
 
-    expect(find.text('http://127.0.0.1:52713/'), findsOneWidget);
+    // The address left this surface with the SERVING NOW panel. The footer's
+    // launch notice and World settings carry it, both credential-stripped;
+    // what must never appear here is the credential itself.
+    expect(find.text('http://127.0.0.1:52713/'), findsNothing);
     expect(
       find.textContaining('token='),
       findsNothing,
@@ -690,7 +713,12 @@ void main() {
     expect(decoded?.dark, isTrue);
   });
 
-  testWidgets('Library search filters the passive rail', (tester) async {
+  testWidgets('the rail draws every installed World, unsearched and unlabelled',
+      (tester) async {
+    // The rail is the install list: a handful of rows compiled into the
+    // build. There is no search field to narrow it, and the ordinary state
+    // carries no heading — READY over a row that is ready says nothing the
+    // row does not.
     final asked = await _pump(
       tester,
       _view(
@@ -701,16 +729,57 @@ void main() {
       ),
     );
 
-    await tester.enterText(find.byKey(const ValueKey('library-search')), 'notes');
-    await tester.pump();
-
-    expect(find.text('IssueWorld'), findsNothing);
-    expect(find.text('Notes'), findsWidgets);
+    expect(find.byKey(const ValueKey('library-search')), findsNothing);
+    expect(find.text('READY'), findsNothing);
+    final rail = find.byKey(const ValueKey('library-rail'));
+    expect(find.descendant(of: rail, matching: find.text('IssueWorld')),
+        findsOneWidget);
+    expect(
+        find.descendant(of: rail, matching: find.text('Notes')), findsOneWidget);
     expect(
       asked,
       isEmpty,
-      reason: 'filtering the Library placed or opened a World',
+      reason: 'drawing the Library placed or opened a World',
     );
+  });
+
+  testWidgets('a World that ships artwork is drawn from it', (tester) async {
+    await _pumpLibraryPage(
+      tester,
+      _view(library: [_row(mount: 'issues', name: 'Issues')]),
+      artwork: {'issues': WorldArtwork(mark: _png, hero: _png)},
+    );
+
+    final rail = find.byKey(const ValueKey('library-rail'));
+    final hero = find.byKey(const ValueKey('library-hero'));
+    expect(
+      find.descendant(of: rail, matching: find.byType(Image)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: hero, matching: find.byType(Image)),
+      findsOneWidget,
+    );
+    // The derived plate is what artwork replaces, not something it is drawn
+    // over: a mark and a letter in the same square is the letter showing
+    // through wherever the art is transparent.
+    expect(find.descendant(of: rail, matching: find.text('I')), findsNothing);
+  });
+
+  testWidgets('a World that ships none keeps the plate cut from its accent',
+      (tester) async {
+    // The default, and deliberately: every World was drawn this way before any
+    // of them shipped art, so shipping none is a choice rather than a gap.
+    await _pumpLibraryPage(
+      tester,
+      _view(library: [_row(mount: 'issues', name: 'Issues')]),
+    );
+
+    final rail = find.byKey(const ValueKey('library-rail'));
+    final hero = find.byKey(const ValueKey('library-hero'));
+    expect(find.descendant(of: rail, matching: find.text('I')), findsOneWidget);
+    expect(find.descendant(of: rail, matching: find.byType(Image)), findsNothing);
+    expect(find.descendant(of: hero, matching: find.byType(Image)), findsNothing);
   });
 
   testWidgets('the Library detail offers no agent-binding authoring',

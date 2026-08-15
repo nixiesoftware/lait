@@ -202,6 +202,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<LibraryRow>? dco_decode_opt_list_library_row(dynamic raw);
 
   @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
   List<WorldPersonRow>? dco_decode_opt_list_world_person_row(dynamic raw);
 
   @protected
@@ -233,6 +236,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void dco_decode_unit(dynamic raw);
+
+  @protected
+  WorldArtwork dco_decode_world_artwork(dynamic raw);
 
   @protected
   WorldPersonRow dco_decode_world_person_row(dynamic raw);
@@ -431,6 +437,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
   List<WorldPersonRow>? sse_decode_opt_list_world_person_row(
       SseDeserializer deserializer);
 
@@ -463,6 +472,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  WorldArtwork sse_decode_world_artwork(SseDeserializer deserializer);
 
   @protected
   WorldPersonRow sse_decode_world_person_row(SseDeserializer deserializer);
@@ -677,6 +689,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<LibraryRow>? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+      Uint8List? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_list_world_person_row(
       List<WorldPersonRow>? self, SseSerializer serializer);
 
@@ -709,6 +725,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_world_artwork(WorldArtwork self, SseSerializer serializer);
 
   @protected
   void sse_encode_world_person_row(

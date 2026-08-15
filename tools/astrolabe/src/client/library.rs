@@ -45,6 +45,44 @@ pub struct LibraryEntry {
     pub version: Option<u32>,
 }
 
+/// A World's own artwork, as the bundled package compiled it in.
+///
+/// Deliberately *not* a field on [`LibraryEntry`]. The Library entry is part of
+/// the view, and the view is pushed whole to every attached surface on every
+/// pump — a mark and a hero riding in it would be re-marshalled on every
+/// presence sample to say a thing that cannot change while the process runs.
+/// This is read once per World instead, by a surface that has decided to draw
+/// it.
+///
+/// Named apart from the interface type it feeds (`api::WorldArtwork`) because
+/// the bridge codegen keys types by bare name across the whole crate: two
+/// `WorldArtwork`s and it warns that it picked one at random. They are the
+/// same shape today, which is exactly why the day one of them changes would be
+/// the confusing one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Artwork {
+    /// PNG bytes for the square mark, or `None` where the World ships none —
+    /// which is a World to be drawn from its accent, not a missing file.
+    pub mark: Option<Vec<u8>>,
+    /// PNG bytes for the square hero frame, under the same rule.
+    pub hero: Option<Vec<u8>>,
+}
+
+/// The artwork one installed World declares, by mount.
+///
+/// An unknown mount answers with no artwork rather than an error: a surface
+/// asking about a World this build does not install is asking a question whose
+/// honest answer is "nothing to draw".
+pub fn artwork(mount: &str) -> Artwork {
+    lait::composition::bundled_client_packages()
+        .package_for_mount(mount)
+        .map(|package| Artwork {
+            mark: package.display().mark().map(<[u8]>::to_vec),
+            hero: package.display().hero().map(<[u8]>::to_vec),
+        })
+        .unwrap_or_default()
+}
+
 /// A credential minted for one launch.
 ///
 /// Short-lived, single-use, and scoped to the Orbit being opened. It is never a

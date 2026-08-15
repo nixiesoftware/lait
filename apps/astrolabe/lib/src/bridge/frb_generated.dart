@@ -67,7 +67,7 @@ class Core extends BaseEntrypoint<CoreApi, CoreApiImpl, CoreWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -1979473582;
+  int get rustContentHash => 489796461;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -86,6 +86,8 @@ abstract class CoreApi extends BaseApi {
   void crateApiStart({String? stateRoot, String? sidecar});
 
   Stream<ClientView> crateApiWatch();
+
+  WorldArtwork crateApiWorldArtwork({required String mount});
 }
 
 class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
@@ -189,6 +191,29 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   TaskConstMeta get kCrateApiWatchConstMeta => const TaskConstMeta(
         debugName: "watch",
         argNames: ["sink"],
+      );
+
+  @override
+  WorldArtwork crateApiWorldArtwork({required String mount}) {
+    return handler.executeSync(SyncTask(
+      callFfi: () {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_String(mount, serializer);
+        return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_world_artwork,
+        decodeErrorData: null,
+      ),
+      constMeta: kCrateApiWorldArtworkConstMeta,
+      argValues: [mount],
+      apiImpl: this,
+    ));
+  }
+
+  TaskConstMeta get kCrateApiWorldArtworkConstMeta => const TaskConstMeta(
+        debugName: "world_artwork",
+        argNames: ["mount"],
       );
 
   @protected
@@ -798,6 +823,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_list_prim_u_8_strict(raw);
+  }
+
+  @protected
   List<WorldPersonRow>? dco_decode_opt_list_world_person_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_list_world_person_row(raw);
@@ -906,6 +937,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   void dco_decode_unit(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return;
+  }
+
+  @protected
+  WorldArtwork dco_decode_world_artwork(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return WorldArtwork(
+      mark: dco_decode_opt_list_prim_u_8_strict(arr[0]),
+      hero: dco_decode_opt_list_prim_u_8_strict(arr[1]),
+    );
   }
 
   @protected
@@ -1694,6 +1737,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_list_prim_u_8_strict(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   List<WorldPersonRow>? sse_decode_opt_list_world_person_row(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1813,6 +1867,14 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   @protected
   void sse_decode_unit(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  WorldArtwork sse_decode_world_artwork(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_mark = sse_decode_opt_list_prim_u_8_strict(deserializer);
+    var var_hero = sse_decode_opt_list_prim_u_8_strict(deserializer);
+    return WorldArtwork(mark: var_mark, hero: var_hero);
   }
 
   @protected
@@ -2489,6 +2551,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+      Uint8List? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_list_prim_u_8_strict(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_list_world_person_row(
       List<WorldPersonRow>? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2578,6 +2651,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   @protected
   void sse_encode_unit(void self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  void sse_encode_world_artwork(WorldArtwork self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_list_prim_u_8_strict(self.mark, serializer);
+    sse_encode_opt_list_prim_u_8_strict(self.hero, serializer);
   }
 
   @protected

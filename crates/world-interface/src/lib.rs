@@ -677,7 +677,38 @@ pub struct Display {
     /// space it is opening. That is the whole of the coupling, and it runs in
     /// the direction that keeps a World's routes the World's business.
     routes: &'static [Route],
+    /// The square mark drawn where a World is one row in a list — PNG bytes,
+    /// compiled in.
+    ///
+    /// **Bytes, never a path.** The rule [`Display::icon`] states still holds:
+    /// a Library that went to disk or to a network per row to draw itself would
+    /// make listing cost what opening costs. `include_bytes!` keeps the artwork
+    /// the World's own and the listing free; what it costs instead is binary
+    /// size, which is why both bounds below are enforced at declaration.
+    mark: Option<&'static [u8]>,
+    /// The frame drawn behind a World's title on a detail surface — PNG bytes,
+    /// compiled in, under the same rule as [`Display::mark`].
+    ///
+    /// Separate from the mark because they are drawn at sizes an order apart. A
+    /// mark at 24 pixels and a banner at 200 cannot be the same image without
+    /// one of them being wrong: detail that reads at 200 is mud at 24, and art
+    /// composed for 24 is four bland shapes at 200.
+    hero: Option<&'static [u8]>,
 }
+
+/// The most one artwork may weigh.
+///
+/// It is compiled into every client that bundles the World, so a World shipping
+/// a photograph makes every install carry it. Generous enough for a mark and a
+/// banner at the sizes they are drawn; far below anything that would be called
+/// a wallpaper.
+pub const MAX_ARTWORK_BYTES: usize = 256 * 1024;
+
+/// The widest an artwork may be.
+///
+/// Both are drawn square and scaled down by the client. Past this a World is
+/// paying binary size for pixels no surface asks for.
+pub const MAX_ARTWORK_SIDE: u32 = 512;
 
 /// One named place inside a World.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -727,6 +758,8 @@ impl Display {
             tagline: None,
             accent: None,
             routes: &[],
+            mark: None,
+            hero: None,
         }
     }
 
@@ -753,6 +786,70 @@ impl Display {
     pub const fn routes(&self) -> &'static [Route] {
         self.routes
     }
+
+    pub const fn mark(&self) -> Option<&'static [u8]> {
+        self.mark
+    }
+
+    pub const fn hero(&self) -> Option<&'static [u8]> {
+        self.hero
+    }
+}
+
+/// The eight bytes every PNG starts with.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Read the dimensions out of a PNG's header.
+///
+/// The signature is 8 bytes, then a chunk length, then `IHDR`, then width and
+/// height as big-endian `u32`s — so the answer is 24 bytes in, with no decoder
+/// and no dependency. `None` for anything that is not a PNG whose first chunk
+/// is `IHDR`, which the spec requires it to be.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.get(..8)? != PNG_SIGNATURE.as_slice() || bytes.get(12..16)? != b"IHDR".as_slice() {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+    let height = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+    Some((width, height))
+}
+
+/// Hold one declared artwork to the bounds a client draws it within.
+///
+/// Every one of these is a compile-time property of the bundled package, so
+/// finding them here means finding them at the build that ships the World —
+/// which is the only place a person who can fix the image is still looking.
+fn validate_artwork(world: &WorldId, kind: &str, bytes: &[u8]) -> Result<(), Failure> {
+    if bytes.is_empty() {
+        return Err(Failure::new(format!(
+            "World '{world}' declares an empty {kind}"
+        )));
+    }
+    if bytes.len() > MAX_ARTWORK_BYTES {
+        return Err(Failure::new(format!(
+            "World '{world}' declares a {kind} of {} bytes; an artwork stops at {MAX_ARTWORK_BYTES}",
+            bytes.len()
+        )));
+    }
+    let Some((width, height)) = png_dimensions(bytes) else {
+        return Err(Failure::new(format!(
+            "World '{world}' declares a {kind} that is not a PNG"
+        )));
+    };
+    // Square, because every surface that draws one draws it in a square: a
+    // 3:1 banner in a mark's plate is either stretched or cropped, and which
+    // of the two happens would be the client deciding what the World meant.
+    if width != height {
+        return Err(Failure::new(format!(
+            "World '{world}' declares a {width}×{height} {kind}; an artwork is square"
+        )));
+    }
+    if width > MAX_ARTWORK_SIDE {
+        return Err(Failure::new(format!(
+            "World '{world}' declares a {kind} {width} wide; an artwork stops at {MAX_ARTWORK_SIDE}"
+        )));
+    }
+    Ok(())
 }
 
 impl WorldClientPackage {
@@ -872,6 +969,34 @@ impl WorldClientPackage {
         }
         self.display = Display {
             accent: Some(accent),
+            ..self.display
+        };
+        Ok(self)
+    }
+
+    /// Ship this World's own artwork: a square mark for a row, a square frame
+    /// for a detail surface.
+    ///
+    /// Both are PNG bytes compiled into the binary — `include_bytes!` in the
+    /// product crate — for the reason the whole of [`Display`] is compile-time:
+    /// a client that fetched art to draw a list would make listing cost what
+    /// opening costs. A World may declare either, both, or neither; a client
+    /// that is given neither draws what it can derive from
+    /// [`Display::accent`], which is why no default artwork exists here.
+    pub fn with_artwork(
+        mut self,
+        mark: Option<&'static [u8]>,
+        hero: Option<&'static [u8]>,
+    ) -> Result<Self, Failure> {
+        if let Some(bytes) = mark {
+            validate_artwork(&self.world, "mark", bytes)?;
+        }
+        if let Some(bytes) = hero {
+            validate_artwork(&self.world, "hero", bytes)?;
+        }
+        self.display = Display {
+            mark,
+            hero,
             ..self.display
         };
         Ok(self)
@@ -1355,6 +1480,96 @@ mod tests {
             decode_json_reply,
         )
         .unwrap()
+    }
+
+    /// A square PNG of `side`, headed exactly as the spec requires — the
+    /// bytes `png_dimensions` reads, and nothing past them.
+    fn png(side: u32) -> Vec<u8> {
+        let mut bytes = Vec::from(PNG_SIGNATURE);
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&side.to_be_bytes());
+        bytes.extend_from_slice(&side.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    /// Artwork is `&'static [u8]` because a real one is `include_bytes!`. A
+    /// test builds its bytes at runtime, so it leaks them — the lifetime is
+    /// the declaration's whole point and is not worth loosening to test it.
+    fn fixed(bytes: Vec<u8>) -> &'static [u8] {
+        Box::leak(bytes.into_boxed_slice())
+    }
+
+    /// Artwork is optional in both halves, and a World that ships none is a
+    /// World drawn from its accent — not a client with a missing file.
+    #[test]
+    fn a_world_that_ships_no_artwork_declares_none() {
+        let display = super::Display::unstated("issues");
+        assert_eq!(display.mark(), None);
+        assert_eq!(display.hero(), None);
+
+        let package = package("com.example.files", "files")
+            .with_artwork(None, None)
+            .expect("no artwork is a legal declaration");
+        assert_eq!(package.display().mark(), None);
+        assert_eq!(package.display().hero(), None);
+    }
+
+    /// The bounds are the whole point of taking bytes instead of a path: the
+    /// artwork ships inside every client that bundles the World, so a World
+    /// that hands over a photograph is spending everyone's binary. Each of
+    /// these is refused where the person who can fix the image is standing.
+    #[test]
+    fn artwork_is_held_to_its_bounds_at_declaration() {
+        let square = fixed(png(64));
+        assert!(package("com.example.files", "files")
+            .with_artwork(Some(square), Some(square))
+            .is_ok());
+
+        // Not a PNG at all.
+        let not_png = fixed(b"GIF89a and then some bytes to clear the length floor".to_vec());
+        assert!(package("com.example.files", "files")
+            .with_artwork(Some(not_png), None)
+            .is_err());
+
+        // Empty is absence spelled wrong: `None` says it.
+        assert!(package("com.example.files", "files")
+            .with_artwork(Some(&[]), None)
+            .is_err());
+
+        // Oblong: every surface draws these in a square, and a client that
+        // cropped or stretched would be deciding what the World meant.
+        let mut oblong = png(64);
+        oblong[20..24].copy_from_slice(&32u32.to_be_bytes());
+        assert!(package("com.example.files", "files")
+            .with_artwork(None, Some(fixed(oblong)))
+            .is_err());
+
+        // Wider than anything asks for.
+        let huge = fixed(png(MAX_ARTWORK_SIDE + 1));
+        assert!(package("com.example.files", "files")
+            .with_artwork(None, Some(huge))
+            .is_err());
+
+        // Heavier than a client should carry. A valid header, so this can only
+        // be the weight being caught.
+        let mut heavy = png(64);
+        heavy.resize(MAX_ARTWORK_BYTES + 1, 0);
+        assert!(package("com.example.files", "files")
+            .with_artwork(Some(fixed(heavy)), None)
+            .is_err());
+    }
+
+    /// The header read is the whole of the decoding done here, so it has to be
+    /// right about the two numbers it takes.
+    #[test]
+    fn png_dimensions_are_read_from_the_header_alone() {
+        assert_eq!(super::png_dimensions(&png(196)), Some((196, 196)));
+        assert_eq!(super::png_dimensions(b"short"), None);
+        let mut wrong_chunk = png(64);
+        wrong_chunk[12..16].copy_from_slice(b"IDAT");
+        assert_eq!(super::png_dimensions(&wrong_chunk), None);
     }
 
     #[test]

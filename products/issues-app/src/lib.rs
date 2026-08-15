@@ -89,6 +89,11 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
             // a list should see what the thing is called.
             .with_display(DISPLAY_NAME, Some("📋"), Some("/"))?
             .with_tagline("Plans, issues, and the Specs that govern them")?
+            // This World's own artwork, compiled in. The mark is the whorl
+            // alone, because the full print at the size a row draws a mark is
+            // a smudge; the hero is the whole print, which is what it was
+            // composed to be.
+            .with_artwork(Some(MARK), Some(HERO))?
             // The tracker's own accent, as a seed rather than an asset. A
             // client derives a plate, an accent or a mark from it locally,
             // which is what keeps listing free.
@@ -111,6 +116,12 @@ const ROUTES: &[world_interface::Route] = &[
     world_interface::Route::new("Activity", "/spaces/{space}/activity"),
     world_interface::Route::new("Settings", "/spaces/{space}/settings"),
 ];
+
+/// The mark: the print's whorl, cropped, for a row's square plate.
+const MARK: &[u8] = include_bytes!("../assets/mark.png");
+
+/// The hero: the whole print, for the frame behind this World's name.
+const HERO: &[u8] = include_bytes!("../assets/hero.png");
 
 /// What this World is called when a person sees it in a list.
 ///
