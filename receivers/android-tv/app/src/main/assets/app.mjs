@@ -146,7 +146,7 @@ const capabilities = {
 };
 
 const client = new DisplayReceiverClient({
-  origin: "https://nixiesoftware.com",
+  bootstrap: JSON.parse(globalThis.AstrolabeNativeTransport.bootstrap()),
   capabilities,
   ui,
   vaultFactory: AndroidCredentialVault.open,

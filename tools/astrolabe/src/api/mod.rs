@@ -198,6 +198,7 @@ pub struct DisplayFacts {
     pub label: String,
     pub origin: String,
     pub certificate_sha256: String,
+    pub certificate_pem: String,
     pub surfaces: Vec<DisplaySurfaceRow>,
     pub devices: Vec<DisplayReceiverRow>,
     pub assignments: Vec<DisplayAssignmentRow>,
@@ -1075,6 +1076,7 @@ fn project(app: &App) -> ClientView {
             label: display.label.clone(),
             origin: display.origin.clone(),
             certificate_sha256: display.certificate_sha256.clone(),
+            certificate_pem: display.certificate_pem.clone(),
             surfaces: display
                 .surfaces
                 .iter()

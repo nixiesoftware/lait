@@ -11,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 const _fingerprint =
     '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const _certificatePem = '-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n';
 
 ClientView _view() => const ClientView(
       loading: false,
@@ -27,6 +28,7 @@ ClientView _view() => const ClientView(
         label: 'Astrolabe on studio-pc',
         origin: 'https://192.0.2.10:7443',
         certificateSha256: _fingerprint,
+        certificatePem: _certificatePem,
         surfaces: [],
         devices: [],
         assignments: [],
@@ -76,6 +78,7 @@ void main() {
           'origin': 'https://192.0.2.10:7443',
           'sha256': _fingerprint,
         },
+        'certificate_pem': _certificatePem,
         'rendezvous': null,
       },
     );

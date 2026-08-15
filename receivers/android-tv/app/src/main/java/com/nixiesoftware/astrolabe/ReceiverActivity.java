@@ -16,6 +16,7 @@ import androidx.webkit.WebViewAssetLoader;
 public final class ReceiverActivity extends Activity {
     private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
     private WebView webView;
+    private NativeTransportBridge transportBridge;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -40,6 +41,8 @@ public final class ReceiverActivity extends Activity {
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setMediaPlaybackRequiresUserGesture(false);
         webView.addJavascriptInterface(new SecureStoreBridge(this), "AstrolabeSecureStore");
+        transportBridge = new NativeTransportBridge(this, webView);
+        webView.addJavascriptInterface(transportBridge, "AstrolabeNativeTransport");
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(
@@ -93,6 +96,11 @@ public final class ReceiverActivity extends Activity {
         if (webView != null) {
             webView.loadUrl("about:blank");
             webView.removeJavascriptInterface("AstrolabeSecureStore");
+            webView.removeJavascriptInterface("AstrolabeNativeTransport");
+            if (transportBridge != null) {
+                transportBridge.close();
+                transportBridge = null;
+            }
             webView.destroy();
             webView = null;
         }

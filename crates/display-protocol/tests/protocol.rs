@@ -8,8 +8,8 @@ use display_protocol::ids::{
     DisplayPairingId, DisplayProgramId, ProgramRevision, ProofKey, ReceiverNonce,
 };
 use display_protocol::pairing::{
-    authenticate_pairing_complete, confirmation_phrase, validate_pairing_start_response,
-    PairingStartResponse,
+    authenticate_pairing_complete, confirmation_phrase, validate_bootstrap,
+    validate_pairing_start_response, CoordinatorTrust, PairingStartResponse, ReceiverBootstrap,
 };
 use display_protocol::program::{
     canonical_program_revision, validate_program, BlankReason, DisplayAsset, DisplayAssetMediaType,
@@ -365,6 +365,31 @@ fn confirmation_phrase_commits_fingerprint_pairing_and_receiver_nonce() {
     assert_ne!(
         first,
         confirmation_phrase(&fingerprint, &pairing, &other).unwrap()
+    );
+
+    use sha2::Digest as _;
+    let certificate = b"bounded bootstrap certificate";
+    let digest = sha2::Sha256::digest(certificate);
+    let certificate_fingerprint = CoordinatorFingerprint::parse(hex(&digest)).unwrap();
+    let encoded = data_encoding::BASE64.encode(certificate);
+    let bootstrap = ReceiverBootstrap {
+        protocol_major: PROTOCOL_MAJOR,
+        trust: CoordinatorTrust::PinnedCertificate {
+            origin: "https://192.0.2.10:7443".to_owned(),
+            sha256: certificate_fingerprint,
+        },
+        certificate_pem: Some(format!(
+            "-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n"
+        )),
+        rendezvous: None,
+    };
+    assert_eq!(validate_bootstrap(&bootstrap), Ok(()));
+    let mut mismatched = bootstrap;
+    mismatched.certificate_pem =
+        Some("-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n".to_owned());
+    assert_eq!(
+        validate_bootstrap(&mismatched),
+        Err(Refusal::Integrity("pinned certificate fingerprint"))
     );
 }
 

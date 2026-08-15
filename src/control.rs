@@ -329,6 +329,7 @@ pub struct DisplayCoordinatorView {
     pub label: String,
     pub origin: String,
     pub certificate_sha256: String,
+    pub certificate_pem: String,
     pub surfaces: Vec<DisplaySurfaceView>,
     pub devices: Vec<DisplayDeviceView>,
     pub assignments: Vec<DisplayAssignmentView>,

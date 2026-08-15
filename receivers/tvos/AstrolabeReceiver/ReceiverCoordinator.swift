@@ -9,8 +9,10 @@ final class ReceiverCoordinator: ObservableObject {
     @Published var sourceState = "none"
     @Published var stale = false
 
-    private let origin = URL(string: "https://nixiesoftware.com")!
-    private let transport = BoundedTransport()
+    private let bootstrap: ReceiverBootstrap?
+    private let bootstrapFailure: Error?
+    private let origin: URL
+    private let transport: BoundedTransport
     private let vault = KeychainVault()
     private var credential: ReceiverCredential?
     private var challenge: String?
@@ -26,12 +28,29 @@ final class ReceiverCoordinator: ObservableObject {
     private var programTask: Task<Void, Never>?
     private var started = false
 
+    init() {
+        do {
+            let bootstrap = try ReceiverBootstrap.load()
+            self.bootstrap = bootstrap
+            bootstrapFailure = nil
+            origin = bootstrap.trust.origin
+            transport = BoundedTransport(trust: bootstrap.trust)
+        } catch {
+            bootstrap = nil
+            bootstrapFailure = error
+            let refused = URL(string: "https://bootstrap.invalid")!
+            origin = refused
+            transport = BoundedTransport(trust: .webPKI(origin: refused))
+        }
+    }
+
     func start() {
         guard !started else { return }
         started = true
         Task {
             do {
                 screen = .booting
+                if let bootstrapFailure { throw bootstrapFailure }
                 credential = try vault.load()
                 if let credential, credential.origin != origin.absoluteString {
                     throw DisplayProtocolV1.refusal("coordinator_changed", "stored identity belongs to another coordinator")
@@ -113,9 +132,17 @@ final class ReceiverCoordinator: ObservableObject {
               label.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
               let trust = instance["trust"] as? [String: Any]
         else { throw DisplayProtocolV1.refusal("unsupported", "coordinator instance") }
-        try StrictJSON.fields(trust, exactly: ["kind", "origin"], name: "trust")
-        guard trust["kind"] as? String == "web_pki_origin", trust["origin"] as? String == origin.absoluteString else {
-            throw DisplayProtocolV1.refusal("unsupported_trust", "tvOS requires the named Web PKI origin")
+        let expectedTrust = bootstrap?.trust
+        let expectedFields: Set<String> = expectedTrust?.fingerprint == nil
+            ? ["kind", "origin"] : ["kind", "origin", "sha256"]
+        try StrictJSON.fields(trust, exactly: expectedFields, name: "trust")
+        guard trust["origin"] as? String == origin.absoluteString,
+              (expectedTrust?.fingerprint == nil
+                ? trust["kind"] as? String == "web_pki_origin"
+                : trust["kind"] as? String == "pinned_certificate"
+                    && trust["sha256"] as? String == expectedTrust?.fingerprint)
+        else {
+            throw DisplayProtocolV1.refusal("unsupported_trust", "coordinator does not match bootstrap")
         }
 
         let nonce = try DisplayProtocolV1.randomHex()
@@ -124,7 +151,7 @@ final class ReceiverCoordinator: ObservableObject {
             "protocol_major": 1,
             "receiver_nonce": nonce,
             "poll_key": pollKey,
-            "rendezvous": NSNull(),
+            "rendezvous": (bootstrap?.rendezvous as Any?) ?? NSNull(),
             "capabilities": capabilities(),
         ])
         try StrictJSON.fields(response, exactly: ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint"], name: "pairing")
@@ -135,6 +162,9 @@ final class ReceiverCoordinator: ObservableObject {
               DisplayProtocolV1.isHex(pairing, count: 32), DisplayProtocolV1.isHex(fingerprint, count: 64),
               phrase == (try DisplayProtocolV1.confirmationPhrase(fingerprint: fingerprint, pairing: pairing, nonce: nonce))
         else { throw DisplayProtocolV1.refusal("pairing_integrity", "confirmation phrase") }
+        if let pinned = bootstrap?.trust.fingerprint, fingerprint != pinned {
+            throw DisplayProtocolV1.refusal("pairing_integrity", "certificate bootstrap")
+        }
 
         let credential = ReceiverCredential(
             mode: "pairing", origin: origin.absoluteString, pairing: pairing,

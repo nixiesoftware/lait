@@ -579,6 +579,7 @@ class DisplayFacts {
   final String label;
   final String origin;
   final String certificateSha256;
+  final String certificatePem;
   final List<DisplaySurfaceRow> surfaces;
   final List<DisplayReceiverRow> devices;
   final List<DisplayAssignmentRow> assignments;
@@ -589,6 +590,7 @@ class DisplayFacts {
     required this.label,
     required this.origin,
     required this.certificateSha256,
+    required this.certificatePem,
     required this.surfaces,
     required this.devices,
     required this.assignments,
@@ -601,6 +603,7 @@ class DisplayFacts {
       label.hashCode ^
       origin.hashCode ^
       certificateSha256.hashCode ^
+      certificatePem.hashCode ^
       surfaces.hashCode ^
       devices.hashCode ^
       assignments.hashCode ^
@@ -615,6 +618,7 @@ class DisplayFacts {
           label == other.label &&
           origin == other.origin &&
           certificateSha256 == other.certificateSha256 &&
+          certificatePem == other.certificatePem &&
           surfaces == other.surfaces &&
           devices == other.devices &&
           assignments == other.assignments &&

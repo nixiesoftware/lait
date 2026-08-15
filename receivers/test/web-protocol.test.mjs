@@ -93,6 +93,19 @@ test("unknown receiver-facing fields fail closed", async () => {
     assert.equal(error.code, "unknown_field");
     return true;
   });
+  assert.throws(
+    () => new DisplayReceiverClient({
+      bootstrap: {
+        protocol_major: 1,
+        trust: { kind: "web_pki_origin", origin: "https://nixiesoftware.com/escaped" },
+        certificate_pem: null,
+        rendezvous: null,
+      },
+      capabilities: {},
+      ui: {},
+    }),
+    (error) => error instanceof ProtocolError && error.code === "invalid_origin",
+  );
 });
 
 test("forged revisions fail before becoming eligible", async () => {
@@ -114,7 +127,12 @@ function receiverHarness(program = structuredClone(fixture.program)) {
     showFrame: (url) => events.push(["frame", url]),
   };
   const receiver = new DisplayReceiverClient({
-    origin: "https://nixiesoftware.com",
+    bootstrap: {
+      protocol_major: 1,
+      trust: { kind: "web_pki_origin", origin: "https://nixiesoftware.com" },
+      certificate_pem: null,
+      rendezvous: null,
+    },
     capabilities: {},
     ui,
   });

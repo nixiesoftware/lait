@@ -1,0 +1,9 @@
+{
+  "protocol_major": 1,
+  "trust": {
+    "kind": "web_pki_origin",
+    "origin": "https://nixiesoftware.com"
+  },
+  "certificate_pem": null,
+  "rendezvous": null
+}

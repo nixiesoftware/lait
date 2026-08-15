@@ -1,4 +1,6 @@
 import Foundation
+import CryptoKit
+import Security
 
 struct BoundedHTTPResponse {
     let status: Int
@@ -6,7 +8,38 @@ struct BoundedHTTPResponse {
     let headers: HTTPURLResponse
 }
 
-final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+final class NoRedirectDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
+    private let trust: ReceiverTrust
+
+    init(trust: ReceiverTrust) { self.trust = trust }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard case let .pinned(origin, fingerprint) = trust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        let protection = challenge.protectionSpace
+        guard protection.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              protection.host.caseInsensitiveCompare(origin.host ?? "") == .orderedSame,
+              challenge.previousFailureCount == 0,
+              let serverTrust = protection.serverTrust,
+              let leaf = SecTrustGetCertificateAtIndex(serverTrust, 0)
+        else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        let certificate = SecCertificateCopyData(leaf) as Data
+        guard SHA256.hash(data: certificate).hex == fingerprint else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+    }
+
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -19,7 +52,13 @@ final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
 }
 
 actor BoundedTransport {
-    private let delegate = NoRedirectDelegate()
+    private let delegate: NoRedirectDelegate
+    private let origin: URL
+
+    init(trust: ReceiverTrust) {
+        delegate = NoRedirectDelegate(trust: trust)
+        origin = trust.origin
+    }
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
@@ -33,6 +72,15 @@ actor BoundedTransport {
 
     func send(_ request: URLRequest, maximumBytes: Int) async throws -> BoundedHTTPResponse {
         let requestedURL = request.url
+        guard requestedURL?.scheme == "https",
+              requestedURL?.host?.caseInsensitiveCompare(origin.host ?? "") == .orderedSame,
+              requestedURL?.port == origin.port,
+              requestedURL?.user == nil,
+              requestedURL?.password == nil,
+              requestedURL?.query == nil,
+              requestedURL?.fragment == nil,
+              requestedURL?.path.hasPrefix("/head/v1/") == true
+        else { throw DisplayProtocolV1.refusal("origin_refused", "coordinator request") }
         let (stream, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.url == requestedURL else {
             throw DisplayProtocolV1.refusal("redirect_refused", "response URL changed")

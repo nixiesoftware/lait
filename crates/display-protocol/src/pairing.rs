@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::bounds::{
-    MAX_CHALLENGE_LIFETIME_MS, MAX_CONFIRMATION_PHRASE_WORDS, MAX_LABEL_BYTES,
-    MAX_PAIRING_LIFETIME_MS, MAX_RETRY_AFTER_MS,
+    MAX_CERTIFICATE_PEM_BYTES, MAX_CHALLENGE_LIFETIME_MS, MAX_CONFIRMATION_PHRASE_WORDS,
+    MAX_LABEL_BYTES, MAX_PAIRING_LIFETIME_MS, MAX_RETRY_AFTER_MS,
 };
 use crate::ids::{
     decode_hex_32, encode_hex, AuthenticationTag, Challenge, CoordinatorFingerprint,
@@ -38,6 +38,10 @@ pub enum CoordinatorTrust {
 pub struct ReceiverBootstrap {
     pub protocol_major: u32,
     pub trust: CoordinatorTrust,
+    /// The exact public leaf certificate for a pinned coordinator. Platforms
+    /// such as Roku need the PEM itself to construct a request-local trust
+    /// store; its SHA-256 must equal the fingerprint in `trust`.
+    pub certificate_pem: Option<String>,
     pub rendezvous: Option<RendezvousId>,
 }
 
@@ -142,13 +146,60 @@ pub fn validate_bootstrap(bootstrap: &ReceiverBootstrap) -> Result<(), Refusal> 
         return Err(Refusal::Unsupported("protocol major"));
     }
     let origin = match &bootstrap.trust {
-        CoordinatorTrust::PinnedCertificate { origin, .. }
-        | CoordinatorTrust::WebPkiOrigin { origin } => origin,
+        CoordinatorTrust::PinnedCertificate { origin, sha256 } => {
+            let pem = bootstrap
+                .certificate_pem
+                .as_deref()
+                .ok_or(Refusal::InvalidShape("pinned certificate PEM"))?;
+            let certificate = decode_certificate_pem(pem)?;
+            let digest = Sha256::digest(certificate);
+            let actual = data_encoding::HEXLOWER.encode(&digest);
+            if actual != sha256.as_str() {
+                return Err(Refusal::Integrity("pinned certificate fingerprint"));
+            }
+            origin
+        }
+        CoordinatorTrust::WebPkiOrigin { origin } => {
+            if bootstrap.certificate_pem.is_some() {
+                return Err(Refusal::InvalidShape("Web PKI certificate PEM"));
+            }
+            origin
+        }
     };
     if !valid_https_origin(origin) {
         return Err(Refusal::InvalidShape("coordinator HTTPS origin"));
     }
     Ok(())
+}
+
+/// Decode the single canonical PEM certificate carried by a pinned bootstrap.
+/// Certificate chains and unrelated PEM blocks are deliberately refused.
+pub fn decode_certificate_pem(pem: &str) -> Result<Vec<u8>, Refusal> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----\n";
+    const END: &str = "-----END CERTIFICATE-----\n";
+    if pem.is_empty()
+        || pem.len() > MAX_CERTIFICATE_PEM_BYTES
+        || !pem.is_ascii()
+        || !pem.starts_with(BEGIN)
+        || !pem.ends_with(END)
+    {
+        return Err(Refusal::InvalidEncoding("pinned certificate PEM"));
+    }
+    let body = pem
+        .strip_prefix(BEGIN)
+        .and_then(|value| value.strip_suffix(END))
+        .ok_or(Refusal::InvalidEncoding("pinned certificate PEM"))?;
+    if body.is_empty() || body.lines().any(|line| line.is_empty() || line.len() > 64) {
+        return Err(Refusal::InvalidEncoding("pinned certificate PEM"));
+    }
+    let encoded: String = body.lines().collect();
+    let certificate = data_encoding::BASE64
+        .decode(encoded.as_bytes())
+        .map_err(|_| Refusal::InvalidEncoding("pinned certificate PEM"))?;
+    if certificate.is_empty() || certificate.len() > MAX_CERTIFICATE_PEM_BYTES {
+        return Err(Refusal::BoundExceeded("pinned certificate"));
+    }
+    Ok(certificate)
 }
 
 pub fn validate_instance(instance: &CoordinatorInstance) -> Result<(), Refusal> {

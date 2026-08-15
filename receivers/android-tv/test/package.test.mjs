@@ -28,17 +28,28 @@ test("credential bridge is Android Keystore AES-GCM and bounded", async () => {
 
 test("web surface is bundled and closes navigation", async () => {
   const source = await read("app/src/main/java/com/nixiesoftware/astrolabe/ReceiverActivity.java");
+  const transport = await read("app/src/main/java/com/nixiesoftware/astrolabe/NativeTransportBridge.java");
   assert.match(source, /WebViewAssetLoader/);
   assert.match(source, /MIXED_CONTENT_NEVER_ALLOW/);
   assert.match(source, /setAllowFileAccess\(false\)/);
   assert.match(source, /shouldOverrideUrlLoading/);
   assert.doesNotMatch(source, /setAllowUniversalAccessFromFileURLs\(true\)/);
+  assert.match(source, /AstrolabeNativeTransport/);
+  assert.match(transport, /MessageDigest\.isEqual/);
+  assert.match(transport, /setInstanceFollowRedirects\(false\)/);
+  assert.match(transport, /getDefaultHostnameVerifier/);
+  assert.match(transport, /Executors\.newSingleThreadExecutor/);
+  assert.match(transport, /webView\.post/);
+  assert.doesNotMatch(`${source}\n${transport}`, /onReceivedSslError|SslErrorHandler\.proceed/);
 });
 
 test("application runtime declares the production Android TV capability", async () => {
   const source = await read("app/src/main/assets/app.mjs");
   assert.match(source, /platform: "android_tv"/);
   assert.match(source, /vaultFactory: AndroidCredentialVault\.open/);
-  assert.match(source, /https:\/\/nixiesoftware\.com/);
+  assert.match(source, /AstrolabeNativeTransport\.bootstrap/);
+  const bootstrap = JSON.parse(await read("app/src/main/assets/receiver-bootstrap.json"));
+  assert.deepEqual(bootstrap.trust, { kind: "web_pki_origin", origin: "https://nixiesoftware.com" });
+  assert.equal(bootstrap.certificate_pem, null);
   assert.doesNotMatch(source, /ASTR-DEMO|Demo program|Preview only/);
 });

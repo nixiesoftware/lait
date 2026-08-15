@@ -207,6 +207,7 @@ String _receiverBootstrap(DisplayFacts display) => jsonEncode({
         'origin': display.origin,
         'sha256': display.certificateSha256,
       },
+      'certificate_pem': display.certificatePem,
       'rendezvous': null,
     });
 

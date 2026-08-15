@@ -102,6 +102,55 @@ function AstrolabeIsArray(value as dynamic) as boolean
     return GetInterface(value, "ifArray") <> invalid
 end function
 
+function AstrolabeReceiverBootstrap() as dynamic
+    text = ReadAsciiFile("pkg:/receiver-bootstrap.json")
+    if Len(text) < 1 or Len(text) > 32768 then return invalid
+    bootstrap = ParseJson(text)
+    if not AstrolabeExactFields(bootstrap, ["protocol_major", "trust", "certificate_pem", "rendezvous"]) then return invalid
+    if bootstrap.protocol_major <> 1 then return invalid
+    if bootstrap.rendezvous <> invalid and not AstrolabeIsHex(bootstrap.rendezvous, 32) then return invalid
+    trust = bootstrap.trust
+    if trust = invalid or not AstrolabeIsString(trust.kind) or not AstrolabeIsString(trust.origin) then return invalid
+    if Left(trust.origin, 8) <> "https://" or Len(trust.origin) > 263 then return invalid
+    authority = Mid(trust.origin, 9)
+    if Len(authority) < 1 then return invalid
+    if Instr(1, authority, "/") > 0 or Instr(1, authority, "?") > 0 or Instr(1, authority, "#") > 0 or Instr(1, authority, "@") > 0 then return invalid
+
+    if trust.kind = "web_pki_origin"
+        if not AstrolabeExactFields(trust, ["kind", "origin"]) or bootstrap.certificate_pem <> invalid then return invalid
+        return {
+            origin: trust.origin,
+            rendezvous: bootstrap.rendezvous,
+            trustKind: trust.kind,
+            fingerprint: invalid,
+            certificates: "common:/certs/ca-bundle.crt"
+        }
+    end if
+    if trust.kind <> "pinned_certificate" or not AstrolabeExactFields(trust, ["kind", "origin", "sha256"]) then return invalid
+    if not AstrolabeIsHex(trust.sha256, 64) or not AstrolabeIsString(bootstrap.certificate_pem) then return invalid
+    pem = bootstrap.certificate_pem
+    beginMarker = "-----BEGIN CERTIFICATE-----" + Chr(10)
+    endMarker = "-----END CERTIFICATE-----" + Chr(10)
+    if Len(pem) < 1 or Len(pem) > 16384 or Left(pem, Len(beginMarker)) <> beginMarker then return invalid
+    if Right(pem, Len(endMarker)) <> endMarker then return invalid
+    encoded = pem.Replace(beginMarker, "").Replace(endMarker, "").Replace(Chr(10), "")
+    base64Matcher = CreateObject("roRegex", "^[A-Za-z0-9+/]+={0,2}$", "")
+    if Len(encoded) < 4 or Len(encoded) mod 4 <> 0 or not base64Matcher.IsMatch(encoded) then return invalid
+    certificate = CreateObject("roByteArray")
+    certificate.FromBase64String(encoded)
+    if certificate.Count() < 1 then return invalid
+    if AstrolabeSha256(certificate) <> trust.sha256 then return invalid
+    certificatePath = "tmp:/astrolabe-coordinator-ca.pem"
+    if not WriteAsciiFile(certificatePath, pem) then return invalid
+    return {
+        origin: trust.origin,
+        rendezvous: bootstrap.rendezvous,
+        trustKind: trust.kind,
+        fingerprint: trust.sha256,
+        certificates: certificatePath
+    }
+end function
+
 function AstrolabeRandomHex() as string
     device = CreateObject("roDeviceInfo")
     seed = device.GetRandomUUID() + device.GetRandomUUID()

@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+data-encoding = "2.6"
 hmac = "0.12"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"

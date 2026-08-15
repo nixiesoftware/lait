@@ -43,10 +43,41 @@ function delay(milliseconds) {
 
 function coordinatorOrigin(origin) {
   const parsed = new URL(origin);
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash
+    || origin.slice("https://".length).includes("/")) {
     throw new ProtocolError("invalid_origin", "Coordinator origin must be credential-free HTTPS");
   }
   return parsed.origin;
+}
+
+function receiverBootstrap(bootstrap) {
+  exactFields(bootstrap, ["protocol_major", "trust", "certificate_pem", "rendezvous"], "receiver bootstrap");
+  if (bootstrap.protocol_major !== PROTOCOL_MAJOR
+    || (bootstrap.rendezvous !== null && !isLowerHex(bootstrap.rendezvous, 32))) {
+    throw new ProtocolError("invalid_bootstrap", "Receiver bootstrap does not speak protocol major 1");
+  }
+  if (bootstrap.trust?.kind === "web_pki_origin") {
+    exactFields(bootstrap.trust, ["kind", "origin"], "coordinator trust");
+    if (bootstrap.certificate_pem !== null) {
+      throw new ProtocolError("invalid_bootstrap", "Web PKI bootstrap must not carry a pinned certificate");
+    }
+  } else if (bootstrap.trust?.kind === "pinned_certificate") {
+    exactFields(bootstrap.trust, ["kind", "origin", "sha256"], "coordinator trust");
+    if (!isLowerHex(bootstrap.trust.sha256, 64)
+      || typeof bootstrap.certificate_pem !== "string"
+      || bootstrap.certificate_pem.length < 1
+      || bootstrap.certificate_pem.length > 16 * 1024) {
+      throw new ProtocolError("invalid_bootstrap", "Pinned bootstrap trust material is invalid");
+    }
+  } else {
+    throw new ProtocolError("unsupported_trust", "Receiver bootstrap trust kind is unsupported");
+  }
+  return {
+    protocolMajor: bootstrap.protocol_major,
+    trust: Object.freeze({ ...bootstrap.trust, origin: coordinatorOrigin(bootstrap.trust.origin) }),
+    certificatePem: bootstrap.certificate_pem,
+    rendezvous: bootstrap.rendezvous,
+  };
 }
 
 function bodyDigestInput(body) {
@@ -87,11 +118,14 @@ async function decodeFrame(arrayBuffer, asset) {
 }
 
 export class DisplayReceiverClient {
-  constructor({ origin, capabilities, ui, rendezvous = null, vaultFactory = CredentialVault.open }) {
-    this.origin = coordinatorOrigin(origin);
+  constructor({ bootstrap, capabilities, ui, vaultFactory = CredentialVault.open }) {
+    const provisioned = receiverBootstrap(bootstrap);
+    this.origin = provisioned.trust.origin;
+    this.trust = provisioned.trust;
+    this.certificatePem = provisioned.certificatePem;
     this.capabilities = capabilities;
     this.ui = ui;
-    this.rendezvous = rendezvous;
+    this.rendezvous = provisioned.rendezvous;
     this.vaultFactory = vaultFactory;
     this.vault = null;
     this.credential = null;
@@ -182,13 +216,15 @@ export class DisplayReceiverClient {
       || /[\u0000-\u001f\u007f-\u009f]/u.test(instance.label)) {
       throw new ProtocolError("unsupported", "Coordinator does not speak protocol major 1");
     }
-    exactFields(instance.trust, ["kind", "origin"], "coordinator trust");
-    if (instance.trust.kind !== "web_pki_origin"
-      || coordinatorOrigin(instance.trust.origin) !== this.origin) {
-      throw new ProtocolError(
-        "unsupported_trust",
-        "This web receiver requires a matching Web PKI coordinator origin",
-      );
+    const trustFields = this.trust.kind === "pinned_certificate"
+      ? ["kind", "origin", "sha256"]
+      : ["kind", "origin"];
+    exactFields(instance.trust, trustFields, "coordinator trust");
+    if (instance.trust.kind !== this.trust.kind
+      || coordinatorOrigin(instance.trust.origin) !== this.origin
+      || (this.trust.kind === "pinned_certificate"
+        && instance.trust.sha256 !== this.trust.sha256)) {
+      throw new ProtocolError("unsupported_trust", "Coordinator trust does not match the receiver bootstrap");
     }
     return instance;
   }
@@ -217,6 +253,10 @@ export class DisplayReceiverClient {
       || response.expires_in_ms <= 0
       || response.expires_in_ms > 600_000) {
       throw new ProtocolError("invalid_pairing", "Coordinator returned an invalid pairing offer");
+    }
+    if (this.trust.kind === "pinned_certificate"
+      && response.coordinator_fingerprint !== this.trust.sha256) {
+      throw new ProtocolError("pairing_integrity", "Pairing certificate does not match the receiver bootstrap");
     }
     const expectedPhrase = await confirmationPhrase(
       response.coordinator_fingerprint,

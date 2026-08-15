@@ -3,7 +3,7 @@
 This SceneGraph channel implements Astrolabe Display protocol major 1. It uses
 Roku's random UUID source for receiver entropy, `roHMAC`/SHA-256 for the frozen
 transcripts, `roDeviceCrypto` plus the transactional registry for receiver
-identity, verified Web PKI HTTPS, authenticated range transfers, bounded asset
+identity, bootstrap-pinned or verified Web PKI HTTPS, authenticated range transfers, bounded asset
 staging, digest and decoded-dimension checks, monotonic playback, and native
 unassigned/offline/stale/revoked/refusal states.
 
@@ -25,3 +25,9 @@ decoder reports the authenticated dimensions.
 
 Signing and final `.pkg` creation require the target Roku device and publisher
 developer key; they are intentionally not repository secrets.
+
+`receiver-bootstrap.json` is the package's only coordinator provisioning
+input. For a private self-hosted build, replace it with the setup JSON copied
+from Astrolabe before packaging. The channel verifies the PEM's DER SHA-256 and
+passes that exact PEM to `roUrlTransfer.SetCertificatesFile`; the default Store
+configuration continues to use Roku's Web-PKI root bundle.

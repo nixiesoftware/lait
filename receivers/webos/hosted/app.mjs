@@ -145,7 +145,12 @@ const capabilities = {
 };
 
 const client = new DisplayReceiverClient({
-  origin: "https://nixiesoftware.com",
+  bootstrap: {
+    protocol_major: 1,
+    trust: { kind: "web_pki_origin", origin: "https://nixiesoftware.com" },
+    certificate_pem: null,
+    rendezvous: null,
+  },
   capabilities,
   ui,
 });

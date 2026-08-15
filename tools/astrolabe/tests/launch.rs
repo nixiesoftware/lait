@@ -93,7 +93,11 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         .await
         .expect("the daemon-owned display coordinator answers Astrolabe");
     assert!(
-        displays.origin.starts_with("https://") && !displays.certificate_sha256.is_empty(),
+        displays.origin.starts_with("https://")
+            && !displays.certificate_sha256.is_empty()
+            && displays
+                .certificate_pem
+                .starts_with("-----BEGIN CERTIFICATE-----\n"),
         "the display coordinator announced no pinned HTTPS identity"
     );
     assert!(

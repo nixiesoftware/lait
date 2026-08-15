@@ -8,8 +8,8 @@ field validation, verified asset decode dimensions, monotonic playback, and
 native pairing/unassigned/offline/stale/revoked/refusal UI.
 
 It does not load a web view, remote code, arbitrary URL, catalog, World route,
-or demo program. Its coordinator origin is fixed to
-`https://nixiesoftware.com` and every post-enrollment request consumes a
+or demo program. Its coordinator origin is fixed to the origin named in
+`ReceiverBootstrap.json`, and every post-enrollment request consumes a
 single-use challenge.
 
 ## Build and qualify
@@ -22,6 +22,11 @@ single-use challenge.
 4. Build for a physical Apple TV running tvOS 17 or newer and complete
    `../QUALIFICATION.md` with the Siri Remote, VoiceOver, network interruption,
    process death, certificate failure, assignment rotation, and revocation.
+
+The checked-in bootstrap uses `https://nixiesoftware.com`. A private build can
+replace that resource with the pinned setup copied from Astrolabe. Its
+`URLSessionDelegate` accepts only the exact bootstrapped leaf SHA-256 for the
+exact origin host, while redirects and cross-origin requests remain closed.
 
 App Store icon/top-shelf art and the final signing profile remain release
 assets; the receiver implementation and project definition are complete here.

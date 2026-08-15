@@ -606,6 +606,7 @@ impl SseDecode for crate::api::DisplayFacts {
         let mut var_label = <String>::sse_decode(deserializer);
         let mut var_origin = <String>::sse_decode(deserializer);
         let mut var_certificateSha256 = <String>::sse_decode(deserializer);
+        let mut var_certificatePem = <String>::sse_decode(deserializer);
         let mut var_surfaces = <Vec<crate::api::DisplaySurfaceRow>>::sse_decode(deserializer);
         let mut var_devices = <Vec<crate::api::DisplayReceiverRow>>::sse_decode(deserializer);
         let mut var_assignments = <Vec<crate::api::DisplayAssignmentRow>>::sse_decode(deserializer);
@@ -616,6 +617,7 @@ impl SseDecode for crate::api::DisplayFacts {
             label: var_label,
             origin: var_origin,
             certificate_sha256: var_certificateSha256,
+            certificate_pem: var_certificatePem,
             surfaces: var_surfaces,
             devices: var_devices,
             assignments: var_assignments,
@@ -1826,6 +1828,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::DisplayFacts {
             self.label.into_into_dart().into_dart(),
             self.origin.into_into_dart().into_dart(),
             self.certificate_sha256.into_into_dart().into_dart(),
+            self.certificate_pem.into_into_dart().into_dart(),
             self.surfaces.into_into_dart().into_dart(),
             self.devices.into_into_dart().into_dart(),
             self.assignments.into_into_dart().into_dart(),
@@ -2602,6 +2605,7 @@ impl SseEncode for crate::api::DisplayFacts {
         <String>::sse_encode(self.label, serializer);
         <String>::sse_encode(self.origin, serializer);
         <String>::sse_encode(self.certificate_sha256, serializer);
+        <String>::sse_encode(self.certificate_pem, serializer);
         <Vec<crate::api::DisplaySurfaceRow>>::sse_encode(self.surfaces, serializer);
         <Vec<crate::api::DisplayReceiverRow>>::sse_encode(self.devices, serializer);
         <Vec<crate::api::DisplayAssignmentRow>>::sse_encode(self.assignments, serializer);

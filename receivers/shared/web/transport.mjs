@@ -62,11 +62,79 @@ function xhrRequest({ method, url, body, headers, maximumBytes, responseType, ti
   });
 }
 
+function decodeBase64(value) {
+  const decoded = atob(value);
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index);
+  return bytes;
+}
+
+let nativeRequestSequence = 0;
+const nativeRequests = new Map();
+globalThis.__astrolabeNativeTransportResolve = (requestId, response) => {
+  const pending = nativeRequests.get(requestId);
+  if (!pending) return;
+  nativeRequests.delete(requestId);
+  pending(response);
+};
+
+function nativeResponse(bridge, payload) {
+  nativeRequestSequence += 1;
+  const requestId = String(nativeRequestSequence);
+  return new Promise((resolve, reject) => {
+    nativeRequests.set(requestId, resolve);
+    try {
+      bridge.request(requestId, payload);
+    } catch (error) {
+      nativeRequests.delete(requestId);
+      reject(error);
+    }
+  });
+}
+
+function nativeRequest({ method, url, body, headers, maximumBytes, responseType, timeoutMs }) {
+  const bridge = globalThis.AstrolabeNativeTransport;
+  if (!bridge || typeof bridge.request !== "function") return null;
+  const payload = JSON.stringify({
+    method,
+    url: normalizedUrl(url),
+    body,
+    headers: headers || {},
+    maximum_bytes: maximumBytes,
+    timeout_ms: timeoutMs,
+  });
+  return nativeResponse(bridge, payload).then((rawResponse) => {
+    let response;
+    try {
+      response = JSON.parse(rawResponse);
+    } catch {
+      throw new ProtocolError("native_transport", "Native receiver transport returned an invalid response");
+    }
+    if (!response || typeof response !== "object" || typeof response.error !== "undefined") {
+      throw new ProtocolError("network", response?.error || "Native receiver transport failed");
+    }
+    const bytes = decodeBase64(response.body_base64);
+    if (bytes.byteLength > maximumBytes) {
+      throw new ProtocolError("bound_exceeded", "Native coordinator response exceeded its byte bound");
+    }
+    return {
+      status: response.status,
+      body: responseType === "arraybuffer" ? bytes.buffer : new TextDecoder().decode(bytes),
+      contentType: response.content_type || "",
+      nextChallenge: response.next_challenge || null,
+    };
+  });
+}
+
+function request(options) {
+  return nativeRequest(options) || xhrRequest(options);
+}
+
 export async function boundedJson({ method, url, body = null, headers = {}, maximumBytes, timeoutMs = 30000 }) {
   const serialized = body == null ? null : JSON.stringify(body);
   const requestHeaders = { Accept: "application/json", ...headers };
   if (serialized != null) requestHeaders["Content-Type"] = "application/json; charset=utf-8";
-  const response = await xhrRequest({
+  const response = await request({
     method,
     url,
     body: serialized,
@@ -86,7 +154,7 @@ export async function boundedJson({ method, url, body = null, headers = {}, maxi
 }
 
 export function boundedBytes({ method, url, headers = {}, maximumBytes, timeoutMs = 30000 }) {
-  return xhrRequest({
+  return request({
     method,
     url,
     body: null,

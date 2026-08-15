@@ -18,17 +18,22 @@ test("receiver uses Apple security boundaries and bounded transport", async () =
   const protocol = await read("AstrolabeReceiver/DisplayProtocol.swift");
   const vault = await read("AstrolabeReceiver/KeychainVault.swift");
   const transport = await read("AstrolabeReceiver/BoundedTransport.swift");
+  const bootstrap = await read("AstrolabeReceiver/ReceiverBootstrap.swift");
   assert.match(protocol, /SecRandomCopyBytes/);
   assert.match(protocol, /HMAC<SHA256>/);
   assert.match(vault, /kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly/);
   assert.match(transport, /URLSessionConfiguration\.ephemeral/);
   assert.match(transport, /for try await byte in stream/);
   assert.match(transport, /completionHandler\(nil\)/);
+  assert.match(transport, /SecTrustGetCertificateAtIndex/);
+  assert.match(transport, /SHA256\.hash\(data: certificate\)\.hex == fingerprint/);
+  assert.match(bootstrap, /certificate_pem/);
+  assert.match(bootstrap, /pin_mismatch/);
 });
 
 test("receiver speaks only the closed authenticated Display protocol", async () => {
   const source = await read("AstrolabeReceiver/ReceiverCoordinator.swift");
-  assert.match(source, /https:\/\/nixiesoftware\.com/);
+  assert.match(source, /ReceiverBootstrap\.load/);
   assert.match(source, /X-Astrolabe-Next-Challenge/);
   assert.match(source, /\/head\/v1\/program\/changes/);
   assert.match(source, /StrictJSON\.program/);

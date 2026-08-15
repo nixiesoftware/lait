@@ -30,7 +30,12 @@ test("protocol implementation uses Roku production cryptography", async () => {
 
 test("receiver uses only closed authenticated coordinator routes", async () => {
   const task = await read("components/ReceiverTask.brs");
-  assert.match(task, /https:\/\/nixiesoftware\.com/);
+  const protocol = await read("source/Protocol.brs");
+  const bootstrap = JSON.parse(await read("receiver-bootstrap.json"));
+  assert.match(task, /SetCertificatesFile\(m\.certificates\)/);
+  assert.match(protocol, /AstrolabeSha256\(certificate\) <> trust\.sha256/);
+  assert.match(protocol, /tmp:\/astrolabe-coordinator-ca\.pem/);
+  assert.deepEqual(bootstrap.trust, { kind: "web_pki_origin", origin: "https://nixiesoftware.com" });
   assert.match(task, /X-Astrolabe-Next-Challenge/);
   assert.match(task, /\/head\/v1\/program\/changes/);
   assert.match(task, /Range/);

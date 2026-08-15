@@ -25,6 +25,7 @@ pub const RANDOM_ID_BYTES: usize = 16;
 pub const DERIVED_ID_BYTES: usize = 32;
 pub const DIGEST_BYTES: usize = 32;
 pub const MAX_LABEL_BYTES: usize = 96;
+pub const MAX_CERTIFICATE_PEM_BYTES: usize = 16 * 1024;
 pub const MAX_BUILD_BYTES: usize = 64;
 pub const MAX_LOCALE_BYTES: usize = 35;
 pub const MAX_SUMMARY_BYTES: usize = 1_024;

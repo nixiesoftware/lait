@@ -23,6 +23,8 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         INFOPLIST_KEY_UIApplicationRequiresPersistentWiFi: YES
         INFOPLIST_KEY_UIRequiresFullScreen: YES
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Astrolabe connects to the display coordinator you approve on your local network.
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
   AstrolabeReceiverTests:
     type: bundle.unit-test

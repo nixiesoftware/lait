@@ -28,6 +28,7 @@ struct StoredTlsIdentity {
 pub struct DisplayTlsIdentity {
     instance: CoordinatorInstance,
     fingerprint: CoordinatorFingerprint,
+    certificate_pem: String,
     server_config: Arc<rustls::ServerConfig>,
     bind: SocketAddr,
     path: PathBuf,
@@ -63,6 +64,7 @@ impl DisplayTlsIdentity {
         let fingerprint = CoordinatorFingerprint::parse(data_encoding::HEXLOWER.encode(&digest))
             .context("parse display certificate fingerprint")?;
         let certificate = CertificateDer::from(stored.certificate_der.clone());
+        let certificate_pem = encode_certificate_pem(&stored.certificate_der);
         let private_key =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(stored.private_key_der.clone()));
         // This workspace legitimately enables both rustls providers through
@@ -91,6 +93,7 @@ impl DisplayTlsIdentity {
         Ok(Self {
             instance,
             fingerprint,
+            certificate_pem,
             server_config: Arc::new(server_config),
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
             path,
@@ -105,6 +108,10 @@ impl DisplayTlsIdentity {
         &self.fingerprint
     }
 
+    pub fn certificate_pem(&self) -> &str {
+        &self.certificate_pem
+    }
+
     pub fn server_config(&self) -> Arc<rustls::ServerConfig> {
         self.server_config.clone()
     }
@@ -116,6 +123,19 @@ impl DisplayTlsIdentity {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn encode_certificate_pem(certificate: &[u8]) -> String {
+    let encoded = data_encoding::BASE64.encode(certificate);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        for byte in line {
+            pem.push(char::from(*byte));
+        }
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
 }
 
 fn create_identity(label: &str, port: u16) -> Result<StoredTlsIdentity> {
@@ -196,6 +216,14 @@ mod tests {
         let second = DisplayTlsIdentity::load_or_create(&root, "Ignored rename", 7443).unwrap();
         assert_eq!(first.instance(), second.instance());
         assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_eq!(first.certificate_pem(), second.certificate_pem());
+        let bootstrap = display_protocol::pairing::ReceiverBootstrap {
+            protocol_major: display_protocol::PROTOCOL_MAJOR,
+            trust: first.instance().trust.clone(),
+            certificate_pem: Some(first.certificate_pem().to_string()),
+            rendezvous: None,
+        };
+        display_protocol::pairing::validate_bootstrap(&bootstrap).unwrap();
         assert!(first.path().exists());
         let _ = std::fs::remove_dir_all(root);
     }

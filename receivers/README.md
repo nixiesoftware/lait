@@ -22,11 +22,18 @@ route.
 
 The reference receiver consumes the pinned self-hosted bootstrap copied from
 Astrolabe Displays and verifies that exact certificate before it sends pairing
-material. The five television packages are still configured for the hosted
-Web-PKI origin while their platform-native pinned transports are completed;
-they must not be represented as compatible with Astrolabe's self-signed LAN
-certificate yet. Web receivers require CORS to allow `POST`/`GET`, the protocol
-request headers listed in `../crates/display-protocol/PROTOCOL.md`, and to
+material. Android TV, Apple TV, and Roku use that same bootstrap contract in
+their native transports: Android and Apple hash the presented leaf, while Roku
+validates the bootstrap PEM/fingerprint pair and installs that PEM as the
+request-local CA file. Their checked-in bootstrap selects the hosted Web-PKI
+origin; a private/sideload build can replace that one JSON resource with the
+object copied from Astrolabe.
+
+LG webOS and Samsung Tizen remain Web-PKI receivers. Their web engines do not
+offer an application-scoped safe override for an untrusted LAN certificate, so
+self-hosted deployments route those two packages through a publicly trusted
+coordinator endpoint. Web receivers require CORS to allow `POST`/`GET`, the
+protocol request headers listed in `../crates/display-protocol/PROTOCOL.md`, and to
 expose `X-Astrolabe-Next-Challenge`. Every transport rejects redirects.
 
 Generated packages, build directories, signing keys, publisher credentials,

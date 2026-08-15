@@ -25,7 +25,7 @@ end function
 function AstrolabeTransfer(path as string, method as string, body as string, headers as object, timeoutMs as integer, targetFile = invalid as dynamic) as dynamic
     transfer = CreateObject("roUrlTransfer")
     transfer.SetPort(m.port)
-    transfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
+    transfer.SetCertificatesFile(m.certificates)
     transfer.EnablePeerVerification(true)
     transfer.EnableHostVerification(true)
     transfer.RetainBodyOnError(true)
@@ -291,8 +291,13 @@ sub AstrolabePair()
     end if
     if not AstrolabeIsHex(offer.instance, 32) or not AstrolabeIsString(offer.label) then return
     if Len(offer.label) < 1 or Len(offer.label) > 96 then return
-    if not AstrolabeExactFields(offer.trust, ["kind", "origin"]) or offer.trust.kind <> "web_pki_origin" or offer.trust.origin <> m.origin
-        AstrolabePublish({ kind: "message", title: "Trust profile unsupported", body: "This Roku build requires the named Web PKI coordinator." })
+    if m.trustKind = "web_pki_origin"
+        trustMatches = AstrolabeExactFields(offer.trust, ["kind", "origin"]) and offer.trust.kind = m.trustKind and offer.trust.origin = m.origin
+    else
+        trustMatches = AstrolabeExactFields(offer.trust, ["kind", "origin", "sha256"]) and offer.trust.kind = m.trustKind and offer.trust.origin = m.origin and offer.trust.sha256 = m.fingerprint
+    end if
+    if not trustMatches
+        AstrolabePublish({ kind: "message", title: "Trust profile refused", body: "The coordinator does not match this Roku bootstrap." })
         return
     end if
 
@@ -302,7 +307,7 @@ sub AstrolabePair()
         protocol_major: 1,
         receiver_nonce: nonce,
         poll_key: pollKey,
-        rendezvous: invalid,
+        rendezvous: m.rendezvous,
         capabilities: AstrolabeCapabilities()
     })
     if response = invalid or response.status <> 200 or response.json = invalid then return
@@ -310,6 +315,7 @@ sub AstrolabePair()
     if not AstrolabeExactFields(pairing, ["protocol_major", "pairing", "expires_in_ms", "confirmation_phrase", "coordinator_fingerprint"]) then return
     if pairing.protocol_major <> 1 or not AstrolabeIntegerIn(pairing.expires_in_ms, 1, 600000) then return
     if not AstrolabeIsHex(pairing.pairing, 32) or not AstrolabeIsHex(pairing.coordinator_fingerprint, 64) then return
+    if m.fingerprint <> invalid and pairing.coordinator_fingerprint <> m.fingerprint then return
     phrase = AstrolabeConfirmationPhrase(pairing.coordinator_fingerprint, pairing.pairing, nonce)
     if FormatJson(phrase) <> FormatJson(pairing.confirmation_phrase) then return
     m.credential = {
@@ -662,9 +668,18 @@ sub AstrolabeProgramLoop()
 end sub
 
 sub AstrolabeRun()
-    m.origin = "https://nixiesoftware.com"
     m.port = CreateObject("roMessagePort")
     m.transport = "connecting"
+    bootstrap = AstrolabeReceiverBootstrap()
+    if bootstrap = invalid
+        AstrolabePublish({ kind: "message", title: "Receiver setup refused", body: "The bundled coordinator bootstrap is invalid." })
+        return
+    end if
+    m.origin = bootstrap.origin
+    m.rendezvous = bootstrap.rendezvous
+    m.trustKind = bootstrap.trustKind
+    m.fingerprint = bootstrap.fingerprint
+    m.certificates = bootstrap.certificates
     m.challenge = invalid
     m.program = invalid
     m.stage = {}

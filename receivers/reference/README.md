@@ -17,9 +17,13 @@ The bootstrap file is non-secret trust material copied from the coordinator:
     "origin": "https://192.0.2.10:7443",
     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   },
+  "certificate_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
   "rendezvous": null
 }
 ```
+
+The PEM is abbreviated above; the receiver requires the complete certificate
+and verifies that its DER SHA-256 exactly matches `trust.sha256`.
 
 Run it with receiver-owned state and presentation directories:
 

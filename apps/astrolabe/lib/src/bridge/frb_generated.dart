@@ -592,17 +592,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   DisplayFacts dco_decode_display_facts(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return DisplayFacts(
       instance: dco_decode_String(arr[0]),
       label: dco_decode_String(arr[1]),
       origin: dco_decode_String(arr[2]),
       certificateSha256: dco_decode_String(arr[3]),
-      surfaces: dco_decode_list_display_surface_row(arr[4]),
-      devices: dco_decode_list_display_receiver_row(arr[5]),
-      assignments: dco_decode_list_display_assignment_row(arr[6]),
-      pendingPairings: dco_decode_list_display_pairing_row(arr[7]),
+      certificatePem: dco_decode_String(arr[4]),
+      surfaces: dco_decode_list_display_surface_row(arr[5]),
+      devices: dco_decode_list_display_receiver_row(arr[6]),
+      assignments: dco_decode_list_display_assignment_row(arr[7]),
+      pendingPairings: dco_decode_list_display_pairing_row(arr[8]),
     );
   }
 
@@ -1581,6 +1582,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_label = sse_decode_String(deserializer);
     var var_origin = sse_decode_String(deserializer);
     var var_certificateSha256 = sse_decode_String(deserializer);
+    var var_certificatePem = sse_decode_String(deserializer);
     var var_surfaces = sse_decode_list_display_surface_row(deserializer);
     var var_devices = sse_decode_list_display_receiver_row(deserializer);
     var var_assignments = sse_decode_list_display_assignment_row(deserializer);
@@ -1590,6 +1592,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         label: var_label,
         origin: var_origin,
         certificateSha256: var_certificateSha256,
+        certificatePem: var_certificatePem,
         surfaces: var_surfaces,
         devices: var_devices,
         assignments: var_assignments,
@@ -2751,6 +2754,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_String(self.label, serializer);
     sse_encode_String(self.origin, serializer);
     sse_encode_String(self.certificateSha256, serializer);
+    sse_encode_String(self.certificatePem, serializer);
     sse_encode_list_display_surface_row(self.surfaces, serializer);
     sse_encode_list_display_receiver_row(self.devices, serializer);
     sse_encode_list_display_assignment_row(self.assignments, serializer);

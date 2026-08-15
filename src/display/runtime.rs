@@ -232,6 +232,7 @@ impl DisplayRuntime {
             label: self.tls.instance().label.clone(),
             origin,
             certificate_sha256: fingerprint,
+            certificate_pem: self.tls.certificate_pem().to_string(),
             surfaces,
             devices,
             assignments,
