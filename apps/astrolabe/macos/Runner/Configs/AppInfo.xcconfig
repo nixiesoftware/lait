@@ -7,8 +7,17 @@
 // The application's name. By default this is also the title of the Flutter window.
 PRODUCT_NAME = astrolabe
 
-// The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.lait.astrolabe
+// The application's bundle identifier. Permanent: notarization tickets, user
+// defaults, TCC grants and Launch Services registration all key on it, so a
+// change after the first shipped build orphans every one of them.
+PRODUCT_BUNDLE_IDENTIFIER = com.nixiesoftware.astrolabe
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.lait. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 Nixie Tech. All rights reserved.
+
+// Apple silicon only, in every configuration. The Rust halves (libastrolabe
+// and the lait sidecar) are built for the host by rust_build.sh; without this
+// the Release runner comes out universal and an Intel Mac would download an
+// app whose first dlopen fails. One ARCHS here keeps the runner honest about
+// what the bundle actually carries.
+ARCHS = arm64
