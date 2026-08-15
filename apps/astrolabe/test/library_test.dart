@@ -541,46 +541,18 @@ void main() {
     );
   });
 
-  test('a .lait store names the project beside it', () {
-    expect(projectDirectory(r'D:\work\foo\.lait'), r'D:\work\foo');
-    expect(projectDirectory(r'D:/work/foo/.lait'), r'D:/work/foo');
-    expect(projectDirectory(r'D:\work\foo'), isNull);
-    expect(projectDirectory(null), isNull);
-  });
-
-  testWidgets('writing an agent binding pins the selected World',
+  testWidgets('the Library detail offers no agent-binding authoring',
       (tester) async {
-    tester.view.physicalSize = const Size(1040, 1600);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
+    // The section is hidden: the MCP install capability stays in the core,
+    // but the Library's detail column no longer authors bindings.
     final asked = await _pump(
       tester,
       _view(library: [_row(name: 'Issues')]),
     );
 
-    expect(find.byKey(const ValueKey('library-agent-binding')), findsOneWidget);
-    await tester.enterText(
-      find.byKey(const ValueKey('library-agent-project')),
-      r'D:\work\tracker',
-    );
-    await tester.pump();
-    await tester.tap(find.text('Write binding'));
-    await tester.pump();
-
-    expect(asked, hasLength(1));
-    expect(
-      asked.single,
-      const ActionRequest.installMcp(
-        client: 'claude',
-        name: 'lait-issues',
-        noAgent: false,
-        project: r'D:\work\tracker',
-        world: 'issues',
-        preview: false,
-      ),
-      reason: 'the binding did not pin the World this row is',
-    );
+    expect(find.byKey(const ValueKey('library-agent-binding')), findsNothing);
+    expect(find.text('AGENT BINDING'), findsNothing);
+    expect(find.text('Write binding'), findsNothing);
+    expect(asked, isEmpty);
   });
 }
