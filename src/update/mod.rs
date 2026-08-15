@@ -57,11 +57,46 @@ pub fn run() -> Result<Updated> {
         available: Some(resolved.version.to_string()),
         floor: resolved.floor.as_ref().map(|floor| floor.to_string()),
     };
-    if resolved.version <= current {
+    // Stage and prove before the swap, so every failure short of the swap
+    // leaves the machine exactly as it was.
+    let Some(binary) = stage_with(feed::http_fetch, &resolved, &current, env!("LAIT_TARGET"))?
+    else {
         return Ok(updated);
+    };
+    swap_self(&binary)?;
+
+    updated.to = resolved.version.to_string();
+    updated.replaced = true;
+    Ok(updated)
+}
+
+/// Everything an update does before it touches the installed binary: decide
+/// whether there is one, choose the artifact for this target, fetch it, prove
+/// it byte for byte, and hand back the binary.
+///
+/// `Ok(None)` means the channel offers nothing newer — the ordinary answer, and
+/// deliberately not an error.
+///
+/// Split out of [`run`] so the whole chain can be driven in a test without
+/// replacing an executable. Every link here was already covered on its own —
+/// archive layout against the real published archives, both extraction layouts,
+/// the doubled-suffix guard — while the *composition* was not, and a chain of
+/// correct parts assembled wrongly is the defect this repository has already
+/// paid for twice in the client-to-process seam. The fetch is injected for the
+/// same reason `feed::resolve_with` injects one.
+fn stage_with<F>(
+    fetch: F,
+    resolved: &feed::Resolved,
+    current: &semver::Version,
+    target: &str,
+) -> Result<Option<Vec<u8>>>
+where
+    F: Fn(&str, u64) -> std::result::Result<Vec<u8>, feed::Failure>,
+{
+    if resolved.version <= *current {
+        return Ok(None);
     }
 
-    let target = env!("LAIT_TARGET");
     let artifact = resolved
         .manifest
         .artifacts
@@ -74,9 +109,10 @@ pub fn run() -> Result<Updated> {
             )
         })?;
 
-    // Stage, prove, then swap — in that order, so every failure before the
-    // swap leaves the machine exactly as it was.
-    let bytes = feed::http_fetch(&artifact.url, artifact.size)
+    // The manifest's size is passed as the fetch ceiling as well as checked
+    // after, so a host that answers with a hundred gigabytes is refused while
+    // streaming rather than after buffering it.
+    let bytes = fetch(&artifact.url, artifact.size)
         .map_err(|error| anyhow!("artifact download: {error}"))?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != artifact.size {
         bail!(
@@ -94,12 +130,7 @@ pub fn run() -> Result<Updated> {
         );
     }
 
-    let binary = extract_binary(&artifact.url, &bytes, target)?;
-    swap_self(&binary)?;
-
-    updated.to = resolved.version.to_string();
-    updated.replaced = true;
-    Ok(updated)
+    Ok(Some(extract_binary(&artifact.url, &bytes, target)?))
 }
 
 /// Pull the `lait` binary out of a release archive, addressed by
@@ -182,6 +213,7 @@ fn bin_path_for(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::bin_path_for;
+    use crate::update::feed::{self, Channel};
 
     #[test]
     fn updater_version_is_clean_semver() {
@@ -294,6 +326,197 @@ mod tests {
                 "the updater would extract {want:?} from lait-{target}.{ext}, \
                  but that archive contains: {found:?}"
             );
+        }
+    }
+
+    /// A release archive shaped like the real Windows one: flat, `lait.exe` at
+    /// the root, carrying `binary`.
+    fn windows_release_zip(binary: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            writer
+                .start_file::<_, ()>("lait.exe", zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(binary).unwrap();
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    /// Seal a whole feed — pointer and manifest — naming one artifact, and hand
+    /// back the url map plus the verifying key.
+    fn sealed_feed(
+        version: &str,
+        artifact_url: &str,
+        archive: &[u8],
+        size_claim: u64,
+        digest_claim: &str,
+    ) -> (std::collections::HashMap<String, Vec<u8>>, [u8; 32]) {
+        let (seed, pubkey) = crate::update::feed::tests::test_keypair();
+        let manifest = serde_json::json!({
+            "version": version,
+            "bundles": {"lait": version},
+            "artifacts": {"lait": {"x86_64-pc-windows-msvc": {
+                "url": artifact_url,
+                "blake3": digest_claim,
+                "size": size_claim,
+            }}},
+        });
+        let pointer = serde_json::json!({
+            "kind": "release",
+            "version": version,
+            "manifest": "https://feed.example/releases/m.json",
+        });
+        let mut objects = std::collections::HashMap::new();
+        objects.insert(
+            "https://feed.example/channels/test".to_string(),
+            crate::update::feed::tests::seal(&pointer, &seed).into_bytes(),
+        );
+        objects.insert(
+            "https://feed.example/releases/m.json".to_string(),
+            crate::update::feed::tests::seal(&manifest, &seed).into_bytes(),
+        );
+        objects.insert(artifact_url.to_string(), archive.to_vec());
+        (objects, pubkey)
+    }
+
+    /// The chain, end to end: a signed pointer names a signed manifest, the
+    /// manifest names an artifact, the artifact is fetched, proven by size and
+    /// digest, and the binary comes back out of it byte for byte.
+    ///
+    /// Every link had a test already. This is the composition, which is what
+    /// the client-to-process seam taught this tree to assert directly: correct
+    /// parts wired wrongly fail with a symptom that names nothing.
+    #[test]
+    fn the_update_chain_holds_from_signed_pointer_to_extracted_binary() {
+        let binary = b"a real lait binary would sit here";
+        let url = "https://feed.example/releases/0.9.0/lait-x86_64-pc-windows-msvc.zip";
+        let archive = windows_release_zip(binary);
+        let digest = blake3::hash(&archive).to_hex().to_string();
+        let (objects, pubkey) = sealed_feed("0.9.0", url, &archive, archive.len() as u64, &digest);
+
+        let resolved = crate::update::feed::resolve_with(
+            |u| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            Channel::Test,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .expect("the signed feed resolves");
+
+        let staged = super::stage_with(
+            |u, _limit| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            &resolved,
+            &semver::Version::parse("0.8.0").unwrap(),
+            "x86_64-pc-windows-msvc",
+        )
+        .expect("the artifact stages")
+        .expect("0.9.0 is newer than 0.8.0, so there is something to stage");
+
+        assert_eq!(
+            staged, binary,
+            "what came out of the chain must be the exact bytes that went into the archive"
+        );
+    }
+
+    #[test]
+    fn a_tampered_artifact_fails_the_digest_and_never_reaches_the_swap() {
+        // The manifest is signed, so an attacker who can rewrite the artifact
+        // bytes cannot rewrite the digest that describes them. This is the
+        // check that makes a compromised artifact host a refusal rather than an
+        // install, and it must fire before anything is written.
+        let url = "https://feed.example/releases/0.9.0/lait-x86_64-pc-windows-msvc.zip";
+        // Equal-length payloads, because padding to the published size is
+        // trivial for an attacker and the cheaper size gate would otherwise be
+        // what refuses this. The digest is the check under test.
+        let honest = windows_release_zip(b"lait v0.9.0 as the maintainer built");
+        let swapped = windows_release_zip(b"lait v0.9.0 with a back door added!");
+        assert_eq!(
+            honest.len(),
+            swapped.len(),
+            "the fixture must isolate the digest check from the size check"
+        );
+        let digest = blake3::hash(&honest).to_hex().to_string();
+
+        // The manifest is signed, so its size and digest describe the honest
+        // archive. Only the bytes on the host changed.
+        let (objects, pubkey) = sealed_feed("0.9.0", url, &swapped, honest.len() as u64, &digest);
+        let resolved = crate::update::feed::resolve_with(
+            |u| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            Channel::Test,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .unwrap();
+
+        let error = super::stage_with(
+            |u, _| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            &resolved,
+            &semver::Version::parse("0.8.0").unwrap(),
+            "x86_64-pc-windows-msvc",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("digest verification failed"),
+            "the refusal must name the digest, not fail vaguely: {error}"
+        );
+    }
+
+    #[test]
+    fn a_channel_offering_nothing_newer_stages_nothing_and_is_not_an_error() {
+        let url = "https://feed.example/releases/0.9.0/lait-x86_64-pc-windows-msvc.zip";
+        let archive = windows_release_zip(b"whatever");
+        let digest = blake3::hash(&archive).to_hex().to_string();
+        let (objects, pubkey) = sealed_feed("0.9.0", url, &archive, archive.len() as u64, &digest);
+        let resolved = crate::update::feed::resolve_with(
+            |u| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            Channel::Test,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .unwrap();
+
+        // Already on 0.9.0, and also on something newer than the channel — both
+        // are "nothing to do" rather than a failure, and neither may download.
+        for running in ["0.9.0", "0.9.1"] {
+            let staged = super::stage_with(
+                |_, _| panic!("nothing may be fetched when there is nothing newer"),
+                &resolved,
+                &semver::Version::parse(running).unwrap(),
+                "x86_64-pc-windows-msvc",
+            )
+            .unwrap();
+            assert!(staged.is_none(), "running {running} must stage nothing");
         }
     }
 
