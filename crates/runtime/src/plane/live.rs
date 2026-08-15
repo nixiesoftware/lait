@@ -1086,6 +1086,29 @@ pub async fn serve_session(
     };
     let _leaving = leaving;
 
+    let media_enabled = peer.features & crate::plane::feature::NATIVE_LIVE_MEDIA != 0
+        && peer.granted_lanes.contains(&stream_kind::MEDIA_GROUP)
+        && peer.granted_lanes.contains(&stream_kind::MEDIA_CONTROL);
+    let media_session = media::Session::new(
+        peer.station.clone(),
+        peer.connection_id,
+        std::sync::Arc::clone(&connection),
+        media_enabled,
+    );
+    if media_enabled
+        && media_session
+            .ensure_setup(media::Setup {
+                protocol_version: media::PROTOCOL_VERSION,
+                max_group_duration_ms: media::DEFAULT_MAX_GROUP_DURATION_MS,
+                max_latency_ms: media::DEFAULT_MAX_LATENCY_MS,
+            })
+            .await
+            .is_err()
+    {
+        connection.close(media::RESET_MEDIA, b"");
+        return;
+    }
+
     // Three gates: control messages, datagrams, and new flows. Separate because
     // a peer that opens flows and sends nothing on them never reaches the
     // message gates, and one that floods datagrams never opens a flow.
@@ -1465,17 +1488,26 @@ pub async fn serve_session(
                 };
                 let station = peer.station.clone();
                 let connection_id = peer.connection_id;
+                let media_session = media_session.clone();
                 tokio::task::spawn_local(async move {
                     let _permit = permit;
                     match tokio::time::timeout(
                         deadline::MEDIA_GROUP_READ,
-                        media::read_group_body(recv.as_mut()),
+                        async {
+                            let header = media::read_group_header(recv.as_mut()).await?;
+                            let mut active = media_session.begin_received_group(&header).await?;
+                            tokio::select! {
+                                group = media::read_group_frames(recv.as_mut(), header) => group,
+                                () = active.until_stale() => Err(media::Invalid::StaleGroup),
+                            }
+                        },
                     )
                     .await
                     {
                         Ok(Ok(group)) => handle.media.publish(media::Event {
                             peer: station,
                             connection_id,
+                            session: media_session,
                             body: media::EventBody::Group(std::sync::Arc::new(group)),
                         }),
                         _ => recv.stop(media::RESET_MEDIA),
@@ -1600,19 +1632,46 @@ pub async fn serve_session(
                     continue;
                 }
                 if kind == stream_kind::MEDIA_CONTROL {
-                    let Ok(Ok(control)) = tokio::time::timeout(
+                    match control_gate.check(Instant::now()) {
+                        Verdict::Allow => {}
+                        Verdict::Drop => {
+                            crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
+                            continue;
+                        }
+                        Verdict::Close => {
+                            connection.close(REFUSED, b"");
+                            break;
+                        }
+                    }
+                    let Ok(Ok(body)) = tokio::time::timeout(
                         deadline::LIVE_FLOW_READ,
-                        media::read_control_body(recv.as_mut()),
+                        read_framed(recv.as_mut(), bounds::MAX_CONTROL_FRAME_BYTES),
                     )
                     .await
                     else {
                         crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
                         continue;
                     };
+                    if matches!(
+                        control_bytes.check(Instant::now(), body.len()),
+                        Verdict::Close
+                    ) {
+                        connection.close(REFUSED, b"");
+                        break;
+                    }
+                    let Ok(control) = media::Control::decode_canonical(&body) else {
+                        crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
+                        continue;
+                    };
+                    if media_session.accept_control(&control).is_err() {
+                        crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
+                        continue;
+                    }
                     if let Some(handle) = &handle {
                         handle.media.publish(media::Event {
                             peer: peer.station.clone(),
                             connection_id: peer.connection_id,
+                            session: media_session.clone(),
                             body: media::EventBody::Control(control),
                         });
                     }

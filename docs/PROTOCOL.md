@@ -573,6 +573,8 @@ Native media adds narrower bounds at its own seam:
 | `MAX_MEDIA_GROUP_BYTES` | 32 MiB | materialized Group ceiling |
 | `MAX_GROUP_DURATION_MS` | 10,000 ms | hard keyframe-recovery cap |
 | `MAX_LATENCY_MS` | 30,000 ms | hard negotiated delivery budget |
+| `MAX_SUBSCRIPTIONS_PER_SESSION` | 128 per direction | connection-lifetime id/churn ceiling |
+| `MAX_ACTIVE_GROUPS_PER_SESSION` | 32 | incomplete Group/worker ceiling |
 
 `comms::MAX_FRAME` is 64 MiB, the framing guard for whole protocol messages on
 the existing framed `Stream`. Raw flows must **not** inherit it: a flow is read
@@ -649,11 +651,26 @@ time and media position as a correction target; it is never an imperative seek
 command. `REQUEST_KEYFRAME` is the bounded recovery verb for a late join or a
 dropped Group.
 
+Both sides send exactly one `SETUP` before any other media control. Subscription
+ids have one owner, are unique for the life of the connection, and move through
+`Pending`, `Active`, then `Ended`; an ended id is never rebound. `UPDATE` is
+accepted only from the subscriber that minted the id, while `OK`, `DROP`, and
+`END` are accepted only from its publisher. A Group header must name an active
+subscription and match that Track's preceding `TRACK_INFO` kind and timescale
+before any frame payload is allocated. Latency and Group-duration limits are
+the minimum of both `SETUP` offers. The
+connection-scoped event handle is the stateful publishing seam: it serializes
+control transitions, derives newer-Group QUIC priority, exposes current path
+quality for conservative encoder adaptation, and refuses a Group the peer did
+not subscribe to.
+
 Groups use reliable streams, not datagrams, and use no application FEC. An
 incomplete Group becomes reset-eligible only after a newer sequence exists.
 Two clocks then apply: its coordinator-timeline age and its local monotonic age.
-Whichever deadline arrives first expires the stream. A skewed or stalled clock
-therefore cannot buy old bytes more flow-control time.
+Whichever deadline arrives first resets the old QUIC stream. Active Group
+registrations are connection-scoped and removed on completion, refusal, task
+cancellation, or session end, so a skewed or stalled clock cannot buy old bytes
+more flow-control time.
 
 If the pin moves, this table is re-measured. Every row in the bounds table above
 is a lait choice and moves only when we decide it should.

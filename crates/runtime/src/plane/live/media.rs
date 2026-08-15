@@ -34,6 +34,8 @@ use crate::plane::stream_kind;
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Default cap offered by a publisher: a late join never waits longer for a keyframe.
 pub const DEFAULT_MAX_GROUP_DURATION_MS: u32 = 2_000;
+/// Default end-to-end delivery budget advertised by a Live session.
+pub const DEFAULT_MAX_LATENCY_MS: u32 = 3_000;
 /// Hard protocol cap on one Group's presentation duration.
 pub const MAX_GROUP_DURATION_MS: u32 = 10_000;
 /// Hard protocol cap on a negotiated delivery-latency budget.
@@ -52,6 +54,11 @@ pub const MAX_MEDIA_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_FRAMES_PER_GROUP: usize = 512;
 /// Aggregate receiver memory ceiling for one materialized Group.
 pub const MAX_MEDIA_GROUP_BYTES: usize = 32 * 1024 * 1024;
+/// A connection may mint only this many subscription ids in either direction.
+/// Ended ids remain spent, which bounds churn as well as concurrent work.
+pub const MAX_SUBSCRIPTIONS_PER_SESSION: usize = 128;
+/// At most the Live worker ceiling's worth of Groups may be incomplete.
+pub const MAX_ACTIVE_GROUPS_PER_SESSION: usize = crate::plane::bounds::MAX_STREAM_WORKERS;
 /// Bounded event fan-out from the plane to local consumers.
 const EVENT_QUEUE: usize = 8;
 /// Reset/stop code for a malformed or expired media flow.
@@ -86,6 +93,16 @@ pub enum Invalid {
     TimestampOrder,
     GroupDuration,
     PayloadLength,
+    FeatureNotNegotiated,
+    SetupRequired,
+    Duplicate,
+    UnknownSubscription,
+    SubscriptionEnded,
+    SubscriptionNotActive,
+    TrackInfoRequired,
+    WrongTrack,
+    GoingAway,
+    StaleGroup,
 }
 
 impl std::fmt::Display for Invalid {
@@ -456,12 +473,713 @@ pub struct ReceivedGroup {
     pub frames: Vec<Frame>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Sent,
+    Received,
+}
+
+impl Direction {
+    fn opposite(self) -> Self {
+        match self {
+            Self::Sent => Self::Received,
+            Self::Received => Self::Sent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriptionPhase {
+    Pending,
+    Active,
+    Ended,
+}
+
+enum GroupReadiness {
+    Pending(Duration),
+    Ready,
+}
+
+enum GroupAdmission {
+    Pending(Duration),
+    Ready(IncomingGroup),
+}
+
+#[derive(Debug, Clone)]
+struct SubscriptionRecord {
+    request: Subscribe,
+    phase: SubscriptionPhase,
+}
+
+struct ActiveGroup {
+    stamp: GroupStamp,
+    budget: Duration,
+    expiry: tokio::sync::watch::Sender<Option<Instant>>,
+}
+
+#[derive(Default)]
+struct SessionState {
+    sent_setup: Option<Setup>,
+    received_setup: Option<Setup>,
+    sent_go_away: bool,
+    received_go_away: bool,
+    /// Subscriptions this Station initiated and therefore receives Groups for.
+    outbound: std::collections::BTreeMap<u64, SubscriptionRecord>,
+    /// Subscriptions the peer initiated and this Station publishes Groups for.
+    inbound: std::collections::BTreeMap<u64, SubscriptionRecord>,
+    sent_tracks: std::collections::BTreeMap<String, TrackInfo>,
+    received_tracks: std::collections::BTreeMap<String, TrackInfo>,
+    active_groups: std::collections::BTreeMap<(u64, u64), ActiveGroup>,
+    /// Highest sequence observed even after its stream completes. Without this,
+    /// an older stream arriving just after the newer one finished would become
+    /// "newest" again and recover a full latency budget.
+    newest_groups: std::collections::BTreeMap<u64, GroupStamp>,
+}
+
+impl SessionState {
+    fn record(&mut self, direction: Direction, control: &Control) -> Result<(), Invalid> {
+        if let Control::Setup(setup) = control {
+            let slot = match direction {
+                Direction::Sent => &mut self.sent_setup,
+                Direction::Received => &mut self.received_setup,
+            };
+            if slot.is_some() {
+                return Err(Invalid::Duplicate);
+            }
+            *slot = Some(setup.clone());
+            return Ok(());
+        }
+        self.require_setup(direction)?;
+        self.require_setup(direction.opposite())?;
+
+        match control {
+            Control::Setup(_) => Err(Invalid::Duplicate),
+            Control::Subscribe(request) => {
+                if self.going_away(direction.opposite()) {
+                    return Err(Invalid::GoingAway);
+                }
+                if request.max_latency_ms > self.negotiated_latency_ms()? {
+                    return Err(Invalid::Bounds);
+                }
+                let subscriptions = self.owner_mut(direction);
+                if subscriptions.contains_key(&request.subscription_id) {
+                    return Err(Invalid::Duplicate);
+                }
+                if subscriptions.len() >= MAX_SUBSCRIPTIONS_PER_SESSION {
+                    return Err(Invalid::TooLarge);
+                }
+                subscriptions.insert(
+                    request.subscription_id,
+                    SubscriptionRecord {
+                        request: request.clone(),
+                        phase: SubscriptionPhase::Pending,
+                    },
+                );
+                Ok(())
+            }
+            Control::SubscribeUpdate(update) => {
+                if update.max_latency_ms > self.negotiated_latency_ms()? {
+                    return Err(Invalid::Bounds);
+                }
+                let record = self
+                    .owner_mut(direction)
+                    .get_mut(&update.subscription_id)
+                    .ok_or(Invalid::UnknownSubscription)?;
+                if record.phase == SubscriptionPhase::Ended {
+                    return Err(Invalid::SubscriptionEnded);
+                }
+                record.request.priority = update.priority;
+                record.request.ordered = update.ordered;
+                record.request.max_latency_ms = update.max_latency_ms;
+                record.request.start_group = update.start_group;
+                record.request.end_group = update.end_group;
+                if direction == Direction::Sent {
+                    let tightened = Duration::from_millis(u64::from(update.max_latency_ms));
+                    for ((subscription, _), active) in &mut self.active_groups {
+                        if *subscription != update.subscription_id || tightened >= active.budget {
+                            continue;
+                        }
+                        active.budget = tightened;
+                        let current = *active.expiry.borrow();
+                        if let Some(current) = current {
+                            let candidate = active
+                                .stamp
+                                .observed_at
+                                .checked_add(tightened)
+                                .unwrap_or(current);
+                            if candidate < current {
+                                active.expiry.send_replace(Some(candidate));
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Control::SubscribeOk(ok) => {
+                let negotiated_latency = self.negotiated_latency_ms()?;
+                let record = self
+                    .responder_mut(direction)
+                    .get_mut(&ok.subscription_id)
+                    .ok_or(Invalid::UnknownSubscription)?;
+                if ok.publisher_max_latency_ms > negotiated_latency
+                    || ok.publisher_max_latency_ms > record.request.max_latency_ms
+                {
+                    return Err(Invalid::Bounds);
+                }
+                if ok.start_group.is_some_and(|start| {
+                    record
+                        .request
+                        .start_group
+                        .is_some_and(|requested| start < requested)
+                }) || ok.end_group.is_some_and(|end| {
+                    record
+                        .request
+                        .end_group
+                        .is_some_and(|requested| end > requested)
+                }) {
+                    return Err(Invalid::Bounds);
+                }
+                match record.phase {
+                    SubscriptionPhase::Pending => {
+                        record.request.max_latency_ms = ok.publisher_max_latency_ms;
+                        if ok.start_group.is_some() {
+                            record.request.start_group = ok.start_group;
+                        }
+                        if ok.end_group.is_some() {
+                            record.request.end_group = ok.end_group;
+                        }
+                        record.phase = SubscriptionPhase::Active;
+                        Ok(())
+                    }
+                    SubscriptionPhase::Active => Err(Invalid::Duplicate),
+                    SubscriptionPhase::Ended => Err(Invalid::SubscriptionEnded),
+                }
+            }
+            Control::SubscribeDrop(drop) => {
+                let record = self
+                    .responder(direction)
+                    .get(&drop.subscription_id)
+                    .ok_or(Invalid::UnknownSubscription)?;
+                if record.phase == SubscriptionPhase::Ended {
+                    return Err(Invalid::SubscriptionEnded);
+                }
+                if record
+                    .request
+                    .start_group
+                    .is_some_and(|first| drop.start_group < first)
+                    || record
+                        .request
+                        .end_group
+                        .is_some_and(|last| drop.end_group > last)
+                {
+                    return Err(Invalid::Bounds);
+                }
+                Ok(())
+            }
+            Control::SubscribeEnd(end) => {
+                let owner = direction.opposite();
+                let record = self
+                    .owner_mut(owner)
+                    .get_mut(&end.subscription_id)
+                    .ok_or(Invalid::UnknownSubscription)?;
+                if record.phase == SubscriptionPhase::Ended {
+                    return Err(Invalid::SubscriptionEnded);
+                }
+                record.phase = SubscriptionPhase::Ended;
+                if owner == Direction::Sent {
+                    let now = Instant::now();
+                    for ((subscription, _), active) in &self.active_groups {
+                        if *subscription == end.subscription_id {
+                            active.expiry.send_replace(Some(now));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Control::TrackInfo(info) => {
+                if info.max_group_duration_ms > self.negotiated_group_duration_ms()? {
+                    return Err(Invalid::Bounds);
+                }
+                self.require_active_track(direction.opposite(), &info.track)?;
+                match direction {
+                    Direction::Sent => &mut self.sent_tracks,
+                    Direction::Received => &mut self.received_tracks,
+                }
+                .insert(info.track.clone(), info.clone());
+                Ok(())
+            }
+            Control::RequestKeyframe(request) => {
+                self.require_active_track(direction, &request.track)
+            }
+            Control::PlayoutTarget(target) => {
+                if target.playout_delay_ms > self.negotiated_latency_ms()? {
+                    return Err(Invalid::Bounds);
+                }
+                self.require_active_track(direction.opposite(), &target.track)
+            }
+            Control::GoAway(_) => {
+                let going_away = match direction {
+                    Direction::Sent => &mut self.sent_go_away,
+                    Direction::Received => &mut self.received_go_away,
+                };
+                if *going_away {
+                    return Err(Invalid::Duplicate);
+                }
+                *going_away = true;
+                Ok(())
+            }
+            Control::Fetch(_) | Control::ClockProbe(_) | Control::ClockReply(_) => Ok(()),
+        }
+    }
+
+    fn require_setup(&self, direction: Direction) -> Result<(), Invalid> {
+        let setup = match direction {
+            Direction::Sent => &self.sent_setup,
+            Direction::Received => &self.received_setup,
+        };
+        setup.as_ref().map(|_| ()).ok_or(Invalid::SetupRequired)
+    }
+
+    fn negotiated_latency_ms(&self) -> Result<u32, Invalid> {
+        Ok(self
+            .sent_setup
+            .as_ref()
+            .ok_or(Invalid::SetupRequired)?
+            .max_latency_ms
+            .min(
+                self.received_setup
+                    .as_ref()
+                    .ok_or(Invalid::SetupRequired)?
+                    .max_latency_ms,
+            ))
+    }
+
+    fn negotiated_group_duration_ms(&self) -> Result<u32, Invalid> {
+        Ok(self
+            .sent_setup
+            .as_ref()
+            .ok_or(Invalid::SetupRequired)?
+            .max_group_duration_ms
+            .min(
+                self.received_setup
+                    .as_ref()
+                    .ok_or(Invalid::SetupRequired)?
+                    .max_group_duration_ms,
+            ))
+    }
+
+    fn going_away(&self, direction: Direction) -> bool {
+        match direction {
+            Direction::Sent => self.sent_go_away,
+            Direction::Received => self.received_go_away,
+        }
+    }
+
+    fn owner(&self, direction: Direction) -> &std::collections::BTreeMap<u64, SubscriptionRecord> {
+        match direction {
+            Direction::Sent => &self.outbound,
+            Direction::Received => &self.inbound,
+        }
+    }
+
+    fn owner_mut(
+        &mut self,
+        direction: Direction,
+    ) -> &mut std::collections::BTreeMap<u64, SubscriptionRecord> {
+        match direction {
+            Direction::Sent => &mut self.outbound,
+            Direction::Received => &mut self.inbound,
+        }
+    }
+
+    fn responder(
+        &self,
+        direction: Direction,
+    ) -> &std::collections::BTreeMap<u64, SubscriptionRecord> {
+        self.owner(direction.opposite())
+    }
+
+    fn responder_mut(
+        &mut self,
+        direction: Direction,
+    ) -> &mut std::collections::BTreeMap<u64, SubscriptionRecord> {
+        self.owner_mut(direction.opposite())
+    }
+
+    fn require_active_track(&self, owner: Direction, track: &str) -> Result<(), Invalid> {
+        self.owner(owner)
+            .values()
+            .any(|record| {
+                record.phase == SubscriptionPhase::Active && record.request.track == track
+            })
+            .then_some(())
+            .ok_or(Invalid::SubscriptionNotActive)
+    }
+
+    fn group_budget(&self, owner: Direction, header: &GroupHeader) -> Result<Duration, Invalid> {
+        let record = self
+            .owner(owner)
+            .get(&header.subscription_id)
+            .ok_or(Invalid::UnknownSubscription)?;
+        if record.phase != SubscriptionPhase::Active {
+            return Err(Invalid::SubscriptionNotActive);
+        }
+        if record.request.track != header.track {
+            return Err(Invalid::WrongTrack);
+        }
+        let track = match owner {
+            Direction::Sent => &self.received_tracks,
+            Direction::Received => &self.sent_tracks,
+        }
+        .get(&header.track)
+        .ok_or(Invalid::TrackInfoRequired)?;
+        if track.kind != header.track_kind {
+            return Err(Invalid::Bounds);
+        }
+        if track.timescale != header.timescale {
+            return Err(Invalid::Bounds);
+        }
+        if record
+            .request
+            .start_group
+            .is_some_and(|first| header.group_sequence < first)
+            || record
+                .request
+                .end_group
+                .is_some_and(|last| header.group_sequence > last)
+        {
+            return Err(Invalid::Bounds);
+        }
+        if header.max_group_duration_ms > self.negotiated_group_duration_ms()? {
+            return Err(Invalid::Bounds);
+        }
+        Ok(Duration::from_millis(u64::from(
+            record
+                .request
+                .max_latency_ms
+                .min(self.negotiated_latency_ms()?),
+        )))
+    }
+
+    fn received_group_readiness(&self, header: &GroupHeader) -> Result<GroupReadiness, Invalid> {
+        let record = self
+            .outbound
+            .get(&header.subscription_id)
+            .ok_or(Invalid::UnknownSubscription)?;
+        if record.phase == SubscriptionPhase::Ended {
+            return Err(Invalid::SubscriptionEnded);
+        }
+        if record.request.track != header.track {
+            return Err(Invalid::WrongTrack);
+        }
+        if record
+            .request
+            .start_group
+            .is_some_and(|first| header.group_sequence < first)
+            || record
+                .request
+                .end_group
+                .is_some_and(|last| header.group_sequence > last)
+            || header.max_group_duration_ms > self.negotiated_group_duration_ms()?
+        {
+            return Err(Invalid::Bounds);
+        }
+        let budget = Duration::from_millis(u64::from(
+            record
+                .request
+                .max_latency_ms
+                .min(self.negotiated_latency_ms()?),
+        ));
+        if record.phase == SubscriptionPhase::Pending {
+            return Ok(GroupReadiness::Pending(budget));
+        }
+        let Some(track) = self.received_tracks.get(&header.track) else {
+            return Ok(GroupReadiness::Pending(budget));
+        };
+        if track.kind != header.track_kind {
+            return Err(Invalid::Bounds);
+        }
+        if track.timescale != header.timescale {
+            return Err(Invalid::Bounds);
+        }
+        Ok(GroupReadiness::Ready)
+    }
+
+    fn begin_received_group(
+        &mut self,
+        state: Arc<std::sync::Mutex<Self>>,
+        header: &GroupHeader,
+    ) -> Result<IncomingGroup, Invalid> {
+        let budget = self.group_budget(Direction::Sent, header)?;
+        let key = (header.subscription_id, header.group_sequence);
+        if self.active_groups.contains_key(&key) {
+            return Err(Invalid::Duplicate);
+        }
+        if self.active_groups.len() >= MAX_ACTIVE_GROUPS_PER_SESSION {
+            return Err(Invalid::TooLarge);
+        }
+
+        let now = Instant::now();
+        let stamp = GroupStamp {
+            sequence: header.group_sequence,
+            published_at_micros: header.published_at_micros,
+            observed_at: now,
+        };
+        if self
+            .newest_groups
+            .get(&header.subscription_id)
+            .is_some_and(|newest| newest.sequence == stamp.sequence)
+        {
+            return Err(Invalid::Duplicate);
+        }
+        let newest = match self.newest_groups.get(&header.subscription_id).copied() {
+            Some(current) if current.sequence > stamp.sequence => current,
+            _ => {
+                self.newest_groups.insert(header.subscription_id, stamp);
+                stamp
+            }
+        };
+        let (expiry, receiver) = tokio::sync::watch::channel(None);
+        self.active_groups.insert(
+            key,
+            ActiveGroup {
+                stamp,
+                budget,
+                expiry,
+            },
+        );
+
+        for ((subscription, _), active) in &self.active_groups {
+            if *subscription != header.subscription_id || active.stamp.sequence >= newest.sequence {
+                continue;
+            }
+            let deadline = if active.stamp.should_reset(newest, now, active.budget) {
+                now
+            } else {
+                active
+                    .stamp
+                    .observed_at
+                    .checked_add(active.budget)
+                    .unwrap_or(now)
+            };
+            active.expiry.send_replace(Some(deadline));
+        }
+
+        Ok(IncomingGroup {
+            state,
+            key,
+            expiry: receiver,
+        })
+    }
+}
+
+/// Connection-scoped native-media control and publishing handle.
+///
+/// Every event for one admitted connection carries the same handle. Control
+/// sends are serialized so subscription ids have one owner and one transition
+/// order even when several product tasks react at once.
+#[derive(Clone)]
+pub struct Session {
+    peer: Key,
+    connection_id: [u8; 16],
+    connection: Arc<dyn comms::Connection>,
+    state: Arc<std::sync::Mutex<SessionState>>,
+    send_lock: Arc<tokio::sync::Mutex<()>>,
+    state_changed: Arc<tokio::sync::Notify>,
+    enabled: bool,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("peer", &self.peer)
+            .field("connection_id", &self.connection_id)
+            .field("enabled", &self.enabled)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Session {
+    pub(crate) fn new(
+        peer: Key,
+        connection_id: [u8; 16],
+        connection: Arc<dyn comms::Connection>,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            peer,
+            connection_id,
+            connection,
+            state: Arc::new(std::sync::Mutex::new(SessionState::default())),
+            send_lock: Arc::new(tokio::sync::Mutex::new(())),
+            state_changed: Arc::new(tokio::sync::Notify::new()),
+            enabled,
+        }
+    }
+
+    pub fn peer(&self) -> &Key {
+        &self.peer
+    }
+
+    pub fn connection_id(&self) -> [u8; 16] {
+        self.connection_id
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Current transport evidence for encoder adaptation. `Unknown` is a real
+    /// answer and should select the conservative bitrate ladder.
+    pub fn quality(&self) -> comms::PathQuality {
+        self.connection.quality()
+    }
+
+    /// Send one state-checked control record on its bounded media flow.
+    ///
+    /// Once a send begins, its id remains spent even if the transport fails.
+    /// Reusing it on a connection whose delivery is unknown would make a late
+    /// record apply to a different subscription; callers reconnect instead.
+    pub async fn send(&self, control: Control) -> Result<(), Invalid> {
+        if !self.enabled {
+            return Err(Invalid::FeatureNotNegotiated);
+        }
+        control.validate()?;
+        let _serial = self.send_lock.lock().await;
+        self.lock_state().record(Direction::Sent, &control)?;
+        self.state_changed.notify_waiters();
+        tokio::time::timeout(
+            crate::budget::deadline::LIVE_FLOW_READ,
+            send_control(self.connection.as_ref(), &control),
+        )
+        .await
+        .map_err(|_| Invalid::Truncated)?
+    }
+
+    pub async fn ensure_setup(&self, setup: Setup) -> Result<(), Invalid> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let existing = self.lock_state().sent_setup.clone();
+        match existing {
+            Some(current) if current == setup => Ok(()),
+            Some(_) => Err(Invalid::Duplicate),
+            None => self.send(Control::Setup(setup)).await,
+        }
+    }
+
+    /// Begin a Group only for an active subscription owned by this peer.
+    /// Newer sequence numbers automatically receive the higher QUIC priority;
+    /// product code cannot accidentally invert the live ordering policy.
+    pub async fn begin_group(&self, header: GroupHeader) -> Result<OutgoingGroup, Invalid> {
+        if !self.enabled {
+            return Err(Invalid::FeatureNotNegotiated);
+        }
+        let _serial = self.send_lock.lock().await;
+        self.lock_state()
+            .group_budget(Direction::Received, &header)?;
+        let priority = i32::try_from(header.group_sequence).unwrap_or(i32::MAX);
+        OutgoingGroup::begin(self.connection.as_ref(), header, priority).await
+    }
+
+    pub(crate) fn accept_control(&self, control: &Control) -> Result<(), Invalid> {
+        self.lock_state().record(Direction::Received, control)?;
+        self.state_changed.notify_waiters();
+        Ok(())
+    }
+
+    pub(crate) async fn begin_received_group(
+        &self,
+        header: &GroupHeader,
+    ) -> Result<IncomingGroup, Invalid> {
+        let state = Arc::clone(&self.state);
+        let mut deadline = None;
+        loop {
+            let changed = self.state_changed.notified();
+            let admission = {
+                let mut locked = self.lock_state();
+                match locked.received_group_readiness(header)? {
+                    GroupReadiness::Ready => GroupAdmission::Ready(
+                        locked.begin_received_group(Arc::clone(&state), header)?,
+                    ),
+                    GroupReadiness::Pending(budget) => GroupAdmission::Pending(budget),
+                }
+            };
+            match admission {
+                GroupAdmission::Ready(group) => return Ok(group),
+                GroupAdmission::Pending(budget) => {
+                    let until = *deadline.get_or_insert_with(|| {
+                        Instant::now()
+                            .checked_add(budget)
+                            .unwrap_or_else(Instant::now)
+                    });
+                    tokio::select! {
+                        () = tokio::time::sleep_until(until) => return Err(Invalid::StaleGroup),
+                        () = changed => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, SessionState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Registration for one incomplete incoming Group. Dropping it removes the
+/// Group from the connection's bounded active set.
+pub(crate) struct IncomingGroup {
+    state: Arc<std::sync::Mutex<SessionState>>,
+    key: (u64, u64),
+    expiry: tokio::sync::watch::Receiver<Option<Instant>>,
+}
+
+impl IncomingGroup {
+    pub async fn until_stale(&mut self) {
+        loop {
+            let deadline = *self.expiry.borrow_and_update();
+            match deadline {
+                Some(deadline) => {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(deadline) => return,
+                        changed = self.expiry.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    if self.expiry.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for IncomingGroup {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_groups
+            .remove(&self.key);
+    }
+}
+
 /// One validated media event, bound to the admitted peer and connection that
 /// carried it.
 #[derive(Debug, Clone)]
 pub struct Event {
     pub peer: Key,
     pub connection_id: [u8; 16],
+    /// Send replies or publish Groups on this exact admitted connection.
+    pub session: Session,
     pub body: EventBody,
 }
 
@@ -622,10 +1340,24 @@ impl OutgoingGroup {
 /// The production session runs one of these per task, so an old Group waiting
 /// on bytes cannot prevent the accept loop from admitting a newer stream.
 pub async fn read_group_body(flow: &mut dyn comms::RecvFlow) -> Result<ReceivedGroup, Invalid> {
+    let header = read_group_header(flow).await?;
+    read_group_frames(flow, header).await
+}
+
+/// Read and validate the first record before any frame payload is allocated.
+pub async fn read_group_header(flow: &mut dyn comms::RecvFlow) -> Result<GroupHeader, Invalid> {
     let header_bytes = read_required_framed(flow, MAX_MEDIA_HEADER_BYTES).await?;
-    let header = GroupHeader::decode_canonical(&header_bytes)?;
+    GroupHeader::decode_canonical(&header_bytes)
+}
+
+/// Read a Group's ordered Frames after its subscription-bearing header has
+/// been admitted by the connection state machine.
+pub async fn read_group_frames(
+    flow: &mut dyn comms::RecvFlow,
+    header: GroupHeader,
+) -> Result<ReceivedGroup, Invalid> {
     let mut frames = Vec::new();
-    let mut bytes = header_bytes.len();
+    let mut bytes = header.encode()?.len();
     let mut first_timestamp = None;
     let mut last_timestamp = None;
 
@@ -861,6 +1593,65 @@ mod tests {
         }
     }
 
+    fn setup() -> Setup {
+        Setup {
+            protocol_version: PROTOCOL_VERSION,
+            max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+            max_latency_ms: DEFAULT_MAX_LATENCY_MS,
+        }
+    }
+
+    fn subscribe() -> Subscribe {
+        Subscribe {
+            subscription_id: 7,
+            track: "screen/main".into(),
+            priority: 9,
+            ordered: false,
+            max_latency_ms: DEFAULT_MAX_LATENCY_MS,
+            start_group: None,
+            end_group: None,
+        }
+    }
+
+    fn track_info() -> TrackInfo {
+        TrackInfo {
+            track: "screen/main".into(),
+            kind: TrackKind::Video,
+            codec: "avc1.640028".into(),
+            timescale: 90_000,
+            decoder_config: vec![1, 100, 0, 40],
+            max_group_duration_ms: DEFAULT_MAX_GROUP_DURATION_MS,
+        }
+    }
+
+    async fn accept_media_control(connection: &dyn comms::Connection) -> Control {
+        loop {
+            let (mut answer, mut flow) = connection
+                .accept_bi()
+                .await
+                .expect("accept control")
+                .expect("control flow");
+            let lane = flow
+                .read_exact(1)
+                .await
+                .expect("control lane")
+                .first()
+                .copied()
+                .expect("one lane byte");
+            if lane == stream_kind::MEDIA_CONTROL {
+                let control = read_control_body(flow.as_mut())
+                    .await
+                    .expect("media control");
+                answer.finish().expect("finish media answer");
+                return control;
+            }
+            flow.read_to_end(crate::plane::bounds::MAX_CONTROL_FRAME_BYTES)
+                .await
+                .expect("drain other control");
+            answer.finish().expect("finish other answer");
+        }
+    }
+
     #[test]
     fn every_control_selector_round_trips_canonically() {
         let values = [
@@ -1035,6 +1826,249 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn subscriptions_have_one_owner_one_setup_and_spent_ids() {
+        let mut state = SessionState::default();
+        assert_eq!(
+            state.record(Direction::Sent, &Control::Subscribe(subscribe())),
+            Err(Invalid::SetupRequired)
+        );
+        state
+            .record(Direction::Sent, &Control::Setup(setup()))
+            .expect("local setup");
+        state
+            .record(Direction::Received, &Control::Setup(setup()))
+            .expect("remote setup");
+        state
+            .record(Direction::Sent, &Control::Subscribe(subscribe()))
+            .expect("subscribe");
+        assert_eq!(
+            state.record(Direction::Sent, &Control::Subscribe(subscribe())),
+            Err(Invalid::Duplicate)
+        );
+        state
+            .record(
+                Direction::Received,
+                &Control::SubscribeOk(SubscribeOk {
+                    subscription_id: 7,
+                    publisher_priority: 4,
+                    publisher_max_latency_ms: DEFAULT_MAX_LATENCY_MS,
+                    start_group: None,
+                    end_group: None,
+                }),
+            )
+            .expect("publisher accepted");
+        state
+            .record(Direction::Received, &Control::TrackInfo(track_info()))
+            .expect("decoder configuration");
+        assert_eq!(
+            state.group_budget(Direction::Sent, &group_header(1)),
+            Ok(Duration::from_millis(u64::from(DEFAULT_MAX_LATENCY_MS)))
+        );
+        let mut wrong_track = group_header(1);
+        wrong_track.track = "screen/other".into();
+        assert_eq!(
+            state.group_budget(Direction::Sent, &wrong_track),
+            Err(Invalid::WrongTrack)
+        );
+        state
+            .record(
+                Direction::Received,
+                &Control::SubscribeEnd(SubscribeEnd { subscription_id: 7 }),
+            )
+            .expect("publisher ended");
+        assert_eq!(
+            state.group_budget(Direction::Sent, &group_header(2)),
+            Err(Invalid::SubscriptionNotActive)
+        );
+    }
+
+    #[test]
+    fn setup_negotiates_the_narrower_latency_and_group_caps() {
+        let mut state = SessionState::default();
+        state
+            .record(Direction::Sent, &Control::Setup(setup()))
+            .expect("local setup");
+        let mut narrower = setup();
+        narrower.max_group_duration_ms = 1_000;
+        narrower.max_latency_ms = 1_000;
+        state
+            .record(Direction::Received, &Control::Setup(narrower))
+            .expect("remote setup");
+        assert_eq!(
+            state.record(Direction::Sent, &Control::Subscribe(subscribe())),
+            Err(Invalid::Bounds)
+        );
+        let mut request = subscribe();
+        request.max_latency_ms = 1_000;
+        state
+            .record(Direction::Sent, &Control::Subscribe(request))
+            .expect("narrow subscription");
+        assert_eq!(
+            state.record(
+                Direction::Received,
+                &Control::SubscribeOk(SubscribeOk {
+                    subscription_id: 7,
+                    publisher_priority: 4,
+                    publisher_max_latency_ms: 1_500,
+                    start_group: None,
+                    end_group: None,
+                })
+            ),
+            Err(Invalid::Bounds)
+        );
+        state
+            .record(
+                Direction::Received,
+                &Control::SubscribeOk(SubscribeOk {
+                    subscription_id: 7,
+                    publisher_priority: 4,
+                    publisher_max_latency_ms: 1_000,
+                    start_group: None,
+                    end_group: None,
+                }),
+            )
+            .expect("narrow response");
+        let mut info = track_info();
+        info.max_group_duration_ms = 1_000;
+        state
+            .record(Direction::Received, &Control::TrackInfo(info))
+            .expect("narrow track info");
+        assert_eq!(
+            state.group_budget(Direction::Sent, &group_header(1)),
+            Err(Invalid::Bounds)
+        );
+        let mut group = group_header(1);
+        group.max_group_duration_ms = 1_000;
+        assert_eq!(
+            state.group_budget(Direction::Sent, &group),
+            Ok(Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn ended_subscription_ids_bound_connection_lifetime_churn() {
+        let mut state = SessionState::default();
+        state
+            .record(Direction::Sent, &Control::Setup(setup()))
+            .expect("local setup");
+        state
+            .record(Direction::Received, &Control::Setup(setup()))
+            .expect("remote setup");
+        for subscription_id in 0..MAX_SUBSCRIPTIONS_PER_SESSION {
+            let mut request = subscribe();
+            request.subscription_id = u64::try_from(subscription_id).expect("small bound");
+            state
+                .record(Direction::Sent, &Control::Subscribe(request))
+                .expect("bounded subscription");
+            state
+                .record(
+                    Direction::Received,
+                    &Control::SubscribeEnd(SubscribeEnd {
+                        subscription_id: u64::try_from(subscription_id).expect("small bound"),
+                    }),
+                )
+                .expect("ended subscription");
+        }
+        let mut overflow = subscribe();
+        overflow.subscription_id =
+            u64::try_from(MAX_SUBSCRIPTIONS_PER_SESSION).expect("small bound");
+        assert_eq!(
+            state.record(Direction::Sent, &Control::Subscribe(overflow)),
+            Err(Invalid::TooLarge)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_newer_group_arms_the_older_groups_monotonic_deadline() {
+        let state = Arc::new(std::sync::Mutex::new(SessionState::default()));
+        {
+            let mut locked = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locked
+                .record(Direction::Sent, &Control::Setup(setup()))
+                .expect("local setup");
+            locked
+                .record(Direction::Received, &Control::Setup(setup()))
+                .expect("remote setup");
+            let mut request = subscribe();
+            request.max_latency_ms = 50;
+            locked
+                .record(Direction::Sent, &Control::Subscribe(request))
+                .expect("subscribe");
+            locked
+                .record(
+                    Direction::Received,
+                    &Control::SubscribeOk(SubscribeOk {
+                        subscription_id: 7,
+                        publisher_priority: 4,
+                        publisher_max_latency_ms: 50,
+                        start_group: None,
+                        end_group: None,
+                    }),
+                )
+                .expect("active");
+            locked
+                .record(Direction::Received, &Control::TrackInfo(track_info()))
+                .expect("decoder configuration");
+        }
+        let mut old = {
+            let mut locked = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locked
+                .begin_received_group(Arc::clone(&state), &group_header(1))
+                .expect("old Group")
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), old.until_stale())
+                .await
+                .is_err(),
+            "age alone cannot expire the newest Group"
+        );
+        let newer = {
+            let mut header = group_header(2);
+            header.published_at_micros = 1_001_000;
+            let mut locked = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locked
+                .begin_received_group(Arc::clone(&state), &header)
+                .expect("new Group")
+        };
+        tokio::time::advance(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_millis(1), old.until_stale())
+            .await
+            .expect("the armed monotonic deadline retires the old Group");
+
+        drop(newer);
+        let completed_newest = {
+            let mut header = group_header(4);
+            header.published_at_micros = 2_000_000;
+            let mut locked = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locked
+                .begin_received_group(Arc::clone(&state), &header)
+                .expect("newest Group")
+        };
+        drop(completed_newest);
+        let mut late_old = {
+            let mut header = group_header(3);
+            header.published_at_micros = 1_000_000;
+            let mut locked = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locked
+                .begin_received_group(Arc::clone(&state), &header)
+                .expect("late old Group")
+        };
+        tokio::time::timeout(Duration::from_millis(1), late_old.until_stale())
+            .await
+            .expect("completed newer Groups still retire late old streams");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn the_live_session_dispatches_a_validated_group_to_its_bounded_inbox() {
         tokio::task::LocalSet::new()
@@ -1079,10 +2113,71 @@ mod tests {
                     },
                 );
                 let sending = async {
+                    assert_eq!(
+                        accept_media_control(dialer.as_ref()).await,
+                        Control::Setup(setup())
+                    );
+                    send_control(dialer.as_ref(), &Control::Setup(setup()))
+                        .await
+                        .expect("peer setup");
+                    let setup_event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                        .await
+                        .expect("setup event in time")
+                        .expect("setup event");
+                    let session = setup_event.session;
+                    assert!(matches!(
+                        setup_event.body,
+                        EventBody::Control(Control::Setup(_))
+                    ));
+
+                    session
+                        .send(Control::Subscribe(subscribe()))
+                        .await
+                        .expect("subscribe");
+                    assert_eq!(
+                        accept_media_control(dialer.as_ref()).await,
+                        Control::Subscribe(subscribe())
+                    );
+                    // Deliberately make the uni Group visible before the bi
+                    // acceptance records. Independent QUIC accept queues may
+                    // present this order even when the publisher wrote OK
+                    // first; the header waits without allocating its payload.
                     let payload = b"key-access-unit";
                     let mut group = OutgoingGroup::begin(dialer.as_ref(), group_header(17), 17)
                         .await
                         .expect("begin");
+                    send_control(
+                        dialer.as_ref(),
+                        &Control::SubscribeOk(SubscribeOk {
+                            subscription_id: 7,
+                            publisher_priority: 17,
+                            publisher_max_latency_ms: DEFAULT_MAX_LATENCY_MS,
+                            start_group: None,
+                            end_group: None,
+                        }),
+                    )
+                    .await
+                    .expect("subscription accepted");
+                    let accepted = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                        .await
+                        .expect("accept event in time")
+                        .expect("accept event");
+                    assert!(matches!(
+                        accepted.body,
+                        EventBody::Control(Control::SubscribeOk(_))
+                    ));
+                    send_control(dialer.as_ref(), &Control::TrackInfo(track_info()))
+                        .await
+                        .expect("track info");
+                    let track = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                        .await
+                        .expect("track event in time")
+                        .expect("track event");
+                    assert!(matches!(
+                        track.body,
+                        EventBody::Control(Control::TrackInfo(_))
+                    ));
+
                     group
                         .write_frame(
                             FrameHeader {
