@@ -4,6 +4,7 @@ library;
 import 'package:astrolabe/src/core/client.dart';
 import 'package:astrolabe/src/shell/book.dart';
 import 'package:covalence/covalence.dart' hide Surface;
+import 'package:astrolabe/src/shell/caption.dart' show CaptionControls;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
@@ -355,7 +356,23 @@ void main() {
     expect(find.bySemanticsLabel('Restore'), findsNothing);
     expect(find.bySemanticsLabel('Minimise'), findsOneWidget);
     expect(find.bySemanticsLabel('Close'), findsOneWidget);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('the book cedes its top band to the traffic lights, not a cluster',
+      (tester) async {
+    await tester.pumpWidget(BookApp(client: Client.canned(_view())));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The controls are the system's, at the leading edge, so the merged
+    // caption draws none of its own opposite them.
+    expect(find.byType(CaptionControls), findsNothing);
+    expect(find.bySemanticsLabel('Minimise'), findsNothing);
+    expect(find.bySemanticsLabel('Close'), findsNothing);
+
+    // And the card starts below the band they are centred in rather than
+    // underneath them — the whole body drops, so nothing is covered.
+    expect(tester.getRect(find.byType(BookPage)).top, kTrafficLightBand);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   testWidgets('refresh on the book asks the core, not a second model',
       (tester) async {

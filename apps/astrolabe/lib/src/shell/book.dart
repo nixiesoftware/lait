@@ -448,11 +448,15 @@ class _CanonicalCard extends StatelessWidget {
         ),
         // The card shares the window's top band with the floating minimise
         // and close controls, so it cedes their corner — two caption widths
-        // — rather than running its text underneath them.
-        t.box.width(
-          TokenEscape.rawSize(kCaptionWidth * 2),
-          child: const SizedBox(),
-        ),
+        // — rather than running its text underneath them. Where the system
+        // draws its own controls there is nothing in this corner to cede to:
+        // they are at the leading edge, above the card rather than beside it,
+        // and the frame has already dropped the card clear of them.
+        if (!systemDrawsWindowControls)
+          t.box.width(
+            TokenEscape.rawSize(kCaptionWidth * 2),
+            child: const SizedBox(),
+          ),
       ],
     );
   }

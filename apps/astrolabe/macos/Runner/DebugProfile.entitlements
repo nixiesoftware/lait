@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The App Sandbox is off, and this is the one place to reverse it if that
+	     changes. Astrolabe supervises a `lait` sidecar it spawns from inside its
+	     own bundle, keeps its managed device roots under the real
+	     `$HOME/.local/share/Astrolabe`, and hands `Open` to the person's
+	     browser. Under the sandbox `$HOME` is the container, so the state root
+	     the sandboxed client manages is a different directory from the one the
+	     `lait` on the person's PATH uses — two clients, one machine, silently
+	     disagreeing about which devices exist. That is the false-disconnection
+	     defect in a new costume, so the sandbox stays off until the state root
+	     is a decision rather than an accident. -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<!-- The head listens on loopback and the client connects to it. Kept even
+	     with the sandbox off, so turning it back on does not silently remove
+	     the client's own reach. -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>
