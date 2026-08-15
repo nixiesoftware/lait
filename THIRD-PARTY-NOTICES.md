@@ -4,13 +4,13 @@ lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, ea
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-792 crates, under 43 distinct licence expressions.
+793 crates, under 43 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 373 |
+| `MIT OR Apache-2.0` | 374 |
 | `MIT` | 148 |
 | `Apache-2.0 OR MIT` | 76 |
 | `MIT/Apache-2.0` | 38 |
@@ -315,6 +315,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | hickory-net | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
 | hickory-proto | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
 | hickory-resolver | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
+| hmac | 0.12.1 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/MACs> |
 | http | 1.4.1 | `MIT OR Apache-2.0` | <https://github.com/hyperium/http> |
 | http-body | 1.0.1 | `MIT` | <https://github.com/hyperium/http-body> |
 | http-body-util | 0.1.3 | `MIT` | <https://github.com/hyperium/http-body> |
