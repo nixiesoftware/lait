@@ -18,6 +18,7 @@ import 'package:astrolabe/src/surfaces/library.dart';
 import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold;
 import 'package:flutter/widgets.dart';
+import 'package:lit_ui/lit_ui.dart' show Lit;
 import 'package:flutter_test/flutter_test.dart';
 
 ClientView _view({
@@ -168,19 +169,75 @@ void main() {
       tester.widget<Icon>(find.byIcon(AppIcons.playArrow)).size,
       20,
     );
-    final launchButton = tester.widget<Button>(
+    // The reference client's anatomy and its colour: launch is the one solid
+    // green slab. Green belongs to the act that starts a World — the running
+    // control wears the white stop coat — so a slip reads before a label.
+    final launchSlab = tester.widget<Lit>(
       find.ancestor(
         of: find.text('LAUNCH'),
-        matching: find.byType(Button),
+        matching: find.byType(Lit),
       ),
     );
-    expect(launchButton.borderRadius, BorderRadius.circular(2));
+    expect(launchSlab.baseColor, kLaunchSlabFill);
+    expect(
+      launchSlab.baseColor,
+      isNot(kStopSlabFill),
+      reason: 'the two acts share one coat',
+    );
+    // The two coats are inverses: white ink on the green, dark ink on the
+    // white stop slab. Asserted against the launch constant rather than a
+    // literal, so the pair cannot drift apart in one place only.
+    expect(
+      tester.widget<Text>(find.text('LAUNCH')).style?.color,
+      kLaunchSlabInk,
+    );
+    expect(
+      tester.widget<Icon>(find.byIcon(AppIcons.playArrow)).color,
+      kLaunchSlabInk,
+      reason: 'the play mark and its word disagree about the ink',
+    );
     expect(asked, hasLength(1));
     expect(
       asked.single,
       const ActionRequest.open(entryPath: '/'),
       reason: 'opening asked for somewhere other than the declared entry',
     );
+  });
+
+  testWidgets('the action slabs are content-sized, not band-wide',
+      (tester) async {
+    // A Container handed an `alignment` expands to its constraints rather than
+    // its child, and these slabs sit in a Wrap that offers the whole band —
+    // which is how LAUNCH once stretched the full width of the pane. Measured
+    // against the band rather than a magic number, so the guard survives a
+    // change of window size.
+    await _pumpLibraryPage(tester, _view(library: [_row()]));
+
+    final band = find.byKey(const ValueKey('library-open-band'));
+    final launch = find.ancestor(
+      of: find.text('LAUNCH'),
+      matching: find.byType(Lit),
+    );
+    expect(
+      tester.getSize(launch).width,
+      lessThan(tester.getSize(band).width / 2),
+      reason: 'the launch slab stretched to fill the action band',
+    );
+
+    await _pumpLibraryPage(
+      tester,
+      _view(library: [_row()], heads: const [_identityHead]),
+    );
+    for (final slab in find
+        .descendant(of: band, matching: find.byType(Lit))
+        .evaluate()
+        .map((element) => find.byWidget(element.widget))) {
+      expect(
+        tester.getSize(slab).width,
+        lessThan(tester.getSize(band).width / 2),
+        reason: 'a segment of the stop slab filled the action band',
+      );
+    }
   });
 
   testWidgets('a World that declares no entry path cannot be opened',
@@ -333,12 +390,12 @@ void main() {
     expect(asked, isEmpty);
   });
 
-  testWidgets('a serving head is one solid split control, both halves Go to',
+  testWidgets('a serving head is one solid split control — STOP, then Go to',
       (tester) async {
     // "Running" is the identity head's own liveness: the destination is up,
-    // and Open is a handoff rather than a start. There is no per-Orbit badge
-    // to read it from any more, deliberately — Space lifecycle belongs to the
-    // head's own front page.
+    // and Open is a handoff rather than a start. The act offered against it
+    // is STOP — the head is what this client started, so it is what this
+    // client can end.
     final asked = await _pump(
       tester,
       _view(
@@ -348,32 +405,58 @@ void main() {
     );
 
     expect(find.text('Go to'), findsNothing);
-    expect(find.text('RUNNING'), findsWidgets);
     expect(find.text('Cancel'), findsNothing);
-    expect(find.text('Stop'), findsNothing);
 
     final openBand = find.byKey(const ValueKey('library-open-band'));
-    final runningLabel = find.descendant(
-      of: openBand,
-      matching: find.text('RUNNING'),
-    );
-    expect(tester.widget<Text>(runningLabel).style?.fontSize, 20);
+    // The state chip said RUNNING here once. The reference client's running
+    // control is the act; the state lives in the badge and the rail.
     expect(
-        tester.widget<Text>(runningLabel).style?.fontWeight, FontWeight.w400);
+      find.descendant(of: openBand, matching: find.text('RUNNING')),
+      findsNothing,
+    );
+    final stopLabel = find.descendant(
+      of: openBand,
+      matching: find.text('STOP'),
+    );
+    expect(stopLabel, findsOneWidget);
+    expect(tester.widget<Text>(stopLabel).style?.fontSize, 20);
+    expect(tester.widget<Text>(stopLabel).style?.fontWeight, FontWeight.w400);
 
-    // The reference client's anatomy: one solid slab — a play mark and the
-    // state, a hairline, the handoff glyph — not a status chip beside a
-    // detached ghost button.
-    final playMark = find.descendant(
+    // The reference client's anatomy: one solid slab — a stop mark and STOP,
+    // a hairline, the handoff glyph — not a status chip beside a detached
+    // ghost button. And its colour: the white stop coat, never launch's green.
+    final stopMark = find.descendant(
       of: openBand,
-      matching: find.byIcon(AppIcons.playArrow),
+      matching: find.byIcon(AppIcons.close),
     );
-    expect(playMark, findsOneWidget);
-    expect(tester.widget<Icon>(playMark).size, 20);
-    // White ink on the vivid fill, in either theme.
+    expect(stopMark, findsOneWidget);
+    expect(tester.widget<Icon>(stopMark).size, 20);
     expect(
-      tester.widget<Text>(runningLabel).style?.color,
-      const Color(0xFFFFFFFF),
+      find.descendant(of: openBand, matching: find.byIcon(AppIcons.playArrow)),
+      findsNothing,
+      reason: 'a running World offered the start glyph',
+    );
+    for (final slab in tester.widgetList<Lit>(
+      find.descendant(of: openBand, matching: find.byType(Lit)),
+    )) {
+      expect(
+        slab.baseColor,
+        kStopSlabFill,
+        reason: 'a segment of the stop slab is not the white stop coat',
+      );
+      expect(
+        slab.baseColor,
+        isNot(kLaunchSlabFill),
+        reason: 'the stop slab wears the colour that launches',
+      );
+    }
+    // Dark ink on the white slab, in either theme — a text rung would flip
+    // with polarity and put white on white.
+    expect(tester.widget<Text>(stopLabel).style?.color, kStopSlabInk);
+    expect(
+      tester.widget<Icon>(stopMark).color,
+      kStopSlabInk,
+      reason: 'the stop mark and its word disagree about the ink',
     );
     expect(
       find.descendant(
@@ -390,24 +473,83 @@ void main() {
     expect(handoff, findsOneWidget);
     expect(
       tester.widget<Icon>(handoff).size,
-      tester.widget<Icon>(playMark).size,
+      tester.widget<Icon>(stopMark).size,
       reason: 'the slab\'s two glyphs share one size',
     );
-    expect(tester.getCenter(handoff).dy, tester.getCenter(runningLabel).dy);
+    expect(tester.getCenter(handoff).dy, tester.getCenter(stopLabel).dy);
 
-    // Both segments are the same act, at the World-declared entry path.
-    await tester.tap(runningLabel);
+    // The halves are different acts: STOP ends the head this client owns;
+    // the handoff goes to it at the World-declared entry path.
+    await tester.tap(stopLabel);
     await tester.pump();
     await tester.tap(handoff);
     await tester.pump();
     expect(
       asked,
       const [
-        ActionRequest.open(entryPath: '/issues'),
+        ActionRequest.stopHead(id: 'identity:default'),
         ActionRequest.open(entryPath: '/issues'),
       ],
-      reason: 'a segment bypassed the World-declared entry path',
+      reason: 'a segment asked for something other than its own act',
     );
+  });
+
+  testWidgets('a head this client does not own is not one it may stop',
+      (tester) async {
+    // Ownership is the boundary the supervisor enforces, so the surface must
+    // not draw past it. Somebody ran `lait` themselves: the World is reachable
+    // and Open still works, but STOP is absent rather than present-and-refused.
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [_row(opensAt: '/issues')],
+        heads: const [
+          HeadRow(
+            id: 'identity:external',
+            kind: 'browser',
+            origin: 'http://127.0.0.1:7717/',
+            owned: false,
+          ),
+        ],
+      ),
+    );
+
+    final openBand = find.byKey(const ValueKey('library-open-band'));
+    expect(
+      find.descendant(of: openBand, matching: find.text('STOP')),
+      findsNothing,
+      reason: 'the client offered to stop a head it never started',
+    );
+    // The handoff is still the whole control, and still names itself.
+    final handoff = find.descendant(
+      of: openBand,
+      matching: find.text('OPEN'),
+    );
+    expect(handoff, findsOneWidget);
+
+    await tester.tap(handoff);
+    await tester.pump();
+    expect(asked, const [ActionRequest.open(entryPath: '/issues')]);
+  });
+
+  testWidgets('an in-flight stop is visibly stopping, with no second press',
+      (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [_row(opensAt: '/issues')],
+        heads: const [_identityHead],
+        inFlight: const ['head.stop:identity:default'],
+      ),
+    );
+
+    expect(find.text('STOPPING'), findsOneWidget);
+    expect(
+      find.text('STOP'),
+      findsNothing,
+      reason: 'the control stayed pressable while its own stop was in flight',
+    );
+    expect(asked, isEmpty);
   });
 
   testWidgets('an in-flight open is visibly launching', (tester) async {
@@ -421,6 +563,27 @@ void main() {
 
     expect(find.text('LAUNCHING'), findsOneWidget);
     expect(find.text('Cancel'), findsNothing);
+
+    // The act in flight wears the stop coat, not a translucent pill: the band
+    // must not change weight or shape under a state that lasts a second.
+    final pending = tester.widget<Lit>(
+      find.ancestor(
+        of: find.text('LAUNCHING'),
+        matching: find.byType(Lit),
+      ),
+    );
+    expect(pending.baseColor, kStopSlabFill);
+    expect(
+      tester.widget<Text>(find.text('LAUNCHING')).style?.color,
+      kStopSlabInk,
+    );
+    expect(
+      tester.widget<Text>(find.text('LAUNCHING')).style?.fontSize,
+      20,
+      reason: 'the pending label is not the slab type size',
+    );
+    expect(tester.widget<Progress>(find.byType(Progress)).size,
+        ProgressSize.lg);
   });
 
   testWidgets('the row reports its declaration and opens settings',
@@ -435,7 +598,16 @@ void main() {
       onSettings: (snapshot) async => settings.add(snapshot),
     );
 
-    expect(find.text('v7'), findsOneWidget);
+    // The action band carries the act and nothing else. The version is still
+    // known — it rides the settings snapshot below — but it is a fact about
+    // the World rather than something to do with it, so it is not drawn
+    // beside the control.
+    expect(
+      find.text('v7'),
+      findsNothing,
+      reason: 'the action band grew a readout beside its one control',
+    );
+    expect(find.text('VERSION'), findsNothing);
 
     await tester.tap(find.byIcon(AppIcons.settings));
     await tester.pump(const Duration(milliseconds: 300));

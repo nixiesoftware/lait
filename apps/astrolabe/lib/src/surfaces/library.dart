@@ -32,6 +32,22 @@ const double kHeroHeight = 196;
 const double kGlanceWidth = 300;
 const double _worldActionGlyphSize = 20;
 
+/// The two action coats — launch and stop — as exact inverses of each other.
+///
+/// Raw rather than theme rungs, and necessarily: a slab that must look the
+/// same in either theme cannot take its fill from a ramp that mirrors with
+/// polarity — `success.l800` is a step *darker* than `l850` in the light
+/// theme and a step *lighter* in the dark one — and its ink cannot come from
+/// a text rung that would go pale in the dark and put white on white.
+final Color kLaunchSlabFill = TokenEscape.rawColor(0xFF22C55E);
+final Color kLaunchSlabInk = TokenEscape.rawColor(0xFFFFFFFF);
+final Color kStopSlabFill = TokenEscape.rawColor(0xFFFFFFFF);
+final Color kStopSlabInk = TokenEscape.rawColor(0xFF10151A);
+
+/// The corner every action slab is cut with — small enough to read as a
+/// square-ish button, large enough to not look like a rendering accident.
+const SizeStep kSlabCorner = Space.xs;
+
 class LibrarySurface extends StatefulWidget {
   const LibrarySurface({super.key});
 
@@ -494,6 +510,14 @@ class _ActionPanel extends StatelessWidget {
     final heads = _serving(view);
     final running = !opening && heads.isNotEmpty;
     final activeOrigin = heads.isEmpty ? null : heads.first.origin;
+    // Stopping is offered against an *owned* head and nothing else. A head
+    // this client did not start belongs to whoever ran it, and ownership is
+    // the boundary the supervisor enforces — a control that pretended
+    // otherwise would be a button whose refusal is the only way to learn it
+    // was never ours.
+    final stoppable = _stoppable(view);
+    final stopping =
+        stoppable != null && view.inFlight.contains(ActionKeys.stopHead(stoppable.id));
 
     return Container(
       key: const ValueKey('library-open-band'),
@@ -505,31 +529,29 @@ class _ActionPanel extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
+          // The band carries the act and nothing else. The version is a fact
+          // about the World rather than something to do with it, and the
+          // detail column below already answers that kind of question.
           Expanded(
-            child: Wrap(
-              spacing: t.size.xl5,
-              runSpacing: t.size.xl3,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                _WorldAction(
-                  showing: showing,
-                  running: running,
-                  opening: opening,
-                  lifecycle: lifecycle,
-                  onOpen: entryPath == null || opening
-                      ? null
-                      : () => client.dispatch(
-                            ActionRequest.open(entryPath: entryPath),
-                          ),
-                ),
-                _StatusReadout(
-                  icon: AppIcons.inventory2,
-                  label: 'VERSION',
-                  value: showing.version == null
-                      ? 'Not reported'
-                      : 'v${showing.version}',
-                ),
-              ],
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: _WorldAction(
+                showing: showing,
+                running: running,
+                opening: opening,
+                stopping: stopping,
+                lifecycle: lifecycle,
+                onOpen: entryPath == null || opening
+                    ? null
+                    : () => client.dispatch(
+                          ActionRequest.open(entryPath: entryPath),
+                        ),
+                onStop: stoppable == null || stopping
+                    ? null
+                    : () => client.dispatch(
+                          ActionRequest.stopHead(id: stoppable.id),
+                        ),
+              ),
             ),
           ),
           t.gap.x(Space.md),
@@ -563,13 +585,16 @@ class _WorldAction extends StatelessWidget {
     required this.showing,
     required this.running,
     required this.opening,
+    required this.stopping,
     required this.lifecycle,
     required this.onOpen,
+    required this.onStop,
   });
 
   final LibraryRow showing;
   final bool running;
   final bool opening;
+  final bool stopping;
   final ({
     String label,
     String description,
@@ -577,54 +602,26 @@ class _WorldAction extends StatelessWidget {
     BadgeDotTone dot,
   }) lifecycle;
   final VoidCallback? onOpen;
+  final VoidCallback? onStop;
 
   @override
   Widget build(BuildContext context) {
-    final t = context.tokens;
+    if (stopping) return const _PendingSlab(label: 'STOPPING');
 
     if (running) {
       return _RunningControl(
+        onStop: onStop,
         onOpen: onOpen,
-        tooltip: _openTooltip(showing, running: true),
+        openTooltip: _openTooltip(showing, running: true),
       );
     }
 
-    if (opening) {
-      return _LifecycleState(
-        label: 'Launching',
-        loading: true,
-        tone: context.text.l950,
-        large: true,
-      );
-    }
+    if (opening) return const _PendingSlab(label: 'LAUNCHING');
 
     if (onOpen != null) {
-      return Button(
-        onPressed: onOpen,
-        semanticLabel: 'Launch World',
-        variant: ButtonVariant.primary,
-        size: ButtonSize.lg,
-        borderRadius: t.radius.all(Space.xxs),
+      return _LaunchControl(
+        onOpen: onOpen!,
         tooltip: _openTooltip(showing, running: false),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              AppIcons.playArrow,
-              size: _worldActionGlyphSize,
-              color: context.surface.l50,
-            ),
-            t.gap.x(Space.sm),
-            Text(
-              'LAUNCH',
-              style: context.bodyStyle.copyWith(
-                color: context.surface.l50,
-                fontSize: _worldActionGlyphSize,
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-          ],
-        ),
       );
     }
 
@@ -636,146 +633,322 @@ class _WorldAction extends StatelessWidget {
   }
 }
 
-/// The running World's control — the reference client's solid split button:
-/// one bright green slab, the play mark and the state on its left, the
-/// browser handoff on the right of a hairline. Both segments are the same
-/// act — go to the running World — because the split is the reference
-/// anatomy, not two behaviors; but each half answers the pointer alone,
-/// brightening under it while its sibling rests.
+/// The launch control — the reference client's solid green slab.
 ///
-/// The sheen is derived, not hand-tuned: [Lit] surfaces under one
-/// top-mounted directional light compute the gradient the reference
-/// client's button wears, and retune themselves if the fill ever changes.
-class _RunningControl extends StatefulWidget {
-  const _RunningControl({required this.onOpen, required this.tooltip});
+/// Green is launch's alone. The colour that starts a World never sits under
+/// the control that stops one, so the two acts read apart before either
+/// label is.
+///
+/// The sheen is derived, not hand-tuned: a [Lit] surface under one
+/// top-mounted directional light computes the gradient the reference
+/// client's button wears, and retunes itself if the fill ever changes.
+class _LaunchControl extends StatefulWidget {
+  const _LaunchControl({required this.onOpen, required this.tooltip});
 
-  final VoidCallback? onOpen;
+  final VoidCallback onOpen;
   final String tooltip;
 
   @override
-  State<_RunningControl> createState() => _RunningControlState();
+  State<_LaunchControl> createState() => _LaunchControlState();
 }
 
-class _RunningControlState extends State<_RunningControl> {
-  double _hoverState = 0;
-  double _hoverHandoff = 0;
+class _LaunchControlState extends State<_LaunchControl> {
+  double _hover = 0;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final fill = context.status.success.l800;
-    // reason: the slab is a vivid status green in both themes, so its ink is
-    // white in both — no theme rung answers "white regardless of theme".
-    final ink = TokenEscape.rawColor(0xFFFFFFFF);
-    // The hovered segment lifts toward its own ink; Lit hands back the
-    // animated 0..1 and imposes no look of its own.
-    Color raised(double hover) => Color.lerp(fill, ink, hover * 0.12)!;
+    final fill = kLaunchSlabFill;
+    final ink = kLaunchSlabInk;
     // The ambient scene first — what the lighting workbench edits is what
     // this control wears — and the canonical scene only where no window
     // mounted one (a bare test harness).
     final scene = LightTheme.maybeOf(context) ?? kAstrolabeScene;
     return Semantics(
       button: true,
-      label: 'Go to running World',
+      label: 'Launch World',
       child: Tooltip(
         message: widget.tooltip,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Lit(
-              scene: scene,
-              baseColor: raised(_hoverState),
-              curvature: 0.12,
-              elevation: 3,
-              borderRadius: t.radius.corner(
-                topLeft: Space.xxs,
-                bottomLeft: Space.xxs,
-              ),
-              onTap: widget.onOpen,
-              onHoverChange: (value) => setState(() => _hoverState = value),
-              child: Container(
-                height: 40,
-                padding: t.padding.symmetric(h: Space.xl3),
-                alignment: Alignment.center,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      AppIcons.playArrow,
-                      size: _worldActionGlyphSize,
-                      color: ink,
-                    ),
-                    t.gap.x(Space.sm),
-                    Text(
-                      'RUNNING',
-                      style: context.bodyStyle.copyWith(
-                        color: ink,
-                        fontSize: _worldActionGlyphSize,
-                        fontWeight: FontWeight.w400,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            Container(
-              width: t.stroke.xxs,
-              height: 40,
-              // reason: the seam splitting the slab is a shade of its own
-              // fill, not a theme rung — a dark line on green in any theme.
-              color: TokenEscape.rawColor(0x40000000),
-            ),
-            Lit(
-              scene: scene,
-              baseColor: raised(_hoverHandoff),
-              curvature: 0.12,
-              elevation: 3,
-              borderRadius: t.radius.corner(
-                topRight: Space.xxs,
-                bottomRight: Space.xxs,
-              ),
-              onTap: widget.onOpen,
-              onHoverChange: (value) =>
-                  setState(() => _hoverHandoff = value),
-              child: Container(
-                height: 40,
-                padding: t.padding.symmetric(h: Space.md),
-                alignment: Alignment.center,
-                child: Icon(
-                  AppIcons.openInNew,
+        child: Lit(
+          scene: scene,
+          baseColor: Color.lerp(fill, ink, _hover * 0.12)!,
+          curvature: 0.12,
+          elevation: 3,
+          borderRadius: t.radius.all(kSlabCorner),
+          onTap: widget.onOpen,
+          onHoverChange: (value) => setState(() => _hover = value),
+          // No `alignment` here, and that is load-bearing: a Container given
+          // one expands to its constraints instead of its child, and this slab
+          // sits directly in a Wrap that offers the whole band. The split
+          // control escapes it by being a min-width Row first; this one has no
+          // Row above it, so alignment would make LAUNCH band-wide.
+          child: Container(
+            height: 40,
+            padding: t.padding.symmetric(h: Space.xl3),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  AppIcons.playArrow,
                   size: _worldActionGlyphSize,
                   color: ink,
                 ),
-              ),
+                t.gap.x(Space.sm),
+                Text(
+                  'LAUNCH',
+                  style: context.bodyStyle.copyWith(
+                    color: ink,
+                    fontSize: _worldActionGlyphSize,
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
   }
 }
 
+/// The running control — the reference client's solid split button in its
+/// stop coat: one white slab, the stop mark and STOP on its left, the browser
+/// handoff on the right of a hairline. White, never green — green is launch's
+/// alone, and a stop control wearing the colour that starts is how a slip
+/// lands on the wrong act.
+///
+/// Unlike the reference's split, the halves are different acts: STOP ends the
+/// head, and the handoff goes to it while it still serves. Each half answers
+/// the pointer alone, brightening under it while its sibling rests.
+///
+/// What is stopped is the **head**, which serves every installed World — so
+/// the word on the tooltip says that, rather than letting a control on one
+/// World's row imply it stops only that one. When no owned head is serving,
+/// [onStop] is null: the left half falls away rather than offering an act
+/// this client has no standing to perform.
+///
+/// The sheen is derived, not hand-tuned: [Lit] surfaces under one
+/// top-mounted directional light compute the gradient the reference
+/// client's button wears, and retune themselves if the fill ever changes.
+class _RunningControl extends StatefulWidget {
+  const _RunningControl({
+    required this.onStop,
+    required this.onOpen,
+    required this.openTooltip,
+  });
+
+  final VoidCallback? onStop;
+  final VoidCallback? onOpen;
+  final String openTooltip;
+
+  @override
+  State<_RunningControl> createState() => _RunningControlState();
+}
+
+class _RunningControlState extends State<_RunningControl> {
+  double _hoverStop = 0;
+  double _hoverHandoff = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final fill = kStopSlabFill;
+    final ink = kStopSlabInk;
+    // The hovered segment lifts toward its own ink; Lit hands back the
+    // animated 0..1 and imposes no look of its own. On a white slab that
+    // reads as settling rather than brightening, which is the same gesture
+    // the vivid fills make — toward the ink, whichever way that runs.
+    Color raised(double hover) => Color.lerp(fill, ink, hover * 0.12)!;
+    // The ambient scene first — what the lighting workbench edits is what
+    // this control wears — and the canonical scene only where no window
+    // mounted one (a bare test harness).
+    final scene = LightTheme.maybeOf(context) ?? kAstrolabeScene;
+    final stoppable = widget.onStop != null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (stoppable) ...[
+          Semantics(
+            button: true,
+            label: 'Stop the head',
+            child: Tooltip(
+              message: 'Stop the head serving your Worlds',
+              child: Lit(
+                scene: scene,
+                baseColor: raised(_hoverStop),
+                curvature: 0.12,
+                elevation: 3,
+                borderRadius: t.radius.corner(
+                  topLeft: kSlabCorner,
+                  bottomLeft: kSlabCorner,
+                ),
+                onTap: widget.onStop,
+                onHoverChange: (value) => setState(() => _hoverStop = value),
+                child: Container(
+                  height: 40,
+                  padding: t.padding.symmetric(h: Space.xl3),
+                  alignment: Alignment.center,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        AppIcons.close,
+                        size: _worldActionGlyphSize,
+                        color: ink,
+                      ),
+                      t.gap.x(Space.sm),
+                      Text(
+                        'STOP',
+                        style: context.bodyStyle.copyWith(
+                          color: ink,
+                          fontSize: _worldActionGlyphSize,
+                          fontWeight: FontWeight.w400,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Container(
+            width: t.stroke.xxs,
+            height: 40,
+            // reason: the seam splitting the slab is a shade of its own ink,
+            // not a theme rung — a grey line on white in any theme. Lighter
+            // than the vivid fills wanted, because full 25% black on white is
+            // a rule through the middle of a button rather than a seam.
+            color: TokenEscape.rawColor(0x24000000),
+          ),
+        ],
+        Semantics(
+          button: true,
+          label: 'Go to running World',
+          child: Tooltip(
+            message: widget.openTooltip,
+            child: Lit(
+              scene: scene,
+              baseColor: raised(_hoverHandoff),
+              curvature: 0.12,
+              elevation: 3,
+              borderRadius: stoppable
+                  ? t.radius.corner(
+                      topRight: kSlabCorner,
+                      bottomRight: kSlabCorner,
+                    )
+                  : t.radius.all(kSlabCorner),
+              onTap: widget.onOpen,
+              onHoverChange: (value) => setState(() => _hoverHandoff = value),
+              child: Container(
+                height: 40,
+                // An unsplit slab is the whole control, so it carries the
+                // word too — a lone glyph would be a button with no name.
+                padding: t.padding.symmetric(
+                  h: stoppable ? Space.md : Space.xl3,
+                ),
+                alignment: Alignment.center,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (!stoppable) ...[
+                      Text(
+                        'OPEN',
+                        style: context.bodyStyle.copyWith(
+                          color: ink,
+                          fontSize: _worldActionGlyphSize,
+                          fontWeight: FontWeight.w400,
+                        ),
+                      ),
+                      t.gap.x(Space.sm),
+                    ],
+                    Icon(
+                      AppIcons.openInNew,
+                      size: _worldActionGlyphSize,
+                      color: ink,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// An act in flight — LAUNCHING, STOPPING — wearing the running control's own
+/// coat.
+///
+/// The same slab as STOP, deliberately: these states occupy the action's slot
+/// for a second or two, and a translucent pill in that slot made the band
+/// change weight and shape under a transition. Launch hands off to this, and
+/// this hands off to stop, without the row moving underneath the pointer.
+///
+/// Not interactive, and `Lit` handles that on its own: with a null `onTap` it
+/// draws the surface and lets pointer events pass straight through.
+class _PendingSlab extends StatelessWidget {
+  const _PendingSlab({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final scene = LightTheme.maybeOf(context) ?? kAstrolabeScene;
+    return Semantics(
+      label: label,
+      liveRegion: true,
+      child: Lit(
+        scene: scene,
+        baseColor: kStopSlabFill,
+        curvature: 0.12,
+        elevation: 3,
+        borderRadius: t.radius.all(kSlabCorner),
+        // No `alignment` on the Container below, for the reason the launch
+        // slab carries in full: one would expand this to the whole band.
+        child: Container(
+          height: 40,
+          padding: t.padding.symmetric(h: Space.xl3),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Progress.spinner(size: ProgressSize.lg, color: kStopSlabInk),
+              t.gap.x(Space.sm),
+              Text(
+                label,
+                style: context.bodyStyle.copyWith(
+                  color: kStopSlabInk,
+                  fontSize: _worldActionGlyphSize,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The row's state where there is no act to offer — a World this build cannot
+/// open. A readout, not a control, and drawn as one.
 class _LifecycleState extends StatelessWidget {
   const _LifecycleState({
     required this.label,
     required this.tone,
     this.icon,
-    this.loading = false,
-    this.large = false,
   });
 
   final String label;
   final Color tone;
   final IconData? icon;
-  final bool loading;
-  final bool large;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     return Semantics(
       label: label,
-      liveRegion: loading,
       child: Container(
         height: 40,
         constraints: const BoxConstraints(minWidth: 124),
@@ -783,80 +956,25 @@ class _LifecycleState extends StatelessWidget {
         decoration: BoxDecoration(
           color: tone.withValues(alpha: 0.10),
           border: Border.all(color: tone.withValues(alpha: 0.45)),
-          borderRadius: t.radius.all(large ? Space.xxs : Space.sm),
+          borderRadius: t.radius.all(Space.sm),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (loading)
-              Progress.spinner(
-                size: large ? ProgressSize.lg : ProgressSize.xs,
-                color: tone,
-              )
-            else if (icon != null)
-              Icon(
-                icon,
-                size: large ? _worldActionGlyphSize : 16,
-                color: tone,
-              ),
+            if (icon != null) Icon(icon, size: 16, color: tone),
             t.gap.x(Space.sm),
             Text(
-              large ? label.toUpperCase() : label,
+              label,
               style: context.bodyStyle.copyWith(
                 color: tone,
-                fontSize:
-                    large ? _worldActionGlyphSize : context.bodyStyle.fontSize,
-                fontWeight: large ? FontWeight.w400 : FontWeight.w700,
+                fontWeight: FontWeight.w700,
               ),
             ),
           ],
         ),
       ),
     );
-  }
-}
-
-class _StatusReadout extends StatelessWidget {
-  const _StatusReadout({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  final IconData icon;
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final color = context.text.l700;
-    final readout = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 18, color: color),
-        t.gap.x(Space.sm),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(label, style: context.factLabelStyle),
-            t.gap.y(Space.xxs),
-            Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: context.labelStyle.copyWith(
-                color: color,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-    return readout;
   }
 }
 
@@ -1156,6 +1274,21 @@ class _Fact extends StatelessWidget {
 List<HeadRow> _serving(ClientView view) =>
     view.heads.where((head) => head.orbit == null).toList();
 
+/// The serving head this client may stop, or `None` when there is none it
+/// owns.
+///
+/// Ownership is the boundary, not a preference: the supervisor stops what it
+/// started, and a head somebody ran from a terminal is theirs. Answering with
+/// the head itself rather than a bool is what lets the caller name the one it
+/// is stopping — `head.stop:<id>` is per-head, so a second head's stop does
+/// not disable this one's control.
+HeadRow? _stoppable(ClientView view) {
+  for (final head in _serving(view)) {
+    if (head.owned) return head;
+  }
+  return null;
+}
+
 enum _Lifecycle { opening, running, ready, unavailable }
 
 ({
@@ -1195,7 +1328,8 @@ enum _Lifecycle { opening, running, ready, unavailable }
 
 _Lifecycle _lifecycle(ClientView view, LibraryRow row) {
   // A browser handoff to a head already up never changes the World-level
-  // state, so there is no cancel/stop state at this layer.
+  // state. Stopping the head does — and until the re-read confirms it, the
+  // honest state is still Running.
   if (_opening(view, row)) return _Lifecycle.opening;
   if (row.opensAt == null) return _Lifecycle.unavailable;
   if (_serving(view).isNotEmpty) return _Lifecycle.running;
