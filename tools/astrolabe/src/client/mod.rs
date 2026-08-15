@@ -10,6 +10,7 @@
 //! things it reaches, and the smallest.
 
 pub mod book;
+pub mod display;
 pub mod error;
 pub mod heads;
 pub mod host;

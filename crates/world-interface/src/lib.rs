@@ -31,6 +31,7 @@
 //! which is why executing one costs a decode and nothing else.
 
 pub mod destination;
+pub mod display;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -632,6 +633,7 @@ pub struct WorldClientPackage {
     confirmation: Option<ConfirmationResolver>,
     decorator: Option<ReplyDecorator>,
     display: Display,
+    display_surfaces: BTreeMap<String, display::DisplaySurface>,
 }
 
 /// What a client needs to draw a World as a row somebody can open.
@@ -893,7 +895,27 @@ impl WorldClientPackage {
             confirmation: None,
             decorator: None,
             display: Display::unstated(mount),
+            display_surfaces: BTreeMap::new(),
         })
+    }
+
+    /// Register one package-owned display projection. Its runtime
+    /// implementation and semantic descriptor are frozen at composition time,
+    /// before a coordinator can create an assignment.
+    pub fn with_display_surface(
+        mut self,
+        surface: display::DisplaySurface,
+    ) -> Result<Self, Failure> {
+        surface.descriptor.validate(&self.world)?;
+        let id = surface.descriptor.id.as_str().to_string();
+        if self.display_surfaces.contains_key(&id) {
+            return Err(Failure::new(format!(
+                "World '{}' declares duplicate display surface '{id}'",
+                self.world
+            )));
+        }
+        self.display_surfaces.insert(id, surface);
+        Ok(self)
     }
 
     /// Say how this World should be drawn and where `Open` lands.
@@ -1055,6 +1077,17 @@ impl WorldClientPackage {
     /// How a client should draw this World.
     pub const fn display(&self) -> &Display {
         &self.display
+    }
+
+    pub fn display_surfaces(&self) -> impl Iterator<Item = &display::DisplaySurface> {
+        self.display_surfaces.values()
+    }
+
+    pub fn display_surface(
+        &self,
+        id: &display::DisplaySurfaceId,
+    ) -> Option<&display::DisplaySurface> {
+        self.display_surfaces.get(id.as_str())
     }
 
     pub fn with_failure_classifier(mut self, classifier: FailureClassifier) -> Self {
@@ -1224,7 +1257,7 @@ impl WorldClientPackage {
         })
     }
 
-    fn validate_invocation(&self, invocation: &ClientInvocation) -> Result<(), Failure> {
+    pub fn validate_invocation(&self, invocation: &ClientInvocation) -> Result<(), Failure> {
         if invocation.world_id() == &self.world {
             Ok(())
         } else {

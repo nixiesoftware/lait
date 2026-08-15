@@ -14,6 +14,8 @@ import 'package:flutter/services.dart';
 /// engine that already carries this argument.
 const bookWindowArgument = 'astrolabe.book';
 const bookWindowKey = 'address-book';
+const displaysWindowArgument = 'astrolabe.displays';
+const displaysWindowKey = 'displays';
 
 /// One typed request for an owned top-level window.
 ///
@@ -31,6 +33,10 @@ class OwnedWindowRoute {
       : key = bookWindowKey,
         arguments = bookWindowArgument;
 
+  const OwnedWindowRoute.displays()
+      : key = displaysWindowKey,
+        arguments = displaysWindowArgument;
+
   final String key;
   final String arguments;
 
@@ -41,12 +47,18 @@ bool isBookWindow(String arguments) =>
     arguments == bookWindowArgument ||
     arguments.split(RegExp(r'[\s,]')).contains(bookWindowArgument);
 
+bool isDisplaysWindow(String arguments) =>
+    arguments == displaysWindowArgument ||
+    arguments.split(RegExp(r'[\s,]')).contains(displaysWindowArgument);
+
 /// A sub-engine created by `desktop_multi_window` receives
 /// `["multi_window", windowId, windowArgument]` on `main`, *before*
 /// [WindowController.fromCurrentEngine] can answer. Routing must
 /// read that list; asking the plugin first is how the book window
 /// used to fall through into `window_manager` and paint nothing.
 bool isBookEngine(List<String> argv) => argv.contains(bookWindowArgument);
+bool isDisplaysEngine(List<String> argv) =>
+    argv.contains(displaysWindowArgument);
 
 bool isSubEngine(List<String> argv) =>
     argv.isNotEmpty && argv.first == 'multi_window';
@@ -67,6 +79,10 @@ final Set<String> _summoning = <String>{};
 /// not create a second engine.
 Future<void> summonBook() =>
     summonOwnedWindow(const OwnedWindowRoute.addressBook());
+
+/// Open display coordination, or focus it if it is already open.
+Future<void> summonDisplays() =>
+    summonOwnedWindow(const OwnedWindowRoute.displays());
 
 /// Open an owned window, or restore and focus the matching instance.
 ///

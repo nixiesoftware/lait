@@ -19,6 +19,7 @@ use crate::control::Request;
 pub fn is_read(req: &Request) -> bool {
     match req {
         Request::Members
+        | Request::DisplayStatus
         | Request::MemberLog
         | Request::DeviceInvite
         | Request::DeviceList
@@ -59,6 +60,11 @@ pub fn is_read(req: &Request) -> bool {
         Request::Work { request, .. } if !request.is_command() => true,
 
         Request::AgentAdd { .. }
+        | Request::DisplayPairingApprove { .. }
+        | Request::DisplayPairingReject { .. }
+        | Request::DisplayAssignmentPut { .. }
+        | Request::DisplayAssignmentRevoke { .. }
+        | Request::DisplayDeviceRevoke { .. }
         | Request::AgentProvision { .. }
         | Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
@@ -240,6 +246,14 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::BookSuggestDismiss { .. } => true,
 
         Request::MemberAdd { .. }
+        // Display coordination is daemon-scoped but intentionally reserved for
+        // the native Astrolabe controller, not the browser host-RPC surface.
+        | Request::DisplayStatus
+        | Request::DisplayPairingApprove { .. }
+        | Request::DisplayPairingReject { .. }
+        | Request::DisplayAssignmentPut { .. }
+        | Request::DisplayAssignmentRevoke { .. }
+        | Request::DisplayDeviceRevoke { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
         | Request::Members

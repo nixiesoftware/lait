@@ -16,6 +16,7 @@ import 'package:window_manager/window_manager.dart';
 import 'src/core/client.dart';
 import 'src/settings/window.dart';
 import 'src/shell/book.dart';
+import 'src/shell/displays.dart';
 import 'src/shell/host.dart';
 import 'src/shell/shell.dart';
 import 'src/shell/theme.dart';
@@ -55,6 +56,11 @@ Future<void> main(List<String> arguments) async {
     final settings = WorldSettingsSnapshot.fromArguments(arguments);
     if (settings != null) {
       runApp(WorldSettingsApp(snapshot: settings));
+      return;
+    }
+    if (isDisplaysEngine(arguments)) {
+      final client = await Client.start();
+      runApp(DisplaysApp(client: client));
       return;
     }
     if (!isBookEngine(arguments)) {

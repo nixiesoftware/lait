@@ -59,6 +59,7 @@ pub mod control;
 pub mod daemon;
 pub mod daemon_spawn;
 pub mod diagnose;
+pub mod display;
 pub mod dto;
 pub mod host_client;
 pub mod install;

@@ -15,6 +15,7 @@ import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
 import '../surfaces/library.dart';
+import 'host.dart';
 import 'lighting.dart';
 import 'menu.dart';
 import 'record.dart';
@@ -156,6 +157,11 @@ class _SettingsMenu extends StatelessWidget {
           label: 'CLIENT SETTINGS',
           children: [
             MenuItem(
+              icon: AppIcons.cable,
+              label: 'Displays',
+              onTap: summonDisplays,
+            ),
+            MenuItem(
               icon: AppIcons.refresh,
               label: 'Refresh local state',
               shortcut: 'F5',
@@ -211,4 +217,3 @@ class _SettingsIdentityHeader extends StatelessWidget {
     );
   }
 }
-

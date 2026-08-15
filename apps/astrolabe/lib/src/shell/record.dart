@@ -103,6 +103,15 @@ class OperationalBar extends StatelessWidget {
                   // the boundary — what is true to its left, what can be done
                   // to its right.
                   Button(
+                    onPressed: summonDisplays,
+                    icon: AppIcons.cable,
+                    semanticLabel: 'Displays',
+                    variant: ButtonVariant.ghost,
+                    size: ButtonSize.iconSm,
+                    tooltip: 'Coordinate displays',
+                  ),
+                  t.gap.x(Space.xxs),
+                  Button(
                     onPressed: summonBook,
                     icon: AppIcons.person,
                     semanticLabel: 'Address book',

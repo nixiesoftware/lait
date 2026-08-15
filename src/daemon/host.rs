@@ -188,19 +188,25 @@ enum Flow {
 /// state remains owned by [`Router`].
 pub(crate) struct Listener {
     router: Arc<Router>,
+    display: Arc<crate::display::DisplayRuntime>,
     stopping: tokio::sync::watch::Sender<bool>,
 }
 
 impl Listener {
-    pub(crate) fn new(router: Arc<Router>) -> Self {
+    pub(crate) fn new(router: Arc<Router>, display: Arc<crate::display::DisplayRuntime>) -> Self {
         Self {
             router,
+            display,
             stopping: tokio::sync::watch::channel(false).0,
         }
     }
 
     pub(crate) fn begin_stop(&self) {
         self.stopping.send_replace(true);
+    }
+
+    pub(crate) fn subscribe_stop(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.stopping.subscribe()
     }
 
     pub(crate) async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
@@ -678,9 +684,12 @@ impl Listener {
                 Flow::Next(reader, write_half)
             }
             (ControlRoute::Daemon, request) => {
-                let response = crate::orbits::bootstrap::dispatch(&self.router, request)
-                    .await
-                    .unwrap_or_else(|| Response::err("request has no daemon-scoped handler"));
+                let response = match self.display.handle_control(&request) {
+                    Some(response) => response,
+                    None => crate::orbits::bootstrap::dispatch(&self.router, request)
+                        .await
+                        .unwrap_or_else(|| Response::err("request has no daemon-scoped handler")),
+                };
                 let _ = write_line(&mut write_half, &response).await;
                 Flow::Next(reader, write_half)
             }
@@ -957,14 +966,20 @@ impl Listener {
 pub struct Daemon {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
+    display: Arc<crate::display::DisplayRuntime>,
 }
 
 impl Daemon {
-    fn new(router: Arc<Router>) -> Self {
-        Self {
-            endpoint: Arc::new(Endpoint::new(router.clone())),
+    fn new(router: Arc<Router>, home: &Path) -> Result<Self> {
+        let display = Arc::new(crate::display::DisplayRuntime::open(
+            &home.join("display"),
+            router.clone(),
+        )?);
+        Ok(Self {
+            endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),
+            display,
             router,
-        }
+        })
     }
 
     fn begin_stop(&self) {
@@ -972,7 +987,33 @@ impl Daemon {
     }
 
     async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
-        self.endpoint.clone().serve(home).await
+        let display = self.display.clone();
+        let display_stop = self.endpoint.subscribe_stop();
+        let endpoint = self.endpoint.clone();
+        let mut display_service = Box::pin(async move { display.serve(display_stop).await });
+        let mut control_service = Box::pin(async move { endpoint.serve(home).await });
+        tokio::select! {
+            endpoint_result = &mut control_service => {
+                self.endpoint.begin_stop();
+                if let Err(error) = display_service.await {
+                    tracing::error!(%error, "display HTTPS service stopped during daemon shutdown");
+                }
+                endpoint_result
+            }
+            display_result = &mut display_service => {
+                // A display bind or listener failure must not sit unnoticed
+                // behind a healthy control socket: Astrolabe would advertise
+                // an origin receivers cannot reach. Stop the sibling service
+                // and fail startup as one daemon-owned unit.
+                self.endpoint.begin_stop();
+                let endpoint_result = control_service.await;
+                endpoint_result?;
+                match display_result {
+                    Ok(()) => Err(anyhow!("display HTTPS service stopped unexpectedly")),
+                    Err(error) => Err(error).context("serve daemon display HTTPS"),
+                }
+            }
+        }
     }
 }
 
@@ -999,9 +1040,10 @@ impl Stop {
 impl Runner {
     pub(crate) fn start(home: PathBuf, router: Arc<Router>) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
+        let daemon = Arc::new(Daemon::new(router, &home)?);
         Ok(Self {
             home,
-            daemon: Arc::new(Daemon::new(router)),
+            daemon,
             _lock: lock,
         })
     }

@@ -350,6 +350,35 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           world: dco_decode_opt_String(raw[7]),
           preview: dco_decode_bool(raw[8]),
         );
+      case 24:
+        return ActionRequest_DisplayPairingApprove(
+          pairing: dco_decode_String(raw[1]),
+          label: dco_decode_String(raw[2]),
+        );
+      case 25:
+        return ActionRequest_DisplayPairingReject(
+          pairing: dco_decode_String(raw[1]),
+        );
+      case 26:
+        return ActionRequest_DisplayAssignmentPut(
+          device: dco_decode_String(raw[1]),
+          orbit: dco_decode_String(raw[2]),
+          world: dco_decode_String(raw[3]),
+          surface: dco_decode_String(raw[4]),
+          inputJson: dco_decode_String(raw[5]),
+          theme: dco_decode_display_theme(raw[6]),
+          staleAfterMs: dco_decode_u_32(raw[7]),
+          onStale: dco_decode_display_stale_action(raw[8]),
+          expiresAtUnixMs: dco_decode_opt_box_autoadd_u_64(raw[9]),
+        );
+      case 27:
+        return ActionRequest_DisplayAssignmentRevoke(
+          assignment: dco_decode_String(raw[1]),
+        );
+      case 28:
+        return ActionRequest_DisplayDeviceRevoke(
+          device: dco_decode_String(raw[1]),
+        );
       default:
         throw Exception("unreachable");
     }
@@ -398,6 +427,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   DiagnosisRow dco_decode_box_autoadd_diagnosis_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_diagnosis_row(raw);
+  }
+
+  @protected
+  DisplayFacts dco_decode_box_autoadd_display_facts(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_display_facts(raw);
+  }
+
+  @protected
+  DisplayHealthRow dco_decode_box_autoadd_display_health_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_display_health_row(raw);
   }
 
   @protected
@@ -473,23 +514,24 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   ClientView dco_decode_client_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 14)
-      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
+    if (arr.length != 15)
+      throw Exception('unexpected arr length: expect 15 but see ${arr.length}');
     return ClientView(
       loading: dco_decode_bool(arr[0]),
       stale: dco_decode_opt_box_autoadd_staleness(arr[1]),
       library_: dco_decode_opt_list_library_row(arr[2]),
       host: dco_decode_opt_box_autoadd_host_facts(arr[3]),
-      heads: dco_decode_list_head_row(arr[4]),
-      devices: dco_decode_list_device_row(arr[5]),
-      storage: dco_decode_list_storage_row(arr[6]),
-      orbits: dco_decode_list_orbit_row(arr[7]),
-      space: dco_decode_opt_box_autoadd_space_row(arr[8]),
-      book: dco_decode_opt_box_autoadd_book_facts(arr[9]),
-      notices: dco_decode_list_notice_row(arr[10]),
-      failures: dco_decode_list_failure_row(arr[11]),
-      inFlight: dco_decode_list_String(arr[12]),
-      mcp: dco_decode_opt_box_autoadd_mcp_binding_row(arr[13]),
+      display: dco_decode_opt_box_autoadd_display_facts(arr[4]),
+      heads: dco_decode_list_head_row(arr[5]),
+      devices: dco_decode_list_device_row(arr[6]),
+      storage: dco_decode_list_storage_row(arr[7]),
+      orbits: dco_decode_list_orbit_row(arr[8]),
+      space: dco_decode_opt_box_autoadd_space_row(arr[9]),
+      book: dco_decode_opt_box_autoadd_book_facts(arr[10]),
+      notices: dco_decode_list_notice_row(arr[11]),
+      failures: dco_decode_list_failure_row(arr[12]),
+      inFlight: dco_decode_list_String(arr[13]),
+      mcp: dco_decode_opt_box_autoadd_mcp_binding_row(arr[14]),
     );
   }
 
@@ -523,6 +565,127 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       blockedOn: dco_decode_opt_String(arr[1]),
       summary: dco_decode_String(arr[2]),
     );
+  }
+
+  @protected
+  DisplayAssignmentRow dco_decode_display_assignment_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    return DisplayAssignmentRow(
+      assignment: dco_decode_String(arr[0]),
+      device: dco_decode_String(arr[1]),
+      orbit: dco_decode_String(arr[2]),
+      space: dco_decode_String(arr[3]),
+      program: dco_decode_String(arr[4]),
+      world: dco_decode_String(arr[5]),
+      surface: dco_decode_String(arr[6]),
+      controller: dco_decode_String(arr[7]),
+      theme: dco_decode_display_theme(arr[8]),
+      expiresAtUnixMs: dco_decode_opt_box_autoadd_u_64(arr[9]),
+      revokedAtUnixMs: dco_decode_opt_box_autoadd_u_64(arr[10]),
+    );
+  }
+
+  @protected
+  DisplayFacts dco_decode_display_facts(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    return DisplayFacts(
+      instance: dco_decode_String(arr[0]),
+      label: dco_decode_String(arr[1]),
+      origin: dco_decode_String(arr[2]),
+      certificateSha256: dco_decode_String(arr[3]),
+      surfaces: dco_decode_list_display_surface_row(arr[4]),
+      devices: dco_decode_list_display_receiver_row(arr[5]),
+      assignments: dco_decode_list_display_assignment_row(arr[6]),
+      pendingPairings: dco_decode_list_display_pairing_row(arr[7]),
+    );
+  }
+
+  @protected
+  DisplayHealthRow dco_decode_display_health_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    return DisplayHealthRow(
+      revision: dco_decode_String(arr[0]),
+      currentItem: dco_decode_String(arr[1]),
+      elapsedMs: dco_decode_u_32(arr[2]),
+      connection: dco_decode_String(arr[3]),
+      playback: dco_decode_String(arr[4]),
+      lastError: dco_decode_String(arr[5]),
+      stagedItems: dco_decode_u_16(arr[6]),
+      stagedBytes: dco_decode_u_32(arr[7]),
+      driftResidualMs: dco_decode_i_32(arr[8]),
+      correctionEvents: dco_decode_u_32(arr[9]),
+      pipelineUnobservable: dco_decode_bool(arr[10]),
+    );
+  }
+
+  @protected
+  DisplayPairingRow dco_decode_display_pairing_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return DisplayPairingRow(
+      pairing: dco_decode_String(arr[0]),
+      confirmationPhrase: dco_decode_list_String(arr[1]),
+      certificateSha256: dco_decode_String(arr[2]),
+      platform: dco_decode_String(arr[3]),
+      build: dco_decode_String(arr[4]),
+      createdAtUnixMs: dco_decode_u_64(arr[5]),
+      expiresAtUnixMs: dco_decode_u_64(arr[6]),
+    );
+  }
+
+  @protected
+  DisplayReceiverRow dco_decode_display_receiver_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return DisplayReceiverRow(
+      device: dco_decode_String(arr[0]),
+      label: dco_decode_String(arr[1]),
+      platform: dco_decode_String(arr[2]),
+      build: dco_decode_String(arr[3]),
+      issuedAtUnixMs: dco_decode_u_64(arr[4]),
+      revokedAtUnixMs: dco_decode_opt_box_autoadd_u_64(arr[5]),
+      health: dco_decode_opt_box_autoadd_display_health_row(arr[6]),
+    );
+  }
+
+  @protected
+  DisplayStaleAction dco_decode_display_stale_action(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DisplayStaleAction.values[raw as int];
+  }
+
+  @protected
+  DisplaySurfaceRow dco_decode_display_surface_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return DisplaySurfaceRow(
+      world: dco_decode_String(arr[0]),
+      surface: dco_decode_String(arr[1]),
+      title: dco_decode_String(arr[2]),
+      contractVersion: dco_decode_u_32(arr[3]),
+      outputs: dco_decode_list_String(arr[4]),
+    );
+  }
+
+  @protected
+  DisplayTheme dco_decode_display_theme(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DisplayTheme.values[raw as int];
   }
 
   @protected
@@ -627,6 +790,33 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   List<DeviceRow> dco_decode_list_device_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_device_row).toList();
+  }
+
+  @protected
+  List<DisplayAssignmentRow> dco_decode_list_display_assignment_row(
+      dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_display_assignment_row)
+        .toList();
+  }
+
+  @protected
+  List<DisplayPairingRow> dco_decode_list_display_pairing_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_display_pairing_row).toList();
+  }
+
+  @protected
+  List<DisplayReceiverRow> dco_decode_list_display_receiver_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_display_receiver_row).toList();
+  }
+
+  @protected
+  List<DisplaySurfaceRow> dco_decode_list_display_surface_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_display_surface_row).toList();
   }
 
   @protected
@@ -760,6 +950,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   DiagnosisRow? dco_decode_opt_box_autoadd_diagnosis_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_diagnosis_row(raw);
+  }
+
+  @protected
+  DisplayFacts? dco_decode_opt_box_autoadd_display_facts(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_display_facts(raw);
+  }
+
+  @protected
+  DisplayHealthRow? dco_decode_opt_box_autoadd_display_health_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_display_health_row(raw);
   }
 
   @protected
@@ -913,6 +1115,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       note: dco_decode_String(arr[2]),
       handles: dco_decode_list_String(arr[3]),
     );
+  }
+
+  @protected
+  int dco_decode_u_16(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -1087,6 +1295,41 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
             project: var_project,
             world: var_world,
             preview: var_preview);
+      case 24:
+        var var_pairing = sse_decode_String(deserializer);
+        var var_label = sse_decode_String(deserializer);
+        return ActionRequest_DisplayPairingApprove(
+            pairing: var_pairing, label: var_label);
+      case 25:
+        var var_pairing = sse_decode_String(deserializer);
+        return ActionRequest_DisplayPairingReject(pairing: var_pairing);
+      case 26:
+        var var_device = sse_decode_String(deserializer);
+        var var_orbit = sse_decode_String(deserializer);
+        var var_world = sse_decode_String(deserializer);
+        var var_surface = sse_decode_String(deserializer);
+        var var_inputJson = sse_decode_String(deserializer);
+        var var_theme = sse_decode_display_theme(deserializer);
+        var var_staleAfterMs = sse_decode_u_32(deserializer);
+        var var_onStale = sse_decode_display_stale_action(deserializer);
+        var var_expiresAtUnixMs = sse_decode_opt_box_autoadd_u_64(deserializer);
+        return ActionRequest_DisplayAssignmentPut(
+            device: var_device,
+            orbit: var_orbit,
+            world: var_world,
+            surface: var_surface,
+            inputJson: var_inputJson,
+            theme: var_theme,
+            staleAfterMs: var_staleAfterMs,
+            onStale: var_onStale,
+            expiresAtUnixMs: var_expiresAtUnixMs);
+      case 27:
+        var var_assignment = sse_decode_String(deserializer);
+        return ActionRequest_DisplayAssignmentRevoke(
+            assignment: var_assignment);
+      case 28:
+        var var_device = sse_decode_String(deserializer);
+        return ActionRequest_DisplayDeviceRevoke(device: var_device);
       default:
         throw UnimplementedError('');
     }
@@ -1138,6 +1381,20 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_diagnosis_row(deserializer));
+  }
+
+  @protected
+  DisplayFacts sse_decode_box_autoadd_display_facts(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_display_facts(deserializer));
+  }
+
+  @protected
+  DisplayHealthRow sse_decode_box_autoadd_display_health_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_display_health_row(deserializer));
   }
 
   @protected
@@ -1225,6 +1482,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_stale = sse_decode_opt_box_autoadd_staleness(deserializer);
     var var_library_ = sse_decode_opt_list_library_row(deserializer);
     var var_host = sse_decode_opt_box_autoadd_host_facts(deserializer);
+    var var_display = sse_decode_opt_box_autoadd_display_facts(deserializer);
     var var_heads = sse_decode_list_head_row(deserializer);
     var var_devices = sse_decode_list_device_row(deserializer);
     var var_storage = sse_decode_list_storage_row(deserializer);
@@ -1240,6 +1498,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         stale: var_stale,
         library_: var_library_,
         host: var_host,
+        display: var_display,
         heads: var_heads,
         devices: var_devices,
         storage: var_storage,
@@ -1284,6 +1543,160 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_summary = sse_decode_String(deserializer);
     return DiagnosisRow(
         gates: var_gates, blockedOn: var_blockedOn, summary: var_summary);
+  }
+
+  @protected
+  DisplayAssignmentRow sse_decode_display_assignment_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_assignment = sse_decode_String(deserializer);
+    var var_device = sse_decode_String(deserializer);
+    var var_orbit = sse_decode_String(deserializer);
+    var var_space = sse_decode_String(deserializer);
+    var var_program = sse_decode_String(deserializer);
+    var var_world = sse_decode_String(deserializer);
+    var var_surface = sse_decode_String(deserializer);
+    var var_controller = sse_decode_String(deserializer);
+    var var_theme = sse_decode_display_theme(deserializer);
+    var var_expiresAtUnixMs = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_revokedAtUnixMs = sse_decode_opt_box_autoadd_u_64(deserializer);
+    return DisplayAssignmentRow(
+        assignment: var_assignment,
+        device: var_device,
+        orbit: var_orbit,
+        space: var_space,
+        program: var_program,
+        world: var_world,
+        surface: var_surface,
+        controller: var_controller,
+        theme: var_theme,
+        expiresAtUnixMs: var_expiresAtUnixMs,
+        revokedAtUnixMs: var_revokedAtUnixMs);
+  }
+
+  @protected
+  DisplayFacts sse_decode_display_facts(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_instance = sse_decode_String(deserializer);
+    var var_label = sse_decode_String(deserializer);
+    var var_origin = sse_decode_String(deserializer);
+    var var_certificateSha256 = sse_decode_String(deserializer);
+    var var_surfaces = sse_decode_list_display_surface_row(deserializer);
+    var var_devices = sse_decode_list_display_receiver_row(deserializer);
+    var var_assignments = sse_decode_list_display_assignment_row(deserializer);
+    var var_pendingPairings = sse_decode_list_display_pairing_row(deserializer);
+    return DisplayFacts(
+        instance: var_instance,
+        label: var_label,
+        origin: var_origin,
+        certificateSha256: var_certificateSha256,
+        surfaces: var_surfaces,
+        devices: var_devices,
+        assignments: var_assignments,
+        pendingPairings: var_pendingPairings);
+  }
+
+  @protected
+  DisplayHealthRow sse_decode_display_health_row(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_revision = sse_decode_String(deserializer);
+    var var_currentItem = sse_decode_String(deserializer);
+    var var_elapsedMs = sse_decode_u_32(deserializer);
+    var var_connection = sse_decode_String(deserializer);
+    var var_playback = sse_decode_String(deserializer);
+    var var_lastError = sse_decode_String(deserializer);
+    var var_stagedItems = sse_decode_u_16(deserializer);
+    var var_stagedBytes = sse_decode_u_32(deserializer);
+    var var_driftResidualMs = sse_decode_i_32(deserializer);
+    var var_correctionEvents = sse_decode_u_32(deserializer);
+    var var_pipelineUnobservable = sse_decode_bool(deserializer);
+    return DisplayHealthRow(
+        revision: var_revision,
+        currentItem: var_currentItem,
+        elapsedMs: var_elapsedMs,
+        connection: var_connection,
+        playback: var_playback,
+        lastError: var_lastError,
+        stagedItems: var_stagedItems,
+        stagedBytes: var_stagedBytes,
+        driftResidualMs: var_driftResidualMs,
+        correctionEvents: var_correctionEvents,
+        pipelineUnobservable: var_pipelineUnobservable);
+  }
+
+  @protected
+  DisplayPairingRow sse_decode_display_pairing_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_pairing = sse_decode_String(deserializer);
+    var var_confirmationPhrase = sse_decode_list_String(deserializer);
+    var var_certificateSha256 = sse_decode_String(deserializer);
+    var var_platform = sse_decode_String(deserializer);
+    var var_build = sse_decode_String(deserializer);
+    var var_createdAtUnixMs = sse_decode_u_64(deserializer);
+    var var_expiresAtUnixMs = sse_decode_u_64(deserializer);
+    return DisplayPairingRow(
+        pairing: var_pairing,
+        confirmationPhrase: var_confirmationPhrase,
+        certificateSha256: var_certificateSha256,
+        platform: var_platform,
+        build: var_build,
+        createdAtUnixMs: var_createdAtUnixMs,
+        expiresAtUnixMs: var_expiresAtUnixMs);
+  }
+
+  @protected
+  DisplayReceiverRow sse_decode_display_receiver_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_device = sse_decode_String(deserializer);
+    var var_label = sse_decode_String(deserializer);
+    var var_platform = sse_decode_String(deserializer);
+    var var_build = sse_decode_String(deserializer);
+    var var_issuedAtUnixMs = sse_decode_u_64(deserializer);
+    var var_revokedAtUnixMs = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_health =
+        sse_decode_opt_box_autoadd_display_health_row(deserializer);
+    return DisplayReceiverRow(
+        device: var_device,
+        label: var_label,
+        platform: var_platform,
+        build: var_build,
+        issuedAtUnixMs: var_issuedAtUnixMs,
+        revokedAtUnixMs: var_revokedAtUnixMs,
+        health: var_health);
+  }
+
+  @protected
+  DisplayStaleAction sse_decode_display_stale_action(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DisplayStaleAction.values[inner];
+  }
+
+  @protected
+  DisplaySurfaceRow sse_decode_display_surface_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_world = sse_decode_String(deserializer);
+    var var_surface = sse_decode_String(deserializer);
+    var var_title = sse_decode_String(deserializer);
+    var var_contractVersion = sse_decode_u_32(deserializer);
+    var var_outputs = sse_decode_list_String(deserializer);
+    return DisplaySurfaceRow(
+        world: var_world,
+        surface: var_surface,
+        title: var_title,
+        contractVersion: var_contractVersion,
+        outputs: var_outputs);
+  }
+
+  @protected
+  DisplayTheme sse_decode_display_theme(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DisplayTheme.values[inner];
   }
 
   @protected
@@ -1404,6 +1817,58 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var ans_ = <DeviceRow>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_device_row(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DisplayAssignmentRow> sse_decode_list_display_assignment_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DisplayAssignmentRow>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_display_assignment_row(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DisplayPairingRow> sse_decode_list_display_pairing_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DisplayPairingRow>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_display_pairing_row(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DisplayReceiverRow> sse_decode_list_display_receiver_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DisplayReceiverRow>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_display_receiver_row(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DisplaySurfaceRow> sse_decode_list_display_surface_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DisplaySurfaceRow>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_display_surface_row(deserializer));
     }
     return ans_;
   }
@@ -1616,6 +2081,30 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_diagnosis_row(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DisplayFacts? sse_decode_opt_box_autoadd_display_facts(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_display_facts(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DisplayHealthRow? sse_decode_opt_box_autoadd_display_health_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_display_health_row(deserializer));
     } else {
       return null;
     }
@@ -1847,6 +2336,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  int sse_decode_u_16(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint16();
+  }
+
+  @protected
   int sse_decode_u_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint32();
@@ -2023,6 +2518,43 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         sse_encode_String(project, serializer);
         sse_encode_opt_String(world, serializer);
         sse_encode_bool(preview, serializer);
+      case ActionRequest_DisplayPairingApprove(
+          pairing: final pairing,
+          label: final label
+        ):
+        sse_encode_i_32(24, serializer);
+        sse_encode_String(pairing, serializer);
+        sse_encode_String(label, serializer);
+      case ActionRequest_DisplayPairingReject(pairing: final pairing):
+        sse_encode_i_32(25, serializer);
+        sse_encode_String(pairing, serializer);
+      case ActionRequest_DisplayAssignmentPut(
+          device: final device,
+          orbit: final orbit,
+          world: final world,
+          surface: final surface,
+          inputJson: final inputJson,
+          theme: final theme,
+          staleAfterMs: final staleAfterMs,
+          onStale: final onStale,
+          expiresAtUnixMs: final expiresAtUnixMs
+        ):
+        sse_encode_i_32(26, serializer);
+        sse_encode_String(device, serializer);
+        sse_encode_String(orbit, serializer);
+        sse_encode_String(world, serializer);
+        sse_encode_String(surface, serializer);
+        sse_encode_String(inputJson, serializer);
+        sse_encode_display_theme(theme, serializer);
+        sse_encode_u_32(staleAfterMs, serializer);
+        sse_encode_display_stale_action(onStale, serializer);
+        sse_encode_opt_box_autoadd_u_64(expiresAtUnixMs, serializer);
+      case ActionRequest_DisplayAssignmentRevoke(assignment: final assignment):
+        sse_encode_i_32(27, serializer);
+        sse_encode_String(assignment, serializer);
+      case ActionRequest_DisplayDeviceRevoke(device: final device):
+        sse_encode_i_32(28, serializer);
+        sse_encode_String(device, serializer);
     }
   }
 
@@ -2068,6 +2600,20 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       DiagnosisRow self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_diagnosis_row(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_display_facts(
+      DisplayFacts self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_display_facts(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_display_health_row(
+      DisplayHealthRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_display_health_row(self, serializer);
   }
 
   @protected
@@ -2146,6 +2692,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_opt_box_autoadd_staleness(self.stale, serializer);
     sse_encode_opt_list_library_row(self.library_, serializer);
     sse_encode_opt_box_autoadd_host_facts(self.host, serializer);
+    sse_encode_opt_box_autoadd_display_facts(self.display, serializer);
     sse_encode_list_head_row(self.heads, serializer);
     sse_encode_list_device_row(self.devices, serializer);
     sse_encode_list_storage_row(self.storage, serializer);
@@ -2178,6 +2725,103 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_list_gate_row(self.gates, serializer);
     sse_encode_opt_String(self.blockedOn, serializer);
     sse_encode_String(self.summary, serializer);
+  }
+
+  @protected
+  void sse_encode_display_assignment_row(
+      DisplayAssignmentRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.assignment, serializer);
+    sse_encode_String(self.device, serializer);
+    sse_encode_String(self.orbit, serializer);
+    sse_encode_String(self.space, serializer);
+    sse_encode_String(self.program, serializer);
+    sse_encode_String(self.world, serializer);
+    sse_encode_String(self.surface, serializer);
+    sse_encode_String(self.controller, serializer);
+    sse_encode_display_theme(self.theme, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.expiresAtUnixMs, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.revokedAtUnixMs, serializer);
+  }
+
+  @protected
+  void sse_encode_display_facts(DisplayFacts self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.instance, serializer);
+    sse_encode_String(self.label, serializer);
+    sse_encode_String(self.origin, serializer);
+    sse_encode_String(self.certificateSha256, serializer);
+    sse_encode_list_display_surface_row(self.surfaces, serializer);
+    sse_encode_list_display_receiver_row(self.devices, serializer);
+    sse_encode_list_display_assignment_row(self.assignments, serializer);
+    sse_encode_list_display_pairing_row(self.pendingPairings, serializer);
+  }
+
+  @protected
+  void sse_encode_display_health_row(
+      DisplayHealthRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.revision, serializer);
+    sse_encode_String(self.currentItem, serializer);
+    sse_encode_u_32(self.elapsedMs, serializer);
+    sse_encode_String(self.connection, serializer);
+    sse_encode_String(self.playback, serializer);
+    sse_encode_String(self.lastError, serializer);
+    sse_encode_u_16(self.stagedItems, serializer);
+    sse_encode_u_32(self.stagedBytes, serializer);
+    sse_encode_i_32(self.driftResidualMs, serializer);
+    sse_encode_u_32(self.correctionEvents, serializer);
+    sse_encode_bool(self.pipelineUnobservable, serializer);
+  }
+
+  @protected
+  void sse_encode_display_pairing_row(
+      DisplayPairingRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.pairing, serializer);
+    sse_encode_list_String(self.confirmationPhrase, serializer);
+    sse_encode_String(self.certificateSha256, serializer);
+    sse_encode_String(self.platform, serializer);
+    sse_encode_String(self.build, serializer);
+    sse_encode_u_64(self.createdAtUnixMs, serializer);
+    sse_encode_u_64(self.expiresAtUnixMs, serializer);
+  }
+
+  @protected
+  void sse_encode_display_receiver_row(
+      DisplayReceiverRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.device, serializer);
+    sse_encode_String(self.label, serializer);
+    sse_encode_String(self.platform, serializer);
+    sse_encode_String(self.build, serializer);
+    sse_encode_u_64(self.issuedAtUnixMs, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.revokedAtUnixMs, serializer);
+    sse_encode_opt_box_autoadd_display_health_row(self.health, serializer);
+  }
+
+  @protected
+  void sse_encode_display_stale_action(
+      DisplayStaleAction self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_display_surface_row(
+      DisplaySurfaceRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.world, serializer);
+    sse_encode_String(self.surface, serializer);
+    sse_encode_String(self.title, serializer);
+    sse_encode_u_32(self.contractVersion, serializer);
+    sse_encode_list_String(self.outputs, serializer);
+  }
+
+  @protected
+  void sse_encode_display_theme(DisplayTheme self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -2266,6 +2910,46 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_device_row(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_display_assignment_row(
+      List<DisplayAssignmentRow> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_display_assignment_row(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_display_pairing_row(
+      List<DisplayPairingRow> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_display_pairing_row(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_display_receiver_row(
+      List<DisplayReceiverRow> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_display_receiver_row(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_display_surface_row(
+      List<DisplaySurfaceRow> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_display_surface_row(item, serializer);
     }
   }
 
@@ -2439,6 +3123,28 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_diagnosis_row(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_display_facts(
+      DisplayFacts? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_display_facts(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_display_health_row(
+      DisplayHealthRow? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_display_health_row(self, serializer);
     }
   }
 
@@ -2628,6 +3334,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_String(self.name, serializer);
     sse_encode_String(self.note, serializer);
     sse_encode_list_String(self.handles, serializer);
+  }
+
+  @protected
+  void sse_encode_u_16(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint16(self);
   }
 
   @protected

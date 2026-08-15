@@ -1,0 +1,23 @@
+[package]
+name = "lait-signage-app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Client protocol and frame renderer for the Signage World"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+font8x8 = "0.3.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+mechanics = { path = "../../crates/mechanics" }
+replica = { path = "../../crates/replica" }
+runtime = { path = "../../crates/runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+signage = { package = "lait-signage", path = "../signage" }
+world-interface = { path = "../../crates/world-interface" }
+
+[lints]
+workspace = true

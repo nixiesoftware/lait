@@ -43,6 +43,14 @@ export '../bridge/api.dart'
         ClientView,
         DeviceRow,
         DiagnosisRow,
+        DisplayAssignmentRow,
+        DisplayFacts,
+        DisplayHealthRow,
+        DisplayPairingRow,
+        DisplayReceiverRow,
+        DisplayStaleAction,
+        DisplaySurfaceRow,
+        DisplayTheme,
         FailureRow,
         GateRow,
         GateState,
@@ -270,4 +278,14 @@ abstract final class ActionKeys {
   static String bookDismiss(String suggestion) => 'book.dismiss:$suggestion';
   static const String bookExport = 'book.export';
   static const String bookImport = 'book.import';
+  static String approveDisplayPairing(String pairing) =>
+      'display.pairing.approve:$pairing';
+  static String rejectDisplayPairing(String pairing) =>
+      'display.pairing.reject:$pairing';
+  static String assignDisplay(String device) =>
+      'display.assignment.put:$device';
+  static String revokeDisplayAssignment(String assignment) =>
+      'display.assignment.revoke:$assignment';
+  static String revokeDisplayDevice(String device) =>
+      'display.device.revoke:$device';
 }

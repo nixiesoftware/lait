@@ -88,6 +88,20 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         matches!(daemon.probe().await, lait::control::Probe::Healthy),
         "client startup returned before its identity daemon answered"
     );
+    let displays = client
+        .display_status()
+        .await
+        .expect("the daemon-owned display coordinator answers Astrolabe");
+    assert!(
+        displays.origin.starts_with("https://") && !displays.certificate_sha256.is_empty(),
+        "the display coordinator announced no pinned HTTPS identity"
+    );
+    assert!(
+        displays.surfaces.iter().any(|surface| {
+            surface.world == "com.lait.signage" && surface.surface == "signage.program"
+        }),
+        "the process serving Astrolabe omitted the bundled Signage display surface"
+    );
     let first_pid = lait::config::daemon_pid(daemon.home()).expect("the started daemon's pid");
 
     // A second client is the existing-daemon half of the startup contract. It
@@ -103,6 +117,18 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         lait::config::daemon_pid(daemon.home()),
         Some(first_pid),
         "attaching to a running identity started a competing daemon"
+    );
+    let attached_displays = attached
+        .display_status()
+        .await
+        .expect("the attached client reaches the same display coordinator");
+    assert_eq!(
+        attached_displays.instance, displays.instance,
+        "attaching to the daemon produced a second display coordinator"
+    );
+    assert_eq!(
+        attached_displays.certificate_sha256, displays.certificate_sha256,
+        "the attached client observed another display trust identity"
     );
     attached.shutdown().await;
 
