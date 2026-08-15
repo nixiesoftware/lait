@@ -21,7 +21,10 @@
 //! machine of whoever is running the suite — would be a test that costs more
 //! than it proves.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use astrolabe::client::http::{post_json, Head};
 use astrolabe::client::Client;
@@ -33,11 +36,105 @@ use astrolabe::Config;
 /// workspace: `target/<profile>/deps/<test>-<hash>.exe` puts it two levels up,
 /// and that holds for every profile without knowing which one is in use.
 fn sidecar() -> Option<PathBuf> {
+    built_binary("lait")
+}
+
+fn reference_receiver() -> Option<PathBuf> {
+    built_binary("astrolabe-display-reference")
+}
+
+fn built_binary(name: &str) -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
     let profile = current.parent()?.parent()?;
-    let name = if cfg!(windows) { "lait.exe" } else { "lait" };
+    let name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
     let candidate = profile.join(name);
     candidate.is_file().then_some(candidate)
+}
+
+struct OwnedReceiver(Child);
+
+impl Drop for OwnedReceiver {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+async fn wait_for_daemon_stop(home: &Path) {
+    for _ in 0..100 {
+        let selection = lait::config::Selection::for_identity(home);
+        let stopped = match lait::daemon::Client::for_selection(&selection) {
+            Ok(daemon) => !matches!(daemon.probe().await, lait::control::Probe::Healthy),
+            Err(_) => true,
+        };
+        if stopped {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("identity daemon did not stop within its process bound");
+}
+
+async fn wait_for_pairing(client: &Client) -> String {
+    for _ in 0..100 {
+        let display = client
+            .display_status()
+            .await
+            .expect("read display pairing status");
+        if let Some(pairing) = display.pending_pairings.first() {
+            return pairing.pairing.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("reference receiver did not open a pairing within ten seconds");
+}
+
+async fn wait_for_receiver(client: &Client) -> String {
+    for _ in 0..100 {
+        let display = client
+            .display_status()
+            .await
+            .expect("read enrolled display status");
+        if let Some(device) = display.devices.first() {
+            if display.pending_pairings.is_empty() {
+                return device.device.clone();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("reference receiver did not complete enrollment within ten seconds");
+}
+
+async fn wait_for_unassigned(path: &Path, device: &str) {
+    for _ in 0..150 {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if status["device"] == device && status["scene"]["reason"] == "unassigned" {
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("enrolled receiver never presented its authenticated unassigned state");
+}
+
+async fn wait_for_receiver_exit(receiver: &mut OwnedReceiver) {
+    for _ in 0..150 {
+        if let Some(status) = receiver.0.try_wait().expect("inspect reference receiver") {
+            assert!(
+                status.success(),
+                "reference receiver exited unsuccessfully: {status}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("revoked reference receiver did not leave its live loop");
 }
 
 /// Stop the daemon the head started under itself.
@@ -78,7 +175,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     let mut config = Config::new(managed.path().to_path_buf(), executable.clone());
     config.identity = Some(identity.path().to_path_buf());
-    let (client, _signals) = Client::start(config)
+    let (client, signals) = Client::start(config)
         .await
         .expect("a client that starts its identity daemon");
 
@@ -135,6 +232,98 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         "the attached client observed another display trust identity"
     );
     attached.shutdown().await;
+
+    // Run the real receiver binary against the real coordinator. This is the
+    // restart/recovery seam: the public certificate copied by Astrolabe must
+    // establish TLS, both halves of the pairing ceremony must enroll one
+    // durable device, and the same protected receiver credential must be able
+    // to authenticate to a fresh daemon process before revocation can stop it.
+    let (client, signals) = if let Some(receiver_executable) = reference_receiver() {
+        let receiver_root = tempfile::tempdir().expect("reference receiver root");
+        let bootstrap_path = receiver_root.path().join("bootstrap.json");
+        let state_path = receiver_root.path().join("state");
+        let output_path = receiver_root.path().join("output");
+        let bootstrap = serde_json::json!({
+            "protocol_major": 1,
+            "trust": {
+                "kind": "pinned_certificate",
+                "origin": displays.origin.clone(),
+                "sha256": displays.certificate_sha256.clone(),
+            },
+            "certificate_pem": displays.certificate_pem.clone(),
+            "rendezvous": null,
+        });
+        std::fs::write(
+            &bootstrap_path,
+            serde_json::to_vec_pretty(&bootstrap).expect("encode receiver bootstrap"),
+        )
+        .expect("write receiver bootstrap");
+        let child = Command::new(receiver_executable)
+            .arg("--bootstrap")
+            .arg(&bootstrap_path)
+            .arg("--state")
+            .arg(&state_path)
+            .arg("--output")
+            .arg(&output_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("launch the reference display receiver");
+        let mut receiver = OwnedReceiver(child);
+        let pairing = wait_for_pairing(&client).await;
+        receiver
+            .0
+            .stdin
+            .take()
+            .expect("receiver confirmation input")
+            .write_all(b"yes\n")
+            .expect("confirm pairing at the receiver");
+        client
+            .display_pairing_approve(pairing, "Restart receiver".to_owned())
+            .await
+            .expect("approve the receiver in Astrolabe");
+        let device = wait_for_receiver(&client).await;
+        wait_for_unassigned(&output_path.join("active.json"), &device).await;
+
+        client.shutdown().await;
+        drop(signals);
+        drop(client);
+        stop_daemon(identity.path()).await;
+        wait_for_daemon_stop(identity.path()).await;
+        let mut restarted_config = Config::new(managed.path().to_path_buf(), executable.clone());
+        restarted_config.identity = Some(identity.path().to_path_buf());
+        let (restarted, restarted_signals) = Client::start(restarted_config)
+            .await
+            .expect("Astrolabe restarts the identity daemon");
+        let restarted_displays = restarted
+            .display_status()
+            .await
+            .expect("restarted daemon restores display state");
+        assert_eq!(restarted_displays.instance, displays.instance);
+        assert_eq!(
+            restarted_displays.certificate_sha256,
+            displays.certificate_sha256
+        );
+        assert!(
+            restarted_displays
+                .devices
+                .iter()
+                .any(|row| row.device == device),
+            "restarted daemon lost its enrolled display"
+        );
+        restarted
+            .display_device_revoke(device)
+            .await
+            .expect("revoke the recovered receiver");
+        wait_for_receiver_exit(&mut receiver).await;
+        (restarted, restarted_signals)
+    } else {
+        eprintln!(
+            "no astrolabe-display-reference binary beside the test binary; skipping the real receiver restart seam"
+        );
+        (client, signals)
+    };
 
     let head = client.head().await.expect("a head for this identity");
     assert!(
@@ -226,5 +415,6 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     );
 
     client.shutdown().await;
+    drop(signals);
     stop_daemon(identity.path()).await;
 }
