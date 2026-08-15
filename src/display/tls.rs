@@ -70,7 +70,7 @@ impl DisplayTlsIdentity {
         // avoids process-global provider inference and keeps daemon startup
         // independent of which other TLS client happened to initialize first.
         let server_config = rustls::ServerConfig::builder_with_provider(
-            rustls::crypto::aws_lc_rs::default_provider().into(),
+            rustls::crypto::ring::default_provider().into(),
         )
         .with_safe_default_protocol_versions()
         .context("select display TLS protocol versions")?

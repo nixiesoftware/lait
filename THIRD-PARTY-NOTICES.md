@@ -4,16 +4,16 @@ lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, ea
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-819 crates, under 43 distinct licence expressions.
+822 crates, under 43 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 384 |
-| `MIT` | 155 |
+| `MIT OR Apache-2.0` | 385 |
+| `MIT` | 156 |
 | `Apache-2.0 OR MIT` | 76 |
-| `MIT/Apache-2.0` | 39 |
+| `MIT/Apache-2.0` | 40 |
 | `Unicode-3.0` | 25 |
 | `Apache-2.0` | 23 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 16 |
@@ -264,6 +264,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | foldhash | 0.1.5 | `Zlib` | <https://github.com/orlp/foldhash> |
 | foldhash | 0.2.0 | `Zlib` | <https://github.com/orlp/foldhash> |
 | font-types | 0.11.3 | `MIT OR Apache-2.0` | <https://github.com/googlefonts/fontations> |
+| font8x8 | 0.3.1 | `MIT` | <https://gitlab.com/saibatizoku/font8x8-rs> |
 | fontdb | 0.23.0 | `MIT` | <https://github.com/RazrFalcon/fontdb> |
 | form_urlencoded | 1.2.2 | `MIT OR Apache-2.0` | <https://github.com/servo/rust-url> |
 | frost-core | 3.0.0 | `MIT OR Apache-2.0` | <https://github.com/ZcashFoundation/frost> |
@@ -326,7 +327,9 @@ Listed here is every crate reachable from this workspace through normal and buil
 | hickory-net | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
 | hickory-proto | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
 | hickory-resolver | 0.26.1 | `MIT OR Apache-2.0` | <https://github.com/hickory-dns/hickory-dns> |
+| hkdf | 0.12.4 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/KDFs/> |
 | hmac | 0.12.1 | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/MACs> |
+| hpke | 0.13.0 | `MIT/Apache-2.0` | <https://github.com/rozbb/rust-hpke> |
 | http | 1.4.1 | `MIT OR Apache-2.0` | <https://github.com/hyperium/http> |
 | http-body | 1.0.1 | `MIT` | <https://github.com/hyperium/http-body> |
 | http-body-util | 0.1.3 | `MIT` | <https://github.com/hyperium/http-body> |

@@ -11,9 +11,30 @@
 //!   payloads (catalog + issue-doc `export()` bytes) are sealed with this, so a
 //!   blind relay or a non-member sees only ciphertext (the "encryption *is* the
 //!   access control" posture).
-//! - **Sealed box**: an anonymous X25519 + AEAD box that distributes the
-//!   space key to a member addressed by their ed25519 `DeviceId`. The member's
-//!   ed25519 identity is converted to X25519 (libsodium's `*_to_curve25519`).
+//! - **Sealed box**: an anonymous box that distributes the space key to a
+//!   member addressed by their ed25519 `DeviceId`, whose identity is converted
+//!   to X25519 (libsodium's `*_to_curve25519`). RFC 9180 HPKE, base mode. It
+//!   comes in a plain form and a context-bound one; they differ only in what
+//!   goes into `info`.
+//!
+//! Both used to be hand-rolled, and the reason for moving is worth stating
+//! precisely, because the obvious phrasing is wrong. The construction they
+//! replaced was **not** broken: X25519 ephemeral-static agreement into
+//! `blake3(label ‖ dh ‖ enc ‖ pkR)` is the same three inputs DHKEM feeds to
+//! HKDF, and in the shape SP 800-56C sanctions as a One-Step KDF. Once the
+//! non-contributory agreement was refused (see [`agree`]) no attack on it was
+//! found, and the reader kept below is safe to keep for exactly that reason.
+//!
+//! What HPKE buys is **assurance, not strength**: a published security proof,
+//! RFC 9180's test vectors, cross-implementation interop, a `suite_id` bound
+//! into every derivation so a second ciphersuite can never collide with the
+//! first, and a path to the ML-KEM hybrid. That is a good trade. "It was
+//! weaker" would not have been a true one.
+//!
+//! So `seal_to` writes HPKE, and [`open_blake3_box`] reads what was written
+//! before the cutover. Nothing writes the old format. Note what that reader is
+//! and is not: see [`open_blake3_box`] for why it is currently **permanent**
+//! rather than transitional.
 //!
 //! # Security status
 //!
@@ -26,6 +47,11 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use curve25519_dalek::edwards::CompressedEdwardsY;
+use hpke::{
+    aead::ChaCha20Poly1305 as HpkeAead, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable,
+    Kem as KemTrait, OpModeR, OpModeS, Serializable,
+};
+use rand_core_hpke::{CryptoRng as HpkeCryptoRng, RngCore as HpkeRngCore};
 use sha2::{Digest, Sha512};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 
@@ -212,17 +238,20 @@ fn unusable_recipient(recipient: &DeviceId, why: &str) {
     tracing::warn!(device = %recipient.as_str(), why, "cannot seal to this device");
 }
 
-/// The Diffie-Hellman both boxes rest on, with the check that makes it a secret.
+/// The Diffie-Hellman the blake3 reader rests on, with the check that makes it a
+/// secret. Everything that writes goes through HPKE, which performs this check
+/// itself; this is here because [`open_blake3_box`] still has to read bytes that
+/// were written before it did.
 ///
 /// A shared secret that is not contributory is the all-zero value, which means
 /// one side's key contributed nothing and every input to the key derivation is
 /// public. RFC 9180 makes rejecting it a MUST for exactly this reason, and it is
 /// the single check whose absence turns a sealed box into plaintext.
 ///
-/// Checked on **both** sides deliberately. Refusing only bad recipients would
-/// still let an attacker put a small-order ephemeral key in an envelope and have
-/// it open, under a key they can compute, to any victim — a forgery needing no
-/// keys at all.
+/// Applied on read as well as write, deliberately. Refusing only bad recipients
+/// would still let an attacker put a small-order ephemeral key in an envelope
+/// and have it open, under a key they can compute, to any victim — a forgery
+/// needing no keys at all.
 fn agree(secret: &StaticSecret, public: &XPublic) -> Option<[u8; 32]> {
     let shared = secret.diffie_hellman(public);
     shared.was_contributory().then(|| *shared.as_bytes())
@@ -240,39 +269,61 @@ fn ed_seed_to_x(seed: &[u8; 32]) -> StaticSecret {
 }
 
 /// Seal `msg` to a member addressed by their ed25519 `DeviceId` (an anonymous
-/// sealed box). Output = `eph_x_pub(32) || nonce(12) || ciphertext`. Used to
-/// distribute the space key. Returns `None` if the recipient key is invalid.
+/// sealed box). Used to distribute the space key. HPKE base mode, like the
+/// bound box; the two differ only in what they bind. Output =
+/// `enc(32) || ciphertext`. Returns `None` if the recipient key is unusable.
 pub fn seal_to(recipient: &DeviceId, msg: &[u8]) -> Result<Option<Vec<u8>>, Failure> {
     let Some(recip_ed) = ed_pubkey_bytes(recipient) else {
         unusable_recipient(recipient, "not a 32-byte hex ed25519 key");
         return Ok(None);
     };
-    let Some(recip_x) = ed_pk_to_x(&recip_ed) else {
-        unusable_recipient(recipient, "not a usable curve point");
-        return Ok(None);
-    };
-    let eph_seed = random_array()?;
-    let eph = StaticSecret::from(eph_seed);
-    let eph_pub = XPublic::from(&eph);
-    let Some(shared) = agree(&eph, &recip_x) else {
-        unusable_recipient(recipient, "agreement was not contributory");
-        return Ok(None);
-    };
-    let key = box_key(&shared, eph_pub.as_bytes(), recip_x.as_bytes());
-    let cipher = ChaCha20Poly1305::new((&key).into());
-    let nonce = random_nonce()?;
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), msg)
-        .map_err(|_| Failure::Encryption)?;
-    let mut out = Vec::with_capacity(32 + NONCE_LEN + ct.len());
-    out.extend_from_slice(eph_pub.as_bytes());
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ct);
-    Ok(Some(out))
+    hpke_seal(recipient, &recip_ed, &unbound_info(&recip_ed), msg)
 }
 
 /// Open a sealed box addressed to us, given our ed25519 seed + `DeviceId`.
+///
+/// Reads the HPKE envelope, and falls back to the v1 construction this
+/// replaced. Both are authenticated, so a wrong guess fails rather than
+/// returning the wrong plaintext, and the order means an envelope written today
+/// costs nothing to read.
+///
+/// The fallback grants no capability the HPKE path does not already grant:
+/// both boxes are *anonymous*, so anyone who can write a valid old envelope can
+/// write a valid new one. And no caller treats "it opened" as "it was
+/// authorized" — `refresh_keyring_into` checks the recovered key against the
+/// `key_commit` in the signed mint, and the ceremony path carries the blob
+/// inside a signed op. That is what makes trial decryption safe here.
 pub fn open_sealed(my_seed: &[u8; 32], me: &DeviceId, sealed: &[u8]) -> Option<Vec<u8>> {
+    let my_ed = ed_pubkey_bytes(me)?;
+    hpke_open(my_seed, &unbound_info(&my_ed), sealed)
+        .or_else(|| open_blake3_box(my_seed, &my_ed, sealed))
+}
+
+/// The sealed box HPKE replaced: X25519 + a blake3-derived key +
+/// ChaCha20-Poly1305, laid out as `eph_x_pub(32) || nonce(12) || ciphertext`.
+/// Named for its key schedule rather than a version, because that is the part
+/// that tells them apart.
+///
+/// Read-only: there is deliberately no writer left.
+///
+/// **This is permanent, not transitional, and saying otherwise would be the
+/// comfortable lie.** Deleting it needs a way to know every old envelope is
+/// gone, and there is none:
+///
+/// - [`crate::ledger::SealedKeyRecord`] is `{epoch, device, sealed}` with no
+///   version, so nothing can even ask which construction a stored blob used.
+/// - Old epochs stay authorized on purpose — `AclState::epochs()` returns every
+///   one of them, because old Bodies must stay readable — so there is no epoch
+///   after which the old format is absent.
+/// - Nothing re-seals an existing record.
+///
+/// A real exit needs the discriminator to ride *outside* the sealed bytes: on
+/// the record, or in store metadata beside it. Not inside the postcard payload
+/// — a leading version byte there was built and disproved, because postcard is
+/// positional and a plausible fraction of genuine records decode as the new
+/// shape *and* survive a canonical re-encode check. Until that lands, treat
+/// this reader as part of the format.
+fn open_blake3_box(my_seed: &[u8; 32], my_ed: &[u8; 32], sealed: &[u8]) -> Option<Vec<u8>> {
     if sealed.len() < 32 + NONCE_LEN {
         return None;
     }
@@ -280,8 +331,7 @@ pub fn open_sealed(my_seed: &[u8; 32], me: &DeviceId, sealed: &[u8]) -> Option<V
     let nonce = &sealed[32..32 + NONCE_LEN];
     let ct = &sealed[32 + NONCE_LEN..];
     let my_x = ed_seed_to_x(my_seed);
-    let my_ed = ed_pubkey_bytes(me)?;
-    let my_x_pub = ed_pk_to_x(&my_ed)?;
+    let my_x_pub = ed_pk_to_x(my_ed)?;
     let shared = agree(&my_x, &eph_pub)?;
     let key = box_key(&shared, eph_pub.as_bytes(), my_x_pub.as_bytes());
     let cipher = ChaCha20Poly1305::new((&key).into());
@@ -305,9 +355,101 @@ pub fn open_sealed(my_seed: &[u8; 32], me: &DeviceId, sealed: &[u8]) -> Option<V
 pub struct DeviceSealed {
     /// The payload under the data key.
     pub ciphertext: Vec<u8>,
+    /// A commitment to the data key, shared by every reader.
+    ///
+    /// This is what makes the readers agree. ChaCha20-Poly1305 is not
+    /// key-committing, so without it a sender can put a different data key in
+    /// each wrap and hand two people one envelope that says different things to
+    /// each — the franking attack, and the thing an abuse report cannot survive.
+    /// Binding the *payload* into each wrap does not fix that, because every
+    /// wrap gets the same payload and none of them constrains the key. It has to
+    /// be one value all readers check against, which means it lives here and not
+    /// in a per-wrap derivation.
+    pub dek_commitment: [u8; 32],
     /// The data key, wrapped once per reader. Sorted by device, so the same set
     /// of readers always encodes the same way.
     pub wraps: Vec<(DeviceId, Vec<u8>)>,
+}
+
+/// A commitment to the payload every wrap in a [`DeviceSealed`] must belong to.
+///
+/// Stops a wrap set being moved onto a different ciphertext. It does *not* make
+/// the readers agree on the plaintext — see [`DeviceSealed::dek_commitment`],
+/// which is the field that does.
+fn payload_commitment(ciphertext: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"lait/device-sealed-payload/1");
+    h.update(ciphertext);
+    *h.finalize().as_bytes()
+}
+
+/// A commitment to the data key itself, which every reader recomputes and
+/// checks. One value, shared, so two readers cannot recover two different keys.
+fn dek_commitment(dek: &SpaceKey) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"lait/device-sealed-dek/1");
+    h.update(dek);
+    *h.finalize().as_bytes()
+}
+
+/// Domain for a wrap, kept distinct from a plain bound envelope so that a wrap
+/// and a `seal_to_bound` call whose last context part happened to be 32 bytes
+/// can never derive the same key.
+const WRAP_SEALED_BOX_DOMAIN: &[u8] = b"lait/device-sealed-wrap/1";
+
+/// The `info` a wrap is sealed under: the caller's context, the payload it
+/// belongs to, and the reader's identity.
+///
+/// Wrap *deletion* is still undetectable: binding the wrap set would be the fix,
+/// and it would make [`add_device_to_sealed`] invalidate every existing wrap,
+/// which is the whole property that operation exists for.
+fn wrap_info(context: &[&[u8]], commitment: &[u8; 32], recipient_ed: &[u8; 32]) -> Vec<u8> {
+    let mut info = Vec::with_capacity(WRAP_SEALED_BOX_DOMAIN.len() + 68);
+    info.extend_from_slice(WRAP_SEALED_BOX_DOMAIN);
+    info.extend_from_slice(&(context.len() as u32).to_be_bytes());
+    for part in context {
+        info.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        info.extend_from_slice(part);
+    }
+    info.extend_from_slice(commitment);
+    info.extend_from_slice(recipient_ed);
+    info
+}
+
+/// Seal the data key for one reader.
+fn seal_wrap(
+    device: &DeviceId,
+    context: &[&[u8]],
+    commitment: &[u8; 32],
+    dek: &SpaceKey,
+) -> Result<Option<Vec<u8>>, Failure> {
+    let Some(recip_ed) = ed_pubkey_bytes(device) else {
+        unusable_recipient(device, "not a 32-byte hex ed25519 key");
+        return Ok(None);
+    };
+    hpke_seal(
+        device,
+        &recip_ed,
+        &wrap_info(context, commitment, &recip_ed),
+        dek,
+    )
+}
+
+/// Recover the data key from this device's wrap, refusing one that does not
+/// match what every other reader will recover.
+fn open_wrap(
+    my_seed: &[u8; 32],
+    me: &DeviceId,
+    context: &[&[u8]],
+    sealed: &DeviceSealed,
+) -> Option<SpaceKey> {
+    let (_, wrapped) = sealed.wraps.iter().find(|(device, _)| device == me)?;
+    let my_ed = ed_pubkey_bytes(me)?;
+    let commitment = payload_commitment(&sealed.ciphertext);
+    let info = wrap_info(context, &commitment, &my_ed);
+    let dek = hpke_open(my_seed, &info, wrapped)?;
+    let dek: SpaceKey = <[u8; KEY_LEN]>::try_from(dek.as_slice()).ok()?;
+    (dek_commitment(&dek) == sealed.dek_commitment).then_some(dek)
 }
 
 /// Seal `plaintext` so that exactly `devices` can read it, bound to `context`.
@@ -322,12 +464,13 @@ pub fn seal_to_devices(
 ) -> Result<DeviceSealed, Failure> {
     let dek = random_key()?;
     let ciphertext = aead_encrypt(&dek, plaintext)?;
+    let commitment = payload_commitment(&ciphertext);
     let mut wraps: Vec<(DeviceId, Vec<u8>)> = Vec::new();
     for device in devices {
         if wraps.iter().any(|(held, _)| held == device) {
             continue;
         }
-        if let Some(wrapped) = seal_to_bound(device, context, &dek)? {
+        if let Some(wrapped) = seal_wrap(device, context, &commitment, &dek)? {
             wraps.push((device.clone(), wrapped));
         }
     }
@@ -338,7 +481,11 @@ pub fn seal_to_devices(
         return Err(Failure::Unaddressable);
     }
     wraps.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(DeviceSealed { ciphertext, wraps })
+    Ok(DeviceSealed {
+        ciphertext,
+        dek_commitment: dek_commitment(&dek),
+        wraps,
+    })
 }
 
 /// Read a payload as one of its devices. `None` when this device holds no wrap,
@@ -349,9 +496,7 @@ pub fn open_as_device(
     context: &[&[u8]],
     sealed: &DeviceSealed,
 ) -> Option<Vec<u8>> {
-    let (_, wrapped) = sealed.wraps.iter().find(|(device, _)| device == me)?;
-    let dek = open_sealed_bound(my_seed, me, context, wrapped)?;
-    let dek: SpaceKey = <[u8; KEY_LEN]>::try_from(dek.as_slice()).ok()?;
+    let dek = open_wrap(my_seed, me, context, sealed)?;
     aead_decrypt(&dek, &sealed.ciphertext)
 }
 
@@ -368,16 +513,14 @@ pub fn add_device_to_sealed(
     sealed: &mut DeviceSealed,
     newcomer: &DeviceId,
 ) -> Result<bool, Failure> {
-    let Some((_, wrapped)) = sealed.wraps.iter().find(|(device, _)| device == me) else {
-        return Ok(false);
-    };
-    let Some(dek) = open_sealed_bound(my_seed, me, context, wrapped) else {
+    let Some(dek) = open_wrap(my_seed, me, context, sealed) else {
         return Ok(false);
     };
     if sealed.wraps.iter().any(|(held, _)| held == newcomer) {
         return Ok(true);
     }
-    let Some(fresh) = seal_to_bound(newcomer, context, &dek)? else {
+    let commitment = payload_commitment(&sealed.ciphertext);
+    let Some(fresh) = seal_wrap(newcomer, context, &commitment, &dek)? else {
         return Ok(false);
     };
     sealed.wraps.push((newcomer.clone(), fresh));
@@ -385,7 +528,10 @@ pub fn add_device_to_sealed(
     Ok(true)
 }
 
-/// Derive the box AEAD key from the DH shared secret + both public keys.
+/// Derive the blake3 box's AEAD key from the DH shared secret + both public keys.
+///
+/// The key schedule HPKE replaced. Reachable only from [`open_blake3_box`], and
+/// deleted with it once no v1 envelopes remain.
 fn box_key(shared: &[u8], eph_pub: &[u8], recip_pub: &[u8]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(b"lait/sealedbox/0");
@@ -395,50 +541,115 @@ fn box_key(shared: &[u8], eph_pub: &[u8], recip_pub: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// The same box, with the caller's context mixed into the key.
+/// Entropy drawn *before* any crypto runs, then served to hpke from a buffer.
 ///
-/// [`seal_to`] binds the ephemeral key and the recipient and nothing else, so a
-/// sealed blob carries no statement about what it is *for* — its meaning comes
-/// entirely from where it happens to be filed, and a blob moved to the wrong
-/// file opens perfectly well. Every place this kernel seals something, the
-/// context matters: a space key belongs to one space and one epoch, a custody
-/// package to one ceremony and one leaf, a mailbox payload to one actor.
+/// hpke wants an RNG. This module wants "no randomness" to be a
+/// [`Failure::Randomness`] rather than a panic — and, more sharply, rather than
+/// a buffer of zeroes: a zero ephemeral secret is one fixed, publicly
+/// computable keypair, so every envelope produced during an outage would open
+/// for anyone. HPKE degrades worse here than a random-nonce design would,
+/// because a repeated ephemeral repeats the key *and* the base nonce.
 ///
-/// Binding turns misfiling from a policy question into a decrypt failure. That
-/// is the whole point: a check the caller can forget to write becomes one the
-/// arithmetic makes for them.
-///
-/// The wire format is unchanged — `eph_x_pub(32) || nonce(12) || ciphertext` —
-/// because the binding lives in the key rather than the bytes. So this is not a
-/// new envelope generation and needs no discriminator: an envelope sealed under
-/// the wrong context simply does not open, which is exactly the intended
-/// behaviour and is indistinguishable from any other failed decryption.
-fn bound_box_key(shared: &[u8], eph_pub: &[u8], recip_pub: &[u8], context: &[&[u8]]) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(BOUND_SEALED_BOX_DOMAIN);
-    h.update(shared);
-    h.update(eph_pub);
-    h.update(recip_pub);
-    // Length-framed, count first, exactly as the signature preimages in this
-    // tree are framed. Concatenating the parts raw would make `["ab", "c"]` and
-    // `["a", "bc"]` the same binding, so two different contexts would open each
-    // other's envelopes — the binding would be decorative.
-    h.update(&(context.len() as u32).to_be_bytes());
-    for part in context {
-        h.update(&(part.len() as u32).to_be_bytes());
-        h.update(part);
-    }
-    *h.finalize().as_bytes()
+/// Drawing up front makes that a precondition instead of an after-the-fact
+/// check: [`random_array`] short-circuits before a single byte of the key
+/// schedule exists. Exhausting the buffer would mean hpke asked for more than a
+/// keypair's worth, which the X25519 KEM does not; it is recorded rather than
+/// quietly served zeroes.
+struct DrawnEntropy {
+    bytes: [u8; DRAWN_ENTROPY_LEN],
+    used: usize,
+    exhausted: bool,
 }
 
-/// Domain for the context-bound box. Distinct from the unbound one, so a bound
+/// Twice what DHKEM(X25519) draws for a keypair.
+const DRAWN_ENTROPY_LEN: usize = 64;
+
+impl HpkeRngCore for DrawnEntropy {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        let end = self.used.saturating_add(dest.len());
+        if end > self.bytes.len() {
+            self.exhausted = true;
+            dest.fill(0);
+            return;
+        }
+        dest.copy_from_slice(&self.bytes[self.used..end]);
+        self.used = end;
+    }
+}
+
+impl HpkeCryptoRng for DrawnEntropy {}
+
+/// The HPKE ciphersuite every sealed box uses: DHKEM(X25519, HKDF-SHA256) with
+/// HKDF-SHA256 and ChaCha20-Poly1305 — RFC 9180's X25519 suite, over the same
+/// primitives this module already carries.
+type SealKem = X25519HkdfSha256;
+
+/// Domain for the context-bound box, and for the plain one. Distinct, so a bound
 /// envelope and an unbound envelope over the same plaintext never share a key
-/// and neither can be opened by the other's reader.
-const BOUND_SEALED_BOX_DOMAIN: &[u8] = b"lait/sealedbox/1";
+/// and neither can be opened by the other's reader. The `2` marks the HPKE
+/// construction; `1` was the hand-rolled box both replaced.
+const BOUND_SEALED_BOX_DOMAIN: &[u8] = b"lait/sealedbox/2";
+const UNBOUND_SEALED_BOX_DOMAIN: &[u8] = b"lait/sealedbox/plain/2";
+
+/// The `info` a plain sealed box is derived under: the domain and the
+/// recipient's ed25519 identity. See [`bound_info`] for why the identity rather
+/// than its Montgomery image.
+fn unbound_info(recipient_ed: &[u8; 32]) -> Vec<u8> {
+    let mut info = Vec::with_capacity(UNBOUND_SEALED_BOX_DOMAIN.len() + 32);
+    info.extend_from_slice(UNBOUND_SEALED_BOX_DOMAIN);
+    info.extend_from_slice(recipient_ed);
+    info
+}
+
+/// The RFC 9180 `info` a bound envelope is derived under.
+///
+/// Length-framed with the part count first, because otherwise `["ab", "c"]` and
+/// `["a", "bc"]` are the same binding — a caller composing a context out of
+/// variable-length names would silently get envelopes that open under a context
+/// nobody meant.
+///
+/// The recipient's **ed25519** key goes in, not its Montgomery image. The
+/// ed→X25519 map is two-to-one, so binding the image would leave two distinct
+/// `DeviceId`s sharing one envelope's binding; binding the identity closes that.
+fn bound_info(context: &[&[u8]], recipient_ed: &[u8; 32]) -> Vec<u8> {
+    let mut info = Vec::with_capacity(BOUND_SEALED_BOX_DOMAIN.len() + 36);
+    info.extend_from_slice(BOUND_SEALED_BOX_DOMAIN);
+    info.extend_from_slice(&(context.len() as u32).to_be_bytes());
+    for part in context {
+        info.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        info.extend_from_slice(part);
+    }
+    info.extend_from_slice(recipient_ed);
+    info
+}
+
+/// The length of the encapsulated key an envelope carries in front.
+fn encapped_len() -> usize {
+    <<SealKem as KemTrait>::EncappedKey as Serializable>::size()
+}
 
 /// Seal `msg` to a member addressed by their ed25519 `DeviceId`, bound to
-/// `context`. See [`bound_box_key`] for what binding buys and why the wire
-/// format is unchanged. Returns `None` if the recipient key is invalid.
+/// `context`.
+///
+/// HPKE base mode: an anonymous sender, which is what a sealed box is. The
+/// binding rides in `info`, so a misfiled envelope is a decryption failure
+/// rather than a readable message in the wrong place, and the validation the
+/// construction depends on (RFC 9180 §7.1.4 — reject a non-contributory
+/// agreement) is the library's rather than ours.
+///
+/// Output = `enc(32) || ciphertext`. `None` if the recipient key is unusable.
 pub fn seal_to_bound(
     recipient: &DeviceId,
     context: &[&[u8]],
@@ -448,28 +659,74 @@ pub fn seal_to_bound(
         unusable_recipient(recipient, "not a 32-byte hex ed25519 key");
         return Ok(None);
     };
-    let Some(recip_x) = ed_pk_to_x(&recip_ed) else {
+    hpke_seal(recipient, &recip_ed, &bound_info(context, &recip_ed), msg)
+}
+
+/// The one place an envelope is written. `recip_ed` is the recipient's parsed
+/// key, which the caller already needed in order to build `info`; `recipient`
+/// rides along only so a refusal can name the device.
+fn hpke_seal(
+    recipient: &DeviceId,
+    recip_ed: &[u8; 32],
+    info: &[u8],
+    msg: &[u8],
+) -> Result<Option<Vec<u8>>, Failure> {
+    let Some(recip_x) = ed_pk_to_x(recip_ed) else {
         unusable_recipient(recipient, "not a usable curve point");
         return Ok(None);
     };
-    let eph_seed = random_array()?;
-    let eph = StaticSecret::from(eph_seed);
-    let eph_pub = XPublic::from(&eph);
-    let Some(shared) = agree(&eph, &recip_x) else {
-        unusable_recipient(recipient, "agreement was not contributory");
+    let Ok(pk) = <<SealKem as KemTrait>::PublicKey as Deserializable>::from_bytes(
+        recip_x.as_bytes().as_slice(),
+    ) else {
+        unusable_recipient(recipient, "not a usable HPKE recipient key");
         return Ok(None);
     };
-    let key = bound_box_key(&shared, eph_pub.as_bytes(), recip_x.as_bytes(), context);
-    let cipher = ChaCha20Poly1305::new((&key).into());
-    let nonce = random_nonce()?;
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), msg)
-        .map_err(|_| Failure::Encryption)?;
-    let mut out = Vec::with_capacity(32 + NONCE_LEN + ct.len());
-    out.extend_from_slice(eph_pub.as_bytes());
-    out.extend_from_slice(&nonce);
+    let mut rng = DrawnEntropy {
+        bytes: random_array()?,
+        used: 0,
+        exhausted: false,
+    };
+    let sealed = hpke::single_shot_seal::<HpkeAead, HkdfSha256, SealKem, _>(
+        &OpModeS::Base,
+        &pk,
+        info,
+        msg,
+        &[],
+        &mut rng,
+    );
+    if rng.exhausted {
+        tracing::error!("hpke drew more entropy than a keypair needs");
+        return Err(Failure::Randomness);
+    }
+    let (encapped, ct) = sealed.map_err(|_| Failure::Encryption)?;
+    let encapped = encapped.to_bytes();
+    let mut out = Vec::with_capacity(encapped.len() + ct.len());
+    out.extend_from_slice(&encapped);
     out.extend_from_slice(&ct);
     Ok(Some(out))
+}
+
+/// The one place an envelope is read.
+fn hpke_open(my_seed: &[u8; 32], info: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+    let enc_len = encapped_len();
+    if sealed.len() < enc_len {
+        return None;
+    }
+    let (encapped_bytes, ct) = sealed.split_at(enc_len);
+    let encapped =
+        <<SealKem as KemTrait>::EncappedKey as Deserializable>::from_bytes(encapped_bytes).ok()?;
+    let my_x = ed_seed_to_x(my_seed);
+    let sk =
+        <<SealKem as KemTrait>::PrivateKey as Deserializable>::from_bytes(&my_x.to_bytes()).ok()?;
+    hpke::single_shot_open::<HpkeAead, HkdfSha256, SealKem>(
+        &OpModeR::Base,
+        &sk,
+        &encapped,
+        info,
+        ct,
+        &[],
+    )
+    .ok()
 }
 
 /// Open a context-bound sealed box addressed to us. `None` when the envelope is
@@ -483,22 +740,10 @@ pub fn open_sealed_bound(
     context: &[&[u8]],
     sealed: &[u8],
 ) -> Option<Vec<u8>> {
-    if sealed.len() < 32 + NONCE_LEN {
-        return None;
-    }
-    let eph_pub = XPublic::from(<[u8; 32]>::try_from(&sealed[..32]).ok()?);
-    let nonce = &sealed[32..32 + NONCE_LEN];
-    let ct = &sealed[32 + NONCE_LEN..];
-    let my_x = ed_seed_to_x(my_seed);
     let my_ed = ed_pubkey_bytes(me)?;
-    let my_x_pub = ed_pk_to_x(&my_ed)?;
-    let shared = agree(&my_x, &eph_pub)?;
-    let key = bound_box_key(&shared, eph_pub.as_bytes(), my_x_pub.as_bytes(), context);
-    let cipher = ChaCha20Poly1305::new((&key).into());
-    cipher.decrypt(Nonce::from_slice(nonce), ct).ok()
+    hpke_open(my_seed, &bound_info(context, &my_ed), sealed)
 }
 
-/// The key-epoch id length prefixed to every protected Body envelope.
 pub const BODY_EPOCH_ID_LEN: usize = 16;
 /// The fixed protected-Body envelope overhead:
 /// `epoch_id(16) || nonce(12) || tag(16)` beyond the plaintext length.
@@ -740,25 +985,6 @@ mod tests {
     /// once the sealing code changes, the old envelopes can never be produced
     /// again, and if none were kept there is nothing left to prove the new code
     /// can still read the old ones.
-    #[test]
-    #[ignore = "run by hand to mint fixtures; output is pasted into V1_GOLDEN"]
-    fn mint_v1_golden_fixtures() {
-        for (seed_byte, label, msg) in [
-            (0x11u8, "empty", &b""[..]),
-            (0x22, "space-key-sized", &[0xABu8; 32][..]),
-            (0x33, "multi-block", &[0x5Au8; 200][..]),
-        ] {
-            let seed = [seed_byte; 32];
-            let device = device_from_seed(&seed);
-            let sealed = seal_to(&device, msg).unwrap().unwrap();
-            println!(
-                "(\n    // {label}\n    [0x{seed_byte:02x}; 32],\n    \"{}\",\n    \"{}\",\n),",
-                hex_of(msg),
-                hex_of(&sealed)
-            );
-        }
-    }
-
     fn hex_of(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
@@ -770,8 +996,13 @@ mod tests {
             .collect()
     }
 
-    /// Real v1 sealed boxes, minted by [`mint_v1_golden_fixtures`] against the
-    /// sealing code as it stood before any HPKE work, and frozen here.
+    /// Real v1 sealed boxes, minted against the sealing code as it stood before
+    /// the HPKE cutover, and frozen here.
+    ///
+    /// They cannot be regenerated: nothing writes v1 any more, and the minter
+    /// that made them was deleted with the writer. That is the point — these
+    /// bytes are the only remaining specimens of a format the fallback reader
+    /// still has to handle.
     ///
     /// `(recipient seed, plaintext hex, sealed hex)`.
     ///
@@ -1174,6 +1405,154 @@ mod tests {
             !verify_detached(&pk, b"a different message entirely", &forged),
             "the same forgery must not verify on any message"
         );
+    }
+
+    #[test]
+    fn the_ed25519_identity_is_bound_not_its_montgomery_image() {
+        let seed = [21u8; 32];
+        let me = device_from_seed(&seed);
+        let mut twin_ed = ed_pubkey_bytes(&me).expect("a seed device is a valid key");
+        // Negating an Edwards point leaves its Montgomery u-coordinate alone, so
+        // flipping the sign bit yields a second, distinct `DeviceId` that shares
+        // one X25519 public key with the first. The agreement cannot tell them
+        // apart; only what the envelope is bound to can.
+        twin_ed[31] ^= 0x80;
+        let twin = device_of(&twin_ed);
+        assert_ne!(twin, me, "premise: the twin is a different identity");
+        assert_eq!(
+            ed_pk_to_x(&twin_ed).map(|x| *x.as_bytes()),
+            ed_pk_to_x(&ed_pubkey_bytes(&me).expect("valid")).map(|x| *x.as_bytes()),
+            "premise: and it maps to the same X25519 key"
+        );
+
+        let key = random_key().expect("random key");
+        let sealed = seal_to_bound(&me, &[b"ctx"], &key)
+            .expect("encrypt")
+            .expect("valid recipient");
+        assert_eq!(
+            open_sealed_bound(&seed, &me, &[b"ctx"], &sealed).as_deref(),
+            Some(&key[..])
+        );
+        assert!(
+            open_sealed_bound(&seed, &twin, &[b"ctx"], &sealed).is_none(),
+            "the twin shares the agreement, so only binding the identity refuses it"
+        );
+    }
+
+    #[test]
+    fn a_wrap_cannot_be_moved_onto_a_different_payload() {
+        let seed = [22u8; 32];
+        let me = device_from_seed(&seed);
+        let first = seal_to_devices(&[me.clone()], &[b"mailbox"], b"the first payload")
+            .expect("seal the first");
+        let second = seal_to_devices(&[me.clone()], &[b"mailbox"], b"the second payload")
+            .expect("seal the second");
+        assert_eq!(
+            open_as_device(&seed, &me, &[b"mailbox"], &first).as_deref(),
+            Some(&b"the first payload"[..])
+        );
+
+        // The ciphertext of one payload under the wraps of another. Without the
+        // payload in each wrap's derivation this opens, which is the shape of
+        // handing two readers one envelope that says different things to each.
+        let grafted = DeviceSealed {
+            ciphertext: second.ciphertext.clone(),
+            dek_commitment: first.dek_commitment,
+            wraps: first.wraps.clone(),
+        };
+        assert!(
+            open_as_device(&seed, &me, &[b"mailbox"], &grafted).is_none(),
+            "a wrap belongs to the payload it was made for"
+        );
+    }
+
+    #[test]
+    fn a_fresh_envelope_is_hpke_and_not_the_construction_it_replaced() {
+        let seed = [31u8; 32];
+        let me = device_from_seed(&seed);
+        let key = random_key().expect("random key");
+        let sealed = seal_to(&me, &key)
+            .expect("encrypt")
+            .expect("valid recipient");
+
+        let my_ed = ed_pubkey_bytes(&me).expect("a seed device is a valid key");
+        assert!(
+            open_blake3_box(&seed, &my_ed, &sealed).is_none(),
+            "nothing writes v1 any more, so a fresh envelope must not read as one"
+        );
+        assert_eq!(
+            open_sealed(&seed, &me, &sealed).as_deref(),
+            Some(&key[..]),
+            "and it reads as what it is"
+        );
+    }
+
+    #[test]
+    fn readers_cannot_be_handed_two_different_data_keys() {
+        let alice_seed = [41u8; 32];
+        let alice = device_from_seed(&alice_seed);
+        let bob_seed = [42u8; 32];
+        let bob = device_from_seed(&bob_seed);
+
+        // What a malicious sender builds: one ciphertext, but a wrap per reader
+        // carrying a *different* data key. Nothing in the AEAD refuses this —
+        // ChaCha20-Poly1305 is not key-committing, which is the whole basis of
+        // the franking attack.
+        //
+        // This does not construct the multi-key-collision ciphertext that
+        // attack needs; it asserts the property that forecloses it, which is
+        // that two readers can never come away holding different keys. Note it
+        // checks `open_wrap` and not `open_as_device`: going through the AEAD
+        // would pass even with the check removed, because the payload simply
+        // fails to decrypt under the wrong key. That would be a test of nothing.
+        let honest = random_key().expect("random key");
+        let divergent = random_key().expect("random key");
+        let ciphertext = aead_encrypt(&honest, b"what alice is shown").expect("encrypt");
+        let commitment = payload_commitment(&ciphertext);
+        let for_alice = seal_wrap(&alice, &[b"mailbox"], &commitment, &honest)
+            .expect("seal")
+            .expect("valid recipient");
+        let for_bob = seal_wrap(&bob, &[b"mailbox"], &commitment, &divergent)
+            .expect("seal")
+            .expect("valid recipient");
+
+        let forged = DeviceSealed {
+            ciphertext,
+            dek_commitment: dek_commitment(&honest),
+            wraps: vec![(alice.clone(), for_alice), (bob.clone(), for_bob)],
+        };
+
+        assert!(
+            open_wrap(&alice_seed, &alice, &[b"mailbox"], &forged).is_some(),
+            "the reader the sender was honest with still recovers the key"
+        );
+        assert!(
+            open_wrap(&bob_seed, &bob, &[b"mailbox"], &forged).is_none(),
+            "the reader handed a different key is refused at the commitment"
+        );
+    }
+
+    #[test]
+    fn drawn_entropy_records_exhaustion_instead_of_serving_zeroes() {
+        let mut rng = DrawnEntropy {
+            bytes: [7u8; DRAWN_ENTROPY_LEN],
+            used: 0,
+            exhausted: false,
+        };
+        let mut drawn = vec![0u8; DRAWN_ENTROPY_LEN];
+        rng.fill_bytes(&mut drawn);
+        assert_eq!(
+            drawn,
+            vec![7u8; DRAWN_ENTROPY_LEN],
+            "it serves what was drawn"
+        );
+        assert!(!rng.exhausted, "a keypair's worth is within budget");
+
+        // One byte past the buffer must be recorded, because the alternative is
+        // a key schedule built on zeroes that nobody notices.
+        let mut past_the_end = [0u8; 1];
+        rng.fill_bytes(&mut past_the_end);
+        assert!(rng.exhausted, "running out has to be visible to the seal");
     }
 
     #[test]

@@ -33,6 +33,22 @@ curve25519-dalek = "4"
 chacha20poly1305 = "0.10"
 sha2 = "0.10"
 blake3 = "1"
+# RFC 9180 HPKE, for the context-bound sealed box. Chosen over the hand-rolled
+# construction it replaced for the parts that are easy to get wrong and give no
+# sign when they are: rejecting a non-contributory agreement (§7.1.4), labeled
+# key schedule derivation, and a defined place to bind context (`info`). The
+# 0.13 line is deliberate — it resolves onto the RustCrypto generation this
+# crate already runs (x25519-dalek 2, chacha20poly1305 0.10, sha2 0.10) and adds
+# no second copy of the crypto stack. 0.14 moves to the next generation and is
+# the follow-on once this crate does, which is also where its ML-KEM hybrid
+# lives.
+# Default features drag in the NIST curve stack (p256/elliptic-curve/sec1);
+# only the X25519 suite is used.
+hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"] }
+# hpke takes its CSPRNG from rand_core 0.9; frost-ed25519 takes its from 0.6,
+# and the two majors do not unify. Both are already in the tree, so this names
+# the second rather than adding one.
+rand_core_hpke = { package = "rand_core", version = "0.9", features = ["os_rng"] }
 # Password-based key derivation for the passphrase unlock slot on a portable
 # share package. Memory-hard by design: blake3's derive_key is a KDF, not a
 # PASSWORD KDF, and using it here would make an offline guessing attack cheap.
