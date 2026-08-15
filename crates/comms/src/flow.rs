@@ -119,8 +119,9 @@ pub trait Connection: Send + Sync {
     /// forever, and both contractors here behave that way on purpose.
     async fn open_bi(&self) -> Result<(Box<dyn SendFlow>, Box<dyn RecvFlow>)>;
 
-    /// `Ok(None)` once the peer will open no more. See [`open_bi`] for when a
-    /// flow becomes visible.
+    /// `Ok(None)` once the peer will open no more bidirectional flows. Uni and
+    /// bi accept queues are independent, as they are in QUIC. See [`open_bi`]
+    /// for when a flow becomes visible.
     ///
     /// [`open_bi`]: Connection::open_bi
     async fn accept_bi(&self) -> Result<Option<(Box<dyn SendFlow>, Box<dyn RecvFlow>)>>;
@@ -129,6 +130,8 @@ pub trait Connection: Send + Sync {
     /// or reset — see [`open_bi`](Connection::open_bi).
     async fn open_uni(&self) -> Result<Box<dyn SendFlow>>;
 
+    /// `Ok(None)` once the peer will open no more unidirectional flows. May be
+    /// polled concurrently with [`accept_bi`](Self::accept_bi).
     async fn accept_uni(&self) -> Result<Option<Box<dyn RecvFlow>>>;
 
     /// Send one unreliable datagram.

@@ -473,12 +473,14 @@ Within `lait/session/1`, one connection carries typed stream kinds:
 |---|---|---|
 | `0x01` | control | implemented |
 | `0x02` | reliable signal | implemented |
-| `0x03` | media frame | reserved, never reassigned |
-| `0x04` | media feedback | reserved, never reassigned |
+| `0x03` | native media Group | implemented, unidirectional |
+| `0x04` | native media control/feedback | implemented, bidirectional |
 
-Reserved kinds are known and unimplemented, which is a different answer from
-unknown: an unknown kind resets that stream, a reserved one means a peer is
-speaking a protocol generation this build agreed to and has not built.
+The media lanes are an atomic pair and require the `NATIVE_LIVE_MEDIA` feature.
+Admission grants neither unless the peer offered the feature and requested both
+lanes. That prevents a half-capable session from receiving Groups it cannot
+control, or control records for Groups it cannot receive. Unknown kinds reset
+that stream and leave the connection alive.
 
 ### 12.1 Flows, framing, and 0.5-RTT replay
 
@@ -558,6 +560,20 @@ before a buffer is reserved, never after bytes have arrived.
 | `MAX_LANES` | 8 | lait policy |
 | `MAX_STREAM_WORKERS` | 32 | lait policy |
 
+Native media adds narrower bounds at its own seam:
+
+| Bound | Value | Meaning |
+|---|---:|---|
+| `MAX_TRACK_NAME_BYTES` | 128 B | identifier, never a path or URL |
+| `MAX_CODEC_NAME_BYTES` | 64 B | WebCodecs codec string |
+| `MAX_DECODER_CONFIG_BYTES` | 64 KiB | codec extradata |
+| `MAX_MEDIA_HEADER_BYTES` | 4 KiB | one Group or Frame header |
+| `MAX_MEDIA_FRAME_BYTES` | 16 MiB | one encoded access unit |
+| `MAX_FRAMES_PER_GROUP` | 512 | frame-table ceiling |
+| `MAX_MEDIA_GROUP_BYTES` | 32 MiB | materialized Group ceiling |
+| `MAX_GROUP_DURATION_MS` | 10,000 ms | hard keyframe-recovery cap |
+| `MAX_LATENCY_MS` | 30,000 ms | hard negotiated delivery budget |
+
 `comms::MAX_FRAME` is 64 MiB, the framing guard for whole protocol messages on
 the existing framed `Stream`. Raw flows must **not** inherit it: a flow is read
 incrementally, so its ceiling bounds one read rather than one message, and
@@ -588,6 +604,56 @@ Cheap stream opens are what make the "one short stream per unit of work" pattern
 affordable rather than a design lait has to avoid. A reset surfacing as a read
 error is what lets a receiver tell an abandoned transfer from a completed one —
 without it, truncation would be silent.
+
+### 12.3 Native live media
+
+The native wire adopts moq-lite's useful delivery semantics and owns its bytes.
+A Track is a sequence of Groups; a Group is an ordered sequence of Frames and
+occupies exactly one QUIC unidirectional stream. A live publisher assigns newer
+Groups a higher advisory QUIC priority. An old or malformed Group is reset at
+the stream rather than closing the Live session, so it cannot head-of-line a
+new keyframe or consume flow control after it stops being useful.
+
+The generation-1 vocabulary has fifteen explicit message selectors: thirteen
+control records plus `GROUP` and `FRAME`. Control records are `SETUP`,
+`SUBSCRIBE`, `SUBSCRIBE_UPDATE`, `SUBSCRIBE_OK`, `SUBSCRIBE_DROP`,
+`SUBSCRIBE_END`, `FETCH`, `TRACK_INFO`, `REQUEST_KEYFRAME`, `CLOCK_PROBE`,
+`CLOCK_REPLY`, `PLAYOUT_TARGET`, and `GO_AWAY`. Their selector byte is explicit;
+Rust enum declaration order is not the wire. Each body is canonical postcard
+and must reproduce its input exactly when re-encoded.
+
+One `0x03` stream is:
+
+```text
+0x03
+u32-le GroupHeader length | canonical GroupHeader
+u32-le FrameHeader length | canonical FrameHeader | exact raw payload
+...
+FIN
+```
+
+Every declared length is checked before proportional allocation. `GroupHeader`
+binds the subscription, Track, Track kind, sequence, coordinator-timeline
+publication time, timescale, and maximum Group duration. `FrameHeader` is shaped
+for a WebCodecs consumer: signed presentation timestamp, optional duration,
+timescale, `Key`/`Delta`, and exact payload length. The first Frame is always
+`Key`, timestamps never decrease, every Frame uses the Group timescale, and the
+presentation span cannot cross the Group's declared duration or the protocol's
+hard cap. Codec configuration is carried out of band by `TRACK_INFO`; peer media
+payloads are raw encoded access units, never CMAF or another container.
+
+One `0x04` flow carries one bounded control or feedback record. Track names are
+identifiers, not routes: empty names, absolute paths, traversal, control
+characters, and URL-like names are refused. `PLAYOUT_TARGET` carries a shared
+time and media position as a correction target; it is never an imperative seek
+command. `REQUEST_KEYFRAME` is the bounded recovery verb for a late join or a
+dropped Group.
+
+Groups use reliable streams, not datagrams, and use no application FEC. An
+incomplete Group becomes reset-eligible only after a newer sequence exists.
+Two clocks then apply: its coordinator-timeline age and its local monotonic age.
+Whichever deadline arrives first expires the stream. A skewed or stalled clock
+therefore cannot buy old bytes more flow-control time.
 
 If the pin moves, this table is re-measured. Every row in the bounds table above
 is a lait choice and moves only when we decide it should.
@@ -650,7 +716,7 @@ exceeds the chunk-resolve deadline by a margin; the flush wait outlasts the
 accept write; revalidation is far shorter than the idle reap; and the driver
 poll is shorter than anything a driver does.
 
-### 12.3 Admission, in order
+### 12.4 Admission, in order
 
 Every opening is judged in one order, and the order is contract rather than an
 implementation detail:
@@ -719,7 +785,7 @@ A refusal is always written before the connection is closed, and the close waits
 out the flush deadline. A close on its own arrives as a transport error the peer
 will retry.
 
-### 12.4 Freight
+### 12.5 Freight
 
 Requests are exact. There is no "list what you have" and no remote path: a peer
 asks for one chunk of one content whose id it already holds, having learned it
@@ -782,7 +848,7 @@ hash the partial transfer already validated, and a provider whose leaf differs
 is rejected before a byte is appended — so a resumed transfer cannot be steered
 onto different content.
 
-### 12.5 Live
+### 12.6 Live
 
 Freight moves bytes somebody asked for. Live moves what people are *doing* —
 where a cursor is, who is looking at an issue, who is typing, who holds part of
@@ -885,7 +951,7 @@ be missed; the second is what stops a revoked peer acquiring new scopes in the
 window before the edge arrives. A revoked peer's slots disappear immediately
 rather than at their TTL.
 
-### 12.6 Reliable signals
+### 12.7 Reliable signals
 
 A signal is a thing that happened — somebody offered you a file, invited you to
 collaborate, asked for your attention. It is reliable in the sense that it is
@@ -922,11 +988,9 @@ fixes the selector, the ceiling, what the sender must satisfy, and whether an
 answer is permitted. A signal nobody declared is one nothing knows how to bound.
 
 **Every signal flow is bidirectional, whatever its response policy.** The
-obvious design is one-way signals on a unidirectional flow and answerable ones
-on a bidirectional flow, and it does not work: the Live plane accepts
-bidirectional flows only — a transport constraint, not a preference — so a
-signal sent on a unidirectional flow succeeds locally, reports success, and is
-served by nobody.
+lane keeps one flow shape so a Ping can answer on the same flow; a one-way
+signal simply ignores the receive half. Live's unidirectional queue is served
+concurrently and belongs to native media Groups.
 
 **The response policy lives on the declaration, not on the call**, and it governs
 what it is actually about: whether an answer is read and a second deadline

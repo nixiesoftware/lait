@@ -11,20 +11,16 @@
 //! late is wrong, not delayed, so it goes on a datagram and the next one
 //! supersedes it.
 //!
-//! **Flow kinds are not mixed on one connection after the opening.** MemNet
-//! has one handoff queue for both uni and bi flows, and `accept_bi` errors when
-//! the next handoff is a uni flow — which the accept loop reads as end of
-//! connection. So this plane accepts bidirectional flows only: the control
-//! stream is bidirectional, subscriptions arrive on it, signal flows are
-//! bidirectional whether or not they expect an answer, and everything else is a
-//! datagram. That is a constraint the transport imposes rather than a
-//! preference, and it is written here rather than discovered in a test — which
-//! is the whole reason it is worth writing down, because a one-way signal on a
-//! unidirectional flow succeeds locally, reports success, and reaches nobody.
+//! QUIC's bidirectional and unidirectional accept queues are independent. The
+//! Live loop polls both: control, signals, and media feedback use bounded bi
+//! flows; each media Group gets its own uni stream; transient presence remains
+//! a datagram.
 //!
 //! Three things are bounded before anything is spent, and the order is the
 //! bound: a permit before the stream kind is read, the gate before the message,
 //! the message's declared length before its buffer.
+
+pub mod media;
 
 use crate::poison::LockRecovering;
 use std::cell::RefCell;
@@ -277,6 +273,8 @@ pub struct LiveHandle {
     table: std::sync::Mutex<PublishTable>,
     table_updates: tokio::sync::watch::Sender<u64>,
     signals: SignalSink,
+    /// Validated native-media records received on the media lane pair.
+    media: media::Inbox,
     anchors: Option<std::sync::Arc<dyn AnchorSource>>,
     residency: std::sync::Arc<dyn ResidencyOracle>,
     /// What this Station is currently doing, for peers to be told about.
@@ -367,6 +365,7 @@ impl LiveHandle {
             table: std::sync::Mutex::new(PublishTable::default()),
             table_updates: tokio::sync::watch::Sender::new(0),
             signals: tokio::sync::broadcast::channel(SIGNAL_QUEUE).0,
+            media: media::Inbox::new(),
             anchors,
             residency,
             local: std::sync::Mutex::new(LocalPresence::default()),
@@ -375,6 +374,15 @@ impl LiveHandle {
             outbox: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             offers: std::sync::Mutex::new(crate::signal::OfferQueue::new()),
         }
+    }
+
+    /// Listen for validated native-media control records and complete Groups.
+    ///
+    /// The receiver is bounded. Falling behind yields broadcast lag rather
+    /// than making the Live driver retain an unbounded history; a consumer then
+    /// resubscribes at the newest Group.
+    pub fn media(&self) -> tokio::sync::broadcast::Receiver<media::Event> {
+        self.media.subscribe()
     }
 
     /// Say what this Station is looking at.
@@ -1100,10 +1108,10 @@ pub async fn serve_session(
     // The permit before the stream kind is read, mirroring Freight: a peer that
     // opens flows faster than they are served queues on a semaphore rather than
     // on the task scheduler.
-    // A plain semaphore, not an `Arc` one: `run_driver` is a current-thread
-    // runtime with a `LocalSet`, so this session has one owner and the permit
-    // is held for the arm that took it.
-    let workers = tokio::sync::Semaphore::new(bounds::MAX_STREAM_WORKERS);
+    // Owned permits let a media Group move into its own local task *after* the
+    // permit was taken. Taking it before spawning is the bound: a stream flood
+    // cannot create an unbounded ready-task queue in front of the semaphore.
+    let workers = std::sync::Arc::new(tokio::sync::Semaphore::new(bounds::MAX_STREAM_WORKERS));
 
     let mut last_seen = Instant::now();
     let mut sweep_at = Instant::now();
@@ -1415,6 +1423,66 @@ pub async fn serve_session(
                 }
             }
 
+            accepted = connection.accept_uni() => {
+                let Ok(Some(mut recv)) = accepted else { break };
+                last_seen = Instant::now();
+                match accept_gate.check(Instant::now()) {
+                    Verdict::Allow => {}
+                    Verdict::Drop => {
+                        recv.stop(REFUSED);
+                        continue;
+                    }
+                    Verdict::Close => {
+                        connection.close(REFUSED, b"");
+                        break;
+                    }
+                }
+                let Ok(permit) = std::sync::Arc::clone(&workers).try_acquire_owned() else {
+                    recv.stop(REFUSED);
+                    continue;
+                };
+                let kind = match tokio::time::timeout(
+                    deadline::LIVE_FLOW_READ,
+                    read_stream_kind(recv.as_mut()),
+                )
+                .await
+                {
+                    Ok(Ok(kind)) => kind,
+                    _ => {
+                        recv.stop(REFUSED);
+                        continue;
+                    }
+                };
+                if kind != stream_kind::MEDIA_GROUP
+                    || !peer.granted_lanes.contains(&stream_kind::MEDIA_GROUP)
+                {
+                    recv.stop(REFUSED);
+                    continue;
+                }
+                let Some(handle) = handle.clone() else {
+                    recv.stop(REFUSED);
+                    continue;
+                };
+                let station = peer.station.clone();
+                let connection_id = peer.connection_id;
+                tokio::task::spawn_local(async move {
+                    let _permit = permit;
+                    match tokio::time::timeout(
+                        deadline::MEDIA_GROUP_READ,
+                        media::read_group_body(recv.as_mut()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(group)) => handle.media.publish(media::Event {
+                            peer: station,
+                            connection_id,
+                            body: media::EventBody::Group(std::sync::Arc::new(group)),
+                        }),
+                        _ => recv.stop(media::RESET_MEDIA),
+                    }
+                });
+            }
+
             accepted = connection.accept_bi() => {
                 let Ok(Some((mut send, mut recv))) = accepted else { break };
                 last_seen = Instant::now();
@@ -1431,7 +1499,7 @@ pub async fn serve_session(
                         break;
                     }
                 }
-                let Ok(_permit) = workers.try_acquire() else {
+                let Ok(_permit) = std::sync::Arc::clone(&workers).try_acquire_owned() else {
                     drop(send);
                     continue;
                 };
@@ -1454,11 +1522,7 @@ pub async fn serve_session(
                         continue;
                     }
                     Ok(Ok(kind)) => kind,
-                    // A reserved kind is a peer using a reservation we
-                    // published and have not built: the flow resets and the
-                    // connection stays up, because the peer is not wrong.
-                    Ok(Err(StreamInvalid::ReservedKind(_)))
-                    | Ok(Err(StreamInvalid::UnknownKind(_))) => {
+                    Ok(Err(StreamInvalid::UnknownKind(_))) => {
                         drop(send);
                         continue;
                     }
@@ -1467,6 +1531,10 @@ pub async fn serve_session(
                         continue;
                     }
                 };
+                if !peer.granted_lanes.contains(&kind) {
+                    crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
+                    continue;
+                }
                 if kind == stream_kind::RELIABLE_SIGNAL {
                     match signal_gate.check(Instant::now()) {
                         Verdict::Allow => {}
@@ -1529,6 +1597,26 @@ pub async fn serve_session(
                             signal,
                         });
                     }
+                    continue;
+                }
+                if kind == stream_kind::MEDIA_CONTROL {
+                    let Ok(Ok(control)) = tokio::time::timeout(
+                        deadline::LIVE_FLOW_READ,
+                        media::read_control_body(recv.as_mut()),
+                    )
+                    .await
+                    else {
+                        crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
+                        continue;
+                    };
+                    if let Some(handle) = &handle {
+                        handle.media.publish(media::Event {
+                            peer: peer.station.clone(),
+                            connection_id: peer.connection_id,
+                            body: media::EventBody::Control(control),
+                        });
+                    }
+                    let _ = send.finish();
                     continue;
                 }
                 if kind != stream_kind::CONTROL {
@@ -2220,7 +2308,12 @@ pub async fn dial(
         connection_id,
         connection_epoch: epoch,
         authority_frontier: Vec::new(),
-        requested_lanes: vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
+        requested_lanes: vec![
+            stream_kind::CONTROL,
+            stream_kind::RELIABLE_SIGNAL,
+            stream_kind::MEDIA_GROUP,
+            stream_kind::MEDIA_CONTROL,
+        ],
     };
 
     let mut flow = connection

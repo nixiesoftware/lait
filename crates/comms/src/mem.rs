@@ -376,10 +376,15 @@ impl Stream for MemStream {
 struct MemConnection {
     peer: PeerId,
     alpn: Vec<u8>,
-    /// Flows this end opens, delivered to the far end.
-    open_tx: mpsc::UnboundedSender<MemFlowHandoff>,
-    /// Flows the far end opened.
-    open_rx: TokioMutex<mpsc::UnboundedReceiver<MemFlowHandoff>>,
+    /// Flows this end opens, delivered to the far end. QUIC has independent
+    /// accept queues for bidirectional and unidirectional streams; modelling
+    /// them as one queue made an `accept_bi` consume and reject a uni stream.
+    bi_open_tx: mpsc::UnboundedSender<MemFlowHandoff>,
+    uni_open_tx: mpsc::UnboundedSender<MemFlowHandoff>,
+    /// Flows the far end opened, separated by direction like the shipped QUIC
+    /// implementation so both accept futures may be polled concurrently.
+    bi_open_rx: TokioMutex<mpsc::UnboundedReceiver<MemFlowHandoff>>,
+    uni_open_rx: TokioMutex<mpsc::UnboundedReceiver<MemFlowHandoff>>,
     datagram_tx: mpsc::UnboundedSender<Vec<u8>>,
     datagram_rx: TokioMutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     /// This end's own closed state. A watch rather than a notify because a
@@ -445,8 +450,10 @@ fn flow_pair() -> (MemSendFlow, MemRecvFlow, MemSendFlow, MemRecvFlow) {
 }
 
 fn connection_pair(dialer: PeerId, accepter: PeerId, alpn: Alpn) -> (MemConnection, MemConnection) {
-    let (a_open_tx, a_open_rx) = mpsc::unbounded_channel();
-    let (b_open_tx, b_open_rx) = mpsc::unbounded_channel();
+    let (a_bi_open_tx, a_bi_open_rx) = mpsc::unbounded_channel();
+    let (b_bi_open_tx, b_bi_open_rx) = mpsc::unbounded_channel();
+    let (a_uni_open_tx, a_uni_open_rx) = mpsc::unbounded_channel();
+    let (b_uni_open_tx, b_uni_open_rx) = mpsc::unbounded_channel();
     let (a_dg_tx, a_dg_rx) = mpsc::unbounded_channel();
     let (b_dg_tx, b_dg_rx) = mpsc::unbounded_channel();
     let a_close = watch::Sender::new(false);
@@ -457,8 +464,10 @@ fn connection_pair(dialer: PeerId, accepter: PeerId, alpn: Alpn) -> (MemConnecti
         MemConnection {
             peer: accepter,
             alpn: alpn.to_vec(),
-            open_tx: b_open_tx,
-            open_rx: TokioMutex::new(a_open_rx),
+            bi_open_tx: b_bi_open_tx,
+            uni_open_tx: b_uni_open_tx,
+            bi_open_rx: TokioMutex::new(a_bi_open_rx),
+            uni_open_rx: TokioMutex::new(a_uni_open_rx),
             datagram_tx: b_dg_tx,
             datagram_rx: TokioMutex::new(a_dg_rx),
             close: a_close,
@@ -467,8 +476,10 @@ fn connection_pair(dialer: PeerId, accepter: PeerId, alpn: Alpn) -> (MemConnecti
         MemConnection {
             peer: dialer,
             alpn: alpn.to_vec(),
-            open_tx: a_open_tx,
-            open_rx: TokioMutex::new(b_open_rx),
+            bi_open_tx: a_bi_open_tx,
+            uni_open_tx: a_uni_open_tx,
+            bi_open_rx: TokioMutex::new(b_bi_open_rx),
+            uni_open_rx: TokioMutex::new(b_uni_open_rx),
             datagram_tx: a_dg_tx,
             datagram_rx: TokioMutex::new(b_dg_rx),
             close: b_close,
@@ -494,7 +505,7 @@ impl super::Connection for MemConnection {
         // transport *laxer* than the wire, and every test above it would then
         // pass against a network that does not behave that way.
         mine_send.pending = Some((
-            self.open_tx.clone(),
+            self.bi_open_tx.clone(),
             Box::new(MemFlowHandoff {
                 send: Some(theirs_send),
                 recv: theirs_recv,
@@ -504,16 +515,17 @@ impl super::Connection for MemConnection {
     }
 
     async fn accept_bi(&self) -> Result<Option<(Box<dyn SendFlow>, Box<dyn RecvFlow>)>> {
-        let mut rx = self.open_rx.lock().await;
+        let mut rx = self.bi_open_rx.lock().await;
         let next = tokio::select! {
             item = rx.recv() => item,
             _ = self.until_closed() => None,
         };
+        drop(rx);
         match next {
             Some(handoff) => {
                 let send = handoff
                     .send
-                    .ok_or_else(|| anyhow!("peer opened a unidirectional flow"))?;
+                    .ok_or_else(|| anyhow!("bidirectional flow lost send half"))?;
                 let send: Box<dyn SendFlow> = Box::new(send);
                 let recv: Box<dyn RecvFlow> = Box::new(handoff.recv);
                 Ok(Some((send, recv)))
@@ -525,7 +537,7 @@ impl super::Connection for MemConnection {
     async fn open_uni(&self) -> Result<Box<dyn SendFlow>> {
         let (mut mine_send, _mine_recv, _theirs_send, theirs_recv) = flow_pair();
         mine_send.pending = Some((
-            self.open_tx.clone(),
+            self.uni_open_tx.clone(),
             Box::new(MemFlowHandoff {
                 send: None,
                 recv: theirs_recv,
@@ -535,11 +547,12 @@ impl super::Connection for MemConnection {
     }
 
     async fn accept_uni(&self) -> Result<Option<Box<dyn RecvFlow>>> {
-        let mut rx = self.open_rx.lock().await;
+        let mut rx = self.uni_open_rx.lock().await;
         let next = tokio::select! {
             item = rx.recv() => item,
             _ = self.until_closed() => None,
         };
+        drop(rx);
         match next {
             Some(handoff) => {
                 let recv: Box<dyn RecvFlow> = Box::new(handoff.recv);

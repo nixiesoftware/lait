@@ -464,14 +464,9 @@ pub enum SignalOutcome {
 /// Send one signal on its own flow.
 ///
 /// **Every signal rides a bidirectional flow, whatever its response policy.**
-/// The obvious design is the one the plan asked for — one-way signals on
-/// `open_uni`, answerable ones on `open_bi` — and it does not work here. The
-/// Live plane accepts bidirectional flows only, because MemNet has a single
-/// handoff queue for both kinds and `accept_bi` errors when the next handoff is
-/// a uni flow, which the accept loop reads as end of connection. A one-way
-/// signal sent on a unidirectional flow is therefore a signal nothing on this
-/// plane will ever serve: it succeeds locally, reports `Accepted`, and is never
-/// received.
+/// Signals keep one flow shape regardless of response policy: the lane handler
+/// can answer a Ping on the same flow, while a one-way signal simply ignores
+/// the receive half. Uni streams on this connection belong to media Groups.
 ///
 /// So the response policy governs what it is actually about — whether an answer
 /// is read and a second deadline is spent — and not which flow is opened. A
