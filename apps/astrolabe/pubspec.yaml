@@ -13,16 +13,30 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # The design system, by path. It is ours: a gap in it is fixed in it rather
-  # than worked around here, which is the whole reason the interface moved.
+  # The design system. It is ours: a gap in it is fixed in it rather than worked
+  # around here, which is the whole reason the interface moved.
+  #
+  # By git, pinned to a commit, and not by path. A relative path out of this
+  # repository resolves only on a machine that happens to hold the sibling
+  # checkout, which meant this application could be analyzed, tested or built on
+  # exactly one machine — and that is why the widget suite had never run in CI
+  # and why the installer workflow would have failed the first time it ran.
+  #
+  # Pinned to a commit rather than a branch because a release has to be
+  # reproducible: `ref: main` would make two builds of the same lait commit
+  # different programs. Moving to a newer design system is an edit here, which
+  # is the point — it is visible in the diff and it is bisectable.
   covalence:
-    path: ../../../covalence
+    git:
+      url: https://gitlab.com/onnixi/mosaic_flutter.git
+      ref: 6292aa6866bdd3bae6478f2cb1e51b8079153770
 
   # The lighting system: widgets derive gradients and sheen from a scene of
-  # lights instead of hand-tuned stops. Proprietary (scrapsignal); a local
-  # checkout like covalence, so fixes land here first and push upstream.
+  # lights instead of hand-tuned stops.
   lit_ui:
-    path: ../../../lit-ui
+    git:
+      url: https://gitlab.com/onnixi/lit-ui.git
+      ref: 1dbadc0681411a6c73fe7d7a6f5ed17ec0187a09
 
   # The bridge. Pinned to the exact version the Rust side carries — a bridge
   # whose halves disagree is the defect the checked-in codegen exists to catch,
@@ -44,8 +58,13 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^5.0.0
   custom_lint: ^0.8.0
+  # Same repository as covalence, same pin: the analyzer tier and the design
+  # system it polices have to move together, and two refs would let them drift.
   covalence_lints:
-    path: ../../../covalence/packages/covalence_lints
+    git:
+      url: https://gitlab.com/onnixi/mosaic_flutter.git
+      path: packages/covalence_lints
+      ref: 6292aa6866bdd3bae6478f2cb1e51b8079153770
   freezed: ^3.2.3
   build_runner: ^2.15.1
 
