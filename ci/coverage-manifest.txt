@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1802
-pr-platform    1393
-nightly        1829
+pr             1825
+pr-platform    1416
+nightly        1852
 mutants        98
 
 [gates]
@@ -130,6 +130,7 @@ astrolabe sidecar::tests::the_sidecar_is_resolved_beside_the_running_executable
 astrolabe single_instance::tests::a_second_acquire_is_told_somebody_else_holds_it
 astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
+astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
 astrolabe::launch a_head_comes_up_and_mints_a_credential_worth_exactly_one_use
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
 astrolabe::packaging the_dmg_refuses_a_bundle_missing_either_half_of_the_pair
@@ -401,6 +402,11 @@ lait diagnose::tests::space_mismatch_is_the_first_blocker
 lait diagnose::tests::synced_member_offline_is_not_blocked
 lait diagnose::tests::unsynced_member_offline_blocks_on_peer
 lait diagnose::tests::view_round_trips_through_json
+lait display::compiler::tests::compilation_binds_assets_and_revision_to_the_assignment
+lait display::coordinator::tests::exact_source_pin_detects_contract_or_input_drift
+lait display::pairing::tests::approval_enrolls_only_after_receiver_proves_the_new_key
+lait display::store::tests::state_is_atomic_versioned_and_reopens
+lait display::tls::tests::tls_identity_is_stable_and_private
 lait host_client::tests::a_book_resolution_crosses_as_labels_not_cards
 lait host_client::tests::a_directory_selected_scope_cannot_address_a_sibling_orbit
 lait host_client::tests::a_not_found_stays_a_not_found_across_the_dto
@@ -457,6 +463,7 @@ lait orbits::router::tests::different_orbits_place_concurrently
 lait orbits::router::tests::failed_placement_leaves_orbit_vacant_for_retry
 lait orbits::router::tests::invalid_world_call_is_rejected_before_it_places_a_station
 lait orbits::router::tests::one_orbit_places_once_for_concurrent_callers
+lait orbits::router::tests::required_query_refuses_a_command_before_it_places_a_station
 lait orbits::router::tests::vacant_orbit_is_owned_in_process_and_shutdown_returns_it_to_vacancy
 lait orbits::tests::forget_removes_by_path_or_id_prefix
 lait orbits::tests::list_is_newest_first
@@ -699,6 +706,11 @@ lait-issues-app tests::every_public_tool_keeps_its_issues_prefix
 lait-issues-app tests::the_world_declares_a_display_name_distinct_from_its_mount
 lait-issues::it package_boundary::semantic_package_has_no_shell_or_process_dependency
 lait-issues::it package_boundary::the_implementation_id_is_pinned_and_moving_it_is_deliberate
+lait-signage contract::tests::programs_are_bounded_and_have_one_canonical_identity
+lait-signage world::tests::reviewed_implementation_is_stable_and_nonzero
+lait-signage-app display::tests::authored_slide_renders_to_a_real_png
+lait-signage-app protocol::tests::query_and_command_classification_is_product_owned
+lait-signage-app tests::package_registers_the_exact_signage_program_surface
 lait-workbench api::tests::contract_endpoint_is_authenticated_and_versioned
 lait-workbench api::tests::every_api_route_requires_the_loopback_credential
 lait-workbench api::tests::foreign_hosts_are_rejected_even_with_the_token
@@ -1013,18 +1025,26 @@ mechanics crypto::tests::a_bound_envelope_and_an_unbound_one_never_open_each_oth
 mechanics crypto::tests::a_bound_envelope_opens_only_under_the_context_it_was_sealed_for
 mechanics crypto::tests::a_bound_envelope_still_refuses_the_wrong_recipient
 mechanics crypto::tests::a_device_that_cannot_read_cannot_add_a_reader
+mechanics crypto::tests::a_fresh_envelope_is_hpke_and_not_the_construction_it_replaced
 mechanics crypto::tests::a_repeated_device_is_wrapped_once_and_the_order_is_stable
 mechanics crypto::tests::a_sealed_payload_is_unreadable_under_a_different_context
+mechanics crypto::tests::a_signature_forged_under_the_identity_key_does_not_verify
+mechanics crypto::tests::a_wrap_cannot_be_moved_onto_a_different_payload
 mechanics crypto::tests::adding_a_device_adds_an_unlock_path_and_re_encrypts_nothing
 mechanics crypto::tests::aead_roundtrip_and_wrong_key_fails
 mechanics crypto::tests::base58btc_matches_known_vectors
 mechanics crypto::tests::contexts_that_concatenate_alike_are_still_different_bindings
 mechanics crypto::tests::did_key_is_a_deterministic_ed25519_multibase
+mechanics crypto::tests::drawn_entropy_records_exhaustion_instead_of_serving_zeroes
 mechanics crypto::tests::every_device_in_the_set_reads_the_payload_and_no_other_does
 mechanics crypto::tests::every_frozen_v1_envelope_still_opens
-mechanics crypto::tests::mint_v1_golden_fixtures
+mechanics crypto::tests::honest_signatures_still_verify_strictly
+mechanics crypto::tests::opening_an_envelope_with_a_small_order_ephemeral_is_refused
+mechanics crypto::tests::readers_cannot_be_handed_two_different_data_keys
 mechanics crypto::tests::sealed_box_only_opens_for_recipient
+mechanics crypto::tests::sealing_to_a_small_order_key_is_refused_not_performed
 mechanics crypto::tests::seals_to_a_seed_derived_device_and_opens
+mechanics crypto::tests::the_ed25519_identity_is_bound_not_its_montgomery_image
 mechanics custody::tests::a_dpapi_only_package_is_not_portable
 mechanics custody::tests::a_package_needs_at_least_one_slot
 mechanics custody::tests::a_package_round_trips_through_its_wire_form
@@ -1852,6 +1872,8 @@ world-interface destination::tests::no_destination_configured_is_a_refusal_not_a
 world-interface destination::tests::nothing_is_ever_refused_outright
 world-interface destination::tests::traversal_becomes_a_file_name
 world-interface destination::tests::windows_devices_are_not_files_at_any_path
+world-interface display::tests::canonical_input_and_surface_ids_are_bounded
+world-interface display::tests::descriptor_digest_binds_semantics_but_not_title
 world-interface tests::a_live_hit_adds_only_a_presentation_field
 world-interface tests::a_package_without_a_decorator_keeps_decoded_json
 world-interface tests::a_reserved_collision_is_scoped_to_the_package_being_mounted
