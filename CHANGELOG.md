@@ -1,16 +1,78 @@
 # Changelog
 
-## Unreleased — one World per MCP session, Astrolabe authors the binding
+## v0.8.0 — the client ships, and identity travels with it
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
 > the installer. Existing `lait mcp` bindings that omit `$LAIT_WORLD` stay
 > valid while Issues is the sole hosted World. Bindings that still pin an
 > absolute `lait` path or `$LAIT_HOME` should be rewritten to `lait` off
 > PATH.
+>
+> This release changes the device-sealing construction to HPKE (RFC 9180).
+> Material sealed by an older build is readable by this one; material sealed by
+> this one is **not** readable by an older build. Update every device in a set
+> before relying on a seal minted here.
 
-An agent session speaks one World. The World designs that surface; Astrolabe
-writes the editor binding; `lait mcp` is the stdio adapter. Traffic does not
-go through Astrolabe.
+Astrolabe becomes a thing a person can install: a Flutter interface over a Rust
+core, built from one tagged tree so the client and its `lait` sidecar ship as a
+pair. Underneath it, identity grew the parts that let one person be reached at
+all — an address book, a signed relation plane, and a carrier for when they are
+offline.
+
+### Astrolabe is installable
+
+- One tag builds the client. The Windows NSIS installer, the macOS DMG and the
+  relocatable Linux bundle are built from the tag itself, and each job asserts
+  the staged `lait` reports the tagged version rather than trusting that the
+  pair was built together.
+- The drawing client is Flutter (`apps/astrolabe`) over a Rust core
+  (`tools/astrolabe`). The retired egui interface is gone.
+- The release feed is first-party and signed: channel pointers and manifests
+  are `{payload, signature}` envelopes verified against a pinned key, and the
+  pointer moves last, so a partially-published release is never pointed at.
+- A sidecar-managed install no longer self-updates. `Custody` names who owns the
+  binary, and an install owned by Astrolabe refuses to replace itself out from
+  under its supervisor.
+
+### Identity grew a way to be reached
+
+- **The address book** is a leaf crate and an identity-scoped daemon service. It
+  is the one namer; the alias design is deleted. Cards carry a picture, a name
+  and what a person holds, and card exchange stages suggestions — review is the
+  only way in.
+- **Kinship** (`mechanics::kinship`) is the Space-less relation plane: mutually
+  signed device links, and avowals that carry their audience *inside* the signed
+  preimage, so showing one out of tier is refused by inspecting the artifact
+  alone. An avowal confers nothing — there is no path from one to a grant,
+  because authority is evaluated at a causal position and a travelling artifact
+  has none. Device links are peerage: losing one device leaves the others
+  standing.
+- **Attested names** resolve relative to the reader. `Evidence::Asserted` names a
+  signing identity instead of a local row, and resolution answers with a ranked
+  set rather than a unique binding — two parties may hold one name and both are
+  correct, so there is no dispute path and nothing to squat.
+- **The Post** carries sealed correspondence for a recipient who is offline. It
+  holds no keys and mints no credentials: a fetch is a signature over a nonce it
+  issued and remembers once, which is what leaves a compromised carrier able to
+  withhold and unable to impersonate.
+
+### Sealing and signature verification
+
+- Device sealing moves to **HPKE (RFC 9180)**, DHKEM(X25519, HKDF-SHA256), for
+  the parts that are easy to get wrong and give no sign when they are:
+  non-contributory agreements are rejected, and there is a defined place to bind
+  context.
+- Ed25519 verification is **strict** everywhere, and small-order keys are
+  refused where a device key is read. Non-strict verification had let a
+  small-order key reach the space key.
+- A sealed envelope commits to its data key across every wrap, so one recipient
+  cannot be shown a different payload than another.
+
+### Live signage media
+
+- A display program can carry live media: HLS and CMAF packaging, elementary
+  stream conversion, and explicit discontinuities on a sequence or timeline gap.
+  Incomplete or replayed groups fail closed.
 
 ### The pin
 
