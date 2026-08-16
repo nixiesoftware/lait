@@ -796,3 +796,179 @@ fn handle_wire_discriminants_are_frozen() {
         assert_eq!(&back, handle, "the encoding round-trips");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Attested names: resolution relative to the reader
+//
+// The consensus half of naming was declared and never built — `Asserted` had no
+// constructor anywhere in the tree. These hold the clauses in the Substrate
+// Spec "Names are attested, and resolution is relative to the reader".
+// ---------------------------------------------------------------------------
+mod attested {
+    use mechanics::actor::device_from_seed;
+    use mechanics::kinship::{Audience, Avowal, Claim, Party, Standing};
+
+    use crate::{names_of, parties_called};
+
+    const SUBJECT: [u8; 32] = [61u8; 32];
+    const FRIEND: [u8; 32] = [62u8; 32];
+    const COLLEAGUE: [u8; 32] = [63u8; 32];
+    const OTHER_SUBJECT: [u8; 32] = [64u8; 32];
+    const READER: [u8; 32] = [65u8; 32];
+
+    fn subject() -> Party {
+        Party::Device(device_from_seed(&SUBJECT))
+    }
+
+    fn reader() -> Standing {
+        Standing {
+            device: Some(device_from_seed(&READER)),
+            ..Standing::default()
+        }
+    }
+
+    fn called(seed: &[u8; 32], about: Party, name: &str, audience: Audience, n: u8) -> Avowal {
+        Avowal::seal(
+            seed,
+            about,
+            Claim::Called(name.into()),
+            audience,
+            1,
+            [n; 16],
+        )
+        .expect("seal")
+    }
+
+    #[test]
+    fn a_self_claim_alone_resolves_and_ranks_lowest() {
+        // "An empty attestation graph returns the avowal alone, ranked lowest,
+        // and never an error implying the subject does not exist."
+        let avowals = vec![called(&SUBJECT, subject(), "omar", Audience::Public, 1)];
+        let devices = vec![device_from_seed(&SUBJECT)];
+
+        let names = names_of(&subject(), &avowals, &reader(), &devices);
+
+        assert_eq!(names.len(), 1);
+        let only = names.first().expect("one name");
+        assert_eq!(only.name, "omar");
+        assert!(only.declared, "the subject said so");
+        assert_eq!(only.attestations, 0, "and nobody else has");
+        assert_eq!(
+            only.weight, 0,
+            "a self-signature is worth what a self-signature is worth"
+        );
+    }
+
+    #[test]
+    fn an_attestation_from_a_tighter_tier_outranks_a_wider_one() {
+        let devices = vec![device_from_seed(&SUBJECT)];
+        let avowals = vec![
+            // Published to nobody in particular.
+            called(&COLLEAGUE, subject(), "o", Audience::Public, 2),
+            // Said to one counterparty, who can hold them to it.
+            called(
+                &FRIEND,
+                subject(),
+                "omar",
+                Audience::Correspondent(Party::Device(device_from_seed(&READER))),
+                3,
+            ),
+        ];
+
+        let names = names_of(&subject(), &avowals, &reader(), &devices);
+
+        assert_eq!(names.len(), 2);
+        assert_eq!(
+            names.first().map(|n| n.name.as_str()),
+            Some("omar"),
+            "the tighter-tier attestation ranks first: {names:?}"
+        );
+    }
+
+    #[test]
+    fn two_parties_may_hold_one_name_and_both_resolve() {
+        // Collisions are the normal case. No dispute path is invoked, nothing is
+        // refused, and neither claimant is wrong.
+        let other = Party::Device(device_from_seed(&OTHER_SUBJECT));
+        let avowals = vec![
+            called(&SUBJECT, subject(), "omar", Audience::Public, 4),
+            called(&OTHER_SUBJECT, other.clone(), "omar", Audience::Public, 5),
+            // One of them is vouched for by somebody the reader hears from.
+            called(
+                &FRIEND,
+                other.clone(),
+                "omar",
+                Audience::Correspondent(Party::Device(device_from_seed(&READER))),
+                6,
+            ),
+        ];
+
+        let holders = parties_called("omar", &avowals, &reader());
+
+        assert_eq!(holders.len(), 2, "both resolve: {holders:?}");
+        assert_eq!(
+            holders.first().map(|(party, _)| party),
+            Some(&other),
+            "ranked, and the better-attested one leads"
+        );
+    }
+
+    #[test]
+    fn an_avowal_out_of_tier_is_skipped_and_that_is_not_the_same_as_no_name() {
+        // A well-signed name the reader may not read must not be counted — and
+        // must not be reported as absence either. The caller sees an empty list
+        // only for "no name I may read", which is a different fact from "no
+        // such subject" and the docs say so.
+        let devices = vec![device_from_seed(&SUBJECT)];
+        let elsewhere = Party::Device(device_from_seed(&COLLEAGUE));
+        let avowals = vec![called(
+            &FRIEND,
+            subject(),
+            "omar",
+            Audience::Correspondent(elsewhere),
+            7,
+        )];
+
+        assert!(
+            names_of(&subject(), &avowals, &reader(), &devices).is_empty(),
+            "not addressed to this reader, so not counted"
+        );
+
+        // The very same artifact, read by the party it was addressed to.
+        let intended = Standing {
+            device: Some(device_from_seed(&COLLEAGUE)),
+            ..Standing::default()
+        };
+        assert_eq!(
+            names_of(&subject(), &avowals, &intended, &devices).len(),
+            1,
+            "the audience reads it"
+        );
+    }
+
+    #[test]
+    fn a_forged_attestation_is_skipped_rather_than_ranked_low() {
+        let devices = vec![device_from_seed(&SUBJECT)];
+        let mut forged = called(&FRIEND, subject(), "omar", Audience::Public, 8);
+        forged.claim = Claim::Called("someone-else".into());
+
+        assert!(
+            names_of(&subject(), &[forged], &reader(), &devices).is_empty(),
+            "an edited avowal does not verify, so it carries no weight at all"
+        );
+    }
+
+    #[test]
+    fn resolution_needs_no_address_book_at_all() {
+        // The Spec clause: "an attestation verifies without the address book
+        // present". This whole module takes avowals and a reader — no Book, no
+        // Store, no Card. That it compiles and runs is the assertion; this test
+        // exists so the property is named somewhere a reader will find it.
+        let devices = vec![device_from_seed(&SUBJECT)];
+        let avowals = vec![called(&FRIEND, subject(), "omar", Audience::Public, 9)];
+
+        let names = names_of(&subject(), &avowals, &reader(), &devices);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names.first().map(|n| n.attestations), Some(1));
+    }
+}

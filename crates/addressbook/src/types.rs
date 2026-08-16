@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use mechanics::ids::{ActorId, DeviceId, SpaceId};
+use mechanics::kinship::Party;
 
 use crate::ids::{CardId, PathHash};
 
@@ -46,10 +47,20 @@ pub struct Field<T> {
 }
 
 /// How a handle or group link was asserted. Never `Derived`.
+///
+/// `Declared` is the subject's own claim, worth exactly what a self-claim is
+/// worth. `Asserted` is somebody else's, and it is the half that carries weight.
+///
+/// `by` names a **signing identity**, never a local row. The variant previously
+/// named a `CardId`, which cannot travel: a recipient has no such row, so an
+/// attestation referring to one is unverifiable the moment it leaves this
+/// machine. The signed artifact itself lives on the kinship plane
+/// ([`mechanics::kinship::Avowal`]); what a Card holds is the reference, and a
+/// Card still asserts nothing on its own authority.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Evidence {
     Declared,
-    Asserted { from: CardId },
+    Asserted { by: Party },
 }
 
 /// Unique per add so an unlink then a re-link is a new set member.
