@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.8.1 — the installer reaches every desktop
+
+> **Upgrading:** re-run the Astrolabe installer or replace the Linux bundle.
+> This release does not change the protocol, wire format, or stored-data format.
+
+This corrective release completes the three-platform Astrolabe package promised
+by v0.8.0 and keeps ordinary Rust development builds lean without starving the
+full-HD Signage rendering path.
+
+### Astrolabe packaging completes
+
+- Linux now has the native Flutter runner, CMake host, and Rust build wiring
+  needed to produce the relocatable Astrolabe bundle from the tagged tree.
+- The Windows packaging job resolves `makensis.exe` explicitly after Chocolatey
+  installs NSIS. It no longer relies on a running PowerShell process noticing a
+  machine-level PATH update made after that process started.
+
+### Development builds stay lean and usable
+
+- The blanket level-3 optimization of every development dependency is replaced
+  by named overrides for the measured curve25519/FROST and Signage PNG hot
+  paths. Proc macros and build dependencies return to fast development builds,
+  while threshold ceremonies and first Signage health remain within their real
+  runtime budgets.
+- The iOS UniFFI runtime no longer enables the generator's Cargo-metadata graph
+  during ordinary workspace builds; the explicit bindgen tool continues to own
+  code generation.
+
 ## v0.8.0 — the client ships, and identity travels with it
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
