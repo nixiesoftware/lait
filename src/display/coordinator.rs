@@ -6,9 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use display_protocol::ids::{DisplayAssetId, DisplayDeviceId};
+use display_protocol::ids::{
+    DisplayAssetId, DisplayAssignmentId, DisplayDeviceId, DisplayProgramId, DisplayProgramItemId,
+    ProgramRevision,
+};
 use display_protocol::program::{DisplayProgram, DisplayScene, DisplaySyncMode};
-use display_protocol::receiver::{validate_capabilities, ReceiverCapabilities, SyncClass};
+use display_protocol::receiver::{
+    validate_capabilities, PlaybackTier, ReceiverCapabilities, SyncClass,
+};
 use replica::body::WorldId;
 use runtime::world::call::{Call, Reply};
 use serde_json::Value;
@@ -27,6 +32,12 @@ use super::{
     AssignmentRecord, CompiledProgram, CoordinatorState, CoordinatorStore, PlaybackAlignment,
     ProgramCompiler,
 };
+use super::{LiveMediaHub, LiveTransport};
+
+const MAX_LIVE_TICKETS: usize = 256;
+const MSE_TICKET_LIFETIME_MS: u64 = 86_400_000;
+const HLS_TICKET_LIFETIME_MS: u64 = 86_400_000;
+const LIVE_SOURCE_WAIT: Duration = Duration::from_secs(2);
 
 /// Product-neutral, self-hosted display coordination.
 ///
@@ -41,6 +52,34 @@ pub struct DisplayCoordinator {
     local_root: PathBuf,
     compiled: Mutex<BTreeMap<String, Arc<CompiledProgram>>>,
     assignment_changes: broadcast::Sender<()>,
+    live: LiveMediaHub,
+    live_tickets: Mutex<BTreeMap<String, LiveTicket>>,
+}
+
+#[derive(Clone)]
+struct LiveTicket {
+    device: DisplayDeviceId,
+    assignment: DisplayAssignmentId,
+    program: DisplayProgramId,
+    revision: ProgramRevision,
+    current_item: DisplayProgramItemId,
+    manifest: DisplayAssetId,
+    orbit: String,
+    resource: String,
+    transport: LiveTransport,
+    expires_at_unix_ms: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct AuthorizedLiveStream {
+    pub orbit: String,
+    pub resource: String,
+    ticket: LiveTicket,
+}
+
+pub(crate) struct LiveTicketGrant {
+    pub token: String,
+    pub expires_at_unix_ms: u64,
 }
 
 /// Receivers a long poll arms before its first compile, closing the race where
@@ -67,6 +106,8 @@ impl DisplayCoordinator {
             local_root,
             compiled: Mutex::new(BTreeMap::new()),
             assignment_changes,
+            live: LiveMediaHub::default(),
+            live_tickets: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -197,6 +238,7 @@ impl DisplayCoordinator {
             assignment.freshness,
             projection,
             alignment.as_ref(),
+            capabilities.playback.tier,
         )?);
         validate_receiver_fit(compiled.as_ref(), capabilities)?;
         self.compiled
@@ -290,6 +332,247 @@ impl DisplayCoordinator {
             .and_then(|compiled| compiled.asset(asset))
             .map(<[u8]>::to_vec))
     }
+
+    pub fn current_live_resource(
+        &self,
+        device: &DisplayDeviceId,
+        manifest: &DisplayAssetId,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .compiled
+            .lock()
+            .map_err(|_| anyhow!("display program cache lock was poisoned"))?
+            .get(device.as_str())
+            .and_then(|compiled| compiled.live_resource(manifest))
+            .map(str::to_string))
+    }
+
+    pub(crate) async fn mint_live_ticket(
+        &self,
+        device: &DisplayDeviceId,
+        current_item: &DisplayProgramItemId,
+        manifest: &DisplayAssetId,
+        transport: LiveTransport,
+        now_unix_ms: u64,
+    ) -> Result<LiveTicketGrant> {
+        let assignment = self
+            .active_assignment_for_device(device, now_unix_ms)?
+            .ok_or_else(|| anyhow!("display device has no active assignment"))?;
+        let compiled = self
+            .compiled
+            .lock()
+            .map_err(|_| anyhow!("display program cache lock was poisoned"))?
+            .get(device.as_str())
+            .cloned()
+            .ok_or_else(|| anyhow!("display program is not compiled"))?;
+        let item = compiled
+            .program
+            .items
+            .iter()
+            .find(|item| &item.id == current_item)
+            .ok_or_else(|| anyhow!("live ticket item is not in the current program"))?;
+        let scene_transport = match &item.scene {
+            DisplayScene::Media {
+                manifest: scene_manifest,
+                protocol,
+                live: true,
+            } if &scene_manifest.id == manifest => match protocol {
+                display_protocol::program::MediaProtocol::Mse => LiveTransport::Mse,
+                display_protocol::program::MediaProtocol::Hls => LiveTransport::Hls,
+                display_protocol::program::MediaProtocol::Dash => {
+                    return Err(anyhow!("live DASH fanout is not supported"))
+                }
+            },
+            _ => return Err(anyhow!("manifest is not the current live media item")),
+        };
+        if scene_transport != transport {
+            return Err(anyhow!("live ticket transport does not match the program"));
+        }
+        match transport {
+            LiveTransport::Mse
+                if !matches!(
+                    self.device_playback_tier(device)?,
+                    PlaybackTier::MseLive | PlaybackTier::NativeFull
+                ) =>
+            {
+                return Err(anyhow!("receiver did not declare MSE live playback"))
+            }
+            LiveTransport::Hls
+                if !matches!(
+                    self.device_playback_tier(device)?,
+                    PlaybackTier::NativeHls | PlaybackTier::NativeFull
+                ) =>
+            {
+                return Err(anyhow!("receiver did not declare native HLS playback"))
+            }
+            _ => {}
+        }
+        let resource = compiled
+            .live_resource(manifest)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("live manifest has no coordinator resource"))?;
+        let resolved = self
+            .router
+            .resolve(&assignment.orbit)
+            .context("resolve live display Orbit")?;
+        if resolved.address.space.as_str() != assignment.space {
+            return Err(anyhow!("live assignment Space changed"));
+        }
+        self.live
+            .ensure_orbit(self.router.clone(), resolved.address)
+            .await?;
+        let orbit = super::live::assignment_orbit_key(&assignment.space, &assignment.orbit);
+        let ready = async {
+            while !self.live.has_resource(&orbit, &resource, transport) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        tokio::time::timeout(LIVE_SOURCE_WAIT, ready)
+            .await
+            .context("live media source did not publish its catalog")?;
+        let lifetime = match transport {
+            LiveTransport::Mse => MSE_TICKET_LIFETIME_MS,
+            LiveTransport::Hls => HLS_TICKET_LIFETIME_MS,
+        };
+        let expires_at_unix_ms = now_unix_ms
+            .checked_add(lifetime)
+            .ok_or_else(|| anyhow!("live ticket expiry overflowed"))?;
+        let token = random_token()?;
+        let mut tickets = self
+            .live_tickets
+            .lock()
+            .map_err(|_| anyhow!("display live ticket lock was poisoned"))?;
+        tickets.retain(|_, ticket| {
+            if ticket.expires_at_unix_ms <= now_unix_ms {
+                return false;
+            }
+            if &ticket.device != device {
+                return true;
+            }
+            ticket.assignment == compiled.program.assignment
+                && ticket.program == compiled.program.program
+                && ticket.revision == compiled.program.revision
+                && (ticket.current_item != *current_item || ticket.transport != transport)
+        });
+        if tickets.len() >= MAX_LIVE_TICKETS {
+            return Err(anyhow!("display live ticket bound reached"));
+        }
+        tickets.insert(
+            token.clone(),
+            LiveTicket {
+                device: device.clone(),
+                assignment: compiled.program.assignment.clone(),
+                program: compiled.program.program.clone(),
+                revision: compiled.program.revision.clone(),
+                current_item: current_item.clone(),
+                manifest: manifest.clone(),
+                orbit,
+                resource,
+                transport,
+                expires_at_unix_ms,
+            },
+        );
+        Ok(LiveTicketGrant {
+            token,
+            expires_at_unix_ms,
+        })
+    }
+
+    pub(crate) fn authorize_live_ticket(
+        &self,
+        token: &str,
+        transport: LiveTransport,
+        consume: bool,
+        now_unix_ms: u64,
+    ) -> Result<AuthorizedLiveStream> {
+        let ticket = {
+            let mut tickets = self
+                .live_tickets
+                .lock()
+                .map_err(|_| anyhow!("display live ticket lock was poisoned"))?;
+            tickets.retain(|_, ticket| ticket.expires_at_unix_ms > now_unix_ms);
+            let ticket = tickets
+                .get(token)
+                .filter(|ticket| ticket.transport == transport)
+                .cloned()
+                .ok_or_else(|| anyhow!("live ticket is invalid or expired"))?;
+            if consume {
+                tickets.remove(token);
+            }
+            ticket
+        };
+        self.validate_live_stream(&ticket, now_unix_ms)?;
+        Ok(AuthorizedLiveStream {
+            orbit: ticket.orbit.clone(),
+            resource: ticket.resource.clone(),
+            ticket,
+        })
+    }
+
+    pub(crate) fn live_stream_still_authorized(
+        &self,
+        stream: &AuthorizedLiveStream,
+        now_unix_ms: u64,
+    ) -> bool {
+        self.validate_live_stream_assignment(&stream.ticket, now_unix_ms)
+            .is_ok()
+    }
+
+    pub(crate) fn live_hub(&self) -> &LiveMediaHub {
+        &self.live
+    }
+
+    fn validate_live_stream(&self, ticket: &LiveTicket, now_unix_ms: u64) -> Result<()> {
+        if now_unix_ms >= ticket.expires_at_unix_ms {
+            return Err(anyhow!("live ticket expired"));
+        }
+        self.validate_live_stream_assignment(ticket, now_unix_ms)
+    }
+
+    fn validate_live_stream_assignment(&self, ticket: &LiveTicket, now_unix_ms: u64) -> Result<()> {
+        let assignment = self
+            .active_assignment_for_device(&ticket.device, now_unix_ms)?
+            .filter(|assignment| {
+                assignment.id == ticket.assignment && assignment.program == ticket.program
+            })
+            .ok_or_else(|| anyhow!("live assignment was revoked or replaced"))?;
+        if super::live::assignment_orbit_key(&assignment.space, &assignment.orbit) != ticket.orbit {
+            return Err(anyhow!("live assignment Orbit changed"));
+        }
+        let compiled = self
+            .compiled
+            .lock()
+            .map_err(|_| anyhow!("display program cache lock was poisoned"))?
+            .get(ticket.device.as_str())
+            .cloned()
+            .ok_or_else(|| anyhow!("live program is unavailable"))?;
+        if compiled.program.revision != ticket.revision
+            || !compiled.program.items.iter().any(|item| {
+                item.id == ticket.current_item
+                    && matches!(
+                        &item.scene,
+                        DisplayScene::Media { manifest, live: true, .. }
+                            if manifest.id == ticket.manifest
+                    )
+            })
+        {
+            return Err(anyhow!("live program was revised"));
+        }
+        Ok(())
+    }
+
+    fn device_playback_tier(&self, device: &DisplayDeviceId) -> Result<PlaybackTier> {
+        self.store
+            .device(device)?
+            .map(|record| record.capabilities.playback.tier)
+            .ok_or_else(|| anyhow!("display device is not enrolled"))
+    }
+}
+
+fn random_token() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).context("mint display live ticket")?;
+    Ok(data_encoding::HEXLOWER.encode(&bytes))
 }
 
 fn playback_alignment(

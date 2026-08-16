@@ -161,6 +161,14 @@ bytes = "1"
 data-encoding = "2.6"
 blake3 = "1"
 sha2 = "0.10"
+# The display coordinator transmuxes lait-live access units into the closed
+# CMAF receiver edge. This is a box codec only: capture, codec work, and the
+# peer wire remain behind their existing seams.
+mp4-atom = "0.15"
+# Roku and native Apple receivers require classic HLS. Generation three HLS
+# uses MPEG-TS segments, so the coordinator performs a bounded pure-Rust
+# PAT/PMT/PES mux rather than mislabelling CMAF fragments as HLS v3.
+libmpegts = "0.3.8"
 
 # cross-platform local IPC for the daemon control channel: a Unix-domain socket
 # on unix, a named pipe on Windows — same API, so the daemon and its heads are portable.
@@ -317,6 +325,17 @@ tower = { version = "0.5", features = ["util"] }
 # cargo-dist's layout is what was wrong in v0.4.8/v0.5.0.)
 # `zip::write` is used by the updater's own extraction tests to build
 # archive fixtures; it ships in the same crate feature set.
+
+# Build-space policy. Cargo does not garbage-collect workspace `target/`
+# artifacts, and the default dev profile combines full debug information with
+# an incremental cache for every workspace/path crate. In this workspace that
+# multiplies across all-target/all-feature verification and has grown `target/`
+# into hundreds of GiB. Keep file-and-line backtraces, assertions, and overflow
+# checks, but do not retain the two high-volume caches. `test` inherits `dev`,
+# so this covers ordinary builds, checks, Clippy, and tests in one place.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
 
 # The profile that 'dist' will build with
 # Tests build with the `test` profile, which inherits `dev` — i.e. unoptimized.

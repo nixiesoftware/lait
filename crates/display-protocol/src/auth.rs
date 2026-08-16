@@ -52,6 +52,7 @@ pub enum RequestRoute {
     ProgramSnapshot,
     ProgramChanges,
     Asset,
+    LiveTicket,
     Health,
 }
 
@@ -62,6 +63,7 @@ impl RequestRoute {
             Self::ProgramSnapshot => "program_snapshot",
             Self::ProgramChanges => "program_changes",
             Self::Asset => "asset",
+            Self::LiveTicket => "live_ticket",
             Self::Health => "health",
         }
     }
@@ -72,6 +74,7 @@ impl RequestRoute {
             Self::ProgramSnapshot => "/head/v1/program",
             Self::ProgramChanges => "/head/v1/program/changes",
             Self::Asset => "/head/v1/assets/{opaque_asset}",
+            Self::LiveTicket => "/head/v1/live/tickets",
             Self::Health => "/head/v1/health",
         }
     }
@@ -144,6 +147,17 @@ fn validate_context(context: &RequestContext<'_>) -> Result<(), Refusal> {
                 && context.wait_ms.is_none()
                 && context.asset.is_some()
                 && context.range.is_none_or(|range| range.length > 0)
+        }
+        RequestRoute::LiveTicket => {
+            context.method == RequestMethod::Post
+                && context.assignment.is_some()
+                && context.program.is_some()
+                && context.revision.is_some()
+                && context.current_item.is_some()
+                && context.elapsed_ms.is_some()
+                && context.wait_ms.is_none()
+                && context.asset.is_some()
+                && context.range.is_none()
         }
         RequestRoute::Health => {
             context.method == RequestMethod::Post

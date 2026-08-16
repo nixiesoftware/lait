@@ -182,14 +182,22 @@ enum DisplayProtocolV1 {
                 guard let asset = item.scene.asset else { throw refusal("invalid_shape", "frame asset") }
                 try transcript.text("frame")
                 try encodeAsset(asset, into: &transcript)
+            case "media":
+                guard let manifest = item.scene.manifest,
+                      item.scene.protocol == "hls", item.scene.live == true,
+                      manifest.mediaType == "hls_manifest"
+                else { throw refusal("invalid_shape", "live HLS scene") }
+                try transcript.text("media")
+                try encodeAsset(manifest, into: &transcript)
+                try transcript.text("hls")
+                try transcript.boolean(true)
             case "blank":
                 guard let reason = item.scene.reason,
                       ["unassigned", "host_unavailable", "source_unavailable", "unsupported", "revoked", "program_ended"].contains(reason)
                 else { throw refusal("invalid_shape", "blank reason") }
                 try transcript.text("blank")
                 try transcript.text(reason)
-            default:
-                throw refusal("unsupported", "tvOS frame receiver does not accept media scenes")
+            default: throw refusal("unsupported", "tvOS scene")
             }
             if let summary = item.spokenSummary {
                 guard !summary.isEmpty, Data(summary.utf8).count <= 1024 else { throw refusal("bound_exceeded", "spoken summary") }
@@ -222,16 +230,22 @@ enum DisplayProtocolV1 {
 
     private static func encodeAsset(_ asset: DisplayAsset, into transcript: inout Transcript) throws {
         guard isHex(asset.id, count: 64), isHex(asset.sha256, count: 64),
-              ["image_jpeg", "image_png", "image_webp"].contains(asset.mediaType),
-              (1...16_777_216).contains(asset.encodedLen),
-              let width = asset.width, let height = asset.height,
-              (1...4096).contains(width), (1...2160).contains(height), width * height <= 8_847_360
-        else { throw refusal("invalid_shape", "frame asset") }
+              (1...16_777_216).contains(asset.encodedLen)
+        else { throw refusal("invalid_shape", "asset") }
+        if ["image_jpeg", "image_png", "image_webp"].contains(asset.mediaType) {
+            guard let width = asset.width, let height = asset.height,
+                  (1...4096).contains(width), (1...2160).contains(height), width * height <= 8_847_360
+            else { throw refusal("invalid_shape", "frame asset") }
+        } else if asset.mediaType == "hls_manifest" {
+            guard asset.width == nil, asset.height == nil else { throw refusal("invalid_shape", "HLS manifest") }
+        } else {
+            throw refusal("unsupported", "asset media type")
+        }
         try transcript.text(asset.mediaType)
         try transcript.u32(asset.encodedLen)
         try transcript.text(asset.sha256)
-        try transcript.optionalU32(width)
-        try transcript.optionalU32(height)
+        try transcript.optionalU32(asset.width)
+        try transcript.optionalU32(asset.height)
     }
 
     static func isHex(_ value: String?, count: Int) -> Bool {

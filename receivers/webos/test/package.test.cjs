@@ -59,9 +59,19 @@ test('the hosted receiver contains production pairing and assigned-frame states'
   assert.match(html, /Compare these words in Astrolabe/);
   assert.match(html, /Ready for an assignment/);
   assert.match(html, /program-frame/);
+  assert.match(html, /program-media/);
   assert.match(html, /type="module" src="app\.mjs"/);
   assert.doesNotMatch(html, /ASTR-DEMO|Demo program|Preview only/);
   assert.equal(fs.existsSync(hostedDir), true);
+});
+
+test('the hosted receiver uses granted MSE live media', () => {
+  const source = `${read('hosted/index.html')}\n${read('hosted/app.mjs')}\n${read('hosted/runtime/client.mjs')}`;
+  assert.match(source, /tier: mseCapable \? "mse_live"/);
+  assert.match(source, /\/head\/v1\/live\/tickets/);
+  assert.match(source, /connect-src https:\/\/nixiesoftware\.com wss:\/\/nixiesoftware\.com/);
+  assert.match(source, /new MediaSource\(\)/);
+  assert.match(source, /new WebSocket\(/);
 });
 
 test('the receiver implements the closed authenticated protocol without a product route', () => {

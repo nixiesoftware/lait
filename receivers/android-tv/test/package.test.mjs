@@ -53,3 +53,17 @@ test("application runtime declares the production Android TV capability", async 
   assert.equal(bootstrap.certificate_pem, null);
   assert.doesNotMatch(source, /ASTR-DEMO|Demo program|Preview only/);
 });
+
+test("Android TV uses the granted MSE decoder path", async () => {
+  const app = await read("app/src/main/assets/app.mjs");
+  const runtime = await read("app/src/main/assets/runtime/client.mjs");
+  const transport = await read("app/src/main/java/com/nixiesoftware/astrolabe/NativeTransportBridge.java");
+  const html = await read("app/src/main/assets/index.html");
+  assert.match(app, /tier: mseCapable \? "mse_live"/);
+  assert.match(app, /bootstrap\.trust\?\.kind === "web_pki_origin"/);
+  assert.match(runtime, /\/head\/v1\/live\/tickets/);
+  assert.match(runtime, /new MediaSource\(\)/);
+  assert.match(transport, /"\/head\/v1\/live\/tickets"\.equals\(path\)/);
+  assert.match(html, /connect-src wss:\/\/nixiesoftware\.com/);
+  assert.match(html, /program-media/);
+});

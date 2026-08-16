@@ -57,6 +57,10 @@ function AstrolabeTransfer(path as string, method as string, body as string, hea
                 m.credential = invalid
                 return invalid
             end if
+            if m.credential.mode = "paired" and Left(m.top.command, 13) = "media_failed:"
+                transfer.AsyncCancel()
+                return invalid
+            end if
         end if
         if event <> invalid and Type(event) = "roUrlEvent" and event.GetSourceIdentity() = transfer.GetIdentity()
             result = { status: event.GetResponseCode(), event: event, body: "" }
@@ -106,11 +110,11 @@ function AstrolabeCapabilities() as object
             audio_description: false
         },
         playback: {
-            tier: "frame",
-            sync_class: "boundary",
+            tier: "native_hls",
+            sync_class: "none",
             rate_control_probed: false,
-            latency_class: "snapshot",
-            health_granularity: "full"
+            latency_class: "broadcast",
+            health_granularity: "coarse"
         }
     }
 end function
@@ -271,6 +275,43 @@ function AstrolabeAuthorizedAsset(asset as object, program as object) as dynamic
     return { uri: finalPath, width: asset.width, height: asset.height, bytes: asset.encoded_len }
 end function
 
+function AstrolabeAuthorizedLive(item as object, program as object) as dynamic
+    manifest = item.scene.manifest
+    response = AstrolabeAuthorizedJson("live_ticket", "POST", "/head/v1/live/tickets", { transport: "hls" }, {
+        assignment: program.assignment,
+        program: program.program,
+        revision: program.revision,
+        currentItem: item.id,
+        elapsedMs: 0,
+        asset: manifest.id
+    })
+    if response = invalid or response.status <> 200 or response.json = invalid then return invalid
+    ticket = response.json
+    if not AstrolabeExactFields(ticket, ["protocol_major", "transport", "endpoint", "expires_at_unix_ms"]) then return invalid
+    if ticket.protocol_major <> 1 or ticket.transport <> "hls" then return invalid
+    if not AstrolabeIntegerIn(ticket.expires_at_unix_ms, 1, 9007199254740991) then return invalid
+    matcher = CreateObject("roRegex", "^/head/v1/live/[0-9a-f]{64}/master[.]m3u8$", "")
+    if not AstrolabeIsString(ticket.endpoint) or not matcher.IsMatch(ticket.endpoint) then return invalid
+    return { uri: m.origin + ticket.endpoint, bytes: manifest.encoded_len, live: true }
+end function
+
+function AstrolabeRefreshLive() as boolean
+    if m.program = invalid then return false
+    playback = AstrolabeCurrentPlayback()
+    item = m.program.items[playback.currentIndex]
+    if item.scene.kind <> "media" then return false
+    failureCommand = m.top.command
+    m.top.command = ""
+    entry = AstrolabeAuthorizedLive(item, m.program)
+    if entry = invalid
+        m.top.command = failureCommand
+        return false
+    end if
+    m.stage[item.scene.manifest.id] = entry
+    AstrolabeRenderCurrent()
+    return true
+end function
+
 function AstrolabeMediaType(kind as string) as string
     if kind = "image_png" then return "image/png"
     if kind = "image_jpeg" then return "image/jpeg"
@@ -428,6 +469,12 @@ function AstrolabeStageProgram(program as object) as dynamic
             entry = AstrolabeAuthorizedAsset(item.scene.asset, program)
             if entry = invalid then return invalid
             stage[item.scene.asset.id] = entry
+        else if item.scene.kind = "media" and not stage.DoesExist(item.scene.manifest.id)
+            stagedBytes = stagedBytes + item.scene.manifest.encoded_len
+            if stagedBytes > 50331648 then return invalid
+            entry = AstrolabeAuthorizedLive(item, program)
+            if entry = invalid then return invalid
+            stage[item.scene.manifest.id] = entry
         end if
     end for
     return stage
@@ -437,7 +484,7 @@ sub AstrolabeRetireStage(stage as dynamic)
     if stage = invalid then return
     filesystem = CreateObject("roFileSystem")
     for each id in stage
-        filesystem.Delete(stage[id].uri)
+        if Left(stage[id].uri, 5) = "tmp:/" then filesystem.Delete(stage[id].uri)
     end for
 end sub
 
@@ -495,6 +542,15 @@ sub AstrolabeRenderCurrent()
             uri: entry.uri,
             expectedWidth: entry.width,
             expectedHeight: entry.height,
+            spokenSummary: item.spoken_summary,
+            source: source,
+            stale: stale
+        })
+    else if item.scene.kind = "media"
+        entry = m.stage[item.scene.manifest.id]
+        AstrolabePublish({
+            kind: "media",
+            uri: entry.uri,
             spokenSummary: item.spoken_summary,
             source: source,
             stale: stale
@@ -604,7 +660,7 @@ sub AstrolabeReportHealth()
         stagedBytes = stagedBytes + m.stage[id].bytes
     end for
     playbackState = "blank"
-    if item.scene.kind = "frame" then playbackState = "displaying"
+    if item.scene.kind = "frame" or item.scene.kind = "media" then playbackState = "displaying"
     response = AstrolabeAuthorizedJson("health", "POST", "/head/v1/health", {
         protocol_major: 1,
         platform: "roku",
@@ -655,6 +711,11 @@ sub AstrolabeProgramLoop()
         if capabilityBackoff > 30000 then capabilityBackoff = 30000
     end while
     while m.credential <> invalid and m.credential.mode = "paired"
+        if Left(m.top.command, 13) = "media_failed:"
+            if AstrolabeRefreshLive()
+                continue while
+            end if
+        end if
         if m.program = invalid
             response = AstrolabeAuthorizedJson("program_snapshot", "GET", "/head/v1/program", invalid)
         else

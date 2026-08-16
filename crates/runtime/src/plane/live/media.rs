@@ -29,6 +29,7 @@ use tokio::time::Instant;
 use mechanics::station::Key;
 
 use crate::plane::stream_kind;
+use crate::poison::LockRecovering;
 
 /// This generation of the lait-owned media message vocabulary.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -1827,6 +1828,12 @@ impl Session {
         self.enabled
     }
 
+    /// Whether both sides have completed generation-one media setup.
+    pub fn is_ready(&self) -> bool {
+        let state = self.lock_state();
+        state.sent_setup.is_some() && state.received_setup.is_some()
+    }
+
     /// Current transport evidence for encoder adaptation. `Unknown` is a real
     /// answer and should select the conservative bitrate ladder.
     pub fn quality(&self) -> comms::PathQuality {
@@ -2080,6 +2087,8 @@ pub struct Event {
 
 #[derive(Debug, Clone)]
 pub enum EventBody {
+    Connected,
+    Disconnected,
     Control(Control),
     Group(Arc<ReceivedGroup>),
     Fetch(FetchResponder),
@@ -2089,12 +2098,14 @@ pub enum EventBody {
 #[derive(Clone)]
 pub struct Inbox {
     events: tokio::sync::broadcast::Sender<Event>,
+    active: Arc<std::sync::Mutex<std::collections::BTreeMap<(Key, [u8; 16]), Session>>>,
 }
 
 impl Inbox {
     pub fn new() -> Self {
         Self {
             events: tokio::sync::broadcast::channel(EVENT_QUEUE).0,
+            active: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -2102,8 +2113,59 @@ impl Inbox {
         self.events.subscribe()
     }
 
+    /// Subscribe without missing sessions that completed setup before this
+    /// consumer existed.
+    ///
+    /// Registration and this snapshot share one short lock. A session is
+    /// therefore either in `active` or delivered as a later `Connected` event;
+    /// it cannot fall into the gap between the two operations.
+    pub fn subscribe_with_sessions(
+        &self,
+    ) -> (Vec<Session>, tokio::sync::broadcast::Receiver<Event>) {
+        let active = self.active.lock_recovering();
+        let sessions = active.values().cloned().collect();
+        let events = self.events.subscribe();
+        (sessions, events)
+    }
+
+    pub(crate) fn register(&self, session: Session) -> SessionRegistration {
+        let key = (session.peer().clone(), session.connection_id());
+        let mut active = self.active.lock_recovering();
+        active.insert(key.clone(), session.clone());
+        let _ = self.events.send(Event {
+            peer: key.0.clone(),
+            connection_id: key.1,
+            session,
+            body: EventBody::Connected,
+        });
+        SessionRegistration {
+            inbox: self.clone(),
+            key,
+        }
+    }
+
     pub(crate) fn publish(&self, event: Event) {
         let _ = self.events.send(event);
+    }
+}
+
+pub(crate) struct SessionRegistration {
+    inbox: Inbox,
+    key: (Key, [u8; 16]),
+}
+
+impl Drop for SessionRegistration {
+    fn drop(&mut self) {
+        let mut active = self.inbox.active.lock_recovering();
+        let Some(session) = active.remove(&self.key) else {
+            return;
+        };
+        let _ = self.inbox.events.send(Event {
+            peer: self.key.0.clone(),
+            connection_id: self.key.1,
+            session,
+            body: EventBody::Disconnected,
+        });
     }
 }
 
@@ -3096,6 +3158,79 @@ mod tests {
             SessionState::default().record_catalog_value(Direction::Received, 1, incomplete_video),
             Err(Invalid::Bounds)
         );
+    }
+
+    struct ClosedConnection;
+
+    #[async_trait::async_trait]
+    impl comms::Connection for ClosedConnection {
+        fn peer(&self) -> comms::PeerId {
+            mechanics::ids::DeviceId::from_key_string("11".repeat(32))
+        }
+
+        fn alpn(&self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        async fn open_bi(
+            &self,
+        ) -> anyhow::Result<(Box<dyn comms::SendFlow>, Box<dyn comms::RecvFlow>)> {
+            anyhow::bail!("closed test connection")
+        }
+
+        async fn accept_bi(
+            &self,
+        ) -> anyhow::Result<Option<(Box<dyn comms::SendFlow>, Box<dyn comms::RecvFlow>)>> {
+            Ok(None)
+        }
+
+        async fn open_uni(&self) -> anyhow::Result<Box<dyn comms::SendFlow>> {
+            anyhow::bail!("closed test connection")
+        }
+
+        async fn accept_uni(&self) -> anyhow::Result<Option<Box<dyn comms::RecvFlow>>> {
+            Ok(None)
+        }
+
+        fn send_datagram(&self, _payload: &[u8]) -> anyhow::Result<()> {
+            anyhow::bail!("closed test connection")
+        }
+
+        async fn read_datagram(&self) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn datagram_capacity(&self) -> Option<usize> {
+            None
+        }
+
+        fn close(&self, _code: u32, _reason: &[u8]) {}
+
+        async fn closed(&self) {}
+    }
+
+    #[tokio::test]
+    async fn inbox_snapshots_active_sessions_and_brackets_their_lifetime() {
+        let inbox = Inbox::new();
+        let mut events = inbox.subscribe();
+        let peer = Key::from_key_bytes([7; 32]);
+        let session = Session::new(peer.clone(), [9; 16], Arc::new(ClosedConnection), true);
+
+        let registration = inbox.register(session.clone());
+        let connected = events.recv().await.expect("connected event");
+        assert_eq!(connected.peer, peer);
+        assert_eq!(connected.connection_id, [9; 16]);
+        assert!(matches!(connected.body, EventBody::Connected));
+
+        let (active, mut later) = inbox.subscribe_with_sessions();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].connection_id(), [9; 16]);
+        drop(registration);
+
+        let disconnected = later.recv().await.expect("disconnected event");
+        assert_eq!(disconnected.peer, peer);
+        assert!(matches!(disconnected.body, EventBody::Disconnected));
+        assert!(inbox.subscribe_with_sessions().0.is_empty());
     }
 
     #[test]

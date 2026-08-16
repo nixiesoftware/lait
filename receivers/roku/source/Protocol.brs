@@ -311,10 +311,16 @@ function AstrolabeEncodeAsset(bytes as object, asset as dynamic) as boolean
     if not AstrolabeExactFields(asset, ["id", "media_type", "encoded_len", "sha256", "width", "height"]) then return false
     if not AstrolabeIsHex(asset.id, 64) or not AstrolabeIsHex(asset.sha256, 64) then return false
     if not AstrolabeIsString(asset.media_type) then return false
-    if asset.media_type <> "image_jpeg" and asset.media_type <> "image_png" and asset.media_type <> "image_webp" then return false
     if not AstrolabeIntegerIn(asset.encoded_len, 1, 16777216) then return false
-    if not AstrolabeIntegerIn(asset.width, 1, 4096) or not AstrolabeIntegerIn(asset.height, 1, 2160) then return false
-    if asset.width * asset.height > 8847360 then return false
+    isImage = asset.media_type = "image_jpeg" or asset.media_type = "image_png" or asset.media_type = "image_webp"
+    if isImage
+        if not AstrolabeIntegerIn(asset.width, 1, 4096) or not AstrolabeIntegerIn(asset.height, 1, 2160) then return false
+        if asset.width * asset.height > 8847360 then return false
+    else if asset.media_type = "hls_manifest"
+        if asset.width <> invalid or asset.height <> invalid then return false
+    else
+        return false
+    end if
     AstrolabeTextField(bytes, asset.media_type)
     AstrolabeU32Field(bytes, asset.encoded_len)
     AstrolabeTextField(bytes, asset.sha256)
@@ -369,12 +375,20 @@ function AstrolabeProgramTranscript(program as dynamic) as dynamic
         end if
         AstrolabeOptionalU32Field(bytes, item.duration_ms)
         if not AstrolabeEncodeSourceState(bytes, item.source_state) then return invalid
-        if not AstrolabeExactFields(item.scene, ["kind", "asset"]) and not AstrolabeExactFields(item.scene, ["kind", "reason"]) then return invalid
+        if not AstrolabeExactFields(item.scene, ["kind", "asset"]) and not AstrolabeExactFields(item.scene, ["kind", "manifest", "protocol", "live"]) and not AstrolabeExactFields(item.scene, ["kind", "reason"]) then return invalid
         if not AstrolabeIsString(item.scene.kind) then return invalid
         if item.scene.kind = "frame"
             if not AstrolabeExactFields(item.scene, ["kind", "asset"]) then return invalid
             AstrolabeTextField(bytes, "frame")
             if not AstrolabeEncodeAsset(bytes, item.scene.asset) then return invalid
+        else if item.scene.kind = "media"
+            if not AstrolabeExactFields(item.scene, ["kind", "manifest", "protocol", "live"]) then return invalid
+            if item.scene.protocol <> "hls" or item.scene.live <> true then return invalid
+            if item.scene.manifest.media_type <> "hls_manifest" then return invalid
+            AstrolabeTextField(bytes, "media")
+            if not AstrolabeEncodeAsset(bytes, item.scene.manifest) then return invalid
+            AstrolabeTextField(bytes, item.scene.protocol)
+            AstrolabeBooleanField(bytes, item.scene.live)
         else if item.scene.kind = "blank"
             if not AstrolabeExactFields(item.scene, ["kind", "reason"]) then return invalid
             allowedBlank = { unassigned: true, host_unavailable: true, source_unavailable: true, unsupported: true, revoked: true, program_ended: true }

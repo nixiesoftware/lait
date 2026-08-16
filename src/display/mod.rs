@@ -4,17 +4,26 @@
 //! executes its World query through the daemon's required-Query boundary, and
 //! compiles bounded host-rendered output into the receiver protocol.
 
+mod cmaf;
 mod compiler;
 mod coordinator;
+mod hls;
 mod http;
+mod live;
 mod pairing;
 mod runtime;
 mod store;
 mod tls;
 
+pub use cmaf::{
+    CmafCatalogPackager, CmafError, CmafFragment, CmafRenditionFragment, CmafTrackDescription,
+    CmafTrackPackager,
+};
 pub use compiler::{CompiledProgram, PlaybackAlignment, ProgramCompiler};
 pub use coordinator::DisplayCoordinator;
+pub use hls::{HlsCatalogPackager, HlsError, HlsRenditionDescription, HlsSegment};
 pub use http::{display_http_router, serve_display_https, DisplayHttpState};
+pub use live::{LiveMediaHub, LiveMediaPacket, LiveMediaSnapshot, LiveMediaTrack, LiveTransport};
 pub use pairing::{
     AuthorizationRefusal, AuthorizedDevice, DisplayPairingService, PendingPairingView,
 };

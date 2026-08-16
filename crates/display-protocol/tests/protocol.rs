@@ -14,7 +14,8 @@ use display_protocol::pairing::{
 use display_protocol::program::{
     canonical_program_revision, validate_program, BlankReason, DisplayAsset, DisplayAssetMediaType,
     DisplayPartialReason, DisplayPlayback, DisplayProgram, DisplayProgramItem, DisplayScene,
-    DisplaySyncMode, DisplaySyncTarget, FreshnessPolicy, ProgramCycle, SourceState, StaleAction,
+    DisplaySyncMode, DisplaySyncTarget, FreshnessPolicy, MediaProtocol, ProgramCycle, SourceState,
+    StaleAction,
 };
 use display_protocol::receiver::{
     validate_capabilities, AccessibilityCapabilities, HealthGranularity, LatencyClass,
@@ -269,6 +270,44 @@ fn frame_metadata_cannot_smuggle_a_manifest_or_unbounded_decode() {
 }
 
 #[test]
+fn live_media_manifest_and_protocol_must_match() {
+    let mut program = fixture_program();
+    let digest = sha256(br#"{"version":1,"resource":"main"}"#).unwrap();
+    let manifest = DisplayAsset {
+        id: derive_asset_id(
+            &identifier_key(),
+            &program.assignment,
+            DisplayAssetMediaType::MseManifest,
+            31,
+            &digest,
+            None,
+            None,
+        )
+        .unwrap(),
+        media_type: DisplayAssetMediaType::MseManifest,
+        encoded_len: 31,
+        sha256: digest,
+        width: None,
+        height: None,
+    };
+    program.items[0].scene = DisplayScene::Media {
+        manifest,
+        protocol: MediaProtocol::Mse,
+        live: true,
+    };
+    program.revision = canonical_program_revision(&program).unwrap();
+    assert_eq!(validate_program(&program), Ok(()));
+
+    if let DisplayScene::Media { protocol, .. } = &mut program.items[0].scene {
+        *protocol = MediaProtocol::Hls;
+    }
+    assert_eq!(
+        canonical_program_revision(&program),
+        Err(Refusal::InvalidShape("media manifest protocol"))
+    );
+}
+
+#[test]
 fn receiver_capabilities_can_only_reduce_server_bounds() {
     let capabilities = fixture_capabilities();
     validate_capabilities(&capabilities).unwrap();
@@ -354,6 +393,47 @@ fn route_shape_refuses_an_asset_request_without_an_asset() {
     };
     assert_eq!(
         request_transcript(&context),
+        Err(Refusal::InvalidShape("request authentication context"))
+    );
+}
+
+#[test]
+fn live_ticket_route_commits_the_current_item_and_manifest() {
+    let challenge = Challenge::parse(repeated('1', 64)).unwrap();
+    let body = sha256(br#"{"transport":"hls"}"#).unwrap();
+    let program = fixture_program();
+    let asset = derive_asset_id(
+        &identifier_key(),
+        &program.assignment,
+        DisplayAssetMediaType::HlsManifest,
+        1,
+        &sha256(b"x").unwrap(),
+        None,
+        None,
+    )
+    .unwrap();
+    let context = RequestContext {
+        protocol_major: PROTOCOL_MAJOR,
+        method: RequestMethod::Post,
+        route: RequestRoute::LiveTicket,
+        device: &device(),
+        assignment: Some(&program.assignment),
+        program: Some(&program.program),
+        revision: Some(&program.revision),
+        current_item: Some(&program.items[0].id),
+        elapsed_ms: Some(0),
+        wait_ms: None,
+        asset: Some(&asset),
+        range: None,
+        challenge: &challenge,
+        body_sha256: &body,
+    };
+    assert!(request_transcript(&context).is_ok());
+    assert_eq!(
+        request_transcript(&RequestContext {
+            current_item: None,
+            ..context
+        }),
         Err(Refusal::InvalidShape("request authentication context"))
     );
 }

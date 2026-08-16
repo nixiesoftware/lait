@@ -144,6 +144,8 @@ h1 { margin: 0; font-size: clamp(52px, 5vw, 86px); line-height: 1.02; letter-spa
 
 .frame-panel { position: absolute; inset: 0; background: #000; }
 .frame-panel img { width: 100%; height: 100%; display: block; object-fit: contain; }
+.media-panel, .media-panel > div { position: absolute; inset: 0; background: #000; }
+.media-panel video { width: 100%; height: 100%; display: block; object-fit: contain; }
 
 .detail-panel {
   position: absolute;

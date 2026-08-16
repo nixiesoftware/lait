@@ -42,5 +42,14 @@ test("receiver UI exposes real pairing, assignment, and refusal states", async (
   assert.match(html, /Compare these words in Astrolabe/);
   assert.match(html, /Ready for an assignment/);
   assert.match(html, /program-frame/);
+  assert.match(html, /program-media/);
   assert.doesNotMatch(html, /ASTR-DEMO|Demo program|Preview only/);
+});
+
+test("receiver uses granted MSE live media", async () => {
+  const source = `${await read("app/index.html")}\n${await read("app/app.mjs")}\n${await read("app/runtime/client.mjs")}`;
+  assert.match(source, /tier: mseCapable \? "mse_live"/);
+  assert.match(source, /\/head\/v1\/live\/tickets/);
+  assert.match(source, /connect-src https:\/\/nixiesoftware\.com wss:\/\/nixiesoftware\.com/);
+  assert.match(source, /new MediaSource\(\)/);
 });

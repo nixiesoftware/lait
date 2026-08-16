@@ -1,7 +1,7 @@
 import { DisplayReceiverClient } from "./runtime/client.mjs";
 import { AndroidCredentialVault } from "./android-vault.mjs";
 
-const panels = ["booting-panel", "pairing-panel", "unassigned-panel", "frame-panel", "message-panel"];
+const panels = ["booting-panel", "pairing-panel", "unassigned-panel", "frame-panel", "media-panel", "message-panel"];
 
 class AndroidTvReceiverUi {
   constructor() {
@@ -17,6 +17,7 @@ class AndroidTvReceiverUi {
 
   show(name) {
     for (const panel of panels) document.getElementById(panel).hidden = panel !== name;
+    if (name !== "media-panel") document.querySelector("#program-media video")?.pause();
   }
 
   showBooting() { this.show("booting-panel"); }
@@ -59,6 +60,11 @@ class AndroidTvReceiverUi {
     const image = document.getElementById("program-frame");
     image.src = url;
     image.alt = summary || "Assigned Astrolabe display frame";
+  }
+
+  showMedia(session, summary) {
+    this.show("media-panel");
+    session.mount(document.getElementById("program-media"), summary);
   }
 
   showBlank(reason) {
@@ -115,6 +121,15 @@ class AndroidTvReceiverUi {
 }
 
 const ui = new AndroidTvReceiverUi();
+const bootstrap = JSON.parse(globalThis.AstrolabeNativeTransport.bootstrap());
+// The Java bridge enforces dynamic certificate pins for request/response
+// routes, but a WebView-owned WebSocket cannot inherit that trust manager.
+// Advertise MSE only when the socket can use the platform Web PKI path.
+const mseCapable = bootstrap.trust?.kind === "web_pki_origin"
+  && typeof MediaSource === "function"
+  && typeof WebSocket === "function"
+  && MediaSource.isTypeSupported('video/mp4; codecs="avc1.640028"')
+  && MediaSource.isTypeSupported('audio/mp4; codecs="mp4a.40.2"');
 const capabilities = {
   protocol_major: 1,
   platform: "android_tv",
@@ -137,16 +152,16 @@ const capabilities = {
     audio_description: false,
   },
   playback: {
-    tier: "frame",
-    sync_class: "boundary",
+    tier: mseCapable ? "mse_live" : "frame",
+    sync_class: mseCapable ? "positional_b" : "boundary",
     rate_control_probed: false,
-    latency_class: "snapshot",
+    latency_class: mseCapable ? "near_realtime" : "snapshot",
     health_granularity: "full",
   },
 };
 
 const client = new DisplayReceiverClient({
-  bootstrap: JSON.parse(globalThis.AstrolabeNativeTransport.bootstrap()),
+  bootstrap,
   capabilities,
   ui,
   vaultFactory: AndroidCredentialVault.open,

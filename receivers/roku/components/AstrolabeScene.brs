@@ -1,5 +1,6 @@
 sub init()
     m.frame = m.top.FindNode("programFrame")
+    m.media = m.top.FindNode("programMedia")
     m.panel = m.top.FindNode("statePanel")
     m.phrase = m.top.FindNode("phraseGroup")
     m.details = m.top.FindNode("details")
@@ -10,6 +11,7 @@ sub init()
     m.expectedHeight = 0
     m.task.ObserveField("viewModel", "AstrolabeViewChanged")
     m.frame.ObserveField("loadStatus", "AstrolabeFrameLoaded")
+    m.media.ObserveField("state", "AstrolabeMediaStateChanged")
     m.top.SetFocus(true)
     m.task.control = "RUN"
 end sub
@@ -17,6 +19,8 @@ end sub
 sub AstrolabeMessage(eyebrow as string, title as string, body as string)
     m.panel.visible = true
     m.frame.visible = false
+    m.media.control = "stop"
+    m.media.visible = false
     m.phrase.visible = false
     m.top.FindNode("eyebrow").text = eyebrow
     m.top.FindNode("title").text = title
@@ -40,6 +44,8 @@ sub AstrolabeViewChanged()
     else if model.kind = "pairing"
         m.panel.visible = true
         m.frame.visible = false
+        m.media.control = "stop"
+        m.media.visible = false
         m.phrase.visible = true
         m.top.FindNode("eyebrow").text = "CONFIRM THIS DISPLAY"
         m.top.FindNode("title").text = "Compare these words in Astrolabe"
@@ -58,12 +64,32 @@ sub AstrolabeViewChanged()
     else if model.kind = "frame"
         m.panel.visible = false
         m.frame.visible = false
+        m.media.control = "stop"
+        m.media.visible = false
         m.expectedWidth = model.expectedWidth
         m.expectedHeight = model.expectedHeight
         m.frame.audioGuideText = model.spokenSummary
         m.frame.uri = model.uri
+    else if model.kind = "media"
+        m.panel.visible = false
+        m.frame.visible = false
+        content = CreateObject("roSGNode", "ContentNode")
+        content.url = model.uri
+        content.streamFormat = "hls"
+        content.title = model.spokenSummary
+        m.media.content = content
+        m.media.visible = true
+        m.media.control = "play"
     else
         AstrolabeMessage("RECEIVER-OWNED STATE", model.title, model.body)
+    end if
+end sub
+
+sub AstrolabeMediaStateChanged()
+    if m.media.state = "error"
+        AstrolabeMessage("RECEIVER REFUSED", "Live media decode failed", "The assigned HLS stream could not be decoded by this Roku device.")
+        m.sequence = m.sequence + 1
+        m.task.command = "media_failed:" + m.sequence.ToStr()
     end if
 end sub
 

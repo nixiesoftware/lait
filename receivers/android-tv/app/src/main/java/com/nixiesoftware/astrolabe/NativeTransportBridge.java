@@ -209,7 +209,7 @@ public final class NativeTransportBridge {
                 || "/head/v1/pairings/status".equals(path) || "/head/v1/pairings/complete".equals(path)
                 || "/head/v1/challenges".equals(path) || "/head/v1/capabilities".equals(path)
                 || "/head/v1/program".equals(path) || "/head/v1/program/changes".equals(path)
-                || "/head/v1/health".equals(path)) {
+                || "/head/v1/health".equals(path) || "/head/v1/live/tickets".equals(path)) {
             return true;
         }
         return path.matches("^/head/v1/assets/[0-9a-f]{64}$");

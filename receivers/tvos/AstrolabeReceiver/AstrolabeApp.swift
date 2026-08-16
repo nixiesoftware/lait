@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 
 @main
@@ -50,6 +51,10 @@ struct ReceiverView: View {
             Color.black.ignoresSafeArea()
                 .overlay(Image(uiImage: image).resizable().aspectRatio(contentMode: .fit))
                 .accessibilityLabel(summary ?? "Assigned Astrolabe display frame")
+        case let .media(summary):
+            Color.black.ignoresSafeArea()
+                .overlay(VideoPlayer(player: receiver.livePlayer).ignoresSafeArea())
+                .accessibilityLabel(summary ?? "Assigned Astrolabe live media")
         case let .message(eyebrow, title, body, retry):
             panel(eyebrow: eyebrow, title: title, body: body) {
                 if retry { Button("Try again") { receiver.retry() }.buttonStyle(.borderedProminent) }

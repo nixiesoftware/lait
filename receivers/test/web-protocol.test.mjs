@@ -10,9 +10,10 @@ import {
   confirmationPhrase,
   ProtocolError,
   requestTranscript,
+  validateProgram,
   verifyProgram,
 } from "../shared/web/protocol.mjs";
-import { DisplayReceiverClient } from "../shared/web/client.mjs";
+import { DisplayReceiverClient, parseLiveMediaPacket } from "../shared/web/client.mjs";
 
 const fixtureUrl = new URL("../../crates/display-protocol/fixtures/v1/conformance.json", import.meta.url);
 const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -47,6 +48,81 @@ test("web adapters reproduce the Rust request HMAC", async () => {
     fixture.program_changes_request.authentication_tag,
   );
 });
+
+test("live-ticket request context is closed and authenticated", async () => {
+  const context = {
+    ...requestContext(),
+    method: "POST",
+    route: "live_ticket",
+    waitMs: null,
+    asset: "a".repeat(64),
+    bodySha256: await sha256ForTest('{"transport":"mse"}'),
+  };
+  assert.equal((await authenticateRequest(fixture.fixture_only_keys.proof_key_hex, context)).length, 64);
+  assert.throws(
+    () => requestTranscript({ ...context, asset: null }),
+    (error) => error instanceof ProtocolError && error.code === "invalid_shape",
+  );
+});
+
+test("MSE manifests are accepted only with the MSE protocol", () => {
+  const program = structuredClone(fixture.program);
+  program.items[0].scene = {
+    kind: "media",
+    manifest: {
+      id: "a".repeat(64),
+      media_type: "mse_manifest",
+      encoded_len: 32,
+      sha256: "b".repeat(64),
+      width: null,
+      height: null,
+    },
+    protocol: "mse",
+    live: true,
+  };
+  assert.equal(validateProgram(program), program);
+  assert.throws(
+    () => validateProgram({ ...program, items: [{ ...program.items[0], scene: { ...program.items[0].scene, protocol: "hls" } }] }),
+    (error) => error instanceof ProtocolError && error.code === "invalid_shape",
+  );
+});
+
+test("live WebSocket packets decode their bounded binary envelope", () => {
+  const rendition = new TextEncoder().encode("main_h264");
+  const payload = Uint8Array.of(1, 2, 3, 4);
+  const wire = new ArrayBuffer(36 + rendition.length + payload.length);
+  const view = new DataView(wire);
+  view.setUint8(0, 2);
+  view.setUint16(1, rendition.length, false);
+  new Uint8Array(wire, 3, rendition.length).set(rendition);
+  const metadata = 3 + rendition.length;
+  view.setBigUint64(metadata, 7n, false);
+  view.setBigInt64(metadata + 8, -25n, false);
+  view.setBigUint64(metadata + 16, 90_000n, false);
+  view.setBigUint64(metadata + 24, 180_000n, false);
+  view.setUint8(metadata + 32, 1);
+  new Uint8Array(wire, metadata + 33).set(payload);
+
+  assert.deepEqual(parseLiveMediaPacket(wire), {
+    kind: "fragment",
+    rendition: "main_h264",
+    sequence: 7n,
+    publishedAtMicros: -25n,
+    startTimestamp: 90_000n,
+    duration: 180_000n,
+    discontinuity: true,
+    payload,
+  });
+  assert.throws(
+    () => parseLiveMediaPacket(new ArrayBuffer(35)),
+    (error) => error instanceof ProtocolError && error.code === "live_packet",
+  );
+});
+
+async function sha256ForTest(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Buffer.from(digest).toString("hex");
+}
 
 test("web adapters independently verify the full program revision", async () => {
   assert.equal(await canonicalProgramRevision(fixture.program), fixture.program.revision);

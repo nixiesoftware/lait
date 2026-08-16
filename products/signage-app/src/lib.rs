@@ -69,6 +69,10 @@ mod tests {
             surface.descriptor.runtime_implementation,
             implementation_id()
         );
-        assert_eq!(surface.descriptor.contract_version, 2);
+        assert_eq!(surface.descriptor.contract_version, 3);
+        assert!(surface
+            .descriptor
+            .outputs
+            .contains(&world_interface::display::DisplayOutputKind::Media));
     }
 }

@@ -36,6 +36,18 @@ an emulator, compiler, static test, or successful store upload alone.
 
 ## Playback and delivery
 
+- Publish a live H.264/AAC resource from the assigned Orbit. Verify MSE on
+  webOS/Tizen/Android TV and native HLS on Roku/tvOS, including audio/video
+  sync, late join at a keyframe, a discontinuity, a dropped Group, ticket
+  expiry before first use, reassignment while playing, and coordinator/source
+  restart. No receiver may learn or request an origin other than its coordinator.
+- On Android TV, repeat capability negotiation with a dynamically pinned
+  bootstrap and verify it advertises Frame rather than attempting a WebView
+  WebSocket outside the Java trust manager.
+- Hold a live stream long enough to roll the retained six-segment window. Memory
+  and append queues remain bounded, obsolete MPEG-TS segments return a closed
+  refusal, and decoder recovery requests a new keyframe without replaying stale
+  media.
 - Exercise hold-last, loop, blank-at-end, and poll-at-end with 250 ms and long
   items. Wall-clock/time-zone/manual-clock changes never select content;
   suspend/resume and long poll preserve monotonic cursor behavior.

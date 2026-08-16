@@ -385,6 +385,19 @@ impl LiveHandle {
         self.media.subscribe()
     }
 
+    /// Listen for native media and atomically include every already-connected
+    /// session. State-oriented consumers such as the display coordinator use
+    /// this form so attaching after a source starts does not require that
+    /// source to reconnect.
+    pub fn media_with_sessions(
+        &self,
+    ) -> (
+        Vec<media::Session>,
+        tokio::sync::broadcast::Receiver<media::Event>,
+    ) {
+        self.media.subscribe_with_sessions()
+    }
+
     /// Say what this Station is looking at.
     ///
     /// **Replace-all**, like a peer's `Subscribe` and for the same reason: this
@@ -1108,6 +1121,13 @@ pub async fn serve_session(
         connection.close(media::RESET_MEDIA, b"");
         return;
     }
+    let _media_registration = if media_enabled {
+        handle
+            .as_ref()
+            .map(|handle| handle.media.register(media_session.clone()))
+    } else {
+        None
+    };
 
     // Three gates: control messages, datagrams, and new flows. Separate because
     // a peer that opens flows and sends nothing on them never reaches the
