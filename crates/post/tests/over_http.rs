@@ -18,8 +18,21 @@ const RECIPIENT_SEED: [u8; 32] = [42u8; 32];
 const STRANGER_SEED: [u8; 32] = [43u8; 32];
 
 /// Start the real service on an ephemeral port and answer with its base URL.
+///
+/// `POST_SMOKE_URL` points the same test at a deployed Post instead, which is
+/// how the running service gets exercised by the thing that defines correct.
+/// Deliberately not `LAIT_`-prefixed: that namespace is scrubbed at process
+/// load in other crates' harnesses, and a variable that silently arrives empty
+/// would turn this into a local run wearing a remote one's name.
 async fn serve() -> (String, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("a deposit root");
+    if let Ok(remote) = std::env::var("POST_SMOKE_URL") {
+        return (remote.trim_end_matches('/').to_string(), dir);
+    }
+    serve_locally(dir).await
+}
+
+async fn serve_locally(dir: tempfile::TempDir) -> (String, tempfile::TempDir) {
     let store = FsStore::open(dir.path()).expect("open");
     let shared: Shared = Arc::new(Mutex::new(Post::new(store)));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
