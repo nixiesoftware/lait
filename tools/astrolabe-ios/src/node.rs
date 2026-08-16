@@ -6,13 +6,23 @@
 //! off stdout. iOS forbids every one of those moves, so this module is the
 //! same composition with the process seams removed: the daemon runs as a task
 //! on an owned runtime, the head announces itself through
-//! [`serve::run_announced`]'s callback instead of stdout, and the exit
-//! watchdog is disarmed because a library must never `exit()` its host.
+//! [`serve::run_until`]'s callback instead of stdout, and the exit watchdog
+//! is disarmed because a library must never `exit()` its host.
+//!
+//! One seam desktop never needed: **the head pauses and resumes.** iOS
+//! suspends the process shortly after backgrounding and may reclaim listener
+//! resources while it sleeps — a loopback listener carried into suspension
+//! comes back dead, and dead reads as the false-disconnection defect. So the
+//! head steps down before suspension and stands back up on foreground, each a
+//! deliberate transition the shell drives from `scenePhase`. The daemon and
+//! its runtime persist for the process lifetime; only the listener cycles.
 //!
 //! The protocol is untouched: joins, invites, and status all ride the same
 //! `daemon::Client` IPC every desktop head uses. One composition, one wire.
 
+use std::collections::HashSet;
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -25,7 +35,38 @@ use runtime::coordinates::SignedCoordinates;
 pub(crate) struct Node {
     rt: tokio::runtime::Runtime,
     client: Client,
-    pub(crate) ready: serve::Ready,
+    /// What the head restarts from: resolved once, reused on every resume.
+    selection: Selection,
+    /// The restartable half. `Down` between background and foreground is a
+    /// deliberate state, not a failure.
+    head: Mutex<HeadState>,
+    /// Store paths with a live admission driver, so re-arming on every
+    /// foreground is idempotent instead of a second dialer per wake.
+    driving: Mutex<HashSet<String>>,
+}
+
+enum HeadState {
+    Up(HeadUp),
+    Down,
+}
+
+/// A serving head: its announcement, and the two ends of stopping it — the
+/// trigger, and the handle whose completion IS "the drain finished".
+struct HeadUp {
+    ready: serve::Ready,
+    stop: tokio::sync::oneshot::Sender<()>,
+    drained: tokio::task::JoinHandle<()>,
+}
+
+impl Node {
+    /// The head's announcement, when it is up. `None` while paused or
+    /// starting — the surface renders that as its own state, never as an error.
+    pub(crate) fn head_ready(&self) -> Option<serve::Ready> {
+        match &*self.head.lock().expect("head state") {
+            HeadState::Up(up) => Some(up.ready.clone()),
+            HeadState::Down => None,
+        }
+    }
 }
 
 static NODE: OnceLock<Node> = OnceLock::new();
@@ -41,7 +82,16 @@ fn ensure_node() -> Result<&'static Node, String> {
     if let Some(node) = NODE.get() {
         return Ok(node);
     }
-    match start_inner() {
+    // One starter at a time: launch fires `node_start` and the first
+    // foreground transition near-simultaneously, and two `start_inner` runs
+    // would race two daemons onto one home — the loser reporting a bind
+    // refusal as if the node were broken.
+    static STARTING: Mutex<()> = Mutex::new(());
+    let _gate = STARTING.lock().expect("start gate");
+    if let Some(node) = NODE.get() {
+        return Ok(node);
+    }
+    match start_inner(Selection::default()) {
         Ok(node) => {
             let _ = NODE.set(node);
             Ok(NODE.get().expect("just set"))
@@ -68,14 +118,42 @@ pub enum NodeStart {
 /// shell calls it off the main thread and renders a starting state.
 #[uniffi::export]
 pub fn node_start() -> NodeStart {
-    match ensure_node() {
-        Ok(node) => {
-            arm_pending_admissions(node);
-            NodeStart::Ready {
-                head: head_ready(&node.ready),
-            }
-        }
+    node_foreground()
+}
+
+/// The foreground transition: the node up, the head serving, every pending
+/// admission being driven. Idempotent — at launch it IS the start, and after
+/// a suspension it restarts only what suspension killed (the listener), so
+/// the shell calls it on every `scenePhase == .active` without counting.
+///
+/// A restarted head is a *new* announcement — fresh port, fresh token — and
+/// the returned fact is the one every open tab must re-authenticate against.
+#[uniffi::export]
+pub fn node_foreground() -> NodeStart {
+    let node = match ensure_node() {
+        Ok(node) => node,
+        Err(reason) => return NodeStart::Failed { reason },
+    };
+    arm_pending_admissions(node);
+    match resume_head(node) {
+        Ok(ready) => NodeStart::Ready {
+            head: head_ready(&ready),
+        },
         Err(reason) => NodeStart::Failed { reason },
+    }
+}
+
+/// The background transition: the head steps down before suspension freezes
+/// it. Close-then-suspend is the platform's own guidance — a listener carried
+/// into suspension is reclaimed under the app and comes back dead — and the
+/// shell holds a background-task assertion across this call so the drain
+/// finishes before the freeze. The daemon stays; suspension merely pauses it.
+///
+/// A no-op when the node never started or the head is already down.
+#[uniffi::export]
+pub fn node_background() {
+    if let Some(node) = node() {
+        pause_head(node);
     }
 }
 
@@ -83,10 +161,12 @@ pub fn node_start() -> NodeStart {
 ///
 /// Admission only ever arrives on a dial this device makes, so the pending
 /// invite must survive relaunch — "the node keeps driving" has to be true
-/// after the process it was promised in is gone.
-const PENDING_INVITE: &str = "pending-invite.link";
+/// after the process it was promised in is gone. Its presence is also the
+/// row's measured fact: joined, still waiting on the inviter.
+pub(crate) const PENDING_INVITE: &str = "pending-invite.link";
 
 /// Re-arm the admission driver for every store still waiting on its inviter.
+/// Idempotent per store: a driver already dialing is left alone.
 fn arm_pending_admissions(node: &'static Node) {
     for entry in lait::orbits::list() {
         let pending = std::path::Path::new(&entry.path).join(PENDING_INVITE);
@@ -104,16 +184,12 @@ fn head_ready(ready: &serve::Ready) -> HeadReady {
     }
 }
 
-fn start_inner() -> anyhow::Result<Node> {
-    // The daemon's shutdown watchdog hard-exits the process 30s into any
-    // drain. In a process we do not own, that is a crash; zero disarms it —
-    // the documented escape, not a hack.
-    std::env::set_var("LAIT_SHUTDOWN_DEADLINE_SECS", "0");
-
-    // The ambient selection: identity and stores resolve under this app's own
-    // container ($HOME *is* the sandbox on iOS), the same way the desktop
-    // daemon resolves under the user profile.
-    let selection = Selection::default();
+fn start_inner(selection: Selection) -> anyhow::Result<Node> {
+    // The embedder's standing declaration: this daemon is a guest in a
+    // process and on a device it does not own — so the exit watchdog never
+    // arms (a library must not `exit()` its host), and no machine-scoped
+    // listener is hosted (a phone does not coordinate displays for the LAN).
+    lait::daemon::embed_in_host_process();
 
     // Four workers, not two: `Station::contact` blocks its thread for up to
     // 35s, and a runtime shared by the daemon, the Station, and the head
@@ -158,25 +234,85 @@ fn start_inner() -> anyhow::Result<Node> {
         anyhow::bail!("the in-process daemon did not come up")
     })?;
 
-    let (tx, rx) = mpsc::channel();
-    {
-        let sel = selection;
-        rt.spawn(async move {
-            let announce = move |ready: &serve::Ready| {
-                let _ = tx.send(ready.clone());
-            };
-            // Port 0: the OS picks; the announcement carries the real one.
-            // Never `open` — there is no browser to hand off to, WebKit is
-            // in-process. This future only returns on failure; on iOS no
-            // termination signal ever fires.
-            if let Err(error) = serve::run_announced(0, false, sel, announce).await {
-                tracing::error!(%error, "in-process head exited");
-            }
-        });
-    }
-    let ready = rx.recv_timeout(Duration::from_secs(20))?;
+    let up = start_head(&rt, selection.clone())?;
+    Ok(Node {
+        rt,
+        client,
+        selection,
+        head: Mutex::new(HeadState::Up(up)),
+        driving: Mutex::new(HashSet::new()),
+    })
+}
 
-    Ok(Node { rt, client, ready })
+/// Start one head and wait for its announcement. Port 0: the OS picks; the
+/// announcement carries the real one. Never `open` — there is no browser to
+/// hand off to, WebKit is in-process.
+fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Result<HeadUp> {
+    let (tx, rx) = mpsc::channel();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let drained = rt.spawn(async move {
+        let announce = move |ready: &serve::Ready| {
+            let _ = tx.send(ready.clone());
+        };
+        // The shutdown future resolves on the trigger — or on its drop, so a
+        // head whose handle is lost drains rather than serving unsupervised.
+        let shutdown = async move {
+            let _ = stopped.await;
+        };
+        if let Err(error) = serve::run_until(0, false, selection, announce, shutdown).await {
+            tracing::error!(%error, "in-process head exited");
+        }
+    });
+    let ready = rx.recv_timeout(Duration::from_secs(20))?;
+    Ok(HeadUp {
+        ready,
+        stop,
+        drained,
+    })
+}
+
+/// How long the background transition waits on the head's drain. The drain is
+/// single-digit milliseconds in the ordinary case — the stop reaches the
+/// never-ending responses before axum starts waiting on them — and the bound
+/// exists so a wedged drain degrades to "suspension freezes it mid-close"
+/// instead of holding the transition forever.
+const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Step the head down and see the drain finish. Idempotent.
+fn pause_head(node: &Node) {
+    // Taken in its own statement so the guard drops before the drain —
+    // holding the state lock across `block_on` would deadlock every reader.
+    let taken = std::mem::replace(&mut *node.head.lock().expect("head state"), HeadState::Down);
+    if let HeadState::Up(up) = taken {
+        let _ = up.stop.send(());
+        let _ = node
+            .rt
+            .block_on(async { tokio::time::timeout(DRAIN_DEADLINE, up.drained).await });
+    }
+}
+
+/// The head, serving: the one already up, or a fresh start. A fresh start is
+/// a new announcement — new port, new token — never a resurrection of the old
+/// one, whose resources suspension may have reclaimed.
+fn resume_head(node: &Node) -> Result<serve::Ready, String> {
+    if let Some(ready) = node.head_ready() {
+        return Ok(ready);
+    }
+    let up = match start_head(&node.rt, node.selection.clone()) {
+        Ok(up) => up,
+        Err(error) => return Err(format!("{error:#}")),
+    };
+    let mut head = node.head.lock().expect("head state");
+    match &*head {
+        // Two foregrounds raced and the other one won: keep its head, stop
+        // ours by dropping the trigger — the drain follows on its own.
+        HeadState::Up(existing) => Ok(existing.ready.clone()),
+        HeadState::Down => {
+            let ready = up.ready.clone();
+            *head = HeadState::Up(up);
+            Ok(ready)
+        }
+    }
 }
 
 /// What an invite says, before anything is created. The confirm screen renders
@@ -210,7 +346,7 @@ pub fn read_ticket(link: String) -> TicketRead {
             },
         },
         Err(invalid) => TicketRead::Invalid {
-            reason: format!("{invalid:?}"),
+            reason: invalid.to_string(),
         },
     }
 }
@@ -253,7 +389,7 @@ pub fn enter_space(link: String, nick: Option<String>) -> EnterOutcome {
         Ok(verified) => verified,
         Err(invalid) => {
             return EnterOutcome::Refused {
-                reason: format!("{invalid:?}"),
+                reason: invalid.to_string(),
             }
         }
     };
@@ -330,29 +466,46 @@ pub fn enter_space(link: String, nick: Option<String>) -> EnterOutcome {
 /// gets fresh addresses each dial instead of leaning on discovery alone. The
 /// cadence respects the engine's 30s contact deadline — a faster loop just
 /// collects `Capacity` refusals from the attempt already in flight.
+///
+/// One driver per store: a second arming while the first still dials is a
+/// no-op, which is what lets every foreground re-arm without counting. A
+/// pass that ends without admission leaves the pending invite in place — the
+/// row keeps saying "waiting for admission", and the next foreground dials
+/// again. Giving up silently was the defect; the file is the memory.
 fn drive_admission(node: &'static Node, home: String, link: String) {
+    {
+        let mut driving = node.driving.lock().expect("driving set");
+        if !driving.insert(home.clone()) {
+            return;
+        }
+    }
     node.rt.spawn(async move {
-        let path = std::path::PathBuf::from(&home);
-        for _ in 0..60 {
-            let orbital::SpaceStore::One(space_id) = orbital::discover_space(&path) else {
+        admission_pass(node, &home, &link).await;
+        node.driving.lock().expect("driving set").remove(&home);
+    });
+}
+
+/// One arming's worth of dials: up to ten minutes on the line.
+async fn admission_pass(node: &Node, home: &str, link: &str) {
+    let path = std::path::PathBuf::from(home);
+    for _ in 0..60 {
+        let orbital::SpaceStore::One(space_id) = orbital::discover_space(&path) else {
+            return;
+        };
+        let route = control::station_route(OrbitAddress::for_store(&path, space_id));
+        let connect = Request::Connect {
+            ticket: link.to_owned(),
+        };
+        let _ = node.client.request(route.clone(), &connect, None).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        if let Ok(Response::Status(info)) = node.client.request(route, &Request::Status, None).await
+        {
+            if info.membership == "member" || info.membership == "admin" {
+                let _ = std::fs::remove_file(path.join(PENDING_INVITE));
                 return;
-            };
-            let route = control::station_route(OrbitAddress::for_store(&path, space_id));
-            let connect = Request::Connect {
-                ticket: link.clone(),
-            };
-            let _ = node.client.request(route.clone(), &connect, None).await;
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            if let Ok(Response::Status(info)) =
-                node.client.request(route, &Request::Status, None).await
-            {
-                if info.membership == "member" || info.membership == "admin" {
-                    let _ = std::fs::remove_file(path.join(PENDING_INVITE));
-                    return;
-                }
             }
         }
-    });
+    }
 }
 
 #[derive(uniffi::Enum)]
@@ -481,8 +634,91 @@ fn slug(hint: &str, space: &str) -> String {
     }
 }
 
-/// A refusal the person can read. The daemon's error variants carry their
-/// message; anything else degrades to its debug form rather than silence.
+/// A refusal the person can read. The daemon's typed error carries its
+/// message verbatim; anything else names itself in its debug form — an answer
+/// this build does not render is still an answer, not silence.
 fn refusal(response: &Response) -> String {
-    format!("{response:?}")
+    match response {
+        Response::Error { message, .. } => message.clone(),
+        other => format!("the daemon answered something this build does not render: {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    /// One HTTP status line off the announced head, over a raw socket — the
+    /// proof that the listener accepts and the token is honored, with no
+    /// client stack between the assertion and the wire.
+    fn status_line(ready: &serve::Ready) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", ready.port))
+            .expect("the announced port accepts a connection");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("a bounded read");
+        write!(
+            stream,
+            "GET /?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            ready.token, ready.port
+        )
+        .expect("the request goes out");
+        let mut raw = Vec::new();
+        let _ = stream.read_to_end(&mut raw);
+        let text = String::from_utf8_lossy(&raw);
+        text.lines().next().unwrap_or_default().to_owned()
+    }
+
+    /// The chain, asserted end to end against the embedded composition — the
+    /// class of failure `tools/astrolabe/tests/launch.rs` exists for, where
+    /// every component is correct and the composition is wrong. Daemon up,
+    /// head announced before accepting, pause actually closes the port,
+    /// resume is a fresh working announcement.
+    #[test]
+    fn the_embedded_node_comes_up_steps_down_and_returns() {
+        let home = tempfile::tempdir().expect("a scratch identity home");
+        let node =
+            start_inner(Selection::for_identity(home.path())).expect("the embedded node starts");
+
+        let first = node.head_ready().expect("the head announced");
+        let line = status_line(&first);
+        assert!(
+            line.starts_with("HTTP/1.1 "),
+            "the announced head must answer HTTP, got: {line:?}"
+        );
+
+        // The background transition: down means the port is closed, not that
+        // a stale announcement lingers.
+        pause_head(&node);
+        assert!(
+            node.head_ready().is_none(),
+            "paused must read as down, never as the old announcement"
+        );
+        assert!(
+            TcpStream::connect(("127.0.0.1", first.port)).is_err(),
+            "the paused head must not accept on its old port"
+        );
+
+        // The foreground transition: a fresh announcement that works. The old
+        // token died with the old head; the new one must be honored.
+        let second = resume_head(&node).expect("the head returns");
+        assert_ne!(
+            second.token, first.token,
+            "a resumed head is a new announcement, not a resurrection"
+        );
+        let line = status_line(&second);
+        assert!(
+            line.starts_with("HTTP/1.1 "),
+            "the resumed head must answer HTTP, got: {line:?}"
+        );
+
+        // Resume while up is the fast path: the same announcement, no churn.
+        let third = resume_head(&node).expect("resume while up answers");
+        assert_eq!(
+            third.port, second.port,
+            "resume while serving must keep the head it has"
+        );
+    }
 }

@@ -51,8 +51,9 @@ struct YouView: View {
     }
 
     private var keychainText: String {
-        switch KeychainProbe.run() {
+        switch KeychainProbe.outcome {
         case .roundTripped: "ok"
+        case .entropyFailed(let s): "entropy unavailable (\(s))"
         case .writeFailed(let s): "write failed (\(s))"
         case .readFailed(let s): "read failed (\(s))"
         case .mismatch: "mismatch"

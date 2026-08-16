@@ -7,9 +7,12 @@
 //! call through it.
 //!
 //! The view below is the interface design's shape rendered honestly at this
-//! build's capability: the bundled World list is compile-time truth, the link
-//! state says *why* it is absent, and the space and tab collections are empty
-//! because nothing fills them yet — not placeholders pretending otherwise.
+//! build's capability: the bundled World list is compile-time truth — the
+//! Library, as on desktop — and the link state says *why* it is absent.
+//! Chats and the Inbox render from nothing at all yet: correspondence rides
+//! the mailbox primitive (a payload sealed once, unlocked per device), and
+//! until that contract is issued their surfaces say so rather than carrying
+//! empty collections pretending to be measured.
 
 uniffi::setup_scaffolding!();
 
@@ -31,9 +34,7 @@ pub struct IosView {
     /// One row per joined Space, from the Orbit registry — advisory
     /// navigation state, never truth.
     pub spaces: Vec<SpaceRow>,
-    /// Open World sessions. Empty until the loopback head stands up.
-    pub tabs: Vec<TabRow>,
-    /// The in-process head, when the node has started. A tab cannot open
+    /// The in-process head, when the node has started. A World cannot open
     /// without it, and its absence renders as "starting", not as an error.
     pub head: Option<HeadReady>,
 }
@@ -109,29 +110,6 @@ pub struct SpaceWorldRow {
     pub resident: bool,
 }
 
-/// An open World session. Identity is (space, world); the provider is a
-/// mutable detail that never renames the tab.
-#[derive(uniffi::Record)]
-pub struct TabRow {
-    pub space_id: String,
-    pub space_name: String,
-    pub mount: String,
-    pub world_name: String,
-    pub accent: Option<u32>,
-    pub state: TabState,
-}
-
-#[derive(uniffi::Enum)]
-pub enum TabState {
-    Live,
-    /// Provider lost; the broker is trying the named next one.
-    Recovering {
-        via: String,
-    },
-    /// The content is not on this phone and no provider can supply it now.
-    NotResident,
-}
-
 /// The one read. Whole view out; no partial asks.
 #[uniffi::export]
 pub fn client_view() -> IosView {
@@ -150,11 +128,16 @@ pub fn client_view() -> IosView {
         })
         .collect();
 
-    let head = node::node().map(|node| HeadReady {
-        url: node.ready.url.clone(),
-        token: node.ready.token.clone(),
-        port: node.ready.port,
-    });
+    // The head's *current* announcement: a paused head reads as absent, and
+    // the tab surface renders that as its own state. Never a startup-frozen
+    // copy — after a foreground restart the old one is a dead port.
+    let head = node::node()
+        .and_then(|node| node.head_ready())
+        .map(|ready| HeadReady {
+            url: ready.url.clone(),
+            token: ready.token.clone(),
+            port: ready.port,
+        });
 
     // The registry is navigation state, never truth: names are advisory
     // snapshots, and a corrupt file degrades to "no known spaces".
@@ -168,9 +151,14 @@ pub fn client_view() -> IosView {
             } else {
                 // Membership is asked passively: a placed Station answers, a
                 // vacant one refuses, and nothing is placed just to draw a row.
+                // The persisted pending invite is the row's measured "still
+                // waiting on the inviter" — it outlives the driver's pass, so
+                // the wait stays visible instead of silently expiring.
+                let pending = path_buf.join(node::PENDING_INVITE).exists();
                 match node::membership_of(&path_buf).as_deref() {
                     Some("member" | "admin") => SpaceStatus::ServingLocally,
                     Some(_) => SpaceStatus::AdmissionPending,
+                    None if pending => SpaceStatus::AdmissionPending,
                     None if head.is_some() => SpaceStatus::ServingLocally,
                     None => SpaceStatus::NotRunning,
                 }
@@ -213,13 +201,6 @@ pub fn client_view() -> IosView {
         link: LinkState::Unavailable,
         bundled_worlds,
         spaces,
-        tabs: Vec::new(),
         head,
     }
-}
-
-/// Kept for the spike's original probe; the version now also rides the view.
-#[uniffi::export]
-pub fn core_version() -> String {
-    lait::VERSION.to_owned()
 }

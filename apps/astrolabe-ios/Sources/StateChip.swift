@@ -50,14 +50,4 @@ extension StateChip {
         }
     }
 
-    init(state: TabState) {
-        switch state {
-        case .live:
-            self.init(kind: .measured(.green), text: "live")
-        case .recovering(let via):
-            self.init(kind: .unmeasured(.orange), text: "recovering — trying \(via)")
-        case .notResident:
-            self.init(kind: .measured(.secondary), text: "not resident")
-        }
-    }
 }

@@ -16,8 +16,13 @@ struct WorldTabView: View {
         NavigationStack {
             Group {
                 if let head {
+                    // Keyed on the announcement, not just the reload count: a
+                    // head restarted after suspension is a new port and a new
+                    // token, and the session must replay the two-step open
+                    // against it — updating the old web view would leave it
+                    // authenticated against a listener that no longer exists.
                     WorldWebView(head: head, orbitId: tab.orbitId, failure: $loadFailure)
-                        .id(reloadToken)
+                        .id("\(reloadToken):\(head.port):\(head.token)")
                         .ignoresSafeArea(edges: .bottom)
                         .overlay(alignment: .top) {
                             if let loadFailure {
@@ -75,9 +80,13 @@ private struct WorldWebView: UIViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
-        if #available(iOS 16.4, *) {
-            view.isInspectable = true
-        }
+        #if DEBUG
+            // Safari's inspector, for development builds only — a shipped
+            // client must not expose its session to anything that asks.
+            if #available(iOS 16.4, *) {
+                view.isInspectable = true
+            }
+        #endif
         if let url = URL(string: head.url) {
             view.load(URLRequest(url: url))
         }
@@ -100,7 +109,14 @@ private struct WorldWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             // After the token-for-cookie trade lands, steer once to the Space.
+            // Only off the head's own front page: the first `didFinish` is
+            // not guaranteed to be the trade — a slow redirect or an in-World
+            // navigation finishing first must never hijack the session.
             guard !steered, let orbitId,
+                  let finished = webView.url,
+                  finished.host == "127.0.0.1",
+                  finished.port == Int(port),
+                  finished.path.isEmpty || finished.path == "/",
                   let url = URL(string: "http://127.0.0.1:\(port)/spaces/\(orbitId)")
             else { return }
             steered = true

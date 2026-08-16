@@ -402,6 +402,7 @@ dependencies = [
  "anyhow",
  "lait",
  "runtime",
+ "tempfile",
  "tokio",
  "tracing",
  "uniffi",

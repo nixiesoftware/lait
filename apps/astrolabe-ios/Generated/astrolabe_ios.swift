@@ -831,11 +831,7 @@ public struct IosView: Equatable, Hashable {
      */
     public var spaces: [SpaceRow]
     /**
-     * Open World sessions. Empty until the loopback head stands up.
-     */
-    public var tabs: [TabRow]
-    /**
-     * The in-process head, when the node has started. A tab cannot open
+     * The in-process head, when the node has started. A World cannot open
      * without it, and its absence renders as "starting", not as an error.
      */
     public var head: HeadReady?
@@ -857,17 +853,13 @@ public struct IosView: Equatable, Hashable {
          * navigation state, never truth.
          */spaces: [SpaceRow], 
         /**
-         * Open World sessions. Empty until the loopback head stands up.
-         */tabs: [TabRow], 
-        /**
-         * The in-process head, when the node has started. A tab cannot open
+         * The in-process head, when the node has started. A World cannot open
          * without it, and its absence renders as "starting", not as an error.
          */head: HeadReady?) {
         self.coreVersion = coreVersion
         self.link = link
         self.bundledWorlds = bundledWorlds
         self.spaces = spaces
-        self.tabs = tabs
         self.head = head
     }
 
@@ -891,7 +883,6 @@ public struct FfiConverterTypeIosView: FfiConverterRustBuffer {
                 link: FfiConverterTypeLinkState.read(from: &buf), 
                 bundledWorlds: FfiConverterSequenceTypeBundledWorld.read(from: &buf), 
                 spaces: FfiConverterSequenceTypeSpaceRow.read(from: &buf), 
-                tabs: FfiConverterSequenceTypeTabRow.read(from: &buf), 
                 head: FfiConverterOptionTypeHeadReady.read(from: &buf)
         )
     }
@@ -901,7 +892,6 @@ public struct FfiConverterTypeIosView: FfiConverterRustBuffer {
         FfiConverterTypeLinkState.write(value.link, into: &buf)
         FfiConverterSequenceTypeBundledWorld.write(value.bundledWorlds, into: &buf)
         FfiConverterSequenceTypeSpaceRow.write(value.spaces, into: &buf)
-        FfiConverterSequenceTypeTabRow.write(value.tabs, into: &buf)
         FfiConverterOptionTypeHeadReady.write(value.head, into: &buf)
     }
 }
@@ -1077,80 +1067,6 @@ public func FfiConverterTypeSpaceWorldRow_lift(_ buf: RustBuffer) throws -> Spac
 #endif
 public func FfiConverterTypeSpaceWorldRow_lower(_ value: SpaceWorldRow) -> RustBuffer {
     return FfiConverterTypeSpaceWorldRow.lower(value)
-}
-
-
-/**
- * An open World session. Identity is (space, world); the provider is a
- * mutable detail that never renames the tab.
- */
-public struct TabRow: Equatable, Hashable {
-    public var spaceId: String
-    public var spaceName: String
-    public var mount: String
-    public var worldName: String
-    public var accent: UInt32?
-    public var state: TabState
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(spaceId: String, spaceName: String, mount: String, worldName: String, accent: UInt32?, state: TabState) {
-        self.spaceId = spaceId
-        self.spaceName = spaceName
-        self.mount = mount
-        self.worldName = worldName
-        self.accent = accent
-        self.state = state
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension TabRow: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeTabRow: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TabRow {
-        return
-            try TabRow(
-                spaceId: FfiConverterString.read(from: &buf), 
-                spaceName: FfiConverterString.read(from: &buf), 
-                mount: FfiConverterString.read(from: &buf), 
-                worldName: FfiConverterString.read(from: &buf), 
-                accent: FfiConverterOptionUInt32.read(from: &buf), 
-                state: FfiConverterTypeTabState.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: TabRow, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.spaceId, into: &buf)
-        FfiConverterString.write(value.spaceName, into: &buf)
-        FfiConverterString.write(value.mount, into: &buf)
-        FfiConverterString.write(value.worldName, into: &buf)
-        FfiConverterOptionUInt32.write(value.accent, into: &buf)
-        FfiConverterTypeTabState.write(value.state, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTabRow_lift(_ buf: RustBuffer) throws -> TabRow {
-    return try FfiConverterTypeTabRow.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTabRow_lower(_ value: TabRow) -> RustBuffer {
-    return FfiConverterTypeTabRow.lower(value)
 }
 
 
@@ -1734,88 +1650,6 @@ public func FfiConverterTypeSyncOutcome_lower(_ value: SyncOutcome) -> RustBuffe
 
 
 
-public enum TabState: Equatable, Hashable {
-    
-    case live
-    /**
-     * Provider lost; the broker is trying the named next one.
-     */
-    case recovering(via: String
-    )
-    /**
-     * The content is not on this phone and no provider can supply it now.
-     */
-    case notResident
-
-
-
-
-
-}
-
-#if compiler(>=6)
-extension TabState: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeTabState: FfiConverterRustBuffer {
-    typealias SwiftType = TabState
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TabState {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        
-        case 1: return .live
-        
-        case 2: return .recovering(via: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 3: return .notResident
-        
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: TabState, into buf: inout [UInt8]) {
-        switch value {
-        
-        
-        case .live:
-            writeInt(&buf, Int32(1))
-        
-        
-        case let .recovering(via):
-            writeInt(&buf, Int32(2))
-            FfiConverterString.write(via, into: &buf)
-            
-        
-        case .notResident:
-            writeInt(&buf, Int32(3))
-        
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTabState_lift(_ buf: RustBuffer) throws -> TabState {
-    return try FfiConverterTypeTabState.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTabState_lower(_ value: TabState) -> RustBuffer {
-    return FfiConverterTypeTabState.lower(value)
-}
-
-
-
-
 public enum TicketRead: Equatable, Hashable {
     
     case valid(facts: TicketFacts
@@ -2032,31 +1866,6 @@ fileprivate struct FfiConverterSequenceTypeSpaceWorldRow: FfiConverterRustBuffer
         return seq
     }
 }
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeTabRow: FfiConverterRustBuffer {
-    typealias SwiftType = [TabRow]
-
-    public static func write(_ value: [TabRow], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeTabRow.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TabRow] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [TabRow]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeTabRow.read(from: &buf))
-        }
-        return seq
-    }
-}
 /**
  * The one read. Whole view out; no partial asks.
  */
@@ -2064,16 +1873,6 @@ public func clientView() -> IosView  {
     return try!  FfiConverterTypeIosView_lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_astrolabe_ios_fn_func_client_view(uniffiCallStatus
-    )
-})
-}
-/**
- * Kept for the spike's original probe; the version now also rides the view.
- */
-public func coreVersion() -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_astrolabe_ios_fn_func_core_version(uniffiCallStatus
     )
 })
 }
@@ -2101,6 +1900,37 @@ public func mintInvite(spacePath: String) -> InviteOutcome  {
         uniffiCallStatus in
     uniffi_astrolabe_ios_fn_func_mint_invite(
         FfiConverterString.lower(spacePath),uniffiCallStatus
+    )
+})
+}
+/**
+ * The background transition: the head steps down before suspension freezes
+ * it. Close-then-suspend is the platform's own guidance — a listener carried
+ * into suspension is reclaimed under the app and comes back dead — and the
+ * shell holds a background-task assertion across this call so the drain
+ * finishes before the freeze. The daemon stays; suspension merely pauses it.
+ *
+ * A no-op when the node never started or the head is already down.
+ */
+public func nodeBackground()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_astrolabe_ios_fn_func_node_background(uniffiCallStatus
+    )
+}
+}
+/**
+ * The foreground transition: the node up, the head serving, every pending
+ * admission being driven. Idempotent — at launch it IS the start, and after
+ * a suspension it restarts only what suspension killed (the listener), so
+ * the shell calls it on every `scenePhase == .active` without counting.
+ *
+ * A restarted head is a *new* announcement — fresh port, fresh token — and
+ * the returned fact is the one every open tab must re-authenticate against.
+ */
+public func nodeForeground() -> NodeStart  {
+    return try!  FfiConverterTypeNodeStart_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_astrolabe_ios_fn_func_node_foreground(uniffiCallStatus
     )
 })
 }
@@ -2159,13 +1989,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_astrolabe_ios_checksum_func_client_view() != 2074) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_astrolabe_ios_checksum_func_core_version() != 48490) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_astrolabe_ios_checksum_func_enter_space() != 53924) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_astrolabe_ios_checksum_func_mint_invite() != 62254) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_astrolabe_ios_checksum_func_node_background() != 36104) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_astrolabe_ios_checksum_func_node_foreground() != 58076) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_astrolabe_ios_checksum_func_node_start() != 15601) {

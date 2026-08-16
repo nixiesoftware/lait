@@ -8,17 +8,24 @@ import Security
 enum KeychainProbe {
     enum Outcome: Equatable {
         case roundTripped
+        case entropyFailed(OSStatus)
         case writeFailed(OSStatus)
         case readFailed(OSStatus)
         case mismatch
     }
 
-    private static let service = "com.nixiesoftware.astrolabe.spike"
-    private static let account = "p0-probe-secret"
+    private static let service = "com.nixiesoftware.astrolabe.keychain-probe"
+    private static let account = "probe-secret"
 
-    static func run() -> Outcome {
+    /// One probe per process. The answer cannot change while the app runs,
+    /// and re-proving it on every render of the row that shows it was a
+    /// Keychain write per frame.
+    static let outcome: Outcome = run()
+
+    private static func run() -> Outcome {
         var secret = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, secret.count, &secret)
+        let minted = SecRandomCopyBytes(kSecRandomDefault, secret.count, &secret)
+        guard minted == errSecSuccess else { return .entropyFailed(minted) }
         let data = Data(secret)
 
         let base: [String: Any] = [

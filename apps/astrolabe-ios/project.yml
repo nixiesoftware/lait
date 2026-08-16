@@ -31,6 +31,11 @@ targets:
       properties:
         CFBundleDisplayName: Astrolabe
         CFBundleIconName: AppIcon
+        # The version has exactly one author: the build settings above. Left
+        # unset, XcodeGen writes a literal "1.0" here and the plist drifts
+        # from MARKETING_VERSION — two spellings of one fact.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         # An invite is a link. Tapping lait://join/… anywhere on the phone
         # lands in the join sheet with the ticket already read.
         CFBundleURLTypes:

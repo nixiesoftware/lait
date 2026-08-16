@@ -10,7 +10,7 @@ struct SpacesView: View {
     let onOpen: (SpaceRow, SpaceWorldRow) -> Void
 
     @State private var entering = false
-    @State private var inviteLink: String?
+    @State private var inviteLink: PresentedLink?
     @State private var inviteFailure: String?
     @State private var syncReport: String?
 
@@ -24,7 +24,6 @@ struct SpacesView: View {
                         SpaceSection(space: space, onOpen: onOpen, onInvite: invite, onSync: sync)
                     }
                 }
-                bundledSection
             }
             .navigationTitle("Spaces")
             .toolbar {
@@ -42,8 +41,8 @@ struct SpacesView: View {
                     onRefresh()
                 })
             }
-            .sheet(item: $inviteLink) { link in
-                InviteShareView(link: link)
+            .sheet(item: $inviteLink) { minted in
+                InviteShareView(link: minted.link)
             }
             .alert("Couldn't mint an invite", isPresented: inviteFailedShown) {
                 Button("OK", role: .cancel) {}
@@ -62,7 +61,7 @@ struct SpacesView: View {
         Task {
             let outcome = await Task.detached { Core.invite(spacePath: space.path) }.value
             switch outcome {
-            case .minted(let link): inviteLink = link
+            case .minted(let link): inviteLink = PresentedLink(link: link)
             case .refused(let reason): inviteFailure = reason
             }
         }
@@ -100,28 +99,6 @@ struct SpacesView: View {
         }
     }
 
-    /// Compile-time truth: what this signed build carries.
-    @ViewBuilder private var bundledSection: some View {
-        Section("This build carries") {
-            ForEach(view.bundledWorlds, id: \.mount) { world in
-                HStack(spacing: 12) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color(accent: world.accent))
-                        .frame(width: 4, height: 32)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(world.name).font(.body.weight(.medium))
-                        if let tagline = world.tagline {
-                            Text(tagline).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer()
-                    if !world.openable {
-                        Text("not openable").font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-    }
 }
 
 private struct SpaceSection: View {
@@ -210,8 +187,4 @@ private struct InviteShareView: View {
         }
         .presentationDetents([.medium])
     }
-}
-
-extension String: @retroactive Identifiable {
-    public var id: String { self }
 }
