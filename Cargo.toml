@@ -6,6 +6,7 @@ members = [
     "crates/fabric",
     "crates/addressbook",
     "crates/comms",
+    "crates/post",
     "crates/relay",
     "crates/replica",
     "crates/runtime",

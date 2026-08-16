@@ -3984,6 +3984,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lait-post"
+version = "0.7.8"
+dependencies = [
+ "anyhow",
+ "axum",
+ "blake3",
+ "data-encoding",
+ "getrandom 0.3.4",
+ "mechanics",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lait-relay"
 version = "0.7.8"
 dependencies = [
