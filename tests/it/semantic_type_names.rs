@@ -679,6 +679,10 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 // Immutable Orbit materializations. The namespace keeps the
                 // lifecycle sharp: Generation -> Build -> Verification ->
                 // Activation, without prefix-stuttering every public type.
+                // The identity-scoped correspondence dial tone
+                // (`lait/correspondence/1`) — the mailbox's transport seam,
+                // routed without a Space by design.
+                "correspondence",
                 "generation",
                 "neighbor",
                 "plane",
