@@ -16,9 +16,12 @@ workspace = true
 
 [lib]
 name = "astrolabe_ios"
-# `staticlib` is what the iOS application links — there is no sidecar and no
-# dylib on that platform; `rlib` is what the workspace's own tests link.
-crate-type = ["staticlib", "rlib"]
+# `rlib` only. The iOS application links a staticlib, but declaring it here
+# makes every HOST build of the workspace emit a ~2 GB archive nobody links —
+# tests link the rlib — and six stale copies of it once filled the disk.
+# `build-core.sh` asks for the archive explicitly (`cargo rustc --crate-type
+# staticlib`) for the one build that wants it: the iOS target's.
+crate-type = ["rlib"]
 
 [dependencies]
 lait = { path = "../.." }

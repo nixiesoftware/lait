@@ -56,7 +56,11 @@ export SDKROOT
 export CARGO_PROFILE_DEV_DEBUG=line-tables-only
 
 echo "astrolabe-ios: building the Rust core for ${CONFIGURATION} (${TARGET})"
-cargo build -p astrolabe-ios --profile "${CARGO_PROFILE}" --target "${TARGET}" \
+# `cargo rustc --crate-type staticlib`, not `cargo build`: the crate declares
+# only `rlib` so that host builds of the workspace never emit the ~2 GB
+# archive nobody on the host links. This is the one build that wants it.
+cargo rustc -p astrolabe-ios --profile "${CARGO_PROFILE}" --target "${TARGET}" \
+  --crate-type staticlib \
   --manifest-path "${WORKSPACE}/Cargo.toml"
 
 LIB="${WORKSPACE}/target/${TARGET}/${PROFILE}/libastrolabe_ios.a"
