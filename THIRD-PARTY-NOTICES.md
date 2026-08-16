@@ -4,14 +4,14 @@ lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, ea
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-835 crates, under 43 distinct licence expressions.
+833 crates, under 43 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 389 |
-| `MIT` | 158 |
+| `MIT OR Apache-2.0` | 388 |
+| `MIT` | 157 |
 | `Apache-2.0 OR MIT` | 77 |
 | `MIT/Apache-2.0` | 41 |
 | `Unicode-3.0` | 25 |
@@ -134,8 +134,6 @@ Listed here is every crate reachable from this workspace through normal and buil
 | byteorder-lite | 0.1.0 | `Unlicense OR MIT` | <https://github.com/image-rs/byteorder-lite> |
 | bytes | 1.11.1 | `MIT` | <https://github.com/tokio-rs/bytes> |
 | camino | 1.2.5 | `MIT OR Apache-2.0` | <https://github.com/camino-rs/camino> |
-| cargo-platform | 0.3.3 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cargo> |
-| cargo_metadata | 0.23.1 | `MIT` | <https://github.com/oli-obk/cargo_metadata> |
 | cc | 1.2.63 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cc-rs> |
 | cfg-if | 1.0.4 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cfg-if> |
 | cfg_aliases | 0.2.1 | `MIT` | <https://github.com/katharostech/cfg_aliases> |

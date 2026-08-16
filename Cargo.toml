@@ -339,13 +339,22 @@ incremental = false
 
 # The profile that 'dist' will build with
 # Tests build with the `test` profile, which inherits `dev` — i.e. unoptimized.
-# That is fine for our own code (fast rebuilds, real debug info) but brutal for
-# the crypto: curve25519-dalek/frost-ed25519 run 10–50x slower unoptimized, and
-# the ceremony tests drive real DKG + threshold-signing rounds. Optimizing only
-# *dependencies* keeps workspace compile times and debuggability intact while
-# making those tests finish in seconds instead of minutes — the difference
-# between fitting nextest's terminate-after budget and being killed by it.
-[profile.dev.package."*"]
+# That is fine for our own code and almost every dependency, but brutal for the
+# curve25519/FROST path: the ceremony tests drive real DKG + threshold-signing
+# rounds and take 10–50x longer without optimization. Keep level 3 at that
+# measured boundary only. A wildcard dependency override also optimizes every
+# build dependency and proc macro before it can run; on the full workspace that
+# made clap/Askama/UniFFI/RMCP macros some of the longest units in a cold build.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.frost-core]
+opt-level = 3
+
+[profile.dev.package.frost-ed25519]
+opt-level = 3
+
+[profile.dev.package.frost-rerandomized]
 opt-level = 3
 
 [profile.dist]
