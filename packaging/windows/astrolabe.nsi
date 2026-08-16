@@ -102,7 +102,11 @@ Section "Astrolabe" SecMain
   File "${STAGE}\astrolabe.dll"
   File "${STAGE}\flutter_windows.dll"
   File "${STAGE}\dartjni.dll"
-  File "${STAGE}\native_assets.json"
+  ; Flutter writes this manifest only when the bundle has native assets to
+  ; describe. It existed in the developer build that originally proved this
+  ; script, but Flutter 3.41 correctly omitted it from the tagged CI bundle.
+  ; Carry it when present; its absence is not an incomplete application.
+  File /nonfatal "${STAGE}\native_assets.json"
   File "${STAGE}\*_plugin.dll"
 
   ; The Visual C++ runtime, staged into the bundle by CMake's

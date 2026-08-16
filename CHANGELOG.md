@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.2 — the Windows package follows Flutter's bundle
+
+> **Upgrading:** Windows users should install v0.8.2. The v0.8.1 Linux bundle
+> and macOS disk image are unchanged. No protocol, wire, or stored-data format
+> changes.
+
+- The Windows installer now treats Flutter's `native_assets.json` as the
+  optional generated file it is. The manifest is packaged when Flutter emits
+  it, while a valid bundle without native assets no longer stops NSIS before it
+  can create the installer. Every required engine, core, plugin, runtime, and
+  data file remains mandatory.
+
 ## v0.8.1 — the installer reaches every desktop
 
 > **Upgrading:** re-run the Astrolabe installer or replace the Linux bundle.
