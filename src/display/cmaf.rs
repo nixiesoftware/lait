@@ -31,7 +31,7 @@ const AUDIO_SAMPLE_FLAGS: u32 = 0x0200_0000;
 /// A refused container operation. Inputs have already crossed the lait-live
 /// bounds, but the receiver edge validates them again before allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CmafError {
+pub enum Failure {
     InvalidCatalog,
     MissingRendition,
     UnsupportedCodec,
@@ -43,7 +43,7 @@ pub enum CmafError {
     Container,
 }
 
-impl fmt::Display for CmafError {
+impl fmt::Display for Failure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidCatalog => "invalid live-media catalog track",
@@ -60,7 +60,7 @@ impl fmt::Display for CmafError {
     }
 }
 
-impl Error for CmafError {}
+impl Error for Failure {}
 
 /// One complete MSE media segment. A discontinuity tells the receiver to
 /// discard its old SourceBuffer timeline and append the init segment again.
@@ -105,10 +105,10 @@ pub struct CmafCatalogPackager {
 }
 
 impl CmafCatalogPackager {
-    pub fn new(catalog: &Catalog) -> Result<Self, CmafError> {
+    pub fn new(catalog: &Catalog) -> Result<Self, Failure> {
         catalog
             .encode_canonical()
-            .map_err(|_| CmafError::InvalidCatalog)?;
+            .map_err(|_| Failure::InvalidCatalog)?;
         let mut descriptions = Vec::new();
         let mut tracks = BTreeMap::new();
         for track in catalog
@@ -118,16 +118,16 @@ impl CmafCatalogPackager {
         {
             let packager = match CmafTrackPackager::new(track) {
                 Ok(packager) => packager,
-                Err(CmafError::UnsupportedCodec) => continue,
+                Err(Failure::UnsupportedCodec) => continue,
                 Err(error) => return Err(error),
             };
             descriptions.push(packager.description());
             if tracks.insert(track.track.clone(), packager).is_some() {
-                return Err(CmafError::InvalidCatalog);
+                return Err(Failure::InvalidCatalog);
             }
         }
         if tracks.is_empty() {
-            return Err(CmafError::MissingRendition);
+            return Err(Failure::MissingRendition);
         }
         Ok(Self {
             descriptions,
@@ -139,14 +139,11 @@ impl CmafCatalogPackager {
         &self.descriptions
     }
 
-    pub fn push_group(
-        &mut self,
-        group: &ReceivedGroup,
-    ) -> Result<CmafRenditionFragment, CmafError> {
+    pub fn push_group(&mut self, group: &ReceivedGroup) -> Result<CmafRenditionFragment, Failure> {
         let packager = self
             .tracks
             .get_mut(&group.header.track)
-            .ok_or(CmafError::InvalidGroup)?;
+            .ok_or(Failure::InvalidGroup)?;
         let rendition = packager.rendition.clone();
         let fragment = packager.push_group(group)?;
         Ok(CmafRenditionFragment {
@@ -173,12 +170,12 @@ pub struct CmafTrackPackager {
 }
 
 impl CmafTrackPackager {
-    pub fn new(track: &CatalogTrack) -> Result<Self, CmafError> {
-        let track_info = track.track_info().map_err(|_| CmafError::InvalidCatalog)?;
+    pub fn new(track: &CatalogTrack) -> Result<Self, Failure> {
+        let track_info = track.track_info().map_err(|_| Failure::InvalidCatalog)?;
         let rendition = track
             .cmaf_rendition
             .clone()
-            .ok_or(CmafError::MissingRendition)?;
+            .ok_or(Failure::MissingRendition)?;
         let codec = codec_sample_entry(track)?;
         let init_segment = init_segment(track, codec)?;
         Ok(Self {
@@ -227,19 +224,19 @@ impl CmafTrackPackager {
         }
     }
 
-    pub fn push_group(&mut self, group: &ReceivedGroup) -> Result<CmafFragment, CmafError> {
+    pub fn push_group(&mut self, group: &ReceivedGroup) -> Result<CmafFragment, Failure> {
         let samples = self.validate_group(group)?;
         let start_timestamp = samples
             .first()
             .map(|sample| sample.timestamp)
-            .ok_or(CmafError::InvalidGroup)?;
+            .ok_or(Failure::InvalidGroup)?;
         let end_timestamp = samples
             .last()
             .and_then(|sample| sample.timestamp.checked_add(u64::from(sample.duration)))
-            .ok_or(CmafError::TimestampOutOfRange)?;
+            .ok_or(Failure::TimestampOutOfRange)?;
         let duration = end_timestamp
             .checked_sub(start_timestamp)
-            .ok_or(CmafError::TimestampOutOfRange)?;
+            .ok_or(Failure::TimestampOutOfRange)?;
         let discontinuity = match (self.last_group_sequence, self.last_end_timestamp) {
             (Some(last_group), Some(last_end)) => {
                 last_group.checked_add(1) != Some(group.header.group_sequence)
@@ -258,7 +255,7 @@ impl CmafTrackPackager {
         self.next_fragment_sequence = self
             .next_fragment_sequence
             .checked_add(1)
-            .ok_or(CmafError::SequenceExhausted)?;
+            .ok_or(Failure::SequenceExhausted)?;
         self.last_group_sequence = Some(group.header.group_sequence);
         self.last_end_timestamp = Some(end_timestamp);
         Ok(CmafFragment {
@@ -271,7 +268,7 @@ impl CmafTrackPackager {
         })
     }
 
-    fn validate_group(&self, group: &ReceivedGroup) -> Result<Vec<Sample>, CmafError> {
+    fn validate_group(&self, group: &ReceivedGroup) -> Result<Vec<Sample>, Failure> {
         if group.header.track != self.track
             || group.header.track_kind != self.kind
             || group.header.timescale != self.timescale
@@ -282,41 +279,41 @@ impl CmafTrackPackager {
                 .last_group_sequence
                 .is_some_and(|last| group.header.group_sequence <= last)
         {
-            return Err(CmafError::InvalidGroup);
+            return Err(Failure::InvalidGroup);
         }
         let mut total_bytes = 0usize;
         let mut expected_timestamp = None;
         let mut samples = Vec::with_capacity(group.frames.len());
         for (index, frame) in group.frames.iter().enumerate() {
             let payload_len =
-                usize::try_from(frame.header.payload_len).map_err(|_| CmafError::TooLarge)?;
+                usize::try_from(frame.header.payload_len).map_err(|_| Failure::TooLarge)?;
             if frame.header.timescale != self.timescale
                 || payload_len != frame.payload.len()
                 || payload_len == 0
                 || (index == 0 && frame.header.kind != FrameKind::Key)
             {
-                return Err(CmafError::InvalidGroup);
+                return Err(Failure::InvalidGroup);
             }
             total_bytes = total_bytes
                 .checked_add(payload_len)
-                .ok_or(CmafError::TooLarge)?;
+                .ok_or(Failure::TooLarge)?;
             if total_bytes > MAX_MEDIA_GROUP_BYTES {
-                return Err(CmafError::TooLarge);
+                return Err(Failure::TooLarge);
             }
-            let timestamp = u64::try_from(frame.header.timestamp)
-                .map_err(|_| CmafError::TimestampOutOfRange)?;
+            let timestamp =
+                u64::try_from(frame.header.timestamp).map_err(|_| Failure::TimestampOutOfRange)?;
             if expected_timestamp.is_some_and(|expected| timestamp != expected) {
-                return Err(CmafError::InvalidGroup);
+                return Err(Failure::InvalidGroup);
             }
             let duration = frame
                 .header
                 .duration
-                .ok_or(CmafError::MissingDuration)
+                .ok_or(Failure::MissingDuration)
                 .and_then(|duration| {
-                    u32::try_from(duration).map_err(|_| CmafError::TimestampOutOfRange)
+                    u32::try_from(duration).map_err(|_| Failure::TimestampOutOfRange)
                 })?;
             if duration == 0 {
-                return Err(CmafError::MissingDuration);
+                return Err(Failure::MissingDuration);
             }
             if self.kind == TrackKind::Video {
                 validate_avc_sample(&frame.payload)?;
@@ -330,22 +327,22 @@ impl CmafTrackPackager {
             expected_timestamp = Some(
                 timestamp
                     .checked_add(u64::from(duration))
-                    .ok_or(CmafError::TimestampOutOfRange)?,
+                    .ok_or(Failure::TimestampOutOfRange)?,
             );
         }
-        let first = samples.first().ok_or(CmafError::InvalidGroup)?;
-        let last = samples.last().ok_or(CmafError::InvalidGroup)?;
+        let first = samples.first().ok_or(Failure::InvalidGroup)?;
+        let last = samples.last().ok_or(Failure::InvalidGroup)?;
         let span = last
             .timestamp
             .checked_add(u64::from(last.duration))
             .and_then(|end| end.checked_sub(first.timestamp))
-            .ok_or(CmafError::TimestampOutOfRange)?;
+            .ok_or(Failure::TimestampOutOfRange)?;
         let maximum = u64::from(self.max_group_duration_ms)
             .checked_mul(u64::from(self.timescale))
             .and_then(|scaled| scaled.checked_div(1_000))
-            .ok_or(CmafError::TimestampOutOfRange)?;
+            .ok_or(Failure::TimestampOutOfRange)?;
         if span > maximum {
-            return Err(CmafError::InvalidGroup);
+            return Err(Failure::InvalidGroup);
         }
         Ok(samples)
     }
@@ -359,19 +356,19 @@ struct Sample {
     kind: FrameKind,
 }
 
-fn codec_sample_entry(track: &CatalogTrack) -> Result<Codec, CmafError> {
+fn codec_sample_entry(track: &CatalogTrack) -> Result<Codec, Failure> {
     let config = track
         .decoder_config()
-        .map_err(|_| CmafError::InvalidCatalog)?;
+        .map_err(|_| Failure::InvalidCatalog)?;
     match track.kind {
         TrackKind::Video if track.codec.starts_with("avc1.") => {
-            let width = u16::try_from(track.width.ok_or(CmafError::InvalidCatalog)?)
-                .map_err(|_| CmafError::InvalidCatalog)?;
-            let height = u16::try_from(track.height.ok_or(CmafError::InvalidCatalog)?)
-                .map_err(|_| CmafError::InvalidCatalog)?;
+            let width = u16::try_from(track.width.ok_or(Failure::InvalidCatalog)?)
+                .map_err(|_| Failure::InvalidCatalog)?;
+            let height = u16::try_from(track.height.ok_or(Failure::InvalidCatalog)?)
+                .map_err(|_| Failure::InvalidCatalog)?;
             let avcc = decode_avcc(&config)?;
             if avcc.length_size != 4 {
-                return Err(CmafError::InvalidCatalog);
+                return Err(Failure::InvalidCatalog);
             }
             Ok(Avc1 {
                 visual: Visual {
@@ -387,9 +384,9 @@ fn codec_sample_entry(track: &CatalogTrack) -> Result<Codec, CmafError> {
             .into())
         }
         TrackKind::Audio if matches!(track.codec.as_str(), "mp4a.40.2" | "mp4a.40.02") => {
-            let channels = u16::from(track.channels.ok_or(CmafError::InvalidCatalog)?);
-            let sample_rate = track.sample_rate.ok_or(CmafError::InvalidCatalog)?;
-            let sample_rate = u16::try_from(sample_rate).map_err(|_| CmafError::InvalidCatalog)?;
+            let channels = u16::from(track.channels.ok_or(Failure::InvalidCatalog)?);
+            let sample_rate = track.sample_rate.ok_or(Failure::InvalidCatalog)?;
+            let sample_rate = u16::try_from(sample_rate).map_err(|_| Failure::InvalidCatalog)?;
             Ok(Mp4a {
                 audio: Audio {
                     data_reference_index: 1,
@@ -420,43 +417,43 @@ fn codec_sample_entry(track: &CatalogTrack) -> Result<Codec, CmafError> {
             }
             .into())
         }
-        _ => Err(CmafError::UnsupportedCodec),
+        _ => Err(Failure::UnsupportedCodec),
     }
 }
 
-fn decode_avcc(description: &[u8]) -> Result<Avcc, CmafError> {
+fn decode_avcc(description: &[u8]) -> Result<Avcc, Failure> {
     let size = description
         .len()
         .checked_add(8)
         .and_then(|size| u32::try_from(size).ok())
-        .ok_or(CmafError::TooLarge)?;
-    let mut atom = Vec::with_capacity(usize::try_from(size).map_err(|_| CmafError::TooLarge)?);
+        .ok_or(Failure::TooLarge)?;
+    let mut atom = Vec::with_capacity(usize::try_from(size).map_err(|_| Failure::TooLarge)?);
     atom.extend_from_slice(&size.to_be_bytes());
     atom.extend_from_slice(b"avcC");
     atom.extend_from_slice(description);
     let mut input = atom.as_slice();
-    Avcc::decode(&mut input).map_err(|_| CmafError::InvalidCatalog)
+    Avcc::decode(&mut input).map_err(|_| Failure::InvalidCatalog)
 }
 
-fn validate_avc_sample(mut payload: &[u8]) -> Result<(), CmafError> {
+fn validate_avc_sample(mut payload: &[u8]) -> Result<(), Failure> {
     while !payload.is_empty() {
-        let length = payload.get(..4).ok_or(CmafError::InvalidGroup)?;
-        let length = u32::from_be_bytes(length.try_into().map_err(|_| CmafError::InvalidGroup)?);
-        let length = usize::try_from(length).map_err(|_| CmafError::TooLarge)?;
+        let length = payload.get(..4).ok_or(Failure::InvalidGroup)?;
+        let length = u32::from_be_bytes(length.try_into().map_err(|_| Failure::InvalidGroup)?);
+        let length = usize::try_from(length).map_err(|_| Failure::TooLarge)?;
         if length == 0 {
-            return Err(CmafError::InvalidGroup);
+            return Err(Failure::InvalidGroup);
         }
-        let consumed = 4usize.checked_add(length).ok_or(CmafError::TooLarge)?;
-        payload = payload.get(consumed..).ok_or(CmafError::InvalidGroup)?;
+        let consumed = 4usize.checked_add(length).ok_or(Failure::TooLarge)?;
+        payload = payload.get(consumed..).ok_or(Failure::InvalidGroup)?;
     }
     Ok(())
 }
 
-fn init_segment(track: &CatalogTrack, codec: Codec) -> Result<Vec<u8>, CmafError> {
+fn init_segment(track: &CatalogTrack, codec: Codec) -> Result<Vec<u8>, Failure> {
     let (width, height, volume, handler, handler_name, vmhd, smhd) = match track.kind {
         TrackKind::Video => (
-            track.width.ok_or(CmafError::InvalidCatalog)?,
-            track.height.ok_or(CmafError::InvalidCatalog)?,
+            track.width.ok_or(Failure::InvalidCatalog)?,
+            track.height.ok_or(Failure::InvalidCatalog)?,
             0,
             FourCC::new(b"vide"),
             "VideoHandler",
@@ -472,7 +469,7 @@ fn init_segment(track: &CatalogTrack, codec: Codec) -> Result<Vec<u8>, CmafError
             None,
             Some(Smhd::default()),
         ),
-        TrackKind::Catalog => return Err(CmafError::UnsupportedCodec),
+        TrackKind::Catalog => return Err(Failure::UnsupportedCodec),
     };
     let ftyp = Ftyp {
         major_brand: FourCC::new(b"iso6"),
@@ -506,10 +503,10 @@ fn init_segment(track: &CatalogTrack, codec: Codec) -> Result<Vec<u8>, CmafError
                 in_movie: true,
                 volume: volume.into(),
                 width: u16::try_from(width)
-                    .map_err(|_| CmafError::InvalidCatalog)?
+                    .map_err(|_| Failure::InvalidCatalog)?
                     .into(),
                 height: u16::try_from(height)
-                    .map_err(|_| CmafError::InvalidCatalog)?
+                    .map_err(|_| Failure::InvalidCatalog)?
                     .into(),
                 ..Default::default()
             },
@@ -548,7 +545,7 @@ fn init_segment(track: &CatalogTrack, codec: Codec) -> Result<Vec<u8>, CmafError
     ftyp.encode(&mut bytes).map_err(container_error)?;
     moov.encode(&mut bytes).map_err(container_error)?;
     if bytes.len() > MAX_INIT_SEGMENT_BYTES {
-        return Err(CmafError::TooLarge);
+        return Err(Failure::TooLarge);
     }
     Ok(bytes)
 }
@@ -559,7 +556,7 @@ fn media_segment(
     start_timestamp: u64,
     samples: &[Sample],
     frames: &[Frame],
-) -> Result<Vec<u8>, CmafError> {
+) -> Result<Vec<u8>, Failure> {
     let entries = samples
         .iter()
         .map(|sample| TrunEntry {
@@ -595,12 +592,12 @@ fn media_segment(
         .len()
         .checked_add(8)
         .and_then(|offset| i32::try_from(offset).ok())
-        .ok_or(CmafError::TooLarge)?;
+        .ok_or(Failure::TooLarge)?;
     let trun = moof
         .traf
         .first_mut()
         .and_then(|traf| traf.trun.first_mut())
-        .ok_or(CmafError::Container)?;
+        .ok_or(Failure::Container)?;
     trun.data_offset = Some(data_offset);
     moof_bytes.clear();
     moof.encode(&mut moof_bytes).map_err(container_error)?;
@@ -608,7 +605,7 @@ fn media_segment(
     let payload_len = frames.iter().try_fold(0usize, |total, frame| {
         total
             .checked_add(frame.payload.len())
-            .ok_or(CmafError::TooLarge)
+            .ok_or(Failure::TooLarge)
     })?;
     let mut payload = Vec::with_capacity(payload_len);
     for frame in frames {
@@ -622,17 +619,17 @@ fn media_segment(
     let mdat = Mdat { data: payload };
     let maximum = MAX_MEDIA_GROUP_BYTES
         .checked_add(MAX_FRAGMENT_OVERHEAD_BYTES)
-        .ok_or(CmafError::TooLarge)?;
+        .ok_or(Failure::TooLarge)?;
     let mut bytes = Vec::with_capacity(
         payload_len
             .checked_add(MAX_FRAGMENT_OVERHEAD_BYTES)
-            .ok_or(CmafError::TooLarge)?,
+            .ok_or(Failure::TooLarge)?,
     );
     styp.encode(&mut bytes).map_err(container_error)?;
     bytes.extend_from_slice(&moof_bytes);
     mdat.encode(&mut bytes).map_err(container_error)?;
     if bytes.len() > maximum {
-        return Err(CmafError::TooLarge);
+        return Err(Failure::TooLarge);
     }
     Ok(bytes)
 }
@@ -645,8 +642,8 @@ fn sample_flags(kind: TrackKind, frame: FrameKind) -> u32 {
     }
 }
 
-fn container_error(_: mp4_atom::Error) -> CmafError {
-    CmafError::Container
+fn container_error(_: mp4_atom::Error) -> Failure {
+    Failure::Container
 }
 
 #[cfg(test)]
@@ -919,14 +916,14 @@ mod tests {
         missing_duration.frames[0].header.duration = None;
         assert_eq!(
             packager.push_group(&missing_duration),
-            Err(CmafError::MissingDuration)
+            Err(Failure::MissingDuration)
         );
         packager
             .push_group(&video_group(1, 0))
             .expect("first complete group");
         assert_eq!(
             packager.push_group(&video_group(1, 6_000)),
-            Err(CmafError::InvalidGroup)
+            Err(Failure::InvalidGroup)
         );
 
         let mut packager = CmafTrackPackager::new(&video_track()).expect("CMAF track");
@@ -934,7 +931,7 @@ mod tests {
         timestamp_gap.frames[1].header.timestamp += 1;
         assert_eq!(
             packager.push_group(&timestamp_gap),
-            Err(CmafError::InvalidGroup)
+            Err(Failure::InvalidGroup)
         );
 
         let mut malformed_avc = video_group(1, 0);
@@ -942,7 +939,7 @@ mod tests {
         malformed_avc.frames[0].header.payload_len += 1;
         assert_eq!(
             packager.push_group(&malformed_avc),
-            Err(CmafError::InvalidGroup)
+            Err(Failure::InvalidGroup)
         );
     }
 

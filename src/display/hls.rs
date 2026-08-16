@@ -21,7 +21,7 @@ const DRAIN_PACKETS: usize = 512;
 const MAX_HLS_SEGMENT_BYTES: usize = MAX_MEDIA_GROUP_BYTES * 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HlsError {
+pub enum Failure {
     InvalidCatalog,
     MissingRendition,
     UnsupportedCodec,
@@ -30,7 +30,7 @@ pub enum HlsError {
     TooLarge,
 }
 
-impl fmt::Display for HlsError {
+impl fmt::Display for Failure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidCatalog => "invalid live-media catalog for HLS",
@@ -43,7 +43,7 @@ impl fmt::Display for HlsError {
     }
 }
 
-impl std::error::Error for HlsError {}
+impl std::error::Error for Failure {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsRenditionDescription {
@@ -96,10 +96,10 @@ pub struct HlsCatalogPackager {
 }
 
 impl HlsCatalogPackager {
-    pub fn new(catalog: &Catalog) -> Result<Self, HlsError> {
+    pub fn new(catalog: &Catalog) -> Result<Self, Failure> {
         catalog
             .encode_canonical()
-            .map_err(|_| HlsError::InvalidCatalog)?;
+            .map_err(|_| Failure::InvalidCatalog)?;
         let mut tracks = BTreeMap::new();
         let mut rendition_for_track = BTreeMap::new();
         let mut renditions = BTreeMap::<String, Rendition>::new();
@@ -111,14 +111,14 @@ impl HlsCatalogPackager {
             let rendition = catalog_track
                 .hls_v3_rendition
                 .clone()
-                .ok_or(HlsError::MissingRendition)?;
+                .ok_or(Failure::MissingRendition)?;
             let track = Track::new(catalog_track.clone())?;
             if tracks.insert(catalog_track.track.clone(), track).is_some()
                 || rendition_for_track
                     .insert(catalog_track.track.clone(), rendition.clone())
                     .is_some()
             {
-                return Err(HlsError::InvalidCatalog);
+                return Err(Failure::InvalidCatalog);
             }
             renditions
                 .entry(rendition)
@@ -131,7 +131,7 @@ impl HlsCatalogPackager {
                 .insert(catalog_track.track.clone());
         }
         if renditions.is_empty() {
-            return Err(HlsError::MissingRendition);
+            return Err(Failure::MissingRendition);
         }
         let descriptions = renditions
             .iter()
@@ -151,26 +151,26 @@ impl HlsCatalogPackager {
 
     /// Add one source Group. `Ok(None)` means the other synchronized tracks
     /// for this segment have not arrived yet.
-    pub fn push_group(&mut self, group: &ReceivedGroup) -> Result<Option<HlsSegment>, HlsError> {
+    pub fn push_group(&mut self, group: &ReceivedGroup) -> Result<Option<HlsSegment>, Failure> {
         let track = self
             .tracks
             .get(&group.header.track)
-            .ok_or(HlsError::InvalidGroup)?;
+            .ok_or(Failure::InvalidGroup)?;
         track.validate(group)?;
         let rendition_name = self
             .rendition_for_track
             .get(&group.header.track)
             .cloned()
-            .ok_or(HlsError::InvalidGroup)?;
+            .ok_or(Failure::InvalidGroup)?;
         let rendition = self
             .renditions
             .get_mut(&rendition_name)
-            .ok_or(HlsError::InvalidGroup)?;
+            .ok_or(Failure::InvalidGroup)?;
         if rendition
             .last_sequence
             .is_some_and(|last| group.header.group_sequence <= last)
         {
-            return Err(HlsError::InvalidGroup);
+            return Err(Failure::InvalidGroup);
         }
         let sequence = group.header.group_sequence;
         let pending = rendition.pending.entry(sequence).or_default();
@@ -178,7 +178,7 @@ impl HlsCatalogPackager {
             .insert(group.header.track.clone(), group.clone())
             .is_some()
         {
-            return Err(HlsError::InvalidGroup);
+            return Err(Failure::InvalidGroup);
         }
         // Newest wins. Incomplete older Groups cannot become useful after the
         // live edge has advanced, and retaining them would turn skew into an
@@ -196,7 +196,7 @@ impl HlsCatalogPackager {
         let groups = rendition
             .pending
             .remove(&sequence)
-            .ok_or(HlsError::InvalidGroup)?;
+            .ok_or(Failure::InvalidGroup)?;
         let discontinuity = rendition
             .last_sequence
             .is_some_and(|last| last.checked_add(1) != Some(sequence));
@@ -213,10 +213,10 @@ impl HlsCatalogPackager {
 }
 
 impl Track {
-    fn new(catalog: CatalogTrack) -> Result<Self, HlsError> {
+    fn new(catalog: CatalogTrack) -> Result<Self, Failure> {
         let config = catalog
             .decoder_config()
-            .map_err(|_| HlsError::InvalidCatalog)?;
+            .map_err(|_| Failure::InvalidCatalog)?;
         let (avc_parameter_sets, aac) = match catalog.kind {
             TrackKind::Video if catalog.codec.starts_with("avc1.") => {
                 (avc_parameter_sets(&config)?, None)
@@ -224,7 +224,7 @@ impl Track {
             TrackKind::Audio if matches!(catalog.codec.as_str(), "mp4a.40.2" | "mp4a.40.02") => {
                 (Vec::new(), Some(aac_config(&config)?))
             }
-            _ => return Err(HlsError::UnsupportedCodec),
+            _ => return Err(Failure::UnsupportedCodec),
         };
         Ok(Self {
             catalog,
@@ -233,7 +233,7 @@ impl Track {
         })
     }
 
-    fn validate(&self, group: &ReceivedGroup) -> Result<(), HlsError> {
+    fn validate(&self, group: &ReceivedGroup) -> Result<(), Failure> {
         if group.header.track != self.catalog.track
             || group.header.track_kind != self.catalog.kind
             || group.header.timescale != self.catalog.timescale
@@ -241,7 +241,7 @@ impl Track {
             || group.frames.is_empty()
             || group.frames.first().map(|frame| frame.header.kind) != Some(FrameKind::Key)
         {
-            return Err(HlsError::InvalidGroup);
+            return Err(Failure::InvalidGroup);
         }
         let mut bytes = 0usize;
         for frame in &group.frames {
@@ -249,14 +249,14 @@ impl Track {
                 || usize::try_from(frame.header.payload_len).ok() != Some(frame.payload.len())
                 || frame.header.duration.is_none()
             {
-                return Err(HlsError::InvalidGroup);
+                return Err(Failure::InvalidGroup);
             }
             bytes = bytes
                 .checked_add(frame.payload.len())
-                .ok_or(HlsError::TooLarge)?;
+                .ok_or(Failure::TooLarge)?;
         }
         if bytes > MAX_MEDIA_GROUP_BYTES {
-            return Err(HlsError::TooLarge);
+            return Err(Failure::TooLarge);
         }
         Ok(())
     }
@@ -266,21 +266,21 @@ fn description(
     name: &str,
     rendition: &Rendition,
     tracks: &BTreeMap<String, Track>,
-) -> Result<HlsRenditionDescription, HlsError> {
+) -> Result<HlsRenditionDescription, Failure> {
     let selected = rendition
         .tracks
         .iter()
-        .map(|name| tracks.get(name).ok_or(HlsError::InvalidCatalog))
+        .map(|name| tracks.get(name).ok_or(Failure::InvalidCatalog))
         .collect::<Result<Vec<_>, _>>()?;
     let target_duration_ms = selected
         .iter()
         .map(|track| track.catalog.max_group_duration_ms)
         .max()
-        .ok_or(HlsError::InvalidCatalog)?;
+        .ok_or(Failure::InvalidCatalog)?;
     let bitrate_bps = selected.iter().try_fold(0u32, |total, track| {
         total
             .checked_add(track.catalog.bitrate_bps)
-            .ok_or(HlsError::TooLarge)
+            .ok_or(Failure::TooLarge)
     })?;
     let video = selected
         .iter()
@@ -304,7 +304,7 @@ fn mux_segment(
     discontinuity: bool,
     groups: &BTreeMap<String, ReceivedGroup>,
     tracks: &BTreeMap<String, Track>,
-) -> Result<HlsSegment, HlsError> {
+) -> Result<HlsSegment, Failure> {
     let mut streams = Vec::new();
     let has_video = groups
         .values()
@@ -340,22 +340,22 @@ fn mux_segment(
     let mut latest = None;
     let mut published_at_micros = i64::MIN;
     for (name, group) in groups {
-        let track = tracks.get(name).ok_or(HlsError::InvalidGroup)?;
+        let track = tracks.get(name).ok_or(Failure::InvalidGroup)?;
         published_at_micros = published_at_micros.max(group.header.published_at_micros);
         let pid = match track.catalog.kind {
             TrackKind::Video => VIDEO_PID,
             TrackKind::Audio => AUDIO_PID,
-            TrackKind::Catalog => return Err(HlsError::InvalidGroup),
+            TrackKind::Catalog => return Err(Failure::InvalidGroup),
         };
-        let stream = mux.stream_index(pid).ok_or(HlsError::InvalidGroup)?;
+        let stream = mux.stream_index(pid).ok_or(Failure::InvalidGroup)?;
         for frame in &group.frames {
             let pts = clock_90k(frame.header.timestamp, track.catalog.timescale)?;
-            let duration = frame.header.duration.ok_or(HlsError::InvalidGroup)?;
+            let duration = frame.header.duration.ok_or(Failure::InvalidGroup)?;
             let end = frame
                 .header
                 .timestamp
-                .checked_add(i64::try_from(duration).map_err(|_| HlsError::TimestampOutOfRange)?)
-                .ok_or(HlsError::TimestampOutOfRange)?;
+                .checked_add(i64::try_from(duration).map_err(|_| Failure::TimestampOutOfRange)?)
+                .ok_or(Failure::TimestampOutOfRange)?;
             let end = clock_90k(end, track.catalog.timescale)?;
             earliest = Some(earliest.map_or(pts, |current: u64| current.min(pts)));
             latest = Some(latest.map_or(end, |current: u64| current.max(end)));
@@ -367,9 +367,9 @@ fn mux_segment(
                 )?,
                 TrackKind::Audio => adts(
                     frame.payload.as_slice(),
-                    track.aac.ok_or(HlsError::InvalidCatalog)?,
+                    track.aac.ok_or(Failure::InvalidCatalog)?,
                 )?,
-                TrackKind::Catalog => return Err(HlsError::InvalidGroup),
+                TrackKind::Catalog => return Err(Failure::InvalidGroup),
             };
             mux.push_frame(
                 stream,
@@ -388,25 +388,25 @@ fn mux_segment(
         if written == 0 {
             break;
         }
-        let next = bytes.len().checked_add(written).ok_or(HlsError::TooLarge)?;
+        let next = bytes.len().checked_add(written).ok_or(Failure::TooLarge)?;
         if next > MAX_HLS_SEGMENT_BYTES {
-            return Err(HlsError::TooLarge);
+            return Err(Failure::TooLarge);
         }
-        bytes.extend_from_slice(buffer.get(..written).ok_or(HlsError::TooLarge)?);
+        bytes.extend_from_slice(buffer.get(..written).ok_or(Failure::TooLarge)?);
     }
     if bytes.is_empty() || bytes.len() % TS_PACKET_BYTES != 0 {
-        return Err(HlsError::InvalidGroup);
+        return Err(Failure::InvalidGroup);
     }
     let duration_90k = latest
         .zip(earliest)
         .and_then(|(end, start)| end.checked_sub(start))
-        .ok_or(HlsError::TimestampOutOfRange)?;
+        .ok_or(Failure::TimestampOutOfRange)?;
     let duration_ms = duration_90k
         .checked_add(89)
         .and_then(|value| value.checked_div(90))
         .and_then(|value| u32::try_from(value).ok())
         .filter(|duration| *duration > 0)
-        .ok_or(HlsError::TimestampOutOfRange)?;
+        .ok_or(Failure::TimestampOutOfRange)?;
     Ok(HlsSegment {
         rendition: rendition.to_string(),
         group_sequence: sequence,
@@ -417,39 +417,39 @@ fn mux_segment(
     })
 }
 
-fn clock_90k(timestamp: i64, timescale: u32) -> Result<u64, HlsError> {
-    let timestamp = u128::try_from(timestamp).map_err(|_| HlsError::TimestampOutOfRange)?;
+fn clock_90k(timestamp: i64, timescale: u32) -> Result<u64, Failure> {
+    let timestamp = u128::try_from(timestamp).map_err(|_| Failure::TimestampOutOfRange)?;
     timestamp
         .checked_mul(90_000)
         .and_then(|value| value.checked_div(u128::from(timescale)))
         .and_then(|value| u64::try_from(value).ok())
-        .ok_or(HlsError::TimestampOutOfRange)
+        .ok_or(Failure::TimestampOutOfRange)
 }
 
-fn avc_parameter_sets(config: &[u8]) -> Result<Vec<u8>, HlsError> {
+fn avc_parameter_sets(config: &[u8]) -> Result<Vec<u8>, Failure> {
     if config.len() < 7
         || config.first().copied() != Some(1)
         || config.get(4).copied().map(|value| value & 0x03) != Some(3)
     {
-        return Err(HlsError::InvalidCatalog);
+        return Err(Failure::InvalidCatalog);
     }
     let mut cursor = 6usize;
     let sps_count = config
         .get(5)
         .copied()
         .map(|value| usize::from(value & 0x1f))
-        .ok_or(HlsError::InvalidCatalog)?;
+        .ok_or(Failure::InvalidCatalog)?;
     let mut output = Vec::new();
     for _ in 0..sps_count {
         copy_parameter_set(config, &mut cursor, &mut output)?;
     }
-    let pps_count = usize::from(*config.get(cursor).ok_or(HlsError::InvalidCatalog)?);
-    cursor = cursor.checked_add(1).ok_or(HlsError::TooLarge)?;
+    let pps_count = usize::from(*config.get(cursor).ok_or(Failure::InvalidCatalog)?);
+    cursor = cursor.checked_add(1).ok_or(Failure::TooLarge)?;
     for _ in 0..pps_count {
         copy_parameter_set(config, &mut cursor, &mut output)?;
     }
     if output.is_empty() || cursor != config.len() {
-        return Err(HlsError::InvalidCatalog);
+        return Err(Failure::InvalidCatalog);
     }
     Ok(output)
 }
@@ -458,18 +458,18 @@ fn copy_parameter_set(
     config: &[u8],
     cursor: &mut usize,
     output: &mut Vec<u8>,
-) -> Result<(), HlsError> {
+) -> Result<(), Failure> {
     let length = config
         .get(*cursor..cursor.saturating_add(2))
         .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
         .map(u16::from_be_bytes)
         .map(usize::from)
-        .ok_or(HlsError::InvalidCatalog)?;
-    *cursor = cursor.checked_add(2).ok_or(HlsError::TooLarge)?;
-    let end = cursor.checked_add(length).ok_or(HlsError::TooLarge)?;
-    let parameter_set = config.get(*cursor..end).ok_or(HlsError::InvalidCatalog)?;
+        .ok_or(Failure::InvalidCatalog)?;
+    *cursor = cursor.checked_add(2).ok_or(Failure::TooLarge)?;
+    let end = cursor.checked_add(length).ok_or(Failure::TooLarge)?;
+    let parameter_set = config.get(*cursor..end).ok_or(Failure::InvalidCatalog)?;
     if parameter_set.is_empty() {
-        return Err(HlsError::InvalidCatalog);
+        return Err(Failure::InvalidCatalog);
     }
     output.extend_from_slice(&[0, 0, 0, 1]);
     output.extend_from_slice(parameter_set);
@@ -477,28 +477,28 @@ fn copy_parameter_set(
     Ok(())
 }
 
-fn annex_b(payload: &[u8], parameter_sets: &[u8], kind: FrameKind) -> Result<Vec<u8>, HlsError> {
+fn annex_b(payload: &[u8], parameter_sets: &[u8], kind: FrameKind) -> Result<Vec<u8>, Failure> {
     let mut output = Vec::with_capacity(
         payload
             .len()
             .checked_add(parameter_sets.len())
-            .ok_or(HlsError::TooLarge)?,
+            .ok_or(Failure::TooLarge)?,
     );
     if kind == FrameKind::Key {
         output.extend_from_slice(parameter_sets);
     }
     let mut cursor = 0usize;
     while cursor < payload.len() {
-        let length_end = cursor.checked_add(4).ok_or(HlsError::TooLarge)?;
+        let length_end = cursor.checked_add(4).ok_or(Failure::TooLarge)?;
         let length = payload
             .get(cursor..length_end)
             .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
             .map(u32::from_be_bytes)
             .and_then(|length| usize::try_from(length).ok())
             .filter(|length| *length > 0)
-            .ok_or(HlsError::InvalidGroup)?;
-        let end = length_end.checked_add(length).ok_or(HlsError::TooLarge)?;
-        let nal = payload.get(length_end..end).ok_or(HlsError::InvalidGroup)?;
+            .ok_or(Failure::InvalidGroup)?;
+        let end = length_end.checked_add(length).ok_or(Failure::TooLarge)?;
+        let nal = payload.get(length_end..end).ok_or(Failure::InvalidGroup)?;
         output.extend_from_slice(&[0, 0, 0, 1]);
         output.extend_from_slice(nal);
         cursor = end;
@@ -506,17 +506,16 @@ fn annex_b(payload: &[u8], parameter_sets: &[u8], kind: FrameKind) -> Result<Vec
     Ok(output)
 }
 
-fn aac_config(config: &[u8]) -> Result<AacConfig, HlsError> {
-    let bytes = config.get(..2).ok_or(HlsError::InvalidCatalog)?;
-    let bits =
-        u16::from_be_bytes(<[u8; 2]>::try_from(bytes).map_err(|_| HlsError::InvalidCatalog)?);
-    let object_type = u8::try_from((bits >> 11) & 0x1f).map_err(|_| HlsError::InvalidCatalog)?;
+fn aac_config(config: &[u8]) -> Result<AacConfig, Failure> {
+    let bytes = config.get(..2).ok_or(Failure::InvalidCatalog)?;
+    let bits = u16::from_be_bytes(<[u8; 2]>::try_from(bytes).map_err(|_| Failure::InvalidCatalog)?);
+    let object_type = u8::try_from((bits >> 11) & 0x1f).map_err(|_| Failure::InvalidCatalog)?;
     let sampling_frequency_index =
-        u8::try_from((bits >> 7) & 0x0f).map_err(|_| HlsError::InvalidCatalog)?;
+        u8::try_from((bits >> 7) & 0x0f).map_err(|_| Failure::InvalidCatalog)?;
     let channel_configuration =
-        u8::try_from((bits >> 3) & 0x0f).map_err(|_| HlsError::InvalidCatalog)?;
+        u8::try_from((bits >> 3) & 0x0f).map_err(|_| Failure::InvalidCatalog)?;
     if object_type != 2 || sampling_frequency_index >= 13 || channel_configuration == 0 {
-        return Err(HlsError::UnsupportedCodec);
+        return Err(Failure::UnsupportedCodec);
     }
     Ok(AacConfig {
         profile: object_type.saturating_sub(1),
@@ -525,12 +524,12 @@ fn aac_config(config: &[u8]) -> Result<AacConfig, HlsError> {
     })
 }
 
-fn adts(payload: &[u8], config: AacConfig) -> Result<Vec<u8>, HlsError> {
-    let frame_length = payload.len().checked_add(7).ok_or(HlsError::TooLarge)?;
+fn adts(payload: &[u8], config: AacConfig) -> Result<Vec<u8>, Failure> {
+    let frame_length = payload.len().checked_add(7).ok_or(Failure::TooLarge)?;
     if frame_length > 0x1fff {
-        return Err(HlsError::TooLarge);
+        return Err(Failure::TooLarge);
     }
-    let length = u16::try_from(frame_length).map_err(|_| HlsError::TooLarge)?;
+    let length = u16::try_from(frame_length).map_err(|_| Failure::TooLarge)?;
     let channels = config.channel_configuration;
     let header = [
         0xff,
