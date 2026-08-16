@@ -29,9 +29,9 @@ impl SignageWorld {
         let world = Self::new();
         runtime::world::Implementation::from_registration(
             &world.descriptor(),
-            1,
+            2,
             *blake3::hash(b"lait.signage.policy-table.v1").as_bytes(),
-            *blake3::hash(b"lait.signage.program.v1:rolling-windows").as_bytes(),
+            *blake3::hash(b"lait.signage.program.v2:rolling-windows:live-resources").as_bytes(),
         )
     }
 }
@@ -46,7 +46,7 @@ impl World for SignageWorld {
     fn descriptor(&self) -> Descriptor {
         Descriptor {
             id: self.id.clone(),
-            implementation_version: Version(1),
+            implementation_version: Version(2),
             schemas: self.schemas.clone(),
             limits: Limits::default(),
             scope_schemas: Vec::new(),

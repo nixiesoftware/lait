@@ -5,12 +5,14 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::{
-    ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE,
+    ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
-use axum::routing::{get, post};
+use axum::response::IntoResponse;
+use axum::routing::{any, get, post};
 use axum::Router;
 use display_protocol::auth::{
     sha256, AssetRange, RequestContext, RequestMethod, RequestRoute, AUTHORIZATION_SCHEME,
@@ -30,10 +32,11 @@ use display_protocol::pairing::{
     PairingCompleteRequest, PairingStartRequest, PairingStatusRequest,
 };
 use display_protocol::program::{
-    DisplayAssetMediaType, DisplayPlayback, DisplayScene, ProgramChange,
+    DisplayAssetMediaType, DisplayPlayback, DisplayScene, MediaProtocol, ProgramChange,
 };
 use display_protocol::receiver::{
-    ApiRefusal, ApiRefusalCode, ChallengeRequest, ReceiverCapabilities, ReceiverHealth,
+    ApiRefusal, ApiRefusalCode, ChallengeRequest, LiveTicketRequest, LiveTicketResponse,
+    ReceiverCapabilities, ReceiverHealth,
 };
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -45,7 +48,10 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tower_http::cors::{Any, CorsLayer};
 
-use super::{AuthorizationRefusal, DisplayCoordinator, DisplayPairingService, DisplayTlsIdentity};
+use super::{
+    AuthorizationRefusal, DisplayCoordinator, DisplayPairingService, DisplayTlsIdentity,
+    LiveMediaPacket, LiveTransport,
+};
 
 #[derive(Clone)]
 pub struct DisplayHttpState {
@@ -80,6 +86,22 @@ pub fn display_http_router(state: DisplayHttpState) -> Router {
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(allowed)
         .expose_headers(exposed);
+    display_routes()
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
+        .layer(cors)
+        .with_state(state)
+}
+
+/// The routing table alone, before any state is attached.
+///
+/// Split out so it can be built in a test. `Router::route` validates each
+/// pattern by **panicking** on a bad one, and the panic lands at daemon
+/// startup rather than at a request — which is how
+/// `/renditions/{rendition}.m3u8` took the whole daemon down with nothing to
+/// catch it, because no test had ever constructed this router. Building the
+/// real table (rather than a copied list of paths) is what keeps that check
+/// honest as routes are added.
+fn display_routes() -> Router<DisplayHttpState> {
     Router::new()
         .route("/head/v1/instance", get(instance))
         .route(
@@ -106,12 +128,28 @@ pub fn display_http_router(state: DisplayHttpState) -> Router {
         .route("/head/v1/program/changes", get(program_changes))
         .route("/head/v1/assets/{asset}", get(asset))
         .route(
+            "/head/v1/live/tickets",
+            post(live_ticket).layer(DefaultBodyLimit::max(MAX_PAIRING_BODY_BYTES)),
+        )
+        .route("/head/v1/live/{ticket}/socket", any(live_socket))
+        .route("/head/v1/live/{ticket}/master.m3u8", get(hls_master))
+        // The parameter captures the whole filename, extension included, because
+        // matchit allows only one parameter per path segment and refuses
+        // `{rendition}.m3u8` — by panicking at insert, which is to say at daemon
+        // startup. The wire URLs are unchanged: `/renditions/hi.m3u8` still
+        // matches, and the handler strips the suffix it requires.
+        .route(
+            "/head/v1/live/{ticket}/renditions/{rendition_file}",
+            get(hls_media_playlist),
+        )
+        .route(
+            "/head/v1/live/{ticket}/segments/{sequence_file}",
+            get(hls_segment),
+        )
+        .route(
             "/head/v1/health",
             post(health).layer(DefaultBodyLimit::max(MAX_HEALTH_BODY_BYTES)),
         )
-        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
-        .layer(cors)
-        .with_state(state)
 }
 
 /// Serve the closed receiver router over the coordinator's pinned certificate.
@@ -149,6 +187,7 @@ pub async fn serve_display_https(
                             TokioIo::new(tls),
                             TowerToHyperService::new(service),
                         )
+                        .with_upgrades()
                         .await
                         .with_context(|| format!("serve display HTTPS connection from {peer}"))
                 });
@@ -664,6 +703,364 @@ async fn health(
     }
 }
 
+async fn live_ticket(
+    State(state): State<DisplayHttpState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let request = match decode::<LiveTicketRequest>(&body) {
+        Ok(request) => request,
+        Err(_) => return auth_refusal(ApiRefusalCode::InvalidRequest),
+    };
+    let manifest = match one_header(&headers, HEADER_ASSET)
+        .and_then(|value| value.ok_or_else(|| anyhow!("missing live manifest")))
+        .and_then(|value| DisplayAssetId::parse(value.to_string()).map_err(Into::into))
+    {
+        Ok(manifest) => manifest,
+        Err(_) => return auth_refusal(ApiRefusalCode::AuthenticationFailed),
+    };
+    let parsed = match AuthorizedRequest::parse(
+        &headers,
+        &body,
+        RequestMethod::Post,
+        RequestRoute::LiveTicket,
+        Some(&manifest),
+    ) {
+        Ok(parsed) => parsed,
+        Err(_) => return auth_refusal(ApiRefusalCode::AuthenticationFailed),
+    };
+    let authorized = match parsed.authorize(&state, now()) {
+        Ok(authorized) => authorized,
+        Err(error) => return authorization_refusal(error),
+    };
+    let compiled = match state
+        .coordinator
+        .compile_for_device(
+            &authorized.record.device,
+            &authorized.record.capabilities,
+            now(),
+        )
+        .await
+    {
+        Ok(compiled) => compiled,
+        Err(_) => {
+            return consumed_refusal(
+                ApiRefusalCode::TemporarilyUnavailable,
+                authorized.next_challenge,
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        }
+    };
+    let Some(current_item) = parsed.current_item.as_ref() else {
+        return consumed_refusal(
+            ApiRefusalCode::InvalidRequest,
+            authorized.next_challenge,
+            StatusCode::BAD_REQUEST,
+        );
+    };
+    if parsed.assignment.as_ref() != Some(&compiled.program.assignment)
+        || parsed.program.as_ref() != Some(&compiled.program.program)
+        || parsed.revision.as_ref() != Some(&compiled.program.revision)
+    {
+        return consumed_refusal(
+            ApiRefusalCode::InvalidRequest,
+            authorized.next_challenge,
+            StatusCode::CONFLICT,
+        );
+    }
+    let transport = match request.transport {
+        MediaProtocol::Mse => LiveTransport::Mse,
+        MediaProtocol::Hls => LiveTransport::Hls,
+        MediaProtocol::Dash => {
+            return consumed_refusal(
+                ApiRefusalCode::InvalidRequest,
+                authorized.next_challenge,
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    let grant = match state
+        .coordinator
+        .mint_live_ticket(
+            &authorized.record.device,
+            current_item,
+            &manifest,
+            transport,
+            now(),
+        )
+        .await
+    {
+        Ok(grant) => grant,
+        Err(_) => {
+            return consumed_refusal(
+                ApiRefusalCode::TemporarilyUnavailable,
+                authorized.next_challenge,
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        }
+    };
+    let suffix = match transport {
+        LiveTransport::Mse => "socket",
+        LiveTransport::Hls => "master.m3u8",
+    };
+    with_challenge(
+        json(
+            StatusCode::OK,
+            &LiveTicketResponse {
+                protocol_major: display_protocol::PROTOCOL_MAJOR,
+                transport: request.transport,
+                endpoint: format!("/head/v1/live/{}/{suffix}", grant.token),
+                expires_at_unix_ms: grant.expires_at_unix_ms,
+            },
+        ),
+        authorized.next_challenge,
+    )
+}
+
+async fn live_socket(
+    State(state): State<DisplayHttpState>,
+    Path(ticket): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Response<Body> {
+    if !valid_ticket_token(&ticket) {
+        return public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest);
+    }
+    let stream =
+        match state
+            .coordinator
+            .authorize_live_ticket(&ticket, LiveTransport::Mse, true, now())
+        {
+            Ok(stream) => stream,
+            Err(_) => return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked),
+        };
+    let snapshot = match state
+        .coordinator
+        .live_hub()
+        .mse_snapshot(&stream.orbit, &stream.resource)
+    {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            return public_refusal(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ApiRefusalCode::TemporarilyUnavailable,
+            )
+        }
+    };
+    ws.on_upgrade(move |socket| serve_live_socket(socket, state, stream, snapshot))
+        .into_response()
+}
+
+async fn serve_live_socket(
+    mut socket: WebSocket,
+    state: DisplayHttpState,
+    stream: super::coordinator::AuthorizedLiveStream,
+    mut snapshot: super::LiveMediaSnapshot,
+) {
+    let hello = serde_json::json!({
+        "kind": "astrolabe_live",
+        "version": 1,
+        "tracks": snapshot.tracks,
+    });
+    let Ok(hello) = serde_json::to_string(&hello) else {
+        return;
+    };
+    if socket.send(Message::Text(hello.into())).await.is_err() {
+        return;
+    }
+    let renditions = snapshot
+        .tracks
+        .iter()
+        .map(|track| track.rendition.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for packet in snapshot.packets {
+        if send_live_packet(&mut socket, packet).await.is_err() {
+            return;
+        }
+    }
+    let mut authorization_check = tokio::time::interval(Duration::from_secs(1));
+    authorization_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = authorization_check.tick() => {
+                if !state.coordinator.live_stream_still_authorized(&stream, now()) {
+                    return;
+                }
+            }
+            update = snapshot.updates.recv() => {
+                let Ok(packet) = update else { return };
+                let rendition = match &packet {
+                    LiveMediaPacket::Init { rendition, .. }
+                    | LiveMediaPacket::Fragment { rendition, .. } => rendition,
+                };
+                if renditions.contains(rendition)
+                    && send_live_packet(&mut socket, packet).await.is_err()
+                {
+                    return;
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn send_live_packet(socket: &mut WebSocket, packet: LiveMediaPacket) -> Result<()> {
+    let (kind, rendition, sequence, published, start, duration, discontinuity, payload) =
+        match packet {
+            LiveMediaPacket::Init { rendition, bytes } => {
+                (1u8, rendition, 0, 0, 0, 0, false, bytes)
+            }
+            LiveMediaPacket::Fragment {
+                rendition,
+                group_sequence,
+                published_at_micros,
+                start_timestamp,
+                duration,
+                discontinuity,
+                bytes,
+            } => (
+                2,
+                rendition,
+                group_sequence,
+                published_at_micros,
+                start_timestamp,
+                duration,
+                discontinuity,
+                bytes,
+            ),
+        };
+    let name_length = u16::try_from(rendition.len()).context("live rendition name")?;
+    let capacity = 36usize
+        .checked_add(rendition.len())
+        .and_then(|value| value.checked_add(payload.len()))
+        .context("live WebSocket message size")?;
+    let mut wire = Vec::with_capacity(capacity);
+    wire.push(kind);
+    wire.extend_from_slice(&name_length.to_be_bytes());
+    wire.extend_from_slice(rendition.as_bytes());
+    wire.extend_from_slice(&sequence.to_be_bytes());
+    wire.extend_from_slice(&published.to_be_bytes());
+    wire.extend_from_slice(&start.to_be_bytes());
+    wire.extend_from_slice(&duration.to_be_bytes());
+    wire.push(u8::from(discontinuity));
+    wire.extend_from_slice(&payload);
+    socket
+        .send(Message::Binary(wire.into()))
+        .await
+        .context("send live WebSocket packet")
+}
+
+async fn hls_master(
+    State(state): State<DisplayHttpState>,
+    Path(ticket): Path<String>,
+) -> Response<Body> {
+    let Some(stream) = hls_authorization(&state, &ticket) else {
+        return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
+    };
+    match state
+        .coordinator
+        .live_hub()
+        .hls_master(&stream.orbit, &stream.resource, ".")
+    {
+        Ok(playlist) => media_response("application/vnd.apple.mpegurl", playlist.into_bytes()),
+        Err(_) => public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest),
+    }
+}
+
+/// The rendition name inside a media-playlist filename.
+///
+/// The extension is required here rather than by the router, because matchit
+/// allows only one parameter per path segment. Wire URLs are unchanged; what
+/// moved is where the `.m3u8` is checked. A filename without it is `None`, so
+/// it becomes the same 404 an unknown rendition gets.
+fn rendition_name(file: &str) -> Option<&str> {
+    file.strip_suffix(".m3u8").filter(|name| !name.is_empty())
+}
+
+/// The sequence number inside a segment filename. Same reasoning; a malformed
+/// number is a 404 rather than an extractor rejection, so the two unreachable
+/// cases answer alike.
+fn segment_sequence(file: &str) -> Option<u64> {
+    file.strip_suffix(".ts")?.parse().ok()
+}
+
+async fn hls_media_playlist(
+    State(state): State<DisplayHttpState>,
+    Path((ticket, rendition_file)): Path<(String, String)>,
+) -> Response<Body> {
+    let Some(rendition) = rendition_name(&rendition_file) else {
+        return public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest);
+    };
+    let Some(stream) = hls_authorization(&state, &ticket) else {
+        return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
+    };
+    match state.coordinator.live_hub().hls_media_playlist(
+        &stream.orbit,
+        &stream.resource,
+        rendition,
+        "..",
+    ) {
+        Ok(playlist) => media_response("application/vnd.apple.mpegurl", playlist.into_bytes()),
+        Err(_) => public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest),
+    }
+}
+
+async fn hls_segment(
+    State(state): State<DisplayHttpState>,
+    Path((ticket, sequence_file)): Path<(String, String)>,
+) -> Response<Body> {
+    let Some(sequence) = segment_sequence(&sequence_file) else {
+        return public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest);
+    };
+    let Some(stream) = hls_authorization(&state, &ticket) else {
+        return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
+    };
+    match state.coordinator.live_hub().hls_segment(
+        &stream.orbit,
+        &stream.resource,
+        &stream.resource,
+        sequence,
+    ) {
+        Ok(segment) => media_response("video/mp2t", segment),
+        Err(_) => public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest),
+    }
+}
+
+fn hls_authorization(
+    state: &DisplayHttpState,
+    ticket: &str,
+) -> Option<super::coordinator::AuthorizedLiveStream> {
+    valid_ticket_token(ticket)
+        .then(|| {
+            state
+                .coordinator
+                .authorize_live_ticket(ticket, LiveTransport::Hls, false, now())
+        })
+        .and_then(Result::ok)
+}
+
+fn media_response(content_type: &'static str, bytes: Vec<u8>) -> Response<Body> {
+    let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn valid_ticket_token(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 struct AuthorizedRequest {
     method: RequestMethod,
     route: RequestRoute,
@@ -992,7 +1389,53 @@ fn media_content_type(media_type: DisplayAssetMediaType) -> &'static str {
         DisplayAssetMediaType::ImagePng => "image/png",
         DisplayAssetMediaType::ImageJpeg => "image/jpeg",
         DisplayAssetMediaType::ImageWebp => "image/webp",
+        DisplayAssetMediaType::MseManifest => "application/vnd.astrolabe.live+json",
         DisplayAssetMediaType::HlsManifest => "application/vnd.apple.mpegurl",
         DisplayAssetMediaType::DashManifest => "application/dash+xml",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_display_route_is_a_pattern_the_router_accepts() {
+        // `Router::route` validates a pattern by PANICKING on a bad one, and
+        // the panic lands at daemon startup rather than at a request. That is
+        // how `/renditions/{rendition}.m3u8` shipped: matchit forbids a
+        // parameter sharing a segment with a literal, `lait daemon` aborted
+        // before printing anything, and no test had ever built this router.
+        //
+        // Building the real table — not a copied list of paths — is what keeps
+        // this honest as routes are added.
+        let _ = display_routes();
+    }
+
+    #[test]
+    fn the_hls_filenames_keep_their_extensions_and_reject_what_lacks_them() {
+        assert_eq!(rendition_name("hi.m3u8"), Some("hi"));
+        assert_eq!(rendition_name("720p.m3u8"), Some("720p"));
+        assert_eq!(
+            rendition_name("hi"),
+            None,
+            "a request without the extension is not a rendition"
+        );
+        assert_eq!(
+            rendition_name(".m3u8"),
+            None,
+            "and an empty name is not one either"
+        );
+        assert_eq!(rendition_name("hi.ts"), None, "nor is the wrong extension");
+
+        assert_eq!(segment_sequence("42.ts"), Some(42));
+        assert_eq!(segment_sequence("0.ts"), Some(0));
+        assert_eq!(segment_sequence("42"), None);
+        assert_eq!(segment_sequence("42.m3u8"), None);
+        assert_eq!(
+            segment_sequence("-1.ts"),
+            None,
+            "a malformed sequence answers as the unknown one does, not as a rejection"
+        );
     }
 }

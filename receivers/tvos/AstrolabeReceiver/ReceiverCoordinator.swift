@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AVFoundation
 import UIKit
 
 @MainActor
@@ -8,6 +9,7 @@ final class ReceiverCoordinator: ObservableObject {
     @Published var transportState = "connecting"
     @Published var sourceState = "none"
     @Published var stale = false
+    @Published var livePlayer: AVPlayer?
 
     private let bootstrap: ReceiverBootstrap?
     private let bootstrapFailure: Error?
@@ -17,7 +19,9 @@ final class ReceiverCoordinator: ObservableObject {
     private var credential: ReceiverCredential?
     private var challenge: String?
     private var program: DisplayProgram?
-    private var stage: [String: StagedFrame] = [:]
+    private var stage: [String: StagedContent] = [:]
+    private var livePlayback: LiveHlsPlayback?
+    private var liveRecoveryRequested = false
     private var playbackStarted = ProcessInfo.processInfo.systemUptime
     private var elapsedBase = 0
     private var lastProgramDelivery = ProcessInfo.processInfo.systemUptime
@@ -282,6 +286,7 @@ final class ReceiverCoordinator: ObservableObject {
                         guard accepted["kind"] as? String == "accepted" else { throw DisplayProtocolV1.refusal("capability_refused", "coordinator") }
                         capabilitiesAccepted = true
                     }
+                    try await recoverLiveMediaIfNeeded()
                     let response: [String: Any]
                     if program == nil {
                         response = try await authorizedJSON(route: "program_snapshot", method: "GET", path: "/head/v1/program", object: nil)
@@ -362,15 +367,29 @@ final class ReceiverCoordinator: ObservableObject {
         }
     }
 
-    private func stageProgram(_ program: DisplayProgram) async throws -> [String: StagedFrame] {
-        var result: [String: StagedFrame] = [:]
+    private func stageProgram(_ program: DisplayProgram) async throws -> [String: StagedContent] {
+        var result: [String: StagedContent] = [:]
         var total = 0
-        for item in program.items where item.scene.kind == "frame" {
-            guard let asset = item.scene.asset else { throw DisplayProtocolV1.refusal("invalid_shape", "frame asset") }
+        for item in program.items {
+            let asset: DisplayAsset
+            if item.scene.kind == "frame", let frame = item.scene.asset {
+                asset = frame
+            } else if item.scene.kind == "media", let manifest = item.scene.manifest {
+                asset = manifest
+            } else {
+                continue
+            }
             if result[asset.id] != nil { continue }
             total += asset.encodedLen
             guard total <= 50_331_648 else { throw DisplayProtocolV1.refusal("bound_exceeded", "staged bytes") }
-            result[asset.id] = try await authorizedAsset(asset, program: program)
+            if item.scene.kind == "frame" {
+                result[asset.id] = .frame(try await authorizedAsset(asset, program: program))
+            } else {
+                result[asset.id] = .hls(
+                    try await authorizedLiveMedia(item, program: program),
+                    encodedBytes: asset.encodedLen
+                )
+            }
         }
         return result
     }
@@ -388,6 +407,28 @@ final class ReceiverCoordinator: ObservableObject {
               cgImage.width == asset.width, cgImage.height == asset.height
         else { throw DisplayProtocolV1.refusal("asset_integrity", "frame bytes or dimensions") }
         return StagedFrame(image: image, encodedBytes: response.body.count, digest: asset.sha256)
+    }
+
+    private func authorizedLiveMedia(_ item: DisplayProgramItem, program: DisplayProgram) async throws -> URL {
+        guard let manifest = item.scene.manifest else { throw DisplayProtocolV1.refusal("invalid_shape", "HLS manifest") }
+        let response = try await authorizedJSON(
+            route: "live_ticket", method: "POST", path: "/head/v1/live/tickets",
+            object: ["transport": "hls"],
+            overrides: .init(
+                assignment: program.assignment, program: program.program, revision: program.revision,
+                currentItem: item.id, elapsedMs: 0, asset: manifest.id
+            )
+        )
+        try StrictJSON.fields(response, exactly: ["protocol_major", "transport", "endpoint", "expires_at_unix_ms"], name: "live ticket")
+        guard StrictJSON.int(response["protocol_major"]) == 1,
+              response["transport"] as? String == "hls",
+              let path = response["endpoint"] as? String,
+              path.hasPrefix("/head/v1/live/"), path.hasSuffix("/master.m3u8"),
+              DisplayProtocolV1.isHex(String(path.dropFirst(14).dropLast(12)), count: 64),
+              let expiry = StrictJSON.int(response["expires_at_unix_ms"]),
+              expiry > Int(Date().timeIntervalSince1970 * 1_000)
+        else { throw DisplayProtocolV1.refusal("live_ticket", "coordinator grant") }
+        return endpoint(path)
     }
 
     @discardableResult
@@ -437,11 +478,33 @@ final class ReceiverCoordinator: ObservableObject {
             screen = .message(eyebrow: "Receiver-owned state", title: "Coordinator unavailable", body: "The assigned content is no longer eligible to remain on screen.", retry: false)
             return
         }
-        if item.scene.kind == "frame", let asset = item.scene.asset, let frame = stage[asset.id] {
+        if item.scene.kind == "frame", let asset = item.scene.asset,
+           case let .frame(frame)? = stage[asset.id] {
+            stopLivePlayback()
             screen = .frame(frame.image, summary: item.spokenSummary)
+        } else if item.scene.kind == "media", let manifest = item.scene.manifest,
+                  case let .hls(url, _)? = stage[manifest.id] {
+            if livePlayback?.sourceURL != url {
+                stopLivePlayback()
+                let playback = LiveHlsPlayback(sourceURL: url, origin: origin, transport: transport) { [weak self] in
+                    Task { @MainActor in
+                        self?.liveRecoveryRequested = true
+                        self?.screen = .message(
+                            eyebrow: "Receiver refused", title: "Live media decode failed",
+                            body: "The assigned HLS stream could not be decoded by this Apple TV.", retry: false
+                        )
+                    }
+                }
+                livePlayback = playback
+                livePlayer = playback.player
+            }
+            livePlayer?.play()
+            screen = .media(summary: item.spokenSummary)
         } else if item.scene.kind == "blank" {
+            stopLivePlayback()
             screen = .message(eyebrow: "Receiver-owned state", title: "Assigned blank state", body: item.scene.reason ?? "unsupported", retry: false)
         } else {
+            stopLivePlayback()
             screen = .message(eyebrow: "Receiver refused", title: "Program unsupported", body: "This receiver cannot safely render the assigned scene.", retry: false)
         }
         if let duration = item.durationMs {
@@ -491,6 +554,8 @@ final class ReceiverCoordinator: ObservableObject {
         playbackTask?.cancel()
         program = nil
         stage.removeAll()
+        stopLivePlayback()
+        liveRecoveryRequested = false
         sourceState = "none"
         stale = false
     }
@@ -499,6 +564,8 @@ final class ReceiverCoordinator: ObservableObject {
         var assignment: String?
         var program: String?
         var revision: String?
+        var currentItem: String?
+        var elapsedMs: Int?
         var waitMs: Int?
         var clearPlayback = false
         var asset: String?
@@ -526,8 +593,8 @@ final class ReceiverCoordinator: ObservableObject {
             assignment: overrides.assignment ?? program?.assignment,
             program: overrides.program ?? program?.program,
             revision: overrides.revision ?? program?.revision,
-            currentItem: overrides.clearPlayback ? nil : cursor.map { program?.items[$0.currentIndex].id } ?? nil,
-            elapsedMs: overrides.clearPlayback ? nil : cursor?.elapsedMs,
+            currentItem: overrides.clearPlayback ? nil : overrides.currentItem ?? cursor.map { program?.items[$0.currentIndex].id } ?? nil,
+            elapsedMs: overrides.clearPlayback ? nil : overrides.elapsedMs ?? cursor?.elapsedMs,
             waitMs: overrides.waitMs, asset: overrides.asset,
             rangeStart: nil, rangeLength: nil, challenge: challenge,
             bodySHA256: DisplayProtocolV1.sha256(body)
@@ -636,7 +703,7 @@ final class ReceiverCoordinator: ObservableObject {
             "max_program_items": 16, "max_staging_horizon_ms": 86_400_000,
             "locale": String(Locale.current.identifier.prefix(35)),
             "accessibility": ["native_screen_reader": true, "spoken_summary": true, "captions": false, "audio_description": false],
-            "playback": ["tier": "frame", "sync_class": "boundary", "rate_control_probed": false, "latency_class": "snapshot", "health_granularity": "full"],
+            "playback": ["tier": "native_hls", "sync_class": "none", "rate_control_probed": false, "latency_class": "broadcast", "health_granularity": "coarse"],
         ]
     }
 
@@ -659,7 +726,7 @@ final class ReceiverCoordinator: ObservableObject {
             "elapsed_ms": cursor.elapsedMs,
             "last_displayed_asset": displayed,
             "connection": "online",
-            "playback": item.scene.kind == "frame" ? "displaying" : "blank",
+            "playback": ["frame", "media"].contains(item.scene.kind) ? "displaying" : "blank",
             "last_error": "none",
             "staged_items": stage.count,
             "staged_bytes": stagedBytes,
@@ -682,6 +749,26 @@ final class ReceiverCoordinator: ObservableObject {
 
     private func mediaType(_ value: String) -> String {
         ["image_png": "image/png", "image_jpeg": "image/jpeg", "image_webp": "image/webp"][value] ?? "application/octet-stream"
+    }
+
+    private func stopLivePlayback() {
+        livePlayer?.pause()
+        livePlayer = nil
+        livePlayback = nil
+    }
+
+    private func recoverLiveMediaIfNeeded() async throws {
+        guard liveRecoveryRequested, let program, let cursor = currentPlayback() else { return }
+        let item = program.items[cursor.currentIndex]
+        guard item.scene.kind == "media", let manifest = item.scene.manifest else {
+            liveRecoveryRequested = false
+            return
+        }
+        let url = try await authorizedLiveMedia(item, program: program)
+        stage[manifest.id] = .hls(url, encodedBytes: manifest.encodedLen)
+        liveRecoveryRequested = false
+        stopLivePlayback()
+        renderCurrent()
     }
 }
 
@@ -725,6 +812,10 @@ enum StrictJSON {
                 try fields(scene, exactly: ["kind", "asset"], name: "frame")
                 guard let asset = scene["asset"] as? [String: Any] else { throw DisplayProtocolV1.refusal("invalid_shape", "asset") }
                 try fields(asset, exactly: ["id", "media_type", "encoded_len", "sha256", "width", "height"], name: "asset")
+            } else if kind == "media" {
+                try fields(scene, exactly: ["kind", "manifest", "protocol", "live"], name: "media")
+                guard let manifest = scene["manifest"] as? [String: Any] else { throw DisplayProtocolV1.refusal("invalid_shape", "manifest") }
+                try fields(manifest, exactly: ["id", "media_type", "encoded_len", "sha256", "width", "height"], name: "manifest")
             } else if kind == "blank" {
                 try fields(scene, exactly: ["kind", "reason"], name: "blank")
             } else { throw DisplayProtocolV1.refusal("unsupported", "scene") }

@@ -41,6 +41,18 @@ test("receiver speaks only the closed authenticated Display protocol", async () 
   assert.doesNotMatch(source, /WKWebView|\/world|\/space|demo/i);
 });
 
+test("tvOS uses native HLS through the bounded pinned transport", async () => {
+  const coordinator = await read("AstrolabeReceiver/ReceiverCoordinator.swift");
+  const playback = await read("AstrolabeReceiver/LiveHlsPlayback.swift");
+  const app = await read("AstrolabeReceiver/AstrolabeApp.swift");
+  assert.match(coordinator, /"tier": "native_hls"/);
+  assert.match(coordinator, /route: "live_ticket"/);
+  assert.match(playback, /AVAssetResourceLoaderDelegate/);
+  assert.match(playback, /transport\.send/);
+  assert.match(playback, /components\.scheme = "astrolabe-hls"/);
+  assert.match(app, /VideoPlayer\(player: receiver\.livePlayer\)/);
+});
+
 test("XCTest suite independently consumes the frozen fixture", async () => {
   const tests = await read("AstrolabeReceiverTests/DisplayProtocolTests.swift");
   assert.match(tests, /confirmationPhrase/);

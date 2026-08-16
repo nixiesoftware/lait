@@ -19,6 +19,9 @@ const encoder = new TextEncoder();
 const JSON_LIMIT = 64 * 1024;
 const PAIRING_LIMIT = 16 * 1024;
 const LONG_POLL_WAIT_MS = 25_000;
+const LIVE_PACKET_LIMIT = 34 * 1024 * 1024;
+const LIVE_QUEUE_LIMIT = 48 * 1024 * 1024;
+const LIVE_QUEUE_PACKETS = 16;
 
 const MEDIA_TYPES = Object.freeze({
   image_png: "image/png",
@@ -114,6 +117,269 @@ async function decodeFrame(arrayBuffer, asset) {
   } catch (error) {
     URL.revokeObjectURL(url);
     throw error;
+  }
+}
+
+export function parseLiveMediaPacket(arrayBuffer) {
+  if (!(arrayBuffer instanceof ArrayBuffer)
+    || arrayBuffer.byteLength < 36
+    || arrayBuffer.byteLength > LIVE_PACKET_LIMIT) {
+    throw new ProtocolError("live_packet", "Live media packet is outside its byte bound");
+  }
+  const view = new DataView(arrayBuffer);
+  const kind = view.getUint8(0);
+  const nameLength = view.getUint16(1, false);
+  const payloadOffset = 36 + nameLength;
+  if (![1, 2].includes(kind) || nameLength < 1 || nameLength > 64 || payloadOffset > arrayBuffer.byteLength) {
+    throw new ProtocolError("live_packet", "Live media packet has an invalid envelope");
+  }
+  let rendition;
+  try {
+    rendition = new TextDecoder("utf-8", { fatal: true })
+      .decode(new Uint8Array(arrayBuffer, 3, nameLength));
+  } catch {
+    throw new ProtocolError("live_packet", "Live rendition is not UTF-8");
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(rendition)) {
+    throw new ProtocolError("live_packet", "Live rendition is not canonical");
+  }
+  const metadata = 3 + nameLength;
+  const sequence = view.getBigUint64(metadata, false);
+  const publishedAtMicros = view.getBigInt64(metadata + 8, false);
+  const startTimestamp = view.getBigUint64(metadata + 16, false);
+  const duration = view.getBigUint64(metadata + 24, false);
+  const discontinuity = view.getUint8(metadata + 32);
+  if (discontinuity > 1 || (kind === 1 && (sequence !== 0n || duration !== 0n || discontinuity !== 0))) {
+    throw new ProtocolError("live_packet", "Live media metadata is invalid");
+  }
+  return {
+    kind: kind === 1 ? "init" : "fragment",
+    rendition,
+    sequence,
+    publishedAtMicros,
+    startTimestamp,
+    duration,
+    discontinuity: discontinuity === 1,
+    payload: new Uint8Array(arrayBuffer.slice(payloadOffset)),
+  };
+}
+
+function supportedLiveTracks(tracks) {
+  if (typeof MediaSource !== "function" || typeof MediaSource.isTypeSupported !== "function") {
+    throw new ProtocolError("unsupported", "Media Source Extensions are unavailable");
+  }
+  if (!Array.isArray(tracks) || tracks.length < 1 || tracks.length > 8) {
+    throw new ProtocolError("live_catalog", "Live track count is outside its bound");
+  }
+  const selected = new Map();
+  for (const track of tracks) {
+    exactFields(
+      track,
+      ["rendition", "kind", "mime_type", "timescale", "target_latency_ms", "render_group"],
+      "live track",
+    );
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(track.rendition)
+      || !["audio", "video"].includes(track.kind)
+      || typeof track.mime_type !== "string"
+      || !Number.isSafeInteger(track.timescale)
+      || track.timescale < 1
+      || !Number.isSafeInteger(track.target_latency_ms)
+      || track.target_latency_ms < 1
+      || (track.render_group !== null && !/^[a-zA-Z0-9_-]{1,64}$/.test(track.render_group))) {
+      throw new ProtocolError("live_catalog", "Live track description is invalid");
+    }
+    if (!selected.has(track.kind) && MediaSource.isTypeSupported(track.mime_type)) {
+      selected.set(track.kind, track);
+    }
+  }
+  if (!selected.has("video")) {
+    throw new ProtocolError("unsupported", "The live catalog has no supported video rendition");
+  }
+  return new Map(Array.from(selected.values(), (track) => [track.rendition, track]));
+}
+
+class MseLiveSession {
+  constructor(origin, endpoint, onFailure) {
+    this.origin = origin;
+    this.endpoint = endpoint;
+    this.onFailure = onFailure;
+    this.video = null;
+    this.socket = null;
+    this.mediaSource = null;
+    this.mediaUrl = null;
+    this.tracks = new Map();
+    this.initializations = new Map();
+    this.buffers = new Map();
+    this.queues = new Map();
+    this.lastSequences = new Map();
+    this.queuedBytes = 0;
+    this.failed = false;
+    this.released = false;
+  }
+
+  mount(container, summary) {
+    if (!this.video) {
+      this.video = document.createElement("video");
+      this.video.autoplay = true;
+      this.video.playsInline = true;
+      this.video.setAttribute("aria-label", summary || "Assigned Astrolabe live media");
+      this.video.addEventListener("error", () => this.fail(new ProtocolError("media_decode", "Live media decoder failed")));
+    }
+    if (this.video.parentElement !== container) container.replaceChildren(this.video);
+    this.connect();
+    this.seekLiveEdge();
+    this.video.play().catch(() => {});
+  }
+
+  connect() {
+    if (this.socket || this.released || this.failed) return;
+    const url = new URL(this.endpoint, this.origin);
+    url.protocol = "wss:";
+    this.socket = new WebSocket(url.href);
+    this.socket.binaryType = "arraybuffer";
+    this.socket.addEventListener("message", (event) => {
+      try {
+        if (typeof event.data === "string") this.acceptHello(event.data);
+        else this.acceptPacket(parseLiveMediaPacket(event.data));
+      } catch (error) {
+        this.fail(error);
+      }
+    });
+    this.socket.addEventListener("error", () => this.fail(new ProtocolError("network", "Live media socket failed")));
+    this.socket.addEventListener("close", () => {
+      if (!this.released && !this.failed) this.fail(new ProtocolError("network", "Live media socket closed"));
+    });
+  }
+
+  acceptHello(serialized) {
+    if (this.tracks.size !== 0) throw new ProtocolError("live_catalog", "Live catalog was repeated");
+    let hello;
+    try { hello = JSON.parse(serialized); } catch { throw new ProtocolError("live_catalog", "Live catalog is not JSON"); }
+    exactFields(hello, ["kind", "version", "tracks"], "live catalog");
+    if (hello.kind !== "astrolabe_live" || hello.version !== 1) {
+      throw new ProtocolError("live_catalog", "Live catalog version is unsupported");
+    }
+    this.tracks = supportedLiveTracks(hello.tracks);
+    this.rebuildMediaSource();
+  }
+
+  acceptPacket(packet) {
+    if (!this.tracks.has(packet.rendition)) return;
+    if (packet.kind === "init") {
+      if (packet.payload.byteLength < 1) throw new ProtocolError("live_packet", "Live init segment is empty");
+      this.initializations.set(packet.rendition, packet.payload);
+      this.enqueue(packet.rendition, packet.payload);
+      return;
+    }
+    if (!this.initializations.has(packet.rendition) || packet.payload.byteLength < 1) {
+      throw new ProtocolError("live_packet", "Live fragment arrived before its init segment");
+    }
+    const previous = this.lastSequences.get(packet.rendition);
+    if (packet.discontinuity || (previous !== undefined && previous + 1n !== packet.sequence)) {
+      this.lastSequences.set(packet.rendition, packet.sequence);
+      this.rebuildMediaSource(packet);
+      return;
+    }
+    this.lastSequences.set(packet.rendition, packet.sequence);
+    this.enqueue(packet.rendition, packet.payload);
+  }
+
+  rebuildMediaSource(firstPacket = null) {
+    if (!this.video || this.tracks.size === 0) return;
+    this.buffers.clear();
+    this.queues.clear();
+    this.queuedBytes = 0;
+    for (const track of this.tracks.values()) this.queues.set(track.rendition, []);
+    const previousUrl = this.mediaUrl;
+    this.mediaSource = new MediaSource();
+    this.mediaUrl = URL.createObjectURL(this.mediaSource);
+    this.video.src = this.mediaUrl;
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
+    this.mediaSource.addEventListener("sourceopen", () => {
+      try {
+        for (const track of this.tracks.values()) {
+          const buffer = this.mediaSource.addSourceBuffer(track.mime_type);
+          this.buffers.set(track.rendition, buffer);
+          buffer.addEventListener("updateend", () => {
+            this.seekLiveEdge();
+            this.pump(track.rendition);
+          });
+          this.pump(track.rendition);
+        }
+        this.mediaSource.duration = Number.POSITIVE_INFINITY;
+      } catch (error) {
+        this.fail(error);
+      }
+    }, { once: true });
+    for (const [rendition, initialization] of this.initializations) {
+      if (this.tracks.has(rendition)) this.enqueue(rendition, initialization);
+    }
+    if (firstPacket) this.enqueue(firstPacket.rendition, firstPacket.payload);
+  }
+
+  enqueue(rendition, payload) {
+    const queue = this.queues.get(rendition);
+    if (!queue) return;
+    const queuedPackets = Array.from(this.queues.values(), (candidate) => candidate.length)
+      .reduce((total, value) => total + value, 0);
+    if (queuedPackets >= LIVE_QUEUE_PACKETS || this.queuedBytes + payload.byteLength > LIVE_QUEUE_LIMIT) {
+      throw new ProtocolError("bound_exceeded", "Live decoder queue exceeded its bound");
+    }
+    const copy = payload.slice();
+    queue.push(copy);
+    this.queuedBytes += copy.byteLength;
+    this.pump(rendition);
+  }
+
+  pump(rendition) {
+    const buffer = this.buffers.get(rendition);
+    const queue = this.queues.get(rendition);
+    if (!buffer || !queue || buffer.updating || queue.length === 0) return;
+    try {
+      if (buffer.buffered.length > 0) {
+        const start = buffer.buffered.start(0);
+        const end = buffer.buffered.end(buffer.buffered.length - 1);
+        if (end - start > 30) {
+          buffer.remove(start, Math.max(start, end - 12));
+          return;
+        }
+      }
+      const payload = queue.shift();
+      this.queuedBytes -= payload.byteLength;
+      buffer.appendBuffer(payload);
+      this.seekLiveEdge();
+    } catch (error) {
+      this.fail(error);
+    }
+  }
+
+  seekLiveEdge() {
+    if (!this.video || !this.video.buffered || this.video.buffered.length === 0) return;
+    const edge = this.video.buffered.end(this.video.buffered.length - 1);
+    if (!Number.isFinite(this.video.currentTime) || edge - this.video.currentTime > 8) {
+      this.video.currentTime = Math.max(0, edge - 2);
+    }
+  }
+
+  fail(error) {
+    if (this.failed || this.released) return;
+    this.failed = true;
+    if (this.socket) this.socket.close();
+    this.socket = null;
+    this.onFailure(error instanceof ProtocolError ? error : new ProtocolError("media_decode", String(error)));
+  }
+
+  release() {
+    this.released = true;
+    if (this.socket) this.socket.close();
+    if (this.video) {
+      this.video.pause();
+      this.video.removeAttribute("src");
+      this.video.load();
+    }
+    if (this.mediaUrl) URL.revokeObjectURL(this.mediaUrl);
+    this.socket = null;
+    this.mediaUrl = null;
   }
 }
 
@@ -627,6 +893,7 @@ export class DisplayReceiverClient {
           await this.negotiateCapabilities();
           capabilitiesAccepted = true;
         }
+        await this.recoverFailedLiveMedia();
         const response = this.program
           ? await this.authorizedJson({
             route: "program_changes",
@@ -641,6 +908,7 @@ export class DisplayReceiverClient {
             path: "/head/v1/program",
           });
         await this.handleProgramResponse(response);
+        await this.recoverFailedLiveMedia();
         if (this.program && performance.now() - this.lastHealthAt >= 30_000) {
           await this.reportHealth();
         }
@@ -714,7 +982,17 @@ export class DisplayReceiverClient {
     let stagedBytes = 0;
     for (const item of program.items) {
       if (item.scene.kind === "media") {
-        throw new ProtocolError("unsupported", "Production media is disabled until byte grants ship");
+        if (!item.scene.live || item.scene.protocol !== "mse" || item.scene.manifest.media_type !== "mse_manifest") {
+          throw new ProtocolError("unsupported", "Receiver accepts only granted live MSE media");
+        }
+        const manifest = item.scene.manifest;
+        if (assets.has(manifest.id)) continue;
+        stagedBytes += manifest.encoded_len;
+        if (stagedBytes > this.capabilities.max_staged_bytes || stagedBytes > BOUNDS.maxStagedBytes) {
+          throw new ProtocolError("bound_exceeded", "Program exceeds negotiated staging bytes");
+        }
+        assets.set(manifest.id, await this.authorizedLiveMedia(item, program));
+        continue;
       }
       if (item.scene.kind !== "frame") continue;
       const asset = item.scene.asset;
@@ -728,8 +1006,63 @@ export class DisplayReceiverClient {
     return assets;
   }
 
+  async authorizedLiveMedia(item, program) {
+    const manifest = item.scene.manifest;
+    const response = await this.authorizedJson({
+      route: "live_ticket",
+      method: "POST",
+      path: "/head/v1/live/tickets",
+      body: { transport: "mse" },
+      overrides: {
+        assignment: program.assignment,
+        program: program.program,
+        revision: program.revision,
+        currentItem: item.id,
+        elapsedMs: 0,
+        asset: manifest.id,
+      },
+    });
+    exactFields(response, ["protocol_major", "transport", "endpoint", "expires_at_unix_ms"], "live ticket");
+    if (response.protocol_major !== PROTOCOL_MAJOR
+      || response.transport !== "mse"
+      || !/^\/head\/v1\/live\/[0-9a-f]{64}\/socket$/.test(response.endpoint)
+      || !Number.isSafeInteger(response.expires_at_unix_ms)
+      || response.expires_at_unix_ms <= Date.now()
+      || response.expires_at_unix_ms > Date.now() + BOUNDS.maxStagingHorizonMs + 60_000) {
+      throw new ProtocolError("live_ticket", "Coordinator returned an invalid live ticket");
+    }
+    const entry = { asset: manifest, item, session: null, lastError: null };
+    entry.session = new MseLiveSession(this.origin, response.endpoint, (error) => {
+      entry.lastError = error;
+      if (this.program?.revision === program.revision
+        && this.program.items[this.program.playback.current_index]?.id === item.id) {
+        this.ui.showBlank("source_unavailable", sourceKind(this.program));
+      }
+    });
+    return entry;
+  }
+
+  async recoverFailedLiveMedia() {
+    if (!this.program) return;
+    let changed = false;
+    for (const item of this.program.items) {
+      if (item.scene.kind !== "media") continue;
+      const manifest = item.scene.manifest;
+      const existing = this.staged.get(manifest.id);
+      if (!existing?.session?.failed) continue;
+      const replacement = await this.authorizedLiveMedia(item, this.program);
+      existing.session.release();
+      this.staged.set(manifest.id, replacement);
+      changed = true;
+    }
+    if (changed) this.renderCurrent();
+  }
+
   releaseStage(stage) {
-    for (const entry of stage.values()) URL.revokeObjectURL(entry.url);
+    for (const entry of stage.values()) {
+      if (entry.url) URL.revokeObjectURL(entry.url);
+      if (entry.session) entry.session.release();
+    }
   }
 
   clearProgram() {
@@ -814,6 +1147,13 @@ export class DisplayReceiverClient {
         return;
       }
       this.ui.showFrame(staged.url, item.spoken_summary, state);
+    } else if (item.scene.kind === "media") {
+      const staged = this.staged.get(item.scene.manifest.id);
+      if (!staged || staged.session.failed || typeof this.ui.showMedia !== "function") {
+        this.ui.showBlank("source_unavailable", state);
+        return;
+      }
+      this.ui.showMedia(staged.session, item.spoken_summary, state);
     } else if (item.scene.kind === "blank") {
       this.ui.showBlank(item.scene.reason, state);
     } else {
@@ -890,7 +1230,7 @@ export class DisplayReceiverClient {
         elapsed_ms: playback.elapsedMs,
         last_displayed_asset: displayed ? { id: displayed.id, sha256: displayed.sha256 } : null,
         connection: "online",
-        playback: displayed ? "displaying" : "blank",
+        playback: ["frame", "media"].includes(item.scene.kind) ? "displaying" : "blank",
         last_error: "none",
         staged_items: this.staged.size,
         staged_bytes: stagedBytes,

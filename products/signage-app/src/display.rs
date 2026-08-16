@@ -36,16 +36,16 @@ pub fn program_surface() -> Result<DisplaySurface, Failure> {
     let mut input_digest = Sha256::new();
     input_digest.update(b"signage.program.input.v1:{program:body-id}");
     let mut renderer_identity = Sha256::new();
-    renderer_identity.update(b"signage.program.frame-renderer.v2:font8x8:png:rolling-windows");
+    renderer_identity.update(b"signage.program.renderer.v3:font8x8:png:lait-live:rolling-windows");
     let mut descriptor = DisplaySurfaceDescriptor {
         id: DisplaySurfaceId::new(SURFACE_ID)?,
         title: "Signage program".into(),
         runtime_implementation: crate::implementation_id(),
-        contract_version: 2,
+        contract_version: 3,
         input_contract_digest: input_digest.finalize().into(),
         renderer_identity: renderer_identity.finalize().into(),
         contract_digest: [0; 32],
-        outputs: BTreeSet::from([DisplayOutputKind::Frame]),
+        outputs: BTreeSet::from([DisplayOutputKind::Frame, DisplayOutputKind::Media]),
     };
     descriptor.contract_digest = descriptor.expected_contract_digest(&world);
     Ok(DisplaySurface {
@@ -122,16 +122,27 @@ impl DisplayRenderer for SignageRenderer {
             let idle = scheduled.items.is_empty();
             let mut items = Vec::with_capacity(scheduled.items.len().max(1));
             for item in scheduled.items {
-                let bytes = render_item(item, request.width, request.height)?;
-                items.push(RenderedProgramItem {
-                    id: item.id.clone(),
-                    duration_ms: item.duration_ms,
-                    scene: RenderedScene::Frame(RenderedFrame {
+                let scene = if let Some(resource) = &item.live_resource {
+                    RenderedScene::Media(world_interface::display::RenderedMedia {
+                        resource: world_interface::display::DisplayResourceId::new(
+                            resource.clone(),
+                        )?,
+                        protocol: world_interface::display::MediaProtocol::Hls,
+                        live: true,
+                    })
+                } else {
+                    let bytes = render_item(item, request.width, request.height)?;
+                    RenderedScene::Frame(RenderedFrame {
                         media_type: FrameMediaType::Png,
                         width: request.width,
                         height: request.height,
                         bytes,
-                    }),
+                    })
+                };
+                items.push(RenderedProgramItem {
+                    id: item.id.clone(),
+                    duration_ms: item.duration_ms,
+                    scene,
                     assessment: DisplayAssessment::Current,
                     spoken_summary: Some(spoken_summary(item)),
                 });
@@ -326,6 +337,7 @@ mod tests {
             body: "Open house at 6".into(),
             background: "102030".into(),
             foreground: "ffffff".into(),
+            live_resource: None,
             duration_ms: Some(10_000),
         };
         let png = render_item(&item, 640, 360).unwrap();

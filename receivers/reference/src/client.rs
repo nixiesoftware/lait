@@ -926,7 +926,9 @@ fn verify_asset_response(response: &HttpResponse, asset: &DisplayAsset) -> Resul
         DisplayAssetMediaType::ImagePng => "image/png",
         DisplayAssetMediaType::ImageJpeg => "image/jpeg",
         DisplayAssetMediaType::ImageWebp => "image/webp",
-        DisplayAssetMediaType::HlsManifest | DisplayAssetMediaType::DashManifest => {
+        DisplayAssetMediaType::MseManifest
+        | DisplayAssetMediaType::HlsManifest
+        | DisplayAssetMediaType::DashManifest => {
             bail!("reference frame receiver was offered a media manifest")
         }
     };

@@ -12,6 +12,7 @@ use display_protocol::program::{
     DisplayPlayback, DisplayProgram, DisplayProgramItem, DisplayScene, DisplaySyncMode,
     DisplaySyncTarget, FreshnessPolicy, ProgramCycle, SourceState,
 };
+use display_protocol::receiver::PlaybackTier;
 use world_interface::display::{
     DisplayAssessment, DisplayPartialReason, DisplayProjection, FrameMediaType, RenderedScene,
 };
@@ -22,6 +23,7 @@ pub struct CompiledProgram {
     /// again even if the underlying World has emitted no invalidation.
     pub refresh_after_ms: Option<u32>,
     assets: BTreeMap<DisplayAssetId, Vec<u8>>,
+    live_resources: BTreeMap<DisplayAssetId, String>,
 }
 
 impl CompiledProgram {
@@ -37,6 +39,10 @@ impl CompiledProgram {
         self.assets
             .iter()
             .map(|(identifier, bytes)| (identifier, bytes.as_slice()))
+    }
+
+    pub fn live_resource(&self, manifest: &DisplayAssetId) -> Option<&str> {
+        self.live_resources.get(manifest).map(String::as_str)
     }
 }
 
@@ -69,9 +75,11 @@ impl ProgramCompiler {
         freshness: FreshnessPolicy,
         projection: DisplayProjection,
         alignment: Option<&PlaybackAlignment>,
+        playback_tier: PlaybackTier,
     ) -> Result<CompiledProgram> {
         let mut refresh_after_ms = projection.program.refresh_after_ms;
         let mut assets = BTreeMap::new();
+        let mut live_resources = BTreeMap::new();
         let mut items = Vec::with_capacity(projection.program.items.len());
         for item in projection.program.items {
             let id = derive_program_item_id(&self.identifier_key, assignment, &item.id)
@@ -107,10 +115,17 @@ impl ProgramCompiler {
                     assets.insert(asset_id, frame.bytes);
                     DisplayScene::Frame { asset }
                 }
-                RenderedScene::Media(_) => {
-                    return Err(anyhow!(
-                        "package returned media before a display resource provider was registered"
-                    ));
+                RenderedScene::Media(media) => {
+                    match media_scene(&self.identifier_key, assignment, media, playback_tier)? {
+                        Some((scene, asset_id, bytes, resource)) => {
+                            assets.insert(asset_id.clone(), bytes);
+                            live_resources.insert(asset_id, resource);
+                            scene
+                        }
+                        None => DisplayScene::Blank {
+                            reason: BlankReason::Unsupported,
+                        },
+                    }
                 }
                 RenderedScene::Blank(reason) => DisplayScene::Blank {
                     reason: match reason {
@@ -172,8 +187,87 @@ impl ProgramCompiler {
             program: wire,
             refresh_after_ms,
             assets,
+            live_resources,
         })
     }
+}
+
+#[derive(serde::Serialize)]
+struct LiveManifest<'a> {
+    version: u16,
+    resource: &'a str,
+}
+
+fn media_scene(
+    identifier_key: &[u8; 32],
+    assignment: &DisplayAssignmentId,
+    media: world_interface::display::RenderedMedia,
+    playback_tier: PlaybackTier,
+) -> Result<Option<(DisplayScene, DisplayAssetId, Vec<u8>, String)>> {
+    let (protocol, media_type) = if media.live {
+        match playback_tier {
+            PlaybackTier::MseLive => (
+                display_protocol::program::MediaProtocol::Mse,
+                DisplayAssetMediaType::MseManifest,
+            ),
+            PlaybackTier::NativeHls | PlaybackTier::NativeFull => (
+                display_protocol::program::MediaProtocol::Hls,
+                DisplayAssetMediaType::HlsManifest,
+            ),
+            PlaybackTier::Frame => return Ok(None),
+        }
+    } else {
+        match media.protocol {
+            world_interface::display::MediaProtocol::Mse => (
+                display_protocol::program::MediaProtocol::Mse,
+                DisplayAssetMediaType::MseManifest,
+            ),
+            world_interface::display::MediaProtocol::Hls => (
+                display_protocol::program::MediaProtocol::Hls,
+                DisplayAssetMediaType::HlsManifest,
+            ),
+            world_interface::display::MediaProtocol::Dash => (
+                display_protocol::program::MediaProtocol::Dash,
+                DisplayAssetMediaType::DashManifest,
+            ),
+        }
+    };
+    let resource = media.resource.as_str().to_string();
+    let bytes = serde_json::to_vec(&LiveManifest {
+        version: 1,
+        resource: &resource,
+    })
+    .context("encode live display manifest")?;
+    let encoded_len = u32::try_from(bytes.len()).context("live manifest is too large")?;
+    let digest = sha256(&bytes).context("digest live display manifest")?;
+    let asset_id = derive_asset_id(
+        identifier_key,
+        assignment,
+        media_type,
+        encoded_len,
+        &digest,
+        None,
+        None,
+    )
+    .context("derive live display manifest id")?;
+    let manifest = DisplayAsset {
+        id: asset_id.clone(),
+        media_type,
+        encoded_len,
+        sha256: digest,
+        width: None,
+        height: None,
+    };
+    Ok(Some((
+        DisplayScene::Media {
+            manifest,
+            protocol,
+            live: media.live,
+        },
+        asset_id,
+        bytes,
+        resource,
+    )))
 }
 
 fn aligned_playback(
@@ -303,7 +397,8 @@ mod tests {
     use super::*;
     use display_protocol::program::StaleAction;
     use world_interface::display::{
-        DisplayProjection, FrameMediaType, RenderedFrame, RenderedProgram, RenderedProgramItem,
+        DisplayProjection, DisplayResourceId, FrameMediaType, MediaProtocol as SourceMediaProtocol,
+        RenderedFrame, RenderedMedia, RenderedProgram, RenderedProgramItem,
     };
 
     #[test]
@@ -339,6 +434,7 @@ mod tests {
                 },
                 projection.clone(),
                 None,
+                PlaybackTier::Frame,
             )
             .unwrap();
         assert_eq!(compiled.asset_count(), 1);
@@ -362,6 +458,7 @@ mod tests {
                 },
                 projection.clone(),
                 Some(&alignment),
+                PlaybackTier::Frame,
             )
             .unwrap();
         let second = compiler
@@ -374,6 +471,7 @@ mod tests {
                 },
                 projection,
                 Some(&alignment),
+                PlaybackTier::Frame,
             )
             .unwrap();
         assert_eq!(first.program.playback.current_index, 0);
@@ -383,5 +481,85 @@ mod tests {
             first.program.playback.sync.as_ref().map(|sync| sync.mode),
             Some(DisplaySyncMode::Positional)
         );
+    }
+
+    #[test]
+    fn live_media_is_compiled_for_each_receiver_playback_tier() {
+        let projection = DisplayProjection {
+            program: RenderedProgram {
+                items: vec![RenderedProgramItem {
+                    id: "live-main".into(),
+                    duration_ms: None,
+                    scene: RenderedScene::Media(RenderedMedia {
+                        resource: DisplayResourceId::new("main").unwrap(),
+                        protocol: SourceMediaProtocol::Hls,
+                        live: true,
+                    }),
+                    assessment: DisplayAssessment::Current,
+                    spoken_summary: Some("Live main display".into()),
+                }],
+                cycle: world_interface::display::ProgramCycle::HoldLast,
+                refresh_after_ms: None,
+            },
+            assessment: DisplayAssessment::Current,
+            spoken_summary: None,
+        };
+        let compiler = ProgramCompiler::new([9; 32]).unwrap();
+        let assignment = DisplayAssignmentId::parse("77".repeat(16)).unwrap();
+        let program = DisplayProgramId::parse("88".repeat(16)).unwrap();
+        let freshness = FreshnessPolicy {
+            stale_after_ms: 60_000,
+            on_stale: StaleAction::Blank,
+        };
+
+        let mse = compiler
+            .compile(
+                &assignment,
+                &program,
+                freshness.clone(),
+                projection.clone(),
+                None,
+                PlaybackTier::MseLive,
+            )
+            .unwrap();
+        let hls = compiler
+            .compile(
+                &assignment,
+                &program,
+                freshness.clone(),
+                projection.clone(),
+                None,
+                PlaybackTier::NativeHls,
+            )
+            .unwrap();
+        let frame = compiler
+            .compile(
+                &assignment,
+                &program,
+                freshness,
+                projection,
+                None,
+                PlaybackTier::Frame,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &mse.program.items[0].scene,
+            DisplayScene::Media { manifest, protocol: display_protocol::program::MediaProtocol::Mse, live: true }
+                if manifest.media_type == DisplayAssetMediaType::MseManifest
+                    && mse.live_resource(&manifest.id) == Some("main")
+        ));
+        assert!(matches!(
+            &hls.program.items[0].scene,
+            DisplayScene::Media { manifest, protocol: display_protocol::program::MediaProtocol::Hls, live: true }
+                if manifest.media_type == DisplayAssetMediaType::HlsManifest
+                    && hls.live_resource(&manifest.id) == Some("main")
+        ));
+        assert!(matches!(
+            frame.program.items[0].scene,
+            DisplayScene::Blank {
+                reason: BlankReason::Unsupported
+            }
+        ));
     }
 }

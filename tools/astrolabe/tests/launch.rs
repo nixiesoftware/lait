@@ -322,6 +322,7 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
                 body: "This frame came from the durable Signage World.".into(),
                 background: "102030".into(),
                 foreground: "ffffff".into(),
+                live_resource: None,
                 duration_ms: Some(2_000),
             },
             signage::SignageItem {
@@ -330,6 +331,7 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
                 body: "Astrolabe supplied one group-aligned cursor.".into(),
                 background: "305010".into(),
                 foreground: "ffffff".into(),
+                live_resource: None,
                 duration_ms: Some(2_000),
             },
         ],
@@ -402,6 +404,7 @@ async fn schedule_signage_boundary(
                 body: "The coordinator is holding an exact wake deadline.".into(),
                 background: "102030".into(),
                 foreground: "ffffff".into(),
+                live_resource: None,
                 duration_ms: Some(60_000),
             },
             signage::SignageItem {
@@ -410,6 +413,7 @@ async fn schedule_signage_boundary(
                 body: "This revision arrived without another World write.".into(),
                 background: "305010".into(),
                 foreground: "ffffff".into(),
+                live_resource: None,
                 duration_ms: Some(60_000),
             },
         ],

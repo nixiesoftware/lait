@@ -52,6 +52,10 @@ pub struct SignageItem {
     pub background: String,
     /// Lowercase six-digit RGB, without '#'.
     pub foreground: String,
+    /// Opaque native-media rendition or render-group published on this
+    /// Orbit's lait-live plane. It is never a URL and never durable media.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_resource: Option<String>,
     pub duration_ms: Option<u32>,
 }
 
@@ -108,6 +112,15 @@ impl SignageProgram {
                 || item.body.chars().count() > MAX_ITEM_BODY_CHARS
                 || !valid_rgb(&item.background)
                 || !valid_rgb(&item.foreground)
+                || item.live_resource.as_ref().is_some_and(|resource| {
+                    resource.is_empty()
+                        || resource.len() > MAX_ITEM_ID_BYTES
+                        || !resource.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'.' | b'-' | b'_')
+                        })
+                })
             {
                 return false;
             }
@@ -294,6 +307,7 @@ mod tests {
                 body: "Open house at 6".into(),
                 background: "102030".into(),
                 foreground: "ffffff".into(),
+                live_resource: None,
                 duration_ms: Some(10_000),
             }],
             windows: Vec::new(),
@@ -317,6 +331,7 @@ mod tests {
                 body: String::new(),
                 background: "102030".into(),
                 foreground: "ffffff".into(),
+                live_resource: None,
                 duration_ms: Some(1_000),
             },
         );
@@ -346,6 +361,7 @@ mod tests {
             body: String::new(),
             background: "901010".into(),
             foreground: "ffffff".into(),
+            live_resource: None,
             duration_ms: Some(10_000),
         });
         program.windows = vec![

@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1883
-pr-platform    1482
-nightly        1911
+pr             1929
+pr-platform    1503
+nightly        1957
 mutants        98
 
 [gates]
@@ -39,6 +39,12 @@ addressbook tests::a_crash_between_remove_and_rename_recovers_the_survivor
 addressbook tests::a_hostile_header_length_is_refused
 addressbook tests::a_picture_is_authored_validated_cleared_and_defaulted
 addressbook tests::a_redirect_cycle_is_refused
+addressbook tests::attested::a_forged_attestation_is_skipped_rather_than_ranked_low
+addressbook tests::attested::a_self_claim_alone_resolves_and_ranks_lowest
+addressbook tests::attested::an_attestation_from_a_tighter_tier_outranks_a_wider_one
+addressbook tests::attested::an_avowal_out_of_tier_is_skipped_and_that_is_not_the_same_as_no_name
+addressbook tests::attested::resolution_needs_no_address_book_at_all
+addressbook tests::attested::two_parties_may_hold_one_name_and_both_resolve
 addressbook tests::checkpoint_reconstructs_projection_and_version
 addressbook tests::concurrent_my_card_keeps_the_lowest_claim
 addressbook tests::empty_name_and_oversize_note_are_bounds
@@ -204,6 +210,8 @@ display-protocol::protocol confirmation_words_outside_the_frozen_dictionary_are_
 display-protocol::protocol cross_language_lists_use_wire_string_order
 display-protocol::protocol frame_metadata_cannot_smuggle_a_manifest_or_unbounded_decode
 display-protocol::protocol language_neutral_fixture_matches_rust_transcripts_and_json
+display-protocol::protocol live_media_manifest_and_protocol_must_match
+display-protocol::protocol live_ticket_route_commits_the_current_item_and_manifest
 display-protocol::protocol malformed_authentication_tags_are_refused_before_comparison
 display-protocol::protocol open_ended_items_exist_only_at_hold_last_end
 display-protocol::protocol pairing_completion_proof_changes_with_the_enrolled_device
@@ -406,8 +414,22 @@ lait diagnose::tests::space_mismatch_is_the_first_blocker
 lait diagnose::tests::synced_member_offline_is_not_blocked
 lait diagnose::tests::unsynced_member_offline_blocks_on_peer
 lait diagnose::tests::view_round_trips_through_json
+lait display::cmaf::tests::aac_init_and_media_segments_preserve_audio_configuration
+lait display::cmaf::tests::catalog_packager_exposes_closed_renditions_and_routes_groups
+lait display::cmaf::tests::generated_segments_are_only_the_expected_top_level_boxes
+lait display::cmaf::tests::incomplete_or_replayed_groups_fail_closed
+lait display::cmaf::tests::init_segment_is_mse_shaped_and_carries_the_decoder_config
+lait display::cmaf::tests::media_segment_is_styp_moof_mdat_with_bounded_sample_metadata
+lait display::cmaf::tests::sequence_or_timeline_gaps_are_explicit_discontinuities
 lait display::compiler::tests::compilation_binds_assets_and_revision_to_the_assignment
+lait display::compiler::tests::live_media_is_compiled_for_each_receiver_playback_tier
 lait display::coordinator::tests::exact_source_pin_detects_contract_or_input_drift
+lait display::hls::tests::avcc_and_aac_are_converted_to_transport_elementary_streams
+lait display::hls::tests::hls_v3_segment_is_real_mpeg_ts_and_discontinuities_are_explicit
+lait display::http::tests::every_display_route_is_a_pattern_the_router_accepts
+lait display::http::tests::the_hls_filenames_keep_their_extensions_and_reject_what_lacks_them
+lait display::live::tests::a_resource_is_refused_when_two_source_sessions_claim_it
+lait display::live::tests::hls_urls_are_relative_to_the_opaque_ticket_and_window_is_bounded
 lait display::pairing::tests::approval_enrolls_only_after_receiver_proves_the_new_key
 lait display::store::tests::state_is_atomic_versioned_and_reopens
 lait display::tls::tests::tls_identity_is_stable_and_private
@@ -1218,6 +1240,29 @@ mechanics::it device_sealing::a_deserialized_envelope_whose_commitment_disagrees
 mechanics::it device_sealing::a_sealed_payload_survives_persistence
 mechanics::it device_sealing::admitting_a_reader_needs_a_reader_and_re_encrypts_nothing
 mechanics::it device_sealing::sealing_to_nobody_is_a_failure_not_an_empty_success
+mechanics::it kinship::a_body_not_in_the_committed_head_is_refused
+mechanics::it kinship::a_device_cannot_link_to_itself
+mechanics::it kinship::a_head_minted_under_other_semantics_is_refused
+mechanics::it kinship::a_link_is_symmetric_and_both_devices_signed_it
+mechanics::it kinship::a_link_signed_by_only_one_side_is_refused_as_not_mutual
+mechanics::it kinship::a_member_tier_projection_excludes_a_reader_from_another_space
+mechanics::it kinship::a_name_is_bounded_and_never_empty
+mechanics::it kinship::a_party_refuses_a_spelling_it_does_not_fully_understand
+mechanics::it kinship::a_projection_verifies_against_its_committed_head
+mechanics::it kinship::a_projection_without_a_head_is_a_hint_and_says_which
+mechanics::it kinship::a_sponsorship_avowal_is_an_assertion_and_not_a_grant
+mechanics::it kinship::a_withheld_body_is_named_as_an_omission
+mechanics::it kinship::an_actor_party_carries_its_space_because_an_actor_id_is_not_resolvable_alone
+mechanics::it kinship::an_avowal_and_an_attestation_differ_only_by_who_signed
+mechanics::it kinship::an_avowal_shown_outside_its_audience_is_refused_by_the_artifact_alone
+mechanics::it kinship::an_id_the_head_never_covered_is_unlisted_rather_than_withheld
+mechanics::it kinship::attribution_states_what_the_audience_size_actually_buys
+mechanics::it kinship::editing_the_committed_entry_set_breaks_the_commitment
+mechanics::it kinship::every_refusal_carries_a_name_rather_than_a_boolean
+mechanics::it kinship::losing_one_device_leaves_every_other_link_standing
+mechanics::it kinship::own_and_kin_cannot_be_decided_without_being_resolved
+mechanics::it kinship::the_profile_id_is_the_genesis_links_content_address
+mechanics::it kinship::widening_the_audience_breaks_the_signature
 mechanics::it world_policy::delegation_permits_granting_but_not_meta_capability
 mechanics::it world_policy::historical_grant_then_removal_evaluated_at_each_frontier
 mechanics::it world_policy::implementation_pin_refuses_unapproved_id
@@ -1766,6 +1811,7 @@ runtime plane::live::media::tests::every_control_selector_round_trips_canonicall
 runtime plane::live::media::tests::fetch_frames_are_one_bounded_keyframe_started_group
 runtime plane::live::media::tests::fetch_ids_are_directional_spent_and_catalog_bound
 runtime plane::live::media::tests::generation_one_headers_have_frozen_encodings
+runtime plane::live::media::tests::inbox_snapshots_active_sessions_and_brackets_their_lifetime
 runtime plane::live::media::tests::one_shared_encode_obeys_the_slowest_viewer
 runtime plane::live::media::tests::setup_negotiates_the_narrower_latency_and_group_caps
 runtime plane::live::media::tests::subscriptions_have_one_owner_one_setup_and_spent_ids

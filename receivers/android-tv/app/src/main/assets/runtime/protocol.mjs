@@ -189,6 +189,7 @@ const ROUTES = Object.freeze({
   program_snapshot: true,
   program_changes: true,
   asset: true,
+  live_ticket: true,
   health: true,
 });
 
@@ -250,6 +251,16 @@ function validateRequestContext(context) {
         && context.elapsedMs == null
         && context.waitMs == null
         && context.asset != null;
+      break;
+    case "live_ticket":
+      valid = context.method === "POST"
+        && context.assignment != null
+        && context.revision != null
+        && context.currentItem != null
+        && context.elapsedMs != null
+        && context.waitMs == null
+        && context.asset != null
+        && context.range == null;
       break;
     case "health":
       valid = context.method === "POST"
@@ -332,7 +343,7 @@ function encodeSourceState(transcript, state) {
 }
 
 const IMAGE_TYPES = Object.freeze(["image_jpeg", "image_png", "image_webp"]);
-const MANIFEST_TYPES = Object.freeze(["dash_manifest", "hls_manifest"]);
+const MANIFEST_TYPES = Object.freeze(["dash_manifest", "hls_manifest", "mse_manifest"]);
 
 function validateAsset(asset) {
   requireFields(asset, ["id", "media_type", "encoded_len", "sha256", "width", "height"], "asset");
@@ -383,7 +394,8 @@ function validateScene(scene) {
       validateAsset(scene.manifest);
       if ((scene.protocol === "hls" && scene.manifest.media_type !== "hls_manifest")
         || (scene.protocol === "dash" && scene.manifest.media_type !== "dash_manifest")
-        || !["hls", "dash"].includes(scene.protocol)
+        || (scene.protocol === "mse" && scene.manifest.media_type !== "mse_manifest")
+        || !["hls", "dash", "mse"].includes(scene.protocol)
         || typeof scene.live !== "boolean") {
         refuse("invalid_shape", "media manifest does not match its protocol");
       }

@@ -50,3 +50,15 @@ test("decoded frame remains hidden until dimensions match", async () => {
   assert.match(scene, /bitmapHeight = m\.expectedHeight/);
   assert.match(scene, /m\.frame\.visible = true/);
 });
+
+test("Roku stages assignment-bound HLS and hands it to Video", async () => {
+  const task = await read("components/ReceiverTask.brs");
+  const scene = await read("components/AstrolabeScene.brs");
+  const xml = await read("components/AstrolabeScene.xml");
+  assert.match(task, /tier: "native_hls"/);
+  assert.match(task, /AstrolabeAuthorizedJson\("live_ticket"/);
+  assert.match(task, /\/head\/v1\/live\/tickets/);
+  assert.match(xml, /<Video id="programMedia"/);
+  assert.match(scene, /content\.streamFormat = "hls"/);
+  assert.match(scene, /m\.media\.control = "play"/);
+});

@@ -105,6 +105,18 @@ struct StagedFrame {
     let digest: String
 }
 
+enum StagedContent {
+    case frame(StagedFrame)
+    case hls(URL, encodedBytes: Int)
+
+    var encodedBytes: Int {
+        switch self {
+        case let .frame(frame): frame.encodedBytes
+        case let .hls(_, encodedBytes): encodedBytes
+        }
+    }
+}
+
 struct ReceiverCredential: Codable, Equatable {
     var mode: String
     let origin: String
@@ -124,6 +136,7 @@ enum ReceiverScreen {
     case pairing(words: [String], fingerprint: String, confirmed: Bool)
     case unassigned(device: String)
     case frame(UIImage, summary: String?)
+    case media(summary: String?)
     case message(eyebrow: String, title: String, body: String, retry: Bool)
 }
 

@@ -12,6 +12,7 @@ use crate::ids::{
     Challenge, DisplayAssetId, DisplayDeviceId, DisplayProgramItemId, ProgramRevision, Sha256Digest,
 };
 use crate::program::DisplayAssetMediaType;
+use crate::program::MediaProtocol;
 use crate::{Refusal, PROTOCOL_MAJOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +102,21 @@ pub struct ReceiverCapabilities {
     pub locale: String,
     pub accessibility: AccessibilityCapabilities,
     pub playback: PlaybackCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveTicketRequest {
+    pub transport: MediaProtocol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveTicketResponse {
+    pub protocol_major: u32,
+    pub transport: MediaProtocol,
+    pub endpoint: String,
+    pub expires_at_unix_ms: u64,
 }
 
 pub fn validate_capabilities(capabilities: &ReceiverCapabilities) -> Result<(), Refusal> {

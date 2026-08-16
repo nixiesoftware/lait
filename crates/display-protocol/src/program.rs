@@ -119,6 +119,7 @@ pub enum DisplayAssetMediaType {
     ImagePng,
     ImageJpeg,
     ImageWebp,
+    MseManifest,
     HlsManifest,
     DashManifest,
 }
@@ -129,6 +130,7 @@ impl DisplayAssetMediaType {
             Self::ImagePng => "image_png",
             Self::ImageJpeg => "image_jpeg",
             Self::ImageWebp => "image_webp",
+            Self::MseManifest => "mse_manifest",
             Self::HlsManifest => "hls_manifest",
             Self::DashManifest => "dash_manifest",
         }
@@ -142,6 +144,7 @@ impl DisplayAssetMediaType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaProtocol {
+    Mse,
     Hls,
     Dash,
 }
@@ -149,6 +152,7 @@ pub enum MediaProtocol {
 impl MediaProtocol {
     const fn wire_name(self) -> &'static str {
         match self {
+            Self::Mse => "mse",
             Self::Hls => "hls",
             Self::Dash => "dash",
         }
@@ -352,7 +356,8 @@ fn validate_scene(scene: &DisplayScene) -> Result<(), Refusal> {
         } => {
             let matches = matches!(
                 (protocol, manifest.media_type),
-                (MediaProtocol::Hls, DisplayAssetMediaType::HlsManifest)
+                (MediaProtocol::Mse, DisplayAssetMediaType::MseManifest)
+                    | (MediaProtocol::Hls, DisplayAssetMediaType::HlsManifest)
                     | (MediaProtocol::Dash, DisplayAssetMediaType::DashManifest)
             );
             if !matches {

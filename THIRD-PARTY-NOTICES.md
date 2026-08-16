@@ -4,14 +4,14 @@ lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, ea
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
-832 crates, under 43 distinct licence expressions.
+835 crates, under 43 distinct licence expressions.
 
 ## Licence expressions in this closure
 
 | Licence | Crates |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 388 |
-| `MIT` | 156 |
+| `MIT OR Apache-2.0` | 389 |
+| `MIT` | 158 |
 | `Apache-2.0 OR MIT` | 77 |
 | `MIT/Apache-2.0` | 41 |
 | `Unicode-3.0` | 25 |
@@ -410,6 +410,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | leb128fmt | 0.1.0 | `MIT OR Apache-2.0` | <https://github.com/bluk/leb128fmt> |
 | libc | 0.2.186 | `MIT OR Apache-2.0` | <https://github.com/rust-lang/libc> |
 | libm | 0.2.16 | `MIT` | <https://github.com/rust-lang/compiler-builtins> |
+| libmpegts | 0.3.8 | `MIT` | <https://github.com/cesbo/libmpegts> |
 | libredox | 0.1.17 | `MIT` | <https://gitlab.redox-os.org/redox-os/libredox.git> |
 | linebender_resource_handle | 0.1.1 | `Apache-2.0 OR MIT` | <https://github.com/linebender/raw_resource_handle> |
 | linked-hash-map | 0.5.6 | `MIT/Apache-2.0` | <https://github.com/contain-rs/linked-hash-map> |
@@ -443,6 +444,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | mio | 1.2.1 | `MIT` | <https://github.com/tokio-rs/mio> |
 | moka | 0.12.15 | `(MIT OR Apache-2.0) AND Apache-2.0` | <https://github.com/moka-rs/moka> |
 | moxcms | 0.8.1 | `BSD-3-Clause OR Apache-2.0` | <https://github.com/awxkee/moxcms.git> |
+| mp4-atom | 0.15.0 | `MIT OR Apache-2.0` | <https://github.com/kixelated/mp4-atom> |
 | mutate_once | 0.1.2 | `BSD-2-Clause` | <https://github.com/kamadak/mutate_once-rs> |
 | n0-error | 1.0.0-rc.0 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/n0-error> |
 | n0-error-macros | 1.0.0-rc.0 | `MIT OR Apache-2.0` | <https://github.com/n0-computer/n0-error> |
@@ -682,6 +684,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | tagptr | 0.2.0 | `MIT/Apache-2.0` | <https://github.com/oliver-giersch/tagptr.git> |
 | tar | 0.4.46 | `MIT OR Apache-2.0` | <https://github.com/composefs/tar-rs> |
 | tempfile | 3.27.0 | `MIT OR Apache-2.0` | <https://github.com/Stebalien/tempfile> |
+| textcode | 0.3.1 | `MIT` | <https://github.com/cesbo/textcode> |
 | textwrap | 0.16.2 | `MIT` | <https://github.com/mgeisler/textwrap> |
 | thin-vec | 0.2.19 | `MIT OR Apache-2.0` | <https://github.com/mozilla/thin-vec> |
 | thiserror | 1.0.69 | `MIT OR Apache-2.0` | <https://github.com/dtolnay/thiserror> |

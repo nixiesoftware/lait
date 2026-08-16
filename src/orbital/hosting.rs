@@ -395,6 +395,15 @@ enum Served {
 }
 
 impl StationHost {
+    pub(crate) fn live_media(
+        &self,
+    ) -> (
+        Vec<runtime::plane::live::media::Session>,
+        tokio::sync::broadcast::Receiver<runtime::plane::live::media::Event>,
+    ) {
+        self.station.live().media_with_sessions()
+    }
+
     /// Open and activate the orbital stack for a home, then dock the routing
     /// Session. Refuses a pre-orbital home.
     pub async fn open(

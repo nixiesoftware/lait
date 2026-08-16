@@ -65,6 +65,7 @@ mod genesis;
 #[cfg(test)]
 mod handover;
 pub mod ids;
+pub mod kinship;
 mod ledger;
 pub mod membership;
 pub mod policy;

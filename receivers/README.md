@@ -12,13 +12,16 @@ players or application clients:
 | Roku TV | native SceneGraph/BrightScript | roDeviceCrypto + transactional registry | `cd roku && npm test` |
 | Apple TV | native SwiftUI | ThisDeviceOnly Keychain | `cd tvos && npm test`, then XCTest on macOS |
 
-All five implement the same closed protocol-major-1 contract in
+All six implement the same closed protocol-major-1 contract in
 `../crates/display-protocol`. A receiver can enroll, authenticate, negotiate a
-narrower frame capability, obtain only its exact assignment, verify and stage
-opaque assets, advance with monotonic time, report bounded health, and render
-native trust/source/delivery/refusal states. It cannot name a World, Space,
-surface, operation, acting identity, filesystem path, external URL, or product
-route.
+narrower playback capability, obtain only its exact assignment, verify and
+stage opaque frame assets or assignment-bound live grants, advance with
+monotonic time, report bounded health, and render native
+trust/source/delivery/refusal states. webOS, Tizen, and Web-PKI Android TV
+builds consume the coordinator's bounded CMAF stream through MSE. Roku and tvOS
+consume its real HLS-v3 MPEG-TS edge through their native video stacks. A receiver cannot name a
+World, Space, surface, operation, acting identity, filesystem path, external
+media URL, or product route.
 
 The reference receiver consumes the pinned self-hosted bootstrap copied from
 Astrolabe Displays and verifies that exact certificate before it sends pairing
@@ -28,6 +31,13 @@ validates the bootstrap PEM/fingerprint pair and installs that PEM as the
 request-local CA file. Their checked-in bootstrap selects the hosted Web-PKI
 origin; a private/sideload build can replace that one JSON resource with the
 object copied from Astrolabe.
+
+Android's dynamically pinned bootstrap continues to protect every HTTPS
+request, but the WebView-owned WebSocket cannot inherit the app-local Java trust
+manager. Such a build therefore negotiates the Frame tier instead of claiming a
+live decoder it cannot open. Android live playback requires the coordinator's
+Web-PKI origin, matching webOS and Tizen; it still talks directly to the
+Astrolabe coordinator and does not require a media cloud.
 
 LG webOS and Samsung Tizen remain Web-PKI receivers. Their web engines do not
 offer an application-scoped safe override for an untrusted LAN certificate, so

@@ -768,6 +768,29 @@ impl Router {
         }
     }
 
+    /// Subscribe to the native media sessions for one explicitly resolved
+    /// Orbit. Media is transport-live state and is therefore available only
+    /// from an in-process StationHost; a compatibility process cannot be
+    /// silently treated as an equivalent byte source.
+    pub(crate) async fn live_media(
+        &self,
+        address: &OrbitAddress,
+    ) -> Result<(
+        Vec<runtime::plane::live::media::Session>,
+        tokio::sync::broadcast::Receiver<runtime::plane::live::media::Event>,
+    )> {
+        let (_resolved, placement) = self.place_address_with_host(address).await?;
+        match &placement.mode {
+            PlacementMode::Owned { host, .. } => host
+                .upgrade()
+                .map(|host| host.live_media())
+                .ok_or_else(|| anyhow!("owned StationHost is draining")),
+            PlacementMode::Attached => Err(anyhow!(
+                "native live media is owned by an attached StationHost process"
+            )),
+        }
+    }
+
     /// Dispatch one product-neutral call to its explicitly addressed World.
     ///
     /// Owned placements are invoked directly in-process. An attached

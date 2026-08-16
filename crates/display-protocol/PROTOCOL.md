@@ -33,11 +33,19 @@ The receiver-facing routes are closed:
 | `GET /head/v1/program` | request HMAC | Fetch a complete current snapshot |
 | `GET /head/v1/program/changes` | request HMAC | Complete with snapshot, no-change, reset, unassigned, revoked, or re-pair |
 | `GET /head/v1/assets/{opaque_asset}` | request HMAC | Fetch one assignment/revision-bound asset |
+| `POST /head/v1/live/tickets` | request HMAC | Mint one assignment/item/manifest-bound MSE or HLS grant |
+| `GET /head/v1/live/{ticket}/socket` | single-use opaque ticket | Upgrade to the bounded CMAF WebSocket stream |
+| `GET /head/v1/live/{ticket}/master.m3u8` | opaque ticket | Fetch the current native-HLS master playlist |
+| `GET /head/v1/live/{ticket}/renditions/{rendition}.m3u8` | opaque ticket | Fetch one bounded HLS live window |
+| `GET /head/v1/live/{ticket}/segments/{sequence}.ts` | opaque ticket | Fetch one retained MPEG-TS segment |
 | `POST /head/v1/health` | request HMAC | Submit bounded operational facts |
 
 There is no catalog, generic RPC, command, upload, browser route, arbitrary URL
-proxy, cookie session, acting-identity selector, or production media resource
-route in major 1.
+proxy, cookie session, acting-identity selector, or receiver-chosen media origin
+in major 1. Live tickets are random 32-byte bearer values scoped to one enrolled
+device, assignment, program revision, current item, opaque manifest, Orbit, and
+transport. The coordinator revalidates assignment eligibility and revision on
+the MSE session and every HLS request.
 
 ## Pairing
 
@@ -128,13 +136,22 @@ positional capability. Static per-receiver delay belongs to coordinator-local
 assignment policy and is never exposed to receivers.
 
 The receiver validates the full snapshot before replacing eligible state. It
-fetches current, next, then later frame assets. Each transfer is authenticated
-and committed to assignment, program, revision, opaque handle, expected media
-type, encoded length, SHA-256, dimensions, and optional range. Bytes are written
-to a new app-owned temporary file, bounded while streaming, verified, decoded
-within declared dimensions, and only then made displayable. Revision replacement
-is atomic; reassignment, revocation, normal exit, and startup sweep retire
-ineligible staged material.
+fetches current, next, then later frame assets and stages grants for eligible
+live scenes. Each frame transfer is authenticated and committed to assignment,
+program, revision, opaque handle, expected media type, encoded length, SHA-256,
+dimensions, and optional range. Bytes are written to a new app-owned temporary
+file, bounded while streaming, verified, decoded within declared dimensions,
+and only then made displayable.
+
+`mse_live` receivers obtain a single-use WebSocket grant. The coordinator sends
+one closed JSON track catalog followed by binary init/media envelopes, and each
+selected SourceBuffer has a bounded append queue and retained live window.
+`native_hls` receivers receive only a coordinator URL. Astrolabe transmuxes the
+same H.264/AAC access units into real HLS-v3 MPEG-TS segments with a six-segment
+window; Roku Video and AVPlayer perform the decode. Catalog resource names are
+opaque identifiers, never URLs. Revision replacement is atomic; reassignment,
+revocation, normal exit, and startup sweep retire ineligible staged material and
+grants.
 
 Playback uses monotonic relative time. A sync value is a sampled target, never a
 command: receivers adopt it according to their negotiated tier, continue on a

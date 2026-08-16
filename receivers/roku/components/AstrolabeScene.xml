@@ -3,6 +3,7 @@
   <children>
     <Rectangle width="1920" height="1080" color="0x0B1016FF"/>
     <Poster id="programFrame" width="1920" height="1080" loadWidth="1920" loadHeight="1080" loadDisplayMode="scaleToFit" visible="false"/>
+    <Video id="programMedia" width="1920" height="1080" visible="false" enableUI="false"/>
     <Rectangle id="headerBackground" width="1920" height="116" color="0x05080CF2"/>
     <Poster uri="pkg:/images/icon.png" width="58" height="58" translation="[54,29]"/>
     <Label text="Astrolabe" translation="[132,25]" width="500" height="45" color="0xF7F4EDFF">
