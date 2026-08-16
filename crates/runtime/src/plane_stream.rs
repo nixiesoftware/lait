@@ -16,13 +16,8 @@
 //! before a buffer that size exists.** Reading first and checking after is not
 //! a bound, it is a bound-shaped comment on an allocation a peer already chose.
 //!
-//! The other half is `read_stream_kind`. `plane::stream_kind` distinguishes a
-//! kind this build does not implement *yet* from one it has never heard of, and
-//! that distinction had no reader. It matters: a reserved kind is a peer
-//! speaking a protocol we agreed to and have not finished, so the stream is
-//! reset and the connection continues. An unknown kind is a peer speaking
-//! something else, which is worth counting separately even though the immediate
-//! response is the same.
+//! The other half is `read_stream_kind`: the lane byte is checked before any
+//! lane-specific body is read, so an unknown kind costs one byte and a reset.
 
 use crate::plane::{bounds, stream_kind};
 
@@ -43,11 +38,6 @@ pub enum Invalid {
     TooLarge,
     /// The bytes arrived and did not decode.
     Malformed,
-    /// A stream kind this build knows about and does not implement.
-    ///
-    /// Separate from `UnknownKind` because it is not a peer misbehaving — it is
-    /// a peer using a reservation we published.
-    ReservedKind(u8),
     /// A stream kind from outside the vocabulary.
     UnknownKind(u8),
 }
@@ -85,22 +75,17 @@ pub async fn read_framed(flow: &mut dyn comms::RecvFlow, max: usize) -> Result<V
 
 /// Read the one byte that says what a stream is.
 ///
-/// Three answers, and the difference between the last two is the whole reason
-/// this exists rather than a `match` at each call site:
+/// Two answers, and keeping the check here prevents each caller inventing a
+/// different lane vocabulary:
 ///
 /// - implemented: the caller serves it;
-/// - reserved: a kind this build published and has not built. The stream is
-///   reset and the connection stays up, because the peer is not wrong;
-/// - unknown: outside the vocabulary. Same immediate response, different
-///   counter — one of these is a version skew and the other is noise, and an
-///   operator looking at a Station wants to know which.
+/// - unknown: outside the vocabulary. The connection stays up and the stream
+///   is refused.
 pub async fn read_stream_kind(flow: &mut dyn comms::RecvFlow) -> Result<u8, Invalid> {
     let byte = flow.read_exact(1).await.map_err(|_| Invalid::Truncated)?;
     let kind = byte.first().copied().ok_or(Invalid::Truncated)?;
     if stream_kind::is_implemented(kind) {
         Ok(kind)
-    } else if stream_kind::is_reserved(kind) {
-        Err(Invalid::ReservedKind(kind))
     } else {
         Err(Invalid::UnknownKind(kind))
     }
@@ -133,21 +118,13 @@ mod tests {
     }
 
     #[test]
-    fn a_reserved_kind_and_an_unknown_one_are_different_answers() {
-        // The distinction `plane::stream_kind` draws and nothing read until
-        // now. A reserved kind is a peer using a reservation we published; an
-        // unknown one is a peer speaking something else. Both reset the stream;
-        // only one of them means a version skew.
+    fn every_allocated_kind_is_implemented_and_unknown_stays_unknown() {
         assert!(stream_kind::is_implemented(stream_kind::CONTROL));
         assert!(stream_kind::is_implemented(stream_kind::RELIABLE_SIGNAL));
-        assert!(stream_kind::is_reserved(stream_kind::RESERVED_MEDIA_FRAME));
-        assert!(stream_kind::is_reserved(
-            stream_kind::RESERVED_MEDIA_FEEDBACK
-        ));
-        assert!(!stream_kind::is_implemented(
-            stream_kind::RESERVED_MEDIA_FRAME
-        ));
-        assert!(!stream_kind::is_reserved(0x7f));
+        assert!(stream_kind::is_implemented(stream_kind::MEDIA_GROUP));
+        assert!(stream_kind::is_implemented(stream_kind::MEDIA_CONTROL));
+        assert!(stream_kind::is_media(stream_kind::MEDIA_GROUP));
+        assert!(stream_kind::is_media(stream_kind::MEDIA_CONTROL));
         assert!(!stream_kind::is_implemented(0x7f));
     }
 }

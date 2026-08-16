@@ -470,6 +470,9 @@ fn the_mcp_head_binds_the_sole_registered_orbit_when_the_directory_names_none() 
         .arg("mcp")
         .current_dir(&cwd)
         .env("LAIT_CONFIG_ROOT", &cfg)
+        // The binding authors the World pin; without one, a build hosting two
+        // Worlds refuses before store resolution — which is not this test.
+        .env("LAIT_WORLD", "issues")
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")
         .stdin(Stdio::piped())

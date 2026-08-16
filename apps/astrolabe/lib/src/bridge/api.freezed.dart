@@ -74,6 +74,16 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_BookAccept value)? bookAccept,
     TResult Function(ActionRequest_BookDismiss value)? bookDismiss,
     TResult Function(ActionRequest_InstallMcp value)? installMcp,
+    TResult Function(ActionRequest_DisplayPairingApprove value)?
+        displayPairingApprove,
+    TResult Function(ActionRequest_DisplayPairingReject value)?
+        displayPairingReject,
+    TResult Function(ActionRequest_DisplayAssignmentPut value)?
+        displayAssignmentPut,
+    TResult Function(ActionRequest_DisplayAssignmentRevoke value)?
+        displayAssignmentRevoke,
+    TResult Function(ActionRequest_DisplayDeviceRevoke value)?
+        displayDeviceRevoke,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -126,6 +136,20 @@ extension ActionRequestPatterns on ActionRequest {
         return bookDismiss(_that);
       case ActionRequest_InstallMcp() when installMcp != null:
         return installMcp(_that);
+      case ActionRequest_DisplayPairingApprove()
+          when displayPairingApprove != null:
+        return displayPairingApprove(_that);
+      case ActionRequest_DisplayPairingReject()
+          when displayPairingReject != null:
+        return displayPairingReject(_that);
+      case ActionRequest_DisplayAssignmentPut()
+          when displayAssignmentPut != null:
+        return displayAssignmentPut(_that);
+      case ActionRequest_DisplayAssignmentRevoke()
+          when displayAssignmentRevoke != null:
+        return displayAssignmentRevoke(_that);
+      case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
+        return displayDeviceRevoke(_that);
       case _:
         return orElse();
     }
@@ -172,6 +196,16 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_BookAccept value) bookAccept,
     required TResult Function(ActionRequest_BookDismiss value) bookDismiss,
     required TResult Function(ActionRequest_InstallMcp value) installMcp,
+    required TResult Function(ActionRequest_DisplayPairingApprove value)
+        displayPairingApprove,
+    required TResult Function(ActionRequest_DisplayPairingReject value)
+        displayPairingReject,
+    required TResult Function(ActionRequest_DisplayAssignmentPut value)
+        displayAssignmentPut,
+    required TResult Function(ActionRequest_DisplayAssignmentRevoke value)
+        displayAssignmentRevoke,
+    required TResult Function(ActionRequest_DisplayDeviceRevoke value)
+        displayDeviceRevoke,
   }) {
     final _that = this;
     switch (_that) {
@@ -223,6 +257,16 @@ extension ActionRequestPatterns on ActionRequest {
         return bookDismiss(_that);
       case ActionRequest_InstallMcp():
         return installMcp(_that);
+      case ActionRequest_DisplayPairingApprove():
+        return displayPairingApprove(_that);
+      case ActionRequest_DisplayPairingReject():
+        return displayPairingReject(_that);
+      case ActionRequest_DisplayAssignmentPut():
+        return displayAssignmentPut(_that);
+      case ActionRequest_DisplayAssignmentRevoke():
+        return displayAssignmentRevoke(_that);
+      case ActionRequest_DisplayDeviceRevoke():
+        return displayDeviceRevoke(_that);
     }
   }
 
@@ -264,6 +308,16 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_BookAccept value)? bookAccept,
     TResult? Function(ActionRequest_BookDismiss value)? bookDismiss,
     TResult? Function(ActionRequest_InstallMcp value)? installMcp,
+    TResult? Function(ActionRequest_DisplayPairingApprove value)?
+        displayPairingApprove,
+    TResult? Function(ActionRequest_DisplayPairingReject value)?
+        displayPairingReject,
+    TResult? Function(ActionRequest_DisplayAssignmentPut value)?
+        displayAssignmentPut,
+    TResult? Function(ActionRequest_DisplayAssignmentRevoke value)?
+        displayAssignmentRevoke,
+    TResult? Function(ActionRequest_DisplayDeviceRevoke value)?
+        displayDeviceRevoke,
   }) {
     final _that = this;
     switch (_that) {
@@ -315,6 +369,20 @@ extension ActionRequestPatterns on ActionRequest {
         return bookDismiss(_that);
       case ActionRequest_InstallMcp() when installMcp != null:
         return installMcp(_that);
+      case ActionRequest_DisplayPairingApprove()
+          when displayPairingApprove != null:
+        return displayPairingApprove(_that);
+      case ActionRequest_DisplayPairingReject()
+          when displayPairingReject != null:
+        return displayPairingReject(_that);
+      case ActionRequest_DisplayAssignmentPut()
+          when displayAssignmentPut != null:
+        return displayAssignmentPut(_that);
+      case ActionRequest_DisplayAssignmentRevoke()
+          when displayAssignmentRevoke != null:
+        return displayAssignmentRevoke(_that);
+      case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
+        return displayDeviceRevoke(_that);
       case _:
         return null;
     }
@@ -360,6 +428,24 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String client, String? scope, String name, String? agent,
             bool noAgent, String project, String? world, bool preview)?
         installMcp,
+    TResult Function(String pairing, String label)? displayPairingApprove,
+    TResult Function(String pairing)? displayPairingReject,
+    TResult Function(
+            String device,
+            String orbit,
+            String world,
+            String surface,
+            String inputJson,
+            DisplayTheme theme,
+            int staleAfterMs,
+            DisplayStaleAction onStale,
+            String? syncGroup,
+            DisplaySyncMode syncMode,
+            int staticDelayMs,
+            BigInt? expiresAtUnixMs)?
+        displayAssignmentPut,
+    TResult Function(String assignment)? displayAssignmentRevoke,
+    TResult Function(String device)? displayDeviceRevoke,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -413,6 +499,32 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_InstallMcp() when installMcp != null:
         return installMcp(_that.client, _that.scope, _that.name, _that.agent,
             _that.noAgent, _that.project, _that.world, _that.preview);
+      case ActionRequest_DisplayPairingApprove()
+          when displayPairingApprove != null:
+        return displayPairingApprove(_that.pairing, _that.label);
+      case ActionRequest_DisplayPairingReject()
+          when displayPairingReject != null:
+        return displayPairingReject(_that.pairing);
+      case ActionRequest_DisplayAssignmentPut()
+          when displayAssignmentPut != null:
+        return displayAssignmentPut(
+            _that.device,
+            _that.orbit,
+            _that.world,
+            _that.surface,
+            _that.inputJson,
+            _that.theme,
+            _that.staleAfterMs,
+            _that.onStale,
+            _that.syncGroup,
+            _that.syncMode,
+            _that.staticDelayMs,
+            _that.expiresAtUnixMs);
+      case ActionRequest_DisplayAssignmentRevoke()
+          when displayAssignmentRevoke != null:
+        return displayAssignmentRevoke(_that.assignment);
+      case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
+        return displayDeviceRevoke(_that.device);
       case _:
         return orElse();
     }
@@ -466,6 +578,25 @@ extension ActionRequestPatterns on ActionRequest {
             String? world,
             bool preview)
         installMcp,
+    required TResult Function(String pairing, String label)
+        displayPairingApprove,
+    required TResult Function(String pairing) displayPairingReject,
+    required TResult Function(
+            String device,
+            String orbit,
+            String world,
+            String surface,
+            String inputJson,
+            DisplayTheme theme,
+            int staleAfterMs,
+            DisplayStaleAction onStale,
+            String? syncGroup,
+            DisplaySyncMode syncMode,
+            int staticDelayMs,
+            BigInt? expiresAtUnixMs)
+        displayAssignmentPut,
+    required TResult Function(String assignment) displayAssignmentRevoke,
+    required TResult Function(String device) displayDeviceRevoke,
   }) {
     final _that = this;
     switch (_that) {
@@ -518,6 +649,28 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_InstallMcp():
         return installMcp(_that.client, _that.scope, _that.name, _that.agent,
             _that.noAgent, _that.project, _that.world, _that.preview);
+      case ActionRequest_DisplayPairingApprove():
+        return displayPairingApprove(_that.pairing, _that.label);
+      case ActionRequest_DisplayPairingReject():
+        return displayPairingReject(_that.pairing);
+      case ActionRequest_DisplayAssignmentPut():
+        return displayAssignmentPut(
+            _that.device,
+            _that.orbit,
+            _that.world,
+            _that.surface,
+            _that.inputJson,
+            _that.theme,
+            _that.staleAfterMs,
+            _that.onStale,
+            _that.syncGroup,
+            _that.syncMode,
+            _that.staticDelayMs,
+            _that.expiresAtUnixMs);
+      case ActionRequest_DisplayAssignmentRevoke():
+        return displayAssignmentRevoke(_that.assignment);
+      case ActionRequest_DisplayDeviceRevoke():
+        return displayDeviceRevoke(_that.device);
     }
   }
 
@@ -561,6 +714,24 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String client, String? scope, String name, String? agent,
             bool noAgent, String project, String? world, bool preview)?
         installMcp,
+    TResult? Function(String pairing, String label)? displayPairingApprove,
+    TResult? Function(String pairing)? displayPairingReject,
+    TResult? Function(
+            String device,
+            String orbit,
+            String world,
+            String surface,
+            String inputJson,
+            DisplayTheme theme,
+            int staleAfterMs,
+            DisplayStaleAction onStale,
+            String? syncGroup,
+            DisplaySyncMode syncMode,
+            int staticDelayMs,
+            BigInt? expiresAtUnixMs)?
+        displayAssignmentPut,
+    TResult? Function(String assignment)? displayAssignmentRevoke,
+    TResult? Function(String device)? displayDeviceRevoke,
   }) {
     final _that = this;
     switch (_that) {
@@ -613,6 +784,32 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_InstallMcp() when installMcp != null:
         return installMcp(_that.client, _that.scope, _that.name, _that.agent,
             _that.noAgent, _that.project, _that.world, _that.preview);
+      case ActionRequest_DisplayPairingApprove()
+          when displayPairingApprove != null:
+        return displayPairingApprove(_that.pairing, _that.label);
+      case ActionRequest_DisplayPairingReject()
+          when displayPairingReject != null:
+        return displayPairingReject(_that.pairing);
+      case ActionRequest_DisplayAssignmentPut()
+          when displayAssignmentPut != null:
+        return displayAssignmentPut(
+            _that.device,
+            _that.orbit,
+            _that.world,
+            _that.surface,
+            _that.inputJson,
+            _that.theme,
+            _that.staleAfterMs,
+            _that.onStale,
+            _that.syncGroup,
+            _that.syncMode,
+            _that.staticDelayMs,
+            _that.expiresAtUnixMs);
+      case ActionRequest_DisplayAssignmentRevoke()
+          when displayAssignmentRevoke != null:
+        return displayAssignmentRevoke(_that.assignment);
+      case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
+        return displayDeviceRevoke(_that.device);
       case _:
         return null;
     }
@@ -2194,6 +2391,472 @@ class _$ActionRequest_InstallMcpCopyWithImpl<$Res>
           ? _self.preview
           : preview // ignore: cast_nullable_to_non_nullable
               as bool,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_DisplayPairingApprove extends ActionRequest {
+  const ActionRequest_DisplayPairingApprove(
+      {required this.pairing, required this.label})
+      : super._();
+
+  final String pairing;
+  final String label;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_DisplayPairingApproveCopyWith<
+          ActionRequest_DisplayPairingApprove>
+      get copyWith => _$ActionRequest_DisplayPairingApproveCopyWithImpl<
+          ActionRequest_DisplayPairingApprove>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_DisplayPairingApprove &&
+            (identical(other.pairing, pairing) || other.pairing == pairing) &&
+            (identical(other.label, label) || other.label == label));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, pairing, label);
+
+  @override
+  String toString() {
+    return 'ActionRequest.displayPairingApprove(pairing: $pairing, label: $label)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_DisplayPairingApproveCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_DisplayPairingApproveCopyWith(
+          ActionRequest_DisplayPairingApprove value,
+          $Res Function(ActionRequest_DisplayPairingApprove) _then) =
+      _$ActionRequest_DisplayPairingApproveCopyWithImpl;
+  @useResult
+  $Res call({String pairing, String label});
+}
+
+/// @nodoc
+class _$ActionRequest_DisplayPairingApproveCopyWithImpl<$Res>
+    implements $ActionRequest_DisplayPairingApproveCopyWith<$Res> {
+  _$ActionRequest_DisplayPairingApproveCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_DisplayPairingApprove _self;
+  final $Res Function(ActionRequest_DisplayPairingApprove) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? pairing = null,
+    Object? label = null,
+  }) {
+    return _then(ActionRequest_DisplayPairingApprove(
+      pairing: null == pairing
+          ? _self.pairing
+          : pairing // ignore: cast_nullable_to_non_nullable
+              as String,
+      label: null == label
+          ? _self.label
+          : label // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_DisplayPairingReject extends ActionRequest {
+  const ActionRequest_DisplayPairingReject({required this.pairing}) : super._();
+
+  final String pairing;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_DisplayPairingRejectCopyWith<
+          ActionRequest_DisplayPairingReject>
+      get copyWith => _$ActionRequest_DisplayPairingRejectCopyWithImpl<
+          ActionRequest_DisplayPairingReject>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_DisplayPairingReject &&
+            (identical(other.pairing, pairing) || other.pairing == pairing));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, pairing);
+
+  @override
+  String toString() {
+    return 'ActionRequest.displayPairingReject(pairing: $pairing)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_DisplayPairingRejectCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_DisplayPairingRejectCopyWith(
+          ActionRequest_DisplayPairingReject value,
+          $Res Function(ActionRequest_DisplayPairingReject) _then) =
+      _$ActionRequest_DisplayPairingRejectCopyWithImpl;
+  @useResult
+  $Res call({String pairing});
+}
+
+/// @nodoc
+class _$ActionRequest_DisplayPairingRejectCopyWithImpl<$Res>
+    implements $ActionRequest_DisplayPairingRejectCopyWith<$Res> {
+  _$ActionRequest_DisplayPairingRejectCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_DisplayPairingReject _self;
+  final $Res Function(ActionRequest_DisplayPairingReject) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? pairing = null,
+  }) {
+    return _then(ActionRequest_DisplayPairingReject(
+      pairing: null == pairing
+          ? _self.pairing
+          : pairing // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_DisplayAssignmentPut extends ActionRequest {
+  const ActionRequest_DisplayAssignmentPut(
+      {required this.device,
+      required this.orbit,
+      required this.world,
+      required this.surface,
+      required this.inputJson,
+      required this.theme,
+      required this.staleAfterMs,
+      required this.onStale,
+      this.syncGroup,
+      required this.syncMode,
+      required this.staticDelayMs,
+      this.expiresAtUnixMs})
+      : super._();
+
+  final String device;
+  final String orbit;
+  final String world;
+  final String surface;
+  final String inputJson;
+  final DisplayTheme theme;
+  final int staleAfterMs;
+  final DisplayStaleAction onStale;
+  final String? syncGroup;
+  final DisplaySyncMode syncMode;
+  final int staticDelayMs;
+  final BigInt? expiresAtUnixMs;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_DisplayAssignmentPutCopyWith<
+          ActionRequest_DisplayAssignmentPut>
+      get copyWith => _$ActionRequest_DisplayAssignmentPutCopyWithImpl<
+          ActionRequest_DisplayAssignmentPut>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_DisplayAssignmentPut &&
+            (identical(other.device, device) || other.device == device) &&
+            (identical(other.orbit, orbit) || other.orbit == orbit) &&
+            (identical(other.world, world) || other.world == world) &&
+            (identical(other.surface, surface) || other.surface == surface) &&
+            (identical(other.inputJson, inputJson) ||
+                other.inputJson == inputJson) &&
+            (identical(other.theme, theme) || other.theme == theme) &&
+            (identical(other.staleAfterMs, staleAfterMs) ||
+                other.staleAfterMs == staleAfterMs) &&
+            (identical(other.onStale, onStale) || other.onStale == onStale) &&
+            (identical(other.syncGroup, syncGroup) ||
+                other.syncGroup == syncGroup) &&
+            (identical(other.syncMode, syncMode) ||
+                other.syncMode == syncMode) &&
+            (identical(other.staticDelayMs, staticDelayMs) ||
+                other.staticDelayMs == staticDelayMs) &&
+            (identical(other.expiresAtUnixMs, expiresAtUnixMs) ||
+                other.expiresAtUnixMs == expiresAtUnixMs));
+  }
+
+  @override
+  int get hashCode => Object.hash(
+      runtimeType,
+      device,
+      orbit,
+      world,
+      surface,
+      inputJson,
+      theme,
+      staleAfterMs,
+      onStale,
+      syncGroup,
+      syncMode,
+      staticDelayMs,
+      expiresAtUnixMs);
+
+  @override
+  String toString() {
+    return 'ActionRequest.displayAssignmentPut(device: $device, orbit: $orbit, world: $world, surface: $surface, inputJson: $inputJson, theme: $theme, staleAfterMs: $staleAfterMs, onStale: $onStale, syncGroup: $syncGroup, syncMode: $syncMode, staticDelayMs: $staticDelayMs, expiresAtUnixMs: $expiresAtUnixMs)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_DisplayAssignmentPutCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_DisplayAssignmentPutCopyWith(
+          ActionRequest_DisplayAssignmentPut value,
+          $Res Function(ActionRequest_DisplayAssignmentPut) _then) =
+      _$ActionRequest_DisplayAssignmentPutCopyWithImpl;
+  @useResult
+  $Res call(
+      {String device,
+      String orbit,
+      String world,
+      String surface,
+      String inputJson,
+      DisplayTheme theme,
+      int staleAfterMs,
+      DisplayStaleAction onStale,
+      String? syncGroup,
+      DisplaySyncMode syncMode,
+      int staticDelayMs,
+      BigInt? expiresAtUnixMs});
+}
+
+/// @nodoc
+class _$ActionRequest_DisplayAssignmentPutCopyWithImpl<$Res>
+    implements $ActionRequest_DisplayAssignmentPutCopyWith<$Res> {
+  _$ActionRequest_DisplayAssignmentPutCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_DisplayAssignmentPut _self;
+  final $Res Function(ActionRequest_DisplayAssignmentPut) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? device = null,
+    Object? orbit = null,
+    Object? world = null,
+    Object? surface = null,
+    Object? inputJson = null,
+    Object? theme = null,
+    Object? staleAfterMs = null,
+    Object? onStale = null,
+    Object? syncGroup = freezed,
+    Object? syncMode = null,
+    Object? staticDelayMs = null,
+    Object? expiresAtUnixMs = freezed,
+  }) {
+    return _then(ActionRequest_DisplayAssignmentPut(
+      device: null == device
+          ? _self.device
+          : device // ignore: cast_nullable_to_non_nullable
+              as String,
+      orbit: null == orbit
+          ? _self.orbit
+          : orbit // ignore: cast_nullable_to_non_nullable
+              as String,
+      world: null == world
+          ? _self.world
+          : world // ignore: cast_nullable_to_non_nullable
+              as String,
+      surface: null == surface
+          ? _self.surface
+          : surface // ignore: cast_nullable_to_non_nullable
+              as String,
+      inputJson: null == inputJson
+          ? _self.inputJson
+          : inputJson // ignore: cast_nullable_to_non_nullable
+              as String,
+      theme: null == theme
+          ? _self.theme
+          : theme // ignore: cast_nullable_to_non_nullable
+              as DisplayTheme,
+      staleAfterMs: null == staleAfterMs
+          ? _self.staleAfterMs
+          : staleAfterMs // ignore: cast_nullable_to_non_nullable
+              as int,
+      onStale: null == onStale
+          ? _self.onStale
+          : onStale // ignore: cast_nullable_to_non_nullable
+              as DisplayStaleAction,
+      syncGroup: freezed == syncGroup
+          ? _self.syncGroup
+          : syncGroup // ignore: cast_nullable_to_non_nullable
+              as String?,
+      syncMode: null == syncMode
+          ? _self.syncMode
+          : syncMode // ignore: cast_nullable_to_non_nullable
+              as DisplaySyncMode,
+      staticDelayMs: null == staticDelayMs
+          ? _self.staticDelayMs
+          : staticDelayMs // ignore: cast_nullable_to_non_nullable
+              as int,
+      expiresAtUnixMs: freezed == expiresAtUnixMs
+          ? _self.expiresAtUnixMs
+          : expiresAtUnixMs // ignore: cast_nullable_to_non_nullable
+              as BigInt?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_DisplayAssignmentRevoke extends ActionRequest {
+  const ActionRequest_DisplayAssignmentRevoke({required this.assignment})
+      : super._();
+
+  final String assignment;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_DisplayAssignmentRevokeCopyWith<
+          ActionRequest_DisplayAssignmentRevoke>
+      get copyWith => _$ActionRequest_DisplayAssignmentRevokeCopyWithImpl<
+          ActionRequest_DisplayAssignmentRevoke>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_DisplayAssignmentRevoke &&
+            (identical(other.assignment, assignment) ||
+                other.assignment == assignment));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, assignment);
+
+  @override
+  String toString() {
+    return 'ActionRequest.displayAssignmentRevoke(assignment: $assignment)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_DisplayAssignmentRevokeCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_DisplayAssignmentRevokeCopyWith(
+          ActionRequest_DisplayAssignmentRevoke value,
+          $Res Function(ActionRequest_DisplayAssignmentRevoke) _then) =
+      _$ActionRequest_DisplayAssignmentRevokeCopyWithImpl;
+  @useResult
+  $Res call({String assignment});
+}
+
+/// @nodoc
+class _$ActionRequest_DisplayAssignmentRevokeCopyWithImpl<$Res>
+    implements $ActionRequest_DisplayAssignmentRevokeCopyWith<$Res> {
+  _$ActionRequest_DisplayAssignmentRevokeCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_DisplayAssignmentRevoke _self;
+  final $Res Function(ActionRequest_DisplayAssignmentRevoke) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? assignment = null,
+  }) {
+    return _then(ActionRequest_DisplayAssignmentRevoke(
+      assignment: null == assignment
+          ? _self.assignment
+          : assignment // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_DisplayDeviceRevoke extends ActionRequest {
+  const ActionRequest_DisplayDeviceRevoke({required this.device}) : super._();
+
+  final String device;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_DisplayDeviceRevokeCopyWith<ActionRequest_DisplayDeviceRevoke>
+      get copyWith => _$ActionRequest_DisplayDeviceRevokeCopyWithImpl<
+          ActionRequest_DisplayDeviceRevoke>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_DisplayDeviceRevoke &&
+            (identical(other.device, device) || other.device == device));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, device);
+
+  @override
+  String toString() {
+    return 'ActionRequest.displayDeviceRevoke(device: $device)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_DisplayDeviceRevokeCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_DisplayDeviceRevokeCopyWith(
+          ActionRequest_DisplayDeviceRevoke value,
+          $Res Function(ActionRequest_DisplayDeviceRevoke) _then) =
+      _$ActionRequest_DisplayDeviceRevokeCopyWithImpl;
+  @useResult
+  $Res call({String device});
+}
+
+/// @nodoc
+class _$ActionRequest_DisplayDeviceRevokeCopyWithImpl<$Res>
+    implements $ActionRequest_DisplayDeviceRevokeCopyWith<$Res> {
+  _$ActionRequest_DisplayDeviceRevokeCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_DisplayDeviceRevoke _self;
+  final $Res Function(ActionRequest_DisplayDeviceRevoke) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? device = null,
+  }) {
+    return _then(ActionRequest_DisplayDeviceRevoke(
+      device: null == device
+          ? _self.device
+          : device // ignore: cast_nullable_to_non_nullable
+              as String,
     ));
   }
 }

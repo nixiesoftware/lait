@@ -1,0 +1,42 @@
+[package]
+name = "lait-post"
+version = "0.7.8"
+edition = "2021"
+rust-version = "1.92"
+description = "The Post: deposit, fetch and acknowledge sealed correspondence for a recipient who is not online."
+license = "MIT OR Apache-2.0"
+# Not published, for the same reason `lait-relay` is not: one of lait's internal
+# boundaries made runnable, rather than a library surface.
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lait-post"
+path = "src/main.rs"
+
+[dependencies]
+# Identity and signature verification. The Post's entire authorization model is
+# `verify_detached` over a framed preimage — it holds no keys of its own and
+# mints no credentials, which is what keeps a compromised carrier able to
+# withhold and unable to impersonate.
+mechanics = { path = "../mechanics" }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+data-encoding = "2.6"
+blake3 = "1"
+getrandom = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3"
+# The integration test speaks HTTP over a real socket rather than pulling a
+# client stack in for four requests.
+tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "macros"] }

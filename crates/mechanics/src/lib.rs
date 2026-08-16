@@ -73,7 +73,12 @@ pub mod recovery;
 mod refresh;
 #[cfg(test)]
 mod reshare;
-mod secretfs;
+/// Owner-only, crash-safe storage for device-local secret material.
+///
+/// Public so process-level adapters such as the display coordinator can keep
+/// receiver proof keys behind the same Windows DACL/DPAPI boundary as Runtime
+/// custody material instead of implementing a second secret store.
+pub mod secretfs;
 mod sigdag;
 pub mod space;
 pub mod station;

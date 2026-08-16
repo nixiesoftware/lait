@@ -101,8 +101,8 @@ class AstrolabeMenuBar extends StatelessWidget {
               label: 'Refresh local state',
               // `⌘R` is what a Mac reaches for; `F5` still works, because the
               // shell's own shortcut is unchanged and this adds to it.
-              shortcut: const SingleActivator(LogicalKeyboardKey.keyR,
-                  meta: true),
+              shortcut:
+                  const SingleActivator(LogicalKeyboardKey.keyR, meta: true),
               onSelected: rereading
                   ? null
                   : () => client.dispatch(const ActionRequest.refresh()),
@@ -120,6 +120,15 @@ class AstrolabeMenuBar extends StatelessWidget {
           menus: [
             PlatformMenuItemGroup(
               members: [
+                PlatformMenuItem(
+                  label: 'Displays',
+                  shortcut: const SingleActivator(
+                    LogicalKeyboardKey.keyD,
+                    meta: true,
+                    shift: true,
+                  ),
+                  onSelected: summonDisplays,
+                ),
                 PlatformMenuItem(
                   label: 'Address book',
                   shortcut: const SingleActivator(

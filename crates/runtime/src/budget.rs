@@ -420,6 +420,11 @@ pub mod deadline {
     /// already has in hand.
     pub const LIVE_FLOW_READ: Duration = Duration::from_secs(5);
 
+    /// Whole-stream ceiling for a native media Group. The protocol separately
+    /// caps presentation duration at ten seconds and latency at thirty; their
+    /// sum is the most a legal Group can remain useful while it is arriving.
+    pub const MEDIA_GROUP_READ: Duration = Duration::from_secs(40);
+
     /// A driver's poll interval, so cancellation is never missed while parked.
     pub const DRIVER_POLL: Duration = Duration::from_millis(25);
 }

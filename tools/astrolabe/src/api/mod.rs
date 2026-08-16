@@ -64,6 +64,9 @@ pub struct ClientView {
     /// a device that serves nothing.
     pub library: Option<Vec<LibraryRow>>,
     pub host: Option<HostFacts>,
+    /// The daemon-owned, self-hosted display coordinator. `None` until its
+    /// first authoritative read lands.
+    pub display: Option<DisplayFacts>,
     pub heads: Vec<HeadRow>,
     pub devices: Vec<DeviceRow>,
     pub storage: Vec<StorageRow>,
@@ -138,6 +141,22 @@ pub struct LibraryRow {
     pub people: Option<Vec<WorldPersonRow>>,
 }
 
+/// The artwork one World ships, as PNG bytes compiled into this build.
+///
+/// Not part of [`LibraryRow`], and the omission is the design: see
+/// [`world_artwork`]. Both halves are optional and their absence is a real
+/// answer — a World that ships neither is drawn from its accent, which is what
+/// every World was drawn from before any of them shipped art.
+///
+/// No `Default` derive: the codegen turns one into a `default_()` on the Dart
+/// class — an asynchronous round trip to the core to learn that two fields are
+/// null, which `const WorldArtwork()` already says on the Dart side for free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldArtwork {
+    pub mark: Option<Vec<u8>>,
+    pub hero: Option<Vec<u8>>,
+}
+
 /// One person the book addresses near a World — the at-a-glance join between
 /// the identity's own book and a Library row, across every Space the card
 /// holds an address in. Not a roster: that is an authoritative read the
@@ -168,6 +187,105 @@ pub struct HostFacts {
     pub identity_home: String,
     pub spaces_root: String,
     pub orbit_count: u32,
+}
+
+/// Astrolabe's complete controller-facing projection of the local display
+/// coordinator. Receiver proof keys and canonical assignment input remain on
+/// the daemon side of the boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayFacts {
+    pub instance: String,
+    pub label: String,
+    pub origin: String,
+    pub certificate_sha256: String,
+    pub certificate_pem: String,
+    pub surfaces: Vec<DisplaySurfaceRow>,
+    pub devices: Vec<DisplayReceiverRow>,
+    pub assignments: Vec<DisplayAssignmentRow>,
+    pub pending_pairings: Vec<DisplayPairingRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplaySurfaceRow {
+    pub world: String,
+    pub surface: String,
+    pub title: String,
+    pub contract_version: u32,
+    pub outputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayReceiverRow {
+    pub device: String,
+    pub label: String,
+    pub platform: String,
+    pub build: String,
+    pub issued_at_unix_ms: u64,
+    pub revoked_at_unix_ms: Option<u64>,
+    pub health: Option<DisplayHealthRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayHealthRow {
+    pub revision: String,
+    pub current_item: String,
+    pub elapsed_ms: u32,
+    pub connection: String,
+    pub playback: String,
+    pub last_error: String,
+    pub staged_items: u16,
+    pub staged_bytes: u32,
+    pub drift_residual_ms: i32,
+    pub correction_events: u32,
+    pub pipeline_unobservable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayAssignmentRow {
+    pub assignment: String,
+    pub device: String,
+    pub orbit: String,
+    pub space: String,
+    pub program: String,
+    pub world: String,
+    pub surface: String,
+    pub controller: String,
+    pub theme: DisplayTheme,
+    pub sync_group: Option<String>,
+    pub sync_mode: Option<DisplaySyncMode>,
+    pub static_delay_ms: i32,
+    pub expires_at_unix_ms: Option<u64>,
+    pub revoked_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayPairingRow {
+    pub pairing: String,
+    pub confirmation_phrase: Vec<String>,
+    pub certificate_sha256: String,
+    pub platform: String,
+    pub build: String,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayTheme {
+    Light,
+    Dark,
+    HighContrast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayStaleAction {
+    KeepWithNativeBanner,
+    Blank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplaySyncMode {
+    StayInSync,
+    Positional,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -482,6 +600,38 @@ pub enum ActionRequest {
         world: Option<String>,
         preview: bool,
     },
+    /// Accept the receiver only after the person has compared the phrase and
+    /// certificate fingerprint shown on both screens.
+    DisplayPairingApprove {
+        pairing: String,
+        label: String,
+    },
+    DisplayPairingReject {
+        pairing: String,
+    },
+    /// Assign one exact World display surface to an enrolled receiver. The
+    /// input remains JSON here because each package owns its own input schema;
+    /// the daemon canonicalizes and validates it before committing the pin.
+    DisplayAssignmentPut {
+        device: String,
+        orbit: String,
+        world: String,
+        surface: String,
+        input_json: String,
+        theme: DisplayTheme,
+        stale_after_ms: u32,
+        on_stale: DisplayStaleAction,
+        sync_group: Option<String>,
+        sync_mode: DisplaySyncMode,
+        static_delay_ms: i32,
+        expires_at_unix_ms: Option<u64>,
+    },
+    DisplayAssignmentRevoke {
+        assignment: String,
+    },
+    DisplayDeviceRevoke {
+        device: String,
+    },
 }
 
 impl ActionRequest {
@@ -531,6 +681,66 @@ impl ActionRequest {
                 }),
                 preview,
             },
+            Self::DisplayPairingApprove { pairing, label } => {
+                Action::DisplayPairingApprove { pairing, label }
+            }
+            Self::DisplayPairingReject { pairing } => Action::DisplayPairingReject(pairing),
+            Self::DisplayAssignmentPut {
+                device,
+                orbit,
+                world,
+                surface,
+                input_json,
+                theme,
+                stale_after_ms,
+                on_stale,
+                sync_group,
+                sync_mode,
+                static_delay_ms,
+                expires_at_unix_ms,
+            } => Action::DisplayAssignmentPut(Box::new(
+                crate::client::display::DisplayAssignmentInput {
+                    device,
+                    orbit,
+                    world,
+                    surface,
+                    input: serde_json::from_str(&input_json)
+                        .map_err(|error| format!("invalid display input JSON: {error}"))?,
+                    theme: match theme {
+                        DisplayTheme::Light => lait::control::DisplayThemeSetting::Light,
+                        DisplayTheme::Dark => lait::control::DisplayThemeSetting::Dark,
+                        DisplayTheme::HighContrast => {
+                            lait::control::DisplayThemeSetting::HighContrast
+                        }
+                    },
+                    stale_after_ms,
+                    on_stale: match on_stale {
+                        DisplayStaleAction::KeepWithNativeBanner => {
+                            lait::control::DisplayStaleActionSetting::KeepWithNativeBanner
+                        }
+                        DisplayStaleAction::Blank => {
+                            lait::control::DisplayStaleActionSetting::Blank
+                        }
+                    },
+                    sync: sync_group.map(|group| lait::control::DisplayAssignmentSyncSetting {
+                        group,
+                        mode: match sync_mode {
+                            DisplaySyncMode::StayInSync => {
+                                lait::control::DisplaySyncModeSetting::StayInSync
+                            }
+                            DisplaySyncMode::Positional => {
+                                lait::control::DisplaySyncModeSetting::Positional
+                            }
+                        },
+                        static_delay_ms,
+                    }),
+                    expires_at_unix_ms,
+                },
+            )),
+            Self::DisplayAssignmentRevoke { assignment } => {
+                Action::DisplayAssignmentRevoke(assignment)
+            }
+            Self::DisplayDeviceRevoke { device } => Action::DisplayDeviceRevoke(device),
         })
     }
 }
@@ -709,7 +919,7 @@ pub fn dispatch(action: ActionRequest) -> ClientView {
                 return empty();
             };
             core.app.fail(
-                "author an MCP binding",
+                "dispatch a client action",
                 crate::client::ClientError::invalid(error),
             );
             let view = project(&core.app);
@@ -732,6 +942,26 @@ pub fn dispatch(action: ActionRequest) -> ClientView {
     // on this dispatch, and the next pump only arrives when the action ends.
     emit(view.clone());
     view
+}
+
+/// The artwork one installed World ships, by mount.
+///
+/// The one thing that crosses this boundary without being part of
+/// [`ClientView`], and for a reason the view's own contract gives: the view is
+/// pushed whole to every attached surface on every pump, and artwork is a
+/// build constant that cannot change while the process runs. Riding in the view
+/// it would be re-marshalled on every presence sample to repeat itself. Asked
+/// for once and cached by the surface, it costs one copy for the life of the
+/// window.
+///
+/// An unknown mount answers with no artwork, not an error.
+#[frb(sync)]
+pub fn world_artwork(mount: String) -> WorldArtwork {
+    let art = crate::client::library::artwork(&mount);
+    WorldArtwork {
+        mark: art.mark,
+        hero: art.hero,
+    }
 }
 
 /// The view as it stands, for a surface that has just been built.
@@ -813,6 +1043,7 @@ fn empty() -> ClientView {
         stale: Some(Staleness::NeverLoaded),
         library: None,
         host: None,
+        display: None,
         heads: Vec::new(),
         devices: Vec::new(),
         storage: Vec::new(),
@@ -866,6 +1097,98 @@ fn project(app: &App) -> ClientView {
             identity_home: context.identity_home.clone(),
             spaces_root: context.spaces_root.clone(),
             orbit_count: u32::try_from(context.orbits.len()).unwrap_or(u32::MAX),
+        }),
+        display: app.display().map(|display| DisplayFacts {
+            instance: display.instance.clone(),
+            label: display.label.clone(),
+            origin: display.origin.clone(),
+            certificate_sha256: display.certificate_sha256.clone(),
+            certificate_pem: display.certificate_pem.clone(),
+            surfaces: display
+                .surfaces
+                .iter()
+                .map(|surface| DisplaySurfaceRow {
+                    world: surface.world.clone(),
+                    surface: surface.surface.clone(),
+                    title: surface.title.clone(),
+                    contract_version: surface.contract_version,
+                    outputs: surface.outputs.clone(),
+                })
+                .collect(),
+            devices: display
+                .devices
+                .iter()
+                .map(|device| DisplayReceiverRow {
+                    device: device.device.clone(),
+                    label: device.label.clone(),
+                    platform: device.platform.clone(),
+                    build: device.build.clone(),
+                    issued_at_unix_ms: device.issued_at_unix_ms,
+                    revoked_at_unix_ms: device.revoked_at_unix_ms,
+                    health: device.health.as_ref().map(|health| DisplayHealthRow {
+                        revision: health.revision.clone(),
+                        current_item: health.current_item.clone(),
+                        elapsed_ms: health.elapsed_ms,
+                        connection: health.connection.clone(),
+                        playback: health.playback.clone(),
+                        last_error: health.last_error.clone(),
+                        staged_items: health.staged_items,
+                        staged_bytes: health.staged_bytes,
+                        drift_residual_ms: health.drift_residual_ms,
+                        correction_events: health.correction_events,
+                        pipeline_unobservable: health.pipeline_unobservable,
+                    }),
+                })
+                .collect(),
+            assignments: display
+                .assignments
+                .iter()
+                .map(|assignment| DisplayAssignmentRow {
+                    assignment: assignment.assignment.clone(),
+                    device: assignment.device.clone(),
+                    orbit: assignment.orbit.clone(),
+                    space: assignment.space.clone(),
+                    program: assignment.program.clone(),
+                    world: assignment.world.clone(),
+                    surface: assignment.surface.clone(),
+                    controller: assignment.controller.clone(),
+                    theme: match assignment.theme {
+                        lait::control::DisplayThemeSetting::Light => DisplayTheme::Light,
+                        lait::control::DisplayThemeSetting::Dark => DisplayTheme::Dark,
+                        lait::control::DisplayThemeSetting::HighContrast => {
+                            DisplayTheme::HighContrast
+                        }
+                    },
+                    sync_group: assignment.sync.as_ref().map(|sync| sync.group.clone()),
+                    sync_mode: assignment.sync.as_ref().map(|sync| match sync.mode {
+                        lait::control::DisplaySyncModeSetting::StayInSync => {
+                            DisplaySyncMode::StayInSync
+                        }
+                        lait::control::DisplaySyncModeSetting::Positional => {
+                            DisplaySyncMode::Positional
+                        }
+                    }),
+                    static_delay_ms: assignment
+                        .sync
+                        .as_ref()
+                        .map_or(0, |sync| sync.static_delay_ms),
+                    expires_at_unix_ms: assignment.expires_at_unix_ms,
+                    revoked_at_unix_ms: assignment.revoked_at_unix_ms,
+                })
+                .collect(),
+            pending_pairings: display
+                .pending_pairings
+                .iter()
+                .map(|pairing| DisplayPairingRow {
+                    pairing: pairing.pairing.clone(),
+                    confirmation_phrase: pairing.confirmation_phrase.clone(),
+                    certificate_sha256: pairing.certificate_sha256.clone(),
+                    platform: pairing.platform.clone(),
+                    build: pairing.build.clone(),
+                    created_at_unix_ms: pairing.created_at_unix_ms,
+                    expires_at_unix_ms: pairing.expires_at_unix_ms,
+                })
+                .collect(),
         }),
         heads: app
             .heads()

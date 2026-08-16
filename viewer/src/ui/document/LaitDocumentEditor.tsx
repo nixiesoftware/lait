@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Tooltip } from "@astryxdesign/core";
 import {
   Bold,
@@ -346,6 +346,7 @@ function mapOffset(offset: number, splice: TextSplice): number {
 export default function LaitDocumentEditor({
   value,
   readOnly = false,
+  onNotEditable,
   placeholder,
   className,
   onChange,
@@ -361,6 +362,17 @@ export default function LaitDocumentEditor({
   placeholder?: string;
   className?: string;
   onChange: (source: string, splice: TextSplice, change: TextChange) => void;
+  /**
+   * Called once when the document cannot be edited safely here — its stored
+   * form does not survive the projection round-trip, so positional offsets
+   * would address the wrong text.
+   *
+   * `canonical` is the form it *would* round-trip to. The editor has already
+   * computed it to draw the document at all, so handing it over costs nothing
+   * and spares the surface from importing the projection (and ProseMirror with
+   * it) just to offer the repair.
+   */
+  onNotEditable?: (reason: string, canonical: string) => void;
   onCommit: () => void;
   remoteCursors?: RemoteCursor[];
   remoteContexts?: RemoteContext[];
@@ -384,7 +396,16 @@ export default function LaitDocumentEditor({
   const awareness = useRef(onAwareness);
   const cursors = useRef(remoteCursors);
   const previews = useRef(remotePreviews);
-  const writable = useRef(!readOnly);
+  // A document that does not survive a projection round-trip is one whose
+  // offsets mean something different here than they do in the store. Editing it
+  // positionally overwrites unrelated text, so this editor does not offer to.
+  //
+  // The World refuses such a splice anyway (`base_len`), which is what makes
+  // corruption impossible. This is the half that makes it *legible*: a hundred
+  // silently rejected keystrokes is a worse answer than one refusal that says
+  // why.
+  const editable = !readOnly && initialProjection.canonical;
+  const writable = useRef(editable);
   const currentRefs = useRef(refs);
   const issueViews = useRef(new Set<IssueRefView>());
   const codeViews = useRef(new Set<CodeBlockView>());
@@ -406,12 +427,21 @@ export default function LaitDocumentEditor({
     barShown.current = false;
     setToolbar(null);
   };
+  useEffect(() => {
+    if (!readOnly && !initialProjection.canonical) {
+      onNotEditable?.(
+        "This description is stored in a form this editor cannot address safely, so it is " +
+          "read-only. Normalizing rewrites it to an equivalent form and makes it editable.",
+        initialProjection.source,
+      );
+    }
+  }, [readOnly, initialProjection.canonical, initialProjection.source, onNotEditable]);
   emit.current = onChange;
   commit.current = onCommit;
   awareness.current = onAwareness;
   cursors.current = remoteCursors;
   previews.current = remotePreviews;
-  writable.current = !readOnly;
+  writable.current = editable;
   currentRefs.current = refs;
 
   useLayoutEffect(() => {
@@ -491,7 +521,7 @@ export default function LaitDocumentEditor({
 
     const view = new EditorView(mount.current, {
       state,
-      editable: () => !readOnly,
+      editable: () => editable,
       attributes: {
         class: "lait-document-editor prose",
         role: "textbox",
@@ -545,6 +575,11 @@ export default function LaitDocumentEditor({
         if (localDocumentChange) {
           const splice = projectionSplice(previous.source, projection.current.source);
           if (splice) {
+            // Measured against `previous.source`, which is what these offsets
+            // index into. The World compares it with what it holds and refuses
+            // on disagreement, so an editor whose space has drifted is stopped
+            // at the door rather than writing through it.
+            splice.base_len = Array.from(previous.source).length;
             emit.current(projection.current.source, splice, {
               previousRevision: textRevision(previous.source),
               resultRevision: textRevision(projection.current.source),
@@ -666,9 +701,9 @@ export default function LaitDocumentEditor({
   useLayoutEffect(() => {
     const view = editor.current;
     if (!view) return;
-    view.setProps({ editable: () => !readOnly });
-    if (readOnly) hideToolbar();
-  }, [readOnly]);
+    view.setProps({ editable: () => editable });
+    if (!editable) hideToolbar();
+  }, [editable]);
 
   useLayoutEffect(() => {
     issueViews.current.forEach((held) => held.setRefs(refs));

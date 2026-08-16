@@ -14,6 +14,7 @@ pub(crate) mod sponsorship;
 pub(crate) mod transport_hub;
 
 pub use crate::orbits::OrbitDoorbell;
+pub use host::embed_in_host_process;
 pub use host::run_lait_daemon;
 pub use host::{Client, Daemon, OrbitSubscription};
 pub(crate) use scope::{ClientScope, LocalOrbitId, OrbitAddress};

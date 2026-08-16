@@ -2419,10 +2419,30 @@ impl World for IssuesWorld {
                 index,
                 delete,
                 insert,
+                base_len,
             } => {
                 let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if delete == 0 && insert.is_empty() {
                     return Err(Rejection::InvalidRequest);
+                }
+                // The fence. A positional splice means nothing without
+                // agreement about which document it was measured against, and
+                // a caller whose coordinate space has drifted writes over
+                // whatever now sits at that offset. Refused as a Conflict
+                // rather than an InvalidRequest, because the caller is not
+                // malformed — it is working from a version this node no longer
+                // holds, and the remedy is to re-read, not to fix the request.
+                //
+                // Optional so that a client which has not been taught to send
+                // it is refused nothing it could already do; a client that does
+                // send it gets the guarantee. Once no unfenced client remains,
+                // this becomes required.
+                if let Some(base_len) = base_len {
+                    let held = u64::try_from(issue.description.chars().count())
+                        .map_err(|_| Rejection::StateCorrupt)?;
+                    if held != base_len {
+                        return Err(Rejection::Conflict);
+                    }
                 }
                 if issue.document_schema == DOCUMENT_SCHEMA_VERSION
                     && index < contract::DOCUMENT_PREFIX.chars().count() as u64
@@ -2448,8 +2468,20 @@ impl World for IssuesWorld {
                 ts,
             } => {
                 let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                if issue.document_schema != 0 || issue.description != expected {
-                    return Err(Rejection::InvalidRequest);
+                // Two jobs, one mechanism. A schema-0 body being moved onto the
+                // document schema, and a schema-1 document being rewritten into
+                // the form an editor can address positionally — both are
+                // "replace this whole source, atomically, only if it is still
+                // what I read". The `expected` compare-and-swap is the whole of
+                // the safety, and it is the same in both directions.
+                //
+                // Normalization needs this route rather than a splice because a
+                // non-canonical document is precisely one whose offsets cannot
+                // be trusted: fixing it with the primitive that the mismatch
+                // breaks would be circular.
+                if issue.document_schema > DOCUMENT_SCHEMA_VERSION || issue.description != expected
+                {
+                    return Err(Rejection::Conflict);
                 }
 
                 let key = issue_key(&doc);

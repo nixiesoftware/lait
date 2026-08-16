@@ -14,6 +14,8 @@
 
 pub mod feed;
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{anyhow, bail, Context, Result};
 use feed::Channel;
 
@@ -32,6 +34,58 @@ pub struct Updated {
     /// The published compatibility floor, when the release declares a
     /// satisfiable one.
     pub floor: Option<String>,
+    /// Set when this binary is a component of an installed client, which owns
+    /// updating it. Carries that client's executable path.
+    ///
+    /// A refusal with a name, not a silent no-op: `available` is still filled
+    /// in above, so the answer is "0.9.0 exists and *this* is what updates you
+    /// to it" rather than "nothing happened".
+    pub managed_by: Option<String>,
+}
+
+/// Who is responsible for replacing this binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Custody {
+    /// Nobody else. This binary may replace itself.
+    SelfManaged,
+    /// An installed client, whose executable sits beside this one.
+    Managed { by: PathBuf },
+}
+
+/// The client executable that would own this one, if it exists.
+///
+/// The exact inverse of `astrolabe`'s `sidecar::beside`, which finds `lait`
+/// beside the client. These two must agree about the layout or they will
+/// disagree on precisely the machine where it matters, so they are tested
+/// against the same shape.
+pub fn custody_of(executable: &Path) -> Custody {
+    let name = if cfg!(windows) {
+        "astrolabe.exe"
+    } else {
+        "astrolabe"
+    };
+    let client = executable.with_file_name(name);
+    if client.is_file() {
+        Custody::Managed { by: client }
+    } else {
+        Custody::SelfManaged
+    }
+}
+
+/// Who is responsible for replacing the running binary.
+pub fn custody() -> Custody {
+    match std::env::current_exe() {
+        Ok(executable) => custody_of(&executable),
+        // Unable to locate ourselves is not evidence of self-management. It is
+        // the reading under which we would proceed to overwrite something, so
+        // it degrades to the side that changes nothing.
+        Err(error) => {
+            tracing::warn!(%error, "cannot locate the running executable; declining to self-update");
+            Custody::Managed {
+                by: PathBuf::from("<unknown>"),
+            }
+        }
+    }
 }
 
 /// Resolve this node's channel and move the installed binary to the release it
@@ -56,12 +110,61 @@ pub fn run() -> Result<Updated> {
         channel: channel.as_str().to_string(),
         available: Some(resolved.version.to_string()),
         floor: resolved.floor.as_ref().map(|floor| floor.to_string()),
+        managed_by: None,
     };
-    if resolved.version <= current {
+    // A sidecar must never replace itself. The client pins its daemon to the
+    // same major.minor, so a lait that updated past its client would leave a
+    // client that can no longer start a daemon and no repair path but a
+    // reinstall — the pair rule asserted at the release gate, undone at runtime
+    // by a feature written when lait was standalone.
+    //
+    // Refused after the channel resolves, deliberately: the answer still says
+    // what is available and who can install it.
+    if let Custody::Managed { by } = custody() {
+        tracing::info!(client = %by.display(), "declining to self-update: this lait is a client's sidecar");
+        updated.managed_by = Some(by.display().to_string());
         return Ok(updated);
     }
+    // Stage and prove before the swap, so every failure short of the swap
+    // leaves the machine exactly as it was.
+    let Some(binary) = stage_with(feed::http_fetch, &resolved, &current, env!("LAIT_TARGET"))?
+    else {
+        return Ok(updated);
+    };
+    swap_self(&binary)?;
 
-    let target = env!("LAIT_TARGET");
+    updated.to = resolved.version.to_string();
+    updated.replaced = true;
+    Ok(updated)
+}
+
+/// Everything an update does before it touches the installed binary: decide
+/// whether there is one, choose the artifact for this target, fetch it, prove
+/// it byte for byte, and hand back the binary.
+///
+/// `Ok(None)` means the channel offers nothing newer — the ordinary answer, and
+/// deliberately not an error.
+///
+/// Split out of [`run`] so the whole chain can be driven in a test without
+/// replacing an executable. Every link here was already covered on its own —
+/// archive layout against the real published archives, both extraction layouts,
+/// the doubled-suffix guard — while the *composition* was not, and a chain of
+/// correct parts assembled wrongly is the defect this repository has already
+/// paid for twice in the client-to-process seam. The fetch is injected for the
+/// same reason `feed::resolve_with` injects one.
+fn stage_with<F>(
+    fetch: F,
+    resolved: &feed::Resolved,
+    current: &semver::Version,
+    target: &str,
+) -> Result<Option<Vec<u8>>>
+where
+    F: Fn(&str, u64) -> std::result::Result<Vec<u8>, feed::Failure>,
+{
+    if resolved.version <= *current {
+        return Ok(None);
+    }
+
     let artifact = resolved
         .manifest
         .artifacts
@@ -74,9 +177,10 @@ pub fn run() -> Result<Updated> {
             )
         })?;
 
-    // Stage, prove, then swap — in that order, so every failure before the
-    // swap leaves the machine exactly as it was.
-    let bytes = feed::http_fetch(&artifact.url, artifact.size)
+    // The manifest's size is passed as the fetch ceiling as well as checked
+    // after, so a host that answers with a hundred gigabytes is refused while
+    // streaming rather than after buffering it.
+    let bytes = fetch(&artifact.url, artifact.size)
         .map_err(|error| anyhow!("artifact download: {error}"))?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != artifact.size {
         bail!(
@@ -94,12 +198,7 @@ pub fn run() -> Result<Updated> {
         );
     }
 
-    let binary = extract_binary(&artifact.url, &bytes, target)?;
-    swap_self(&binary)?;
-
-    updated.to = resolved.version.to_string();
-    updated.replaced = true;
-    Ok(updated)
+    Ok(Some(extract_binary(&artifact.url, &bytes, target)?))
 }
 
 /// Pull the `lait` binary out of a release archive, addressed by
@@ -182,6 +281,51 @@ fn bin_path_for(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::bin_path_for;
+    use crate::update::feed::{self, Channel};
+
+    #[test]
+    fn a_binary_beside_a_client_is_that_client_s_to_replace() {
+        use super::{custody_of, Custody};
+
+        let root = std::env::temp_dir().join(format!("lait-custody-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the fake install");
+
+        let lait = root.join(if cfg!(windows) { "lait.exe" } else { "lait" });
+        std::fs::write(&lait, b"not really a binary").expect("stage lait");
+
+        assert_eq!(
+            custody_of(&lait),
+            Custody::SelfManaged,
+            "a lait installed on its own replaces itself"
+        );
+
+        let client = root.join(if cfg!(windows) {
+            "astrolabe.exe"
+        } else {
+            "astrolabe"
+        });
+        std::fs::write(&client, b"not really a client").expect("stage the client");
+
+        assert_eq!(
+            custody_of(&lait),
+            Custody::Managed { by: client.clone() },
+            "the same lait, with a client beside it, is the client's to replace"
+        );
+
+        // A directory of that name is not a client. The check is `is_file`
+        // rather than `exists` because the failure it guards is a lait that
+        // refuses forever on a machine that happens to hold a stray path.
+        std::fs::remove_file(&client).expect("remove the client");
+        std::fs::create_dir_all(&client).expect("a directory in its place");
+        assert_eq!(
+            custody_of(&lait),
+            Custody::SelfManaged,
+            "a directory named like the client is not a client"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn updater_version_is_clean_semver() {
@@ -295,6 +439,278 @@ mod tests {
                  but that archive contains: {found:?}"
             );
         }
+    }
+
+    /// A release archive shaped like the real Windows one: flat, `lait.exe` at
+    /// the root, carrying `binary`.
+    fn windows_release_zip(binary: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            writer
+                .start_file::<_, ()>("lait.exe", zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(binary).unwrap();
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    /// Seal a whole feed — pointer and manifest — naming one artifact, and hand
+    /// back the url map plus the verifying key.
+    fn sealed_feed(
+        version: &str,
+        artifact_url: &str,
+        archive: &[u8],
+        size_claim: u64,
+        digest_claim: &str,
+    ) -> (std::collections::HashMap<String, Vec<u8>>, [u8; 32]) {
+        let (seed, pubkey) = crate::update::feed::tests::test_keypair();
+        let manifest = serde_json::json!({
+            "version": version,
+            "bundles": {"lait": version},
+            "artifacts": {"lait": {"x86_64-pc-windows-msvc": {
+                "url": artifact_url,
+                "blake3": digest_claim,
+                "size": size_claim,
+            }}},
+        });
+        let pointer = serde_json::json!({
+            "kind": "release",
+            "version": version,
+            "manifest": "https://feed.example/releases/m.json",
+        });
+        let mut objects = std::collections::HashMap::new();
+        objects.insert(
+            "https://feed.example/channels/test".to_string(),
+            crate::update::feed::tests::seal(&pointer, &seed).into_bytes(),
+        );
+        objects.insert(
+            "https://feed.example/releases/m.json".to_string(),
+            crate::update::feed::tests::seal(&manifest, &seed).into_bytes(),
+        );
+        objects.insert(artifact_url.to_string(), archive.to_vec());
+        (objects, pubkey)
+    }
+
+    /// The chain, end to end: a signed pointer names a signed manifest, the
+    /// manifest names an artifact, the artifact is fetched, proven by size and
+    /// digest, and the binary comes back out of it byte for byte.
+    ///
+    /// Every link had a test already. This is the composition, which is what
+    /// the client-to-process seam taught this tree to assert directly: correct
+    /// parts wired wrongly fail with a symptom that names nothing.
+    #[test]
+    fn the_update_chain_holds_from_signed_pointer_to_extracted_binary() {
+        let binary = b"a real lait binary would sit here";
+        let url = "https://feed.example/releases/0.9.0/lait-x86_64-pc-windows-msvc.zip";
+        let archive = windows_release_zip(binary);
+        let digest = blake3::hash(&archive).to_hex().to_string();
+        let (objects, pubkey) = sealed_feed("0.9.0", url, &archive, archive.len() as u64, &digest);
+
+        let resolved = crate::update::feed::resolve_with(
+            |u| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            Channel::Test,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .expect("the signed feed resolves");
+
+        let staged = super::stage_with(
+            |u, _limit| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            &resolved,
+            &semver::Version::parse("0.8.0").unwrap(),
+            "x86_64-pc-windows-msvc",
+        )
+        .expect("the artifact stages")
+        .expect("0.9.0 is newer than 0.8.0, so there is something to stage");
+
+        assert_eq!(
+            staged, binary,
+            "what came out of the chain must be the exact bytes that went into the archive"
+        );
+    }
+
+    #[test]
+    fn a_tampered_artifact_fails_the_digest_and_never_reaches_the_swap() {
+        // The manifest is signed, so an attacker who can rewrite the artifact
+        // bytes cannot rewrite the digest that describes them. This is the
+        // check that makes a compromised artifact host a refusal rather than an
+        // install, and it must fire before anything is written.
+        let url = "https://feed.example/releases/0.9.0/lait-x86_64-pc-windows-msvc.zip";
+        // Equal-length payloads, because padding to the published size is
+        // trivial for an attacker and the cheaper size gate would otherwise be
+        // what refuses this. The digest is the check under test.
+        let honest = windows_release_zip(b"lait v0.9.0 as the maintainer built");
+        let swapped = windows_release_zip(b"lait v0.9.0 with a back door added!");
+        assert_eq!(
+            honest.len(),
+            swapped.len(),
+            "the fixture must isolate the digest check from the size check"
+        );
+        let digest = blake3::hash(&honest).to_hex().to_string();
+
+        // The manifest is signed, so its size and digest describe the honest
+        // archive. Only the bytes on the host changed.
+        let (objects, pubkey) = sealed_feed("0.9.0", url, &swapped, honest.len() as u64, &digest);
+        let resolved = crate::update::feed::resolve_with(
+            |u| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            Channel::Test,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .unwrap();
+
+        let error = super::stage_with(
+            |u, _| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            &resolved,
+            &semver::Version::parse("0.8.0").unwrap(),
+            "x86_64-pc-windows-msvc",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("digest verification failed"),
+            "the refusal must name the digest, not fail vaguely: {error}"
+        );
+    }
+
+    #[test]
+    fn a_channel_offering_nothing_newer_stages_nothing_and_is_not_an_error() {
+        let url = "https://feed.example/releases/0.9.0/lait-x86_64-pc-windows-msvc.zip";
+        let archive = windows_release_zip(b"whatever");
+        let digest = blake3::hash(&archive).to_hex().to_string();
+        let (objects, pubkey) = sealed_feed("0.9.0", url, &archive, archive.len() as u64, &digest);
+        let resolved = crate::update::feed::resolve_with(
+            |u| {
+                objects
+                    .get(u)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {u}")))
+            },
+            Channel::Test,
+            "https://feed.example",
+            &[pubkey],
+            None,
+        )
+        .unwrap();
+
+        // Already on 0.9.0, and also on something newer than the channel — both
+        // are "nothing to do" rather than a failure, and neither may download.
+        for running in ["0.9.0", "0.9.1"] {
+            let staged = super::stage_with(
+                |_, _| panic!("nothing may be fetched when there is nothing newer"),
+                &resolved,
+                &semver::Version::parse(running).unwrap(),
+                "x86_64-pc-windows-msvc",
+            )
+            .unwrap();
+            assert!(staged.is_none(), "running {running} must stage nothing");
+        }
+    }
+
+    /// The env var the child half reads. Deliberately not `LAIT_`-prefixed:
+    /// this crate's test harness scrubs every ambient `LAIT_*` at process load,
+    /// before any test runs, so a `LAIT_`-named handoff would arrive empty in
+    /// the child and the parent would look like a silent no-op.
+    const SWAP_PROBE_PAYLOAD: &str = "SWAP_SELF_PROBE_PAYLOAD";
+
+    /// The child half of the self-replace proof. Inert unless invoked with the
+    /// payload variable set, so it costs nothing in a normal run.
+    ///
+    /// It replaces *itself* — the parent hands it a disposable copy of the test
+    /// binary to be, never the real one.
+    #[test]
+    fn swap_self_child_replaces_the_binary_it_is_running_from() {
+        let Ok(payload) = std::env::var(SWAP_PROBE_PAYLOAD) else {
+            return;
+        };
+        let bytes = std::fs::read(&payload).expect("child reads the staged payload");
+        super::swap_self(&bytes).expect("a running executable replaces itself");
+    }
+
+    /// `swap_self` replaces the executable of the process that is running it.
+    ///
+    /// Everything else in this module could be tested in-process; this could
+    /// not, which is exactly why it went unexercised. The consequence was that
+    /// the riskiest step in the whole update — the one that has to defeat a
+    /// live image lock on Windows, where this repository meets that lock so
+    /// often the build fails when a daemon is running — rested on the belief
+    /// that the library handles it.
+    ///
+    /// The proof spends a child process: copy this test binary somewhere
+    /// disposable, run the copy, and have it replace itself. The real binary is
+    /// never a candidate.
+    #[test]
+    fn a_running_executable_replaces_itself_with_the_staged_bytes() {
+        let workspace = std::env::temp_dir().join(format!(
+            "lait-swap-probe-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("probe workspace");
+
+        let victim = workspace.join(format!("victim{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(std::env::current_exe().unwrap(), &victim).expect("copy the test binary");
+        let before = std::fs::read(&victim).unwrap();
+
+        // Not a valid executable, deliberately: this asserts the *replacement*
+        // landed, and using real binary bytes would make "did it change?"
+        // unanswerable. Whether the result still loads is a separate claim and
+        // is not made here.
+        let payload_bytes = b"lait-swap-probe: these bytes replaced a running image";
+        let payload = workspace.join("payload.bin");
+        std::fs::write(&payload, payload_bytes).unwrap();
+
+        let output = std::process::Command::new(&victim)
+            .args([
+                "update::tests::swap_self_child_replaces_the_binary_it_is_running_from",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(SWAP_PROBE_PAYLOAD, &payload)
+            .output()
+            .expect("run the disposable copy");
+
+        assert!(
+            output.status.success(),
+            "the child failed to replace itself:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let after = std::fs::read(&victim).expect("the replaced binary is still at its path");
+        assert_ne!(before, after, "the image on disk did not change");
+        assert_eq!(
+            after, payload_bytes,
+            "the bytes on disk must be exactly what was staged"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]

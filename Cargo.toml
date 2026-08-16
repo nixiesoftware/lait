@@ -1,18 +1,25 @@
 [workspace]
 members = [
+    "crates/display-protocol",
     "crates/journal",
     "crates/mechanics",
     "crates/fabric",
     "crates/addressbook",
     "crates/comms",
+    "crates/post",
     "crates/relay",
     "crates/replica",
     "crates/runtime",
+    "crates/schedule",
     "crates/world-interface",
     "products/issues",
     "products/issues-app",
+    "products/signage",
+    "products/signage-app",
+    "receivers/reference",
     "tools/workbench",
     "tools/astrolabe",
+    "tools/astrolabe-ios",
     "tools/feed",
 ]
 # Two packages live in this repository but are NOT members, each because it
@@ -119,6 +126,7 @@ addressbook = { path = "crates/addressbook" }
 runtime = { path = "crates/runtime" }
 replica = { path = "crates/replica" }
 world-interface = { path = "crates/world-interface" }
+display-protocol = { path = "crates/display-protocol" }
 # The network adapter — how independently held replicas exchange their material.
 # `iroh` is intentionally absent from THIS manifest: the app composes the seam
 # (`Transport`, framed `Stream`s, gossip rooms) and never names the contractor
@@ -129,6 +137,8 @@ comms = { path = "crates/comms" }
 # control adapters that compose it into Daemon.
 issues = { package = "lait-issues", path = "products/issues" }
 issues-app = { package = "lait-issues-app", path = "products/issues-app" }
+signage = { package = "lait-signage", path = "products/signage" }
+signage-app = { package = "lait-signage-app", path = "products/signage-app" }
 # randomness for ULID minting (app-minted DocId/ProjectId/… ids).
 getrandom = "0.3"
 
@@ -150,6 +160,7 @@ serde-byte-array = "0.1"
 bytes = "1"
 data-encoding = "2.6"
 blake3 = "1"
+sha2 = "0.10"
 
 # cross-platform local IPC for the daemon control channel: a Unix-domain socket
 # on unix, a named pipe on Windows — same API, so the daemon and its heads are portable.
@@ -175,7 +186,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # additive rather than unified in from another crate. `http2` stays off — it buys
 # nothing without TLS, and this surface is loopback plaintext by design.
 axum = { version = "0.8", features = ["ws"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "server", "service", "tokio"] }
+# The display coordinator's TLS. All three pin the portable `ring` provider
+# explicitly: rustls features unify across the whole graph, so leaving these at
+# their defaults enables `aws-lc-rs` for *every* rustls user here — including
+# iroh's hickory resolver, which otherwise uses ring. `deny.toml` bans the
+# aws-lc-* crates (they need cmake, a C toolchain, and NASM on Windows) and
+# `ci/assert-portable-tls.sh` fails the build if one is linked.
+rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["cors"] }
 # The web client, compiled into the binary. `include_dir` reads `src/serve/assets`
 # at compile time, which is why the built bundle is COMMITTED and lives under
 # `src/` rather than in the excluded `viewer/`: `cargo install lait` must not need

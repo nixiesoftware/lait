@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -31,6 +31,20 @@ void start({String? stateRoot, String? sidecar}) =>
 /// times and see three refusals.
 ClientView dispatch({required ActionRequest action}) =>
     Core.instance.api.crateApiDispatch(action: action);
+
+/// The artwork one installed World ships, by mount.
+///
+/// The one thing that crosses this boundary without being part of
+/// [`ClientView`], and for a reason the view's own contract gives: the view is
+/// pushed whole to every attached surface on every pump, and artwork is a
+/// build constant that cannot change while the process runs. Riding in the view
+/// it would be re-marshalled on every presence sample to repeat itself. Asked
+/// for once and cached by the surface, it costs one copy for the life of the
+/// window.
+///
+/// An unknown mount answers with no artwork, not an error.
+WorldArtwork worldArtwork({required String mount}) =>
+    Core.instance.api.crateApiWorldArtwork(mount: mount);
 
 /// The view as it stands, for a surface that has just been built.
 ClientView current() => Core.instance.api.crateApiCurrent();
@@ -159,6 +173,40 @@ sealed class ActionRequest with _$ActionRequest {
     String? world,
     required bool preview,
   }) = ActionRequest_InstallMcp;
+
+  /// Accept the receiver only after the person has compared the phrase and
+  /// certificate fingerprint shown on both screens.
+  const factory ActionRequest.displayPairingApprove({
+    required String pairing,
+    required String label,
+  }) = ActionRequest_DisplayPairingApprove;
+  const factory ActionRequest.displayPairingReject({
+    required String pairing,
+  }) = ActionRequest_DisplayPairingReject;
+
+  /// Assign one exact World display surface to an enrolled receiver. The
+  /// input remains JSON here because each package owns its own input schema;
+  /// the daemon canonicalizes and validates it before committing the pin.
+  const factory ActionRequest.displayAssignmentPut({
+    required String device,
+    required String orbit,
+    required String world,
+    required String surface,
+    required String inputJson,
+    required DisplayTheme theme,
+    required int staleAfterMs,
+    required DisplayStaleAction onStale,
+    String? syncGroup,
+    required DisplaySyncMode syncMode,
+    required int staticDelayMs,
+    BigInt? expiresAtUnixMs,
+  }) = ActionRequest_DisplayAssignmentPut;
+  const factory ActionRequest.displayAssignmentRevoke({
+    required String assignment,
+  }) = ActionRequest_DisplayAssignmentRevoke;
+  const factory ActionRequest.displayDeviceRevoke({
+    required String device,
+  }) = ActionRequest_DisplayDeviceRevoke;
 }
 
 /// The identity's address book, as last read.
@@ -286,6 +334,10 @@ class ClientView {
   /// a device that serves nothing.
   final List<LibraryRow>? library_;
   final HostFacts? host;
+
+  /// The daemon-owned, self-hosted display coordinator. `None` until its
+  /// first authoritative read lands.
+  final DisplayFacts? display;
   final List<HeadRow> heads;
   final List<DeviceRow> devices;
   final List<StorageRow> storage;
@@ -316,6 +368,7 @@ class ClientView {
     this.stale,
     this.library_,
     this.host,
+    this.display,
     required this.heads,
     required this.devices,
     required this.storage,
@@ -334,6 +387,7 @@ class ClientView {
       stale.hashCode ^
       library_.hashCode ^
       host.hashCode ^
+      display.hashCode ^
       heads.hashCode ^
       devices.hashCode ^
       storage.hashCode ^
@@ -354,6 +408,7 @@ class ClientView {
           stale == other.stale &&
           library_ == other.library_ &&
           host == other.host &&
+          display == other.display &&
           heads == other.heads &&
           devices == other.devices &&
           storage == other.storage &&
@@ -458,6 +513,330 @@ class DiagnosisRow {
           gates == other.gates &&
           blockedOn == other.blockedOn &&
           summary == other.summary;
+}
+
+class DisplayAssignmentRow {
+  final String assignment;
+  final String device;
+  final String orbit;
+  final String space;
+  final String program;
+  final String world;
+  final String surface;
+  final String controller;
+  final DisplayTheme theme;
+  final String? syncGroup;
+  final DisplaySyncMode? syncMode;
+  final int staticDelayMs;
+  final BigInt? expiresAtUnixMs;
+  final BigInt? revokedAtUnixMs;
+
+  const DisplayAssignmentRow({
+    required this.assignment,
+    required this.device,
+    required this.orbit,
+    required this.space,
+    required this.program,
+    required this.world,
+    required this.surface,
+    required this.controller,
+    required this.theme,
+    this.syncGroup,
+    this.syncMode,
+    required this.staticDelayMs,
+    this.expiresAtUnixMs,
+    this.revokedAtUnixMs,
+  });
+
+  @override
+  int get hashCode =>
+      assignment.hashCode ^
+      device.hashCode ^
+      orbit.hashCode ^
+      space.hashCode ^
+      program.hashCode ^
+      world.hashCode ^
+      surface.hashCode ^
+      controller.hashCode ^
+      theme.hashCode ^
+      syncGroup.hashCode ^
+      syncMode.hashCode ^
+      staticDelayMs.hashCode ^
+      expiresAtUnixMs.hashCode ^
+      revokedAtUnixMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DisplayAssignmentRow &&
+          runtimeType == other.runtimeType &&
+          assignment == other.assignment &&
+          device == other.device &&
+          orbit == other.orbit &&
+          space == other.space &&
+          program == other.program &&
+          world == other.world &&
+          surface == other.surface &&
+          controller == other.controller &&
+          theme == other.theme &&
+          syncGroup == other.syncGroup &&
+          syncMode == other.syncMode &&
+          staticDelayMs == other.staticDelayMs &&
+          expiresAtUnixMs == other.expiresAtUnixMs &&
+          revokedAtUnixMs == other.revokedAtUnixMs;
+}
+
+/// Astrolabe's complete controller-facing projection of the local display
+/// coordinator. Receiver proof keys and canonical assignment input remain on
+/// the daemon side of the boundary.
+class DisplayFacts {
+  final String instance;
+  final String label;
+  final String origin;
+  final String certificateSha256;
+  final String certificatePem;
+  final List<DisplaySurfaceRow> surfaces;
+  final List<DisplayReceiverRow> devices;
+  final List<DisplayAssignmentRow> assignments;
+  final List<DisplayPairingRow> pendingPairings;
+
+  const DisplayFacts({
+    required this.instance,
+    required this.label,
+    required this.origin,
+    required this.certificateSha256,
+    required this.certificatePem,
+    required this.surfaces,
+    required this.devices,
+    required this.assignments,
+    required this.pendingPairings,
+  });
+
+  @override
+  int get hashCode =>
+      instance.hashCode ^
+      label.hashCode ^
+      origin.hashCode ^
+      certificateSha256.hashCode ^
+      certificatePem.hashCode ^
+      surfaces.hashCode ^
+      devices.hashCode ^
+      assignments.hashCode ^
+      pendingPairings.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DisplayFacts &&
+          runtimeType == other.runtimeType &&
+          instance == other.instance &&
+          label == other.label &&
+          origin == other.origin &&
+          certificateSha256 == other.certificateSha256 &&
+          certificatePem == other.certificatePem &&
+          surfaces == other.surfaces &&
+          devices == other.devices &&
+          assignments == other.assignments &&
+          pendingPairings == other.pendingPairings;
+}
+
+class DisplayHealthRow {
+  final String revision;
+  final String currentItem;
+  final int elapsedMs;
+  final String connection;
+  final String playback;
+  final String lastError;
+  final int stagedItems;
+  final int stagedBytes;
+  final int driftResidualMs;
+  final int correctionEvents;
+  final bool pipelineUnobservable;
+
+  const DisplayHealthRow({
+    required this.revision,
+    required this.currentItem,
+    required this.elapsedMs,
+    required this.connection,
+    required this.playback,
+    required this.lastError,
+    required this.stagedItems,
+    required this.stagedBytes,
+    required this.driftResidualMs,
+    required this.correctionEvents,
+    required this.pipelineUnobservable,
+  });
+
+  @override
+  int get hashCode =>
+      revision.hashCode ^
+      currentItem.hashCode ^
+      elapsedMs.hashCode ^
+      connection.hashCode ^
+      playback.hashCode ^
+      lastError.hashCode ^
+      stagedItems.hashCode ^
+      stagedBytes.hashCode ^
+      driftResidualMs.hashCode ^
+      correctionEvents.hashCode ^
+      pipelineUnobservable.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DisplayHealthRow &&
+          runtimeType == other.runtimeType &&
+          revision == other.revision &&
+          currentItem == other.currentItem &&
+          elapsedMs == other.elapsedMs &&
+          connection == other.connection &&
+          playback == other.playback &&
+          lastError == other.lastError &&
+          stagedItems == other.stagedItems &&
+          stagedBytes == other.stagedBytes &&
+          driftResidualMs == other.driftResidualMs &&
+          correctionEvents == other.correctionEvents &&
+          pipelineUnobservable == other.pipelineUnobservable;
+}
+
+class DisplayPairingRow {
+  final String pairing;
+  final List<String> confirmationPhrase;
+  final String certificateSha256;
+  final String platform;
+  final String build;
+  final BigInt createdAtUnixMs;
+  final BigInt expiresAtUnixMs;
+
+  const DisplayPairingRow({
+    required this.pairing,
+    required this.confirmationPhrase,
+    required this.certificateSha256,
+    required this.platform,
+    required this.build,
+    required this.createdAtUnixMs,
+    required this.expiresAtUnixMs,
+  });
+
+  @override
+  int get hashCode =>
+      pairing.hashCode ^
+      confirmationPhrase.hashCode ^
+      certificateSha256.hashCode ^
+      platform.hashCode ^
+      build.hashCode ^
+      createdAtUnixMs.hashCode ^
+      expiresAtUnixMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DisplayPairingRow &&
+          runtimeType == other.runtimeType &&
+          pairing == other.pairing &&
+          confirmationPhrase == other.confirmationPhrase &&
+          certificateSha256 == other.certificateSha256 &&
+          platform == other.platform &&
+          build == other.build &&
+          createdAtUnixMs == other.createdAtUnixMs &&
+          expiresAtUnixMs == other.expiresAtUnixMs;
+}
+
+class DisplayReceiverRow {
+  final String device;
+  final String label;
+  final String platform;
+  final String build;
+  final BigInt issuedAtUnixMs;
+  final BigInt? revokedAtUnixMs;
+  final DisplayHealthRow? health;
+
+  const DisplayReceiverRow({
+    required this.device,
+    required this.label,
+    required this.platform,
+    required this.build,
+    required this.issuedAtUnixMs,
+    this.revokedAtUnixMs,
+    this.health,
+  });
+
+  @override
+  int get hashCode =>
+      device.hashCode ^
+      label.hashCode ^
+      platform.hashCode ^
+      build.hashCode ^
+      issuedAtUnixMs.hashCode ^
+      revokedAtUnixMs.hashCode ^
+      health.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DisplayReceiverRow &&
+          runtimeType == other.runtimeType &&
+          device == other.device &&
+          label == other.label &&
+          platform == other.platform &&
+          build == other.build &&
+          issuedAtUnixMs == other.issuedAtUnixMs &&
+          revokedAtUnixMs == other.revokedAtUnixMs &&
+          health == other.health;
+}
+
+enum DisplayStaleAction {
+  keepWithNativeBanner,
+  blank,
+  ;
+}
+
+class DisplaySurfaceRow {
+  final String world;
+  final String surface;
+  final String title;
+  final int contractVersion;
+  final List<String> outputs;
+
+  const DisplaySurfaceRow({
+    required this.world,
+    required this.surface,
+    required this.title,
+    required this.contractVersion,
+    required this.outputs,
+  });
+
+  @override
+  int get hashCode =>
+      world.hashCode ^
+      surface.hashCode ^
+      title.hashCode ^
+      contractVersion.hashCode ^
+      outputs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DisplaySurfaceRow &&
+          runtimeType == other.runtimeType &&
+          world == other.world &&
+          surface == other.surface &&
+          title == other.title &&
+          contractVersion == other.contractVersion &&
+          outputs == other.outputs;
+}
+
+enum DisplaySyncMode {
+  stayInSync,
+  positional,
+  ;
+}
+
+enum DisplayTheme {
+  light,
+  dark,
+  highContrast,
+  ;
 }
 
 class FailureRow {
@@ -967,6 +1346,37 @@ class SuggestionRow {
           name == other.name &&
           note == other.note &&
           handles == other.handles;
+}
+
+/// The artwork one World ships, as PNG bytes compiled into this build.
+///
+/// Not part of [`LibraryRow`], and the omission is the design: see
+/// [`world_artwork`]. Both halves are optional and their absence is a real
+/// answer — a World that ships neither is drawn from its accent, which is what
+/// every World was drawn from before any of them shipped art.
+///
+/// No `Default` derive: the codegen turns one into a `default_()` on the Dart
+/// class — an asynchronous round trip to the core to learn that two fields are
+/// null, which `const WorldArtwork()` already says on the Dart side for free.
+class WorldArtwork {
+  final Uint8List? mark;
+  final Uint8List? hero;
+
+  const WorldArtwork({
+    this.mark,
+    this.hero,
+  });
+
+  @override
+  int get hashCode => mark.hashCode ^ hero.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WorldArtwork &&
+          runtimeType == other.runtimeType &&
+          mark == other.mark &&
+          hero == other.hero;
 }
 
 /// One person the book addresses near a World — the at-a-glance join between

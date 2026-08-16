@@ -29,3 +29,15 @@ ci/coverage-manifest.txt.new
 apps/astrolabe/build/
 apps/astrolabe/.dart_tool/
 apps/astrolabe/windows/flutter/ephemeral/
+
+# The local escape hatch from the pinned design-system commits. `pubspec.yaml`
+# takes covalence and lit_ui from git at an exact ref so that a clean checkout
+# — and CI — can build this application at all. Anyone working ON those
+# packages wants their sibling checkout instead, and pub reads this file for
+# exactly that.
+#
+# It stays out of the tree because committing it would put the relative paths
+# back and undo the fix. Note that running `pub get` while it exists rewrites
+# `pubspec.lock` to the path sources: that lock is local truth, not project
+# truth, so restore it before committing.
+apps/astrolabe/pubspec_overrides.yaml

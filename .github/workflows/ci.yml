@@ -18,6 +18,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # NOTE: the Astrolabe interface job (`flutter analyze` + the widget suite) is
+  # not here yet, and it is one secret away.
+  #
+  # `apps/astrolabe` now takes covalence, lit_ui and covalence_lints from git at
+  # pinned commits rather than by relative path, so a clean checkout can resolve
+  # them. Both repositories are **private** (gitlab.com/onnixi/…), so a runner
+  # needs a credential before `pub get` will do anything but ask for a username.
+  #
+  # To turn it on: add a GitLab token with read_repository as a secret, then a
+  # job with these steps —
+  #
+  #   - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+  #     with: { flutter-version: '3.41.6', channel: stable, cache: true }
+  #   - run: git config --global url."https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/".insteadOf "https://gitlab.com/"
+  #   - run: flutter pub get      # working-directory: apps/astrolabe
+  #   - run: flutter analyze      # working-directory: apps/astrolabe
+  #   - run: flutter test         # working-directory: apps/astrolabe
+  #
+  # and add it to orbital-complete's needs. The suite is green — 58 tests and a
+  # clean analyze — and it is cheap: the widget tests press real controls against
+  # `Client.canned`, so they need the Flutter SDK and nothing else.
+  #
+  # Left as a comment rather than a disabled job on purpose. A job that cannot
+  # pass trains people to ignore red, which costs more than the check catches.
+
   # The web client (the UI bare `lait` serves). Its build output is COMMITTED under
   # src/serve/assets because `include_dir!` embeds it at compile time and
   # `cargo install lait` must not need npm (docs/SERVE.md). Committed build output

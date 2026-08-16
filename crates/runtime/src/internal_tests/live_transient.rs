@@ -964,7 +964,12 @@ mod dialling {
         );
         assert_eq!(
             open.requested_lanes,
-            vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
+            vec![
+                stream_kind::CONTROL,
+                stream_kind::RELIABLE_SIGNAL,
+                stream_kind::MEDIA_GROUP,
+                stream_kind::MEDIA_CONTROL,
+            ],
             "the ALPN does not type this plane, so the lanes are named"
         );
 
@@ -972,7 +977,10 @@ mod dialling {
         assert_eq!(live.peer.granted_lanes, vec![stream_kind::CONTROL]);
         assert_eq!(live.peer.connection_id, [7u8; 16]);
         // And the negotiated intersection reaches the plane that honours it.
-        assert_eq!(live.peer.features, runtime::plane::feature::RESIDENCY_HINTS);
+        assert_eq!(
+            live.peer.features,
+            runtime::plane::feature::RESIDENCY_HINTS | runtime::plane::feature::NATIVE_LIVE_MEDIA
+        );
         // And the identity is this Station's own resolution, never the packet's.
         assert_eq!(live.peer.actor.as_str(), format!("act_{}", "12".repeat(32)));
     }

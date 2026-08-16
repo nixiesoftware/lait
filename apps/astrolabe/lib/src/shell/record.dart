@@ -10,6 +10,7 @@ import 'package:covalence/covalence.dart' hide Surface;
 import 'package:flutter/widgets.dart';
 
 import '../core/client.dart';
+import 'host.dart';
 import 'type.dart';
 
 const double kOperationalBarHeight = 32;
@@ -89,6 +90,35 @@ class OperationalBar extends StatelessWidget {
                     t.gap.x(Space.xl3),
                     Text('v${view.host!.version}', style: context.monoStyle),
                   ],
+                  t.gap.x(Space.xl3),
+                  Container(
+                    width: t.stroke.xxs,
+                    height: t.size.xl3,
+                    color: context.border.l500,
+                  ),
+                  t.gap.x(Space.sm),
+                  // The one act on a bar of facts, and it sits with them for
+                  // the same reason they do: the book is this device's own,
+                  // like the identity and the counts beside it. The rule is
+                  // the boundary — what is true to its left, what can be done
+                  // to its right.
+                  Button(
+                    onPressed: summonDisplays,
+                    icon: AppIcons.cable,
+                    semanticLabel: 'Displays',
+                    variant: ButtonVariant.ghost,
+                    size: ButtonSize.iconSm,
+                    tooltip: 'Coordinate displays',
+                  ),
+                  t.gap.x(Space.xxs),
+                  Button(
+                    onPressed: summonBook,
+                    icon: AppIcons.person,
+                    semanticLabel: 'Address book',
+                    variant: ButtonVariant.ghost,
+                    size: ButtonSize.iconSm,
+                    tooltip: 'Open the address book',
+                  ),
                 ],
               );
             },

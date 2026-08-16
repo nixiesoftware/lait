@@ -196,16 +196,20 @@ packages:
   covalence:
     dependency: "direct main"
     description:
-      path: "../../../covalence"
-      relative: true
-    source: path
+      path: "."
+      ref: "6292aa6866bdd3bae6478f2cb1e51b8079153770"
+      resolved-ref: "6292aa6866bdd3bae6478f2cb1e51b8079153770"
+      url: "https://gitlab.com/onnixi/mosaic_flutter.git"
+    source: git
     version: "0.1.0"
   covalence_lints:
     dependency: "direct dev"
     description:
-      path: "../../../covalence/packages/covalence_lints"
-      relative: true
-    source: path
+      path: "packages/covalence_lints"
+      ref: "6292aa6866bdd3bae6478f2cb1e51b8079153770"
+      resolved-ref: "6292aa6866bdd3bae6478f2cb1e51b8079153770"
+      url: "https://gitlab.com/onnixi/mosaic_flutter.git"
+    source: git
     version: "0.1.0"
   crypto:
     dependency: transitive
@@ -484,9 +488,11 @@ packages:
   lit_ui:
     dependency: "direct main"
     description:
-      path: "../../../lit-ui"
-      relative: true
-    source: path
+      path: "."
+      ref: "1dbadc0681411a6c73fe7d7a6f5ed17ec0187a09"
+      resolved-ref: "1dbadc0681411a6c73fe7d7a6f5ed17ec0187a09"
+      url: "https://gitlab.com/onnixi/lit-ui.git"
+    source: git
     version: "0.1.0"
   logging:
     dependency: transitive

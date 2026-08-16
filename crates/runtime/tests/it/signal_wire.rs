@@ -206,7 +206,7 @@ async fn a_one_way_signal_is_accepted_and_that_is_not_a_delivery_receipt() {
         // a responder, and this asserts that it does. It did not until the flow
         // kind was fixed: a one-way signal on a unidirectional flow succeeded
         // locally, reported `Accepted`, and was never served by anything,
-        // because the Live plane accepts bidirectional flows only.
+        // because this signal lane is explicitly bidirectional.
         let policy = policy(vec![stream_kind::RELIABLE_SIGNAL]);
         let responder = tokio::spawn({
             let accepter = pair.accepter.clone();

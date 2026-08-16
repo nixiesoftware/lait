@@ -991,6 +991,14 @@ export interface DocumentSplice {
   index: number;
   delete: number;
   insert: string;
+  /**
+   * Scalar length of the document these offsets were measured against.
+   *
+   * The World refuses a splice whose base length disagrees with what it holds:
+   * positional offsets are meaningless without agreement about which document
+   * they index into.
+   */
+  base_len?: number;
 }
 
 export interface Filter {
@@ -1047,7 +1055,15 @@ export type Request =
    *  a number as a string, or `"none"` to clear. Absent = untouched. */
   | { cmd: "issue_edit"; reff: string; title?: string | null; status?: string | null; priority?: string | null; description?: string | null; due?: string | null; estimate?: string | null }
   /** Unicode-scalar offsets into the collaborative description text. */
-  | { cmd: "issue_text_splice"; reff: string; index: number; delete: number; insert: string }
+  | {
+      cmd: "issue_text_splice";
+      reff: string;
+      index: number;
+      delete: number;
+      insert: string;
+      /** Scalar length of the document the offsets were measured against. */
+      base_len?: number;
+    }
   /** Atomic upgrade from a legacy body into Lait's hidden document model. */
   | { cmd: "issue_document_upgrade"; reff: string; expected: string; splices: DocumentSplice[] }
   /** Group a burst of live splices into one activity entry. */
@@ -1323,7 +1339,26 @@ export type HostReply =
   | { host: "forgotten"; entries: OrbitEntry[] }
   | { host: "pruned"; entries: OrbitEntry[] }
   | { host: "rebuilt"; generation: string; effects: number; bodies: number; receipts: number; evidence: string }
-  | { host: "updated"; from: string; to: string; replaced: boolean }
+  | {
+      host: "updated";
+      from: string;
+      to: string;
+      replaced: boolean;
+      /** The channel this node follows. */
+      channel?: string;
+      /** The newest release the channel points at. */
+      available?: string | null;
+      /** The published floor, when the release declares a satisfiable one. */
+      floor?: string | null;
+      /**
+       * Set when this daemon is a client's sidecar and declined to replace
+       * itself; carries the client's path. `replaced` is false and `available`
+       * may still name a newer release — the two together are "an update
+       * exists, and *that* is what installs it", which is a different fact from
+       * "you are up to date".
+       */
+      managed_by?: string | null;
+    }
   | { host: "restarting"; pid?: number | null }
   | {
       host: "context";

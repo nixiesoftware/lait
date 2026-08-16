@@ -1,0 +1,49 @@
+[package]
+name = "astrolabe-ios"
+version = "0.1.0"
+edition = "2021"
+# MSRV: the workspace figure. See the root manifest for what drives it.
+rust-version = "1.92"
+description = "The Swift bridge crate for the native iOS client"
+# RustDesk's license, by decision (2026-08-15). This crate and the iOS shell
+# above it are AGPL; the engine and the rest of the workspace keep their dual
+# MIT OR Apache-2.0 offer.
+license = "AGPL-3.0-only"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "astrolabe_ios"
+# `rlib` only. The iOS application links a staticlib, but declaring it here
+# makes every HOST build of the workspace emit a ~2 GB archive nobody links —
+# tests link the rlib — and six stale copies of it once filled the disk.
+# `build-core.sh` asks for the archive explicitly (`cargo rustc --crate-type
+# staticlib`) for the one build that wants it: the iOS target's.
+crate-type = ["rlib"]
+
+[dependencies]
+lait = { path = "../.." }
+runtime = { path = "../../crates/runtime" }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+# The Swift boundary. Pinned exactly, because the generated Swift is checked in
+# and a generator bump regenerates the whole surface — the same discipline (and
+# the same sentence) as flutter_rust_bridge on the desktop boundary.
+uniffi = "=0.32.0"
+
+# The bindgen binary that emits the Swift half. `cli` only exists for it, so a
+# library build never carries clap.
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi_bindgen_swift.rs"
+required-features = ["bindgen-cli"]
+
+[features]
+bindgen-cli = ["uniffi/cli"]
+
+[dev-dependencies]
+tempfile = "3"

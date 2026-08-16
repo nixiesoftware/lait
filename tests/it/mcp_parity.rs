@@ -87,8 +87,8 @@ fn the_served_tool_list_matches_the_declared_surface() {
     let mut mcp = Mcp::start(&config, &home, None);
     let served: std::collections::BTreeSet<String> = mcp.tool_names().into_iter().collect();
     mcp.stop();
-    let declared: std::collections::BTreeSet<String> = declared_tool_names(None)
-        .expect("sole World pin")
+    let declared: std::collections::BTreeSet<String> = declared_tool_names(Some("issues"))
+        .expect("issues is hosted")
         .into_iter()
         .collect();
 
@@ -108,13 +108,16 @@ fn the_served_tool_list_matches_the_declared_surface() {
 /// The declared surface has no duplicates (a copy-paste / merge guard).
 #[test]
 fn mcp_tool_names_are_unique() {
-    let names = declared_tool_names(None).expect("sole World pin");
-    let mut seen = std::collections::HashSet::new();
-    for name in &names {
-        assert!(
-            seen.insert(name.as_str()),
-            "duplicate MCP tool name: {name}"
-        );
+    // Every hosted World's surface, since a session is pinned to one of them.
+    for mount in ["issues", "signage"] {
+        let names = declared_tool_names(Some(mount)).expect("a hosted mount");
+        let mut seen = std::collections::HashSet::new();
+        for name in &names {
+            assert!(
+                seen.insert(name.as_str()),
+                "duplicate MCP tool name under {mount}: {name}"
+            );
+        }
     }
 }
 

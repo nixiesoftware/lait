@@ -1,0 +1,17 @@
+{
+  "id": "com.nixiesoftware.app.astrolabe",
+  "version": "0.1.0",
+  "vendor": "Nixie Solutions LLC",
+  "type": "web",
+  "main": "index.html",
+  "title": "Astrolabe",
+  "appDescription": "A reliable display receiver for Astrolabe",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "iconColor": "#11161d",
+  "resolution": "1920x1080",
+  "disableBackHistoryAPI": false,
+  "handlesRelaunch": false,
+  "splashBackground": "splashBackground.png"
+}
+

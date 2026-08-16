@@ -31,21 +31,21 @@ which is the one thing about this that cannot be guessed from the manifest.
 
 ```sh
 flutter pub get
-flutter run -d macos       # or -d windows
+flutter run -d macos       # or -d windows / -d linux
 ```
 
 The Rust halves are built and staged by the platform build, not by hand — an
-Xcode build phase (`macos/rust_build.sh`) on macOS, custom CMake targets
-(`windows/rust_build.cmake`) on Windows. Both produce the same two artifacts and
-put them beside the executable, because that is where both consumers look:
+Xcode build phase (`macos/rust_build.sh`) on macOS and custom CMake targets on
+Windows and Linux. All three produce the same two artifacts and put them beside
+the executable, because that is where both consumers look:
 `Client._core()` in Dart for the core library, and `sidecar::beside` in Rust for
 the `lait` daemon.
 
-| | macOS | Windows |
-|---|---|---|
-| The core | `libastrolabe.dylib` | `astrolabe.dll` |
-| The sidecar | `lait` | `lait.exe` |
-| Staged into | `astrolabe.app/Contents/MacOS/` | the bundle's lib directory |
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| The core | `libastrolabe.dylib` | `astrolabe.dll` | `libastrolabe.so` |
+| The sidecar | `lait` | `lait.exe` | `lait` |
+| Staged into | `astrolabe.app/Contents/MacOS/` | the bundle's lib directory | the bundle root |
 
 A first build compiles the whole Rust workspace and takes on the order of twenty
 minutes. Afterwards, `ASTROLABE_SKIP_SIDECAR=1` drops the sidecar's link from
@@ -56,6 +56,35 @@ the change under test is Dart.
 open and cargo cannot relink them; `rust_build.cmake` says so rather than
 letting MSBuild report `MSB8066`. macOS has no such rule — the staging step
 unlinks before it copies.
+
+### Linux and WSL2
+
+The release baseline is Ubuntu 24.04 x86_64 with Flutter **3.41.6**, the same
+exact SDK pinned in the installer workflow. Install Flutter's documented Linux
+desktop prerequisites plus the tray plugin's AppIndicator development package:
+
+```sh
+sudo apt-get install clang lld-18 cmake ninja-build pkg-config libgtk-3-dev \
+  libstdc++-12-dev libayatana-appindicator3-dev
+flutter doctor -v
+flutter build linux --release
+```
+
+WSL2 is a supported validation host when WSLg exposes the `linux` device. Set a
+Linux-only Cargo output directory when the checkout is also built from Windows,
+so the two host toolchains never share fingerprints:
+
+```sh
+CARGO_TARGET_DIR=/path/to/lait-linux-target flutter build linux --release
+```
+
+The relocatable package is the whole Flutter bundle, not the runner alone:
+
+```sh
+bash ../../packaging/linux/make-tarball.sh \
+  --bundle build/linux/x64/release/bundle \
+  --version <version> --target x86_64-unknown-linux-gnu --out ../../dist
+```
 
 ## Verifying
 

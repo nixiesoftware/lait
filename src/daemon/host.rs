@@ -188,19 +188,25 @@ enum Flow {
 /// state remains owned by [`Router`].
 pub(crate) struct Listener {
     router: Arc<Router>,
+    display: Arc<crate::display::DisplayRuntime>,
     stopping: tokio::sync::watch::Sender<bool>,
 }
 
 impl Listener {
-    pub(crate) fn new(router: Arc<Router>) -> Self {
+    pub(crate) fn new(router: Arc<Router>, display: Arc<crate::display::DisplayRuntime>) -> Self {
         Self {
             router,
+            display,
             stopping: tokio::sync::watch::channel(false).0,
         }
     }
 
     pub(crate) fn begin_stop(&self) {
         self.stopping.send_replace(true);
+    }
+
+    pub(crate) fn subscribe_stop(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.stopping.subscribe()
     }
 
     pub(crate) async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
@@ -678,9 +684,12 @@ impl Listener {
                 Flow::Next(reader, write_half)
             }
             (ControlRoute::Daemon, request) => {
-                let response = crate::orbits::bootstrap::dispatch(&self.router, request)
-                    .await
-                    .unwrap_or_else(|| Response::err("request has no daemon-scoped handler"));
+                let response = match self.display.handle_control(&request) {
+                    Some(response) => response,
+                    None => crate::orbits::bootstrap::dispatch(&self.router, request)
+                        .await
+                        .unwrap_or_else(|| Response::err("request has no daemon-scoped handler")),
+                };
                 let _ = write_line(&mut write_half, &response).await;
                 Flow::Next(reader, write_half)
             }
@@ -957,14 +966,20 @@ impl Listener {
 pub struct Daemon {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
+    display: Arc<crate::display::DisplayRuntime>,
 }
 
 impl Daemon {
-    fn new(router: Arc<Router>) -> Self {
-        Self {
-            endpoint: Arc::new(Endpoint::new(router.clone())),
+    fn new(router: Arc<Router>, home: &Path) -> Result<Self> {
+        let display = Arc::new(crate::display::DisplayRuntime::open(
+            &home.join("display"),
+            router.clone(),
+        )?);
+        Ok(Self {
+            endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),
+            display,
             router,
-        }
+        })
     }
 
     fn begin_stop(&self) {
@@ -972,7 +987,42 @@ impl Daemon {
     }
 
     async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
-        self.endpoint.clone().serve(home).await
+        // Display coordination is withheld from a daemon that does not own
+        // the machine's posture: a guest in somebody's process (see
+        // [`embed_in_host_process`]) and a daemon told `LAIT_DISPLAY=off`
+        // (see [`display_hosting`]). The control socket stays, and the
+        // display control-plane requests still answer (status reads state,
+        // not the listener); only the LAN-facing HTTPS service is absent.
+        if embedded() || !display_hosting() {
+            return self.endpoint.clone().serve(home).await;
+        }
+        let display = self.display.clone();
+        let display_stop = self.endpoint.subscribe_stop();
+        let endpoint = self.endpoint.clone();
+        let mut display_service = Box::pin(async move { display.serve(display_stop).await });
+        let mut control_service = Box::pin(async move { endpoint.serve(home).await });
+        tokio::select! {
+            endpoint_result = &mut control_service => {
+                self.endpoint.begin_stop();
+                if let Err(error) = display_service.await {
+                    tracing::error!(%error, "display HTTPS service stopped during daemon shutdown");
+                }
+                endpoint_result
+            }
+            display_result = &mut display_service => {
+                // A display bind or listener failure must not sit unnoticed
+                // behind a healthy control socket: Astrolabe would advertise
+                // an origin receivers cannot reach. Stop the sibling service
+                // and fail startup as one daemon-owned unit.
+                self.endpoint.begin_stop();
+                let endpoint_result = control_service.await;
+                endpoint_result?;
+                match display_result {
+                    Ok(()) => Err(anyhow!("display HTTPS service stopped unexpectedly")),
+                    Err(error) => Err(error).context("serve daemon display HTTPS"),
+                }
+            }
+        }
     }
 }
 
@@ -999,9 +1049,10 @@ impl Stop {
 impl Runner {
     pub(crate) fn start(home: PathBuf, router: Arc<Router>) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
+        let daemon = Arc::new(Daemon::new(router, &home)?);
         Ok(Self {
             home,
-            daemon: Arc::new(Daemon::new(router)),
+            daemon,
             _lock: lock,
         })
     }
@@ -1150,7 +1201,55 @@ fn watchdog() {
     ARMED.call_once(arm_watchdog);
 }
 
+/// Whether this daemon runs as a library inside somebody else's process.
+static EMBEDDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An embedder's standing declaration: this daemon is a guest in a process —
+/// and on a device — it does not own. Called once before the daemon starts; a
+/// value rather than an environment mutation, for the same reason
+/// `run_lait_daemon` takes its selection as one.
+///
+/// Two consequences, both sides of the same fact:
+///
+/// - **The exit watchdog never arms.** Its whole action is `exit()`, and a
+///   library must never exit its host — on iOS the daemon runs as a task
+///   inside the application, and the deadline would take the interface down
+///   with the drain it was policing. `LAIT_SHUTDOWN_DEADLINE_SECS=0` stays
+///   the CLI's spelling of that half.
+/// - **No machine-scoped listener is hosted.** Display coordination binds a
+///   well-known LAN-facing port that receivers discover; that is the desktop
+///   identity daemon's posture. A guest daemon must neither claim that port
+///   out from under the machine's real daemon nor open its host device to
+///   the LAN.
+pub fn embed_in_host_process() {
+    EMBEDDED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn embedded() -> bool {
+    EMBEDDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether this daemon hosts the machine's display coordinator.
+///
+/// On by default: the identity daemon owns the machine's display posture.
+/// `LAIT_DISPLAY=off` withholds it — the coordinator binds one well-known,
+/// machine-scoped port, and a daemon that is not *the* machine's daemon must
+/// neither race the real one for that port nor die because it lost. The test
+/// suite is the standing case: it runs many daemons on one machine in
+/// parallel, and a fixed port makes them mutually exclusive — every spawned
+/// test daemon says `off` and the one suite that exercises receivers leaves
+/// it hosting.
+fn display_hosting() -> bool {
+    !matches!(
+        std::env::var("LAIT_DISPLAY").as_deref(),
+        Ok("off" | "0" | "false")
+    )
+}
+
 fn arm_watchdog() {
+    if embedded() {
+        return;
+    }
     let deadline = std::env::var("LAIT_SHUTDOWN_DEADLINE_SECS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -1441,6 +1540,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn one_host_endpoint_places_routes_streams_and_drains_an_orbit() {
+        // A test daemon is not the machine's daemon — see [`display_hosting`].
+        // Hosting here would race every parallel test (and any real daemon on
+        // this machine) for the coordinator's one well-known port.
+        std::env::set_var("LAIT_DISPLAY", "off");
         let seed = [211; 32];
         let (base, daemon_home, directory, resolved) = formed_directory("route", &seed);
         let orbit_home = resolved.home.clone();
@@ -1543,6 +1646,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_rejects_a_stale_space_expectation_before_placement() {
+        // See the sibling test: a test daemon never hosts displays.
+        std::env::set_var("LAIT_DISPLAY", "off");
         let seed = [212; 32];
         let (base, daemon_home, directory, mut resolved) = formed_directory("scope", &seed);
         let orbit_home = resolved.home.clone();

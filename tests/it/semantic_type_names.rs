@@ -636,6 +636,11 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 "membership",
                 "policy",
                 "recovery",
+                // Owner-only, crash-safe storage for device-local secret
+                // material. Public so process-level adapters (the display
+                // coordinator's receiver proof keys) share Runtime custody's
+                // DACL/DPAPI boundary instead of growing a second secret store.
+                "secretfs",
                 "space",
                 "station",
                 // Wall-clock time, with a freeze seam for tests. Public because
@@ -674,6 +679,10 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 // Immutable Orbit materializations. The namespace keeps the
                 // lifecycle sharp: Generation -> Build -> Verification ->
                 // Activation, without prefix-stuttering every public type.
+                // The identity-scoped correspondence dial tone
+                // (`lait/correspondence/1`) — the mailbox's transport seam,
+                // routed without a Space by design.
+                "correspondence",
                 "generation",
                 "neighbor",
                 "plane",

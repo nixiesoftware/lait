@@ -74,6 +74,11 @@ allow = [
     "Unlicense",
     "0BSD",
 ]
+# The iOS client is AGPL by decision (RustDesk's license); the exception is
+# scoped to that one crate so the allowlist above stays the workspace's story.
+exceptions = [
+    { name = "astrolabe-ios", allow = ["AGPL-3.0-only"] },
+]
 
 [sources]
 unknown-registry = "deny"

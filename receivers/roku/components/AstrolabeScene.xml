@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="AstrolabeScene" extends="Scene">
+  <children>
+    <Rectangle width="1920" height="1080" color="0x0B1016FF"/>
+    <Poster id="programFrame" width="1920" height="1080" loadWidth="1920" loadHeight="1080" loadDisplayMode="scaleToFit" visible="false"/>
+    <Rectangle id="headerBackground" width="1920" height="116" color="0x05080CF2"/>
+    <Poster uri="pkg:/images/icon.png" width="58" height="58" translation="[54,29]"/>
+    <Label text="Astrolabe" translation="[132,25]" width="500" height="45" color="0xF7F4EDFF">
+      <Font role="font" uri="font:MediumSystemFont" size="32"/>
+    </Label>
+    <Label text="Nixie Solutions LLC" translation="[132,67]" width="500" height="30" color="0xAEB8C4FF">
+      <Font role="font" uri="font:SmallSystemFont" size="19"/>
+    </Label>
+    <Label id="transportState" text="Connecting" translation="[1430,40]" width="190" height="42" horizAlign="center" color="0xFFD18CFF"/>
+    <Label id="sourceState" text="No source" translation="[1650,40]" width="190" height="42" horizAlign="center" color="0xC5CED8FF"/>
+
+    <Group id="statePanel" translation="[250,190]">
+      <Rectangle width="1420" height="760" color="0x0F161EF5"/>
+      <Label id="eyebrow" translation="[80,70]" width="1260" height="40" horizAlign="center" color="0x7FD7C6FF"/>
+      <Label id="title" translation="[80,125]" width="1260" height="105" horizAlign="center" vertAlign="center" wrap="true" color="0xF7F4EDFF">
+        <Font role="font" uri="font:LargeSystemFont" size="62"/>
+      </Label>
+      <Label id="body" translation="[180,255]" width="1060" height="115" horizAlign="center" vertAlign="center" wrap="true" color="0xBCC5CFFF">
+        <Font role="font" uri="font:MediumSystemFont" size="28"/>
+      </Label>
+      <Group id="phraseGroup" translation="[175,390]" visible="false">
+        <Label id="phrase0" translation="[0,0]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
+        <Label id="phrase1" translation="[370,0]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
+        <Label id="phrase2" translation="[740,0]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
+        <Label id="phrase3" translation="[0,100]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
+        <Label id="phrase4" translation="[370,100]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
+        <Label id="phrase5" translation="[740,100]" width="330" height="70" horizAlign="center" vertAlign="center" color="0xD7FFF4FF"/>
+      </Group>
+      <Label id="fingerprint" translation="[120,590]" width="1180" height="50" horizAlign="center" color="0xEDF2F5FF">
+        <Font role="font" uri="font:SmallSystemFont" size="21"/>
+      </Label>
+      <Label id="action" translation="[260,660]" width="900" height="48" horizAlign="center" color="0x8EE2D1FF">
+        <Font role="font" uri="font:MediumSystemFont" size="25"/>
+      </Label>
+    </Group>
+
+    <Group id="details" translation="[1390,790]" visible="false">
+      <Rectangle width="470" height="220" color="0x060A0FF2"/>
+      <Label id="detailsText" translation="[28,28]" width="414" height="165" wrap="true" color="0xDCE4EBFF"/>
+    </Group>
+    <AstrolabeReceiverTask id="receiverTask"/>
+  </children>
+  <script type="text/brightscript" uri="pkg:/components/AstrolabeScene.brs"/>
+</component>

@@ -43,6 +43,15 @@ export '../bridge/api.dart'
         ClientView,
         DeviceRow,
         DiagnosisRow,
+        DisplayAssignmentRow,
+        DisplayFacts,
+        DisplayHealthRow,
+        DisplayPairingRow,
+        DisplayReceiverRow,
+        DisplayStaleAction,
+        DisplaySurfaceRow,
+        DisplaySyncMode,
+        DisplayTheme,
         FailureRow,
         GateRow,
         GateState,
@@ -63,6 +72,7 @@ export '../bridge/api.dart'
         SuggestionRow,
         CardRow,
         PresenceView,
+        WorldArtwork,
         WorldPersonRow;
 
 /// The core library, resolved for the process that is about to load it.
@@ -123,7 +133,7 @@ ExternalLibrary? _core() {
 /// own subscription could paint a frame out of step with its siblings. One
 /// listenable is one moment.
 class Client {
-  Client._(this._view, [this._onDispatch]);
+  Client._(this._view, [this._onDispatch, this._cannedArtwork]);
 
   /// A client over a canned view, for tests.
   ///
@@ -132,12 +142,17 @@ class Client {
   /// property the interaction tests on the retiring interface had, and the one
   /// worth keeping. `onDispatch` records what a control asked for, which is the
   /// other half: press a real control, read what it asked for.
+  ///
+  /// `artwork` is keyed by mount and defaults to none, which is the case worth
+  /// having as the default: a World that ships no art is drawn from its accent,
+  /// and that path must stay the one a test falls into without asking.
   @visibleForTesting
   factory Client.canned(
     api.ClientView view, {
     void Function(api.ActionRequest) onDispatch = _ignore,
+    Map<String, api.WorldArtwork> artwork = const {},
   }) =>
-      Client._(ValueNotifier(view), onDispatch);
+      Client._(ValueNotifier(view), onDispatch, artwork);
 
   static void _ignore(api.ActionRequest _) {}
 
@@ -145,6 +160,12 @@ class Client {
 
   /// Set only by [Client.canned]. In production the bridge is the sink.
   final void Function(api.ActionRequest)? _onDispatch;
+
+  /// Set only by [Client.canned] — non-null is what "this client has no bridge
+  /// under it" means here, the same way [_onDispatch] means it for actions.
+  final Map<String, api.WorldArtwork>? _cannedArtwork;
+
+  final Map<String, api.WorldArtwork> _artwork = {};
 
   ValueListenable<api.ClientView> get view => _view;
 
@@ -180,6 +201,23 @@ class Client {
       return;
     }
     _view.value = api.dispatch(action: action);
+  }
+
+  /// The artwork one World ships, by mount.
+  ///
+  /// The one thing a surface reads that does not arrive in the view, and the
+  /// core's `world_artwork` carries the reason: artwork is a build constant,
+  /// while the view is pushed whole on every pump. Riding along it would be
+  /// re-marshalled on every presence sample to repeat itself.
+  ///
+  /// Cached per mount for the life of the client, which is exactly as long as
+  /// the answer is good for — nothing can change it without a new binary.
+  api.WorldArtwork artworkFor(String mount) {
+    final canned = _cannedArtwork;
+    if (canned != null) {
+      return canned[mount] ?? const api.WorldArtwork();
+    }
+    return _artwork[mount] ??= api.worldArtwork(mount: mount);
   }
 
   /// Whether an action is already under way.
@@ -229,7 +267,6 @@ abstract final class ActionKeys {
   static const String startHead = 'head.start';
   static String stopHead(String id) => 'head.stop:$id';
   static String forgetOrbit(String space) => 'orbit.forget:$space';
-  static String stopOrbit(String orbit) => 'orbit.stop:$orbit';
   static const String bookPutNew = 'book.put';
   static String bookPut(String card) => 'book.put:$card';
   static String bookDelete(String card) => 'book.delete:$card';
@@ -242,4 +279,14 @@ abstract final class ActionKeys {
   static String bookDismiss(String suggestion) => 'book.dismiss:$suggestion';
   static const String bookExport = 'book.export';
   static const String bookImport = 'book.import';
+  static String approveDisplayPairing(String pairing) =>
+      'display.pairing.approve:$pairing';
+  static String rejectDisplayPairing(String pairing) =>
+      'display.pairing.reject:$pairing';
+  static String assignDisplay(String device) =>
+      'display.assignment.put:$device';
+  static String revokeDisplayAssignment(String assignment) =>
+      'display.assignment.revoke:$assignment';
+  static String revokeDisplayDevice(String device) =>
+      'display.device.revoke:$device';
 }

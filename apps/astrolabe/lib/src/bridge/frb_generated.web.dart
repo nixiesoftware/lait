@@ -54,6 +54,15 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DiagnosisRow dco_decode_box_autoadd_diagnosis_row(dynamic raw);
 
   @protected
+  DisplayFacts dco_decode_box_autoadd_display_facts(dynamic raw);
+
+  @protected
+  DisplayHealthRow dco_decode_box_autoadd_display_health_row(dynamic raw);
+
+  @protected
+  DisplaySyncMode dco_decode_box_autoadd_display_sync_mode(dynamic raw);
+
+  @protected
   HostFacts dco_decode_box_autoadd_host_facts(dynamic raw);
 
   @protected
@@ -90,6 +99,33 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DiagnosisRow dco_decode_diagnosis_row(dynamic raw);
 
   @protected
+  DisplayAssignmentRow dco_decode_display_assignment_row(dynamic raw);
+
+  @protected
+  DisplayFacts dco_decode_display_facts(dynamic raw);
+
+  @protected
+  DisplayHealthRow dco_decode_display_health_row(dynamic raw);
+
+  @protected
+  DisplayPairingRow dco_decode_display_pairing_row(dynamic raw);
+
+  @protected
+  DisplayReceiverRow dco_decode_display_receiver_row(dynamic raw);
+
+  @protected
+  DisplayStaleAction dco_decode_display_stale_action(dynamic raw);
+
+  @protected
+  DisplaySurfaceRow dco_decode_display_surface_row(dynamic raw);
+
+  @protected
+  DisplaySyncMode dco_decode_display_sync_mode(dynamic raw);
+
+  @protected
+  DisplayTheme dco_decode_display_theme(dynamic raw);
+
+  @protected
   FailureRow dco_decode_failure_row(dynamic raw);
 
   @protected
@@ -118,6 +154,19 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   List<DeviceRow> dco_decode_list_device_row(dynamic raw);
+
+  @protected
+  List<DisplayAssignmentRow> dco_decode_list_display_assignment_row(
+      dynamic raw);
+
+  @protected
+  List<DisplayPairingRow> dco_decode_list_display_pairing_row(dynamic raw);
+
+  @protected
+  List<DisplayReceiverRow> dco_decode_list_display_receiver_row(dynamic raw);
+
+  @protected
+  List<DisplaySurfaceRow> dco_decode_list_display_surface_row(dynamic raw);
 
   @protected
   List<FailureRow> dco_decode_list_failure_row(dynamic raw);
@@ -174,6 +223,15 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DiagnosisRow? dco_decode_opt_box_autoadd_diagnosis_row(dynamic raw);
 
   @protected
+  DisplayFacts? dco_decode_opt_box_autoadd_display_facts(dynamic raw);
+
+  @protected
+  DisplayHealthRow? dco_decode_opt_box_autoadd_display_health_row(dynamic raw);
+
+  @protected
+  DisplaySyncMode? dco_decode_opt_box_autoadd_display_sync_mode(dynamic raw);
+
+  @protected
   HostFacts? dco_decode_opt_box_autoadd_host_facts(dynamic raw);
 
   @protected
@@ -204,6 +262,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<LibraryRow>? dco_decode_opt_list_library_row(dynamic raw);
 
   @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
   List<WorldPersonRow>? dco_decode_opt_list_world_person_row(dynamic raw);
 
   @protected
@@ -225,6 +286,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   SuggestionRow dco_decode_suggestion_row(dynamic raw);
 
   @protected
+  int dco_decode_u_16(dynamic raw);
+
+  @protected
   int dco_decode_u_32(dynamic raw);
 
   @protected
@@ -235,6 +299,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void dco_decode_unit(dynamic raw);
+
+  @protected
+  WorldArtwork dco_decode_world_artwork(dynamic raw);
 
   @protected
   WorldPersonRow dco_decode_world_person_row(dynamic raw);
@@ -270,6 +337,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DiagnosisRow sse_decode_box_autoadd_diagnosis_row(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplayFacts sse_decode_box_autoadd_display_facts(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplayHealthRow sse_decode_box_autoadd_display_health_row(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplaySyncMode sse_decode_box_autoadd_display_sync_mode(
       SseDeserializer deserializer);
 
   @protected
@@ -311,6 +390,38 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DiagnosisRow sse_decode_diagnosis_row(SseDeserializer deserializer);
 
   @protected
+  DisplayAssignmentRow sse_decode_display_assignment_row(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplayFacts sse_decode_display_facts(SseDeserializer deserializer);
+
+  @protected
+  DisplayHealthRow sse_decode_display_health_row(SseDeserializer deserializer);
+
+  @protected
+  DisplayPairingRow sse_decode_display_pairing_row(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplayReceiverRow sse_decode_display_receiver_row(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplayStaleAction sse_decode_display_stale_action(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplaySurfaceRow sse_decode_display_surface_row(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplaySyncMode sse_decode_display_sync_mode(SseDeserializer deserializer);
+
+  @protected
+  DisplayTheme sse_decode_display_theme(SseDeserializer deserializer);
+
+  @protected
   FailureRow sse_decode_failure_row(SseDeserializer deserializer);
 
   @protected
@@ -339,6 +450,22 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   List<DeviceRow> sse_decode_list_device_row(SseDeserializer deserializer);
+
+  @protected
+  List<DisplayAssignmentRow> sse_decode_list_display_assignment_row(
+      SseDeserializer deserializer);
+
+  @protected
+  List<DisplayPairingRow> sse_decode_list_display_pairing_row(
+      SseDeserializer deserializer);
+
+  @protected
+  List<DisplayReceiverRow> sse_decode_list_display_receiver_row(
+      SseDeserializer deserializer);
+
+  @protected
+  List<DisplaySurfaceRow> sse_decode_list_display_surface_row(
+      SseDeserializer deserializer);
 
   @protected
   List<FailureRow> sse_decode_list_failure_row(SseDeserializer deserializer);
@@ -399,6 +526,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  DisplayFacts? sse_decode_opt_box_autoadd_display_facts(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplayHealthRow? sse_decode_opt_box_autoadd_display_health_row(
+      SseDeserializer deserializer);
+
+  @protected
+  DisplaySyncMode? sse_decode_opt_box_autoadd_display_sync_mode(
+      SseDeserializer deserializer);
+
+  @protected
   HostFacts? sse_decode_opt_box_autoadd_host_facts(
       SseDeserializer deserializer);
 
@@ -433,6 +572,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
   List<WorldPersonRow>? sse_decode_opt_list_world_person_row(
       SseDeserializer deserializer);
 
@@ -455,6 +597,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   SuggestionRow sse_decode_suggestion_row(SseDeserializer deserializer);
 
   @protected
+  int sse_decode_u_16(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
@@ -465,6 +610,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  WorldArtwork sse_decode_world_artwork(SseDeserializer deserializer);
 
   @protected
   WorldPersonRow sse_decode_world_person_row(SseDeserializer deserializer);
@@ -504,6 +652,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_box_autoadd_diagnosis_row(
       DiagnosisRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_display_facts(
+      DisplayFacts self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_display_health_row(
+      DisplayHealthRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_display_sync_mode(
+      DisplaySyncMode self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_host_facts(
@@ -547,6 +707,40 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_diagnosis_row(DiagnosisRow self, SseSerializer serializer);
 
   @protected
+  void sse_encode_display_assignment_row(
+      DisplayAssignmentRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_facts(DisplayFacts self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_health_row(
+      DisplayHealthRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_pairing_row(
+      DisplayPairingRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_receiver_row(
+      DisplayReceiverRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_stale_action(
+      DisplayStaleAction self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_surface_row(
+      DisplaySurfaceRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_sync_mode(
+      DisplaySyncMode self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_theme(DisplayTheme self, SseSerializer serializer);
+
+  @protected
   void sse_encode_failure_row(FailureRow self, SseSerializer serializer);
 
   @protected
@@ -576,6 +770,22 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_list_device_row(
       List<DeviceRow> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_display_assignment_row(
+      List<DisplayAssignmentRow> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_display_pairing_row(
+      List<DisplayPairingRow> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_display_receiver_row(
+      List<DisplayReceiverRow> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_display_surface_row(
+      List<DisplaySurfaceRow> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_failure_row(
@@ -642,6 +852,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       DiagnosisRow? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_display_facts(
+      DisplayFacts? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_display_health_row(
+      DisplayHealthRow? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_display_sync_mode(
+      DisplaySyncMode? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_host_facts(
       HostFacts? self, SseSerializer serializer);
 
@@ -679,6 +901,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       List<LibraryRow>? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+      Uint8List? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_list_world_person_row(
       List<WorldPersonRow>? self, SseSerializer serializer);
 
@@ -701,6 +927,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_suggestion_row(SuggestionRow self, SseSerializer serializer);
 
   @protected
+  void sse_encode_u_16(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
@@ -711,6 +940,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_world_artwork(WorldArtwork self, SseSerializer serializer);
 
   @protected
   void sse_encode_world_person_row(

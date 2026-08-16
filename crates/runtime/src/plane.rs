@@ -50,29 +50,31 @@ pub const LIVE_PROTOCOL_VERSION: u16 = 1;
 
 /// Typed stream kinds within one live connection.
 ///
-/// One byte, and reserved values are never silently reused. `0x03` and `0x04`
-/// belong to the media reservation (plan 14 §10) which this docket does not
-/// build; keeping them allocated is what lets media arrive later without
-/// disturbing anything here.
+/// One byte, and allocated values are never silently reused. `0x03` and `0x04`
+/// are the native media pair: Group streams and bounded control/feedback.
 pub mod stream_kind {
     /// Long-lived bidirectional framed control.
     pub const CONTROL: u8 = 0x01;
     /// One bounded message per short stream.
     pub const RELIABLE_SIGNAL: u8 = 0x02;
-    /// Reserved: one header plus raw frame bytes per unidirectional stream.
-    pub const RESERVED_MEDIA_FRAME: u8 = 0x03;
-    /// Reserved: bounded media control and feedback.
-    pub const RESERVED_MEDIA_FEEDBACK: u8 = 0x04;
+    /// One Group header plus length-delimited encoded Frames on a uni stream.
+    pub const MEDIA_GROUP: u8 = 0x03;
+    /// Bounded media control and feedback on a short bidirectional flow.
+    pub const MEDIA_CONTROL: u8 = 0x04;
 
-    /// Whether this build implements a kind. A reserved kind is known and
-    /// unimplemented, which is a different answer from unknown — one resets
-    /// the stream, the other is a peer speaking a protocol we agreed to.
+    /// Whether this build implements a kind.
     pub fn is_implemented(kind: u8) -> bool {
-        matches!(kind, CONTROL | RELIABLE_SIGNAL)
+        matches!(
+            kind,
+            CONTROL | RELIABLE_SIGNAL | MEDIA_GROUP | MEDIA_CONTROL
+        )
     }
 
-    pub fn is_reserved(kind: u8) -> bool {
-        matches!(kind, RESERVED_MEDIA_FRAME | RESERVED_MEDIA_FEEDBACK)
+    /// Media lanes are granted as a pair and only when the media feature was
+    /// negotiated. Keeping this predicate separate makes that admission rule
+    /// explicit without teaching `comms` what a lane means.
+    pub fn is_media(kind: u8) -> bool {
+        matches!(kind, MEDIA_GROUP | MEDIA_CONTROL)
     }
 }
 
@@ -279,6 +281,9 @@ pub mod feature {
     pub const UNSOLICITED_PROVIDE: u64 = 1 << 0;
     /// The peer understands residency hints.
     pub const RESIDENCY_HINTS: u64 = 1 << 1;
+    /// The peer implements the lait-live generation-1 media vocabulary and
+    /// serves the `MEDIA_GROUP`/`MEDIA_CONTROL` lane pair.
+    pub const NATIVE_LIVE_MEDIA: u64 = 1 << 2;
 
     /// What *this* build actually implements.
     ///
@@ -291,7 +296,7 @@ pub mod feature {
     ///
     /// A bit joins this constant in the same commit as the code that honours
     /// it, and never before.
-    pub const LOCAL_SUPPORTED: u64 = RESIDENCY_HINTS;
+    pub const LOCAL_SUPPORTED: u64 = RESIDENCY_HINTS | NATIVE_LIVE_MEDIA;
 }
 
 /// What a peer advertises about a plane it speaks.

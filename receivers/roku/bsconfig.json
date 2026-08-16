@@ -1,0 +1,12 @@
+{
+  "rootDir": ".",
+  "files": [
+    "source/**/*",
+    "components/**/*",
+    "manifest",
+    "receiver-bootstrap.json",
+    "images/**/*"
+  ],
+  "createPackage": false,
+  "retainStagingDir": false
+}

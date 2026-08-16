@@ -69,6 +69,10 @@ class AstrolabeShell extends StatelessWidget {
                 chrome: chrome,
                 captionHeight: kUtilityBarHeight,
                 captionBottomBorder: false,
+                // The same fact the HWND is configured with in `main`: no
+                // maximise control, and a double-click on the caption that
+                // does nothing rather than zooming what the button refuses.
+                maximisable: kClientMaximisable,
                 // Drawn only where the window carries the application menu;
                 // on macOS the frame leaves this slot alone and the screen's
                 // own bar holds what it opened.
@@ -76,8 +80,13 @@ class AstrolabeShell extends StatelessWidget {
                   themeMode: themeMode,
                   onToggleTheme: onToggleTheme,
                 ),
+                // The caption's middle carries nothing: the address book moved
+                // to the operational bar, beside the other facts this device
+                // holds about itself. Still a builder rather than a title —
+                // a title would draw a rule and repeat the word the wordmark
+                // to its left already says.
                 captionBuilder: (context, constraints) =>
-                    const _UtilityCaption(),
+                    const SizedBox.shrink(),
                 body: const Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -148,6 +157,11 @@ class _SettingsMenu extends StatelessWidget {
           label: 'CLIENT SETTINGS',
           children: [
             MenuItem(
+              icon: AppIcons.cable,
+              label: 'Displays',
+              onTap: summonDisplays,
+            ),
+            MenuItem(
               icon: AppIcons.refresh,
               label: 'Refresh local state',
               shortcut: 'F5',
@@ -200,28 +214,6 @@ class _SettingsIdentityHeader extends StatelessWidget {
             ),
         ],
       ),
-    );
-  }
-}
-
-class _UtilityCaption extends StatelessWidget {
-  const _UtilityCaption();
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.end,
-      children: [
-        Button(
-          onPressed: summonBook,
-          icon: AppIcons.person,
-          semanticLabel: 'Address book',
-          variant: ButtonVariant.ghost,
-          size: ButtonSize.iconSm,
-          tooltip: 'Open the address book',
-        ),
-        context.tokens.gap.x(Space.sm),
-      ],
     );
   }
 }

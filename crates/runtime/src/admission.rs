@@ -193,11 +193,17 @@ pub fn judge(
     // is a promise nothing can keep: a peer taking it at its word would write a
     // kind byte that Freight's reader consumes as the first quarter of its
     // length prefix, and the flow desynchronises on the first frame.
+    let accept_features = open.features & crate::plane::feature::LOCAL_SUPPORTED;
+    let media_pair = accept_features & crate::plane::feature::NATIVE_LIVE_MEDIA != 0
+        && open.requested_lanes.contains(&stream_kind::MEDIA_GROUP)
+        && open.requested_lanes.contains(&stream_kind::MEDIA_CONTROL);
     let granted: Vec<u8> = if context.plane.serves_lanes() {
         open.requested_lanes
             .iter()
             .copied()
-            .filter(|lane| stream_kind::is_implemented(*lane))
+            .filter(|lane| {
+                stream_kind::is_implemented(*lane) && (!stream_kind::is_media(*lane) || media_pair)
+            })
             .collect()
     } else {
         Vec::new()
@@ -210,7 +216,6 @@ pub fn judge(
         return Admission::refuse();
     }
 
-    let accept_features = open.features & crate::plane::feature::LOCAL_SUPPORTED;
     let accept = Accept {
         connection_id: open.connection_id,
         connection_epoch: open.connection_epoch,

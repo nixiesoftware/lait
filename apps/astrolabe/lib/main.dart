@@ -16,18 +16,30 @@ import 'package:window_manager/window_manager.dart';
 import 'src/core/client.dart';
 import 'src/settings/window.dart';
 import 'src/shell/book.dart';
+import 'src/shell/displays.dart';
 import 'src/shell/host.dart';
 import 'src/shell/shell.dart';
 import 'src/shell/theme.dart';
 import 'src/shell/window.dart';
 
-/// The window's own opening size, and the floor every layout has to survive.
+/// The client's whole range of shapes: it opens at its ceiling and the only
+/// direction it moves is shorter.
 ///
-/// The minimum is not decoration: a measurement that only works at the size the
-/// window happens to open at is one that breaks the first time somebody drags a
-/// corner.
-const Size _opening = Size(1040, 720);
-const Size _narrowest = Size(640, 480);
+/// Neither bound is decoration. A layout that only works at the size the window
+/// happens to open at breaks the first time somebody drags a corner — and a
+/// launcher that can be dragged across a 4K display is a page of emptiness
+/// around one card, which is the same defect from the other end.
+///
+/// Width is *fixed*: floor and ceiling are both 640, because the client is a
+/// rail and one detail column and neither has anything to do with more. Height
+/// is the only axis with play, and only 40 of it — the client stacks a hero, an
+/// action band and a card down one column, so vertical is what runs out first.
+///
+/// The ceiling is also the opening size on purpose. `waitUntilReadyToShow`
+/// applies `size` before `maximumSize`, so a window asked to open wider than
+/// its ceiling opens wide anyway and is only clamped at the next drag.
+const Size _widest = Size(640, 720);
+const Size _narrowest = Size(640, 680);
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -46,6 +58,11 @@ Future<void> main(List<String> arguments) async {
       runApp(WorldSettingsApp(snapshot: settings));
       return;
     }
+    if (isDisplaysEngine(arguments)) {
+      final client = await Client.start();
+      runApp(DisplaysApp(client: client));
+      return;
+    }
     if (!isBookEngine(arguments)) {
       debugPrint('unknown sub-window arguments: $arguments');
       return;
@@ -61,10 +78,12 @@ Future<void> main(List<String> arguments) async {
   await windowManager.ensureInitialized();
   await showAstrolabeWindow(
     astrolabeWindowOptions(
-      size: _opening,
+      size: _widest,
       minimumSize: _narrowest,
+      maximumSize: _widest,
       title: 'Astrolabe',
     ),
+    maximisable: kClientMaximisable,
   );
 
   // The core comes up before the first frame, so nothing is ever drawn against

@@ -123,6 +123,10 @@ pub enum IssuesRequest {
         index: u64,
         delete: u64,
         insert: String,
+        /// Scalar length of the document these offsets were measured against.
+        /// The World refuses when it disagrees with what it holds.
+        #[serde(default)]
+        base_len: Option<u64>,
     },
     /// Upgrade a legacy issue body without exposing either storage language in
     /// the user interface. `expected` prevents a concurrent edit being lost.
@@ -1100,6 +1104,7 @@ mod tests {
                 index: 4,
                 delete: 1,
                 insert: "🙂".into(),
+                base_len: None,
             }
             .access(),
             Access::Command
@@ -1113,16 +1118,37 @@ mod tests {
             index: 4,
             delete: 1,
             insert: "🙂".into(),
+            base_len: Some(12),
         };
         let json = serde_json::to_value(&splice).unwrap();
         assert_eq!(json["cmd"], "issue_text_splice");
         assert_eq!(json["index"], 4);
         assert_eq!(json["delete"], 1);
         assert_eq!(json["insert"], "🙂");
+        // The document the offsets were measured against travels with them.
+        // Without it the World has no way to tell an offset that means what the
+        // caller thought from one that addresses different text entirely.
+        assert_eq!(json["base_len"], 12);
         assert!(matches!(
             serde_json::from_value(json).unwrap(),
-            IssuesRequest::IssueTextSplice { index: 4, delete: 1, insert, .. }
+            IssuesRequest::IssueTextSplice { index: 4, delete: 1, insert, base_len: Some(12), .. }
                 if insert == "🙂"
+        ));
+
+        // A client that predates the fence still parses, and is fenced by
+        // nothing — which is the point of the option, and the reason it must
+        // become required once no such client remains.
+        let unfenced: IssuesRequest = serde_json::from_value(serde_json::json!({
+            "cmd": "issue_text_splice",
+            "reff": "ORB-1",
+            "index": 4,
+            "delete": 1,
+            "insert": "x",
+        }))
+        .expect("an older client's splice still parses");
+        assert!(matches!(
+            unfenced,
+            IssuesRequest::IssueTextSplice { base_len: None, .. }
         ));
 
         let checkpoint = serde_json::to_value(IssuesRequest::IssueTextCheckpoint {

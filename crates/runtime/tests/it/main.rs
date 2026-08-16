@@ -19,6 +19,7 @@ mod contact_mem;
 mod coordinates_fixtures;
 mod independent_world;
 mod live_acceptance;
+mod live_media;
 mod plane_fixtures;
 mod reciprocal_dial_loop;
 mod signal_wire;

@@ -1,0 +1,332 @@
+# CD: build the Astrolabe installers for a released tag and attach them to the
+# release, so one tag ships every bundle (CLIENT-46).
+#
+# Astrolabe is the only thing that installs on a user's machine, and it bundles
+# every dependency inside. `flutter build <platform>` drives the Rust builds
+# itself (windows/rust_build.cmake, macos/rust_build.sh): the core AND the
+# `lait` sidecar are built from the SAME tagged tree into the same bundle, so
+# the pair rule (CLIENT-12: the pair ships together, declared compatible)
+# holds by construction — and each job still *asserts* it by running the
+# staged `lait` and comparing its version to the tag, because "by
+# construction" is a claim and the release gate is where claims get checked.
+#
+# Triggered on the **Release** workflow completing (`workflow_run`), like every
+# publish-* job — that trigger fires even though cargo-dist creates the release
+# with the default GITHUB_TOKEN (a `release:` trigger would be suppressed).
+#
+# Three platform jobs, one resolved tag. Windows produces the NSIS installer;
+# macOS produces a signed, notarized drag-install DMG; Linux produces the
+# relocatable Flutter bundle that WSL2 and clean distributions can exercise.
+# The macOS job needs five repository secrets —
+# the Developer ID Application certificate (MACOS_CERT_P12, base64 of the .p12
+# export, and MACOS_CERT_PASSWORD) and the App Store Connect API key for
+# notarization (NOTARY_KEY_P8, the raw .p8 text; NOTARY_KEY_ID;
+# NOTARY_ISSUER_ID). The certificate's private key exists in exactly two
+# places: the maintainer's keychain and that secret.
+#
+# The installers land on the GitHub release as build artifacts with SLSA
+# provenance. Publishing to the FEED stays a deliberate local act —
+# `ci/publish-feed.sh --from-release <tag>` — because the feed signing seed
+# never lives on a build machine (SUB-13 decision, 2026-08-15).
+name: Build Astrolabe installer
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build the installer for (e.g. v0.8.0)"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+# A release is reproducible only if its UI toolchain is as fixed as its tagged
+# source. Update this deliberately, with all three platform builds exercised.
+env:
+  FLUTTER_VERSION: '3.41.6'
+
+jobs:
+  gate:
+    name: resolve the release tag
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    outputs:
+      tag: ${{ steps.gate.outputs.tag }}
+      version: ${{ steps.gate.outputs.version }}
+      numeric: ${{ steps.gate.outputs.numeric }}
+    steps:
+      - name: Resolve tag
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          tag="${DISPATCH_TAG:-${RUN_TAG:-}}"
+          if [ -z "$tag" ] || [ "${tag#v}" = "$tag" ]; then
+            tag="$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName --jq '.[0].tagName')"
+          fi
+          [ -n "$tag" ] || { echo "::error::could not resolve a release tag"; exit 1; }
+          version="${tag#v}"
+          # NSIS VIProductVersion demands a numeric x.y.z; a test prerelease
+          # (0.8.0-test.1) keeps its full form everywhere visible and drops the
+          # prerelease only for that one numeric field.
+          numeric="${version%%-*}"
+          echo "tag=$tag"          >> "$GITHUB_OUTPUT"
+          echo "version=$version"  >> "$GITHUB_OUTPUT"
+          echo "numeric=$numeric"  >> "$GITHUB_OUTPUT"
+
+  installer:
+    name: astrolabe windows installer
+    needs: gate
+    runs-on: windows-latest
+    steps:
+      # Build from the TAG, not from main: the installer must carry the release
+      # that names it, not whatever landed since.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.gate.outputs.tag }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Build the bundle (core + sidecar + interface, one tree)
+        shell: pwsh
+        working-directory: apps/astrolabe
+        run: flutter build windows --release
+
+      - name: Stage the notices beside the pair
+        shell: pwsh
+        run: Copy-Item THIRD-PARTY-NOTICES.md "apps\astrolabe\build\windows\x64\runner\Release\"
+
+      - name: Assert the staged pair is the tagged release
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          $reported = & "apps\astrolabe\build\windows\x64\runner\Release\lait.exe" --version
+          if ($reported -notmatch [regex]::Escape($env:VERSION)) {
+            Write-Error "staged lait.exe reports '$reported', tag says '$env:VERSION' — the pair is not the release"
+            exit 1
+          }
+          Write-Output "pair confirmed: $reported"
+
+      - name: Compile the installer
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          NUMERIC: ${{ needs.gate.outputs.numeric }}
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $stage = (Resolve-Path "apps\astrolabe\build\windows\x64\runner\Release").Path
+          Push-Location dist
+          makensis "-DVERSION=$env:VERSION" "-DVERSION_NUMERIC=$env:NUMERIC" "-DSTAGE=$stage" ..\packaging\windows\astrolabe.nsi
+          Pop-Location
+          $exe = "dist\astrolabe-$env:VERSION-setup.exe"
+          if (-not (Test-Path $exe)) { Write-Error "makensis produced no $exe"; exit 1 }
+          (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower() + "  astrolabe-$env:VERSION-setup.exe" |
+            Set-Content "$exe.sha256" -NoNewline
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/astrolabe-${{ needs.gate.outputs.version }}-setup.exe
+
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
+            "dist/astrolabe-$VERSION-setup.exe" \
+            "dist/astrolabe-$VERSION-setup.exe.sha256"
+          echo "installer attached to $TAG"
+
+  installer-macos:
+    name: astrolabe macos disk image
+    needs: gate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.gate.outputs.tag }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Build the bundle (core + sidecar + interface, one tree)
+        working-directory: apps/astrolabe
+        run: flutter build macos --release
+
+      - name: Assert the staged pair is the tagged release
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          app="apps/astrolabe/build/macos/Build/Products/Release/astrolabe.app"
+          reported="$("$app/Contents/MacOS/lait" --version)"
+          case "$reported" in
+            *"$VERSION"*) echo "pair confirmed: $reported" ;;
+            *) echo "::error::staged lait reports '$reported', tag says '$VERSION' — the pair is not the release"; exit 1 ;;
+          esac
+
+      # A throwaway keychain holding exactly one secret, dead with the runner.
+      # `set-key-partition-list` is the line that lets codesign use the key
+      # without a UI prompt a headless runner can never answer.
+      - name: Import the Developer ID certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          keychain_password="$(uuidgen)"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+          rm "$RUNNER_TEMP/cert.p12"
+          # The identity name is read off the imported certificate rather than
+          # kept as a sixth secret that could drift from the real five.
+          identity="$(security find-identity -v -p codesigning "$keychain" |
+            sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
+          [ -n "$identity" ] || { echo "::error::the imported .p12 holds no Developer ID Application identity"; exit 1; }
+          echo "MACOS_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Store the notary credential
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials ci-notary \
+            --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"
+          rm "$RUNNER_TEMP/notary.p8"
+
+      - name: Package, sign, notarize
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          packaging/macos/make-dmg.sh \
+            --app apps/astrolabe/build/macos/Build/Products/Release/astrolabe.app \
+            --version "$VERSION" \
+            --identity "$MACOS_IDENTITY" \
+            --out dist \
+            --notarize ci-notary
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/astrolabe-${{ needs.gate.outputs.version }}.dmg
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
+            "dist/astrolabe-$VERSION.dmg" \
+            "dist/astrolabe-$VERSION.dmg.sha256"
+          echo "disk image attached to $TAG"
+
+  installer-linux:
+    name: astrolabe linux bundle
+    needs: gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.gate.outputs.tag }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
+      # Flutter's documented Linux build closure plus tray_manager's one native
+      # requirement. Pinning the runner image and Flutter version makes this
+      # release input reviewable instead of whatever "stable" meant that day.
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang lld-18 cmake ninja-build pkg-config libgtk-3-dev libstdc++-12-dev \
+            libayatana-appindicator3-dev
+
+      - name: Install pinned Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Build the bundle (core + sidecar + interface, one tree)
+        working-directory: apps/astrolabe
+        run: flutter build linux --release
+
+      - name: Package and assert the staged pair
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          bash packaging/linux/make-tarball.sh \
+            --bundle apps/astrolabe/build/linux/x64/release/bundle \
+            --version "$VERSION" \
+            --target x86_64-unknown-linux-gnu \
+            --out dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/astrolabe-${{ needs.gate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          asset="dist/astrolabe-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
+            "$asset" "$asset.sha256"
+          echo "Linux bundle attached to $TAG"

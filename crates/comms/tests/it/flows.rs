@@ -171,6 +171,47 @@ async fn concurrent_flows_do_not_interleave_with_each_other() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn uni_and_bi_accept_queues_can_be_polled_at_the_same_time() {
+    // A realtime connection accepts control flows and media Group streams
+    // concurrently. If one accept call owns a shared queue, whichever parks
+    // first prevents the other kind from ever being observed.
+    on_both("mixed accept queues", async |pair: Pair| {
+        let accepter = Arc::<dyn Connection>::from(pair.accepter);
+        let accepting_bi = {
+            let accepter = Arc::clone(&accepter);
+            tokio::spawn(async move { accepter.accept_bi().await })
+        };
+        let accepting_uni = {
+            let accepter = Arc::clone(&accepter);
+            tokio::spawn(async move { accepter.accept_uni().await })
+        };
+
+        let (mut bi_send, _bi_recv) = pair.dialer.open_bi().await.expect("open bi");
+        let mut uni_send = pair.dialer.open_uni().await.expect("open uni");
+        bi_send.write_all(b"control").await.expect("write bi");
+        bi_send.finish().expect("finish bi");
+        uni_send.write_all(b"group").await.expect("write uni");
+        uni_send.finish().expect("finish uni");
+
+        let (_answer, mut bi_recv) = tokio::time::timeout(Duration::from_secs(5), accepting_bi)
+            .await
+            .expect("bi accepted in time")
+            .expect("bi task")
+            .expect("bi accept")
+            .expect("bi flow");
+        let mut uni_recv = tokio::time::timeout(Duration::from_secs(5), accepting_uni)
+            .await
+            .expect("uni accepted in time")
+            .expect("uni task")
+            .expect("uni accept")
+            .expect("uni flow");
+        assert_eq!(bi_recv.read_to_end(64).await.expect("read bi"), b"control");
+        assert_eq!(uni_recv.read_to_end(64).await.expect("read uni"), b"group");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_reset_flow_reads_as_an_error_not_as_a_clean_end() {
     // What lets an abandoned transfer be told from a completed one. Without
     // it, truncation is silent, and truncation has to be loud.

@@ -29,6 +29,7 @@ use runtime::world::call::{Call, Code, Reply};
 use crate::daemon::transport_hub::TransportHubFactory;
 use crate::daemon::{LocalOrbitId, OrbitAddress};
 use crate::orbits::{Catalog, ResolvedOrbit};
+use replica::body::WorldId;
 
 /// A Station placement's current hosting strategy.
 ///
@@ -642,6 +643,15 @@ impl Router {
         self.catalog.resolve(id)
     }
 
+    /// The reviewed implementation this daemon can execute for one World.
+    ///
+    /// Display assignments pin this value. Exposing the already-injected
+    /// package fact here lets the coordinator reject implementation drift
+    /// before it places an Orbit or asks product code to render anything.
+    pub fn reviewed_world_implementation(&self, world: &WorldId) -> Option<[u8; 32]> {
+        self.packages.reviewed_implementation(world)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<OrbitDoorbell> {
         self.doorbells.subscribe()
     }
@@ -810,6 +820,36 @@ impl Router {
         }
     }
 
+    /// Execute a World call only when the daemon's trusted package handler
+    /// classifies it as the required access.
+    ///
+    /// Display coordination uses this with `Access::Query`. The outer client
+    /// package declaration is useful for early refusal, but it is not an
+    /// authorization fact; this check runs against the host-side handler before
+    /// placement and before any product code executes.
+    pub async fn call_world_requiring(
+        &self,
+        route: ControlRoute,
+        call: &Call,
+        required: runtime::world::call::Access,
+    ) -> Result<Reply> {
+        call.validate()?;
+        let actual = match self.packages.call_access(call) {
+            Ok(access) => access,
+            Err(error) => return Ok(Reply::error(call, error.code, error.message())),
+        };
+        if actual != required {
+            return Ok(Reply::error(
+                call,
+                Code::Denied,
+                "World call does not satisfy the required access",
+            ));
+        }
+        // No acting-identity selector exists on this operation. The
+        // coordinator always executes as its configured local identity.
+        self.call_world(route, call, None).await
+    }
+
     /// Dispatch through an existing per-Orbit adapter without placing a vacant
     /// Orbit. This keeps passive catalog reads behind the daemon boundary while
     /// preserving their no-wake contract.
@@ -858,24 +898,6 @@ impl Router {
             placement.shutdown().await?;
         }
         Ok(vacancy)
-    }
-
-    /// Stop one Orbit's placement now, and hold the Orbit for nothing.
-    ///
-    /// [`Self::vacate`] with the guard released on the way out: the point is
-    /// the stop itself, not an exclusive operation behind it, so the next
-    /// routed request places the Orbit lazily as if it had never been placed.
-    ///
-    /// Answers whether anything was actually stopped, because "stopped" and
-    /// "was not placed" are different facts and the caller reports one of them.
-    pub async fn stop_placement(&self, orbit: &LocalOrbitId) -> Result<bool> {
-        let (vacancy, placement) = self.occupancy.vacate(orbit).await;
-        let stopped = placement.is_some();
-        if let Some(placement) = placement {
-            placement.shutdown().await?;
-        }
-        drop(vacancy);
-        Ok(stopped)
     }
 
     /// Stop and join every in-process placement. Externally attached
@@ -1259,6 +1281,51 @@ mod tests {
         drop(
             crate::config::acquire_daemon_lock(&home)
                 .expect("invalid product calls must not wake a vacant Orbit"),
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn required_query_refuses_a_command_before_it_places_a_station() {
+        let seed = [199; 32];
+        let (home, directory, id) = formed_directory("required-query", &seed);
+        let router = Router::with_factory(
+            directory,
+            Arc::new(MemFactory(MemNet::new())),
+            crate::world::packages(),
+        );
+        let resolved = router.resolve(&id).unwrap();
+        let call = issues_app::encode_call(&issues_app::IssuesRequest::IssueNew {
+            title: "must not execute".into(),
+            project: None,
+            project_hint: None,
+            assignees: Vec::new(),
+            priority: None,
+            labels: Vec::new(),
+            body: None,
+            due: None,
+            estimate: None,
+        })
+        .unwrap();
+        let reply = router
+            .call_world_requiring(
+                ControlRoute::World {
+                    address: resolved.address,
+                    world: call.world().as_str().to_string(),
+                },
+                &call,
+                runtime::world::call::Access::Query,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reply.into_result().unwrap_err().code,
+            runtime::world::call::Code::Denied
+        );
+        assert!(router.occupancy.placements().await.is_empty());
+        drop(
+            crate::config::acquire_daemon_lock(&home)
+                .expect("a refused display query must not wake a vacant Orbit"),
         );
         let _ = std::fs::remove_dir_all(home);
     }

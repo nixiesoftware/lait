@@ -71,9 +71,19 @@ The core is layered, and the boundary is the bridge and nothing else:
   drafts. There is no optimistic local mutation, because that would be a second
   model disagreeing with the first exactly when an action was refused.
 - `api/mod.rs` is the whole boundary: one `ClientView` out, one `ActionRequest`
-  back. Both generated halves are checked in and CI fails on drift; regenerate
-  with `flutter_rust_bridge_codegen generate` from `apps/astrolabe` (slow — it
+  back. The one read outside that pair is `world_artwork` — a World's
+  compiled-in PNGs, which are a build constant rather than state, asked for
+  once per mount and cached in Dart because the view is pushed whole to every
+  surface on every pump. Both generated halves are checked in; regenerate with
+  `flutter_rust_bridge_codegen generate` from `apps/astrolabe` (slow — it
   cargo-expands the workspace).
+
+  **Nothing checks this.** `ci/bridge-drift.sh` exists and works, and no
+  workflow references it — verified 2026-08-15. So a change to `api/mod.rs`
+  with no regeneration produces a binding that compiles, runs, and disagrees
+  with the model, and no machine will say so. Run it by hand until it is wired.
+  The same is true of `ci/dart-licences.sh`, and of the `Generated/` drift check
+  that `apps/astrolabe-ios/build-core.sh` says CI performs.
 - `lib/src/core/client.dart` is the only Dart file that may import the bridge.
   The check: `grep -rn "import.*bridge/" lib/ | grep -v "^lib/src/bridge/"`
   answers with that file and nothing else.

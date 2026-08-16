@@ -221,6 +221,13 @@ default-filter = '''
 # actually binding its control channel, actually taking the single-instance
 # lock, over the real OS rather than in-process.
 #
+# `astrolabe::launch` and `astrolabe::packaging` are here for the same reason
+# and were missing for a bad one: neither is `kind(lib)` and neither was named,
+# so the client-to-process seam ran on LINUX ONLY — while both of the times that
+# seam was wrong, the symptom was Windows-shaped, against a `%LOCALAPPDATA%`
+# state root and a locked running image. The one platform where it had been
+# wrong was the one platform not testing it.
+#
 # Excluded from `kind(lib)`: the two mechanics ceremony gates, which are CPU
 # gates rather than platform gates — 10,000 iterations of real DKG proves the
 # same thing on every OS, and on a 2-core windows-latest it proves it slowly.
@@ -236,6 +243,8 @@ default-filter = '''
         + (binary_id(lait::it) & test(seed_registry::))
         + (binary_id(lait::it) & test(station_lifecycle::))
         + (binary_id(lait::it) & test(content_ipc::))
+        + binary_id(astrolabe::launch)
+        + binary_id(astrolabe::packaging)
     )
     - (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
 '''

@@ -55,4 +55,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+jiff = "0.2.35"
+replica = { path = "../../crates/replica" }
+schedule = { path = "../../crates/schedule" }
+signage = { package = "lait-signage", path = "../../products/signage" }
+signage-app = { package = "lait-signage-app", path = "../../products/signage-app" }
 tempfile = "3"

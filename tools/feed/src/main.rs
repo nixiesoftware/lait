@@ -10,6 +10,12 @@
 //!   unsatisfiable floor would force every installed machine forever), and
 //! - a stable pointer may never name a prerelease.
 //!
+//! Every pointer is stamped with `published_at` at seal time. Clients keep the
+//! newest stamp they have believed and refuse anything older, which is what
+//! makes the one mutable object in the feed un-replayable. The stamp is not
+//! optional going forward: once a client has seen one, an unstamped pointer is
+//! refused, so publishing must never regress to a tool that omits it.
+//!
 //! Subcommands:
 //!
 //! ```text
@@ -68,7 +74,13 @@ struct Manifest {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PointerPayload {
-    Release { version: String, manifest: String },
+    Release {
+        version: String,
+        manifest: String,
+        /// Unix seconds at seal time. The client's replay ratchet compares
+        /// against it; see `lait::update::feed::check_freshness`.
+        published_at: u64,
+    },
 }
 
 fn main() {
@@ -124,7 +136,10 @@ fn keygen(args: &[String]) -> Result<()> {
     fs::write(&out, data_encoding::HEXLOWER.encode(&seed))
         .with_context(|| format!("write {}", out.display()))?;
     println!("seed written to {}", out.display());
-    println!("public key (pin as FEED_PUBKEY_HEX): {}", device.as_str());
+    println!("public key (add to FEED_PUBKEYS_HEX): {}", device.as_str());
+    println!(
+        "rotating: add this key, ship that build, wait for adoption, then sign with this seed"
+    );
     Ok(())
 }
 
@@ -193,9 +208,8 @@ fn hash_file(path: &Path) -> Result<(String, u64)> {
 /// Build and sign the release manifest from a directory of built artifacts.
 ///
 /// Refuses a directory missing any lait target. The astrolabe installer is
-/// optional (`--astrolabe <version>` names its bundle version; the installer is
-/// expected as `astrolabe-<version>-setup.exe`) because the client ships
-/// Windows-first while lait ships everywhere.
+/// optional (`--astrolabe <version>` names its bundle version) because lait can
+/// still ship independently when a client platform job is unavailable.
 fn manifest(args: &[String]) -> Result<()> {
     let version = required(args, "--version")?;
     semver::Version::parse(&version).with_context(|| format!("--version {version}"))?;
@@ -242,27 +256,52 @@ fn manifest(args: &[String]) -> Result<()> {
     artifacts.insert("lait".to_string(), lait);
 
     if let Some(astrolabe_version) = arg(args, "--astrolabe") {
-        let name = format!("astrolabe-{astrolabe_version}-setup.exe");
-        let path = dir.join(&name);
-        if !path.is_file() {
-            bail!(
-                "--astrolabe {astrolabe_version} given but {} is missing",
-                path.display()
-            );
-        }
-        let (digest, size) = hash_file(&path)?;
-        bundles.insert("astrolabe".to_string(), astrolabe_version);
-        artifacts.insert(
-            "astrolabe".to_string(),
-            BTreeMap::from([(
-                "x86_64-pc-windows-msvc".to_string(),
+        // One artifact per supported platform: NSIS on Windows, a signed DMG
+        // on Apple silicon, and Flutter's relocatable bundle on Linux x64.
+        // Each is included when the directory holds it; an absent platform is
+        // a loud note rather than a refusal, because the jobs can succeed
+        // independently and a publisher must be able to ship the half that
+        // built. Refusing only when NONE exists keeps `--astrolabe` from
+        // sealing a bundle version no artifact backs.
+        let platforms: &[(&str, String)] = &[
+            (
+                "x86_64-pc-windows-msvc",
+                format!("astrolabe-{astrolabe_version}-setup.exe"),
+            ),
+            (
+                "aarch64-apple-darwin",
+                format!("astrolabe-{astrolabe_version}.dmg"),
+            ),
+            (
+                "x86_64-unknown-linux-gnu",
+                format!("astrolabe-{astrolabe_version}-x86_64-unknown-linux-gnu.tar.gz"),
+            ),
+        ];
+        let mut astrolabe = BTreeMap::new();
+        for (target, name) in platforms {
+            let path = dir.join(name);
+            if !path.is_file() {
+                eprintln!("lait-feed: NOTE — no {name}; publishing astrolabe without {target}");
+                continue;
+            }
+            let (digest, size) = hash_file(&path)?;
+            astrolabe.insert(
+                target.to_string(),
                 Artifact {
                     url: format!("{base}/releases/{version}/{name}"),
                     blake3: digest,
                     size,
                 },
-            )]),
-        );
+            );
+        }
+        if astrolabe.is_empty() {
+            bail!(
+                "--astrolabe {astrolabe_version} given but {} holds no Astrolabe platform artifact",
+                dir.display()
+            );
+        }
+        bundles.insert("astrolabe".to_string(), astrolabe_version);
+        artifacts.insert("astrolabe".to_string(), astrolabe);
     }
 
     let manifest = Manifest {
@@ -317,12 +356,31 @@ fn pointer(args: &[String]) -> Result<()> {
         }
     }
 
+    // Stamp the moment of publication inside the signed payload. This is what
+    // makes the one mutable object in the feed un-replayable: a client records
+    // the newest stamp it has believed and refuses anything older, so putting
+    // an old correctly-signed pointer back in place becomes a refusal rather
+    // than a silent freeze at that release.
+    //
+    // Taken from the clock rather than a flag, so no operator has to remember
+    // it and no two publishes can share a value by mistake. A clock far behind
+    // the last publish would emit a pointer clients refuse — an outage, not a
+    // compromise, and cleared by publishing again with the clock fixed.
+    let published_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the unix epoch")?
+        .as_secs();
+
     let payload = PointerPayload::Release {
         version,
         manifest: manifest_url,
+        published_at,
     };
     fs::write(&out, seal(&payload, &seed)?).with_context(|| format!("write {}", out.display()))?;
-    println!("pointer sealed to {}", out.display());
+    println!(
+        "pointer sealed to {} (published_at {published_at})",
+        out.display()
+    );
     Ok(())
 }
 

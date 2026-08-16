@@ -1,0 +1,10 @@
+{
+  "name": "@nixie/astrolabe-tizen-receiver",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production Samsung Tizen receiver for Astrolabe Display",
+  "scripts": {
+    "sync:runtime": "node scripts/sync-runtime.mjs",
+    "test": "npm run sync:runtime && node --test"
+  }
+}

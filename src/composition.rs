@@ -49,6 +49,19 @@ pub fn package() -> WorldPackage {
         .with_lifecycle(Arc::new(IssuesLifecycle))
 }
 
+/// The Signage World's host-side semantic package. The shell only sees the
+/// generic package value; Signage-specific protocol and rendering stay in the
+/// product crates named by this composition root.
+pub fn signage_package() -> WorldPackage {
+    WorldPackage::new(
+        Arc::new(signage::SignageWorld::new()),
+        signage_app::implementation_id(),
+    )
+    .with_control(Arc::new(signage_app::SignageCallHandler))
+    .with_projector(Arc::new(SignageProjector))
+    .with_lifecycle(Arc::new(SignageLifecycle))
+}
+
 /// Translates generic runtime Observations into the Issues doorbell dirty-set.
 ///
 /// The baseline is per-projector state, not per-call: a dirty-set is a *diff*
@@ -94,6 +107,80 @@ impl ObservationProjector for IssuesProjector {
 }
 
 struct IssuesLifecycle;
+
+struct SignageLifecycle;
+
+struct SignageProjector;
+
+impl ObservationProjector for SignageProjector {
+    fn status(&self, session: &runtime::Session) -> Option<StatusProjection> {
+        let projection = session
+            .query(runtime::world::Query {
+                schema: signage::contract::program_schema(),
+                schema_version: signage::contract::PROGRAM_SCHEMA_VERSION,
+                payload: serde_json::to_vec(&signage::SignageQuery::Programs).ok()?,
+            })
+            .ok()?;
+        let signage::SignageProjection::Programs { programs } =
+            serde_json::from_slice(&projection.bytes).ok()?
+        else {
+            return None;
+        };
+        Some(StatusProjection {
+            items: programs.len(),
+            scopes: usize::from(!programs.is_empty()),
+            name: "Signage".into(),
+            description: "Durable display programs".into(),
+        })
+    }
+
+    fn start(&self, _session: &runtime::Session, _space: &mechanics::ids::SpaceId) {}
+
+    fn project(
+        &self,
+        _session: &runtime::Session,
+        _space: &mechanics::ids::SpaceId,
+        observation: &runtime::world::Observation,
+    ) -> Invalidation {
+        if observation
+            .bodies
+            .iter()
+            .any(|key| key.world == signage::contract::world_id())
+        {
+            Invalidation {
+                dirty: Vec::new(),
+                planes: vec![runtime::world::DirtyPlane {
+                    plane: "programs".into(),
+                    scope: None,
+                }],
+            }
+        } else {
+            Invalidation::default()
+        }
+    }
+}
+
+impl WorldLifecycle for SignageLifecycle {
+    fn founder_grants(&self) -> anyhow::Result<Vec<FounderGrant>> {
+        Ok(signage::contract::founder_capabilities()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (capability, resource))| FounderGrant {
+                capability,
+                resource,
+                salt: [u8::try_from(index).unwrap_or(u8::MAX); 16],
+            })
+            .collect())
+    }
+
+    fn initial_scope(&self, _display_name: &str) -> Option<InitialScope> {
+        None
+    }
+
+    fn bootstrap(&self, _context: BootstrapContext<'_>) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 impl WorldLifecycle for IssuesLifecycle {
     fn founder_grants(&self) -> anyhow::Result<Vec<FounderGrant>> {
@@ -153,7 +240,9 @@ impl WorldLifecycle for IssuesLifecycle {
 
 /// Every product World this build bundles, for the host side.
 pub fn bundled_packages() -> WorldPackages {
-    WorldPackages::new().with_package(package())
+    WorldPackages::new()
+        .with_package(package())
+        .with_package(signage_package())
 }
 
 /// Every client-facing World package this build mounts.
@@ -165,7 +254,12 @@ pub fn bundled_packages() -> WorldPackages {
 pub fn bundled_client_packages() -> WorldClientRegistry {
     issues_app::package()
         .ok()
-        .and_then(|package| WorldClientRegistry::new().with_package(package).ok())
+        .and_then(|issues| WorldClientRegistry::new().with_package(issues).ok())
+        .and_then(|registry| {
+            signage_app::package()
+                .ok()
+                .and_then(|signage| registry.with_package(signage).ok())
+        })
         .unwrap_or_default()
 }
 

@@ -33,6 +33,7 @@ use lait_workbench::{
     RemoveDeviceRequest, Signals, UpdateDeviceRequest, WorkbenchSnapshot,
 };
 
+use crate::client::display::DisplayAssignmentInput;
 use crate::client::heads::{McpBinding, McpBindingOutcome};
 use crate::client::host::HostContext;
 use crate::client::library::{LaunchTicket, LibraryEntry};
@@ -174,6 +175,14 @@ pub enum Action {
         binding: Box<McpBinding>,
         preview: bool,
     },
+    DisplayPairingApprove {
+        pairing: String,
+        label: String,
+    },
+    DisplayPairingReject(String),
+    DisplayAssignmentPut(Box<DisplayAssignmentInput>),
+    DisplayAssignmentRevoke(String),
+    DisplayDeviceRevoke(String),
     Exit(ExitRequest),
 }
 
@@ -225,6 +234,17 @@ impl Action {
                     "mcp.install".into()
                 }
             }
+            Self::DisplayPairingApprove { pairing, .. } => {
+                format!("display.pairing.approve:{pairing}")
+            }
+            Self::DisplayPairingReject(pairing) => format!("display.pairing.reject:{pairing}"),
+            Self::DisplayAssignmentPut(assignment) => {
+                format!("display.assignment.put:{}", assignment.device)
+            }
+            Self::DisplayAssignmentRevoke(assignment) => {
+                format!("display.assignment.revoke:{assignment}")
+            }
+            Self::DisplayDeviceRevoke(device) => format!("display.device.revoke:{device}"),
             Self::Exit(_) => "exit".into(),
         }
     }
@@ -279,6 +299,17 @@ impl Action {
             Self::BookDismiss { .. } => "dismiss a suggested card".to_owned(),
             Self::InstallMcp { preview: true, .. } => "preview an MCP binding".into(),
             Self::InstallMcp { .. } => "write an MCP binding".into(),
+            Self::DisplayPairingApprove { label, .. } => {
+                format!("approve the display '{label}'")
+            }
+            Self::DisplayPairingReject(_) => "reject a display pairing".into(),
+            Self::DisplayAssignmentPut(assignment) => {
+                format!("assign display {}", assignment.device)
+            }
+            Self::DisplayAssignmentRevoke(assignment) => {
+                format!("revoke display assignment {assignment}")
+            }
+            Self::DisplayDeviceRevoke(device) => format!("revoke display device {device}"),
             Self::Exit(ExitRequest::GoOffline) => "go offline and exit".into(),
             Self::Exit(ExitRequest::StayOnline) => "close and stay online".into(),
         }
@@ -292,6 +323,7 @@ pub enum Update {
     Storage(Vec<StorageFacts>),
     Heads(Vec<HeadFacts>),
     Context(Box<HostContext>),
+    Display(Box<lait::control::DisplayCoordinatorView>),
     Book(crate::client::book::BookSnapshot),
     /// What passive presence sampling measured this pass — including which
     /// Spaces answered at all, so absence keeps its kind.
@@ -558,6 +590,10 @@ impl Worker {
             }
             Err(error) => self.fail(None, "read host context", error),
         }
+        match self.client.display_status().await {
+            Ok(display) => self.send(Update::Display(Box::new(display))),
+            Err(error) => self.fail(None, "read display coordinator", error),
+        }
         match self.client.book_list().await {
             Ok(book) => self.send(Update::Book(book)),
             Err(error) => self.fail(None, "read the address book", error),
@@ -578,6 +614,9 @@ impl Worker {
     async fn sample_host(&self) {
         if let Ok(context) = self.client.host_context().await {
             self.send(Update::Context(Box::new(context)));
+        }
+        if let Ok(display) = self.client.display_status().await {
+            self.send(Update::Display(Box::new(display)));
         }
     }
 
@@ -804,6 +843,35 @@ impl Worker {
             Action::InstallMcp { binding, preview } => {
                 let outcome = client.install_mcp_head(binding, *preview).await?;
                 Ok(Outcome::Mcp(Box::new(outcome)))
+            }
+            Action::DisplayPairingApprove { pairing, label } => {
+                client
+                    .display_pairing_approve(pairing.clone(), label.clone())
+                    .await?;
+                Ok(Outcome::Said(format!("approved the display '{label}'")))
+            }
+            Action::DisplayPairingReject(pairing) => {
+                client.display_pairing_reject(pairing.clone()).await?;
+                Ok(Outcome::Said("rejected the display pairing".into()))
+            }
+            Action::DisplayAssignmentPut(assignment) => {
+                client
+                    .display_assignment_put((**assignment).clone())
+                    .await?;
+                Ok(Outcome::Said(format!(
+                    "assigned display {}",
+                    assignment.device
+                )))
+            }
+            Action::DisplayAssignmentRevoke(assignment) => {
+                client.display_assignment_revoke(assignment.clone()).await?;
+                Ok(Outcome::Said(format!(
+                    "revoked display assignment {assignment}"
+                )))
+            }
+            Action::DisplayDeviceRevoke(device) => {
+                client.display_device_revoke(device.clone()).await?;
+                Ok(Outcome::Said(format!("revoked display device {device}")))
             }
             Action::Exit(request) => {
                 let report = crate::lifecycle::exit(client.supervisor(), *request).await;

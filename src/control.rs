@@ -45,14 +45,21 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub(crate) fn new(router: Arc<crate::orbits::Router>) -> Self {
+    pub(crate) fn new(
+        router: Arc<crate::orbits::Router>,
+        display: Arc<crate::display::DisplayRuntime>,
+    ) -> Self {
         Self {
-            listener: Arc::new(crate::daemon::host::Listener::new(router)),
+            listener: Arc::new(crate::daemon::host::Listener::new(router, display)),
         }
     }
 
     pub(crate) fn begin_stop(&self) {
         self.listener.begin_stop();
+    }
+
+    pub(crate) fn subscribe_stop(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.listener.subscribe_stop()
     }
 
     pub(crate) async fn serve(&self, home: &Path) -> Result<()> {
@@ -126,7 +133,12 @@ impl Endpoint {
 /// v12: card exchange stages rather than mutates — `BookPropose`,
 /// `BookSuggestAccept`, `BookSuggestDismiss`, and the suggestions carried on
 /// the Book view.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 12;
+///
+/// v13: the identity daemon owns the self-hosted display coordinator. Native
+/// Astrolabe clients can inspect its receiver surfaces, two-party enrollment,
+/// exact assignments, and receiver health, and can approve, assign, revoke,
+/// or reject through the daemon-scoped display verbs.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 13;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
 ///
@@ -213,7 +225,7 @@ impl BuildFingerprint {
 /// than failing once. The minimum moves with the version rather than trailing
 /// it — a v10 daemon answers the book's verbs with "unknown variant" instead
 /// of a version complaint, which is a worse failure than being told to stop.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 12;
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 13;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -309,10 +321,157 @@ pub struct WatchingTyping {
 /// contract, not a display string.
 pub const AGENT_GROUP: &str = "Agents";
 
+/// Astrolabe's controller-facing view of the identity daemon's display service.
+/// Receiver credentials and canonical package input never cross this plane.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayCoordinatorView {
+    pub instance: String,
+    pub label: String,
+    pub origin: String,
+    pub certificate_sha256: String,
+    pub certificate_pem: String,
+    pub surfaces: Vec<DisplaySurfaceView>,
+    pub devices: Vec<DisplayDeviceView>,
+    pub assignments: Vec<DisplayAssignmentView>,
+    pub pending_pairings: Vec<DisplayPairingView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplaySurfaceView {
+    pub world: String,
+    pub surface: String,
+    pub title: String,
+    pub contract_version: u32,
+    pub outputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayDeviceView {
+    pub device: String,
+    pub label: String,
+    pub platform: String,
+    pub build: String,
+    pub issued_at_unix_ms: u64,
+    pub revoked_at_unix_ms: Option<u64>,
+    pub health: Option<DisplayHealthView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayHealthView {
+    pub revision: String,
+    pub current_item: String,
+    pub elapsed_ms: u32,
+    pub connection: String,
+    pub playback: String,
+    pub last_error: String,
+    pub staged_items: u16,
+    pub staged_bytes: u32,
+    pub drift_residual_ms: i32,
+    pub correction_events: u32,
+    pub pipeline_unobservable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayAssignmentView {
+    pub assignment: String,
+    pub device: String,
+    pub orbit: String,
+    pub space: String,
+    pub program: String,
+    pub world: String,
+    pub surface: String,
+    pub controller: String,
+    pub theme: DisplayThemeSetting,
+    pub sync: Option<DisplayAssignmentSyncView>,
+    pub expires_at_unix_ms: Option<u64>,
+    pub revoked_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayAssignmentSyncView {
+    pub group: String,
+    pub mode: DisplaySyncModeSetting,
+    pub static_delay_ms: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayPairingView {
+    pub pairing: String,
+    pub confirmation_phrase: Vec<String>,
+    pub certificate_sha256: String,
+    pub platform: String,
+    pub build: String,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayThemeSetting {
+    Light,
+    Dark,
+    HighContrast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayStaleActionSetting {
+    KeepWithNativeBanner,
+    Blank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplaySyncModeSetting {
+    StayInSync,
+    Positional,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayAssignmentSyncSetting {
+    pub group: String,
+    pub mode: DisplaySyncModeSetting,
+    pub static_delay_ms: i32,
+}
+
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
+    // ---- identity-scoped Astrolabe display coordination ----
+    DisplayStatus,
+    DisplayPairingApprove {
+        pairing: String,
+        label: String,
+    },
+    DisplayPairingReject {
+        pairing: String,
+    },
+    /// Commit an exact package display pin for one enrolled receiver. The
+    /// daemon derives Space, implementation and contract digests from its
+    /// trusted registry rather than accepting those facts from the controller.
+    DisplayAssignmentPut {
+        device: String,
+        orbit: String,
+        world: String,
+        surface: String,
+        #[schemars(with = "serde_json::Value")]
+        input: serde_json::Value,
+        theme: DisplayThemeSetting,
+        stale_after_ms: u32,
+        on_stale: DisplayStaleActionSetting,
+        #[serde(default)]
+        sync: Option<DisplayAssignmentSyncSetting>,
+        #[serde(default)]
+        expires_at_unix_ms: Option<u64>,
+    },
+    DisplayAssignmentRevoke {
+        assignment: String,
+    },
+    DisplayDeviceRevoke {
+        device: String,
+    },
+
     // ---- membership and authorization ----
     MemberAdd {
         who: String,
@@ -1353,6 +1512,12 @@ pub fn classify(req: &Request) -> RequestOwner {
 
         // ---- Lifecycle/deployment: daemon process + node-local config ----
         Request::Diagnose { .. }
+        | Request::DisplayStatus
+        | Request::DisplayPairingApprove { .. }
+        | Request::DisplayPairingReject { .. }
+        | Request::DisplayAssignmentPut { .. }
+        | Request::DisplayAssignmentRevoke { .. }
+        | Request::DisplayDeviceRevoke { .. }
         | Request::SeedAdd { .. }
         | Request::SeedList
         | Request::SeedRemove { .. }
@@ -1412,6 +1577,26 @@ pub fn station_route(address: OrbitAddress) -> ControlRoute {
 pub fn representative_requests() -> Vec<Request> {
     let s = String::new;
     vec![
+        Request::DisplayStatus,
+        Request::DisplayPairingApprove {
+            pairing: s(),
+            label: s(),
+        },
+        Request::DisplayPairingReject { pairing: s() },
+        Request::DisplayAssignmentPut {
+            device: s(),
+            orbit: s(),
+            world: s(),
+            surface: s(),
+            input: serde_json::Value::Null,
+            theme: DisplayThemeSetting::Dark,
+            stale_after_ms: 0,
+            on_stale: DisplayStaleActionSetting::Blank,
+            sync: None,
+            expires_at_unix_ms: None,
+        },
+        Request::DisplayAssignmentRevoke { assignment: s() },
+        Request::DisplayDeviceRevoke { device: s() },
         Request::AssignmentList { actor: None },
         Request::AssignmentGrant {
             actor: s(),
@@ -1719,6 +1904,8 @@ pub enum Response {
     Ok {
         message: Option<String>,
     },
+    /// Identity-scoped display coordination state for Astrolabe.
+    Display(Box<DisplayCoordinatorView>),
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,
@@ -1991,6 +2178,10 @@ pub enum HostReply {
         /// The newest release the channel points at.
         #[serde(default)]
         available: Option<String>,
+        /// Set when this daemon is a client's sidecar and declined to replace
+        /// itself. Carries the client's path — the thing that *does* update it.
+        #[serde(default)]
+        managed_by: Option<String>,
         /// The published compatibility floor — the lowest version still
         /// permitted to run — when the release declares a satisfiable one.
         #[serde(default)]

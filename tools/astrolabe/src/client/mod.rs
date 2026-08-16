@@ -10,6 +10,7 @@
 //! things it reaches, and the smallest.
 
 pub mod book;
+pub mod display;
 pub mod error;
 pub mod heads;
 pub mod host;
@@ -21,7 +22,7 @@ pub mod space;
 pub mod storage;
 
 pub use error::{ClientError, ClientResult};
-pub use library::{LaunchTicket, LibraryEntry};
+pub use library::{Artwork, LaunchTicket, LibraryEntry};
 
 use std::path::PathBuf;
 use std::sync::Arc;

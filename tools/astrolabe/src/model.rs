@@ -52,6 +52,9 @@ pub struct App {
     /// Orientation: this build, this identity, and the Orbits it has. `None`
     /// before the first read, for the same reason `snapshot` is.
     context: Option<HostContext>,
+    /// Self-hosted receiver enrollment, assignments, and health. `None` until
+    /// the identity daemon's display service has answered once.
+    display: Option<lait::control::DisplayCoordinatorView>,
     /// The last MCP binding authored or previewed. Held because a preview is
     /// only useful if it stays on screen long enough to be read.
     mcp: Option<McpBindingOutcome>,
@@ -149,6 +152,7 @@ impl App {
             Update::Storage(facts) => self.absorb_storage(facts, Vec::new()),
             Update::Heads(heads) => self.heads = heads,
             Update::Context(context) => self.absorb_context(*context),
+            Update::Display(display) => self.display = Some(*display),
             Update::Book(book) => self.book = Some(book),
             Update::Presence(presence) => self.presence = Some(presence),
             Update::Signal(signal) => self.consume(&signal),
@@ -320,6 +324,10 @@ impl App {
 
     pub fn context(&self) -> Option<&HostContext> {
         self.context.as_ref()
+    }
+
+    pub fn display(&self) -> Option<&lait::control::DisplayCoordinatorView> {
+        self.display.as_ref()
     }
 
     pub fn mcp(&self) -> Option<&McpBindingOutcome> {

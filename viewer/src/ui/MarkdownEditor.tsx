@@ -42,9 +42,17 @@ export function MarkdownEditor(props: {
     typing: boolean,
     markdown: string,
   ) => void;
+  /**
+   * The document cannot be edited safely here — its stored form does not
+   * survive the projection round-trip, so positional offsets would address the
+   * wrong text. Only the document editor can reach this; the source editor
+   * writes whole values and has no offsets to be wrong about.
+   */
+  onNotEditable?: (reason: string, canonical: string) => void;
 }) {
   const {
     documentSchema = 0,
+    onNotEditable,
     ...editorProps
   } = props;
   return (
@@ -62,7 +70,10 @@ export function MarkdownEditor(props: {
       }
     >
       {documentSchema > 0
-        ? <DocumentEditor {...editorProps} />
+        ? <DocumentEditor
+            {...editorProps}
+            {...(onNotEditable ? { onNotEditable } : {})}
+          />
         : <SourceEditor {...editorProps} documentSchema={documentSchema} />}
     </Suspense>
   );

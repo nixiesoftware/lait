@@ -54,6 +54,8 @@ mod budget;
 mod contact_driver;
 mod content_host;
 pub mod coordinates;
+/// The identity-scoped correspondence dial tone (`lait/correspondence/1`).
+pub mod correspondence;
 #[cfg(test)]
 mod dispatch_tests;
 mod dto;

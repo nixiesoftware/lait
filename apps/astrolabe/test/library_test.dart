@@ -11,13 +11,19 @@
 /// that has to work — `Open` naming the row the pane is about.
 library;
 
+import 'dart:convert' show base64Decode;
+import 'dart:typed_data' show Uint8List;
+
 import 'package:astrolabe/src/core/client.dart';
 import 'package:astrolabe/src/settings/window.dart';
 import 'package:astrolabe/src/shell/person.dart';
 import 'package:astrolabe/src/surfaces/library.dart';
-import 'package:covalence/covalence.dart' hide Surface;
+// `Image` hidden for the reason the surface hides it: covalence's is a network
+// component, and the artwork under test is bytes.
+import 'package:covalence/covalence.dart' hide Surface, Image;
 import 'package:flutter/material.dart' show MaterialApp, Scaffold;
 import 'package:flutter/widgets.dart';
+import 'package:lit_ui/lit_ui.dart' show Lit;
 import 'package:flutter_test/flutter_test.dart';
 
 ClientView _view({
@@ -66,17 +72,27 @@ const HeadRow _identityHead = HeadRow(
   owned: true,
 );
 
+/// A real 1×1 PNG. `Image.memory` runs its bytes through the actual decoder,
+/// so a fixture that only looks like an image fails there rather than in the
+/// assertion it was written for.
+final Uint8List _png = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQ'
+  'GAhKmMIQAAAABJRU5ErkJggg==',
+);
+
 Future<List<ActionRequest>> _pump(
   WidgetTester tester,
   ClientView view, {
   OpenWorldSettings? onSettings,
+  Map<String, WorldArtwork> artwork = const {},
 }) async {
   final asked = <ActionRequest>[];
   await tester.pumpWidget(
     MaterialApp(
       theme: covalenceTheme(const ThemeConfig()),
       home: ClientScope(
-        client: Client.canned(view, onDispatch: asked.add),
+        client:
+            Client.canned(view, onDispatch: asked.add, artwork: artwork),
         child: WorldSettingsScope(
           onOpen: onSettings ?? (_) async {},
           child: const Scaffold(
@@ -96,7 +112,11 @@ Future<List<ActionRequest>> _pump(
   return asked;
 }
 
-Future<void> _pumpLibraryPage(WidgetTester tester, ClientView view) async {
+Future<void> _pumpLibraryPage(
+  WidgetTester tester,
+  ClientView view, {
+  Map<String, WorldArtwork> artwork = const {},
+}) async {
   tester.view.physicalSize = const Size(1040, 720);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
@@ -106,7 +126,7 @@ Future<void> _pumpLibraryPage(WidgetTester tester, ClientView view) async {
     MaterialApp(
       theme: covalenceTheme(const ThemeConfig()),
       home: ClientScope(
-        client: Client.canned(view),
+        client: Client.canned(view, artwork: artwork),
         child: const Scaffold(
           body: LibrarySurface(),
         ),
@@ -168,19 +188,75 @@ void main() {
       tester.widget<Icon>(find.byIcon(AppIcons.playArrow)).size,
       20,
     );
-    final launchButton = tester.widget<Button>(
+    // The reference client's anatomy and its colour: launch is the one solid
+    // green slab. Green belongs to the act that starts a World — the running
+    // control wears the white stop coat — so a slip reads before a label.
+    final launchSlab = tester.widget<Lit>(
       find.ancestor(
         of: find.text('LAUNCH'),
-        matching: find.byType(Button),
+        matching: find.byType(Lit),
       ),
     );
-    expect(launchButton.borderRadius, BorderRadius.circular(2));
+    expect(launchSlab.baseColor, kLaunchSlabFill);
+    expect(
+      launchSlab.baseColor,
+      isNot(kStopSlabFill),
+      reason: 'the two acts share one coat',
+    );
+    // The two coats are inverses: white ink on the green, dark ink on the
+    // white stop slab. Asserted against the launch constant rather than a
+    // literal, so the pair cannot drift apart in one place only.
+    expect(
+      tester.widget<Text>(find.text('LAUNCH')).style?.color,
+      kLaunchSlabInk,
+    );
+    expect(
+      tester.widget<Icon>(find.byIcon(AppIcons.playArrow)).color,
+      kLaunchSlabInk,
+      reason: 'the play mark and its word disagree about the ink',
+    );
     expect(asked, hasLength(1));
     expect(
       asked.single,
       const ActionRequest.open(entryPath: '/'),
       reason: 'opening asked for somewhere other than the declared entry',
     );
+  });
+
+  testWidgets('the action slabs are content-sized, not band-wide',
+      (tester) async {
+    // A Container handed an `alignment` expands to its constraints rather than
+    // its child, and these slabs sit in a Wrap that offers the whole band —
+    // which is how LAUNCH once stretched the full width of the pane. Measured
+    // against the band rather than a magic number, so the guard survives a
+    // change of window size.
+    await _pumpLibraryPage(tester, _view(library: [_row()]));
+
+    final band = find.byKey(const ValueKey('library-open-band'));
+    final launch = find.ancestor(
+      of: find.text('LAUNCH'),
+      matching: find.byType(Lit),
+    );
+    expect(
+      tester.getSize(launch).width,
+      lessThan(tester.getSize(band).width / 2),
+      reason: 'the launch slab stretched to fill the action band',
+    );
+
+    await _pumpLibraryPage(
+      tester,
+      _view(library: [_row()], heads: const [_identityHead]),
+    );
+    for (final slab in find
+        .descendant(of: band, matching: find.byType(Lit))
+        .evaluate()
+        .map((element) => find.byWidget(element.widget))) {
+      expect(
+        tester.getSize(slab).width,
+        lessThan(tester.getSize(band).width / 2),
+        reason: 'a segment of the stop slab filled the action band',
+      );
+    }
   });
 
   testWidgets('a World that declares no entry path cannot be opened',
@@ -291,7 +367,8 @@ void main() {
     expect(find.text('Nobody in the book is addressed here.'), findsOneWidget);
   });
 
-  testWidgets('a head address is drawn without its credential', (tester) async {
+  testWidgets('a head address is not the front page\'s to state',
+      (tester) async {
     await _pump(
       tester,
       _view(
@@ -300,7 +377,10 @@ void main() {
       ),
     );
 
-    expect(find.text('http://127.0.0.1:52713/'), findsOneWidget);
+    // The address left this surface with the SERVING NOW panel. The footer's
+    // launch notice and World settings carry it, both credential-stripped;
+    // what must never appear here is the credential itself.
+    expect(find.text('http://127.0.0.1:52713/'), findsNothing);
     expect(
       find.textContaining('token='),
       findsNothing,
@@ -333,12 +413,12 @@ void main() {
     expect(asked, isEmpty);
   });
 
-  testWidgets('a serving head is one solid split control, both halves Go to',
+  testWidgets('a serving head is one solid split control — STOP, then Go to',
       (tester) async {
     // "Running" is the identity head's own liveness: the destination is up,
-    // and Open is a handoff rather than a start. There is no per-Orbit badge
-    // to read it from any more, deliberately — Space lifecycle belongs to the
-    // head's own front page.
+    // and Open is a handoff rather than a start. The act offered against it
+    // is STOP — the head is what this client started, so it is what this
+    // client can end.
     final asked = await _pump(
       tester,
       _view(
@@ -348,32 +428,58 @@ void main() {
     );
 
     expect(find.text('Go to'), findsNothing);
-    expect(find.text('RUNNING'), findsWidgets);
     expect(find.text('Cancel'), findsNothing);
-    expect(find.text('Stop'), findsNothing);
 
     final openBand = find.byKey(const ValueKey('library-open-band'));
-    final runningLabel = find.descendant(
-      of: openBand,
-      matching: find.text('RUNNING'),
-    );
-    expect(tester.widget<Text>(runningLabel).style?.fontSize, 20);
+    // The state chip said RUNNING here once. The reference client's running
+    // control is the act; the state lives in the badge and the rail.
     expect(
-        tester.widget<Text>(runningLabel).style?.fontWeight, FontWeight.w400);
+      find.descendant(of: openBand, matching: find.text('RUNNING')),
+      findsNothing,
+    );
+    final stopLabel = find.descendant(
+      of: openBand,
+      matching: find.text('STOP'),
+    );
+    expect(stopLabel, findsOneWidget);
+    expect(tester.widget<Text>(stopLabel).style?.fontSize, 20);
+    expect(tester.widget<Text>(stopLabel).style?.fontWeight, FontWeight.w400);
 
-    // The reference client's anatomy: one solid slab — a play mark and the
-    // state, a hairline, the handoff glyph — not a status chip beside a
-    // detached ghost button.
-    final playMark = find.descendant(
+    // The reference client's anatomy: one solid slab — a stop mark and STOP,
+    // a hairline, the handoff glyph — not a status chip beside a detached
+    // ghost button. And its colour: the white stop coat, never launch's green.
+    final stopMark = find.descendant(
       of: openBand,
-      matching: find.byIcon(AppIcons.playArrow),
+      matching: find.byIcon(AppIcons.close),
     );
-    expect(playMark, findsOneWidget);
-    expect(tester.widget<Icon>(playMark).size, 20);
-    // White ink on the vivid fill, in either theme.
+    expect(stopMark, findsOneWidget);
+    expect(tester.widget<Icon>(stopMark).size, 20);
     expect(
-      tester.widget<Text>(runningLabel).style?.color,
-      const Color(0xFFFFFFFF),
+      find.descendant(of: openBand, matching: find.byIcon(AppIcons.playArrow)),
+      findsNothing,
+      reason: 'a running World offered the start glyph',
+    );
+    for (final slab in tester.widgetList<Lit>(
+      find.descendant(of: openBand, matching: find.byType(Lit)),
+    )) {
+      expect(
+        slab.baseColor,
+        kStopSlabFill,
+        reason: 'a segment of the stop slab is not the white stop coat',
+      );
+      expect(
+        slab.baseColor,
+        isNot(kLaunchSlabFill),
+        reason: 'the stop slab wears the colour that launches',
+      );
+    }
+    // Dark ink on the white slab, in either theme — a text rung would flip
+    // with polarity and put white on white.
+    expect(tester.widget<Text>(stopLabel).style?.color, kStopSlabInk);
+    expect(
+      tester.widget<Icon>(stopMark).color,
+      kStopSlabInk,
+      reason: 'the stop mark and its word disagree about the ink',
     );
     expect(
       find.descendant(
@@ -390,24 +496,83 @@ void main() {
     expect(handoff, findsOneWidget);
     expect(
       tester.widget<Icon>(handoff).size,
-      tester.widget<Icon>(playMark).size,
+      tester.widget<Icon>(stopMark).size,
       reason: 'the slab\'s two glyphs share one size',
     );
-    expect(tester.getCenter(handoff).dy, tester.getCenter(runningLabel).dy);
+    expect(tester.getCenter(handoff).dy, tester.getCenter(stopLabel).dy);
 
-    // Both segments are the same act, at the World-declared entry path.
-    await tester.tap(runningLabel);
+    // The halves are different acts: STOP ends the head this client owns;
+    // the handoff goes to it at the World-declared entry path.
+    await tester.tap(stopLabel);
     await tester.pump();
     await tester.tap(handoff);
     await tester.pump();
     expect(
       asked,
       const [
-        ActionRequest.open(entryPath: '/issues'),
+        ActionRequest.stopHead(id: 'identity:default'),
         ActionRequest.open(entryPath: '/issues'),
       ],
-      reason: 'a segment bypassed the World-declared entry path',
+      reason: 'a segment asked for something other than its own act',
     );
+  });
+
+  testWidgets('a head this client does not own is not one it may stop',
+      (tester) async {
+    // Ownership is the boundary the supervisor enforces, so the surface must
+    // not draw past it. Somebody ran `lait` themselves: the World is reachable
+    // and Open still works, but STOP is absent rather than present-and-refused.
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [_row(opensAt: '/issues')],
+        heads: const [
+          HeadRow(
+            id: 'identity:external',
+            kind: 'browser',
+            origin: 'http://127.0.0.1:7717/',
+            owned: false,
+          ),
+        ],
+      ),
+    );
+
+    final openBand = find.byKey(const ValueKey('library-open-band'));
+    expect(
+      find.descendant(of: openBand, matching: find.text('STOP')),
+      findsNothing,
+      reason: 'the client offered to stop a head it never started',
+    );
+    // The handoff is still the whole control, and still names itself.
+    final handoff = find.descendant(
+      of: openBand,
+      matching: find.text('OPEN'),
+    );
+    expect(handoff, findsOneWidget);
+
+    await tester.tap(handoff);
+    await tester.pump();
+    expect(asked, const [ActionRequest.open(entryPath: '/issues')]);
+  });
+
+  testWidgets('an in-flight stop is visibly stopping, with no second press',
+      (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [_row(opensAt: '/issues')],
+        heads: const [_identityHead],
+        inFlight: const ['head.stop:identity:default'],
+      ),
+    );
+
+    expect(find.text('STOPPING'), findsOneWidget);
+    expect(
+      find.text('STOP'),
+      findsNothing,
+      reason: 'the control stayed pressable while its own stop was in flight',
+    );
+    expect(asked, isEmpty);
   });
 
   testWidgets('an in-flight open is visibly launching', (tester) async {
@@ -421,6 +586,27 @@ void main() {
 
     expect(find.text('LAUNCHING'), findsOneWidget);
     expect(find.text('Cancel'), findsNothing);
+
+    // The act in flight wears the stop coat, not a translucent pill: the band
+    // must not change weight or shape under a state that lasts a second.
+    final pending = tester.widget<Lit>(
+      find.ancestor(
+        of: find.text('LAUNCHING'),
+        matching: find.byType(Lit),
+      ),
+    );
+    expect(pending.baseColor, kStopSlabFill);
+    expect(
+      tester.widget<Text>(find.text('LAUNCHING')).style?.color,
+      kStopSlabInk,
+    );
+    expect(
+      tester.widget<Text>(find.text('LAUNCHING')).style?.fontSize,
+      20,
+      reason: 'the pending label is not the slab type size',
+    );
+    expect(tester.widget<Progress>(find.byType(Progress)).size,
+        ProgressSize.lg);
   });
 
   testWidgets('the row reports its declaration and opens settings',
@@ -435,7 +621,16 @@ void main() {
       onSettings: (snapshot) async => settings.add(snapshot),
     );
 
-    expect(find.text('v7'), findsOneWidget);
+    // The action band carries the act and nothing else. The version is still
+    // known — it rides the settings snapshot below — but it is a fact about
+    // the World rather than something to do with it, so it is not drawn
+    // beside the control.
+    expect(
+      find.text('v7'),
+      findsNothing,
+      reason: 'the action band grew a readout beside its one control',
+    );
+    expect(find.text('VERSION'), findsNothing);
 
     await tester.tap(find.byIcon(AppIcons.settings));
     await tester.pump(const Duration(milliseconds: 300));
@@ -518,7 +713,12 @@ void main() {
     expect(decoded?.dark, isTrue);
   });
 
-  testWidgets('Library search filters the passive rail', (tester) async {
+  testWidgets('the rail draws every installed World, unsearched and unlabelled',
+      (tester) async {
+    // The rail is the install list: a handful of rows compiled into the
+    // build. There is no search field to narrow it, and the ordinary state
+    // carries no heading — READY over a row that is ready says nothing the
+    // row does not.
     final asked = await _pump(
       tester,
       _view(
@@ -529,58 +729,71 @@ void main() {
       ),
     );
 
-    await tester.enterText(find.byKey(const ValueKey('library-search')), 'notes');
-    await tester.pump();
-
-    expect(find.text('IssueWorld'), findsNothing);
-    expect(find.text('Notes'), findsWidgets);
+    expect(find.byKey(const ValueKey('library-search')), findsNothing);
+    expect(find.text('READY'), findsNothing);
+    final rail = find.byKey(const ValueKey('library-rail'));
+    expect(find.descendant(of: rail, matching: find.text('IssueWorld')),
+        findsOneWidget);
+    expect(
+        find.descendant(of: rail, matching: find.text('Notes')), findsOneWidget);
     expect(
       asked,
       isEmpty,
-      reason: 'filtering the Library placed or opened a World',
+      reason: 'drawing the Library placed or opened a World',
     );
   });
 
-  test('a .lait store names the project beside it', () {
-    expect(projectDirectory(r'D:\work\foo\.lait'), r'D:\work\foo');
-    expect(projectDirectory(r'D:/work/foo/.lait'), r'D:/work/foo');
-    expect(projectDirectory(r'D:\work\foo'), isNull);
-    expect(projectDirectory(null), isNull);
+  testWidgets('a World that ships artwork is drawn from it', (tester) async {
+    await _pumpLibraryPage(
+      tester,
+      _view(library: [_row(mount: 'issues', name: 'Issues')]),
+      artwork: {'issues': WorldArtwork(mark: _png, hero: _png)},
+    );
+
+    final rail = find.byKey(const ValueKey('library-rail'));
+    final hero = find.byKey(const ValueKey('library-hero'));
+    expect(
+      find.descendant(of: rail, matching: find.byType(Image)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: hero, matching: find.byType(Image)),
+      findsOneWidget,
+    );
+    // The derived plate is what artwork replaces, not something it is drawn
+    // over: a mark and a letter in the same square is the letter showing
+    // through wherever the art is transparent.
+    expect(find.descendant(of: rail, matching: find.text('I')), findsNothing);
   });
 
-  testWidgets('writing an agent binding pins the selected World',
+  testWidgets('a World that ships none keeps the plate cut from its accent',
       (tester) async {
-    tester.view.physicalSize = const Size(1040, 1600);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+    // The default, and deliberately: every World was drawn this way before any
+    // of them shipped art, so shipping none is a choice rather than a gap.
+    await _pumpLibraryPage(
+      tester,
+      _view(library: [_row(mount: 'issues', name: 'Issues')]),
+    );
 
+    final rail = find.byKey(const ValueKey('library-rail'));
+    final hero = find.byKey(const ValueKey('library-hero'));
+    expect(find.descendant(of: rail, matching: find.text('I')), findsOneWidget);
+    expect(find.descendant(of: rail, matching: find.byType(Image)), findsNothing);
+    expect(find.descendant(of: hero, matching: find.byType(Image)), findsNothing);
+  });
+
+  testWidgets('the Library detail offers no agent-binding authoring',
+      (tester) async {
+    // The section is hidden: the MCP install capability stays in the core,
+    // but the Library's detail column no longer authors bindings.
     final asked = await _pump(
       tester,
       _view(library: [_row(name: 'Issues')]),
     );
 
-    expect(find.byKey(const ValueKey('library-agent-binding')), findsOneWidget);
-    await tester.enterText(
-      find.byKey(const ValueKey('library-agent-project')),
-      r'D:\work\tracker',
-    );
-    await tester.pump();
-    await tester.tap(find.text('Write binding'));
-    await tester.pump();
-
-    expect(asked, hasLength(1));
-    expect(
-      asked.single,
-      const ActionRequest.installMcp(
-        client: 'claude',
-        name: 'lait-issues',
-        noAgent: false,
-        project: r'D:\work\tracker',
-        world: 'issues',
-        preview: false,
-      ),
-      reason: 'the binding did not pin the World this row is',
-    );
+    expect(find.byKey(const ValueKey('library-agent-binding')), findsNothing);
+    expect(find.text('AGENT BINDING'), findsNothing);
+    expect(find.text('Write binding'), findsNothing);
+    expect(asked, isEmpty);
   });
 }

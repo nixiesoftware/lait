@@ -89,30 +89,22 @@ fn a_generation_this_build_does_not_speak_is_named() {
 }
 
 #[test]
-fn a_reserved_stream_kind_is_known_and_unimplemented() {
-    // Different answers for different things. Unknown means reset the stream;
-    // reserved means a peer is speaking a protocol we allocated and have not
-    // built, which is a version problem rather than a malformed one.
-    for kind in [stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL] {
-        assert!(stream_kind::is_implemented(kind));
-        assert!(!stream_kind::is_reserved(kind));
-    }
+fn every_allocated_stream_kind_is_implemented() {
     for kind in [
-        stream_kind::RESERVED_MEDIA_FRAME,
-        stream_kind::RESERVED_MEDIA_FEEDBACK,
+        stream_kind::CONTROL,
+        stream_kind::RELIABLE_SIGNAL,
+        stream_kind::MEDIA_GROUP,
+        stream_kind::MEDIA_CONTROL,
     ] {
-        assert!(stream_kind::is_reserved(kind));
-        assert!(
-            !stream_kind::is_implemented(kind),
-            "reserving a kind is the promise that it is not built"
-        );
+        assert!(stream_kind::is_implemented(kind));
     }
+    assert!(stream_kind::is_media(stream_kind::MEDIA_GROUP));
+    assert!(stream_kind::is_media(stream_kind::MEDIA_CONTROL));
     assert!(!stream_kind::is_implemented(0x99));
-    assert!(!stream_kind::is_reserved(0x99));
 }
 
 #[test]
-fn an_opening_may_name_a_lane_this_build_does_not_implement() {
+fn an_opening_carries_lane_requests_without_interpreting_them() {
     // Refusing the whole opening here would break the one thing feature
     // negotiation exists for: a newer peer asking for something extra must get
     // everything it asked for that we *do* have, not a closed door. The grant
@@ -120,7 +112,7 @@ fn an_opening_may_name_a_lane_this_build_does_not_implement() {
     // peer that then opens an ungranted flow is refused at the flow, where the
     // cost is a reset rather than a connection.
     let mut open = opening(Plane::Live);
-    open.requested_lanes = vec![stream_kind::CONTROL, stream_kind::RESERVED_MEDIA_FRAME];
+    open.requested_lanes = vec![stream_kind::CONTROL, stream_kind::MEDIA_GROUP];
     let decoded = Open::decode_canonical(&open.encode()).expect("it decodes");
     assert_eq!(
         decoded.requested_lanes.len(),

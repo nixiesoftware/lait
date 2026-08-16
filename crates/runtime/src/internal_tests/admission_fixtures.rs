@@ -135,7 +135,7 @@ fn a_capability_this_build_does_not_implement_is_not_echoed_back() {
     // behind it, which is the whole point of having the assertion.
     assert_eq!(
         accept.capability.features,
-        feature::RESIDENCY_HINTS,
+        feature::RESIDENCY_HINTS | feature::NATIVE_LIVE_MEDIA,
         "everything offered, intersected down to what is actually implemented"
     );
     assert_eq!(accept.capability.features & feature::UNSOLICITED_PROVIDE, 0);
@@ -424,18 +424,16 @@ fn the_replay_ledger_is_bounded_and_forgets_rather_than_refuses() {
 }
 
 #[test]
-fn a_lane_this_build_cannot_serve_is_dropped_from_the_grant_not_the_opening() {
-    // Where the decision actually belongs. The opening carries what the peer
-    // asked for; the accept says what it got. A newer peer asking for a media
-    // lane still gets its control lane — which is the whole reason additive
-    // capability exists inside an ALPN rather than requiring a new one.
+fn media_lanes_are_granted_only_as_a_negotiated_pair() {
     let space = space();
     let mut open = opening(&space, Plane::Live);
     open.plane = Plane::Live;
     open.protocol_version = Plane::Live.protocol_version();
+    open.features = feature::LOCAL_SUPPORTED;
     open.requested_lanes = vec![
         stream_kind::CONTROL,
-        stream_kind::RESERVED_MEDIA_FRAME,
+        stream_kind::MEDIA_GROUP,
+        stream_kind::MEDIA_CONTROL,
         stream_kind::RELIABLE_SIGNAL,
     ];
 
@@ -450,23 +448,41 @@ fn a_lane_this_build_cannot_serve_is_dropped_from_the_grant_not_the_opening() {
     };
     assert_eq!(
         accept.granted_lanes,
-        vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
-        "granted what we can serve, and nothing else"
+        vec![
+            stream_kind::CONTROL,
+            stream_kind::MEDIA_GROUP,
+            stream_kind::MEDIA_CONTROL,
+            stream_kind::RELIABLE_SIGNAL,
+        ],
+        "the implemented pair is granted when its feature was negotiated"
     );
     assert_eq!(peer.granted_lanes, accept.granted_lanes);
 
-    // A peer that asked for *only* things we cannot serve gets nothing, and
-    // "nothing" is a refusal rather than an empty grant it would sit on.
-    let mut hopeless = open.clone();
-    hopeless.requested_lanes = vec![stream_kind::RESERVED_MEDIA_FRAME];
+    let mut half = open.clone();
+    half.requested_lanes = vec![stream_kind::CONTROL, stream_kind::MEDIA_GROUP];
+    let Admission::Accept(accept, _) = judge(
+        &half,
+        &context(&space, Plane::Live),
+        &member(),
+        &PlanePolicy::default(),
+    ) else {
+        panic!("the ordinary control lane remains usable");
+    };
+    assert_eq!(accept.granted_lanes, vec![stream_kind::CONTROL]);
+
+    let mut no_feature = open.clone();
+    no_feature.features = feature::RESIDENCY_HINTS;
+    let Admission::Accept(accept, _) = judge(
+        &no_feature,
+        &context(&space, Plane::Live),
+        &member(),
+        &PlanePolicy::default(),
+    ) else {
+        panic!("the ordinary lanes remain usable");
+    };
     assert_eq!(
-        judge(
-            &hopeless,
-            &context(&space, Plane::Live),
-            &member(),
-            &PlanePolicy::default()
-        ),
-        Admission::Refuse(Refusal::Refused)
+        accept.granted_lanes,
+        vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL]
     );
 }
 
@@ -505,7 +521,7 @@ fn asking_for_only_unservable_lanes_is_still_a_refusal_where_lanes_exist() {
     let mut open = opening(&space, Plane::Live);
     open.plane = Plane::Live;
     open.protocol_version = Plane::Live.protocol_version();
-    open.requested_lanes = vec![stream_kind::RESERVED_MEDIA_FRAME];
+    open.requested_lanes = vec![stream_kind::MEDIA_GROUP];
     assert_eq!(
         judge(
             &open,
