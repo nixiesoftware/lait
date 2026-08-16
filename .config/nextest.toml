@@ -34,11 +34,13 @@ retries = 0
 # default being widened for everyone. Widening it here would buy one test some
 # headroom at the cost of every genuinely wedged test taking longer to surface.
 #
-# This budget assumes THE CRYPTO BOUNDARY IS BUILT OPTIMIZED — see the named
-# curve25519/FROST package overrides in Cargo.toml. Tests inherit the `dev`
-# profile, and with those packages unoptimized the ceremony tests (real DKG +
-# threshold signing) take ~115s each and get terminated here. If these start
-# timing out, check those overrides before reaching for a larger budget.
+# This budget assumes THE MEASURED RUNTIME BOUNDARIES ARE BUILT OPTIMIZED — see
+# the named curve25519/FROST and Signage PNG package overrides in Cargo.toml.
+# Tests inherit the `dev` profile. Without the crypto overrides the ceremony
+# tests (real DKG + threshold signing) take ~115s each; without the PNG
+# overrides the real Astrolabe receiver misses its first-health deadline. If
+# these start timing out, check those overrides before reaching for a larger
+# budget.
 slow-timeout = { period = "30s", terminate-after = 3 }
 
 # Only the suites that put real traffic on a real relay belong in the network

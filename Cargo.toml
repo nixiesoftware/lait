@@ -339,12 +339,13 @@ incremental = false
 
 # The profile that 'dist' will build with
 # Tests build with the `test` profile, which inherits `dev` — i.e. unoptimized.
-# That is fine for our own code and almost every dependency, but brutal for the
-# curve25519/FROST path: the ceremony tests drive real DKG + threshold-signing
-# rounds and take 10–50x longer without optimization. Keep level 3 at that
-# measured boundary only. A wildcard dependency override also optimizes every
-# build dependency and proc macro before it can run; on the full workspace that
-# made clap/Askama/UniFFI/RMCP macros some of the longest units in a cold build.
+# That is fine for our own code and almost every dependency, but brutal at two
+# measured runtime boundaries: curve25519/FROST ceremony work, and the
+# image/PNG/DEFLATE path which repeatedly renders full-HD Signage frames. Keep
+# level 3 at those boundaries only. A wildcard dependency override also
+# optimizes every build dependency and proc macro before it can run; on the full
+# workspace that made clap/Askama/UniFFI/RMCP macros some of the longest units in
+# a cold build.
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
 
@@ -355,6 +356,27 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.frost-rerandomized]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.flate2]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.zlib-rs]
+opt-level = 3
+
+[profile.dev.package.crc32fast]
+opt-level = 3
+
+[profile.dev.package.simd-adler32]
 opt-level = 3
 
 [profile.dist]
