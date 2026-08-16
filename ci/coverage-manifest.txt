@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1868
-pr-platform    1468
-nightly        1896
+pr             1883
+pr-platform    1482
+nightly        1911
 mutants        98
 
 [gates]
@@ -711,6 +711,21 @@ lait-issues-app tests::every_public_tool_keeps_its_issues_prefix
 lait-issues-app tests::the_world_declares_a_display_name_distinct_from_its_mount
 lait-issues::it package_boundary::semantic_package_has_no_shell_or_process_dependency
 lait-issues::it package_boundary::the_implementation_id_is_pinned_and_moving_it_is_deliberate
+lait-post store::tests::a_deposit_id_reaching_for_another_path_is_refused
+lait-post store::tests::a_mailbox_directory_does_not_name_its_owner
+lait-post store::tests::the_filesystem_store_holds_the_same_end
+lait-post store::tests::the_memory_store_holds_its_end
+lait-post tests::a_challenge_answers_once
+lait-post tests::a_deposit_is_collected_by_the_device_it_was_addressed_to
+lait-post tests::a_deposit_that_asks_to_be_kept_forever_is_refused
+lait-post tests::a_fetch_without_the_devices_signature_gets_nothing
+lait-post tests::a_stale_challenge_is_refused_and_outstanding_ones_do_not_accumulate
+lait-post tests::a_tampered_deposit_does_not_verify
+lait-post tests::acknowledging_drops_exactly_what_was_named
+lait-post tests::an_envelope_beyond_the_bound_is_refused_before_it_is_stored
+lait-post tests::an_expired_deposit_is_neither_returned_nor_kept
+lait-post tests::one_persons_mailbox_is_not_anothers
+lait-post::over_http a_letter_crosses_the_wire_and_only_its_recipient_collects_it
 lait-signage contract::tests::highest_priority_active_window_selects_items_and_exposes_the_next_boundary
 lait-signage contract::tests::programs_are_bounded_and_have_one_canonical_identity
 lait-signage world::tests::reviewed_implementation_is_stable_and_nonzero
