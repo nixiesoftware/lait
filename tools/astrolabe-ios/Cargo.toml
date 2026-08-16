@@ -32,8 +32,12 @@ tracing = "0.1"
 
 # The Swift boundary. Pinned exactly, because the generated Swift is checked in
 # and a generator bump regenerates the whole surface — the same discipline (and
-# the same sentence) as flutter_rust_bridge on the desktop boundary.
-uniffi = "=0.32.0"
+# the same sentence) as flutter_rust_bridge on the desktop boundary. UniFFI's
+# default is its `cargo-metadata` generator feature; the runtime scaffolding
+# needs only core + macros, while the explicit `bindgen-cli` feature below owns
+# generation. Keeping the default off stops ordinary workspace builds from
+# carrying the generator's Cargo graph.
+uniffi = { version = "=0.32.0", default-features = false }
 
 # The bindgen binary that emits the Swift half. `cli` only exists for it, so a
 # library build never carries clap.
