@@ -172,6 +172,27 @@ pub async fn run_announced(
     selection: crate::config::Selection,
     announce: impl FnOnce(&Ready) + Send,
 ) -> Result<()> {
+    run_until(port, open, selection, announce, shutdown_signal()).await
+}
+
+/// [`run_announced`], with the second process-shaped assumption handed over
+/// too: *when to stop*.
+///
+/// [`run`] stops on a signal, because a process receives signals. An embedded
+/// head does not — iOS delivers no SIGTERM, ever — and it has a need no
+/// process has: the platform suspends the app and reclaims listener resources
+/// while it sleeps, so the head must be able to step down before suspension
+/// and come back after, as a transition rather than a crash. The caller hands
+/// in the future that resolves when the head should leave; everything else —
+/// the stop-before-drain ordering that lets the never-ending SSE and
+/// WebSocket responses release — is identical to a signalled shutdown.
+pub async fn run_until(
+    port: u16,
+    open: bool,
+    selection: crate::config::Selection,
+    announce: impl FnOnce(&Ready) + Send,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     // Identity scoping, resolved once at startup from the invocation's own
     // selection rather than from a process-wide environment.
     let identity = selection.identity_dir()?;
@@ -257,7 +278,7 @@ pub async fn run_announced(
         .with_graceful_shutdown({
             let stop = stop.clone();
             async move {
-                shutdown_signal().await;
+                shutdown.await;
                 // Every long-lived task selects on this. Sending before axum
                 // begins draining is what lets the drain finish at all.
                 let _ = stop.send(true);

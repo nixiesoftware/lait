@@ -987,6 +987,15 @@ impl Daemon {
     }
 
     async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
+        // Display coordination is withheld from a daemon that does not own
+        // the machine's posture: a guest in somebody's process (see
+        // [`embed_in_host_process`]) and a daemon told `LAIT_DISPLAY=off`
+        // (see [`display_hosting`]). The control socket stays, and the
+        // display control-plane requests still answer (status reads state,
+        // not the listener); only the LAN-facing HTTPS service is absent.
+        if embedded() || !display_hosting() {
+            return self.endpoint.clone().serve(home).await;
+        }
         let display = self.display.clone();
         let display_stop = self.endpoint.subscribe_stop();
         let endpoint = self.endpoint.clone();
@@ -1192,7 +1201,55 @@ fn watchdog() {
     ARMED.call_once(arm_watchdog);
 }
 
+/// Whether this daemon runs as a library inside somebody else's process.
+static EMBEDDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An embedder's standing declaration: this daemon is a guest in a process —
+/// and on a device — it does not own. Called once before the daemon starts; a
+/// value rather than an environment mutation, for the same reason
+/// `run_lait_daemon` takes its selection as one.
+///
+/// Two consequences, both sides of the same fact:
+///
+/// - **The exit watchdog never arms.** Its whole action is `exit()`, and a
+///   library must never exit its host — on iOS the daemon runs as a task
+///   inside the application, and the deadline would take the interface down
+///   with the drain it was policing. `LAIT_SHUTDOWN_DEADLINE_SECS=0` stays
+///   the CLI's spelling of that half.
+/// - **No machine-scoped listener is hosted.** Display coordination binds a
+///   well-known LAN-facing port that receivers discover; that is the desktop
+///   identity daemon's posture. A guest daemon must neither claim that port
+///   out from under the machine's real daemon nor open its host device to
+///   the LAN.
+pub fn embed_in_host_process() {
+    EMBEDDED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn embedded() -> bool {
+    EMBEDDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether this daemon hosts the machine's display coordinator.
+///
+/// On by default: the identity daemon owns the machine's display posture.
+/// `LAIT_DISPLAY=off` withholds it — the coordinator binds one well-known,
+/// machine-scoped port, and a daemon that is not *the* machine's daemon must
+/// neither race the real one for that port nor die because it lost. The test
+/// suite is the standing case: it runs many daemons on one machine in
+/// parallel, and a fixed port makes them mutually exclusive — every spawned
+/// test daemon says `off` and the one suite that exercises receivers leaves
+/// it hosting.
+fn display_hosting() -> bool {
+    !matches!(
+        std::env::var("LAIT_DISPLAY").as_deref(),
+        Ok("off" | "0" | "false")
+    )
+}
+
 fn arm_watchdog() {
+    if embedded() {
+        return;
+    }
     let deadline = std::env::var("LAIT_SHUTDOWN_DEADLINE_SECS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -1483,6 +1540,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn one_host_endpoint_places_routes_streams_and_drains_an_orbit() {
+        // A test daemon is not the machine's daemon — see [`display_hosting`].
+        // Hosting here would race every parallel test (and any real daemon on
+        // this machine) for the coordinator's one well-known port.
+        std::env::set_var("LAIT_DISPLAY", "off");
         let seed = [211; 32];
         let (base, daemon_home, directory, resolved) = formed_directory("route", &seed);
         let orbit_home = resolved.home.clone();
@@ -1585,6 +1646,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_rejects_a_stale_space_expectation_before_placement() {
+        // See the sibling test: a test daemon never hosts displays.
+        std::env::set_var("LAIT_DISPLAY", "off");
         let seed = [212; 32];
         let (base, daemon_home, directory, mut resolved) = formed_directory("scope", &seed);
         let orbit_home = resolved.home.clone();
