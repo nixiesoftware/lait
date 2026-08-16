@@ -27,7 +27,13 @@ use std::path::{Path, PathBuf};
 /// stamp whose equality guarantees byte-equivalent Bodies.
 /// MCP 2026-07-28 `cacheScope` (rmcp `CacheScope` / `cache_scope`) is a
 /// listing annotation on `tools/list`, not a derived product projection.
-const NOT_A_PRODUCT_CACHE: &[&str] = &["cache_scope", "CacheScope"];
+const NOT_A_PRODUCT_CACHE: &[&str] = &[
+    "cache_scope",
+    "CacheScope",
+    // The typed HTTP `Cache-Control` header name. It controls receiver/proxy
+    // storage policy; it is not a derived product read model.
+    "CACHE_CONTROL",
+];
 
 const REGISTERED_CACHES: &[(&str, &str, &str)] = &[
     (
