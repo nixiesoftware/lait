@@ -563,9 +563,19 @@ impl WorldRouter {
                 continue;
             };
             let session = host.primary_session.lock_recovering();
-            let status = session
+            // A host with nothing to say is skipped, never propagated: with a
+            // second bundled World this loop visits hosts that hold no session
+            // on this Space at all (Signage on a board-only Space), and an
+            // early `?` here let that silence erase the answer of the World
+            // that had one — the joiner's board synced and its status still
+            // read "no board data", which the join diagnosis renders as a
+            // sync that never completes.
+            let Some(status) = session
                 .as_ref()
-                .and_then(|session| projector.status(session))?;
+                .and_then(|session| projector.status(session))
+            else {
+                continue;
+            };
             match &mut combined {
                 Some(total) => {
                     total.items = total.items.saturating_add(status.items);
