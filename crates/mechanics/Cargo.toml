@@ -60,6 +60,10 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 getrandom = "0.3"
 # serialization of signed bytes + wire/DTO types
 serde = { version = "1", features = ["derive"] }
+# serde implements the byte-array traits only to length 32, and an ed25519
+# signature is 64. Already in this workspace for replica's manifest and
+# runtime's wire types; named here rather than adding a second technique.
+serde-byte-array = "0.1"
 # JSON Schema for the authority DTOs a product publishes in its policy bundle
 # (products/issues' product_policy_schema_bundle, gated by its drift test).
 schemars = "1"

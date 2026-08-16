@@ -4404,6 +4404,7 @@ dependencies = [
  "rand_core 0.9.5",
  "schemars",
  "serde",
+ "serde-byte-array",
  "serde_json",
  "sha2 0.10.9",
  "tracing",

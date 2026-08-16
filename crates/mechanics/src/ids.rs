@@ -73,7 +73,7 @@ pub fn valid_ulid(s: &str) -> bool {
 }
 
 /// Render a 128-bit value as a 26-char Crockford base32 ULID string.
-fn encode_ulid(value: u128) -> String {
+pub(crate) fn encode_ulid(value: u128) -> String {
     // 128 bits → 26 base32 chars (the top char encodes only 2 bits).
     let mut out = [0u8; 26];
     let mut v = value;
