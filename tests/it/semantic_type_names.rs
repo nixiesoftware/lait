@@ -633,6 +633,14 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 "assignment",
                 "authorization",
                 "ids",
+                // The Space-less relation plane: mutual device links, signed
+                // audience-scoped avowals, and the projection that commits to
+                // its log head. Public because it is a boundary others cross —
+                // the address book resolves attested names against it, and it
+                // is what the directory publishes. Deliberately not folded into
+                // `actor`: that plane is per-Space by construction, and this
+                // one is Space-less by construction.
+                "kinship",
                 "membership",
                 "policy",
                 "recovery",
