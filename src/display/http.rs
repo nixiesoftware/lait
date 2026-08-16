@@ -86,6 +86,22 @@ pub fn display_http_router(state: DisplayHttpState) -> Router {
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(allowed)
         .expose_headers(exposed);
+    display_routes()
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
+        .layer(cors)
+        .with_state(state)
+}
+
+/// The routing table alone, before any state is attached.
+///
+/// Split out so it can be built in a test. `Router::route` validates each
+/// pattern by **panicking** on a bad one, and the panic lands at daemon
+/// startup rather than at a request — which is how
+/// `/renditions/{rendition}.m3u8` took the whole daemon down with nothing to
+/// catch it, because no test had ever constructed this router. Building the
+/// real table (rather than a copied list of paths) is what keeps that check
+/// honest as routes are added.
+fn display_routes() -> Router<DisplayHttpState> {
     Router::new()
         .route("/head/v1/instance", get(instance))
         .route(
@@ -117,21 +133,23 @@ pub fn display_http_router(state: DisplayHttpState) -> Router {
         )
         .route("/head/v1/live/{ticket}/socket", any(live_socket))
         .route("/head/v1/live/{ticket}/master.m3u8", get(hls_master))
+        // The parameter captures the whole filename, extension included, because
+        // matchit allows only one parameter per path segment and refuses
+        // `{rendition}.m3u8` — by panicking at insert, which is to say at daemon
+        // startup. The wire URLs are unchanged: `/renditions/hi.m3u8` still
+        // matches, and the handler strips the suffix it requires.
         .route(
-            "/head/v1/live/{ticket}/renditions/{rendition}.m3u8",
+            "/head/v1/live/{ticket}/renditions/{rendition_file}",
             get(hls_media_playlist),
         )
         .route(
-            "/head/v1/live/{ticket}/segments/{sequence}.ts",
+            "/head/v1/live/{ticket}/segments/{sequence_file}",
             get(hls_segment),
         )
         .route(
             "/head/v1/health",
             post(health).layer(DefaultBodyLimit::max(MAX_HEALTH_BODY_BYTES)),
         )
-        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
-        .layer(cors)
-        .with_state(state)
 }
 
 /// Serve the closed receiver router over the coordinator's pinned certificate.
@@ -953,17 +971,37 @@ async fn hls_master(
     }
 }
 
+/// The rendition name inside a media-playlist filename.
+///
+/// The extension is required here rather than by the router, because matchit
+/// allows only one parameter per path segment. Wire URLs are unchanged; what
+/// moved is where the `.m3u8` is checked. A filename without it is `None`, so
+/// it becomes the same 404 an unknown rendition gets.
+fn rendition_name(file: &str) -> Option<&str> {
+    file.strip_suffix(".m3u8").filter(|name| !name.is_empty())
+}
+
+/// The sequence number inside a segment filename. Same reasoning; a malformed
+/// number is a 404 rather than an extractor rejection, so the two unreachable
+/// cases answer alike.
+fn segment_sequence(file: &str) -> Option<u64> {
+    file.strip_suffix(".ts")?.parse().ok()
+}
+
 async fn hls_media_playlist(
     State(state): State<DisplayHttpState>,
-    Path((ticket, rendition)): Path<(String, String)>,
+    Path((ticket, rendition_file)): Path<(String, String)>,
 ) -> Response<Body> {
+    let Some(rendition) = rendition_name(&rendition_file) else {
+        return public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest);
+    };
     let Some(stream) = hls_authorization(&state, &ticket) else {
         return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
     };
     match state.coordinator.live_hub().hls_media_playlist(
         &stream.orbit,
         &stream.resource,
-        &rendition,
+        rendition,
         "..",
     ) {
         Ok(playlist) => media_response("application/vnd.apple.mpegurl", playlist.into_bytes()),
@@ -973,8 +1011,11 @@ async fn hls_media_playlist(
 
 async fn hls_segment(
     State(state): State<DisplayHttpState>,
-    Path((ticket, sequence)): Path<(String, u64)>,
+    Path((ticket, sequence_file)): Path<(String, String)>,
 ) -> Response<Body> {
+    let Some(sequence) = segment_sequence(&sequence_file) else {
+        return public_refusal(StatusCode::NOT_FOUND, ApiRefusalCode::InvalidRequest);
+    };
     let Some(stream) = hls_authorization(&state, &ticket) else {
         return public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked);
     };
@@ -1351,5 +1392,50 @@ fn media_content_type(media_type: DisplayAssetMediaType) -> &'static str {
         DisplayAssetMediaType::MseManifest => "application/vnd.astrolabe.live+json",
         DisplayAssetMediaType::HlsManifest => "application/vnd.apple.mpegurl",
         DisplayAssetMediaType::DashManifest => "application/dash+xml",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_display_route_is_a_pattern_the_router_accepts() {
+        // `Router::route` validates a pattern by PANICKING on a bad one, and
+        // the panic lands at daemon startup rather than at a request. That is
+        // how `/renditions/{rendition}.m3u8` shipped: matchit forbids a
+        // parameter sharing a segment with a literal, `lait daemon` aborted
+        // before printing anything, and no test had ever built this router.
+        //
+        // Building the real table — not a copied list of paths — is what keeps
+        // this honest as routes are added.
+        let _ = display_routes();
+    }
+
+    #[test]
+    fn the_hls_filenames_keep_their_extensions_and_reject_what_lacks_them() {
+        assert_eq!(rendition_name("hi.m3u8"), Some("hi"));
+        assert_eq!(rendition_name("720p.m3u8"), Some("720p"));
+        assert_eq!(
+            rendition_name("hi"),
+            None,
+            "a request without the extension is not a rendition"
+        );
+        assert_eq!(
+            rendition_name(".m3u8"),
+            None,
+            "and an empty name is not one either"
+        );
+        assert_eq!(rendition_name("hi.ts"), None, "nor is the wrong extension");
+
+        assert_eq!(segment_sequence("42.ts"), Some(42));
+        assert_eq!(segment_sequence("0.ts"), Some(0));
+        assert_eq!(segment_sequence("42"), None);
+        assert_eq!(segment_sequence("42.m3u8"), None);
+        assert_eq!(
+            segment_sequence("-1.ts"),
+            None,
+            "a malformed sequence answers as the unknown one does, not as a rejection"
+        );
     }
 }
