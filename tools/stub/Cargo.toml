@@ -1,0 +1,38 @@
+[package]
+name = "astrolabe-stub"
+version = "0.1.0"
+edition = "2021"
+# MSRV: the workspace figure. See the root manifest for what drives it.
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "The stub launcher: applies a verified staged tree by rename, then starts the client"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "astrolabe-stub"
+path = "src/main.rs"
+
+# The chain test's reference entry binary — the "client" the stub launches
+# in tools/astrolabe/tests/launch.rs. Built, never packaged.
+[[bin]]
+name = "chain-probe"
+path = "src/bin/chain_probe.rs"
+
+[lib]
+name = "astrolabe_stub"
+path = "src/lib.rs"
+
+# Deliberately tiny. The stub survives updates, so every dependency here is a
+# reason it might have to change; nothing async, nothing that talks to a
+# network, nothing that parses anything but its own stage manifest.
+[dependencies]
+blake3 = "1"
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

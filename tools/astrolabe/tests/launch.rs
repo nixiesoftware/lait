@@ -984,3 +984,354 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     drop(signals);
     stop_daemon(identity.path()).await;
 }
+
+// ---------------------------------------------------------------------------
+// The staged-swap chain (CLIENT-65).
+//
+// The seam: a signed feed names a tree artifact, `lait::update::tree` stages
+// it beside the live tree, and the `astrolabe-stub` launcher — a real
+// process, spawned here — proves it and swaps it in by rename before
+// starting the client. Every part is unit-tested where it lives; this is the
+// composition, which is the thing this file exists to assert. The "client"
+// the trees carry is `chain-probe`, a reference binary that announces the
+// version of the tree it actually ran from, so the assertions below are
+// about *which* tree launched, never merely that something did.
+
+/// The stub binary beside the test binary, or a panic — like `sidecar()`,
+/// and unlike the reference receiver: the stub is the thing under test, and
+/// reporting `ok` without it would be a guard trusted while guarding
+/// nothing.
+fn stub_binary() -> PathBuf {
+    built_binary("astrolabe-stub").unwrap_or_else(|| {
+        panic!(
+            "no astrolabe-stub binary beside the test binary, so the staged-swap seam was not \
+             exercised; build the workspace bins (cargo build -p astrolabe-stub) first"
+        )
+    })
+}
+
+/// The reference entry binary the fabricated trees carry.
+fn probe_binary() -> PathBuf {
+    built_binary("chain-probe").unwrap_or_else(|| {
+        panic!(
+            "no chain-probe binary beside the test binary, so the staged-swap seam was not \
+             exercised; build the workspace bins (cargo build -p astrolabe-stub) first"
+        )
+    })
+}
+
+/// The tree's entry name on this platform — the same convention
+/// `lait::update::tree` records and the stub launches.
+fn tree_entry_name() -> &'static str {
+    if cfg!(windows) {
+        "astrolabe.exe"
+    } else {
+        "astrolabe"
+    }
+}
+
+/// The sidecar name the pair contract requires beside the entry.
+fn tree_sidecar_name() -> &'static str {
+    if cfg!(windows) {
+        "lait.exe"
+    } else {
+        "lait"
+    }
+}
+
+/// A target triple whose platform half matches this host, so the staged
+/// entry name and the launched entry name agree.
+fn tree_target() -> &'static str {
+    if cfg!(windows) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    }
+}
+
+/// Seal a payload into the feed's envelope: base64 payload bytes, detached
+/// ed25519 over exactly those bytes. The shape `feed::open_envelope`
+/// verifies; sealed here with `mechanics` directly because the feed's own
+/// test sealer is crate-private — which is right, and this duplication is
+/// itself covered by the resolve call below refusing anything misshapen.
+fn seal_feed_object(payload: &serde_json::Value, seed: &[u8; 32]) -> Vec<u8> {
+    let bytes = serde_json::to_vec(payload).expect("a payload encodes");
+    let signature = mechanics::actor::sign_detached(seed, &bytes);
+    serde_json::json!({
+        "payload": data_encoding::BASE64.encode(&bytes),
+        "signature": data_encoding::BASE64.encode(&signature),
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// A tree artifact as the feed publishes them: gzip'd tar, one root
+/// directory, entry executable at the root.
+fn tree_artifact(version: &str, entry_bytes: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let root = format!("astrolabe-{version}");
+        let mut file = |path: &str, contents: &[u8], mode: u32| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(mode);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{root}/{path}"), contents)
+                .expect("a tree entry appends");
+        };
+        file(tree_entry_name(), entry_bytes, 0o755);
+        // The sidecar half of the pair. Not a real lait — the stager's
+        // contract is that the tree carries one at its root, which is what
+        // makes sidecar::beside and custody_of agree after a swap, and that
+        // shape is what this fixture has to honour.
+        file(tree_sidecar_name(), b"the sidecar half of the pair", 0o755);
+        file("version.txt", version.as_bytes(), 0o644);
+        file("data/asset.bin", b"an asset the tree carries", 0o644);
+        builder
+            .into_inner()
+            .expect("the tar seals")
+            .finish()
+            .expect("the gzip seals");
+    }
+    bytes
+}
+
+/// Seal a whole feed — pointer and manifest — naming one tree artifact, and
+/// resolve it with the matching key, exactly as an installed machine would.
+fn resolve_sealed_tree_release(
+    version: &str,
+    archive: &[u8],
+) -> (
+    std::collections::HashMap<String, Vec<u8>>,
+    lait::update::feed::Resolved,
+) {
+    let seed = [41u8; 32];
+    let pubkey_hex = mechanics::actor::device_from_seed(&seed)
+        .as_str()
+        .to_string();
+    let decoded = data_encoding::HEXLOWER
+        .decode(pubkey_hex.as_bytes())
+        .expect("a device id is lowercase hex of the public key");
+    let pubkey: [u8; 32] = decoded.try_into().expect("a feed key is exactly 32 bytes");
+
+    let url = format!("https://feed.example/releases/{version}/astrolabe-tree.tar.gz");
+    let manifest = serde_json::json!({
+        "version": version,
+        "bundles": { lait::update::tree::TREE_BUNDLE: version },
+        "artifacts": { lait::update::tree::TREE_BUNDLE: { tree_target(): {
+            "url": url,
+            "blake3": blake3_hex(archive),
+            "size": archive.len(),
+        }}},
+    });
+    let pointer = serde_json::json!({
+        "kind": "release",
+        "version": version,
+        "manifest": "https://feed.example/releases/manifest.json",
+    });
+
+    let mut objects = std::collections::HashMap::new();
+    objects.insert(
+        "https://feed.example/channels/test".to_string(),
+        seal_feed_object(&pointer, &seed),
+    );
+    objects.insert(
+        "https://feed.example/releases/manifest.json".to_string(),
+        seal_feed_object(&manifest, &seed),
+    );
+    objects.insert(url, archive.to_vec());
+
+    let resolved = lait::update::feed::resolve_with(
+        |asked| {
+            objects.get(asked).cloned().ok_or_else(|| {
+                lait::update::feed::Failure::Unreachable(format!("no object at {asked}"))
+            })
+        },
+        lait::update::feed::Channel::Test,
+        "https://feed.example",
+        &[pubkey],
+        None,
+    )
+    .expect("the sealed feed resolves against its own key");
+    (objects, resolved)
+}
+
+/// blake3 as the feed manifests spell it: lowercase hex.
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+/// Run the stub as a real process against `root`, with the probe announcing
+/// into `root`, and wait for it to exit.
+///
+/// The stub holds its claim for the lifetime of the client it starts, so
+/// waiting on the stub waits on the whole tree of processes — which is also
+/// what keeps the next phase from racing a still-exiting client over the
+/// directory it is about to rename.
+fn run_stub(root: &Path) {
+    let status = Command::new(root.join(if cfg!(windows) {
+        "astrolabe-stub.exe"
+    } else {
+        "astrolabe-stub"
+    }))
+    .env("CHAIN_PROBE_ANNOUNCE", root)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status()
+    .expect("the stub spawns");
+    assert!(
+        status.success(),
+        "the stub exited with a failure, and the stub must launch even when it refuses to apply"
+    );
+}
+
+/// Wait for the probe's announcement and hand back the version it saw.
+fn wait_for_announcement(root: &Path) -> String {
+    let path = root.join("launched.txt");
+    for _ in 0..150 {
+        if let Ok(version) = std::fs::read_to_string(&path) {
+            std::fs::remove_file(&path).expect("the announcement is consumed");
+            return version;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("no tree announced itself within the budget");
+}
+
+/// The chain, end to end: signed pointer → manifest → verified tree
+/// artifact → staged tree → a real stub process swaps by rename → the
+/// launched entry announces the *new* tree — with the deferred, tampered,
+/// and rollback arms asserted on the same install root.
+#[test]
+fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
+    let stub = stub_binary();
+    let probe = probe_binary();
+    let probe_bytes = std::fs::read(&probe).expect("the probe binary's bytes");
+
+    let scratch = tempfile::tempdir().expect("an install root");
+    let root = scratch.path();
+    std::fs::copy(
+        &stub,
+        root.join(stub.file_name().expect("the stub has a name")),
+    )
+    .expect("the stub lands in the install root");
+
+    // The live tree, version 0.0.1 — the install as the person has it.
+    let current = root.join("current");
+    std::fs::create_dir(&current).expect("the live tree");
+    std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
+    std::fs::write(current.join("version.txt"), "0.0.1").expect("the live version");
+
+    // Release 0.0.2, sealed into a feed and staged exactly as a daemon
+    // would: resolve against the pinned key, verify, extract, record.
+    let archive = tree_artifact("0.0.2", &probe_bytes);
+    let (objects, resolved) = resolve_sealed_tree_release("0.0.2", &archive);
+    let staged = lait::update::tree::stage_tree_with(
+        |asked, _limit| {
+            objects.get(asked).cloned().ok_or_else(|| {
+                lait::update::feed::Failure::Unreachable(format!("no object at {asked}"))
+            })
+        },
+        &resolved,
+        tree_target(),
+        root,
+    )
+    .expect("the 0.0.2 tree stages");
+    assert_eq!(
+        staged.version, "0.0.2",
+        "the stage carries the release version"
+    );
+
+    // A live client holds the installation: the apply defers, is said, and
+    // the person still gets their client — the old one.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("instance.lock"))
+        .expect("the instance lock file");
+    fs2::FileExt::try_lock_exclusive(&lock).expect("the test plays the live client");
+    run_stub(root);
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.1",
+        "an apply ran under a live client, or the wrong tree launched"
+    );
+    assert!(
+        root.join("staged.manifest.json").is_file(),
+        "a deferred stage was consumed"
+    );
+    fs2::FileExt::unlock(&lock).expect("the live client exits");
+
+    // The lock is free: this launch applies, and the new tree is what runs.
+    run_stub(root);
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.2",
+        "the staged release did not become the running client"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("version.txt")).expect("the live version"),
+        "0.0.2",
+        "the live tree is not the staged release"
+    );
+    assert!(
+        !root.join("staged.manifest.json").exists(),
+        "a consumed stage manifest was left behind"
+    );
+    // The pair, after the swap: astrolabe and lait as flat siblings, which
+    // is what sidecar::beside and custody_of both mean by "beside". A swap
+    // that delivered a tree without it would install a client that cannot
+    // find its daemon.
+    assert!(
+        current.join(tree_sidecar_name()).is_file(),
+        "the swapped-in tree does not carry its sidecar beside the entry"
+    );
+
+    // The previous tree is kept, and kept *bootable*: it runs and announces
+    // itself, which is what makes it a rollback target rather than a copy.
+    let previous_entry = root.join("previous").join(tree_entry_name());
+    let status = Command::new(&previous_entry)
+        .env("CHAIN_PROBE_ANNOUNCE", root)
+        .status()
+        .expect("the previous tree's entry spawns");
+    assert!(status.success(), "the previous tree is not bootable");
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.1",
+        "the kept previous tree is not the prior release"
+    );
+
+    // A tampered stage: release 0.0.3 stages cleanly, then a byte changes on
+    // disk. The stub must refuse by name and leave the live tree untouched.
+    let archive = tree_artifact("0.0.3", &probe_bytes);
+    let (objects, resolved) = resolve_sealed_tree_release("0.0.3", &archive);
+    lait::update::tree::stage_tree_with(
+        |asked, _limit| {
+            objects.get(asked).cloned().ok_or_else(|| {
+                lait::update::feed::Failure::Unreachable(format!("no object at {asked}"))
+            })
+        },
+        &resolved,
+        tree_target(),
+        root,
+    )
+    .expect("the 0.0.3 tree stages");
+    std::fs::write(root.join("staged").join("version.txt"), "0.0.3-tampered").expect("the tamper");
+    run_stub(root);
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.2",
+        "a tampered stage was applied, or the launch did not survive the refusal"
+    );
+    let log = std::fs::read_to_string(root.join("stub.log")).expect("the stub said its refusals");
+    assert!(
+        log.contains("verification failed"),
+        "the tamper refusal must name verification, not fail vaguely: {log}"
+    );
+}

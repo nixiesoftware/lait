@@ -21,6 +21,7 @@ members = [
     "tools/astrolabe",
     "tools/astrolabe-ios",
     "tools/feed",
+    "tools/stub",
 ]
 # Two packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.
@@ -292,6 +293,7 @@ libc = "0.2"
 libc = "0.2"
 
 [dev-dependencies]
+tempfile = "3"
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
 replica = { path = "crates/replica", features = ["fault-injection"] }
 issues-app = { package = "lait-issues-app", path = "products/issues-app", features = ["fault-injection"] }

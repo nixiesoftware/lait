@@ -138,6 +138,17 @@ slow-timeout = { period = "120s", terminate-after = 5 }
 filter = '(binary_id(lait::it) & test(orbital_ceremonies::))'
 slow-timeout = { period = "120s", terminate-after = 5 }
 
+# The client-to-process seam spawns real daemons, heads, receivers, and — as
+# of CLIENT-65 — the stub launcher. Measured on a warm Apple-silicon dev box
+# (dev profile): the head/credential chain ~12 s of scheduled boundary plus
+# hundreds of 100 ms polls; the staged-swap chain 0.8 s. ci.yml now runs this
+# binary on macOS and Windows for the first time, and 2-core Windows runners
+# historically land 3-5x the dev-box figure, which crowds the default 90 s
+# ceiling for the head chain.
+[[profile.default.overrides]]
+filter = 'binary_id(astrolabe::launch)'
+slow-timeout = { period = "120s", terminate-after = 3 }
+
 [[profile.default.overrides]]
 filter = '''
     (binary_id(lait::it) & test(orbital_join_iroh::))

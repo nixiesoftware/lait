@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1929
-pr-platform    1503
-nightly        1957
+pr             1953
+pr-platform    1527
+nightly        1981
 mutants        98
 
 [gates]
@@ -138,7 +138,22 @@ astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
 astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
+astrolabe-stub tests::a_claim_is_exclusive_and_a_second_launch_defers_rather_than_applying
+astrolabe-stub tests::a_live_tree_that_cannot_start_falls_back_to_the_previous_tree
+astrolabe-stub tests::a_manifest_that_does_not_carry_its_own_entry_is_refused
+astrolabe-stub tests::a_missing_live_tree_with_no_stage_restores_the_previous_tree
+astrolabe-stub tests::a_same_length_tamper_is_caught_by_the_digest_rather_than_the_size
+astrolabe-stub tests::a_stage_being_written_right_now_is_left_alone
+astrolabe-stub tests::a_stage_manifest_without_its_tree_is_cleared_rather_than_refused_forever
+astrolabe-stub tests::a_swap_that_cannot_complete_restores_the_live_tree_and_keeps_the_rollback
+astrolabe-stub tests::a_tampered_stage_is_refused_by_name_and_the_live_tree_is_untouched
+astrolabe-stub tests::a_verified_stage_is_applied_and_the_previous_tree_is_kept
+astrolabe-stub tests::an_extra_file_in_the_staged_tree_is_a_verification_failure
+astrolabe-stub tests::an_interrupted_swap_is_finished_at_the_next_launch
+astrolabe-stub tests::nothing_staged_is_the_ordinary_launch_and_touches_nothing
+astrolabe-stub tests::stale_scratch_is_swept_when_the_installation_is_claimed
 astrolabe::launch a_head_comes_up_and_mints_a_credential_worth_exactly_one_use
+astrolabe::launch a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
 astrolabe::packaging the_client_and_its_sidecar_agree_about_the_layout
 astrolabe::packaging the_dmg_refuses_a_bundle_missing_either_half_of_the_pair
@@ -622,6 +637,15 @@ lait update::tests::update_bin_path_is_a_real_entry_in_the_published_archives
 lait update::tests::update_bin_path_matches_the_published_archive_layout_for_every_target
 lait update::tests::update_bin_path_never_doubles_the_exe_suffix
 lait update::tests::updater_version_is_clean_semver
+lait update::tree::tests::a_release_without_a_tree_artifact_for_this_target_says_so
+lait update::tree::tests::a_signed_tree_stages_with_a_manifest_the_stub_shape_can_read
+lait update::tree::tests::a_tampered_tree_artifact_fails_the_digest_and_stages_nothing
+lait update::tree::tests::a_tree_missing_half_the_pair_is_refused_before_it_is_ever_staged
+lait update::tree::tests::an_archive_addressing_outside_its_root_is_refused
+lait update::tree::tests::an_artifact_longer_than_the_manifest_says_is_refused_by_size
+lait update::tree::tests::restaging_replaces_the_prior_stage_whole
+lait update::tree::tests::the_entry_name_is_computable_for_every_target_from_any_host
+lait update::tree::tests::the_stage_layout_names_are_the_contract_the_stub_reads
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
 lait-issues contract::ring_digest_tests::a_ring_digest_survives_its_own_round_trip
 lait-issues contract::ring_digest_tests::an_unknown_plane_fails_the_decode
