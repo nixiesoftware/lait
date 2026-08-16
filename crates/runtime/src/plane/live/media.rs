@@ -2113,8 +2113,9 @@ impl Inbox {
         self.events.subscribe()
     }
 
-    /// Subscribe without missing sessions that completed setup before this
-    /// consumer existed.
+    /// Subscribe without missing sessions that registered before this consumer
+    /// existed. A registered session may still be waiting for the peer's Setup;
+    /// callers can inspect [`Session::is_ready`] before sending controls.
     ///
     /// Registration and this snapshot share one short lock. A session is
     /// therefore either in `active` or delivered as a later `Connected` event;
@@ -3953,6 +3954,13 @@ mod tests {
                         accept_media_control(dialer.as_ref()).await,
                         Control::Setup(setup())
                     );
+                    let connected = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                        .await
+                        .expect("connected event in time")
+                        .expect("connected event");
+                    assert!(matches!(connected.body, EventBody::Connected));
+                    assert!(!connected.session.is_ready());
+
                     send_control(dialer.as_ref(), &Control::Setup(setup()))
                         .await
                         .expect("peer setup");
