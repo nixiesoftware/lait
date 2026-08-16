@@ -1246,6 +1246,10 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
         "the stage carries the release version"
     );
 
+    // Recorded before anything moves, so the path-stability assertion after
+    // the swap compares against what the person actually had.
+    let entry_before_swap = current.join(tree_entry_name());
+
     // A live client holds the installation: the apply defers, is said, and
     // the person still gets their client — the old one.
     let lock = std::fs::OpenOptions::new()
@@ -1291,6 +1295,18 @@ fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
     assert!(
         current.join(tree_sidecar_name()).is_file(),
         "the swapped-in tree does not carry its sidecar beside the entry"
+    );
+    // The entry's path is the same string it was before the update. This is
+    // the half of the macOS identity rule a test can hold: TCC grants key on
+    // signing identity, bundle id and *path*, so a layout that versioned the
+    // live directory — Squirrel's `app-1.0.0/`, the obvious alternative to
+    // this one — would silently drop every permission the person had granted
+    // on the first update. The stable `current/` name is what prevents it,
+    // and an assertion is what keeps it stable.
+    assert_eq!(
+        current.join(tree_entry_name()),
+        entry_before_swap,
+        "the update moved the client's path, which is how macOS loses TCC grants"
     );
 
     // The previous tree is kept, and kept *bootable*: it runs and announces
