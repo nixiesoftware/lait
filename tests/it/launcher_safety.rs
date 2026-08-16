@@ -89,6 +89,10 @@ fn serve(home: &std::path::Path) -> std::process::Child {
         .env("LAIT_CONFIG_ROOT", config_root(home))
         .env("LAIT_IDLE_SECS", "0")
         .env("LAIT_NETWORK", "isolated")
+        // A test daemon never hosts the display coordinator: its fixed
+        // machine-scoped port would make parallel test daemons — and any real
+        // daemon on this machine — mutually exclusive.
+        .env("LAIT_DISPLAY", "off")
         .args(["--json", "--port", "0"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -192,6 +196,10 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
     let exe = std::path::PathBuf::from(bin());
     let home = tmp_home("live");
     let daemon_home = home.join("daemon");
+    // Inherited by both daemons this test spawns — a test daemon never hosts
+    // the display coordinator (see `serve` above). Process-wide is safe here:
+    // nextest runs each test in its own process, and every test wants it off.
+    std::env::set_var("LAIT_DISPLAY", "off");
     let mut child = lait::daemon_spawn::spawn(&exe, None, Some(&home)).expect("spawn live daemon");
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     runtime.block_on(async {
@@ -270,6 +278,7 @@ fn an_unresolvable_orbit_is_refused_in_one_voice() {
             .env("LAIT_HOME", &home)
             .env("LAIT_CONFIG_ROOT", config_root(&home))
             .env("LAIT_IDLE_SECS", "0")
+            .env("LAIT_DISPLAY", "off")
             .args(args)
             .output()
             .expect("spawn lait")
@@ -425,6 +434,7 @@ fn takes_over_fake_daemon(tag: &str, reply: &'static [u8]) -> (String, Duration)
     let mut child = Command::new(bin())
         .env("LAIT_HOME", &home)
         .env("LAIT_CONFIG_ROOT", config_root(&home))
+        .env("LAIT_DISPLAY", "off")
         .args(["--json", "--port", "0"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

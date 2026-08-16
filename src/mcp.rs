@@ -568,9 +568,9 @@ mod scope_tests {
             home.clone(),
             crate::config::Selection::default(),
             None,
-            None,
+            Some("issues".into()),
         )
-        .expect("sole World pin");
+        .expect("issues is hosted");
         let own = OrbitAddress::for_store(&home, space.clone());
         let other = OrbitAddress::for_store(&sibling, space);
 
@@ -584,16 +584,16 @@ mod scope_tests {
             PathBuf::from("/tmp/lait-mcp-tools"),
             crate::config::Selection::default(),
             None,
-            None,
+            Some("issues".into()),
         )
-        .expect("sole World pin");
+        .expect("issues is hosted");
         let names: Vec<_> = mcp
             .tool_router
             .list_all()
             .into_iter()
             .map(|tool| tool.name.into_owned())
             .collect();
-        let declared = declared_tool_names(None).expect("sole World pin");
+        let declared = declared_tool_names(Some("issues")).expect("issues is hosted");
         for expected in &declared {
             assert!(names.iter().any(|name| name == expected), "{expected}");
         }
@@ -616,19 +616,18 @@ mod scope_tests {
 
     #[test]
     fn an_unknown_world_pin_is_refused_rather_than_served_empty() {
+        // "signage" stopped being the example the day it became hosted; the
+        // mount here must stay one no build carries.
         let error = match LaitMcp::from_pins(
             PathBuf::from("/tmp/lait-mcp-world"),
             crate::config::Selection::default(),
             None,
-            Some("signage".into()),
+            Some("atlas".into()),
         ) {
             Ok(_) => panic!("an unhosted World was mounted"),
             Err(error) => error,
         };
-        assert!(
-            error.to_string().contains("LAIT_WORLD=signage"),
-            "{error:#}"
-        );
+        assert!(error.to_string().contains("LAIT_WORLD=atlas"), "{error:#}");
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub use compiler::{CompiledProgram, PlaybackAlignment, ProgramCompiler};
 pub use coordinator::DisplayCoordinator;
 pub use http::{display_http_router, serve_display_https, DisplayHttpState};
 pub use pairing::{
-    AuthorizedDevice, DisplayAuthorizationError, DisplayPairingService, PendingPairingView,
+    AuthorizationRefusal, AuthorizedDevice, DisplayPairingService, PendingPairingView,
 };
 pub use runtime::DisplayRuntime;
 pub use store::{

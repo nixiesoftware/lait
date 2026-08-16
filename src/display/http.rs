@@ -45,9 +45,7 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tower_http::cors::{Any, CorsLayer};
 
-use super::{
-    DisplayAuthorizationError, DisplayCoordinator, DisplayPairingService, DisplayTlsIdentity,
-};
+use super::{AuthorizationRefusal, DisplayCoordinator, DisplayPairingService, DisplayTlsIdentity};
 
 #[derive(Clone)]
 pub struct DisplayHttpState {
@@ -774,7 +772,7 @@ impl AuthorizedRequest {
         &self,
         state: &DisplayHttpState,
         now_unix_ms: u64,
-    ) -> std::result::Result<super::AuthorizedDevice, DisplayAuthorizationError> {
+    ) -> std::result::Result<super::AuthorizedDevice, AuthorizationRefusal> {
         state
             .pairing
             .authorize(&self.context(), &self.tag, now_unix_ms)
@@ -812,25 +810,21 @@ fn auth_refusal(code: ApiRefusalCode) -> Response<Body> {
     public_refusal(StatusCode::UNAUTHORIZED, code)
 }
 
-fn authorization_refusal(error: DisplayAuthorizationError) -> Response<Body> {
+fn authorization_refusal(error: AuthorizationRefusal) -> Response<Body> {
     match error {
-        DisplayAuthorizationError::NotEnrolled => auth_refusal(ApiRefusalCode::NotEnrolled),
-        DisplayAuthorizationError::Revoked => {
+        AuthorizationRefusal::NotEnrolled => auth_refusal(ApiRefusalCode::NotEnrolled),
+        AuthorizationRefusal::Revoked => {
             public_refusal(StatusCode::FORBIDDEN, ApiRefusalCode::Revoked)
         }
-        DisplayAuthorizationError::ChallengeUnavailable => {
+        AuthorizationRefusal::ChallengeUnavailable => {
             public_refusal(StatusCode::CONFLICT, ApiRefusalCode::ChallengeConsumed)
         }
-        DisplayAuthorizationError::ChallengeExpired => {
-            auth_refusal(ApiRefusalCode::ChallengeExpired)
-        }
-        DisplayAuthorizationError::ChallengeConsumed => {
+        AuthorizationRefusal::ChallengeExpired => auth_refusal(ApiRefusalCode::ChallengeExpired),
+        AuthorizationRefusal::ChallengeConsumed => {
             public_refusal(StatusCode::CONFLICT, ApiRefusalCode::ChallengeConsumed)
         }
-        DisplayAuthorizationError::Authentication => {
-            auth_refusal(ApiRefusalCode::AuthenticationFailed)
-        }
-        DisplayAuthorizationError::Internal(error) => {
+        AuthorizationRefusal::Authentication => auth_refusal(ApiRefusalCode::AuthenticationFailed),
+        AuthorizationRefusal::Internal(error) => {
             tracing::error!(%error, "display authorization failed internally");
             public_refusal(
                 StatusCode::SERVICE_UNAVAILABLE,

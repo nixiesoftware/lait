@@ -94,9 +94,13 @@ fn stop_daemon_at(home: &Path, child: &mut lait::daemon_spawn::DaemonChild) {
 }
 
 fn spawn_daemon(home: &Path) -> lait::daemon_spawn::DaemonChild {
-    // `--home` is the child's identity. Do not pin `LAIT_*` on this
-    // process: `cargo test` shares the env across threads, and a sibling
-    // Head would inherit a home it did not ask for.
+    // `--home` is the child's identity. Do not pin `LAIT_*` selection vars on
+    // this process: `cargo test` shares the env across threads, and a sibling
+    // Head would inherit a home it did not ask for. The display opt-out is the
+    // one exception — every test daemon wants it, so a sibling inheriting it
+    // is correct, and the child must inherit it or die racing the machine's
+    // real daemon for the coordinator's fixed port.
+    std::env::set_var("LAIT_DISPLAY", "off");
     let exe = PathBuf::from(bin());
     let log_path = home.join("daemon.log");
     let log = std::fs::File::create(&log_path).expect("daemon log");

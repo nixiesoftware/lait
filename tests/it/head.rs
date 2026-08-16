@@ -43,7 +43,13 @@ fn with_env(command: &mut Command, config: &Path, home: Option<&Path>) {
         // A daemon auto-started for a test otherwise lingers for the 30-minute
         // idle window, and a client that connects while one is tearing down can
         // park. Tests must not race that.
-        .env("LAIT_IDLE_SECS", "0");
+        .env("LAIT_IDLE_SECS", "0")
+        // A test daemon never hosts the display coordinator: it binds one
+        // well-known machine-scoped port, and this suite runs many daemons in
+        // parallel — hosting would make them mutually exclusive with each
+        // other and with any real daemon on the machine. The receiver suite
+        // (tools/astrolabe/tests/launch.rs) is the one place that hosts.
+        .env("LAIT_DISPLAY", "off");
     if let Some(home) = home {
         command.env("LAIT_HOME", home);
     }
@@ -289,6 +295,10 @@ impl Mcp {
     pub fn start(config: &Path, home: &Path, agent: Option<&str>) -> Mcp {
         let mut command = Command::new(bin());
         with_env(&mut command, config, Some(home));
+        // The editor binding authors the World pin — `lait mcp` refuses an
+        // ambiguous mount now that the build hosts more than one World, and
+        // this harness models the binding, so it pins the way a real one does.
+        command.env("LAIT_WORLD", "issues");
         if let Some(agent) = agent {
             command.env("LAIT_AGENT", agent);
         }

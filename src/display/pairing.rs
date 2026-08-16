@@ -41,7 +41,7 @@ pub struct AuthorizedDevice {
 }
 
 #[derive(Debug)]
-pub enum DisplayAuthorizationError {
+pub enum AuthorizationRefusal {
     NotEnrolled,
     Revoked,
     ChallengeUnavailable,
@@ -51,7 +51,7 @@ pub enum DisplayAuthorizationError {
     Internal(anyhow::Error),
 }
 
-impl std::fmt::Display for DisplayAuthorizationError {
+impl std::fmt::Display for AuthorizationRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotEnrolled => formatter.write_str("display device is not enrolled"),
@@ -69,7 +69,7 @@ impl std::fmt::Display for DisplayAuthorizationError {
     }
 }
 
-impl std::error::Error for DisplayAuthorizationError {}
+impl std::error::Error for AuthorizationRefusal {}
 
 pub struct DisplayPairingService {
     store: Arc<CoordinatorStore>,
@@ -351,26 +351,26 @@ impl DisplayPairingService {
         &self,
         device: &DisplayDeviceId,
         now_unix_ms: u64,
-    ) -> Result<ChallengeResponse, DisplayAuthorizationError> {
+    ) -> Result<ChallengeResponse, AuthorizationRefusal> {
         let _enrolled = self
             .store
             .device(device)
-            .map_err(DisplayAuthorizationError::Internal)?
-            .ok_or(DisplayAuthorizationError::NotEnrolled)?;
+            .map_err(AuthorizationRefusal::Internal)?
+            .ok_or(AuthorizationRefusal::NotEnrolled)?;
         // A revoked installation may still obtain a challenge. The following
         // authenticated request proves possession and receives the typed
         // Revoked refusal; exposing revocation from this public device-id-only
         // route would both leak policy and strand receivers after restart.
-        let challenge = random_challenge().map_err(DisplayAuthorizationError::Internal)?;
+        let challenge = random_challenge().map_err(AuthorizationRefusal::Internal)?;
         self.lock()
-            .map_err(DisplayAuthorizationError::Internal)?
+            .map_err(AuthorizationRefusal::Internal)?
             .challenges
             .insert(
                 device.as_str().to_string(),
                 ChallengeLease {
                     challenge: challenge.clone(),
                     expires_at_unix_ms: challenge_expiry(now_unix_ms)
-                        .map_err(DisplayAuthorizationError::Internal)?,
+                        .map_err(AuthorizationRefusal::Internal)?,
                 },
             );
         Ok(ChallengeResponse {
@@ -387,37 +387,37 @@ impl DisplayPairingService {
         context: &RequestContext<'_>,
         tag: &AuthenticationTag,
         now_unix_ms: u64,
-    ) -> Result<AuthorizedDevice, DisplayAuthorizationError> {
+    ) -> Result<AuthorizedDevice, AuthorizationRefusal> {
         let record = self
             .store
             .device(context.device)
-            .map_err(DisplayAuthorizationError::Internal)?
-            .ok_or(DisplayAuthorizationError::NotEnrolled)?;
+            .map_err(AuthorizationRefusal::Internal)?
+            .ok_or(AuthorizationRefusal::NotEnrolled)?;
         let revoked = record.revoked_at_unix_ms.is_some();
-        let mut state = self.lock().map_err(DisplayAuthorizationError::Internal)?;
+        let mut state = self.lock().map_err(AuthorizationRefusal::Internal)?;
         let lease = state
             .challenges
             .get(context.device.as_str())
-            .ok_or(DisplayAuthorizationError::ChallengeUnavailable)?;
+            .ok_or(AuthorizationRefusal::ChallengeUnavailable)?;
         if lease.expires_at_unix_ms <= now_unix_ms {
-            return Err(DisplayAuthorizationError::ChallengeExpired);
+            return Err(AuthorizationRefusal::ChallengeExpired);
         }
         if lease.challenge != *context.challenge {
-            return Err(DisplayAuthorizationError::ChallengeConsumed);
+            return Err(AuthorizationRefusal::ChallengeConsumed);
         }
         verify_request(&record.proof_key, context, tag)
-            .map_err(|_| DisplayAuthorizationError::Authentication)?;
+            .map_err(|_| AuthorizationRefusal::Authentication)?;
         if revoked {
             state.challenges.remove(context.device.as_str());
-            return Err(DisplayAuthorizationError::Revoked);
+            return Err(AuthorizationRefusal::Revoked);
         }
-        let next_challenge = random_challenge().map_err(DisplayAuthorizationError::Internal)?;
+        let next_challenge = random_challenge().map_err(AuthorizationRefusal::Internal)?;
         state.challenges.insert(
             context.device.as_str().to_string(),
             ChallengeLease {
                 challenge: next_challenge.clone(),
                 expires_at_unix_ms: challenge_expiry(now_unix_ms)
-                    .map_err(DisplayAuthorizationError::Internal)?,
+                    .map_err(AuthorizationRefusal::Internal)?,
             },
         );
         Ok(AuthorizedDevice {
@@ -679,7 +679,7 @@ mod tests {
         service.authorize(&context, &tag, 1_005).unwrap();
         assert!(matches!(
             service.authorize(&context, &tag, 1_006),
-            Err(DisplayAuthorizationError::ChallengeConsumed)
+            Err(AuthorizationRefusal::ChallengeConsumed)
         ));
         store.revoke_device(&device, 1_007).unwrap();
         let revoked_challenge = service.challenge(&device, 1_008).unwrap().challenge;
@@ -690,7 +690,7 @@ mod tests {
         let revoked_tag = authenticate_request(&proof_key, &revoked_context).unwrap();
         assert!(matches!(
             service.authorize(&revoked_context, &revoked_tag, 1_009),
-            Err(DisplayAuthorizationError::Revoked)
+            Err(AuthorizationRefusal::Revoked)
         ));
         let _ = std::fs::remove_dir_all(root);
     }

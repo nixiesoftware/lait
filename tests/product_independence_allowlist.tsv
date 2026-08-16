@@ -22,11 +22,14 @@
 src/composition.rs	CatalogScope	D
 src/composition.rs	InitialProject	D
 src/composition.rs	IssuesCallHandler	D
+src/composition.rs	SignageCallHandler	D
 src/composition.rs	bootstrap_tracker	D
 src/composition.rs	for_space	D
+src/composition.rs	founder_capabilities	D
 src/composition.rs	founder_policy	D
 src/composition.rs	implementation_id	D
 src/composition.rs	issues	D
+src/composition.rs	new	D
 src/composition.rs	observation	D
 src/composition.rs	package	D
 src/composition.rs	ring_state	D
