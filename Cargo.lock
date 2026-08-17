@@ -3967,6 +3967,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
+ "world-interface",
 ]
 
 [[package]]
@@ -9071,6 +9072,7 @@ dependencies = [
  "replica",
  "runtime",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
