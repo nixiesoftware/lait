@@ -168,6 +168,48 @@ void main() {
     );
   });
 
+  testWidgets('a second unlock path is offered once, and only where it is '
+      'missing', (tester) async {
+    tester.view.physicalSize = const Size(900, 760);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: covalenceTheme(const ThemeConfig()),
+        home: ClientScope(
+          client: Client.canned(
+            _viewWithCustody(const DisplayIdentifierCustodyRow(
+              slots: ['recovery-key'],
+              portable: true,
+            )),
+          ),
+          child: const Scaffold(body: DisplaysPage()),
+        ),
+      ),
+    );
+    expect(find.text('Add a passphrase'), findsOneWidget);
+
+    // Already held: the store refuses a second passphrase slot, and a control
+    // that would be refused is one the surface should not draw.
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: covalenceTheme(const ThemeConfig()),
+        home: ClientScope(
+          client: Client.canned(
+            _viewWithCustody(const DisplayIdentifierCustodyRow(
+              slots: ['recovery-key', 'passphrase'],
+              portable: true,
+            )),
+          ),
+          child: const Scaffold(body: DisplaysPage()),
+        ),
+      ),
+    );
+    expect(find.text('Add a passphrase'), findsNothing);
+  });
+
   testWidgets('a portable coordinator states the cost without the warning',
       (tester) async {
     tester.view.physicalSize = const Size(900, 760);

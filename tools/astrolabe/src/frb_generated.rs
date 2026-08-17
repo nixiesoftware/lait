@@ -440,9 +440,15 @@ impl SseDecode for crate::api::ActionRequest {
                 return crate::api::ActionRequest::DisplayDeviceRevoke { device: var_device };
             }
             29 => {
-                return crate::api::ActionRequest::EnterPresentation;
+                let mut var_passphrase = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::DisplayIdentifierAdmitPassphrase {
+                    passphrase: var_passphrase,
+                };
             }
             30 => {
+                return crate::api::ActionRequest::EnterPresentation;
+            }
+            31 => {
                 let mut var_orbit = <String>::sse_decode(deserializer);
                 let mut var_world = <String>::sse_decode(deserializer);
                 let mut var_surface = <String>::sse_decode(deserializer);
@@ -456,10 +462,10 @@ impl SseDecode for crate::api::ActionRequest {
                     title: var_title,
                 };
             }
-            31 => {
+            32 => {
                 return crate::api::ActionRequest::PresentRefresh;
             }
-            32 => {
+            33 => {
                 return crate::api::ActionRequest::LeavePresentation;
             }
             _ => {
@@ -1947,7 +1953,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             crate::api::ActionRequest::DisplayDeviceRevoke { device } => {
                 [29.into_dart(), device.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::ActionRequest::EnterPresentation => [29.into_dart()].into_dart(),
+            crate::api::ActionRequest::DisplayIdentifierAdmitPassphrase { passphrase } => {
+                [29.into_dart(), passphrase.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ActionRequest::EnterPresentation => [30.into_dart()].into_dart(),
             crate::api::ActionRequest::PresentHere {
                 orbit,
                 world,
@@ -1955,7 +1964,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
                 input,
                 title,
             } => [
-                30.into_dart(),
+                31.into_dart(),
                 orbit.into_into_dart().into_dart(),
                 world.into_into_dart().into_dart(),
                 surface.into_into_dart().into_dart(),
@@ -1963,8 +1972,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
                 title.into_into_dart().into_dart(),
             ]
             .into_dart(),
-            crate::api::ActionRequest::PresentRefresh => [31.into_dart()].into_dart(),
-            crate::api::ActionRequest::LeavePresentation => [32.into_dart()].into_dart(),
+            crate::api::ActionRequest::PresentRefresh => [32.into_dart()].into_dart(),
+            crate::api::ActionRequest::LeavePresentation => [33.into_dart()].into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -2988,8 +2997,12 @@ impl SseEncode for crate::api::ActionRequest {
                 <i32>::sse_encode(29, serializer);
                 <String>::sse_encode(device, serializer);
             }
-            crate::api::ActionRequest::EnterPresentation => {
+            crate::api::ActionRequest::DisplayIdentifierAdmitPassphrase { passphrase } => {
                 <i32>::sse_encode(29, serializer);
+                <String>::sse_encode(passphrase, serializer);
+            }
+            crate::api::ActionRequest::EnterPresentation => {
+                <i32>::sse_encode(30, serializer);
             }
             crate::api::ActionRequest::PresentHere {
                 orbit,
@@ -2998,7 +3011,7 @@ impl SseEncode for crate::api::ActionRequest {
                 input,
                 title,
             } => {
-                <i32>::sse_encode(30, serializer);
+                <i32>::sse_encode(31, serializer);
                 <String>::sse_encode(orbit, serializer);
                 <String>::sse_encode(world, serializer);
                 <String>::sse_encode(surface, serializer);
@@ -3006,10 +3019,10 @@ impl SseEncode for crate::api::ActionRequest {
                 <String>::sse_encode(title, serializer);
             }
             crate::api::ActionRequest::PresentRefresh => {
-                <i32>::sse_encode(31, serializer);
+                <i32>::sse_encode(32, serializer);
             }
             crate::api::ActionRequest::LeavePresentation => {
-                <i32>::sse_encode(32, serializer);
+                <i32>::sse_encode(33, serializer);
             }
             _ => {
                 unimplemented!("");

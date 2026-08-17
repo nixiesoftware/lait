@@ -31,6 +31,14 @@ use super::{AssignmentRecord, AssignmentSync, Custodian, SourceGrant};
 /// one comfortable presentation window.
 const MEMBER_HORIZON_MS: u32 = 300_000;
 
+/// The shortest passphrase that may hold the identifier key.
+///
+/// A floor rather than a composition rule. The device slot is bound to this
+/// machine and cannot be attacked from elsewhere; a passphrase slot is portable
+/// by design, which is the point of it and also the reason a memorable-but-short
+/// one would quietly become the weakest way in.
+const MIN_PASSPHRASE_CHARS: usize = 12;
+
 /// Project a rendered surface for a member screen.
 ///
 /// Assessment is carried through rather than folded into the items: an empty
@@ -154,6 +162,15 @@ pub struct DisplayRuntime {
     pub coordinator: Arc<DisplayCoordinator>,
     pub pairing: Arc<DisplayPairingService>,
     pub tls: Arc<DisplayTlsIdentity>,
+    /// How this daemon opens its own identifier envelope.
+    ///
+    /// Held here rather than in the store, which is the boundary the store's
+    /// API draws: a caller supplies an unlock at each site that spends one, so
+    /// reading policy can never acquire key material. The daemon already holds
+    /// this seed — it is the identity it runs as — so keeping it beside the
+    /// display services adds no reach, and it is what lets an operator admit a
+    /// second unlock path without handing one in from outside the process.
+    custodian: Custodian,
     router: Arc<crate::orbits::Router>,
     registry: WorldClientRegistry,
 }
@@ -172,10 +189,11 @@ impl DisplayRuntime {
         let mut identifier_key = [0u8; 32];
         getrandom::fill(&mut identifier_key).context("mint display identifier key")?;
         let store_root = root.join("state");
+        let custodian = custodian(device_seed);
         let store = Arc::new(CoordinatorStore::open(
             &store_root,
             identifier_key,
-            &custodian(device_seed),
+            &custodian,
         )?);
         let tls = Arc::new(DisplayTlsIdentity::load_or_create(
             &root.join("tls"),
@@ -199,6 +217,7 @@ impl DisplayRuntime {
             coordinator,
             pairing,
             tls,
+            custodian,
             router,
             registry,
         })
@@ -306,6 +325,11 @@ impl DisplayRuntime {
                     message: Some(format!("revoked display device {device}")),
                 })
             }
+            Request::DisplayIdentifierAdmitPassphrase { passphrase } => self
+                .admit_identifier_passphrase(passphrase)
+                .map(|()| Response::Ok {
+                    message: Some("the identifier key now opens with this passphrase".into()),
+                }),
             _ => return None,
         };
         Some(result.unwrap_or_else(|error| Response::err(format!("{error:#}"))))
@@ -367,6 +391,32 @@ impl DisplayRuntime {
         };
         let projection = self.coordinator.render_for_member(&want).await?;
         Ok(present_view(world, surface, projection))
+    }
+
+    /// Add a passphrase slot to the identifier envelope.
+    ///
+    /// The salt is fresh per slot, and the cost parameters are the module's
+    /// defaults rather than this call's opinion — they are stored in the slot,
+    /// so a package written today still opens after the defaults are raised.
+    fn admit_identifier_passphrase(&self, passphrase: &str) -> Result<()> {
+        // A short passphrase is worse than none here: it is a portable slot, so
+        // unlike the device slot it can be attacked away from this machine.
+        if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
+            anyhow::bail!(
+                "a passphrase protecting the identifier key must be at least \
+                 {MIN_PASSPHRASE_CHARS} characters"
+            );
+        }
+        let mut salt = [0u8; 16];
+        getrandom::fill(&mut salt).context("obtain passphrase salt")?;
+        self.store.admit_identifier_slot(
+            &self.custodian.unlock,
+            &mechanics::authorization::custody::SlotSpec::Passphrase {
+                passphrase: passphrase.to_owned(),
+                salt,
+                params: mechanics::authorization::custody::Argon2Params::default(),
+            },
+        )
     }
 
     fn status(&self) -> Result<crate::control::DisplayCoordinatorView> {

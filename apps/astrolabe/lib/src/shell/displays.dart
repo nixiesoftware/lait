@@ -228,10 +228,27 @@ class _IdentifierCustody extends StatelessWidget {
     }
     final paths =
         held.slots.isEmpty ? 'none' : held.slots.map(_slotName).join(', ');
+    // Offered once. A second passphrase is two things to lose and one thing to
+    // remember, and the store refuses it — a control that would be refused is
+    // one the surface should not draw.
+    final hasPassphrase = held.slots.contains('passphrase');
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _Fact(label: 'IDENTIFIER KEY UNLOCKS', value: paths),
+        Row(
+          children: [
+            Expanded(child: _Fact(label: 'IDENTIFIER KEY UNLOCKS', value: paths)),
+            if (!hasPassphrase)
+              Button(
+                label: 'Add a passphrase',
+                size: ButtonSize.sm,
+                variant: ButtonVariant.outline,
+                tooltip: 'A way in that survives losing this machine and this '
+                    'identity.',
+                onPressed: () => _addPassphrase(context),
+              ),
+          ],
+        ),
         t.gap.y(Space.xs),
         Text(
           held.portable
@@ -249,6 +266,84 @@ class _IdentifierCustody extends StatelessWidget {
       ],
     );
   }
+}
+
+/// The shortest passphrase the daemon will accept. Stated here so the control
+/// can refuse before a round trip, and refused there too — this copy is a
+/// convenience, never the check.
+const int _minPassphrase = 12;
+
+Future<void> _addPassphrase(BuildContext context) async {
+  final entered = TextEditingController();
+  final again = TextEditingController();
+
+  final go = await showAppDialog<bool>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setLocal) {
+        final value = entered.text;
+        final long = value.characters.length >= _minPassphrase;
+        final matches = value == again.text;
+        return DialogContent(
+          children: [
+            DialogHeader(
+              title: const DialogTitle('Add a passphrase'),
+              description: const DialogDescription(
+                'A second way into the identifier key, independent of this '
+                'machine and this identity. It is not stored — it wraps the '
+                'key and is forgotten, so losing it costs this path and '
+                'nothing else.',
+              ),
+            ),
+            Input(
+              controller: entered,
+              label: 'Passphrase',
+              obscureText: true,
+              onChanged: (_) => setLocal(() {}),
+            ),
+            // Typed twice because it cannot be recovered and cannot be shown
+            // back: a mistyped passphrase would look like a working slot until
+            // the day it was the only one left.
+            Input(
+              controller: again,
+              label: 'Again',
+              obscureText: true,
+              onChanged: (_) => setLocal(() {}),
+            ),
+            if (value.isNotEmpty && !long)
+              Text(
+                'At least $_minPassphrase characters.',
+                style: context.labelStyle,
+              )
+            else if (again.text.isNotEmpty && !matches)
+              Text('These do not match.', style: context.labelStyle),
+            DialogFooter(
+              children: [
+                Button(
+                  label: 'Cancel',
+                  variant: ButtonVariant.outline,
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                ),
+                Button(
+                  label: 'Add it',
+                  onPressed: long && matches
+                      ? () => Navigator.of(ctx).pop(true)
+                      : null,
+                ),
+              ],
+            ),
+          ],
+        );
+      },
+    ),
+  );
+
+  if (go != true || !context.mounted) return;
+  ClientScope.of(context).dispatch(
+    ActionRequest.displayIdentifierAdmitPassphrase(
+      passphrase: entered.text,
+    ),
+  );
 }
 
 String _slotName(String slot) => switch (slot) {
