@@ -387,11 +387,29 @@ fn draw() -> f64 {
 /// and a staged tree. A daemon on a machine that is not a stub-managed
 /// installation never starts this at all — there is nowhere to stage to, and
 /// inventing one would put a client tree beside a developer's `target/`.
-pub async fn serve(identity: PathBuf, root: PathBuf, mut stop: tokio::sync::watch::Receiver<bool>) {
+pub async fn serve(identity: PathBuf, root: PathBuf, stop: tokio::sync::watch::Receiver<bool>) {
+    serve_checking(identity, root, stop, CHECK_PERIOD, check).await;
+}
+
+/// The loop itself, with its period and its check supplied.
+///
+/// Split out for one reason: the parts of this module were unit-tested and the
+/// *loop* was not, so nothing asserted that a running daemon ever reaches its
+/// check — the composition, which is the half this tree keeps getting wrong
+/// while every part is correct. A `fn` pointer rather than a closure keeps it
+/// `Send + 'static` for `spawn_blocking` without a generic parameter reaching
+/// into the production path.
+async fn serve_checking(
+    identity: PathBuf,
+    root: PathBuf,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    period: Duration,
+    check: fn(&Path, &Path) -> Standing,
+) {
     tracing::info!(root = %root.display(), "staging updates for this installation");
     // The first check is spread too, so a fleet restarted together by a
     // reboot or a deploy does not arrive at the host together either.
-    let mut delay = MAX_SPREAD.mul_f64(draw());
+    let mut delay = MAX_SPREAD.mul_f64(draw()).min(period);
     loop {
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
@@ -405,7 +423,7 @@ pub async fn serve(identity: PathBuf, root: PathBuf, mut stop: tokio::sync::watc
             Ok(standing) => tracing::debug!(?standing, "channel checked"),
             Err(error) => tracing::warn!(%error, "the staging check panicked"),
         }
-        delay = next_delay(CHECK_PERIOD);
+        delay = next_delay(period);
     }
 }
 
@@ -660,5 +678,64 @@ mod tests {
                 "a delay exceeded the stretch and spread bounds: {delay:?}"
             );
         }
+    }
+
+    /// How many times the loop's check has been reached, and by which paths.
+    ///
+    /// A static rather than a captured counter because the loop takes a `fn`
+    /// pointer, which is what keeps `spawn_blocking` free of a generic.
+    static REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_check(_identity: &Path, _root: &Path) -> Standing {
+        REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Standing::Current {
+            channel_version: "0.0.0".into(),
+        }
+    }
+
+    /// The gap this issue left open: every part of the check was tested and the
+    /// *loop* was not, so a daemon could have been wired to a watcher that
+    /// never reached its check and every unit test would still have passed.
+    ///
+    /// Asserts the two things the loop is: it comes back round on its period
+    /// rather than checking once, and it ends on the stop signal every other
+    /// service in `Daemon::serve` shares. It does not assert that the daemon
+    /// spawns it — `spawn_staging` is the remaining joint, and it is guarded by
+    /// `an_install_root_is_recognised_only_by_its_whole_shape` on one side.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_comes_back_round_on_its_period_and_stops_when_told() {
+        REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
+        let identity = tempfile::tempdir().expect("an identity directory");
+        let root = tempfile::tempdir().expect("an install root");
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let period = Duration::from_secs(60);
+
+        let loops = tokio::spawn(serve_checking(
+            identity.path().to_path_buf(),
+            root.path().to_path_buf(),
+            receiver,
+            period,
+            counting_check,
+        ));
+
+        // Paused time: advancing past several periods is what a real machine
+        // does over hours, without the test taking them.
+        for _ in 0..4 {
+            tokio::time::advance(period.mul_f64(1.0 + MAX_STRETCH) + MAX_SPREAD).await;
+            tokio::task::yield_now().await;
+        }
+        let reached = REACHED.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            reached >= 2,
+            "the loop reached its check {reached} time(s) across four periods — \
+             a watcher that checks once is not a watcher"
+        );
+
+        stop.send(true).expect("the stop signal is received");
+        tokio::time::advance(period.mul_f64(2.0)).await;
+        tokio::time::timeout(Duration::from_secs(5), loops)
+            .await
+            .expect("the loop did not end on the stop signal, so a shutdown would hang")
+            .expect("the loop panicked");
     }
 }
