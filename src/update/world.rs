@@ -796,6 +796,96 @@ mod tests {
         assert!(error.contains("size mismatch"), "{error}");
     }
 
+    /// The seam that matters: what this build *declares* for its own World is
+    /// what this build *accepts* when it is fetched back.
+    ///
+    /// Both halves are generated from the composition root — the publisher
+    /// writes the declaration, the stager checks it against the facts this
+    /// build offers — so a drift between them would mean shipping a World our
+    /// own machines refuse. Every other test here fabricates a declaration by
+    /// hand; this one uses the real thing.
+    #[test]
+    fn a_world_this_build_declares_is_a_world_this_build_accepts() {
+        let world = crate::composition::PRODUCT_WORLD;
+        let (declaration, art) = crate::composition::world_declaration(world, "0.8.0")
+            .expect("this build hosts its own product World");
+
+        let mut files: Vec<(String, Vec<u8>)> = vec![(
+            "world.json".to_string(),
+            serde_json::to_vec(&declaration).expect("the declaration encodes"),
+        )];
+        files.push(("index.html".to_string(), b"<html>the head</html>".to_vec()));
+        for (path, bytes) in art {
+            files.push((path, bytes.to_vec()));
+        }
+        let borrowed: Vec<(&str, Vec<u8>)> =
+            files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
+        let archive = bundle(&format!("world-{world}-0.8.0"), &borrowed);
+
+        let (seed, pubkey) = feed::tests::test_keypair();
+        let url = format!("https://feed.example/releases/worlds/{world}/0.8.0/b.tar.gz");
+        let manifest = serde_json::json!({
+            "version": "0.8.0",
+            "bundles": { world: "0.8.0" },
+            "artifacts": { world: { ARTIFACT: {
+                "url": url,
+                "blake3": blake3::hash(&archive).to_hex().to_string(),
+                "size": archive.len(),
+            }}},
+        });
+        let pointer = serde_json::json!({
+            "kind": "release", "version": "0.8.0",
+            "manifest": format!("https://feed.example/releases/worlds/{world}/0.8.0/m.json"),
+        });
+        let mut objects = std::collections::HashMap::new();
+        objects.insert(
+            pointer_url("https://feed.example", world, Channel::Test),
+            feed::tests::seal(&pointer, &seed).into_bytes(),
+        );
+        objects.insert(
+            format!("https://feed.example/releases/worlds/{world}/0.8.0/m.json"),
+            feed::tests::seal(&manifest, &seed).into_bytes(),
+        );
+        objects.insert(url, archive);
+
+        let resolved = feed::resolve_pointer_with(
+            |asked| {
+                objects
+                    .get(asked)
+                    .cloned()
+                    .ok_or_else(|| feed::Failure::Unreachable(format!("no object at {asked}")))
+            },
+            &pointer_url("https://feed.example", world, Channel::Test),
+            Channel::Test,
+            &[pubkey],
+            None,
+        )
+        .expect("the channel resolves");
+
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        // Against the facts this build really offers, not a fixture: if the
+        // declaration asked for something we do not provide, this is where a
+        // release nobody could install would be caught.
+        let outcome = stage_bundle_with(
+            fetcher(&objects),
+            &resolved,
+            world,
+            &crate::update::facts::offered(),
+            worlds.path(),
+        )
+        .expect("the World this build declares stages here");
+        assert_eq!(
+            outcome,
+            Outcome::Staged {
+                version: "0.8.0".into()
+            }
+        );
+        assert_eq!(
+            std::fs::read(live_dir(worlds.path(), world).join("index.html")).expect("the head"),
+            b"<html>the head</html>"
+        );
+    }
+
     /// A World's pointer is its own object, one level inside the product's
     /// channel layout, and resolved by the same function — so it inherits
     /// every rule rather than getting a weaker copy.

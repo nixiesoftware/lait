@@ -511,6 +511,32 @@ fn world(args: &[String]) -> Result<()> {
         if !bundle.is_dir() {
             bail!("--bundle {} is not a directory", bundle.display());
         }
+        // `--declare` writes the declaration this build would ship for one of
+        // its own Worlds, from the consts the composition root already holds:
+        // name, artwork, accent, entry path, and the facts its head depends
+        // on. A third-party World writes its own `world.json` and does not
+        // pass this; the file that results is the same shape either way,
+        // which is the point — a compiled-in World must not quietly be the
+        // only first-class kind.
+        if arg(args, "--declare").is_some() {
+            let Some((declaration, art)) = lait::composition::world_declaration(&world, &version)
+            else {
+                bail!("this build hosts no {world}, so it cannot declare one");
+            };
+            for (path, bytes) in art {
+                let at = bundle.join(&path);
+                if let Some(parent) = at.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create {}", parent.display()))?;
+                }
+                fs::write(&at, bytes).with_context(|| format!("write {}", at.display()))?;
+            }
+            let encoded =
+                serde_json::to_vec_pretty(&declaration).context("encode the World declaration")?;
+            fs::write(bundle.join("world.json"), encoded)
+                .with_context(|| format!("write {}/world.json", bundle.display()))?;
+            println!("declared {world} {version} into {}", bundle.display());
+        }
         // The declaration is what makes a directory of files a World, and it
         // is checked here rather than discovered by a machine that already
         // downloaded it. A publisher learns at publish time.

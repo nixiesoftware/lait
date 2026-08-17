@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2008
-pr-platform    1575
-nightly        2036
+pr             2009
+pr-platform    1576
+nightly        2037
 mutants        98
 
 [gates]
@@ -679,6 +679,7 @@ lait update::world::tests::a_bundle_with_no_declaration_is_refused
 lait update::world::tests::a_signed_bundle_that_runs_here_is_staged_under_its_own_world
 lait update::world::tests::a_tampered_bundle_fails_the_digest_and_stages_nothing
 lait update::world::tests::a_world_channel_sits_beside_the_products_and_under_the_same_rules
+lait update::world::tests::a_world_this_build_declares_is_a_world_this_build_accepts
 lait update::world::tests::an_over_long_bundle_is_refused_by_size_before_the_digest_is_reached
 lait update::world::tests::declared_artwork_must_be_carried_and_must_meet_the_bounds
 lait update::world::tests::two_worlds_stage_side_by_side_without_touching_each_other

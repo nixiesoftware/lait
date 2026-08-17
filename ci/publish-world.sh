@@ -22,6 +22,11 @@
 #   ci/publish-world.sh --world com.lait.issues --version 0.1.0 \
 #     --channel stable --promote --seed ~/.lait-feed-signing.seed
 #
+# A World this build hosts is declared for you: the bundle is the built head
+# (viewer/dist, or src/serve/assets after `npm run build`) and the declaration
+# is written into it from the composition root. Pass --no-declare for a World
+# that ships its own.
+#
 # The bundle must carry `world.json` at its root: what the World is, how to
 # reach it, and the host facts it runs against. `lait-feed world` refuses
 # without one, so a publisher learns at publish time rather than a machine
@@ -46,6 +51,7 @@ while [ $# -gt 0 ]; do
     --channel) CHANNEL="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
     --promote) PROMOTE=1; shift ;;
+    --no-declare) NO_DECLARE=1; shift ;;
     *) echo "publish-world: unknown argument $1" >&2; exit 1 ;;
   esac
 done
@@ -78,8 +84,14 @@ else
     echo "publish-world: --bundle is required unless --promote" >&2
     exit 1
   fi
+  # `--declare` writes the declaration for a World this build hosts, from the
+  # composition root: name, artwork, accent, entry path, and the facts its head
+  # depends on. A third-party World ships its own world.json and is published
+  # with --no-declare, which is the same command minus one flag.
+  DECLARE=(--declare yes)
+  [ -n "${NO_DECLARE:-}" ] && DECLARE=()
   # shellcheck disable=SC2086
-  $FEED_TOOL world --world "$WORLD" --version "$VERSION" \
+  $FEED_TOOL world --world "$WORLD" --version "$VERSION" "${DECLARE[@]}" \
     --bundle "$BUNDLE" --channel "$CHANNEL" --base-url "$BASE_URL" \
     --seed "$SEED" --out "$WORK"
 

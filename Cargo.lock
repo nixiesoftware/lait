@@ -3963,6 +3963,7 @@ dependencies = [
  "blake3",
  "data-encoding",
  "flate2",
+ "lait",
  "mechanics",
  "semver",
  "serde",
