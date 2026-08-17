@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2005
-pr-platform    1572
-nightly        2033
+pr             2006
+pr-platform    1573
+nightly        2034
 mutants        98
 
 [gates]
@@ -668,6 +668,7 @@ lait update::watch::tests::a_release_that_cannot_be_staged_is_available_rather_t
 lait update::watch::tests::a_standing_round_trips_and_absence_is_its_own_answer
 lait update::watch::tests::an_install_root_is_recognised_only_by_its_whole_shape
 lait update::watch::tests::every_feed_failure_keeps_its_own_kind_and_none_reads_as_current
+lait update::watch::tests::re_observing_a_staged_release_does_not_reset_how_long_it_has_waited
 lait update::watch::tests::the_live_application_is_the_bundle_this_daemon_ships_inside
 lait update::watch::tests::the_period_is_spread_so_two_daemons_do_not_stay_together
 lait update::world::tests::a_bundle_already_staged_at_this_version_is_not_fetched_again

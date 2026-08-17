@@ -67,6 +67,15 @@ pub enum Standing {
     Staged {
         /// The version that will be live after the next launch.
         version: String,
+        /// When it was staged, unix seconds.
+        ///
+        /// Recorded because the only question a person is ever asked on this
+        /// path is *when to restart*, and how insistently to ask depends on
+        /// how long a release has been waiting — not on how new it is. A
+        /// staged release with no timestamp could only ever be asked about at
+        /// one volume.
+        #[serde(default)]
+        at: u64,
     },
     /// The channel could not be asked. Never rendered as up to date.
     CouldNotAsk {
@@ -93,7 +102,17 @@ impl Standing {
     /// The version waiting to become live, when one is.
     pub fn staged_version(&self) -> Option<&str> {
         match self {
-            Self::Staged { version } => Some(version),
+            Self::Staged { version, .. } => Some(version),
+            _ => None,
+        }
+    }
+
+    /// How long a staged release has been waiting, at `now` (unix seconds).
+    pub fn staged_for(&self, now: u64) -> Option<std::time::Duration> {
+        match self {
+            Self::Staged { at, .. } => {
+                Some(std::time::Duration::from_secs(now.saturating_sub(*at)))
+            }
             _ => None,
         }
     }
@@ -151,6 +170,13 @@ pub fn live_bundle() -> Option<PathBuf> {
     live_bundle_of(&std::env::current_exe().ok()?)
 }
 
+/// Now, in unix seconds.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
 /// Read the recorded standing, or `None` when no check has ever completed.
 pub fn standing(identity: &Path) -> Option<Standing> {
     let bytes = std::fs::read(identity.join(STANDING_FILE)).ok()?;
@@ -186,6 +212,7 @@ pub fn check_with<R, F>(
     current: &semver::Version,
     target: &str,
     root: &Path,
+    previous: Option<Standing>,
 ) -> Standing
 where
     R: FnOnce() -> Result<feed::Resolved, feed::Failure>,
@@ -215,13 +242,27 @@ where
     // every period would be bytes spent to learn nothing.
     if let Some(staged) = tree::staged_version(root) {
         if staged == resolved.version.to_string() {
-            return Standing::Staged { version: staged };
+            // The clock is *not* reset. A period that re-observes the same
+            // staged release must leave its age alone, or a release waiting a
+            // week would look four hours old at every check and the
+            // escalation would never escalate.
+            let at = previous
+                .and_then(|standing| match standing {
+                    Standing::Staged { version, at } if version == staged => Some(at),
+                    _ => None,
+                })
+                .unwrap_or_else(now);
+            return Standing::Staged {
+                version: staged,
+                at,
+            };
         }
     }
 
     match tree::stage_tree_with(fetch, &resolved, target, root) {
         Ok(staged) => Standing::Staged {
             version: staged.version,
+            at: now(),
         },
         Err(error) => {
             // The release exists and this machine could not take it. That is
@@ -269,6 +310,7 @@ fn check(identity: &Path, root: &Path) -> Standing {
         &current,
         env!("LAIT_TARGET"),
         root,
+        standing(identity),
     );
     record(identity, &standing);
     apply_if_this_platform_has_no_stub(root);
@@ -395,6 +437,7 @@ mod tests {
             &semver::Version::parse("0.8.0").unwrap(),
             "x86_64-unknown-linux-gnu",
             root.path(),
+            None,
         );
         assert_eq!(
             standing,
@@ -443,6 +486,7 @@ mod tests {
                 &semver::Version::parse("0.8.0").unwrap(),
                 "x86_64-unknown-linux-gnu",
                 root.path(),
+                None,
             );
             assert_eq!(standing, expected);
         }
@@ -459,6 +503,7 @@ mod tests {
             &semver::Version::parse("0.8.0").unwrap(),
             "x86_64-unknown-linux-gnu",
             root.path(),
+            None,
         );
         assert_eq!(
             standing,
@@ -478,6 +523,7 @@ mod tests {
         );
         let staged = Standing::Staged {
             version: "0.9.0".into(),
+            at: 1_700_000_000,
         };
         record(identity.path(), &staged);
         assert_eq!(standing(identity.path()), Some(staged));
@@ -521,6 +567,48 @@ mod tests {
             install_root_of(&built),
             None,
             "a build directory was read as an installation"
+        );
+    }
+
+    /// A period that re-observes the same staged release must leave its age
+    /// alone. Resetting it would make a release waiting a week look four hours
+    /// old at every check, and the escalation would never escalate.
+    #[test]
+    fn re_observing_a_staged_release_does_not_reset_how_long_it_has_waited() {
+        let root = tempfile::tempdir().expect("a root");
+        // A tree already staged at the version the channel names.
+        std::fs::create_dir_all(root.path().join(tree::STAGED_DIR)).expect("a staged tree");
+        std::fs::write(
+            root.path().join(tree::STAGE_MANIFEST),
+            serde_json::json!({ "version": "0.9.0", "entry": "astrolabe", "files": [] })
+                .to_string(),
+        )
+        .expect("a stage manifest");
+
+        let long_ago = 1_700_000_000;
+        let standing = check_with(
+            || Ok(resolved("0.9.0")),
+            |_, _| panic!("an already-staged release must not be downloaded again"),
+            &semver::Version::parse("0.8.0").unwrap(),
+            "x86_64-unknown-linux-gnu",
+            root.path(),
+            Some(Standing::Staged {
+                version: "0.9.0".into(),
+                at: long_ago,
+            }),
+        );
+        assert_eq!(
+            standing,
+            Standing::Staged {
+                version: "0.9.0".into(),
+                at: long_ago
+            },
+            "re-observing the same staged release reset its clock"
+        );
+        assert!(
+            standing.staged_for(long_ago + 604_800).expect("an age")
+                >= std::time::Duration::from_secs(604_800),
+            "a release waiting a week did not report a week"
         );
     }
 
