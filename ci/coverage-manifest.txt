@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2008
-pr-platform    1575
-nightly        2036
+pr             2012
+pr-platform    1579
+nightly        2040
 mutants        98
 
 [gates]
@@ -669,6 +669,7 @@ lait update::watch::tests::a_standing_round_trips_and_absence_is_its_own_answer
 lait update::watch::tests::an_install_root_is_recognised_only_by_its_whole_shape
 lait update::watch::tests::every_feed_failure_keeps_its_own_kind_and_none_reads_as_current
 lait update::watch::tests::re_observing_a_staged_release_does_not_reset_how_long_it_has_waited
+lait update::watch::tests::the_loop_comes_back_round_on_its_period_and_stops_when_told
 lait update::watch::tests::the_period_is_spread_so_two_daemons_do_not_stay_together
 lait update::world::tests::a_bundle_already_staged_at_this_version_is_not_fetched_again
 lait update::world::tests::a_bundle_survives_a_host_change_it_does_not_name
@@ -680,7 +681,10 @@ lait update::world::tests::a_tampered_bundle_fails_the_digest_and_stages_nothing
 lait update::world::tests::a_world_channel_sits_beside_the_products_and_under_the_same_rules
 lait update::world::tests::a_world_this_build_declares_is_a_world_this_build_accepts
 lait update::world::tests::an_over_long_bundle_is_refused_by_size_before_the_digest_is_reached
+lait update::world::tests::an_unmet_bundle_records_the_refusal_and_keeps_naming_what_serves
 lait update::world::tests::declared_artwork_must_be_carried_and_must_meet_the_bounds
+lait update::world::tests::only_a_known_newer_bundle_this_build_can_run_is_behind
+lait update::world::tests::the_standing_is_recorded_beside_the_served_tree_and_never_within_it
 lait update::world::tests::two_worlds_stage_side_by_side_without_touching_each_other
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
 lait-feed::bin/lait-feed tests::a_bundle_that_declares_another_world_or_version_is_refused
