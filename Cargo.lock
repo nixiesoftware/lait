@@ -3946,6 +3946,8 @@ version = "0.7.8"
 dependencies = [
  "anyhow",
  "data-encoding",
+ "font8x8",
+ "image",
  "lait-issues",
  "mechanics",
  "postcard",
@@ -3954,6 +3956,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "typst",
  "typst-html",
  "world-interface",

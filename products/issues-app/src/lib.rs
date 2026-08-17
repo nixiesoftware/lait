@@ -26,6 +26,7 @@
 //! composed it decides what a person sees.
 
 pub mod decorate;
+pub mod display;
 pub mod document;
 pub mod host;
 pub mod lifecycle;
@@ -99,6 +100,12 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
             // which is what keeps listing free.
             .with_accent(0x004C_6EF5)?
             .with_routes(ROUTES)
+            // A board on a screen. Registered here rather than anywhere near
+            // the receiver, which is the whole claim the surface contract
+            // makes: a second, unlike World reaches a television with no
+            // television application update and no product vocabulary crossing
+            // the boundary.
+            .and_then(|package| package.with_display_surface(display::board_wall_surface()?))
     })
 }
 
