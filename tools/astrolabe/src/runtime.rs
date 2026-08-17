@@ -919,8 +919,25 @@ impl Worker {
                 Ok(Outcome::Said(format!("a head is serving at {}", head.base)))
             }
             Action::StopHead(id) => {
-                client.stop_head(id).await?;
-                Ok(Outcome::Said(format!("head {id} stopped")))
+                // Say which success it was. "stopped" for a head that had already
+                // crashed is a true statement about the current state and a false
+                // one about what just happened, and the difference is the only way
+                // a person learns their World fell over by itself.
+                match client.stop_head(id).await? {
+                    crate::client::heads::Stopped::Stopped => {
+                        Ok(Outcome::Said(format!("head {id} stopped")))
+                    }
+                    // Named, because a forced stop means the head did not run its
+                    // ordered shutdown: a browser saw a reset and an in-flight
+                    // transfer was cut. Reporting it as an ordinary stop would hide
+                    // the only evidence that anything was lost.
+                    crate::client::heads::Stopped::Forced => Ok(Outcome::Said(format!(
+                        "head {id} did not stop when asked and was forced"
+                    ))),
+                    crate::client::heads::Stopped::WasAlreadyGone { status } => Ok(Outcome::Said(
+                        format!("head {id} had already exited ({status})"),
+                    )),
+                }
             }
             Action::SpaceFound { home, name, nick } => {
                 client.space_found(home, name, nick.clone()).await?;

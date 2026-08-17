@@ -34,6 +34,17 @@ use serde::{Deserialize, Serialize};
 /// answer is reported rather than waited on.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How long a head gets to shut down on its own before it is forced.
+///
+/// Its ordered shutdown releases streaming responses and joins its tasks, so this
+/// is bounded by how long a drain takes rather than by anything a network does. Too
+/// short and every stop is a force; too long and a wedged head holds a person's
+/// click.
+const GRACEFUL_STOP_BUDGET: Duration = Duration::from_secs(5);
+
+/// How often the stop ladder checks whether the ask was taken.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HeadFacts {
@@ -69,6 +80,66 @@ pub struct HeadFacts {
     /// is handed to a person rather than logged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// What can be said about this head *now*, rather than when it started.
+    ///
+    /// This field exists because its absence was the one place in this tree where
+    /// a guess was reported as a fact. `HeadFacts` was recorded at spawn and
+    /// cloned out on every list, so a head that had crashed read as running
+    /// forever, and `stop` on it answered success — leaving a person unable to
+    /// tell "I stopped it" from "it had already died".
+    pub state: HeadState,
+}
+
+/// What the supervisor can say about a head right now.
+///
+/// # This is liveness, not readiness, and the distinction is deliberate
+///
+/// [`HeadState::Running`] means the process has not exited. It does **not** mean
+/// the head answers. A head that is alive and wedged reads `Running` here, and
+/// that is the honest limit of what a free check can establish.
+///
+/// Separating the two is the settled answer to this problem — Kubernetes splits
+/// liveness from readiness for the reason that a single verdict makes an outage
+/// in a dependency indistinguishable from a dead process, so the remedy for one
+/// gets applied to the other. Here the split falls out of cost: a `try_wait` is
+/// free and can run on every list, while asking a head whether it answers is a
+/// round trip per head per refresh. This codebase already refuses that trade in
+/// the same words — a Library that fetched something per row to draw itself would
+/// make listing cost what opening costs.
+///
+/// So readiness is asked when somebody acts, not when a list is drawn, and this
+/// enum promises only what it can keep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum HeadState {
+    /// The process has not exited. Says nothing about whether it answers.
+    Running,
+    /// The process exited, and this is what it exited with.
+    ///
+    /// The entry stays listed rather than vanishing, because a row that
+    /// disappears looks exactly like one that was never started — and the person
+    /// needs to learn that the thing they opened died.
+    Exited { status: String },
+    /// It could not be determined, and this is why.
+    ///
+    /// Never collapsed into either of the others. A poll that failed is not a
+    /// dead process and not a live one, and this is the arm that keeps the
+    /// running answer from being the only lifecycle statement in the tree that
+    /// cannot say "I could not ask".
+    Unknown { why: String },
+}
+
+impl HeadState {
+    /// Whether a caller may treat this head as one it can still use.
+    ///
+    /// `Unknown` answers `false`: a head nobody could poll is not a head to hand
+    /// somebody a URL for. The failure that matters is the other direction —
+    /// reporting usable when it is not — so uncertainty resolves against use, the
+    /// same way `update::world::Standing::behind` answers `false` for every
+    /// uncertainty.
+    pub fn usable(&self) -> bool {
+        matches!(self, Self::Running)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
@@ -114,6 +185,28 @@ struct Ready {
     world: String,
 }
 
+/// What stopping a head actually did.
+///
+/// Two successes, deliberately distinguishable. "I stopped it" and "it had
+/// already died" are different facts about the same request, and the second is
+/// one a person needs — it is the only signal that the World they opened fell over
+/// on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stopped {
+    /// It was asked, and it went.
+    Stopped,
+    /// It was asked, did not go inside the budget, and was forced.
+    ///
+    /// Distinct from [`Stopped::Stopped`] because it is the one that means
+    /// something got cut off: a head that had to be killed did not run its
+    /// ordered shutdown, so a browser saw a reset and a transfer was severed.
+    /// Reporting it as an ordinary stop would hide the only evidence that
+    /// anything was lost.
+    Forced,
+    /// It had already exited before the request arrived.
+    WasAlreadyGone { status: String },
+}
+
 /// A browser head this process started and holds.
 pub(crate) struct OwnedHead {
     facts: HeadFacts,
@@ -125,16 +218,86 @@ impl OwnedHead {
         &self.facts
     }
 
+    /// Poll the handle and answer what it says.
+    ///
+    /// Mirrors `Supervisor::refresh_owned_process` for devices, including the arm
+    /// that matters most: a poll that *fails* records why and does not decide the
+    /// head is dead. Three answers, because there are three facts.
+    ///
+    /// `&mut` rather than consuming, because unlike `stop` this is something a
+    /// list does — the whole defect was that listing never asked.
+    pub(crate) fn refresh(&mut self) -> HeadState {
+        self.facts.state = match self.child.try_wait() {
+            Ok(Some(exit)) => HeadState::Exited {
+                status: format!("{exit}"),
+            },
+            Ok(None) => HeadState::Running,
+            Err(error) => HeadState::Unknown {
+                why: format!("poll head process: {error}"),
+            },
+        };
+        self.facts.state.clone()
+    }
+
     /// Stop it, and collect it. Only ever called on a head we spawned — the
     /// handle *is* the proof, exactly as it is for a daemon.
-    pub(crate) fn stop(mut self) -> Result<()> {
-        // Already gone is a success: the caller asked for it to not be running.
-        if self.child.try_wait().context("poll head")?.is_some() {
-            return Ok(());
+    pub(crate) fn stop(mut self) -> Result<Stopped> {
+        self.stop_within(GRACEFUL_STOP_BUDGET)
+    }
+
+    /// Ask, wait, then force — the ladder `stop_device` already climbs.
+    ///
+    /// This used to be `kill()` alone, and what that threw away is specific. The
+    /// head has a complete ordered shutdown (`serve::run_until`): it flips its stop
+    /// channel *before* axum begins draining, so the never-completing SSE and
+    /// WebSocket responses release, then joins its tasks rather than aborting them
+    /// — its own comment says that is "so 'did it stop' is a fact rather than a
+    /// hope". A SIGKILL runs none of it: browsers get a reset mid-stream and
+    /// in-flight content transfers are severed. Rude for a page; data loss for a
+    /// World running a server of its own.
+    ///
+    /// **Why a signal and not a request.** The obvious alternative — ask the head
+    /// over its own HTTP surface — is closed on purpose. `Request::Stop` is refused
+    /// on the host plane because "`Stop` reaches whatever process is on the other
+    /// end of the socket, and a page that could send it could kill the server
+    /// answering it". A graceful stop must therefore travel a channel a web page
+    /// cannot reach, and a signal to the process group is that channel.
+    ///
+    /// The group, not the process: a World that spawned children of its own is
+    /// asked as a whole, which is the case a page-sized head does not have and a
+    /// server-sized one does.
+    pub(crate) fn stop_within(&mut self, budget: Duration) -> Result<Stopped> {
+        // Already gone is still a success — the caller asked for it to not be
+        // running and it is not — but it is a *different* success, and saying so
+        // is the point. A supervisor that answers "stopped" identically either way
+        // cannot tell somebody their World had already crashed.
+        if let Some(exit) = self.child.try_wait().context("poll head")? {
+            return Ok(Stopped::WasAlreadyGone {
+                status: format!("{exit}"),
+            });
         }
+
+        if request_stop(&self.child) {
+            // Poll rather than block: `wait` would give up the ability to escalate,
+            // and a head that ignores the ask must not hold the supervisor forever.
+            // `checked_add` because this crate denies silent arithmetic. An
+            // `Instant` that cannot represent now-plus-a-few-seconds is a machine
+            // in a state where waiting is not the useful answer, so it escalates.
+            let deadline = Instant::now().checked_add(budget);
+            while deadline.is_some_and(|deadline| Instant::now() < deadline) {
+                if self.child.try_wait().context("poll head")?.is_some() {
+                    return Ok(Stopped::Stopped);
+                }
+                std::thread::sleep(STOP_POLL);
+            }
+        }
+
+        // It would not, or could not, be asked. Force is the last rung and it is
+        // still reached, because a supervisor that cannot stop a wedged process is
+        // not a supervisor.
         self.child.kill().context("stop head")?;
         self.child.wait().context("collect head")?;
-        Ok(())
+        Ok(Stopped::Forced)
     }
 }
 
@@ -180,6 +343,7 @@ pub(crate) fn start_browser(
         command.arg("--home").arg(home);
     }
     no_console(&mut command);
+    own_process_group(&mut command);
 
     let mut child = command
         .spawn()
@@ -208,6 +372,10 @@ pub(crate) fn start_browser(
                 ownership: Ownership::Owned,
                 pid: Some(child.id()),
                 url: Some(ready.url),
+                // It printed its readiness line, so it is up. Every later answer
+                // comes from polling the handle rather than from this moment,
+                // which is the whole point of the field.
+                state: HeadState::Running,
             },
             child,
         }),
@@ -253,6 +421,95 @@ fn read_ready(stdout: std::process::ChildStdout) -> Result<Ready> {
     }
 }
 
+/// Ask a head to stop, on the channel a web page cannot reach.
+///
+/// `false` means no ask was possible on this platform, so the caller should go
+/// straight to force rather than waiting out a budget for a message nobody sent.
+/// That distinction is why this returns a bool instead of swallowing the case:
+/// waiting five seconds for a signal that was never delivered would make every
+/// Windows stop feel broken.
+#[cfg(unix)]
+fn request_stop(child: &Child) -> bool {
+    let Ok(pid) = i32::try_from(child.id()) else {
+        return false;
+    };
+    // Negative pid addresses the *group*, which is the one the head was spawned as
+    // the root of. That is what reaches a World's own children; signalling the pid
+    // alone would ask the supervisor's child and leave its descendants running.
+    //
+    // SIGTERM, not SIGINT: the head listens for both, and SIGTERM is the one that
+    // means "shut down" rather than "the person at a terminal pressed something".
+    //
+    // SAFETY: the documented POSIX form. `kill` on a group or process that has
+    // already exited answers `ESRCH`, which is a value here and not undefined
+    // behaviour.
+    //
+    // The group first, then the process alone. The fallback is not belt-and-braces:
+    // `kill(-pid, …)` only resolves if the child actually leads a group, so a head
+    // spawned by a path that forgot `own_process_group` would otherwise get *no
+    // ask at all* and be forced every time — a silent downgrade from graceful to
+    // violent, which is the failure mode this whole ladder exists to remove. Asking
+    // the process alone still runs its ordered shutdown; what it misses is a
+    // World's own children, which is worth saying rather than worth failing over.
+    // The group id is the pid negated, and the negation is checked: `kill(0, …)`
+    // means "every process in *our* group", which would signal the supervisor
+    // itself. A pid that cannot be negated is one to refuse rather than to guess at.
+    if let Some(group) = pid.checked_neg() {
+        if group != 0 && unsafe { libc::kill(group, libc::SIGTERM) } == 0 {
+            return true;
+        }
+    }
+    unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
+}
+
+/// No ask is available yet — see `own_process_group` for exactly what stands in
+/// the way and what the shape of the answer is.
+#[cfg(not(unix))]
+fn request_stop(_child: &Child) -> bool {
+    false
+}
+
+/// Put a head at the root of its own process group.
+///
+/// Three things this buys, and the first is a live bug:
+///
+/// 1. **A terminal's Ctrl-C stops reaching it.** A child inherits its parent's
+///    foreground process group, so on unix a Ctrl-C in the terminal that launched
+///    the client delivered SIGINT to every head *and* the identity daemon —
+///    "stop one World" had a sibling path that stopped everything, and it was the
+///    default keystroke. `daemon_spawn`'s windows branch already argues this case
+///    in prose ("sharing the spawner's console puts the daemon in that console's
+///    process group, so a Ctrl-C or a closed terminal delivers a control event to
+///    a process whose whole contract is to outlive the command that started it")
+///    while the unix branch did the thing it warns against.
+///
+/// 2. **It is what a graceful stop can address.** Signalling the group rather
+///    than the process is what reaches a World that spawned children of its own —
+///    a World running a server, rather than serving a page.
+///
+/// 3. **It bounds a force-stop.** `Child::kill` signals one process and leaves
+///    descendants (rust-lang/rust#115241); a group does not.
+///
+/// Windows is deliberately not done here, and the reason is recorded rather than
+/// left as an omission. `CREATE_NEW_PROCESS_GROUP` would give the same root, and
+/// `GenerateConsoleCtrlEvent` with **`CTRL_BREAK_EVENT`** is then the graceful
+/// signal — `CTRL_C_EVENT` is documented to *succeed and not be delivered* for a
+/// group, which is the trap in every naive port of this. But a console control
+/// event only reaches processes attached to the same console as the caller, and a
+/// head is spawned `CREATE_NO_WINDOW` precisely so it has none. Reconciling those
+/// two needs a Windows machine to verify on, and untested process control in a
+/// supervisor is worse than a named gap.
+#[cfg(unix)]
+fn own_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    // Stable since 1.64. `0` means "a new group whose id is the child's pid",
+    // which is what makes the group addressable by the pid we already hold.
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn own_process_group(_command: &mut Command) {}
+
 #[cfg(windows)]
 fn no_console(command: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -295,6 +552,13 @@ pub fn mcp_head(
         ownership: Ownership::External,
         pid: None,
         url: None,
+        // No handle, so there is nothing to poll. Not `Running` — that would be
+        // a claim this process cannot support about a child it never had.
+        state: HeadState::Unknown {
+            why: "an MCP head is spawned by the agent's harness, so this process \
+                  holds no handle to poll"
+                .to_owned(),
+        },
     }
 }
 
@@ -346,6 +610,282 @@ mod tests {
             started.is_err(),
             "a process that announced nothing was accepted as a head"
         );
+    }
+
+    /// A head that has exited says so, and a stop on it says which success it was.
+    ///
+    /// This is the test that would have caught the original defect. `HeadFacts`
+    /// was recorded at spawn and cloned on every list, so this sequence — start,
+    /// let it die, ask — reported `Running` forever, and `stop` answered plain
+    /// success. Both halves are asserted here because fixing one without the
+    /// other still leaves a person unable to tell what happened.
+    #[test]
+    fn a_head_that_died_reports_it_and_stopping_it_says_which_success() {
+        let mut head = OwnedHead {
+            facts: HeadFacts {
+                id: "probe".into(),
+                kind: HeadKind::Browser,
+                device: None,
+                orbit: None,
+                world: Some("issues".into()),
+                identity: "test".into(),
+                ownership: Ownership::Owned,
+                pid: None,
+                url: None,
+                // Deliberately the stale claim the defect used to keep forever.
+                state: HeadState::Running,
+            },
+            child: short_lived(),
+        };
+
+        // Wait for the real process to exit, so this is a poll of a dead handle
+        // rather than a simulated one.
+        for _ in 0..200 {
+            if matches!(head.refresh(), HeadState::Exited { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        match head.facts().state.clone() {
+            HeadState::Exited { status } => {
+                assert!(!status.is_empty(), "an exit must carry what it exited with")
+            }
+            other => panic!("a process that exited reported {other:?}"),
+        }
+        assert!(
+            !head.facts().state.usable(),
+            "a dead head must not read as usable"
+        );
+
+        match head.stop().expect("stop a dead head") {
+            Stopped::WasAlreadyGone { status } => assert!(!status.is_empty()),
+            other => panic!("stopping a head that had already exited reported {other:?}"),
+        }
+    }
+
+    /// A live head reports running, and stopping it reports a stop.
+    #[test]
+    fn a_live_head_reports_running_and_stops_as_one() {
+        let mut head = OwnedHead {
+            facts: HeadFacts {
+                id: "probe".into(),
+                kind: HeadKind::Browser,
+                device: None,
+                orbit: None,
+                world: None,
+                identity: "test".into(),
+                ownership: Ownership::Owned,
+                pid: None,
+                url: None,
+                state: HeadState::Running,
+            },
+            child: long_lived(),
+        };
+        assert_eq!(head.refresh(), HeadState::Running);
+        assert!(head.facts().state.usable());
+        // `sleep` does not handle SIGTERM specially, so the default disposition
+        // terminates it — which is exactly the ordinary case: asked, and it went.
+        assert_eq!(head.stop().expect("stop"), Stopped::Stopped);
+    }
+
+    /// A head that ignores the ask is forced, and says it was forced.
+    ///
+    /// The rung that matters most, because it is the one a wedged World takes. If
+    /// force were unreachable a supervisor could not stop anything that stopped
+    /// listening; if it reported an ordinary stop, the evidence that a shutdown was
+    /// cut short would be gone.
+    ///
+    /// A tiny budget rather than the production five seconds: this asserts the
+    /// escalation happens, and waiting five real seconds to prove a timeout is a
+    /// test that costs more than it proves.
+    #[test]
+    fn a_head_that_ignores_the_ask_is_forced_and_reports_it() {
+        let mut head = OwnedHead {
+            facts: HeadFacts {
+                id: "deaf".into(),
+                kind: HeadKind::Browser,
+                device: None,
+                orbit: None,
+                world: Some("issues".into()),
+                identity: "test".into(),
+                ownership: Ownership::Owned,
+                pid: None,
+                url: None,
+                state: HeadState::Running,
+            },
+            child: deaf_to_term(),
+        };
+
+        assert_eq!(
+            head.refresh(),
+            HeadState::Running,
+            "the fixture must be alive"
+        );
+        assert_eq!(
+            head.stop_within(Duration::from_millis(250))
+                .expect("stop a deaf head"),
+            Stopped::Forced,
+            "a head that ignored SIGTERM must be forced, and must say so"
+        );
+    }
+
+    /// A single process that ignores SIGTERM, so the ladder must escalate.
+    ///
+    /// `exec` is load-bearing, and the first attempt without it is instructive: a
+    /// plain `sh -c "trap '' TERM; sleep 60"` is *two* processes, and signalling the
+    /// group reached the `sleep`, which was not deaf — so the shell's `wait`
+    /// returned, the tree exited, and the ladder reported an ordinary stop. That is
+    /// the group signalling working, and it is now asserted on its own below.
+    ///
+    /// `trap '' TERM; exec sleep 60` leaves one process instead. An *ignored*
+    /// disposition survives `exec` (POSIX: only handled signals reset to default),
+    /// so this is a `sleep` that cannot be asked — which is the case the budget and
+    /// the force rung exist for.
+    #[cfg(unix)]
+    fn deaf_to_term() -> Child {
+        // It announces itself before it becomes deaf, and this test waits for that
+        // line. Without the wait the test races the shell: signalling before `trap`
+        // has run finds SIGTERM at its default disposition and the process dies, so
+        // the ladder reports an ordinary stop and the assertion fails for a reason
+        // that has nothing to do with the ladder.
+        //
+        // Production cannot have this race — `start_browser` waits for the head's
+        // readiness line before anything could stop it — so waiting here is
+        // matching production rather than papering over a real hazard. It is also
+        // the same discipline: a process says when it is ready, rather than the
+        // caller guessing with a sleep.
+        let mut command = Command::new("sh");
+        command.args(["-c", "trap '' TERM; echo ready; exec sleep 60"]);
+        command.stdout(Stdio::piped());
+        own_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn a SIGTERM-deaf process");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("read the fixture's readiness line");
+        assert_eq!(line.trim(), "ready");
+        child
+    }
+
+    #[cfg(not(unix))]
+    fn deaf_to_term() -> Child {
+        // No ask is available on this platform, so every stop is already a force —
+        // the assertion holds for a different reason, which is worth stating rather
+        // than skipping.
+        long_lived()
+    }
+
+    /// Asking reaches a World's own children, not just the process we spawned.
+    ///
+    /// The property the group buys, and the one that matters for a World that runs
+    /// a server rather than serving a page: `Child::kill` signals one process and
+    /// leaves descendants (rust-lang/rust#115241), so a supervisor addressing the
+    /// process alone would stop the parent and leave the work running.
+    ///
+    /// The fixture is a shell waiting on a child. Only the child is reachable by a
+    /// signal that ignores the group — the shell here ignores SIGTERM — so if the
+    /// tree goes down inside the budget, the signal reached the child.
+    #[cfg(unix)]
+    #[test]
+    fn asking_reaches_the_childs_children() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "trap '' TERM; sleep 60"]);
+        own_process_group(&mut command);
+        let child = command.spawn().expect("spawn a parent with a child");
+
+        let mut head = OwnedHead {
+            facts: HeadFacts {
+                id: "tree".into(),
+                kind: HeadKind::Browser,
+                device: None,
+                orbit: None,
+                world: None,
+                identity: "test".into(),
+                ownership: Ownership::Owned,
+                pid: None,
+                url: None,
+                state: HeadState::Running,
+            },
+            child,
+        };
+
+        assert_eq!(
+            head.stop_within(Duration::from_secs(2))
+                .expect("stop a tree"),
+            Stopped::Stopped,
+            "the ask must reach a descendant; a process-only signal would have \
+             left the child running and forced the parent"
+        );
+    }
+
+    /// The three states are three, and uncertainty is not usability.
+    ///
+    /// `Unknown` resolving to unusable is the direction that matters: reporting a
+    /// head usable when nobody could check hands somebody a URL for a process that
+    /// may not be there.
+    #[test]
+    fn uncertainty_is_not_usable_and_an_mcp_head_is_never_claimed_running() {
+        assert!(HeadState::Running.usable());
+        assert!(!HeadState::Exited {
+            status: "exit status: 0".into()
+        }
+        .usable());
+        assert!(!HeadState::Unknown {
+            why: "no handle".into()
+        }
+        .usable());
+
+        // An MCP head is spawned by the agent's harness, so this process holds no
+        // handle. Claiming `Running` there would be a statement about a child it
+        // never had.
+        let mcp = mcp_head(
+            "mcp".into(),
+            None,
+            std::path::PathBuf::from("/identity"),
+            None,
+        );
+        match mcp.state {
+            HeadState::Unknown { why } => assert!(
+                why.contains("holds no handle"),
+                "the reason must name why it cannot be known: {why}"
+            ),
+            other => panic!("an unowned head claimed {other:?}"),
+        }
+    }
+
+    /// A process that exits immediately, for the dead-handle cases.
+    fn short_lived() -> Child {
+        spawned(if cfg!(windows) {
+            ("cmd", vec!["/C", "exit 0"])
+        } else {
+            ("true", vec![])
+        })
+    }
+
+    /// A process that will outlive the test unless stopped.
+    fn long_lived() -> Child {
+        spawned(if cfg!(windows) {
+            ("cmd", vec!["/C", "ping -n 60 127.0.0.1 >NUL"])
+        } else {
+            ("sleep", vec!["60"])
+        })
+    }
+
+    /// Spawned the way `start_browser` spawns, group and all.
+    ///
+    /// The group is not incidental to these tests. A first draft omitted it and
+    /// `stop` reported `Forced` on a healthy process in nineteen milliseconds:
+    /// `kill(-pid, …)` addresses a *group*, so with no group there was nothing to
+    /// signal and the ladder fell through to force. A helper that spawns
+    /// differently from production would have hidden the coupling instead of
+    /// proving it.
+    fn spawned((program, args): (&str, Vec<&str>)) -> Child {
+        let mut command = Command::new(program);
+        command.args(args);
+        own_process_group(&mut command);
+        command.spawn().expect("spawn a test process")
     }
 
     /// The readiness line is the contract between a head and whatever started

@@ -1450,10 +1450,30 @@ impl Supervisor {
     /// rather than started, and listing one would mean reading an agent
     /// harness's configuration — which is CLIENT-20's other half and belongs to
     /// whoever owns that file, not here.
+    /// Every head this supervisor started, polled rather than remembered.
+    ///
+    /// **It polls.** That is the fix, not a detail: this used to clone facts
+    /// recorded at spawn, so a head that had crashed read as running for the rest
+    /// of the process's life and a person could not tell "I stopped it" from "it
+    /// had already died". Devices were polled on every snapshot
+    /// (`refresh_owned_process`); heads were the one lifecycle object here that
+    /// was not.
+    ///
+    /// `&mut` is not needed by callers because the poll happens behind the same
+    /// lock the list is read under — a head cannot be handed out as running and
+    /// then found dead in the same breath.
+    ///
+    /// An exited head stays in the list. Removing it would make a row that died
+    /// indistinguishable from one that was never started, which is the same
+    /// absence-versus-verdict confusion in a different costume.
     pub fn list_heads(&self) -> Vec<HeadFacts> {
-        lock_recovering(&self.inner.heads)
-            .values()
-            .map(|head| head.facts().clone())
+        let mut heads = lock_recovering(&self.inner.heads);
+        heads
+            .values_mut()
+            .map(|head| {
+                head.refresh();
+                head.facts().clone()
+            })
             .collect()
     }
 
@@ -1462,7 +1482,9 @@ impl Supervisor {
     /// The handle is the proof, exactly as it is for a daemon. There is no
     /// pid-based path here at all, which is what makes "no external process can
     /// be stopped" true of heads by construction rather than by check.
-    pub async fn stop_head(&self, id: &str) -> Result<(), SupervisorError> {
+    /// Returns *which* success it was: stopped, or already gone. A caller that
+    /// discards the distinction is choosing to; one that never had it could not.
+    pub async fn stop_head(&self, id: &str) -> Result<crate::heads::Stopped, SupervisorError> {
         let head = lock_recovering(&self.inner.heads).remove(id);
         let head = head.ok_or_else(|| {
             SupervisorError::NotFound(format!(
@@ -1470,12 +1492,27 @@ impl Supervisor {
             ))
         })?;
         let device = head.facts().device.clone();
-        tokio::task::spawn_blocking(move || head.stop())
+        let outcome = tokio::task::spawn_blocking(move || head.stop())
             .await
             .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head stop: {error}")))?
             .map_err(SupervisorError::Internal)?;
-        self.publish(EventKind::LifecycleChanged, device, "browser head stopped");
-        Ok(())
+        // The two successes are published differently, because the second one is
+        // news. A person who presses stop on a World that had already crashed
+        // should learn that it crashed, not be told their button worked.
+        self.publish(
+            EventKind::LifecycleChanged,
+            device,
+            match &outcome {
+                crate::heads::Stopped::Stopped => "browser head stopped",
+                crate::heads::Stopped::Forced => {
+                    "browser head did not shut down in time and was forced"
+                }
+                crate::heads::Stopped::WasAlreadyGone { .. } => {
+                    "browser head had already exited before it was stopped"
+                }
+            },
+        );
+        Ok(outcome)
     }
 
     /// The image devices are spawned from, once one has been staged.
