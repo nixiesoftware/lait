@@ -624,6 +624,17 @@ fn production_boundaries_expose_no_fault_injectors() {
 fn concept_crates_expose_only_their_semantic_namespaces() {
     let root = workspace_root();
     let expected: &[(&str, &[&str])] = &[
+        (
+            "correspondence",
+            // The seam itself is the crate root — `Carrier`, `Sealed`, `Missed`.
+            // Only the contractor behind it gets a module, and there is exactly
+            // one so far: the in-process carrier that lets the send and receive
+            // paths be tested with no network and no protocol. A second entry
+            // here should be another contractor and nothing else; a *concept*
+            // appearing in this list would mean the seam had grown an opinion
+            // about delivery, which is the thing it exists not to have.
+            &["mem"],
+        ),
         ("fabric", &[]),
         ("journal", &[]),
         (
@@ -632,6 +643,17 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 "actor",
                 "assignment",
                 "authorization",
+                // Whose key is about to be spent on the way out. Public because
+                // the crate that carries correspondence has to take the witness
+                // as an argument — that is the whole enforcement mechanism, and a
+                // witness type nobody outside can name cannot be an argument.
+                //
+                // Deliberately not folded into `authorization`: that module
+                // answers whether an act is permitted, and this one answers whose
+                // signature would make it. A grant can be revoked; a signature
+                // made under somebody else's identity cannot be recalled, so the
+                // two are not degrees of one question.
+                "egress",
                 "ids",
                 // The Space-less relation plane: mutual device links, signed
                 // audience-scoped avowals, and the projection that commits to
