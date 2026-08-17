@@ -282,6 +282,64 @@ mod tests {
     const BOB_B: [u8; 32] = [41u8; 32];
     const NOW: u64 = 1_800_000_000;
 
+    /// The client's own plane reaches over the **deployed** Post, when one is
+    /// pointed at by `POST_SMOKE_URL` (e.g. `https://post.foundation.pub`).
+    /// Skipped when unset so the offline suite never depends on the network.
+    #[test]
+    fn a_plane_reaches_over_the_deployed_post() {
+        let Ok(base) = std::env::var("POST_SMOKE_URL") else {
+            return;
+        };
+        use correspondence::post::{PostCarrier, Signer};
+        let base = base.trim_end_matches('/').to_owned();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+
+        // Unique seeds per run, so this test's mailbox is its own and the
+        // persistent Post never crosses one run's assertions with another's.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+            .to_le_bytes();
+        let mk = |tag: u8| {
+            let mut s = [0u8; 32];
+            s[..16].copy_from_slice(&stamp);
+            s[16] = tag;
+            s
+        };
+        let (a0, a1, b0, b1) = (mk(1), mk(2), mk(3), mk(4));
+
+        let mut alice = ReachPlane::found(vec![a0, a1], now).expect("alice");
+        let mut bob = ReachPlane::found(vec![b0, b1], now).expect("bob");
+
+        let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&b0)));
+        let announcement = alice.announce(to_bob, &bob.standing()).expect("announce");
+        bob.learn(announcement, &bob.standing()).expect("learn");
+
+        // Bob sends to Alice over the deployed carrier; Alice collects it there.
+        let mut carrier = PostCarrier::new(base, Signer::new(b0));
+        bob.send(&mut carrier, &alice.profile().clone(), "over the wire", now)
+            .expect("deposit over HTTP");
+
+        let mut alice_carrier = PostCarrier::new(
+            std::env::var("POST_SMOKE_URL")
+                .unwrap()
+                .trim_end_matches('/')
+                .to_owned(),
+            Signer::new(a0),
+        );
+        let filed = alice.collect(&mut alice_carrier, now);
+        assert_eq!(
+            filed, 1,
+            "Alice fetched Bob's letter from the deployed Post"
+        );
+        assert_eq!(alice.messages()[0].1, "over the wire");
+    }
+
     /// Two planes, no Space in common, reach each other over one carrier: Alice
     /// announces to Bob, Bob learns her and sends, Alice collects and reads it.
     #[test]
