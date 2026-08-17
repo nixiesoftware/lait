@@ -809,6 +809,94 @@ mod tests {
         )
     }
 
+    /// A revoked device cannot keep its standing by having bound a second
+    /// spelling of its own key.
+    ///
+    /// The chain, not the parts, because every part was correct on its own. A
+    /// bound device may add a device; consent covers the device *string*, so a
+    /// device can validly consent to its own shouted spelling; `hex_key` decodes
+    /// permissively, so that consent verifies; and `RevokeDevice` removed a set
+    /// member. Four correct steps composed into: an admin revokes the device by
+    /// the only id any surface shows, and the device is still bound and still
+    /// authorized by `acl`'s `device_speaks_for`.
+    ///
+    /// The fix is [`DeviceId`]'s spelling-blind `Eq`/`Ord`/`Hash`, so this test
+    /// pins the composition rather than the comparison — the unit property lives
+    /// in `ids`. Note the last assertion: the hostile event still *verifies*.
+    /// Closing this by voiding it instead would make a stored effect fail
+    /// signature verification, and `Authority::open` answers `Failure::corrupt`
+    /// to that rather than treating it as a cache miss.
+    #[test]
+    fn a_revoked_device_cannot_hide_behind_a_second_spelling_of_its_own_key() {
+        let w = ws();
+        let (e_incept, id) = incept(1, &w, None);
+        // A second honest device, so the revoker is somebody other than the
+        // device being revoked.
+        let e_add2 = add_device(1, 2, 20, &id, vec![e_incept.hash()], &w);
+
+        // Device 1 binds its own upper-case spelling. Consent covers that exact
+        // string, so the binding is built by hand rather than with the helper.
+        let shouted = DeviceId::from_key_string(device(1).as_str().to_ascii_uppercase());
+        assert_eq!(
+            shouted.key_bytes(),
+            device(1).key_bytes(),
+            "one key, two spellings, or this test is about nothing"
+        );
+        let consent: Signature = SigningKey::from_bytes(&seed(1)).sign(&consent_payload(
+            w.as_str(),
+            &shouted,
+            &[77u8; 16],
+            &ConsentCtx::Member { actor: &id },
+        ));
+        let e_shout = sign_event(
+            &seed(1),
+            &ActorOp::AddDevice {
+                actor: id.clone(),
+                binding: DeviceBinding {
+                    device: shouted.clone(),
+                    nonce: [77u8; 16],
+                    consent: consent.to_bytes().to_vec(),
+                },
+            },
+            vec![e_add2.hash()],
+            &w,
+        );
+
+        let plane = replay(&w, &[e_incept.clone(), e_add2.clone(), e_shout.clone()]);
+        assert_eq!(
+            plane.devices_of(&id).len(),
+            2,
+            "two physical devices are two bindings; a re-spelling must not be a third"
+        );
+
+        // Device 2 revokes device 1, naming the canonical id — the only spelling
+        // any surface renders, since every display path derives from key bytes.
+        let e_revoke = sign_event(
+            &seed(2),
+            &ActorOp::RevokeDevice {
+                actor: id.clone(),
+                device: device(1),
+            },
+            vec![e_shout.hash()],
+            &w,
+        );
+        let after = replay(&w, &[e_incept, e_add2, e_shout.clone(), e_revoke]);
+
+        assert!(!after.is_device_of(&id, &device(1)), "the revocation took");
+        assert!(
+            !after.is_device_of(&id, &shouted),
+            "and it took for every spelling of that key — otherwise the device \
+             keeps authoring ACL ops through `device_speaks_for`"
+        );
+        assert_eq!(after.devices_of(&id), vec![device(2)]);
+
+        assert!(
+            e_shout.verify_sig(ACTOR_DOMAIN, w.as_str()),
+            "the hostile event must still verify: closing this by voiding it \
+             would make a stored effect corrupt on open"
+        );
+    }
+
     #[test]
     fn incept_defines_a_single_device_actor() {
         let w = ws();

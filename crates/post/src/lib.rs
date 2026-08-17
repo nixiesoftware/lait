@@ -604,15 +604,25 @@ mod tests {
 
         // The premise, and the reason this was silent rather than merely wrong:
         // both spellings name the *same* ed25519 key, so a signature made by
-        // that device verifies under either. Only the string differs — and the
-        // string is the store key, the mailbox directory hash, and the equality
-        // `take_challenge` tests.
+        // that device verifies under either. Only the *string* differs.
         assert_eq!(
             shouted.key_bytes(),
             recipient.key_bytes(),
             "the two spellings must name one key, or this test is about nothing"
         );
-        assert_ne!(shouted, recipient);
+        assert_ne!(
+            shouted.as_str(),
+            recipient.as_str(),
+            "…and they must be spelled differently, or likewise"
+        );
+
+        // `DeviceId` now compares spelling-blind, so `MemStore`'s map no longer
+        // splits. This refusal is still load-bearing rather than belt-and-braces:
+        // `FsStore::box_dir` hashes `as_str()`, and a *string* hash cannot be
+        // folded by an `Eq` impl — two spellings would still be two directories.
+        // A boundary that receives an id is also the right place to insist on one
+        // spelling, which replay cannot do because it may not rewrite the past.
+        assert_eq!(shouted, recipient, "one key is one DeviceId");
 
         let mut post = Post::new(MemStore::default());
 
