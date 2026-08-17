@@ -29,6 +29,7 @@ pub use pairing::{
 };
 pub use runtime::DisplayRuntime;
 pub use store::{
-    AssignmentRecord, AssignmentSync, CoordinatorState, CoordinatorStore, DeviceRecord, SourceGrant,
+    AssignmentRecord, AssignmentSync, CoordinatorPolicy, CoordinatorSecrets, CoordinatorStore,
+    DeviceRecord, SourceGrant,
 };
 pub use tls::{DisplayTlsIdentity, DEFAULT_DISPLAY_PORT};

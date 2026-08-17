@@ -313,15 +313,17 @@ impl DisplayPairingService {
             }
             let was_completed = *completed;
             if !was_completed {
-                self.store.put_device(DeviceRecord {
-                    version: 1,
-                    device: device.clone(),
-                    label: label.clone(),
-                    proof_key: proof_key.clone(),
-                    capabilities: pending.capabilities.clone(),
-                    issued_at_unix_ms: now_unix_ms,
-                    revoked_at_unix_ms: None,
-                })?;
+                self.store.enrol(
+                    DeviceRecord {
+                        version: 1,
+                        device: device.clone(),
+                        label: label.clone(),
+                        capabilities: pending.capabilities.clone(),
+                        issued_at_unix_ms: now_unix_ms,
+                        revoked_at_unix_ms: None,
+                    },
+                    proof_key.clone(),
+                )?;
                 *completed = true;
             }
             (device.clone(), was_completed)
@@ -394,6 +396,12 @@ impl DisplayPairingService {
             .map_err(AuthorizationRefusal::Internal)?
             .ok_or(AuthorizationRefusal::NotEnrolled)?;
         let revoked = record.revoked_at_unix_ms.is_some();
+        // Custody is fetched by its own call, never carried along with standing.
+        let proof_key = self
+            .store
+            .proof_key(context.device)
+            .map_err(AuthorizationRefusal::Internal)?
+            .ok_or(AuthorizationRefusal::NotEnrolled)?;
         let mut state = self.lock().map_err(AuthorizationRefusal::Internal)?;
         let lease = state
             .challenges
@@ -405,7 +413,7 @@ impl DisplayPairingService {
         if lease.challenge != *context.challenge {
             return Err(AuthorizationRefusal::ChallengeConsumed);
         }
-        verify_request(&record.proof_key, context, tag)
+        verify_request(&proof_key, context, tag)
             .map_err(|_| AuthorizationRefusal::Authentication)?;
         if revoked {
             state.challenges.remove(context.device.as_str());
@@ -442,7 +450,7 @@ impl DisplayPairingService {
             ));
         }
         record.capabilities = capabilities;
-        self.store.put_device(record)
+        self.store.update_device(record)
     }
 
     pub fn record_health(&self, device: &DisplayDeviceId, health: ReceiverHealth) -> Result<()> {
