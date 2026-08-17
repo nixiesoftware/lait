@@ -3960,10 +3960,13 @@ dependencies = [
  "anyhow",
  "blake3",
  "data-encoding",
+ "flate2",
  "mechanics",
  "semver",
  "serde",
  "serde_json",
+ "tar",
+ "tempfile",
 ]
 
 [[package]]
