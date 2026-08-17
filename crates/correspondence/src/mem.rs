@@ -87,6 +87,37 @@ impl MemCarrier {
     pub fn holding(&self, device: &DeviceId) -> usize {
         self.held.get(device).map(BTreeMap::len).unwrap_or(0)
     }
+
+    /// Put a letter straight into a mailbox, for tests that are about *reading*.
+    ///
+    /// The deposit path has its own coverage — witness, blocks, capacity, retry —
+    /// and a test of the poll loop should not have to reconstruct a signed sender
+    /// to make one letter exist. Named `_for_test` and gated so it cannot leak into
+    /// a real send path.
+    #[cfg(test)]
+    pub(crate) fn deliver_for_test(
+        &mut self,
+        sealed: &Sealed,
+        from: &DeviceId,
+        now: u64,
+    ) -> String {
+        // No `admissible` gate: this is a direct insert for read-path tests, not a
+        // deposit, so it does not re-litigate expiry or capacity.
+        let id = deposit_id(from, sealed);
+        self.held
+            .entry(sealed.recipient.clone())
+            .or_default()
+            .insert(
+                id.clone(),
+                Waiting {
+                    id: id.clone(),
+                    deposited_by: from.clone(),
+                    sealed: sealed.clone(),
+                    arrived_at: now,
+                },
+            );
+        id
+    }
 }
 
 impl Carrier for MemCarrier {

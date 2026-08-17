@@ -21,6 +21,7 @@ mechanics = { path = "../mechanics" }
 
 serde = { version = "1", features = ["derive"] }
 blake3 = "1"
+getrandom = "0.3"
 data-encoding = "2.6"
 postcard = { version = "1", features = ["use-std"] }
 serde_json = "1"
@@ -33,7 +34,11 @@ lait-post = { path = "../post" }
 # (`src/update/feed.rs`): pure Rust, no reqwest, no native-tls, no OpenSSL.
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 
+# For the arrival-poll loop (`watch::serve`): the timer, the stop channel, and the
+# select! that races them. No runtime is started here — the daemon owns that.
+tokio = { version = "1", default-features = false, features = ["time", "sync", "macros", "rt"] }
+
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "test-util"] }
 axum = "0.8"
 tempfile = "3"
