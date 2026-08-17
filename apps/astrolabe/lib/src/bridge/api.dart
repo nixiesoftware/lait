@@ -68,7 +68,11 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.refresh() = ActionRequest_Refresh;
 
   /// Hand a World to the person's browser.
+  ///
+  /// Names the mount as well as the path: a head serves one World, so opening
+  /// says which rather than reaching for whichever head is up.
   const factory ActionRequest.open({
+    required String world,
     required String entryPath,
   }) = ActionRequest_Open;
 
@@ -1010,6 +1014,14 @@ class HeadRow {
   /// its identity has.
   final String? orbit;
 
+  /// The one World this head serves.
+  ///
+  /// `None` is a head from before the pin, which answers for every mounted
+  /// World. It matches no row deliberately: a surface cannot say a definite
+  /// thing about it, and saying an indefinite thing is the defect this field
+  /// closes.
+  final String? world;
+
   /// The address, *without* the run credential its URL carries. A front page
   /// has no use for a credential — `Open` mints a single-use ticket of its
   /// own, which is what that ceremony is for.
@@ -1020,6 +1032,7 @@ class HeadRow {
     required this.id,
     required this.kind,
     this.orbit,
+    this.world,
     this.origin,
     required this.owned,
   });
@@ -1029,6 +1042,7 @@ class HeadRow {
       id.hashCode ^
       kind.hashCode ^
       orbit.hashCode ^
+      world.hashCode ^
       origin.hashCode ^
       owned.hashCode;
 
@@ -1040,6 +1054,7 @@ class HeadRow {
           id == other.id &&
           kind == other.kind &&
           orbit == other.orbit &&
+          world == other.world &&
           origin == other.origin &&
           owned == other.owned;
 }

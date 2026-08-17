@@ -249,7 +249,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         return ActionRequest_Refresh();
       case 1:
         return ActionRequest_Open(
-          entryPath: dco_decode_String(raw[1]),
+          world: dco_decode_String(raw[1]),
+          entryPath: dco_decode_String(raw[2]),
         );
       case 2:
         return ActionRequest_UpdateWorld(
@@ -813,14 +814,15 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   HeadRow dco_decode_head_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return HeadRow(
       id: dco_decode_String(arr[0]),
       kind: dco_decode_String(arr[1]),
       orbit: dco_decode_opt_String(arr[2]),
-      origin: dco_decode_opt_String(arr[3]),
-      owned: dco_decode_bool(arr[4]),
+      world: dco_decode_opt_String(arr[3]),
+      origin: dco_decode_opt_String(arr[4]),
+      owned: dco_decode_bool(arr[5]),
     );
   }
 
@@ -1435,8 +1437,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case 0:
         return ActionRequest_Refresh();
       case 1:
+        var var_world = sse_decode_String(deserializer);
         var var_entryPath = sse_decode_String(deserializer);
-        return ActionRequest_Open(entryPath: var_entryPath);
+        return ActionRequest_Open(world: var_world, entryPath: var_entryPath);
       case 2:
         var var_world = sse_decode_String(deserializer);
         return ActionRequest_UpdateWorld(world: var_world);
@@ -2070,12 +2073,14 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_id = sse_decode_String(deserializer);
     var var_kind = sse_decode_String(deserializer);
     var var_orbit = sse_decode_opt_String(deserializer);
+    var var_world = sse_decode_opt_String(deserializer);
     var var_origin = sse_decode_opt_String(deserializer);
     var var_owned = sse_decode_bool(deserializer);
     return HeadRow(
         id: var_id,
         kind: var_kind,
         orbit: var_orbit,
+        world: var_world,
         origin: var_origin,
         owned: var_owned);
   }
@@ -2947,8 +2952,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     switch (self) {
       case ActionRequest_Refresh():
         sse_encode_i_32(0, serializer);
-      case ActionRequest_Open(entryPath: final entryPath):
+      case ActionRequest_Open(world: final world, entryPath: final entryPath):
         sse_encode_i_32(1, serializer);
+        sse_encode_String(world, serializer);
         sse_encode_String(entryPath, serializer);
       case ActionRequest_UpdateWorld(world: final world):
         sse_encode_i_32(2, serializer);
@@ -3478,6 +3484,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_String(self.id, serializer);
     sse_encode_String(self.kind, serializer);
     sse_encode_opt_String(self.orbit, serializer);
+    sse_encode_opt_String(self.world, serializer);
     sse_encode_opt_String(self.origin, serializer);
     sse_encode_bool(self.owned, serializer);
   }

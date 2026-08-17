@@ -1354,13 +1354,18 @@ impl Supervisor {
     /// trying to replace. That is the tax this whole initiative exists to
     /// remove, and a head started from the workspace target would reintroduce
     /// it on the one process a person is most likely to leave running.
-    pub async fn start_head(&self, device_id: &str) -> Result<HeadFacts, SupervisorError> {
+    pub async fn start_head(
+        &self,
+        device_id: &str,
+        world: Option<&str>,
+    ) -> Result<HeadFacts, SupervisorError> {
         let device = self.device(device_id).await?;
         let home = device.home.clone();
         self.spawn_head(
-            format!("{device_id}-browser"),
+            format!("{device_id}-browser:{}", world.unwrap_or("default")),
             Some(device_id.to_owned()),
             Some(home),
+            world,
         )
         .await
     }
@@ -1380,8 +1385,9 @@ impl Supervisor {
     pub async fn start_identity_head(
         &self,
         home: Option<&Path>,
+        world: Option<&str>,
     ) -> Result<HeadFacts, SupervisorError> {
-        let id = identity_head_id(home);
+        let id = identity_head_id(home, world);
         // A head that is already up for this identity *is* the answer. Starting
         // a second would work and would still be wrong: two heads mean two run
         // credentials and two ports for one identity, and the second is the one
@@ -1392,7 +1398,8 @@ impl Supervisor {
         if let Some(existing) = running {
             return Ok(existing);
         }
-        self.spawn_head(id, None, home.map(Path::to_path_buf)).await
+        self.spawn_head(id, None, home.map(Path::to_path_buf), world)
+            .await
     }
 
     async fn spawn_head(
@@ -1400,6 +1407,7 @@ impl Supervisor {
         id: String,
         device: Option<String>,
         home: Option<PathBuf>,
+        world: Option<&str>,
     ) -> Result<HeadFacts, SupervisorError> {
         {
             let heads = lock_recovering(&self.inner.heads);
@@ -1413,11 +1421,18 @@ impl Supervisor {
         let executable = self.inner.executable.clone();
         let facts_id = id.clone();
         let owner = device.clone();
+        let world = world.map(str::to_owned);
         // Spawning and waiting for a readiness line are blocking, and both must
         // stay off whatever runtime thread asked: a head that takes its full
         // startup budget would otherwise stall every other task on that thread.
         let head = tokio::task::spawn_blocking(move || {
-            start_browser(&executable, facts_id, owner, home.as_deref())
+            start_browser(
+                &executable,
+                facts_id,
+                owner,
+                home.as_deref(),
+                world.as_deref(),
+            )
         })
         .await
         .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head start: {error}")))?
@@ -1855,10 +1870,17 @@ fn path_text(path: &Path) -> String {
 /// generated id would let an identity accumulate heads nobody can find again,
 /// and a counter would make "is there already a head for this identity" a scan
 /// of every value instead of a lookup.
-fn identity_head_id(home: Option<&Path>) -> String {
+/// One head per identity *and World*.
+///
+/// The World is in the key because it is in the head: two Worlds are two
+/// processes, so a key that named only the identity would find the first and
+/// hand it back for the second — which is the shared-head behaviour the pin
+/// exists to end, reintroduced one layer up.
+fn identity_head_id(home: Option<&Path>, world: Option<&str>) -> String {
+    let world = world.unwrap_or("default");
     match home {
-        Some(home) => format!("identity:{}", path_text(home)),
-        None => "identity:default".to_owned(),
+        Some(home) => format!("identity:{}:{world}", path_text(home)),
+        None => format!("identity:default:{world}"),
     }
 }
 

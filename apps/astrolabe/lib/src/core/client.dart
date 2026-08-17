@@ -267,7 +267,10 @@ class ClientScope extends InheritedNotifier<ValueListenable<api.ClientView>> {
 /// than seven controls that quietly stop disabling themselves.
 abstract final class ActionKeys {
   static const String refresh = 'refresh';
-  static String open(String entryPath) => 'open:$entryPath';
+  /// Keyed by World, matching `Action::key`. It was keyed by entry path, which
+  /// two Worlds could share — and which said nothing about which head an open
+  /// was for once heads became per-World.
+  static String open(String world) => 'open:$world';
   static String updateWorld(String world) => 'world.update:$world';
   static String startDevice(String id) => 'device.start:$id';
   static String stopDevice(String id) => 'device.stop:$id';

@@ -55,7 +55,11 @@ pub enum Action {
     /// when a surface has gone stale and they would rather not wait.
     Refresh,
     /// Hand a World's own head to the person's browser.
+    ///
+    /// Carries the mount as well as the path: the head is per World now, so
+    /// opening names which one rather than reaching for whichever is up.
     OpenWorld {
+        world: String,
         entry_path: String,
     },
     /// Become a screen. Pressing the control *is* the consent; nothing is
@@ -206,7 +210,7 @@ impl Action {
     pub fn key(&self) -> String {
         match self {
             Self::Refresh => "refresh".into(),
-            Self::OpenWorld { entry_path } => format!("open:{entry_path}"),
+            Self::OpenWorld { world, .. } => format!("open:{world}"),
             Self::UpdateWorld { world } => format!("world.update:{world}"),
             Self::StartDevice(id) => format!("device.start:{id}"),
             Self::StopDevice(id) => format!("device.stop:{id}"),
@@ -275,7 +279,7 @@ impl Action {
     pub fn what(&self) -> String {
         match self {
             Self::Refresh => "re-read this machine".into(),
-            Self::OpenWorld { entry_path } => format!("open {entry_path}"),
+            Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
             Self::StartDevice(id) => format!("start {id}"),
             Self::StopDevice(id) => format!("stop {id}"),
@@ -827,8 +831,8 @@ impl Worker {
                     }
                 }))
             }
-            Action::OpenWorld { entry_path } => {
-                let launch = client.open_world(entry_path).await?;
+            Action::OpenWorld { world, entry_path } => {
+                let launch = client.open_world(world, entry_path).await?;
                 // The browser is the person's, and this is the only place in
                 // the client that starts something it does not own. It happens
                 // last: a launch URL composed and never opened is recoverable,
@@ -942,7 +946,11 @@ impl Worker {
                 Ok(Outcome::Said(said))
             }
             Action::StartHead => {
-                let head = client.head().await?;
+                // No mount: this is "bring a head up", not "open that World".
+                // A build hosting one World gets it; one hosting several
+                // refuses rather than choosing, which is the honest answer to
+                // an ask that named nothing.
+                let head = client.head(None).await?;
                 Ok(Outcome::Said(format!("a head is serving at {}", head.base)))
             }
             Action::StopHead(id) => {
@@ -1275,11 +1283,13 @@ mod tests {
         );
         assert_ne!(
             Action::OpenWorld {
-                entry_path: "/issues".into(),
+                world: "issues".into(),
+                entry_path: "/".into(),
             }
             .key(),
             Action::OpenWorld {
-                entry_path: "/notes".into(),
+                world: "signage".into(),
+                entry_path: "/".into(),
             }
             .key()
         );

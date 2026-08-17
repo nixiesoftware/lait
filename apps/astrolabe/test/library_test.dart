@@ -67,9 +67,13 @@ LibraryRow _row({
 /// The one head an identity serves its Worlds through. `orbit` stays null —
 /// that is what marks it as the identity-wide browser head the Library reads
 /// "running" from.
+/// A head serving one World, which is what a head is now. Naming the mount is
+/// not fixture decoration: it is the fact the Library derives running from, and
+/// a head without one is deliberately matched by no row.
 const HeadRow _identityHead = HeadRow(
-  id: 'identity:default',
+  id: 'identity:default:issues',
   kind: 'browser',
+  world: 'issues',
   origin: 'http://127.0.0.1:52713/',
   owned: true,
 );
@@ -220,7 +224,7 @@ void main() {
     expect(asked, hasLength(1));
     expect(
       asked.single,
-      const ActionRequest.open(entryPath: '/'),
+      const ActionRequest.open(world: 'issues', entryPath: '/'),
       reason: 'opening asked for somewhere other than the declared entry',
     );
   });
@@ -302,7 +306,7 @@ void main() {
     await tester.pump();
     expect(
       asked.single,
-      const ActionRequest.open(entryPath: '/notes'),
+      const ActionRequest.open(world: 'notes', entryPath: '/notes'),
       reason: 'Open followed the page rather than the selection',
     );
   });
@@ -396,7 +400,7 @@ void main() {
       tester,
       _view(
         library: [_row()],
-        inFlight: const ['open:/'],
+        inFlight: const ['open:issues'],
       ),
     );
 
@@ -512,8 +516,8 @@ void main() {
     expect(
       asked,
       const [
-        ActionRequest.stopHead(id: 'identity:default'),
-        ActionRequest.open(entryPath: '/issues'),
+        ActionRequest.stopHead(id: 'identity:default:issues'),
+        ActionRequest.open(world: 'issues', entryPath: '/issues'),
       ],
       reason: 'a segment asked for something other than its own act',
     );
@@ -530,8 +534,9 @@ void main() {
         library: [_row(opensAt: '/issues')],
         heads: const [
           HeadRow(
-            id: 'identity:external',
+            id: 'identity:external:issues',
             kind: 'browser',
+            world: 'issues',
             origin: 'http://127.0.0.1:7717/',
             owned: false,
           ),
@@ -554,7 +559,7 @@ void main() {
 
     await tester.tap(handoff);
     await tester.pump();
-    expect(asked, const [ActionRequest.open(entryPath: '/issues')]);
+    expect(asked, const [ActionRequest.open(world: 'issues', entryPath: '/issues')]);
   });
 
   testWidgets('an in-flight stop is visibly stopping, with no second press',
@@ -564,7 +569,7 @@ void main() {
       _view(
         library: [_row(opensAt: '/issues')],
         heads: const [_identityHead],
-        inFlight: const ['head.stop:identity:default'],
+        inFlight: const ['head.stop:identity:default:issues'],
       ),
     );
 
@@ -582,7 +587,7 @@ void main() {
       tester,
       _view(
         library: [_row()],
-        inFlight: const ['open:/'],
+        inFlight: const ['open:issues'],
       ),
     );
 
@@ -941,5 +946,53 @@ void main() {
       reason: 'a control whose action is already in flight must not queue a '
           'second one',
     );
+  });
+
+  testWidgets('one World running leaves the other alone', (tester) async {
+    // The bug this closed: the head was per-identity and served every World, so
+    // "running" was the head's own liveness applied to every row. Opening
+    // Issues put Signage into RUNNING, and the STOP it drew there stopped the
+    // head Issues was reading.
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [
+          _row(mount: 'issues', name: 'Issues', opensAt: '/'),
+          _row(mount: 'signage', name: 'Signage', opensAt: '/'),
+        ],
+        heads: const [_identityHead],
+      ),
+    );
+
+    // Issues is the World with a head, and it is the only one offering to stop
+    // anything. A STOP on the other row would be a control that reaches across
+    // Worlds — which is the part that was not merely a wrong label.
+    expect(find.text('STOP'), findsOneWidget);
+    expect(asked, isEmpty);
+  });
+
+  testWidgets('a head that names no World is claimed by no row',
+      (tester) async {
+    // A head from before the pin answers for everything, so nothing definite
+    // can be said about it. Matched by no row rather than by every row: an
+    // indefinite fact drawn as a definite one is the defect, not the absence.
+    await _pump(
+      tester,
+      _view(
+        library: [_row(mount: 'issues', name: 'Issues', opensAt: '/')],
+        heads: const [
+          HeadRow(
+            id: 'identity:default',
+            kind: 'browser',
+            origin: 'http://127.0.0.1:52713/',
+            owned: true,
+          ),
+        ],
+      ),
+    );
+
+    // Not running, so the row offers to launch rather than to stop.
+    expect(find.text('STOP'), findsNothing);
+    expect(find.text('LAUNCH'), findsOneWidget);
   });
 }

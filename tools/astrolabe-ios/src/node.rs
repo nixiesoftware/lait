@@ -259,7 +259,12 @@ fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Res
         let shutdown = async move {
             let _ = stopped.await;
         };
-        if let Err(error) = serve::run_until(0, false, selection, announce, shutdown).await {
+        // Named rather than left to the sole-World fallback. This crate links
+        // the whole workspace, so "the only World" stopped being true the
+        // moment a second one shipped — and the fallback answers that with a
+        // refusal, which for an embedded node is a head that never comes up.
+        let world = Some(lait::composition::PRODUCT_WORLD_MOUNT.to_owned());
+        if let Err(error) = serve::run_until(0, false, selection, world, announce, shutdown).await {
             tracing::error!(%error, "in-process head exited");
         }
     });
