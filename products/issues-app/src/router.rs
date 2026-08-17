@@ -349,6 +349,7 @@ impl<'a> IssueRouter<'a> {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: IssueQuery::Snapshot.to_json(),
+                publication: None,
             })
             .map(|p| p.bytes)
             .unwrap_or_default();
@@ -384,6 +385,7 @@ impl<'a> IssueRouter<'a> {
                 doc: None,
                 run: None,
                 unchanged: false,
+                results: Vec::new(),
             }),
         )
     }
@@ -425,33 +427,26 @@ impl<'a> IssueRouter<'a> {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: query.to_json(),
+                publication: None,
             })?
             .bytes;
         serde_json::from_slice(&bytes)
             .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
     }
 
-    fn query_at<T: DeserializeOwned>(
+    fn query_pinned<T: DeserializeOwned>(
         &self,
         query: &IssueQuery,
-        generation: &str,
+        publication: runtime::publication::PublicationId,
     ) -> Result<T, SessionFailure> {
-        let bytes = data_encoding::HEXLOWER
-            .decode(generation.as_bytes())
-            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))?;
-        let root = <[u8; 32]>::try_from(bytes.as_slice())
-            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))?;
-        let id = runtime::WorldSnapshotId::new(contract::world_id(), root);
         let bytes = self
             .session
-            .query_at(
-                &id,
-                Query {
-                    schema: contract::issue_schema(),
-                    schema_version: contract::ISSUE_SCHEMA_VERSION,
-                    payload: query.to_json(),
-                },
-            )?
+            .query(Query {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: query.to_json(),
+                publication: Some(publication),
+            })?
             .bytes;
         serde_json::from_slice(&bytes)
             .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
@@ -643,6 +638,9 @@ impl<'a> IssueRouter<'a> {
                  write can be authorized for anyone — an admin runs `world_upgrade` \
                  to activate this build's; nothing was changed",
             ),
+            SessionFailure::Rejected(Rejection::ImplementationUnavailable) => Response::err(
+                "the exact World implementation active for this space is not installed on this node",
+            ),
             SessionFailure::Rejected(Rejection::Conflict)
             | SessionFailure::Conflict(SessionConflict::Body) => {
                 Response::err("that change conflicts with the current state")
@@ -792,6 +790,60 @@ impl<'a> IssueRouter<'a> {
     fn route_inner(&self, req: Request, facts: &RouterFacts) -> Result<(Response, bool), Response> {
         let snapshot = self.snapshot();
         match req {
+            Request::ChangeSet { operations } => {
+                let operations = operations
+                    .into_iter()
+                    .map(|operation| match operation {
+                        crate::ChangeOperation::ProjectCreate { name, key, color } => {
+                            contract::ChangeOperation::ProjectCreate { name, key, color }
+                        }
+                        crate::ChangeOperation::SpecCreate {
+                            project,
+                            kind,
+                            title,
+                            text,
+                            links,
+                        } => contract::ChangeOperation::SpecCreate {
+                            project: match project {
+                                crate::ChangeProject::Existing { project } => {
+                                    contract::ChangeProject::Existing { project }
+                                }
+                                crate::ChangeProject::Created { operation } => {
+                                    contract::ChangeProject::Created { operation }
+                                }
+                            },
+                            kind,
+                            title,
+                            text: if text.starts_with(contract::DOCUMENT_PREFIX) {
+                                text
+                            } else {
+                                crate::document::plain_document(&text)
+                            },
+                            links,
+                        },
+                    })
+                    .collect();
+                let effect = self
+                    .submit(&IssueIntent::ChangeSet {
+                        operations,
+                        ts: facts.now,
+                    })
+                    .map_err(Self::effect_err)?;
+                Ok((
+                    Response::ChangeSet {
+                        results: effect
+                            .results
+                            .into_iter()
+                            .map(|result| crate::ChangeEffect {
+                                operation: result.operation,
+                                kind: result.kind,
+                                id: result.id,
+                            })
+                            .collect(),
+                    },
+                    !effect.unchanged,
+                ))
+            }
             Request::StructureStatus => {
                 let report = self
                     .query(&IssueQuery::StructureStatus)
@@ -1227,6 +1279,12 @@ impl<'a> IssueRouter<'a> {
                 source,
                 build,
             } => {
+                let package_filled = build.trim().is_empty();
+                let build = if package_filled {
+                    issues::contract::verify_build_hex(crate::lifecycle::implementation_id())
+                } else {
+                    build
+                };
                 let doc = self.resolve(&snapshot, &reff)?;
                 let request = RequestId::mint();
                 let run = runtime::exec::derive_run_id(
@@ -1244,6 +1302,7 @@ impl<'a> IssueRouter<'a> {
                             run: run.clone(),
                             source,
                             build,
+                            package_filled,
                             actor: facts.actor.clone(),
                             device: facts.device.clone(),
                             ts: facts.now,
@@ -1386,14 +1445,24 @@ impl<'a> IssueRouter<'a> {
             Request::Geometry {
                 project,
                 roots,
-                generation,
+                publication,
+                page,
             } => {
                 let id = snapshot.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                let query = IssueQuery::Geometry { project: id, roots };
-                let view: issues::geometry::GeometryView = match generation {
-                    Some(generation) => self.query_at(&query, &generation),
+                let query = IssueQuery::Geometry {
+                    project: id,
+                    roots,
+                    page,
+                };
+                let view: issues::contract::GeometryProjection = match publication {
+                    Some(publication) => self.query_pinned(
+                        &query,
+                        publication.parse().ok_or_else(|| {
+                            Response::invalid("publication digests must be 64 lowercase hex bytes")
+                        })?,
+                    ),
                     None => self.query(&query),
                 }
                 .map_err(Self::effect_err)?;
@@ -1435,16 +1504,12 @@ impl<'a> IssueRouter<'a> {
                 ))
             }
             Request::ProjectNew { name, key, color } => {
-                let id = ProjectId::mint(self.clock).as_str().to_string();
-                self.submit(&IssueIntent::ProjectNew {
-                    id,
-                    name,
-                    key: key.clone(),
-                    // Optional on the wire, resolved to the birth default here — the
-                    // same shape `LabelNew` uses, so an omitted colour still lands a
-                    // sensible one rather than an empty string.
-                    color: color.unwrap_or_else(|| "blue".into()),
-                    device: facts.device.clone(),
+                self.submit(&IssueIntent::ChangeSet {
+                    operations: vec![contract::ChangeOperation::ProjectCreate {
+                        name,
+                        key: key.clone(),
+                        color: color.unwrap_or_else(|| "blue".into()),
+                    }],
                     ts: facts.now,
                 })
                 .map_err(Self::effect_err)?;
@@ -2382,19 +2447,24 @@ impl<'a> IssueRouter<'a> {
                 let project = snapshot
                     .resolve_project(&project)
                     .ok_or_else(|| Response::not_found("no such project"))?;
-                let spec = issues::ids::mint_spec_id(self.clock);
-                self.submit(&IssueIntent::SpecCreate {
-                    spec: spec.clone(),
-                    project,
-                    kind,
-                    title,
-                    text,
-                    links,
-                    actor: facts.actor.clone(),
-                    device: facts.device.clone(),
-                    ts: facts.now,
-                })
-                .map_err(Self::effect_err)?;
+                let effect = self
+                    .submit(&IssueIntent::ChangeSet {
+                        operations: vec![contract::ChangeOperation::SpecCreate {
+                            project: contract::ChangeProject::Existing { project },
+                            kind,
+                            title,
+                            text,
+                            links,
+                        }],
+                        ts: facts.now,
+                    })
+                    .map_err(Self::effect_err)?;
+                let spec = effect
+                    .results
+                    .first()
+                    .filter(|result| result.kind == "spec")
+                    .map(|result| result.id.clone())
+                    .ok_or_else(|| Response::err("change set omitted the created Spec"))?;
                 let view = self
                     .query(&IssueQuery::Spec { spec })
                     .map_err(Self::effect_err)?;

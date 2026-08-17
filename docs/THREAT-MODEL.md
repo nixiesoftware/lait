@@ -285,25 +285,31 @@ claims, or resource claims trustworthy.
   root adapter transports the exact Runtime types and invokes the same
   `lower_exec` validator rather than implementing a second lifecycle path.
 - Work projections expose World/Run/Attempt/Event/Build/Spec ids and lifecycle
-  facts only. They omit inputs, outputs, digests, evidence, resources, and World
-  Bodies. Inspect and watch are read-classified; cancel and later transitions
+  facts only, including failure class and returned output ContentRefs. They omit
+  input/output bytes, digests, evidence, resources, and World Bodies. Inspect and watch are read-classified; cancel and later transitions
   retain the delegated-agent partial-view guard. Watch is a causal-head
   comparison, not a promise of a live stream. Continue and resume may derive a
   new fenced Attempt only from a completed Attempt's committed scheduling
   evidence in the same Station activation; service-backed work requires a new
   Role lease. Resume also requires a committed checkpoint and a matching Spec
-  contract. A Started-only Run fails explicitly until a scheduler publishes its
-  first Offer; the host never reconstructs or guesses coordinates from product
-  state.
+  contract. A Started-only Run waits for this Station's exclusive drain, which
+  commits a Station-only first `Try` (no Offer, no enforcement artifact)
+  rather than minting a derived OfferId or guessing scheduling coordinates
+  from product state. Signed Offer news remains E4 evidence when it exists; it
+  is never ownership and is not required for a local first Attempt.
 - The Issues reference adopter makes that split concrete. `issues_verify`
-  carries a committed source ContentRef and caller-supplied BuildId through a
-  semantic issue action. Issues writes its check record only in the transaction
-  that writes Runtime's `Started` event, and rejects a Run link that differs
-  from the request-derived coordinate. Build publication and publisher
-  attestation are still required before a dispatcher may execute that Run; the
-  reference adopter does not treat an arbitrary 32-byte BuildId as trusted
-  executable material. `issues_accept_check` similarly accepts only typed
-  Outcome facts from the pinned snapshot and makes the report, verdict,
+  carries a committed source ContentRef and a BuildId through a semantic issue
+  action. When the caller omits `build`, the application package fills the
+  bundled in-process verifier and the check records `package_filled`; a named
+  Build is recorded as caller-selected. Issues writes its check record only in
+  the transaction that writes Runtime's `Started` event, and rejects a Run
+  link that differs from the request-derived coordinate. The bundled handler
+  binds the pinned source; it does not compile the repository, isolate the
+  host, or turn an advisory backend into attestation. Build publication is
+  durable identity, not a dispatch gate: the local dispatcher selects the
+  exact package handler for the pinned Build id. The reference adopter does
+  not treat an arbitrary 32-byte BuildId as trusted executable material. `issues_accept_check` similarly accepts only
+  typed Outcome facts from the pinned snapshot and makes the report, verdict,
   workflow transition, history, and protected `Accepted` event one commit.
 - Handler code receives a bounded `exec::Context`, never a Session, Replica,
   unrestricted filesystem, process environment, transport, clock, random
@@ -327,7 +333,12 @@ claims, or resource claims trustworthy.
 - `Cancel` records `CancelAsked` and makes no claim that handler work stopped.
   Every admitted retry is a new visible Attempt id derived from its persistent
   command coordinates; command batches account for already-staged Attempts and
-  cannot spend the same remaining Attempt allowance twice.
+  cannot spend the same remaining Attempt allowance twice. An inherited or
+  unclaimed `Began`, and a prior-epoch `Leased` that never began, are committed
+  `Failed` with `FailureClass::Unknown` and are never re-invoked under that
+  Attempt id. Automatic outbox retry is only a later `Try` after that unknown
+  failure, `Resume::Restart`, remaining Attempt budget, and no later Return or
+  handler/protocol failure.
 - The first trusted in-process backend explicitly reports resource enforcement
   as advisory. It validates selected coordinates and candidate output and
   contains a Rust unwind, but shares the host process and therefore claims no
@@ -367,8 +378,13 @@ claims, or resource claims trustworthy.
   Attempt cannot widen that intersection, ask for latest mutable state, or lend
   ambient query authority to a child Run.
 - Offers are private, bounded, signed, and advisory. They reveal only the exact
-  capabilities the protocol permits and confer no reservation or ownership. A
-  lying or stalled Station cannot prevent another authorized Attempt.
+  capabilities the protocol permits and confer no reservation or ownership.
+  `Session::announce` evaluates each claimed Spec's offer demand. A first-use
+  Try that cites an Offer consumes its Ready only after `Leased` is durable.
+  Continue with live news does not demand a new Ready; continue without news
+  still pays the offer demand. A prior-epoch `Leased` that never began is
+  failed `Unknown` so another Attempt can proceed. A Station that only
+  advertises, or that leases and then dies, cannot imprison the Run.
 - Remote incorporation is inert: adopting `Started`, `Began`, or any other Run
   event never launches a handler. Dispatch is a local act after the complete
   committed root becomes active. The unresolved-Run scan accepts only an
@@ -405,20 +421,23 @@ belongs to a granted Schema. A child or instantiated Grant must prove set,
 operator, mode, and work-budget containment in its parent; composition can only
 narrow.
 
-The F0 Query decoder applies the same standalone size, version, canonical-byte,
+The Query decoder applies the same standalone size, version, canonical-byte,
 and trailing-byte rules before accepting a typed DAG. It also proves canonical
 topological identity and input order, acyclicity, reachability, stable final
 output type, operator composition, declared-Schema reference containment, finite per-Step and whole
 Query ceilings, exact-versus-augmented feature use, and containment in a Grant.
 
-`Session::find` now derives a fresh principal, its authority frontier, the
-active World implementation, and local Station policy without accepting any of
-them from its caller. It pins either the requested retained Manifest root or the
-current read snapshot while holding the Station writer, releases that writer,
-and enters one Runtime-owned Find path. Revocation, inactive implementation,
-invalid or missing generation, and Station-policy exhaustion are typed
-admission failures. A generic Find never enters `World::submit` or
-`World::query`, and World callbacks receive no Find or Session facade.
+`Session::find` derives a fresh principal, its authority frontier, the exact
+installed World implementation named by the publication, and local Station
+policy without accepting any of them from its caller. It pins immutable durable
+generation and package readers under the Station lock, then reconstructs and
+extracts a cold historical corpus off that lock through a deduplicated
+single-flight. Revocation, inactive or unavailable implementation, invalid or
+missing generation, cursor expiry/capacity, and Station-policy exhaustion are
+typed admission failures. A generic Find never enters `World::submit` or
+`World::query`. A World callback may receive only a publication-pinned,
+principal-gated `Context::find` reader; it re-enters the same Runtime evaluator
+and exposes neither Session nor Corpus internals.
 
 A World that declares Find commits that vocabulary under descriptor section tag
 `0x0003`. Empty declarations emit no section, while every source, semantic
@@ -426,15 +445,20 @@ Field, Edge/Gate demand, analyzer configuration, feature stamp, operator/mode
 set, and Bound is implementation-identity material. Registry composition
 requires every declared Body source to exist and to have exactly one extractor
 coordinate; missing, extra, duplicated, or cross-wired bindings reject before a
-Station can host the package. F0 binds coordinates only and introduces no
-product-selected backend or executable evaluator.
+Station can host the package. Extractor ABI version and semantic digest are
+committed alongside source and schema identity, so a corpus cannot be reused
+under changed executable semantics.
 
-This is still not a query evaluator. F0 returns `Unavailable` after successful
-admission rather than claiming an empty complete result. Candidate-production
-authority filtering, Grant intersection, feature coverage, cursor binding,
-measured work, and Answer honesty remain mandatory before that terminal can be
-replaced by evaluation. No raw Grant or Query decoder is a client surface, and
-possession of canonical bytes grants no read.
+After admission, the bounded evaluator implements Seek, Keep, Walk, Rank,
+Merge, and Pack over the immutable corpus. Granted Gate partitions are applied
+before a node, field, edge, feature, count, or order can affect output. Every
+visited or returned unit is metered against the declared Bound; unsupported
+feature scoring and pagination shapes fail typed rather than approximating.
+Cursors bind the full publication, principal/authority coordinates, query, and
+position. Their publications are retained by bounded TTL and byte leases;
+expiry is explicit and never resumes against a silently newer corpus. No raw
+Grant or Query decoder is a client surface, and possession of canonical bytes
+grants no read.
 
 ## Peer-authored names on local paths
 
@@ -535,6 +559,37 @@ send whatever it liked.
 session ceiling, or after a gate drop, the view reports itself partial. A
 surface that can be incomplete and does not say so is worse than one that is
 plainly unavailable.
+
+## Attached display receivers
+
+An attached display is a narrowly authorized output device, not a Space member,
+World client, browser, or general Astrolabe principal. Enrollment binds a
+receiver-owned secret to one coordinator record only after the operator checks
+the same confirmation phrase and certificate fingerprint on both surfaces.
+Pairing grants no content authority.
+
+Every post-enrollment request is authenticated, challenge-bound, bounded, and
+scoped to the receiver's current assignment and revision. The receiver may ask
+only for the exact program, opaque frame assets, or assignment-bound live grant
+named by that assignment. It cannot select a World, Space, surface, operation,
+acting identity, filesystem path, external URL, or product route. Redirects,
+cross-origin delivery, stale revisions, replayed challenges, oversized bodies,
+digest mismatches, and unsupported output fail closed.
+
+Frame assets become visible only after complete transfer, type, encoded-length,
+digest, and decoded-dimension checks. Live media is likewise coordinator-owned:
+web receivers consume a bounded CMAF stream through MSE, while native Roku and
+tvOS receivers consume the authenticated HLS edge. Neither path accepts an
+arbitrary media URL. Revocation and assignment changes clear staged authority;
+receiver-owned chrome continues to distinguish transport loss, source
+incompleteness, delivery staleness, refusal, and trust change.
+
+The coordinator certificate is part of receiver bootstrap. Native receivers
+can pin a private deployment's exact leaf. webOS and Tizen, and Android live
+playback, require a Web-PKI endpoint because their media/WebSocket stacks cannot
+safely inherit an app-local private trust override. A private Android build
+therefore negotiates the Frame tier. These platform limits are explicit
+capability downgrades, never silent bypasses.
 
 ## Local web surface
 

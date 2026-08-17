@@ -566,6 +566,22 @@ fn operator_configuration_lowers_but_never_raises_protocol_maxima() {
 }
 
 #[test]
+fn million_body_protocol_envelope_is_lazy_not_preallocated() {
+    let replica = Replica::loro();
+    assert_eq!(replica.quota().max_space_bodies, 10_000_000);
+    assert_eq!(
+        replica.quota().max_space_bytes,
+        16 * 1024 * 1024 * 1024 * 1024
+    );
+    assert_eq!(replica.usage(), (0, 0));
+    assert!(replica.body_keys().is_empty());
+    assert!(
+        std::mem::size_of_val(&replica) < 4096,
+        "the quota is an arithmetic ceiling, not reserved Body storage"
+    );
+}
+
+#[test]
 fn configured_limits_persist_so_restart_cannot_raise_capacity() {
     let dir = temp_store("persist");
     let mut r = Replica::open(&dir, keys()).unwrap();

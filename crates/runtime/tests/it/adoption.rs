@@ -195,6 +195,7 @@ impl World for KvWorld {
             schema_version: 1,
             bytes: value,
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -263,6 +264,7 @@ fn a_consumer_drives_the_whole_lifecycle_through_the_public_api() {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: key.as_bytes().to_vec(),
+            publication: None,
         })
         .unwrap()
         .bytes

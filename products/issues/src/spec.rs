@@ -21,6 +21,17 @@ pub const MAX_PREDECESSORS: usize = 8;
 const SPEC_REVISION_CONTEXT: &str = "lait.issues.spec-revision.v1";
 const BASELINE_REVISION_CONTEXT: &str = "lait.issues.baseline-revision.v1";
 
+// `runtime::publication::PublicationId` deliberately has no dependency on
+// schemars. This private mirror describes its serde shape for the product
+// contract without creating a second durable coordinate type.
+#[derive(JsonSchema)]
+#[allow(dead_code, reason = "schema-only mirror for PublicationId")]
+struct PublicationSchema {
+    manifest_root: [u8; 32],
+    implementation_digest: [u8; 32],
+    extractor_schema_digest: [u8; 32],
+}
+
 /// What one Spec contributes to the lifecycle.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
@@ -293,11 +304,11 @@ pub struct Body {
     pub spec: String,
     pub project: String,
     pub kind: Kind,
-    /// World generation against which this revision was composed. This is the
-    /// coordinate for every Issue-derived projection of the revision; it is
-    /// deliberately part of the immutable revision identity.
-    #[serde(default)]
-    pub generation: String,
+    /// Full portable World publication against which this revision was
+    /// composed. A Manifest root alone cannot name the implementation or
+    /// extractor semantics that gave the Plan its meaning.
+    #[schemars(with = "PublicationSchema")]
+    pub publication: runtime::publication::PublicationId,
     pub title: String,
     #[serde(default)]
     pub text: String,
@@ -324,13 +335,10 @@ impl Body {
         if crate::ids::ProjectId::parse(&self.project).is_none() {
             return Err("invalid Project id".into());
         }
-        if !self.generation.is_empty()
-            && (self.generation.len() != 64
-                || data_encoding::HEXLOWER
-                    .decode(self.generation.as_bytes())
-                    .is_err())
+        if self.publication.implementation_digest == [0; 32]
+            || self.publication.extractor_schema_digest.digest() == [0; 32]
         {
-            return Err("invalid World generation".into());
+            return Err("invalid World publication".into());
         }
         let title = self.title.trim();
         if title.is_empty() || self.title.len() > MAX_TITLE_BYTES {
@@ -356,6 +364,9 @@ impl Body {
         }
         if self.plan.is_some() && self.kind != Kind::Plan {
             return Err("structured Plan data belongs only on a Plan Spec".into());
+        }
+        if self.kind == Kind::Plan && self.plan.is_none() {
+            return Err("Plan revision is missing its bounded root selection".into());
         }
         if let Some(plan) = &self.plan {
             plan.validate()?;
@@ -1041,7 +1052,7 @@ mod tests {
             spec: spec.into(),
             project: "prj_01k1k8q6c6t0g0000000000000".into(),
             kind: Kind::Requirement,
-            generation: String::new(),
+            publication: publication(),
             title: "A requirement".into(),
             text: "The system shall be deterministic.".into(),
             state,
@@ -1070,6 +1081,14 @@ mod tests {
         }
     }
 
+    fn publication() -> runtime::publication::PublicationId {
+        runtime::publication::PublicationId::new(
+            [1; 32],
+            [2; 32],
+            runtime::publication::ExtractorSchemaDigest::from_digest([3; 32]),
+        )
+    }
+
     #[test]
     fn structured_plan_data_belongs_only_to_plan_specs() {
         let mut revision = body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 1);
@@ -1080,6 +1099,7 @@ mod tests {
             Err("structured Plan data belongs only on a Plan Spec".into())
         );
         revision.kind = Kind::Plan;
+        revision.publication = publication();
         assert_eq!(revision.validate(), Ok(()));
     }
 
@@ -1131,6 +1151,7 @@ mod tests {
     fn structured_plan_changes_are_part_of_revision_identity() {
         let mut left = body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 1);
         left.kind = Kind::Plan;
+        left.publication = publication();
         left.plan = Some(plan());
         let mut right = left.clone();
         right.plan.as_mut().expect("Plan data").roots[0] = "iss_01k1k8q6c6t0g0000000000001".into();

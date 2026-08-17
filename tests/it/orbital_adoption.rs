@@ -126,6 +126,7 @@ impl World for TallyWorld {
             schema_version: 1,
             bytes: self.current(ctx).to_string().into_bytes(),
             frontier: ReplicaFrontier::EMPTY, // overwritten by Runtime
+            publication: None,
         })
     }
 }
@@ -200,6 +201,7 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
             schema: SchemaId::parse("tally").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(proj.bytes, b"8");
@@ -254,6 +256,7 @@ fn one_station_hosts_and_routes_two_worlds_independently() {
         schema: SchemaId::parse("tally").unwrap(),
         schema_version: 1,
         payload: vec![],
+        publication: None,
     };
     assert_eq!(
         worlds

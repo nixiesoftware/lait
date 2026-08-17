@@ -19,6 +19,11 @@ use crate::{BoardPos, Filter, IssuesRequest};
 struct EmptyArgs {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ChangeSetArgs {
+    operations: Vec<crate::ChangeOperation>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct IssueNewArgs {
     title: String,
     #[serde(default)]
@@ -46,6 +51,35 @@ struct InboxArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RefArgs {
     reff: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IssuesSearchArgs {
+    #[serde(default)]
+    text: Option<String>,
+    /// Product entity kinds (for example issue, project, spec, plan_revision,
+    /// comment). Several kinds use a bounded union and intentionally do not
+    /// promise a continuation cursor until Runtime has Merge continuation.
+    #[serde(default)]
+    kinds: Vec<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    priority: Option<String>,
+    #[serde(default)]
+    tombstone: Option<bool>,
+    /// 1..=10,000 rows; defaults to 50.
+    #[serde(default)]
+    limit: Option<u32>,
+    /// Opaque base64url continuation returned by the prior Find answer.
+    #[serde(default)]
+    cursor: Option<String>,
+    /// Bounded product field names. Raw schema/DAG coordinates are never
+    /// accepted from an MCP caller.
+    #[serde(default)]
+    fields: Vec<String>,
 }
 
 macro_rules! exact_hex {
@@ -119,9 +153,12 @@ struct VerifyArgs {
     reff: String,
     /// Pinned repository ContentRef (64 lowercase hex).
     source: Hex32Bytes,
-    /// Exact caller-selected Build id. Execution begins only when that Build
-    /// is trusted and available in the selected Space.
-    build: Hex32Bytes,
+    /// Exact caller-selected Build id. Omit to use the bundled in-process
+    /// verifier (the check records package_filled). That verifier binds the
+    /// pinned source; it does not compile or isolate. Execution begins only
+    /// when the named Build is installed locally.
+    #[serde(default)]
+    build: Option<Hex32Bytes>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -665,6 +702,16 @@ pub const WITHOUT_A_TOOL: &[&str] = &[
 
 pub fn tools() -> Vec<McpTool> {
     vec![
+        tool::<IssuesSearchArgs>(
+            "issues_search",
+            "Search Issues, projects, Plans/Specs and related records through the shared pinned publication. Supports product filters, bounded fields, and Runtime cursors without exposing the raw Find DAG.",
+            issues_search,
+        ),
+        tool::<ChangeSetArgs>(
+            "issues_change_set",
+            "Atomically create dependent Issues records in one publication. Operations are ordered; later Specs/Plans may reference an earlier project_create by operation ordinal. The planner enforces product limits, preconditions, and retry-stable identities.",
+            issues_change_set,
+        ),
         tool::<IssueNewArgs>(
             "new",
             "Create an issue. Returns the resolved canonical handle.",
@@ -688,7 +735,7 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<VerifyArgs>(
             "verify",
-            "Start a durable issue verification against one pinned repository ContentRef. Returns the stable Run id; execution waits until the selected Build is trusted and available in the Space.",
+            "Start a durable issue verification Run against one pinned repository ContentRef. Returns the stable Run id. The local Station may perform an Attempt after commit when a matching handler is installed. The bundled in-process verifier binds the pinned source; it does not compile the repository or isolate the host. Omit build to select that bundled Build — the check then records package_filled.",
             verify,
         ),
         tool::<AcceptCheckArgs>(
@@ -973,6 +1020,303 @@ fn local(operation: &str, input: Value) -> Result<ClientInvocation, Failure> {
     crate::host::invocation(operation, input)
 }
 
+fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
+    use runtime::find as find_api;
+
+    let a: IssuesSearchArgs = args(input)?;
+    let page_size = a.limit.unwrap_or(50);
+    if !(1..=find_api::MAX_PAGE_SIZE).contains(&page_size) {
+        return Err(Failure::new("limit must be between 1 and 10000"));
+    }
+    let text = a.text.filter(|value| !value.trim().is_empty());
+    if a.kinds.len() > 16 {
+        return Err(Failure::new("at most 16 kinds may be searched together"));
+    }
+    let mut kinds = a.kinds;
+    kinds.sort();
+    kinds.dedup();
+    if kinds.iter().any(|kind| {
+        kind.is_empty()
+            || kind.len() > 64
+            || !kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    }) {
+        return Err(Failure::new("kinds must be lowercase product tokens"));
+    }
+
+    let allowed_fields = [
+        issues::find::field::ID,
+        issues::find::field::KIND,
+        issues::find::field::TITLE,
+        issues::find::field::TEXT,
+        issues::find::field::PROJECT,
+        issues::find::field::STATE,
+        issues::find::field::PRIORITY,
+        issues::find::field::AUTHOR,
+        issues::find::field::CREATED_AT,
+        issues::find::field::DUE_AT,
+        issues::find::field::HEALTH,
+        issues::find::field::TOMBSTONE,
+        issues::find::field::REVISION,
+        issues::find::field::HEAD,
+        issues::find::field::ISSUED,
+        issues::find::field::CONFLICTED,
+        issues::find::field::SOURCE_ID,
+        issues::find::field::TARGET_ID,
+        issues::find::field::RELATION_KIND,
+    ];
+    let requested = if a.fields.is_empty() {
+        vec![
+            issues::find::field::ID.into(),
+            issues::find::field::KIND.into(),
+            issues::find::field::TITLE.into(),
+            issues::find::field::PROJECT.into(),
+            issues::find::field::STATE.into(),
+            issues::find::field::PRIORITY.into(),
+            issues::find::field::TOMBSTONE.into(),
+        ]
+    } else {
+        a.fields
+    };
+    if requested.len() > 20
+        || requested
+            .iter()
+            .any(|field| !allowed_fields.contains(&field.as_str()))
+    {
+        return Err(Failure::new("fields contains an unsupported product field"));
+    }
+    let mut packed = requested
+        .iter()
+        .map(|field| issues::find::field_ref(field))
+        .collect::<Vec<_>>();
+    packed.sort();
+    packed.dedup();
+
+    let cursor = a
+        .cursor
+        .map(|encoded| {
+            data_encoding::BASE64URL_NOPAD
+                .decode(encoded.as_bytes())
+                .map_err(|_| Failure::new("cursor is not canonical base64url"))
+                .and_then(|bytes| {
+                    find_api::Cursor::new(bytes)
+                        .map_err(|_| Failure::new("cursor is not Runtime-issued"))
+                })
+        })
+        .transpose()?;
+    if cursor.is_some() && kinds.len() > 1 {
+        return Err(Failure::new(
+            "multi-kind union continuation is not available; narrow to one kind",
+        ));
+    }
+
+    let candidate_bound = u64::from(page_size).saturating_mul(64).min(100_000);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: candidate_bound.saturating_mul(4),
+        edges_visited: 1,
+        nodes_visited: candidate_bound,
+        paths_retained: 1,
+        candidates_per_branch: candidate_bound,
+        score_evaluations: candidate_bound,
+        projected_bytes: u64::from(page_size).saturating_mul(64 * 1024),
+        packed_tokens: u64::from(page_size).saturating_mul(512),
+        wall_millis: 5_000,
+    };
+    let branch_kinds = if kinds.is_empty() {
+        vec![None]
+    } else {
+        kinds.into_iter().map(Some).collect()
+    };
+    let mut steps = Vec::new();
+    let mut outputs = Vec::new();
+    let mut next_id = 1u32;
+    for kind in branch_kinds {
+        let seek_id = find_api::StepId::new(next_id)
+            .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
+        next_id += 1;
+        let seek = if let Some(text) = &text {
+            find_api::Seek::Term {
+                field: issues::find::field_ref(issues::find::field::SEARCH),
+                text: text.clone(),
+                kind: find_api::Term::Token,
+            }
+        } else if let Some(kind) = &kind {
+            find_api::Seek::Field(find_api::Predicate {
+                field: issues::find::field_ref(issues::find::field::KIND),
+                test: find_api::Test::Equal,
+                value: find_api::Atom::Text(kind.clone()),
+            })
+        } else {
+            find_api::Seek::Source
+        };
+        steps.push(find_api::Step {
+            id: seek_id,
+            input: Vec::new(),
+            op: find_api::Op::Seek(seek),
+            bound,
+        });
+        let mut predicates = Vec::new();
+        if text.is_some() {
+            if let Some(kind) = kind {
+                predicates.push(find_api::Predicate {
+                    field: issues::find::field_ref(issues::find::field::KIND),
+                    test: find_api::Test::Equal,
+                    value: find_api::Atom::Text(kind),
+                });
+            }
+        }
+        for (field, value) in [
+            (issues::find::field::PROJECT, a.project.clone()),
+            (issues::find::field::STATE, a.state.clone()),
+            (issues::find::field::PRIORITY, a.priority.clone()),
+        ] {
+            if let Some(value) = value {
+                predicates.push(find_api::Predicate {
+                    field: issues::find::field_ref(field),
+                    test: find_api::Test::Equal,
+                    value: find_api::Atom::Text(value),
+                });
+            }
+        }
+        if let Some(tombstone) = a.tombstone {
+            predicates.push(find_api::Predicate {
+                field: issues::find::field_ref(issues::find::field::TOMBSTONE),
+                test: find_api::Test::Equal,
+                value: find_api::Atom::Bool(tombstone),
+            });
+        }
+        if predicates.is_empty() {
+            outputs.push(seek_id);
+        } else {
+            predicates.sort();
+            let keep_id = find_api::StepId::new(next_id)
+                .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
+            next_id += 1;
+            steps.push(find_api::Step {
+                id: keep_id,
+                input: vec![seek_id],
+                op: find_api::Op::Keep(find_api::Keep { predicates }),
+                bound,
+            });
+            outputs.push(keep_id);
+        }
+    }
+    let output = if outputs.len() == 1 {
+        outputs[0]
+    } else {
+        let merge_id = find_api::StepId::new(next_id)
+            .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
+        next_id += 1;
+        steps.push(find_api::Step {
+            id: merge_id,
+            input: outputs,
+            op: find_api::Op::Merge(find_api::Merge {
+                method: find_api::MergeMethod::Union,
+            }),
+            bound,
+        });
+        merge_id
+    };
+    let pack_id = find_api::StepId::new(next_id)
+        .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
+    steps.push(find_api::Step {
+        id: pack_id,
+        input: vec![output],
+        op: find_api::Op::Pack(find_api::Pack { fields: packed }),
+        bound,
+    });
+    Ok(ClientInvocation::find_presented(
+        issues::contract::world_id(),
+        find_api::Query {
+            schema: issues::find::entity_schema_ref(),
+            publication: None,
+            mode: find_api::Mode::Exact,
+            steps,
+            output: pack_id,
+            bound,
+            page_size,
+            cursor,
+        },
+        present_issues_search,
+    ))
+}
+
+fn issues_change_set(input: Value) -> Result<ClientInvocation, Failure> {
+    let args: ChangeSetArgs = args(input)?;
+    if args.operations.is_empty()
+        || args.operations.len() > issues::contract::CHANGE_SET_MAX_OPERATIONS
+    {
+        return Err(Failure::invalid());
+    }
+    world(IssuesRequest::ChangeSet {
+        operations: args.operations,
+    })
+}
+
+/// Present Runtime's exact Find answer using Issues' public query vocabulary.
+///
+/// Runtime cursors are opaque bytes by design; byte-array JSON would expose an
+/// accidental transport representation and contradict the base64url cursor
+/// accepted by [`IssuesSearchArgs`]. Rows similarly become product field maps
+/// rather than leaking schema references and corpus node coordinates.
+fn present_issues_search(answer: runtime::find::Answer) -> Result<Value, Failure> {
+    let publication = answer.coordinates().world_publication();
+    let mut items = Vec::with_capacity(answer.rows().len());
+    for row in answer.rows() {
+        let mut item = serde_json::Map::new();
+        for field in &row.fields {
+            item.insert(
+                field.reference.name.as_str().to_owned(),
+                present_find_value(&field.value),
+            );
+        }
+        items.push(Value::Object(item));
+    }
+
+    let mut envelope = serde_json::Map::new();
+    envelope.insert(
+        "publication".into(),
+        json!({
+            "manifest_root": data_encoding::HEXLOWER.encode(
+                &publication.publication.manifest_root
+            ),
+            "implementation_digest": data_encoding::HEXLOWER.encode(
+                &publication.publication.implementation_digest
+            ),
+            "extractor_schema_digest": data_encoding::HEXLOWER.encode(
+                &publication.publication.extractor_schema_digest.digest()
+            ),
+            "materialization": publication.materialization.get(),
+        }),
+    );
+    envelope.insert("items".into(), Value::Array(items));
+    envelope.insert(
+        "next_cursor".into(),
+        answer
+            .next_cursor()
+            .map(|cursor| Value::String(data_encoding::BASE64URL_NOPAD.encode(cursor.as_bytes())))
+            .unwrap_or(Value::Null),
+    );
+    if let Some(total) = answer.matched_total() {
+        envelope.insert("total".into(), Value::Number(total.into()));
+    }
+    Ok(Value::Object(envelope))
+}
+
+fn present_find_value(value: &runtime::find::Value) -> Value {
+    match value {
+        runtime::find::Value::Bool(value) => Value::Bool(*value),
+        runtime::find::Value::Signed(value) => Value::Number((*value).into()),
+        runtime::find::Value::Unsigned(value) => Value::Number((*value).into()),
+        runtime::find::Value::Bytes(value) => {
+            Value::String(data_encoding::BASE64URL_NOPAD.encode(value))
+        }
+        runtime::find::Value::Text(value) => Value::String(value.to_string()),
+    }
+}
+
 fn issue_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueNewArgs = args(input)?;
     world(IssuesRequest::IssueNew {
@@ -1034,7 +1378,9 @@ fn verify(input: Value) -> Result<ClientInvocation, Failure> {
     world(IssuesRequest::Verify {
         reff: a.reff,
         source: a.source.into_string(),
-        build: a.build.into_string(),
+        // Empty means omitted: the router fills the bundled Build and records
+        // package_filled. Filling here would look like a caller-named Build.
+        build: a.build.map(Hex32Bytes::into_string).unwrap_or_default(),
     })
 }
 
@@ -1768,6 +2114,42 @@ mod tests {
             invocation.into_kind(),
             world_interface::ClientInvocationKind::World(_)
         ));
+    }
+
+    #[test]
+    fn search_owns_a_product_presenter_and_never_exposes_the_raw_find_dag() {
+        let invocation = issues_search(json!({
+            "kinds": ["issue"],
+            "limit": 25,
+            "fields": ["id", "title"]
+        }))
+        .expect("friendly search compiles");
+        let world_interface::ClientInvocationKind::Find { query, presenter } =
+            invocation.into_kind()
+        else {
+            panic!("issues_search did not compile to Runtime Find")
+        };
+        assert_eq!(query.page_size, 25);
+        assert!(
+            presenter.is_some(),
+            "raw Runtime JSON would leak cursor bytes"
+        );
+    }
+
+    #[test]
+    fn search_values_use_client_scalars() {
+        assert_eq!(
+            present_find_value(&runtime::find::Value::text("Plan title")),
+            json!("Plan title")
+        );
+        assert_eq!(
+            present_find_value(&runtime::find::Value::bytes([0xfb, 0xff])),
+            json!("-_8")
+        );
+        assert_eq!(
+            present_find_value(&runtime::find::Value::Unsigned(42)),
+            json!(42)
+        );
     }
 
     #[test]

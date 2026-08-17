@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 pub use crate::protected::{
-    BodyKeySource, Material, StaticBodyKeys, MAX_BODY_BYTES, MAX_PROTECTED_PLAINTEXT,
-    MUTATION_ATOMIC, MUTATION_COLLABORATIVE,
+    BodyKeySource, StaticBodyKeys, MAX_BODY_BYTES, MAX_PROTECTED_PLAINTEXT, MUTATION_ATOMIC,
+    MUTATION_COLLABORATIVE,
 };
 pub use crate::replica::{BodyBinding, QuotaConfig, SupportedSchemas};
+pub use fabric::Material;
 
 pub use crate::transaction::Descriptor;
 

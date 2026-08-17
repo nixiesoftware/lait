@@ -2,7 +2,7 @@
 //!
 //! This module owns the substrate vocabulary for execution. The module is the
 //! qualifier: public types are `Spec`, `Run`, `Attempt`, `Outcome`, `Build`,
-//! and `Service`, never names that repeat `Exec` or `Execution`.
+//! `Service`, and `Offer`, never names that repeat `Exec` or `Execution`.
 //!
 //! A World remains a pure semantic authority. It declares what may run and,
 //! through its ordinary [`World::submit`](crate::world::World::submit)
@@ -64,16 +64,50 @@ use std::sync::{
 const SPEC_VERSION: u8 = 1;
 /// Standalone canonical encoding generation for [`Build`].
 const BUILD_VERSION: u8 = 1;
+/// Standalone canonical encoding generation for [`Offer`].
+const OFFER_VERSION: u8 = 1;
 /// Signature algorithm carried by [`Signature`] in generation 1.
 const SIGNATURE_ED25519: u8 = 1;
 /// Domain for [`BuildId`] derivation over canonical identity-bearing material.
 const BUILD_ID_DOMAIN: &[u8] = b"lait/exec/build/1\0";
 /// Domain for the signed Build publication envelope.
 const BUILD_SIGNATURE_DOMAIN: &[u8] = b"lait/exec/build/signature/1\0";
+/// Domain for [`OfferId`] derivation over canonical identity-bearing material.
+const OFFER_ID_DOMAIN: &[u8] = b"lait/exec/offer/1\0";
+/// Domain for the signed Offer news envelope.
+const OFFER_SIGNATURE_DOMAIN: &[u8] = b"lait/exec/offer/signature/1\0";
+/// Standalone canonical encoding generation for [`Challenge`].
+const CHALLENGE_VERSION: u8 = 1;
+/// Domain for the signed Ready answer over one Challenge.
+const READY_SIGNATURE_DOMAIN: &[u8] = b"lait/exec/ready/signature/1\0";
 /// Maximum bytes in one canonical standalone [`Spec`].
 pub const MAX_SPEC_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum bytes in one canonical standalone [`Build`].
 pub const MAX_BUILD_BYTES: usize = 256 * 1024;
+/// Maximum bytes in one canonical standalone [`Offer`].
+pub const MAX_OFFER_BYTES: usize = 64 * 1024;
+/// Maximum exact Builds one Offer may claim.
+pub const MAX_BUILDS_PER_OFFER: usize = 64;
+/// Maximum resident ContentRef hints one Offer may carry.
+pub const MAX_RESIDENT_HINTS_PER_OFFER: usize = 64;
+/// Maximum live Offers one Station activation may retain as news.
+pub const MAX_OFFERS_PER_STATION: usize = 256;
+/// Maximum outstanding readiness challenges one Station activation may retain.
+pub const MAX_CHALLENGES_PER_STATION: usize = 256;
+/// Default lifetime of one readiness challenge, in unix milliseconds.
+pub const CHALLENGE_TTL_MILLIS: u64 = 30_000;
+/// Canonical CPU quantity name.
+pub const CPU_MILLIS: &str = "cpu.millis";
+/// Canonical memory quantity name.
+pub const MEMORY_BYTES: &str = "memory.bytes";
+/// Canonical storage quantity name.
+pub const STORAGE_BYTES: &str = "storage.bytes";
+/// Canonical wall-time quantity name.
+pub const WALL_TIME_MS: &str = "wall_time.ms";
+/// Canonical ingress bandwidth quantity name.
+pub const NETWORK_INGRESS_BPS: &str = "network.ingress_bps";
+/// Canonical egress bandwidth quantity name.
+pub const NETWORK_EGRESS_BPS: &str = "network.egress_bps";
 /// Maximum Find envelopes one Spec may expose to an Attempt.
 pub const MAX_QUERIES_PER_SPEC: usize = 16;
 /// Maximum declared Links in one Spec or Set Service.
@@ -98,6 +132,12 @@ pub const MAX_RUN_COMMAND_CHUNK_BYTES: usize = 64 * 1024;
 pub const RUN_EVENTS_PATH: &str = "events";
 /// Collaborative map path containing canonical Start command chunks.
 pub const RUN_COMMAND_PATH: &str = "command";
+/// Collaborative map path containing one published Build envelope.
+pub const BUILD_ENVELOPE_PATH: &str = "envelope";
+/// Map key of the canonical Build bytes under [`BUILD_ENVELOPE_PATH`].
+pub const BUILD_ENVELOPE_KEY: &str = "bytes";
+/// Domain for deriving a reserved Build Body id from a [`BuildId`].
+const BUILD_BODY_ID_DOMAIN: &[u8] = b"lait/exec/build-body/1\0";
 
 const RUN_EVENT_VERSION: u8 = 1;
 const RUN_EVENT_ID_CONTEXT: &str = "lait.exec.run-event.v1";
@@ -1362,6 +1402,7 @@ pub struct Context<'a> {
     committed_cancel: bool,
     checkpoints: Vec<CheckpointRef>,
     children: Vec<Start>,
+    output_blobs: Vec<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Context<'_> {
@@ -1403,6 +1444,7 @@ impl<'a> Context<'a> {
             committed_cancel: !run.cancel_asked.is_empty(),
             checkpoints: Vec::new(),
             children: Vec::new(),
+            output_blobs: Vec::new(),
         })
     }
 
@@ -1442,7 +1484,8 @@ impl<'a> Context<'a> {
         &self.attempt.resources
     }
 
-    pub const fn enforcement_evidence(&self) -> ContentRef {
+    /// Isolation evidence when a backend produced some. Advisory is absence.
+    pub const fn enforcement_evidence(&self) -> Option<ContentRef> {
         self.attempt.enforcement
     }
 
@@ -1502,6 +1545,21 @@ impl<'a> Context<'a> {
         Ok(())
     }
 
+    /// Stage one output blob for Runtime to ingest and bind as a ContentRef.
+    ///
+    /// The handler never receives a content-plane handle. Runtime seals the
+    /// bytes after the callback returns and only then attributes them on
+    /// `Returned`.
+    pub fn stage_output(&mut self, bytes: Vec<u8>) -> Result<(), Failure> {
+        let staged = u64::try_from(self.output_blobs.len()).map_err(|_| Failure::InvalidOutcome)?;
+        let next = staged.checked_add(1).ok_or(Failure::InvalidOutcome)?;
+        if next > u64::from(self.run.started.limits.events.max(1)) {
+            return Err(Failure::InvalidOutcome);
+        }
+        self.output_blobs.push(bytes);
+        Ok(())
+    }
+
     fn validate_staged(&self, spec: &Spec, build: &Build) -> Result<(), Failure> {
         if !self.checkpoints.is_empty()
             && !matches!(
@@ -1516,10 +1574,11 @@ impl<'a> Context<'a> {
         Ok(())
     }
 
-    fn take_staged(&mut self) -> (Vec<CheckpointRef>, Vec<Start>) {
+    fn take_staged(&mut self) -> (Vec<CheckpointRef>, Vec<Start>, Vec<Vec<u8>>) {
         (
             std::mem::take(&mut self.checkpoints),
             std::mem::take(&mut self.children),
+            std::mem::take(&mut self.output_blobs),
         )
     }
 }
@@ -1531,6 +1590,7 @@ pub struct Completion {
     candidate: Candidate,
     checkpoints: Vec<CheckpointRef>,
     children: Vec<Start>,
+    output_blobs: Vec<Vec<u8>>,
 }
 
 impl Completion {
@@ -1544,6 +1604,21 @@ impl Completion {
 
     pub fn children(&self) -> &[Start] {
         &self.children
+    }
+
+    pub fn output_blobs(&self) -> &[Vec<u8>] {
+        &self.output_blobs
+    }
+
+    /// Bind ingested output ContentRefs after Runtime seals staged blobs.
+    pub fn bind_output_content(
+        &mut self,
+        content: Vec<ContentRef>,
+        content_bytes: u64,
+    ) -> Result<(), Failure> {
+        self.candidate.content = content;
+        self.candidate.content_bytes = content_bytes;
+        Ok(())
     }
 
     /// Build predecessor-bound Saved/Returned facts. Runtime remains the only
@@ -1618,7 +1693,7 @@ impl std::error::Error for Failure {}
 ///
 /// Requested and reserved resources remain scheduling and accounting evidence;
 /// this statement is separate so neither can be mistaken for isolation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Enforcement {
     Advisory,
     Measured,
@@ -1664,11 +1739,12 @@ impl InProcess {
         .map_err(|_| Failure::Handler)??;
         candidate.validate_with_spec(selection.spec)?;
         context.validate_staged(selection.spec, selection.build)?;
-        let (checkpoints, children) = context.take_staged();
+        let (checkpoints, children, output_blobs) = context.take_staged();
         Ok(Completion {
             candidate,
             checkpoints,
             children,
+            output_blobs,
         })
     }
 }
@@ -1794,6 +1870,34 @@ fn selected_links(selection: &Selection<'_>) -> Vec<LinkSpec> {
         }
     }
     selected
+}
+
+/// What the local outbox did after observing committed Runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PerformStep {
+    Tried {
+        run: RunId,
+        attempt: AttemptId,
+    },
+    Began {
+        run: RunId,
+        attempt: AttemptId,
+    },
+    Returned {
+        run: RunId,
+        attempt: AttemptId,
+    },
+    Failed {
+        run: RunId,
+        attempt: AttemptId,
+        class: FailureClass,
+    },
+}
+
+/// Bounded record of one local perform pass.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PerformReport {
+    pub steps: Vec<PerformStep>,
 }
 
 /// Why committed local dispatch could not enter a backend.
@@ -1976,10 +2080,10 @@ pub struct Leased {
     pub executor: ActorId,
     pub device: DeviceId,
     pub build: BuildId,
-    pub offer: OfferId,
+    pub offer: Option<OfferId>,
     pub offer_epoch: u64,
     pub resources: Vec<Resource>,
-    pub enforcement: ContentRef,
+    pub enforcement: Option<ContentRef>,
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
@@ -2035,6 +2139,10 @@ pub enum FailureClass {
     Protocol,
     Deadline,
     Fence,
+    /// Completion is unknown: this Attempt is dead and must not be retried
+    /// under the same id. Used for an inherited `Began` and for a prior-epoch
+    /// `Leased` that never began.
+    Unknown,
 }
 
 /// A durable Attempt failure, distinct from a returned application failure.
@@ -2211,12 +2319,12 @@ impl RunEvent {
                 Try {
                     run: event.run,
                     build: event.build,
-                    offer: OfferRef {
-                        id: event.offer,
+                    offer: event.offer.map(|id| OfferRef {
+                        id,
                         station: event.station.clone(),
                         station_epoch: event.station_epoch,
                         epoch: event.offer_epoch,
-                    },
+                    }),
                     resources: event.resources.clone(),
                     enforcement: event.enforcement,
                     limits: event.limits,
@@ -2226,6 +2334,9 @@ impl RunEvent {
                 }
                 .validate()
                 .map_err(|_| Invalid::InvalidEvent("leased"))?;
+                if event.offer.is_none() != (event.offer_epoch == 0) {
+                    return Err(Invalid::InvalidEvent("leased"));
+                }
             }
             RunEventKind::Began(event) => {
                 require_predecessors(&self.predecessors)?;
@@ -2476,10 +2587,10 @@ pub struct Attempt {
     pub executor: ActorId,
     pub device: DeviceId,
     pub build: BuildId,
-    pub offer: OfferId,
+    pub offer: Option<OfferId>,
     pub offer_epoch: u64,
     pub resources: Vec<Resource>,
-    pub enforcement: ContentRef,
+    pub enforcement: Option<ContentRef>,
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
@@ -2604,6 +2715,16 @@ pub struct WorkCheckpoint {
 pub struct WorkReturn {
     pub event: EventId,
     pub terminal: TerminalClass,
+    /// Content identities of returned output. Bytes stay behind the World.
+    #[serde(default)]
+    pub output_content: Vec<ContentRef>,
+}
+
+/// One Attempt failure fact an actor can branch on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkFailure {
+    pub event: EventId,
+    pub class: FailureClass,
 }
 
 /// One acceptance or rejection fact. Concurrent choices remain separate.
@@ -2619,10 +2740,12 @@ pub struct WorkAttempt {
     pub attempt: AttemptId,
     pub station: StationKey,
     pub build: BuildId,
+    #[serde(default)]
+    pub offer: Option<OfferId>,
     pub began: Vec<EventId>,
     pub checkpoints: Vec<WorkCheckpoint>,
     pub returned: Vec<WorkReturn>,
-    pub failed: Vec<EventId>,
+    pub failed: Vec<WorkFailure>,
     pub cancelled: Vec<EventId>,
 }
 
@@ -2655,6 +2778,7 @@ impl WorkState {
                 attempt: attempt.id,
                 station: attempt.station.clone(),
                 build: attempt.build,
+                offer: attempt.offer,
                 began: attempt.began.iter().map(|fact| fact.event).collect(),
                 checkpoints: attempt
                     .checkpoints
@@ -2670,9 +2794,17 @@ impl WorkState {
                     .map(|outcome| WorkReturn {
                         event: outcome.event,
                         terminal: outcome.terminal,
+                        output_content: outcome.output_content.clone(),
                     })
                     .collect(),
-                failed: attempt.failures.iter().map(|fact| fact.event).collect(),
+                failed: attempt
+                    .failures
+                    .iter()
+                    .map(|fact| WorkFailure {
+                        event: fact.event,
+                        class: fact.value.class,
+                    })
+                    .collect(),
                 cancelled: attempt
                     .cancellations
                     .iter()
@@ -3012,16 +3144,13 @@ pub fn scan_unresolved(
     world: &WorldId,
 ) -> Result<Vec<Unresolved>, Invalid> {
     let mut unresolved = Vec::new();
-    for key in snapshot
-        .body_keys()
-        .into_iter()
-        .filter(|key| &key.world == world)
-    {
+    let run_schema = SchemaId::parse(RUN_BODY_SCHEMA).ok_or(Invalid::InvalidEvent("run schema"))?;
+    for key in snapshot.body_keys_with_schema_version(world, &run_schema, RUN_BODY_SCHEMA_VERSION) {
         let binding = snapshot
             .binding(&key)
             .ok_or(Invalid::InvalidEvent("run binding"))?;
-        if binding.schema.as_str() != RUN_BODY_SCHEMA {
-            continue;
+        if binding.schema != run_schema || binding.schema_version != RUN_BODY_SCHEMA_VERSION {
+            return Err(Invalid::InvalidEvent("run binding"));
         }
         let id = RunId::from_bytes(key.body.as_bytes());
         let Some((run, start, _)) = read_committed_run(snapshot, world, id)? else {
@@ -3238,9 +3367,477 @@ pub fn derive_attempt_id(
     AttemptId::from_bytes(attempt)
 }
 
+/// Derive the reserved Body identity that holds one published Build envelope.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "BLAKE3 output is a fixed 32-byte array and BodyId is the first 16 bytes"
+)]
+pub fn derive_build_body_id(id: BuildId) -> BodyId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(BUILD_BODY_ID_DOMAIN);
+    hasher.update(&id.as_bytes());
+    let digest = hasher.finalize();
+    let mut body = [0u8; 16];
+    body.copy_from_slice(&digest.as_bytes()[..16]);
+    BodyId::from_bytes(body)
+}
+
 fn command_chunk_count(command_bytes: u32) -> Option<u32> {
     let bytes = usize::try_from(command_bytes).ok()?;
     u32::try_from(bytes.div_ceil(MAX_RUN_COMMAND_CHUNK_BYTES)).ok()
+}
+
+/// One exact Build this Offer claims to serve.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct OfferedBuild {
+    pub id: BuildId,
+    pub spec: SchemaRef,
+}
+
+/// Whether a Station claims it can accept new Attempts now.
+///
+/// This is news, not a rank. Runtime may drop an impossible Offer; it must not
+/// order Offers by this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Availability {
+    Ready,
+    Busy,
+    Draining,
+}
+
+/// Borrowed identity-bearing portion of [`Offer`]. The field order is the
+/// generation-1 OfferId grammar and must not be changed in place.
+#[derive(Serialize)]
+struct OfferMaterial<'a> {
+    space: &'a mechanics::ids::SpaceId,
+    station: &'a StationKey,
+    station_epoch: StationEpoch,
+    actor: &'a ActorId,
+    device: &'a DeviceId,
+    world: &'a WorldId,
+    world_build: &'a [u8; 32],
+    builds: &'a [OfferedBuild],
+    resources: &'a [Resource],
+    backend: &'a SchemaId,
+    enforcement: Enforcement,
+    resident: &'a [ContentRef],
+    availability: Availability,
+    epoch: u64,
+    expiry: u64,
+}
+
+/// Signed, lossy, expiring news that a Station is willing to run exact Builds.
+///
+/// An Offer confers no authority and reserves no Run. Publisher and signature
+/// attest those exact bytes and sit outside [`OfferId`]. The envelope reveals
+/// no local path and no Space catalog: resident hints are ContentRefs only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offer {
+    pub id: OfferId,
+    pub space: mechanics::ids::SpaceId,
+    pub station: StationKey,
+    pub station_epoch: StationEpoch,
+    pub actor: ActorId,
+    pub device: DeviceId,
+    pub world: WorldId,
+    pub world_build: [u8; 32],
+    pub builds: Vec<OfferedBuild>,
+    pub resources: Vec<Resource>,
+    pub backend: SchemaId,
+    pub enforcement: Enforcement,
+    pub resident: Vec<ContentRef>,
+    pub availability: Availability,
+    pub epoch: u64,
+    pub expiry: u64,
+    pub publisher: ActorId,
+    pub signature: Signature,
+}
+
+impl Offer {
+    fn material(&self) -> OfferMaterial<'_> {
+        OfferMaterial {
+            space: &self.space,
+            station: &self.station,
+            station_epoch: self.station_epoch,
+            actor: &self.actor,
+            device: &self.device,
+            world: &self.world,
+            world_build: &self.world_build,
+            builds: &self.builds,
+            resources: &self.resources,
+            backend: &self.backend,
+            enforcement: self.enforcement,
+            resident: &self.resident,
+            availability: self.availability,
+            epoch: self.epoch,
+            expiry: self.expiry,
+        }
+    }
+
+    fn validate_material(&self) -> Result<(), Invalid> {
+        if mechanics::ids::SpaceId::parse(self.space.as_str()).as_ref() != Some(&self.space) {
+            return Err(Invalid::InvalidOffer("space"));
+        }
+        if self.station_epoch == StationEpoch::ZERO {
+            return Err(Invalid::InvalidOffer("station"));
+        }
+        if ActorId::parse(self.actor.as_str()).as_ref() != Some(&self.actor) {
+            return Err(Invalid::InvalidOffer("actor"));
+        }
+        if DeviceId::parse(self.device.as_str()).as_ref() != Some(&self.device) {
+            return Err(Invalid::InvalidOffer("device"));
+        }
+        if WorldId::parse(self.world.as_str()).as_ref() != Some(&self.world) {
+            return Err(Invalid::InvalidOffer("world"));
+        }
+        if self.builds.is_empty()
+            || self.builds.len() > MAX_BUILDS_PER_OFFER
+            || self
+                .builds
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left >= right))
+            || self.builds.iter().any(|build| !valid_schema(&build.spec))
+        {
+            return Err(Invalid::InvalidOffer("builds"));
+        }
+        if self.resources.len() > MAX_RESOURCES_PER_INTENT
+            || self.resources.iter().any(|resource| {
+                SchemaId::parse(resource.name.as_str()).as_ref() != Some(&resource.name)
+                    || !resource.name.as_str().contains('.')
+                    || resource.amount == 0
+                    || resource.amount == u64::MAX
+            })
+            || self
+                .resources
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left.name >= right.name))
+        {
+            return Err(Invalid::InvalidOffer("resources"));
+        }
+        if SchemaId::parse(self.backend.as_str()).as_ref() != Some(&self.backend) {
+            return Err(Invalid::InvalidOffer("backend"));
+        }
+        if self.resident.len() > MAX_RESIDENT_HINTS_PER_OFFER
+            || self
+                .resident
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left >= right))
+        {
+            return Err(Invalid::InvalidOffer("resident"));
+        }
+        if self.epoch == 0 {
+            return Err(Invalid::InvalidOffer("epoch"));
+        }
+        if self.expiry == 0 || self.expiry == u64::MAX {
+            return Err(Invalid::InvalidOffer("expiry"));
+        }
+        Ok(())
+    }
+
+    fn material_bytes(&self) -> Result<Vec<u8>, Invalid> {
+        self.validate_material()?;
+        postcard::to_stdvec(&(OFFER_VERSION, self.material()))
+            .map_err(|_| Invalid::InvalidOffer("encoding"))
+    }
+
+    /// Derive the stable identity of this Offer's news. Publisher and
+    /// signature do not participate.
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "BLAKE3 output is a fixed 32-byte array and OfferId deliberately retains its first 16 bytes"
+    )]
+    pub fn derived_id(&self) -> Result<OfferId, Invalid> {
+        let material = self.material_bytes()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(OFFER_ID_DOMAIN);
+        hasher.update(&material);
+        let digest = hasher.finalize();
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&digest.as_bytes()[..16]);
+        Ok(OfferId::from_bytes(id))
+    }
+
+    fn signature_preimage(&self) -> Result<Vec<u8>, Invalid> {
+        let body = postcard::to_stdvec(&(
+            OFFER_VERSION,
+            self.id,
+            self.material(),
+            &self.publisher,
+            &self.signature.signer,
+            self.signature.algorithm,
+        ))
+        .map_err(|_| Invalid::InvalidOffer("signature encoding"))?;
+        let mut preimage = Vec::with_capacity(
+            2usize
+                .saturating_add(OFFER_SIGNATURE_DOMAIN.len())
+                .saturating_add(4)
+                .saturating_add(body.len()),
+        );
+        let domain_len = u16::try_from(OFFER_SIGNATURE_DOMAIN.len())
+            .map_err(|_| Invalid::InvalidOffer("signature domain"))?;
+        let body_len =
+            u32::try_from(body.len()).map_err(|_| Invalid::InvalidOffer("signature encoding"))?;
+        preimage.extend_from_slice(&domain_len.to_be_bytes());
+        preimage.extend_from_slice(OFFER_SIGNATURE_DOMAIN);
+        preimage.extend_from_slice(&body_len.to_be_bytes());
+        preimage.extend_from_slice(&body);
+        Ok(preimage)
+    }
+
+    /// Replace the identity and signature placeholders with a canonical news
+    /// envelope signed by `device_seed`.
+    ///
+    /// The publisher must already be set. Mechanics later proves that the
+    /// derived signer belonged to that Actor at the referenced frontier.
+    pub fn sign(mut self, device_seed: &[u8; 32]) -> Result<Self, Invalid> {
+        if ActorId::parse(self.publisher.as_str()).as_ref() != Some(&self.publisher) {
+            return Err(Invalid::InvalidOffer("publisher"));
+        }
+        self.id = self.derived_id()?;
+        self.signature.signer = mechanics::actor::device_from_seed(device_seed);
+        self.signature.algorithm = SIGNATURE_ED25519;
+        self.signature.bytes = [0; 64];
+        let preimage = self.signature_preimage()?;
+        self.signature.bytes = mechanics::actor::sign_detached(device_seed, &preimage);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Validate the complete self-contained Offer envelope.
+    ///
+    /// This proves byte shape, content identity, and the device signature. It
+    /// does not consult a clock, so an expired Offer still validates as well-
+    /// formed news. [`Offer::usable_at`] applies expiry. It also cannot prove
+    /// that the signer represented `publisher` or that publication satisfied
+    /// the Spec's Offer demand.
+    pub fn validate(&self) -> Result<(), Invalid> {
+        self.validate_material()?;
+        if ActorId::parse(self.publisher.as_str()).as_ref() != Some(&self.publisher) {
+            return Err(Invalid::InvalidOffer("publisher"));
+        }
+        if DeviceId::parse(self.signature.signer.as_str()).as_ref() != Some(&self.signature.signer)
+        {
+            return Err(Invalid::InvalidOffer("signer"));
+        }
+        if self.signature.algorithm != SIGNATURE_ED25519 {
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
+                self.signature.algorithm,
+            ));
+        }
+        if self.id != self.derived_id()? {
+            return Err(Invalid::OfferIdMismatch);
+        }
+        let public_key = self
+            .signature
+            .signer
+            .key_bytes()
+            .ok_or(Invalid::InvalidOffer("signer"))?;
+        let preimage = self.signature_preimage()?;
+        if !mechanics::actor::verify_detached(&public_key, &preimage, &self.signature.bytes) {
+            return Err(Invalid::BadOfferSignature);
+        }
+        Ok(())
+    }
+
+    /// Prove the news is still live at `now` unix milliseconds.
+    pub fn usable_at(&self, now: u64) -> Result<(), Invalid> {
+        self.validate()?;
+        if now >= self.expiry {
+            return Err(Invalid::InvalidOffer("expiry"));
+        }
+        Ok(())
+    }
+
+    /// Coordinates a [`Try`] may cite as optional evidence.
+    pub fn reference(&self) -> OfferRef {
+        OfferRef {
+            id: self.id,
+            station: self.station.clone(),
+            station_epoch: self.station_epoch,
+            epoch: self.epoch,
+        }
+    }
+
+    /// Whether this news claims the named Build.
+    pub fn covers(&self, build: BuildId) -> bool {
+        self.builds.iter().any(|offered| offered.id == build)
+    }
+
+    /// Encode this complete Offer envelope to canonical standalone bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, Invalid> {
+        self.validate()?;
+        let bytes = postcard::to_stdvec(&(OFFER_VERSION, self))
+            .map_err(|_| Invalid::InvalidOffer("encoding"))?;
+        if bytes.len() > MAX_OFFER_BYTES {
+            return Err(Invalid::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    /// Decode and validate exact canonical standalone Offer bytes.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        if bytes.len() > MAX_OFFER_BYTES {
+            return Err(Invalid::TooLarge);
+        }
+        let (version, offer): (u8, Self) =
+            postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
+        if version != OFFER_VERSION {
+            return Err(Invalid::UnsupportedVersion(version));
+        }
+        offer.validate()?;
+        if offer.encode()? != bytes {
+            return Err(Invalid::NonCanonical);
+        }
+        Ok(offer)
+    }
+}
+
+/// One nonce-bound readiness challenge against a live Offer.
+///
+/// Answering it does not prove intent and does not reserve a Run. A Station
+/// that answers and then stalls cannot block another authorized Attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Challenge {
+    pub offer: OfferId,
+    pub nonce: [u8; 16],
+    pub station: StationKey,
+    pub station_epoch: StationEpoch,
+    pub issued_at: u64,
+    pub expiry: u64,
+}
+
+impl Challenge {
+    /// Validate shape without consulting a clock.
+    pub fn validate(&self) -> Result<(), Invalid> {
+        if self.nonce == [0; 16] {
+            return Err(Invalid::InvalidChallenge("nonce"));
+        }
+        if self.station_epoch == StationEpoch::ZERO {
+            return Err(Invalid::InvalidChallenge("station"));
+        }
+        if self.issued_at == 0 || self.expiry == 0 || self.expiry == u64::MAX {
+            return Err(Invalid::InvalidChallenge("expiry"));
+        }
+        if self.expiry <= self.issued_at {
+            return Err(Invalid::InvalidChallenge("expiry"));
+        }
+        Ok(())
+    }
+
+    /// Prove the challenge is still live at `now` unix milliseconds.
+    pub fn usable_at(&self, now: u64) -> Result<(), Invalid> {
+        self.validate()?;
+        if now < self.issued_at || now >= self.expiry {
+            return Err(Invalid::InvalidChallenge("expiry"));
+        }
+        Ok(())
+    }
+
+    fn signature_body(&self) -> Result<Vec<u8>, Invalid> {
+        self.validate()?;
+        postcard::to_stdvec(&(
+            CHALLENGE_VERSION,
+            self.offer,
+            self.nonce,
+            &self.station,
+            self.station_epoch,
+            self.issued_at,
+            self.expiry,
+        ))
+        .map_err(|_| Invalid::InvalidChallenge("encoding"))
+    }
+}
+
+/// A Station's signed answer to one [`Challenge`].
+///
+/// Readiness is not intent. The answer expires with its challenge and never
+/// owns the Run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ready {
+    pub offer: OfferId,
+    pub nonce: [u8; 16],
+    pub signature: Signature,
+}
+
+impl Ready {
+    fn signature_preimage(
+        challenge: &Challenge,
+        signer: &DeviceId,
+        algorithm: u8,
+    ) -> Result<Vec<u8>, Invalid> {
+        let body = challenge.signature_body()?;
+        let envelope = postcard::to_stdvec(&(
+            CHALLENGE_VERSION,
+            challenge.offer,
+            challenge.nonce,
+            signer,
+            algorithm,
+            body,
+        ))
+        .map_err(|_| Invalid::InvalidReady("signature encoding"))?;
+        let mut preimage = Vec::with_capacity(
+            2usize
+                .saturating_add(READY_SIGNATURE_DOMAIN.len())
+                .saturating_add(4)
+                .saturating_add(envelope.len()),
+        );
+        let domain_len = u16::try_from(READY_SIGNATURE_DOMAIN.len())
+            .map_err(|_| Invalid::InvalidReady("signature domain"))?;
+        let body_len = u32::try_from(envelope.len())
+            .map_err(|_| Invalid::InvalidReady("signature encoding"))?;
+        preimage.extend_from_slice(&domain_len.to_be_bytes());
+        preimage.extend_from_slice(READY_SIGNATURE_DOMAIN);
+        preimage.extend_from_slice(&body_len.to_be_bytes());
+        preimage.extend_from_slice(&envelope);
+        Ok(preimage)
+    }
+
+    /// Sign an answer to `challenge` with `device_seed`.
+    pub fn sign(challenge: &Challenge, device_seed: &[u8; 32]) -> Result<Self, Invalid> {
+        challenge.validate()?;
+        let signer = mechanics::actor::device_from_seed(device_seed);
+        let mut ready = Self {
+            offer: challenge.offer,
+            nonce: challenge.nonce,
+            signature: Signature {
+                signer: signer.clone(),
+                algorithm: SIGNATURE_ED25519,
+                bytes: [0; 64],
+            },
+        };
+        let preimage = Self::signature_preimage(challenge, &signer, SIGNATURE_ED25519)?;
+        ready.signature.bytes = mechanics::actor::sign_detached(device_seed, &preimage);
+        ready.validate_for(challenge)?;
+        Ok(ready)
+    }
+
+    /// Prove this answer is the signed response to `challenge`.
+    pub fn validate_for(&self, challenge: &Challenge) -> Result<(), Invalid> {
+        challenge.validate()?;
+        if self.offer != challenge.offer || self.nonce != challenge.nonce {
+            return Err(Invalid::InvalidReady("challenge"));
+        }
+        if DeviceId::parse(self.signature.signer.as_str()).as_ref() != Some(&self.signature.signer)
+        {
+            return Err(Invalid::InvalidReady("signer"));
+        }
+        if self.signature.algorithm != SIGNATURE_ED25519 {
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
+                self.signature.algorithm,
+            ));
+        }
+        let public_key = self
+            .signature
+            .signer
+            .key_bytes()
+            .ok_or(Invalid::InvalidReady("signer"))?;
+        let preimage =
+            Self::signature_preimage(challenge, &self.signature.signer, self.signature.algorithm)?;
+        if !mechanics::actor::verify_detached(&public_key, &preimage, &self.signature.bytes) {
+            return Err(Invalid::BadReadySignature);
+        }
+        Ok(())
+    }
 }
 
 /// Exact signed-Offer and Station-activation coordinates selected by [`Try`].
@@ -3288,9 +3885,12 @@ pub struct AttemptLimits {
 pub struct Try {
     pub run: RunId,
     pub build: BuildId,
-    pub offer: OfferRef,
+    /// Signed published news, when E4 has one. Local and explicit-Station
+    /// Tries omit it.
+    pub offer: Option<OfferRef>,
     pub resources: Vec<Resource>,
-    pub enforcement: ContentRef,
+    /// Isolation evidence, when a backend produced some. Advisory is absence.
+    pub enforcement: Option<ContentRef>,
     pub limits: AttemptLimits,
     pub lease: Option<RoleLease>,
     pub checkpoint: Option<CheckpointRef>,
@@ -3425,9 +4025,9 @@ impl Start {
     /// Prove this intent is within one exact World-declared Spec.
     ///
     /// A Start always carries an exact Build id. Build publication is durable
-    /// Runtime state, so this descriptor-only check deliberately cannot claim
-    /// that the selected Build has been published; dispatch performs that
-    /// stateful check before an Attempt begins.
+    /// identity, not a dispatch gate: this descriptor-only check does not
+    /// claim the selected Build has been published. Dispatch selects the
+    /// exact package handler for the pinned Build.
     pub fn validate_with_spec(&self, spec: &Spec) -> Result<(), Invalid> {
         self.validate()?;
         spec.validate()?;
@@ -3508,8 +4108,10 @@ impl Try {
     pub fn validate(&self) -> Result<(), Invalid> {
         validate_resources(&self.resources, "try")?;
         self.limits.validate()?;
-        if self.offer.station_epoch == StationEpoch::ZERO || self.offer.epoch == 0 {
-            return Err(Invalid::InvalidTry("offer"));
+        if let Some(offer) = &self.offer {
+            if offer.station_epoch == StationEpoch::ZERO || offer.epoch == 0 {
+                return Err(Invalid::InvalidTry("offer"));
+            }
         }
         if let Some(lease) = &self.lease {
             if SchemaId::parse(lease.role.as_str()).as_ref() != Some(&lease.role)
@@ -3531,6 +4133,79 @@ impl Try {
             return Err(Invalid::InvalidTry("fence"));
         }
         Ok(())
+    }
+
+    /// Prove a cited Offer is the news this Try named, and that it claims the
+    /// pinned Build. The Offer still reserves nothing: another Try may omit
+    /// this news or cite different news for the same Run.
+    pub fn validate_with_offer(&self, offer: &Offer) -> Result<(), Invalid> {
+        self.validate()?;
+        offer.validate()?;
+        let Some(reference) = &self.offer else {
+            return Err(Invalid::InvalidTry("offer"));
+        };
+        if reference.id != offer.id
+            || reference.station != offer.station
+            || reference.station_epoch != offer.station_epoch
+            || reference.epoch != offer.epoch
+        {
+            return Err(Invalid::InvalidTry("offer"));
+        }
+        if !offer.covers(self.build) {
+            return Err(Invalid::InvalidTry("build"));
+        }
+        Ok(())
+    }
+
+    /// First local Attempt for a Started Run that this Station will perform.
+    ///
+    /// The first Attempt names this Station activation only. It does not mint
+    /// an Offer; E4 publishes signed news when that news exists.
+    pub fn local_first(
+        run: &Run,
+        _station: StationKey,
+        station_epoch: StationEpoch,
+    ) -> Result<Self, Invalid> {
+        if station_epoch == StationEpoch::ZERO {
+            return Err(Invalid::InvalidTry("station"));
+        }
+        let limits = AttemptLimits {
+            events: run.started.limits.events,
+            checkpoints: run.started.limits.checkpoints,
+            child_runs: run.started.limits.child_runs,
+            progress_bytes: run.started.limits.progress_bytes,
+            checkpoint_bytes: run.started.limits.checkpoint_bytes,
+            wall_millis: run.started.limits.wall_millis,
+        };
+        let fence = run
+            .attempts
+            .iter()
+            .map(|attempt| attempt.fence.as_u64())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+        let intent = Self {
+            run: run.id,
+            build: run.started.build,
+            offer: None,
+            resources: run.started.resources.clone(),
+            enforcement: None,
+            limits,
+            lease: None,
+            checkpoint: None,
+            fence: Fence::from_u64(fence),
+        };
+        intent.validate_with(run.started.limits)?;
+        Ok(intent)
+    }
+
+    /// Cite live Offer news on a Station-local Attempt. The Offer still
+    /// reserves nothing; another Station may omit it.
+    pub fn with_offer(mut self, offer: OfferRef) -> Result<Self, Invalid> {
+        self.offer = Some(offer);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Prove the Attempt ceilings do not widen the pinned Run ceilings.
@@ -3595,10 +4270,23 @@ pub enum Invalid {
     InvalidTry(&'static str),
     /// A Build's carried identity does not match its canonical material.
     BuildIdMismatch,
+    /// An Offer field is malformed, unbounded, duplicated, expired, or out of
+    /// canonical order.
+    InvalidOffer(&'static str),
+    /// An Offer's carried identity does not match its canonical material.
+    OfferIdMismatch,
     /// The Build signature algorithm is unknown to this Runtime.
     UnsupportedSignatureAlgorithm(u8),
     /// The detached signature does not verify against the carried signer.
     BadBuildSignature,
+    /// The detached Offer signature does not verify against the carried signer.
+    BadOfferSignature,
+    /// A readiness challenge is malformed, expired, or unbounded.
+    InvalidChallenge(&'static str),
+    /// A Ready answer is malformed or does not match its Challenge.
+    InvalidReady(&'static str),
+    /// The detached Ready signature does not verify against the carried signer.
+    BadReadySignature,
 }
 
 impl std::fmt::Display for Invalid {
@@ -4012,6 +4700,39 @@ mod tests {
         }
     }
 
+    fn offer() -> Offer {
+        let seed = [0x63; 32];
+        Offer {
+            id: OfferId::from_bytes([0; 16]),
+            space: mechanics::ids::SpaceId::parse("ws_00000000000000000000000000").unwrap(),
+            station: StationKey::from_key_bytes([0x63; 32]),
+            station_epoch: StationEpoch::from_u64(2),
+            actor: ActorId::from_incept_hash(&"a".repeat(64)),
+            device: mechanics::actor::device_from_seed(&seed),
+            world: WorldId::parse("com.example.product").unwrap(),
+            world_build: [0x11; 32],
+            builds: vec![OfferedBuild {
+                id: build().id,
+                spec: schema("check", 1),
+            }],
+            resources: vec![resource("memory.bytes", 65_536)],
+            backend: SchemaId::parse("in-process.rust").unwrap(),
+            enforcement: Enforcement::Advisory,
+            resident: vec![content(0x80)],
+            availability: Availability::Ready,
+            epoch: 3,
+            expiry: 4_000_000_000_000,
+            publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+            signature: Signature {
+                signer: mechanics::actor::device_from_seed(&seed),
+                algorithm: SIGNATURE_ED25519,
+                bytes: [0; 64],
+            },
+        }
+        .sign(&seed)
+        .unwrap()
+    }
+
     fn start() -> Start {
         let declared = grant("records");
         Start {
@@ -4296,14 +5017,14 @@ mod tests {
         Try {
             run: run(0x61),
             build: build().id,
-            offer: OfferRef {
+            offer: Some(OfferRef {
                 id: OfferId::from_bytes([0x62; 16]),
                 station: StationKey::from_key_bytes([0x63; 32]),
                 station_epoch: StationEpoch::from_u64(2),
                 epoch: 3,
-            },
+            }),
             resources: vec![resource("memory.bytes", 65_536)],
-            enforcement: content(0x64),
+            enforcement: Some(content(0x64)),
             limits: AttemptLimits {
                 events: 32,
                 checkpoints: 0,
@@ -4326,20 +5047,22 @@ mod tests {
     fn leased_event(run: RunId, attempt: AttemptId, predecessor: EventId, station: u8) -> RunEvent {
         let mut intent = try_intent();
         intent.run = run;
-        intent.offer.id = OfferId::from_bytes([station; 16]);
-        intent.offer.station = StationKey::from_key_bytes([station; 32]);
+        let offer = intent.offer.as_mut().expect("test offer");
+        offer.id = OfferId::from_bytes([station; 16]);
+        offer.station = StationKey::from_key_bytes([station; 32]);
+        let offer = intent.offer.clone().expect("test offer");
         RunEvent::new(
             vec![predecessor],
             RunEventKind::Leased(Leased {
                 run,
                 attempt,
-                station: intent.offer.station,
-                station_epoch: intent.offer.station_epoch,
+                station: offer.station.clone(),
+                station_epoch: offer.station_epoch,
                 executor: ActorId::from_incept_hash(&"b".repeat(64)),
                 device: mechanics::actor::device_from_seed(&[station; 32]),
                 build: intent.build,
-                offer: intent.offer.id,
-                offer_epoch: intent.offer.epoch,
+                offer: Some(offer.id),
+                offer_epoch: offer.epoch,
                 resources: intent.resources,
                 enforcement: intent.enforcement,
                 limits: intent.limits,
@@ -4668,7 +5391,7 @@ mod tests {
         context.start_child(child.clone()).unwrap();
         assert_eq!(context.start_child(child), Err(Failure::ChildLimit));
 
-        let (checkpoints, children) = context.take_staged();
+        let (checkpoints, children, output_blobs) = context.take_staged();
         let completion = Completion {
             candidate: Candidate {
                 output: spec().output.schema,
@@ -4681,6 +5404,7 @@ mod tests {
             },
             checkpoints,
             children,
+            output_blobs,
         };
         let events = completion
             .events(
@@ -4872,16 +5596,17 @@ mod tests {
         let actor = ActorId::from_incept_hash(&"b".repeat(64));
         let device = mechanics::actor::device_from_seed(&[0x46; 32]);
         let intent = try_intent();
+        let offer = intent.offer.clone().expect("test offer");
         let leased = Leased {
             run,
             attempt: attempt(1),
-            station: intent.offer.station,
-            station_epoch: intent.offer.station_epoch,
+            station: offer.station,
+            station_epoch: offer.station_epoch,
             executor: actor.clone(),
             device: device.clone(),
             build: intent.build,
-            offer: intent.offer.id,
-            offer_epoch: intent.offer.epoch,
+            offer: Some(offer.id),
+            offer_epoch: offer.epoch,
             resources: intent.resources,
             enforcement: intent.enforcement,
             limits: intent.limits,
@@ -5662,7 +6387,7 @@ mod tests {
         assert_eq!(Cmd::decode_canonical(&intent_bytes), Ok(intent));
         assert_eq!(
             blake3::hash(&intent_bytes).to_hex().as_str(),
-            "77dda1e2ce2b66c7b3521de59e0ca8337aec2906dbeac8b3742cf515794aa768"
+            "6c8a8aa2e01f956196d7e0516ec1bd0c94dd81ffa0fcac9262b44f6437e9fca9"
         );
     }
 
@@ -5712,8 +6437,17 @@ mod tests {
         assert_eq!(unbounded.validate(), Err(Invalid::InvalidTry("limits")));
 
         let mut no_activation = try_intent();
-        no_activation.offer.station_epoch = StationEpoch::ZERO;
+        no_activation
+            .offer
+            .as_mut()
+            .expect("test offer")
+            .station_epoch = StationEpoch::ZERO;
         assert_eq!(no_activation.validate(), Err(Invalid::InvalidTry("offer")));
+
+        let mut station_only = try_intent();
+        station_only.offer = None;
+        station_only.enforcement = None;
+        assert_eq!(station_only.validate(), Ok(()));
 
         let mut no_fence = try_intent();
         no_fence.fence = Fence::from_u64(0);
@@ -5812,5 +6546,153 @@ mod tests {
             Cmd::decode_canonical(&vec![0; MAX_CMD_BYTES + 1]),
             Err(Invalid::TooLarge)
         );
+    }
+
+    #[test]
+    fn offer_envelope_identity_and_bytes_are_frozen() {
+        let signed = offer();
+        assert_eq!(signed.validate(), Ok(()));
+        assert_eq!(signed.usable_at(signed.expiry - 1), Ok(()));
+        let bytes = signed.encode().unwrap();
+        assert_eq!(bytes[0], OFFER_VERSION);
+        assert_eq!(Offer::decode_canonical(&bytes), Ok(signed.clone()));
+        assert_eq!(
+            blake3::hash(&bytes).to_hex().as_str(),
+            "901009fa9344aa884d4704a380f68aacb0e26054321edacd4f38a0af42535fce"
+        );
+
+        let mut republished = signed.clone();
+        republished.publisher = ActorId::from_incept_hash(&"b".repeat(64));
+        republished = republished.sign(&[0x64; 32]).unwrap();
+        assert_eq!(signed.id, republished.id);
+        assert_ne!(signed.publisher, republished.publisher);
+        assert_ne!(signed.signature, republished.signature);
+        assert_ne!(signed.encode().unwrap(), republished.encode().unwrap());
+    }
+
+    #[test]
+    fn offer_rejects_impossible_or_expired_news() {
+        let signed = offer();
+        assert_eq!(
+            signed.usable_at(signed.expiry),
+            Err(Invalid::InvalidOffer("expiry"))
+        );
+
+        let mut zero_expiry = offer();
+        zero_expiry.expiry = 0;
+        assert_eq!(
+            zero_expiry.derived_id(),
+            Err(Invalid::InvalidOffer("expiry"))
+        );
+
+        let mut stale = offer();
+        stale.expiry = 2;
+        stale = stale.sign(&[0x63; 32]).unwrap();
+        assert_eq!(stale.validate(), Ok(()));
+        assert_eq!(stale.usable_at(1), Ok(()));
+        assert_eq!(stale.usable_at(2), Err(Invalid::InvalidOffer("expiry")));
+
+        let mut no_builds = offer();
+        no_builds.builds.clear();
+        assert_eq!(no_builds.derived_id(), Err(Invalid::InvalidOffer("builds")));
+
+        let mut unsorted = offer();
+        unsorted.builds = vec![
+            OfferedBuild {
+                id: BuildId::from_bytes([0x02; 32]),
+                spec: schema("check", 1),
+            },
+            OfferedBuild {
+                id: BuildId::from_bytes([0x01; 32]),
+                spec: schema("check", 1),
+            },
+        ];
+        assert_eq!(unsorted.derived_id(), Err(Invalid::InvalidOffer("builds")));
+
+        let mut catalog_path = offer();
+        catalog_path.resident = vec![content(0x82), content(0x81)];
+        assert_eq!(
+            catalog_path.derived_id(),
+            Err(Invalid::InvalidOffer("resident"))
+        );
+
+        let mut unknown = signed.encode().unwrap();
+        unknown[0] = OFFER_VERSION + 1;
+        assert_eq!(
+            Offer::decode_canonical(&unknown),
+            Err(Invalid::UnsupportedVersion(OFFER_VERSION + 1))
+        );
+        assert_eq!(
+            Offer::decode_canonical(&vec![0; MAX_OFFER_BYTES + 1]),
+            Err(Invalid::TooLarge)
+        );
+    }
+
+    #[test]
+    fn try_treats_offer_as_optional_evidence_not_ownership() {
+        let signed = offer();
+        let mut intent = try_intent();
+        intent.offer = Some(signed.reference());
+        intent.build = signed.builds[0].id;
+        assert_eq!(intent.validate_with_offer(&signed), Ok(()));
+
+        let mut other_station = signed.clone();
+        other_station.station = StationKey::from_key_bytes([0x99; 32]);
+        other_station = other_station.sign(&[0x63; 32]).unwrap();
+        assert_eq!(
+            intent.validate_with_offer(&other_station),
+            Err(Invalid::InvalidTry("offer"))
+        );
+
+        let mut other_build = intent.clone();
+        other_build.build = BuildId::from_bytes([0x77; 32]);
+        assert_eq!(
+            other_build.validate_with_offer(&signed),
+            Err(Invalid::InvalidTry("build"))
+        );
+
+        let mut station_only = intent;
+        station_only.offer = None;
+        station_only.enforcement = None;
+        assert_eq!(station_only.validate(), Ok(()));
+        assert_eq!(
+            station_only.validate_with_offer(&signed),
+            Err(Invalid::InvalidTry("offer"))
+        );
+        assert_eq!(try_intent().validate(), Ok(()));
+    }
+
+    fn challenge_for(offer: &Offer, nonce: u8, issued_at: u64, expiry: u64) -> Challenge {
+        Challenge {
+            offer: offer.id,
+            nonce: [nonce; 16],
+            station: offer.station.clone(),
+            station_epoch: offer.station_epoch,
+            issued_at,
+            expiry,
+        }
+    }
+
+    #[test]
+    fn ready_answers_one_challenge_and_not_another() {
+        let signed = offer();
+        let challenge = challenge_for(&signed, 0x21, 1, 1_000);
+        let ready = Ready::sign(&challenge, &[0x63; 32]).unwrap();
+        assert_eq!(ready.validate_for(&challenge), Ok(()));
+        assert_eq!(challenge.usable_at(1), Ok(()));
+        assert_eq!(
+            challenge.usable_at(1_000),
+            Err(Invalid::InvalidChallenge("expiry"))
+        );
+
+        let other = challenge_for(&signed, 0x22, 1, 1_000);
+        assert_eq!(
+            ready.validate_for(&other),
+            Err(Invalid::InvalidReady("challenge"))
+        );
+
+        let mut zero = challenge.clone();
+        zero.nonce = [0; 16];
+        assert_eq!(zero.validate(), Err(Invalid::InvalidChallenge("nonce")));
     }
 }

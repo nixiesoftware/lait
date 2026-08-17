@@ -635,7 +635,9 @@ async fn contact_attempt(
 
     // Stage → validate (authority first, durable) → incorporate under the
     // Station writer. TransferAck already went out — it acknowledged the
-    // transcript, not convergence.
+    // transcript, not convergence. Each Body byte string is now the bounded
+    // delivery pack for the protected artifacts named by its signed
+    // transaction descriptor; Contact remains blind to Body keys and content.
     let staged = StagedContactMaterial {
         authority_records: received.authority_records,
         manifest_root_bytes: received.manifest_root_bytes,
@@ -651,7 +653,7 @@ async fn contact_attempt(
     let attempted = {
         let mut incorporator = ctx.options.authority.incorporator.lock_recovering();
         ctx.core
-            .with_replica(|replica| {
+            .with_replica_convergence(|replica| {
                 let commit_ctx = replica::transaction::CommitContext {
                     space: &ctx.space,
                     signer: &signer,
@@ -708,9 +710,10 @@ async fn contact_attempt(
         Err(_) => (Vec::new(), ctx.core.frontier()),
     };
     if authority_advanced || !bodies.is_empty() {
+        let publications = ctx.core.affected_world_publications(&bodies);
         ctx.core
             .broadcaster
-            .publish(bodies, body_frontier, authority_advanced);
+            .publish(bodies, body_frontier, authority_advanced, publications);
     }
     if authority_advanced {
         // Rung here as well as on a local write, and this is the half that
@@ -812,7 +815,7 @@ async fn initiate(
     // trap primed for exactly the descent this file keeps promising.
     let (published, held) = ctx
         .core
-        .with_replica(|replica| {
+        .with_replica_read(|replica| {
             Ok((
                 replica.published_root(),
                 if declare {
@@ -1142,7 +1145,7 @@ async fn serve_contact(
     if ctx.options.gossip.is_some() {
         let ours = ctx
             .core
-            .with_replica(|replica| {
+            .with_replica_read(|replica| {
                 Ok(replica
                     .published_root()
                     .map(|root| root.0)
@@ -1177,7 +1180,7 @@ async fn serve_contact(
         .signer_authorized(&ctx.station_key, &frontier);
     let (material, manifest) = if advertise {
         ctx.core
-            .with_replica(|replica| {
+            .with_replica_read(|replica| {
                 let commit_ctx = replica::transaction::CommitContext {
                     space: &ctx.space,
                     signer: &signer,
@@ -1193,10 +1196,10 @@ async fn serve_contact(
     };
     let mut authority_records = (ctx.options.authority.export)();
     let mut bodies = Vec::new();
-    for (tx, payloads) in &material {
+    for (tx, closures) in &material {
         authority_records.push(tx.encode());
-        for (key, envelope) in payloads {
-            bodies.push((tx.id(), key.clone(), envelope.clone()));
+        for (key, artifact_pack) in closures {
+            bodies.push((tx.id(), key.clone(), artifact_pack.clone()));
         }
     }
     let transfer = OutboundTransfer {

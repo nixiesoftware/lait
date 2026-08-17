@@ -113,6 +113,7 @@ fn snapshot_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Result
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: contract::IssueQuery::Snapshot.to_json(),
+                publication: None,
             },
         )
         .map(|_| ())

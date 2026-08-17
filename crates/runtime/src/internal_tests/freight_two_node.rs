@@ -307,8 +307,9 @@ fn commit_declaring_body(node: &Node, seq: u8) {
     let ctx = commit_context(&space, &signer);
     let mut request = [0u8; 16];
     request[0] = seq;
+    let changed = body_key(seq);
     node.core
-        .with_replica(|replica| {
+        .with_replica_bodies(std::slice::from_ref(&changed), |replica| {
             replica.commit_action(
                 &ctx,
                 &replica::transaction::CommitAuthorization {
@@ -348,7 +349,7 @@ fn stage(node: &Node) -> replica::convergence::StagedContactMaterial {
     let ctx = commit_context(&space, &signer);
     let (material, root, nodes) = node
         .core
-        .with_replica(|replica| {
+        .with_replica_read(|replica| {
             let material = replica.export_material()?;
             let (root, nodes) = replica.export_manifest(&ctx)?;
             Ok((material, root, nodes))
@@ -395,8 +396,11 @@ fn seed_content(node: &Node, operation: u8, plaintext: &[u8]) -> ContentRef {
     commit_declaring_body(node, operation);
     let mut declarations = std::collections::BTreeMap::new();
     declarations.insert(body_key(operation), vec![content]);
+    let changed = body_key(operation);
     node.core
-        .with_replica(|replica| replica.declare_content(&ctx, declarations))
+        .with_replica_bodies(std::slice::from_ref(&changed), |replica| {
+            replica.declare_content(&ctx, declarations)
+        })
         .expect("declare");
     content
 }
@@ -414,7 +418,7 @@ fn learn_descriptor(learner: &Node, from: &Node, content: &ContentRef) {
     let ctx = commit_context(&space, &signer);
     learner
         .core
-        .with_replica(|replica| {
+        .with_replica_convergence(|replica| {
             let bundle = replica.validate_contact(&staged, &AnySigner, &mut BatchReceipts)?;
             replica.incorporate_bundle(&ctx, bundle, &AnySigner)
         })

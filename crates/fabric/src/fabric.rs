@@ -17,12 +17,14 @@
 //!
 //! [`Engine`] is the sole engine: atomic Bodies plus the frozen
 //! collaborative algebra (register/map/list/text/set/counter with stable
-//! element identity) over real Loro containers — one Loro document per Body,
-//! so per-Body export/import carries exactly one Body's causal history — with
-//! batch atomicity. The durable store is the journaled protocol in
+//! element identity) over real Loro containers — one independent causal image
+//! per Body, with only a bounded mutation-hot set inflated as live documents,
+//! so per-Body export/import carries exactly one Body's history — with batch
+//! atomicity. The durable store is the journaled protocol in
 //! [`crate::journal`], persisting per-Body protected objects.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -515,58 +517,86 @@ pub enum BodyExport {
 ///
 /// A live [`Engine`] owns non-`Sync` collaborative documents and therefore
 /// cannot sit behind a shared reader lock. This value crosses that boundary as
-/// plain canonical data: the projected view and causal version are computed
-/// once when the writer publishes a generation. Rare anchor operations replay
-/// the retained one-Body export into a private temporary engine; ordinary
-/// queries never touch the writer and never import a document.
+/// plain canonical data. Collaborative projection is decoded only when a
+/// caller explicitly reads this Body and is not retained beside the canonical
+/// export. The compact causal version is memoized independently, so write
+/// routing can ask for it without keeping a full view or live `LoroDoc`.
 #[derive(Debug, Clone)]
 pub struct BodySnapshot {
-    export: BodyExport,
-    view: Option<CollaborativeView>,
-    version: crate::causal::Version,
+    export: SnapshotExport,
+    version: Arc<OnceLock<Result<crate::causal::Version, crate::causal::Invalid>>>,
+}
+
+#[derive(Debug, Clone)]
+enum SnapshotExport {
+    Atomic(Arc<[u8]>),
+    Collaborative(Arc<[u8]>),
 }
 
 impl BodySnapshot {
+    /// Canonical Body bytes retained by this immutable image. This is an O(1)
+    /// sizing seam for publication/cursor admission; callers need not decode
+    /// collaborative material merely to price its residency.
+    pub fn retained_bytes(&self) -> u64 {
+        let len = match &self.export {
+            SnapshotExport::Atomic(bytes) | SnapshotExport::Collaborative(bytes) => bytes.len(),
+        };
+        u64::try_from(len).unwrap_or(u64::MAX)
+    }
+
     /// Freeze one canonical Body export. The key is required because anchors
     /// bind to a Body identity even though the export itself is per-Body.
-    pub fn from_export(key: &Key, export: BodyExport) -> Result<Self, Failure> {
-        match &export {
-            BodyExport::Atomic(_) => Ok(Self {
-                export,
-                view: None,
-                version: crate::causal::Version::empty(),
-            }),
-            BodyExport::Collaborative(_) => {
-                let mut engine = Engine::new();
-                engine.import_body(key, &export)?;
-                let view = engine
-                    .read_collaborative(key)
-                    .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
-                let version = engine
-                    .version(key)
-                    .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
-                Ok(Self {
-                    export,
-                    view: Some(view),
-                    version,
-                })
-            }
+    pub fn from_export(_key: &Key, export: BodyExport) -> Result<Self, Failure> {
+        Ok(match export {
+            BodyExport::Atomic(bytes) => Self::from_atomic(bytes.into()),
+            BodyExport::Collaborative(bytes) => Self {
+                export: SnapshotExport::Collaborative(bytes.into()),
+                version: Arc::new(OnceLock::new()),
+            },
+        })
+    }
+
+    fn from_atomic(export: Arc<[u8]>) -> Self {
+        let version = Arc::new(OnceLock::new());
+        let _ = version.set(Ok(crate::causal::Version::empty()));
+        Self {
+            export: SnapshotExport::Atomic(export),
+            version,
+        }
+    }
+
+    fn from_frozen(frozen: &FrozenCollab) -> Self {
+        Self {
+            export: SnapshotExport::Collaborative(frozen.export.clone()),
+            version: frozen.version.clone(),
         }
     }
 
     pub fn read(&self) -> Option<Vec<u8>> {
         match &self.export {
-            BodyExport::Atomic(bytes) => Some(bytes.clone()),
-            BodyExport::Collaborative(_) => None,
+            SnapshotExport::Atomic(bytes) => Some(bytes.to_vec()),
+            SnapshotExport::Collaborative(_) => None,
         }
     }
 
     pub fn read_collaborative(&self) -> Result<CollaborativeView, ProjectionFailure> {
-        self.view.clone().ok_or(ProjectionFailure::NotCollaborative)
+        let SnapshotExport::Collaborative(bytes) = &self.export else {
+            return Err(ProjectionFailure::NotCollaborative);
+        };
+        let doc =
+            import_collaborative_doc(bytes, None).map_err(|_| ProjectionFailure::Malformed)?;
+        project_collaborative_doc(&doc)
     }
 
-    pub fn version(&self) -> crate::causal::Version {
-        self.version.clone()
+    pub fn version(&self) -> Result<crate::causal::Version, crate::causal::Invalid> {
+        self.version
+            .get_or_init(|| match &self.export {
+                SnapshotExport::Atomic(_) => Ok(crate::causal::Version::empty()),
+                SnapshotExport::Collaborative(bytes) => import_collaborative_doc(bytes, None)
+                    .map(|doc| crate::causal::Version::from_frontiers(&doc.oplog_frontiers()))
+                    .map_err(|_| crate::causal::Invalid::Engine),
+            })
+            .clone()
     }
 
     /// Mint an anchor without borrowing the live writer. Anchor traffic is
@@ -574,9 +604,11 @@ impl BodySnapshot {
     /// query serialize behind the writer merely because some queries can ask
     /// for an anchor.
     pub fn anchor(&self, key: &Key, path: &str, position: u64) -> Option<crate::causal::Anchor> {
-        let mut engine = Engine::new();
-        engine.import_body(key, &self.export).ok()?;
-        engine.anchor(key, path, position).ok()
+        let SnapshotExport::Collaborative(bytes) = &self.export else {
+            return None;
+        };
+        let doc = import_collaborative_doc(bytes, None).ok()?;
+        anchor_in_doc(&doc, key, path, position).ok()
     }
 
     pub fn resolve(
@@ -584,25 +616,33 @@ impl BodySnapshot {
         key: &Key,
         anchor: &crate::causal::Anchor,
     ) -> crate::causal::AnchorResolution {
-        let mut engine = Engine::new();
-        if engine.import_body(key, &self.export).is_err() {
+        let SnapshotExport::Collaborative(bytes) = &self.export else {
             return crate::causal::AnchorResolution::Drifted;
-        }
-        engine.resolve(key, anchor)
+        };
+        let Ok(doc) = import_collaborative_doc(bytes, None) else {
+            return crate::causal::AnchorResolution::Drifted;
+        };
+        resolve_in_doc(&doc, key, anchor)
     }
 
     pub fn export(&self) -> BodyExport {
-        self.export.clone()
+        match &self.export {
+            SnapshotExport::Atomic(bytes) => BodyExport::Atomic(bytes.to_vec()),
+            SnapshotExport::Collaborative(bytes) => BodyExport::Collaborative(bytes.to_vec()),
+        }
     }
 }
 
 /// The Loro-backed engine: the canonical collaborative representation, and the
 /// reason this crate alone names Loro.
 ///
-/// **Layout — one Loro document per Body.** Each collaborative Body is its own
-/// `LoroDoc`, so its canonical export ([`fabric::export_body`]) carries exactly
-/// that Body's causal history and stable element identity — never a whole-
-/// engine or cross-Body snapshot. Inside a Body's doc, one root map (`body`)
+/// **Layout — one causal image per Body, bounded live documents.** Each
+/// collaborative Body has its own canonical export, so
+/// ([`fabric::export_body`]) carries exactly that Body's causal history and
+/// stable element identity — never a whole-engine or cross-Body snapshot. Cold
+/// images remain Arc-backed export bytes plus a compact Version; mutation
+/// inflates at most [`MAX_HOT_COLLABORATIVE_BODIES`] `LoroDoc`s and LRU eviction
+/// freezes them again. Inside an inflated Body, one root map (`body`)
 /// holds keys `"<type>:<path>"` — `reg:` LWW binary registers, `map:` child
 /// maps of binary entries, `list:` child movable lists whose element values are
 /// `element_id[16] || value` (the id embedded in the value is the **stable
@@ -638,12 +678,102 @@ pub struct Engine {
     /// minting colliding operation ids.
     writer: u64,
     bodies: BTreeMap<Key, BodyState>,
+    /// Mutation-hot collaborative documents. Imported/read-only Bodies remain
+    /// compact exports; this bounded recency set prevents a broad sequence of
+    /// writes from turning the whole store back into live `LoroDoc`s.
+    hot: std::collections::VecDeque<Key>,
 }
 
 /// One Body's live state.
 enum BodyState {
-    Atomic(Vec<u8>),
+    Atomic(Arc<[u8]>),
     Collab(loro::LoroDoc),
+    FrozenCollab(FrozenCollab),
+}
+
+#[derive(Clone)]
+struct FrozenCollab {
+    export: Arc<[u8]>,
+    version: Arc<OnceLock<Result<crate::causal::Version, crate::causal::Invalid>>>,
+}
+
+const MAX_HOT_COLLABORATIVE_BODIES: usize = 64;
+
+/// One applied but unpublished Engine transaction.
+///
+/// The live Engine exposes the candidate values while this token exists. The
+/// owner must either [`Engine::finalize`] it after the enclosing durable
+/// publication succeeds or [`Engine::rollback`] it when candidate validation
+/// fails. Its rollback state is proportional only to touched Bodies; a
+/// collaborative `LoroDoc` clone shares its underlying document.
+pub struct Prepared {
+    receipt: Receipt,
+    prior: BTreeMap<Key, Option<(BodyState, Option<loro::Frontiers>)>>,
+}
+
+/// A cheap, immutable coordinate for building an ordinary checkpoint away
+/// from the publication path.
+///
+/// A mutation-hot document shares its backing history and captures only its
+/// frontier. A cold document shares its already-retained export and version
+/// memo. Importing that export is deliberately deferred to [`Self::export`],
+/// which the checkpoint executor calls only after reserving bounded worker
+/// capacity. Capturing a seed therefore never turns a cold Body back into a
+/// live `LoroDoc` on the user-action or Contact path.
+pub enum CheckpointSeed {
+    Hot {
+        doc: loro::LoroDoc,
+        frontier: loro::Frontiers,
+    },
+    Cold {
+        export: Arc<[u8]>,
+        version: Arc<OnceLock<Result<crate::causal::Version, crate::causal::Invalid>>>,
+    },
+}
+
+impl CheckpointSeed {
+    pub fn export(self) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
+        let (result, bytes) = match self {
+            Self::Hot { doc, frontier } => {
+                let doc = doc.fork_at(&frontier).map_err(|source| {
+                    tracing::warn!(%source, "fabric checkpoint fork failed");
+                    crate::causal::Invalid::Engine
+                })?;
+                let bytes = doc.export(loro::ExportMode::Snapshot).map_err(|source| {
+                    tracing::warn!(%source, "fabric detached checkpoint export failed");
+                    crate::causal::Invalid::Engine
+                })?;
+                (crate::causal::Version::from_frontiers(&frontier), bytes)
+            }
+            Self::Cold { export, version } => {
+                // Even discovering an uncached cold version requires a Loro
+                // import. Keep that work here, after the executor reservation,
+                // rather than in `Engine::checkpoint_seed`.
+                let result = if let Some(version) = version.get() {
+                    version.clone()?
+                } else {
+                    let doc = import_collaborative_doc(&export, None)
+                        .map_err(|_| crate::causal::Invalid::Engine)?;
+                    let discovered = crate::causal::Version::from_frontiers(&doc.oplog_frontiers());
+                    let _ = version.set(Ok(discovered.clone()));
+                    discovered
+                };
+                (result, export.to_vec())
+            }
+        };
+        Ok(crate::causal::Artifact::Checkpoint {
+            format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+            retention_frontier: crate::causal::Version::empty(),
+            result,
+            bytes,
+        })
+    }
+}
+
+impl Prepared {
+    pub fn receipt(&self) -> &Receipt {
+        &self.receipt
+    }
 }
 
 const BODY_MAP: &str = "body";
@@ -761,48 +891,349 @@ fn new_body_doc(writer: Option<u64>) -> loro::LoroDoc {
     doc
 }
 
+fn import_collaborative_doc(
+    snapshot: &[u8],
+    writer: Option<u64>,
+) -> Result<loro::LoroDoc, Failure> {
+    let doc = new_body_doc(writer);
+    doc.import(snapshot)
+        .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
+    Ok(doc)
+}
+
+fn project_collaborative_doc(doc: &loro::LoroDoc) -> Result<CollaborativeView, ProjectionFailure> {
+    let mut view = CollaborativeView::default();
+    let loro::LoroValue::Map(roots) = doc.get_deep_value() else {
+        return Ok(view);
+    };
+    for (name, value) in roots.iter() {
+        if name == BODY_MAP {
+            let loro::LoroValue::Map(body) = value else {
+                continue;
+            };
+            for (key, value) in body.iter() {
+                if let (Some(path), loro::LoroValue::Binary(bytes)) =
+                    (key.strip_prefix("reg:"), value)
+                {
+                    view.registers.insert(path.to_string(), bytes.to_vec());
+                }
+            }
+            continue;
+        }
+        let Some((tag, path)) = name.split_once(':') else {
+            tracing::warn!(tag = %name, "unrecognized collaborative root");
+            return Err(ProjectionFailure::SchemaAhead);
+        };
+        if tag == LOG_COUNT_TAG {
+            let loro::LoroValue::Map(counts) = value else {
+                tracing::warn!(tag, "log count held an invalid value");
+                return Err(ProjectionFailure::Malformed);
+            };
+            let total = counts
+                .values()
+                .filter_map(|value| match value {
+                    loro::LoroValue::I64(value) => u64::try_from(*value).ok(),
+                    _ => None,
+                })
+                .fold(0u64, u64::saturating_add);
+            view.logs.entry(path.to_string()).or_default().appended = total;
+            continue;
+        }
+        if !is_implemented_type_tag(tag) {
+            tracing::warn!(tag, "unsupported collaborative type");
+            return Err(ProjectionFailure::SchemaAhead);
+        }
+        let path = path.to_string();
+        match (tag, value) {
+            ("map", loro::LoroValue::Map(map)) => {
+                let mut entries = BTreeMap::new();
+                for (key, value) in map.iter() {
+                    if let loro::LoroValue::Binary(bytes) = value {
+                        entries.insert(key.clone(), bytes.to_vec());
+                    }
+                }
+                view.maps.insert(path, entries);
+            }
+            ("list", loro::LoroValue::List(items)) => {
+                view.lists.insert(path, list_elements(items));
+            }
+            ("log", loro::LoroValue::List(items)) => {
+                view.logs.entry(path).or_default().entries = list_elements(items);
+            }
+            ("text", loro::LoroValue::String(text)) => {
+                view.texts.insert(path, text.to_string());
+            }
+            ("set", loro::LoroValue::Map(map)) => {
+                let mut members: Vec<Vec<u8>> = map
+                    .values()
+                    .filter_map(|value| match value {
+                        loro::LoroValue::Binary(bytes) => Some(bytes.to_vec()),
+                        _ => None,
+                    })
+                    .collect();
+                members.sort();
+                members.dedup();
+                view.sets.insert(path, members);
+            }
+            ("tree", loro::LoroValue::List(roots)) => {
+                let mut nodes = Vec::new();
+                if !flatten_tree(roots, None, &mut nodes) {
+                    tracing::warn!(tag, "tree node held an invalid value");
+                    return Err(ProjectionFailure::Malformed);
+                }
+                view.trees.insert(path, nodes);
+            }
+            ("cnt", loro::LoroValue::Map(map)) => {
+                let total = map
+                    .values()
+                    .filter_map(|value| match value {
+                        loro::LoroValue::I64(value) => Some(*value),
+                        _ => None,
+                    })
+                    .fold(0i64, i64::saturating_add);
+                view.counters.insert(path, total);
+            }
+            _ => {
+                tracing::warn!(tag, "collaborative type held an invalid value");
+                return Err(ProjectionFailure::Malformed);
+            }
+        }
+    }
+    Ok(view)
+}
+
+fn anchor_in_doc(
+    doc: &loro::LoroDoc,
+    key: &Key,
+    path: &str,
+    position: u64,
+) -> Result<crate::causal::Anchor, crate::causal::Invalid> {
+    let text = doc.get_text(typed_key("text", path));
+    let length = u64::try_from(text.len_unicode()).unwrap_or(u64::MAX);
+    let anchored_to = if position == 0 || length == 0 {
+        None
+    } else {
+        text.get_cursor(
+            usize::try_from(position.min(length))
+                .unwrap_or(usize::MAX)
+                .saturating_sub(1),
+            loro::cursor::Side::Right,
+        )
+        .and_then(|cursor| cursor.id)
+        .map(|id| crate::causal::OpHead {
+            writer: id.peer,
+            sequence: id.counter,
+        })
+    };
+    Ok(crate::causal::Anchor {
+        format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+        body: body_digest(key),
+        path: path.to_string(),
+        anchored_to,
+        offset: position,
+        after: true,
+        taken_at: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
+    })
+}
+
+fn resolve_in_doc(
+    doc: &loro::LoroDoc,
+    key: &Key,
+    anchor: &crate::causal::Anchor,
+) -> crate::causal::AnchorResolution {
+    use crate::causal::AnchorResolution;
+    if anchor.body != body_digest(key) {
+        return AnchorResolution::Drifted;
+    }
+    let text = doc.get_text(typed_key("text", &anchor.path));
+    let length = u64::try_from(text.len_unicode()).unwrap_or(u64::MAX);
+    let Some(head) = anchor.anchored_to else {
+        return AnchorResolution::Resolved(anchor.offset.min(length));
+    };
+    let cursor = loro::cursor::Cursor::new(
+        Some(loro::ID {
+            peer: head.writer,
+            counter: head.sequence,
+        }),
+        loro::ContainerID::Root {
+            name: typed_key("text", &anchor.path).into(),
+            container_type: loro::ContainerType::Text,
+        },
+        if anchor.after {
+            loro::cursor::Side::Right
+        } else {
+            loro::cursor::Side::Left
+        },
+        usize::try_from(anchor.offset).unwrap_or(usize::MAX),
+    );
+    match doc.get_cursor_pos(&cursor) {
+        Ok(position) if position.current.side == loro::cursor::Side::Right => {
+            let resolved = u64::try_from(position.current.pos)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1)
+                .min(length);
+            AnchorResolution::Resolved(resolved)
+        }
+        Ok(_) | Err(_) => AnchorResolution::Drifted,
+    }
+}
+
+fn export_delta_from_doc(
+    doc: &loro::LoroDoc,
+    from: &crate::causal::Version,
+) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
+    let base = from.to_frontiers();
+    let Some(version_vector) = doc.frontiers_to_vv(&base) else {
+        return Err(crate::causal::Invalid::MissingBase);
+    };
+    let bytes = doc
+        .export(loro::ExportMode::updates(&version_vector))
+        .map_err(|source| {
+            tracing::warn!(%source, "fabric delta export failed");
+            crate::causal::Invalid::Engine
+        })?;
+    Ok(crate::causal::Artifact::Delta {
+        format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+        base: from.clone(),
+        result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
+        bytes,
+    })
+}
+
+fn export_checkpoint_from_doc(
+    doc: &loro::LoroDoc,
+    retention_frontier: &crate::causal::Version,
+) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
+    let (frontier, bytes) = if retention_frontier.is_empty() {
+        let bytes = doc.export(loro::ExportMode::Snapshot).map_err(|source| {
+            tracing::warn!(%source, "fabric checkpoint export failed");
+            crate::causal::Invalid::Engine
+        })?;
+        (loro::Frontiers::default(), bytes)
+    } else {
+        let frontier = retention_frontier.to_frontiers();
+        if doc.frontiers_to_vv(&frontier).is_none() {
+            return Err(crate::causal::Invalid::MissingBase);
+        }
+        let bytes = doc
+            .export(loro::ExportMode::shallow_snapshot(&frontier))
+            .map_err(|source| {
+                tracing::warn!(%source, "fabric compaction checkpoint export failed");
+                crate::causal::Invalid::Engine
+            })?;
+        (frontier, bytes)
+    };
+    Ok(crate::causal::Artifact::Checkpoint {
+        format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+        retention_frontier: crate::causal::Version::from_frontiers(&frontier),
+        result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
+        bytes,
+    })
+}
+
+fn export_history_from_doc(
+    doc: &loro::LoroDoc,
+) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
+    let bytes = doc.export(loro::ExportMode::Snapshot).map_err(|source| {
+        tracing::warn!(%source, "fabric history export failed");
+        crate::causal::Invalid::Engine
+    })?;
+    Ok(crate::causal::Artifact::Archive {
+        format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+        result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
+        bytes,
+    })
+}
+
 impl BodyState {
     /// A position digest for the causal token: the atomic bytes' hash, or the
     /// collaborative doc's oplog frontier.
-    fn digest(&self) -> Vec<u8> {
+    fn digest(&self) -> Result<Vec<u8>, Failure> {
         match self {
-            BodyState::Atomic(bytes) => blake3::hash(bytes).as_bytes().to_vec(),
-            BodyState::Collab(doc) => doc.oplog_frontiers().encode().to_vec(),
+            BodyState::Atomic(bytes) => Ok(blake3::hash(bytes).as_bytes().to_vec()),
+            BodyState::Collab(doc) => Ok(doc.oplog_frontiers().encode().to_vec()),
+            BodyState::FrozenCollab(frozen) => frozen
+                .version()
+                .map(|version| version.to_frontiers().encode().to_vec()),
         }
     }
 
     fn export(&self) -> Result<BodyExport, Failure> {
         match self {
-            BodyState::Atomic(bytes) => Ok(BodyExport::Atomic(bytes.clone())),
+            BodyState::Atomic(bytes) => Ok(BodyExport::Atomic(bytes.to_vec())),
             BodyState::Collab(doc) => doc
                 .export(loro::ExportMode::Snapshot)
                 .map(BodyExport::Collaborative)
                 .map_err(|_| Failure::Invalid(commit::Invalid::Import)),
-        }
-    }
-
-    fn from_export(export: &BodyExport) -> Result<Self, Failure> {
-        match export {
-            BodyExport::Atomic(bytes) => Ok(BodyState::Atomic(bytes.clone())),
-            BodyExport::Collaborative(snapshot) => {
-                // A doc reconstructed from an export is not yet authoring, so
-                // it keeps Loro's own id until this activation writes into it
-                // through `collab_doc`.
-                let doc = new_body_doc(None);
-                doc.import(snapshot)
-                    .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
-                Ok(BodyState::Collab(doc))
+            BodyState::FrozenCollab(frozen) => {
+                Ok(BodyExport::Collaborative(frozen.export.to_vec()))
             }
         }
     }
 }
 
+impl FrozenCollab {
+    fn new(export: Arc<[u8]>) -> Self {
+        Self {
+            export,
+            version: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn from_doc(doc: &loro::LoroDoc) -> Result<Self, Failure> {
+        let bytes = doc
+            .export(loro::ExportMode::Snapshot)
+            .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
+        let version = Arc::new(OnceLock::new());
+        let _ = version.set(Ok(crate::causal::Version::from_frontiers(
+            &doc.oplog_frontiers(),
+        )));
+        Ok(Self {
+            export: bytes.into(),
+            version,
+        })
+    }
+
+    fn doc(&self, writer: Option<u64>) -> Result<loro::LoroDoc, Failure> {
+        import_collaborative_doc(&self.export, writer)
+    }
+
+    fn version(&self) -> Result<crate::causal::Version, Failure> {
+        if let Some(version) = self.version.get() {
+            return version
+                .clone()
+                .map_err(|_| Failure::Invalid(commit::Invalid::Import));
+        }
+        let doc = self.doc(None)?;
+        let version = crate::causal::Version::from_frontiers(&doc.oplog_frontiers());
+        let _ = self.version.set(Ok(version.clone()));
+        Ok(version)
+    }
+}
+
 impl Engine {
+    /// Capture a Body position for off-path ordinary checkpoint construction.
+    /// This call performs no snapshot serialization or history copy.
+    pub fn checkpoint_seed(&self, key: &Key) -> Result<CheckpointSeed, crate::causal::Invalid> {
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => Ok(CheckpointSeed::Hot {
+                doc: doc.clone(),
+                frontier: doc.oplog_frontiers(),
+            }),
+            Some(BodyState::FrozenCollab(frozen)) => Ok(CheckpointSeed::Cold {
+                export: Arc::clone(&frozen.export),
+                version: Arc::clone(&frozen.version),
+            }),
+            _ => Err(crate::causal::Invalid::NotCollaborative),
+        }
+    }
+
     /// A fresh, empty Loro-backed engine, minting this activation's writer id.
     pub fn new() -> Self {
         Self {
             writer: crate::op::mint_activation_peer(),
             bodies: BTreeMap::new(),
+            hot: std::collections::VecDeque::new(),
         }
     }
 
@@ -816,24 +1247,76 @@ impl Engine {
         self.bodies.keys().cloned().collect()
     }
 
+    /// Number of retained Bodies without cloning the key directory.
+    pub fn body_count(&self) -> u64 {
+        u64::try_from(self.bodies.len()).unwrap_or(u64::MAX)
+    }
+
     fn loro_err(e: impl std::fmt::Display) -> Failure {
         tracing::warn!(%e, "fabric operation was invalid");
         Failure::Invalid(commit::Invalid::Import)
+    }
+
+    fn cool_body(&mut self, key: &Key) -> Result<(), Failure> {
+        let Some(state) = self.bodies.get_mut(key) else {
+            return Ok(());
+        };
+        if let BodyState::Collab(doc) = state {
+            *state = BodyState::FrozenCollab(FrozenCollab::from_doc(doc)?);
+        }
+        self.hot.retain(|candidate| candidate != key);
+        Ok(())
+    }
+
+    fn reserve_hot(&mut self, key: &Key) -> Result<(), Failure> {
+        self.hot.retain(|candidate| candidate != key);
+        while self.hot.len() >= MAX_HOT_COLLABORATIVE_BODIES {
+            let Some(cold) = self.hot.pop_front() else {
+                break;
+            };
+            if &cold != key {
+                self.cool_body(&cold)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn make_hot(&mut self, key: &Key) -> Result<(), Failure> {
+        let frozen = match self.bodies.get(key) {
+            Some(BodyState::FrozenCollab(frozen)) => Some(frozen.clone()),
+            Some(BodyState::Collab(_)) => None,
+            Some(BodyState::Atomic(_)) | None => return Ok(()),
+        };
+        self.reserve_hot(key)?;
+        if let Some(frozen) = frozen {
+            let doc = frozen.doc(Some(self.writer))?;
+            self.bodies.insert(key.clone(), BodyState::Collab(doc));
+        }
+        self.hot.push_back(key.clone());
+        Ok(())
     }
 
     /// The collaborative doc for a Body, creating it when `create`. An atomic
     /// value at the key is a [`Failure::TypeConflict`].
     fn collab_doc(&mut self, key: &Key, create: bool) -> Result<Option<&loro::LoroDoc>, Failure> {
         use std::collections::btree_map::Entry;
+        self.make_hot(key)?;
+        let creating = !self.bodies.contains_key(key) && create;
+        if creating {
+            self.reserve_hot(key)?;
+            self.hot.push_back(key.clone());
+        }
         match self.bodies.entry(key.clone()) {
             Entry::Occupied(e) => match e.into_mut() {
                 BodyState::Collab(doc) => Ok(Some(doc)),
                 BodyState::Atomic(_) => Err(Failure::TypeConflict),
+                BodyState::FrozenCollab(_) => Err(Failure::OutcomeUnknown),
             },
             Entry::Vacant(v) if create => {
                 match v.insert(BodyState::Collab(new_body_doc(Some(self.writer)))) {
                     BodyState::Collab(doc) => Ok(Some(doc)),
                     BodyState::Atomic(_) => Err(Failure::TypeConflict),
+                    BodyState::FrozenCollab(_) => Err(Failure::OutcomeUnknown),
                 }
             }
             Entry::Vacant(_) => Ok(None),
@@ -1052,7 +1535,10 @@ impl Engine {
     }
 
     /// The causal token digesting the touched Bodies' post-commit positions.
-    fn causal_for(&self, touched: &std::collections::BTreeSet<Key>) -> CausalToken {
+    fn causal_for(
+        &self,
+        touched: &std::collections::BTreeSet<Key>,
+    ) -> Result<CausalToken, Failure> {
         let mut h = blake3::Hasher::new();
         h.update(CAUSAL_DOMAIN);
         for key in touched {
@@ -1061,7 +1547,7 @@ impl Engine {
             h.update(key.as_bytes());
             match self.bodies.get(key) {
                 Some(state) => {
-                    let digest = state.digest();
+                    let digest = state.digest()?;
                     h.update(&[1]);
                     let digest_len = u64::try_from(digest.len()).unwrap_or(u64::MAX);
                     h.update(&digest_len.to_le_bytes());
@@ -1072,7 +1558,7 @@ impl Engine {
                 }
             }
         }
-        CausalToken::from_bytes(h.finalize().as_bytes().to_vec())
+        Ok(CausalToken::from_bytes(h.finalize().as_bytes().to_vec()))
     }
 
     /// Apply one operation. Errors leave partially-applied state in the touched
@@ -1080,12 +1566,15 @@ impl Engine {
     fn apply(&mut self, op: &Op) -> Result<(), Failure> {
         match op {
             Op::PutCanonical { key, value } => {
-                if let Some(BodyState::Collab(_)) = self.bodies.get(key) {
+                if matches!(
+                    self.bodies.get(key),
+                    Some(BodyState::Collab(_) | BodyState::FrozenCollab(_))
+                ) {
                     // A collaborative Body cannot be silently flattened.
                     return Err(Failure::TypeConflict);
                 }
                 self.bodies
-                    .insert(key.clone(), BodyState::Atomic(value.clone()));
+                    .insert(key.clone(), BodyState::Atomic(value.clone().into()));
                 Ok(())
             }
             Op::Remove { key } => {
@@ -1446,7 +1935,10 @@ impl Default for Engine {
 }
 
 impl Engine {
-    pub fn commit(&mut self, request: Transaction) -> Result<Receipt, Failure> {
+    /// Apply a transaction into the live candidate image without publishing
+    /// it. Reads and exports observe the candidate until it is finalized or
+    /// rolled back.
+    pub fn prepare(&mut self, request: Transaction) -> Result<Prepared, Failure> {
         // Batch atomicity, bounded. This used to back every touched Body up by
         // full export before applying — a complete-history snapshot per
         // ordinary edit, paid inside Engine before anything was sealed, and no
@@ -1485,6 +1977,9 @@ impl Engine {
                     BodyState::Collab(doc) => {
                         (BodyState::Collab(doc.clone()), Some(doc.oplog_frontiers()))
                     }
+                    BodyState::FrozenCollab(frozen) => {
+                        (BodyState::FrozenCollab(frozen.clone()), None)
+                    }
                 });
                 (key.clone(), snapshot)
             })
@@ -1501,28 +1996,7 @@ impl Engine {
             // Total, not best-effort. One Body that will not revert must not
             // abandon the rest of the batch half-applied, so every key is put
             // back before anything is reported.
-            let mut unrestored = 0usize;
-            for (key, snapshot) in prior {
-                let Some((state, frontiers)) = snapshot else {
-                    // The Body did not exist before this batch, so undoing the
-                    // batch means it does not exist now either.
-                    self.bodies.remove(&key);
-                    continue;
-                };
-                self.bodies.insert(key.clone(), state);
-                if let (Some(frontiers), Some(BodyState::Collab(doc))) =
-                    (frontiers, self.bodies.get(&key))
-                {
-                    doc.commit();
-                    if doc.revert_to(&frontiers).is_err() {
-                        unrestored = unrestored.saturating_add(1);
-                    }
-                }
-            }
-            if unrestored > 0 {
-                tracing::error!(unrestored, "fabric rollback did not restore all bodies");
-                return Err(Failure::OutcomeUnknown);
-            }
+            self.restore(prior)?;
             return Err(e);
         }
         // Seal each touched collaborative doc's staged change as one labelled
@@ -1535,124 +2009,82 @@ impl Engine {
         }
         let applied = u32::try_from(request.ops.len())
             .map_err(|_| Failure::Invalid(commit::Invalid::Bounds))?;
-        Ok(Receipt::new(self.causal_for(&touched), applied))
+        Ok(Prepared {
+            receipt: Receipt::new(self.causal_for(&touched)?, applied),
+            prior,
+        })
+    }
+
+    /// Accept one prepared candidate. Durability is owned by Replica, so the
+    /// Engine has no additional write to perform here. Finalized collaborative
+    /// Bodies remain in the bounded mutation-hot set: the next edit can reuse
+    /// its `LoroDoc`, while [`Engine::reserve_hot`] freezes the least-recently
+    /// used Body when the cap is reached.
+    pub fn finalize(&mut self, prepared: Prepared) -> Receipt {
+        prepared.receipt
+    }
+
+    /// Restore the exact semantic state that preceded a preparation.
+    pub fn rollback(&mut self, prepared: Prepared) -> Result<(), Failure> {
+        self.restore(prepared.prior)
+    }
+
+    /// Preserve the original one-call surface for callers that do not need a
+    /// validation phase.
+    pub fn commit(&mut self, request: Transaction) -> Result<Receipt, Failure> {
+        let prepared = self.prepare(request)?;
+        Ok(self.finalize(prepared))
+    }
+
+    fn restore(
+        &mut self,
+        prior: BTreeMap<Key, Option<(BodyState, Option<loro::Frontiers>)>>,
+    ) -> Result<(), Failure> {
+        let mut unrestored = 0usize;
+        for (key, snapshot) in prior {
+            self.hot.retain(|candidate| candidate != &key);
+            let Some((state, frontiers)) = snapshot else {
+                // The Body did not exist before this batch, so undoing the
+                // batch means it does not exist now either.
+                self.bodies.remove(&key);
+                continue;
+            };
+            self.bodies.insert(key.clone(), state);
+            if let (Some(frontiers), Some(BodyState::Collab(doc))) =
+                (frontiers, self.bodies.get(&key))
+            {
+                doc.commit();
+                if doc.revert_to(&frontiers).is_err() {
+                    unrestored = unrestored.saturating_add(1);
+                }
+            }
+            if matches!(self.bodies.get(&key), Some(BodyState::Collab(_))) {
+                self.hot.push_back(key);
+            }
+        }
+        if unrestored > 0 {
+            tracing::error!(unrestored, "fabric rollback did not restore all bodies");
+            return Err(Failure::OutcomeUnknown);
+        }
+        Ok(())
     }
 
     pub fn read(&self, key: &Key) -> Option<Vec<u8>> {
         match self.bodies.get(key)? {
-            BodyState::Atomic(bytes) => Some(bytes.clone()),
-            BodyState::Collab(_) => None,
+            BodyState::Atomic(bytes) => Some(bytes.to_vec()),
+            BodyState::Collab(_) | BodyState::FrozenCollab(_) => None,
         }
     }
 
     pub fn read_collaborative(&self, key: &Key) -> Result<CollaborativeView, ProjectionFailure> {
-        let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
-            return Err(ProjectionFailure::NotCollaborative);
-        };
-        // The projection walks the doc's ROOT value tree once: registers live
-        // as `reg:<path>` keys in the `body` root map; every other typed path
-        // is a name-identified root container `<tag>:<path>`.
-        let mut view = CollaborativeView::default();
-        let loro::LoroValue::Map(roots) = doc.get_deep_value() else {
-            return Ok(view);
-        };
-        for (name, value) in roots.iter() {
-            if name == BODY_MAP {
-                let loro::LoroValue::Map(body) = value else {
-                    continue;
-                };
-                for (k, v) in body.iter() {
-                    if let (Some(path), loro::LoroValue::Binary(bytes)) =
-                        (k.strip_prefix("reg:"), v)
-                    {
-                        view.registers.insert(path.to_string(), bytes.to_vec());
-                    }
-                }
-                continue;
-            }
-            let Some((tag, path)) = name.split_once(':') else {
-                tracing::warn!(tag = %name, "unrecognized collaborative root");
-                return Err(ProjectionFailure::SchemaAhead);
-            };
-            // A log's count lives in a companion root rather than in the type
-            // tag space, so it is folded in here and never surfaces as a path
-            // of its own.
-            if tag == LOG_COUNT_TAG {
-                let loro::LoroValue::Map(counts) = value else {
-                    tracing::warn!(tag, "log count held an invalid value");
-                    return Err(ProjectionFailure::Malformed);
-                };
-                let total = counts
-                    .values()
-                    .filter_map(|v| match v {
-                        loro::LoroValue::I64(n) => u64::try_from(*n).ok(),
-                        _ => None,
-                    })
-                    .fold(0u64, u64::saturating_add);
-                view.logs.entry(path.to_string()).or_default().appended = total;
-                continue;
-            }
-            if !is_implemented_type_tag(tag) {
-                tracing::warn!(tag, "unsupported collaborative type");
-                return Err(ProjectionFailure::SchemaAhead);
-            }
-            let path = path.to_string();
-            match (tag, value) {
-                ("map", loro::LoroValue::Map(m)) => {
-                    let mut entries = BTreeMap::new();
-                    for (k, v) in m.iter() {
-                        if let loro::LoroValue::Binary(bytes) = v {
-                            entries.insert(k.clone(), bytes.to_vec());
-                        }
-                    }
-                    view.maps.insert(path, entries);
-                }
-                ("list", loro::LoroValue::List(items)) => {
-                    view.lists.insert(path, list_elements(items));
-                }
-                ("log", loro::LoroValue::List(items)) => {
-                    view.logs.entry(path).or_default().entries = list_elements(items);
-                }
-                ("text", loro::LoroValue::String(text)) => {
-                    view.texts.insert(path, text.to_string());
-                }
-                ("set", loro::LoroValue::Map(m)) => {
-                    let mut members: Vec<Vec<u8>> = m
-                        .values()
-                        .filter_map(|v| match v {
-                            loro::LoroValue::Binary(bytes) => Some(bytes.to_vec()),
-                            _ => None,
-                        })
-                        .collect();
-                    members.sort();
-                    members.dedup();
-                    view.sets.insert(path, members);
-                }
-                ("tree", loro::LoroValue::List(roots)) => {
-                    let mut nodes = Vec::new();
-                    if !flatten_tree(roots, None, &mut nodes) {
-                        tracing::warn!(tag, "tree node held an invalid value");
-                        return Err(ProjectionFailure::Malformed);
-                    }
-                    view.trees.insert(path, nodes);
-                }
-                ("cnt", loro::LoroValue::Map(m)) => {
-                    let total = m
-                        .values()
-                        .filter_map(|v| match v {
-                            loro::LoroValue::I64(n) => Some(*n),
-                            _ => None,
-                        })
-                        .fold(0i64, i64::saturating_add);
-                    view.counters.insert(path, total);
-                }
-                _ => {
-                    tracing::warn!(tag, "collaborative type held an invalid value");
-                    return Err(ProjectionFailure::Malformed);
-                }
-            }
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => project_collaborative_doc(doc),
+            Some(BodyState::FrozenCollab(frozen)) => frozen
+                .doc(None)
+                .map_err(|_| ProjectionFailure::Malformed)
+                .and_then(|doc| project_collaborative_doc(&doc)),
+            _ => Err(ProjectionFailure::NotCollaborative),
         }
-        Ok(view)
     }
 
     pub fn version(&self, key: &Key) -> Result<crate::causal::Version, crate::causal::Invalid> {
@@ -1660,6 +2092,9 @@ impl Engine {
             Some(BodyState::Collab(doc)) => Ok(crate::causal::Version::from_frontiers(
                 &doc.oplog_frontiers(),
             )),
+            Some(BodyState::FrozenCollab(frozen)) => {
+                frozen.version().map_err(|_| crate::causal::Invalid::Engine)
+            }
             // An atomic Body has one writer at a time and no operation history,
             // so its position is the empty one. It still answers, because a
             // caller should not have to know which model a key holds to ask.
@@ -1675,27 +2110,14 @@ impl Engine {
     ) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
         from.validate()?;
         match self.bodies.get(key) {
-            Some(BodyState::Collab(doc)) => {
-                let base = from.to_frontiers();
-                let Some(vv) = doc.frontiers_to_vv(&base) else {
-                    return Err(crate::causal::Invalid::MissingBase);
-                };
-                let bytes = doc
-                    .export(loro::ExportMode::updates(&vv))
-                    .map_err(|source| {
-                        tracing::warn!(%source, "fabric delta export failed");
-                        crate::causal::Invalid::Engine
-                    })?;
-                Ok(crate::causal::Artifact::Delta {
-                    format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-                    base: from.clone(),
-                    result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
-                    bytes,
-                })
-            }
+            Some(BodyState::Collab(doc)) => export_delta_from_doc(doc, from),
+            Some(BodyState::FrozenCollab(frozen)) => frozen
+                .doc(None)
+                .map_err(|_| crate::causal::Invalid::Engine)
+                .and_then(|doc| export_delta_from_doc(&doc, from)),
             Some(BodyState::Atomic(bytes)) => Ok(crate::causal::Artifact::Replace {
                 format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-                bytes: bytes.clone(),
+                bytes: bytes.to_vec(),
             }),
             None => Err(crate::causal::Invalid::NotCollaborative),
         }
@@ -1708,31 +2130,14 @@ impl Engine {
     ) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
         retention_frontier.validate()?;
         match self.bodies.get(key) {
-            Some(BodyState::Collab(doc)) => {
-                let frontier = if retention_frontier.is_empty() {
-                    doc.oplog_frontiers()
-                } else {
-                    retention_frontier.to_frontiers()
-                };
-                if doc.frontiers_to_vv(&frontier).is_none() {
-                    return Err(crate::causal::Invalid::MissingBase);
-                }
-                let bytes = doc
-                    .export(loro::ExportMode::shallow_snapshot(&frontier))
-                    .map_err(|source| {
-                        tracing::warn!(%source, "fabric checkpoint export failed");
-                        crate::causal::Invalid::Engine
-                    })?;
-                Ok(crate::causal::Artifact::Checkpoint {
-                    format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-                    retention_frontier: crate::causal::Version::from_frontiers(&frontier),
-                    result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
-                    bytes,
-                })
-            }
+            Some(BodyState::Collab(doc)) => export_checkpoint_from_doc(doc, retention_frontier),
+            Some(BodyState::FrozenCollab(frozen)) => frozen
+                .doc(None)
+                .map_err(|_| crate::causal::Invalid::Engine)
+                .and_then(|doc| export_checkpoint_from_doc(&doc, retention_frontier)),
             Some(BodyState::Atomic(bytes)) => Ok(crate::causal::Artifact::Replace {
                 format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-                bytes: bytes.clone(),
+                bytes: bytes.to_vec(),
             }),
             None => Err(crate::causal::Invalid::NotCollaborative),
         }
@@ -1743,20 +2148,14 @@ impl Engine {
         key: &Key,
     ) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
         match self.bodies.get(key) {
-            Some(BodyState::Collab(doc)) => {
-                let bytes = doc.export(loro::ExportMode::Snapshot).map_err(|source| {
-                    tracing::warn!(%source, "fabric history export failed");
-                    crate::causal::Invalid::Engine
-                })?;
-                Ok(crate::causal::Artifact::Archive {
-                    format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-                    result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
-                    bytes,
-                })
-            }
+            Some(BodyState::Collab(doc)) => export_history_from_doc(doc),
+            Some(BodyState::FrozenCollab(frozen)) => frozen
+                .doc(None)
+                .map_err(|_| crate::causal::Invalid::Engine)
+                .and_then(|doc| export_history_from_doc(&doc)),
             Some(BodyState::Atomic(bytes)) => Ok(crate::causal::Artifact::Replace {
                 format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-                bytes: bytes.clone(),
+                bytes: bytes.to_vec(),
             }),
             None => Err(crate::causal::Invalid::NotCollaborative),
         }
@@ -1775,16 +2174,19 @@ impl Engine {
             // an atomic Body — is refused below; flattening a collaborative
             // Body into a value here would discard its whole history because a
             // peer sent the wrong artifact kind.
-            if matches!(self.bodies.get(key), Some(BodyState::Collab(_))) {
+            if matches!(
+                self.bodies.get(key),
+                Some(BodyState::Collab(_) | BodyState::FrozenCollab(_))
+            ) {
                 return Err(Invalid::NotCollaborative);
             }
             let changed = !matches!(
                 self.bodies.get(key),
-                Some(BodyState::Atomic(current)) if current == bytes
+                Some(BodyState::Atomic(current)) if current.as_ref() == bytes.as_slice()
             );
             if changed {
                 self.bodies
-                    .insert(key.clone(), BodyState::Atomic(bytes.clone()));
+                    .insert(key.clone(), BodyState::Atomic(bytes.clone().into()));
             }
             return Ok(ImportStatus {
                 applied: changed,
@@ -1799,14 +2201,10 @@ impl Engine {
             Artifact::Replace { .. } => return Err(Invalid::Engine),
         };
 
-        let writer = self.writer;
-        let entry = self
-            .bodies
-            .entry(key.clone())
-            .or_insert_with(|| BodyState::Collab(new_body_doc(Some(writer))));
-        let BodyState::Collab(doc) = entry else {
-            return Err(Invalid::NotCollaborative);
-        };
+        let doc = self
+            .collab_doc(key, true)
+            .map_err(|_| Invalid::Engine)?
+            .ok_or(Invalid::NotCollaborative)?;
         let before = doc.oplog_frontiers();
         let status = doc.import(bytes).map_err(|e| {
             // A compacted document refuses work whose dependencies precede its
@@ -1838,6 +2236,10 @@ impl Engine {
     ) -> crate::causal::CausalRelation {
         match self.bodies.get(key) {
             Some(BodyState::Collab(doc)) => crate::causal::relation(doc, a, b),
+            Some(BodyState::FrozenCollab(frozen)) => frozen
+                .doc(None)
+                .map(|doc| crate::causal::relation(&doc, a, b))
+                .unwrap_or(crate::causal::CausalRelation::Undetermined),
             _ => crate::causal::CausalRelation::Undetermined,
         }
     }
@@ -1848,38 +2250,14 @@ impl Engine {
         path: &str,
         position: u64,
     ) -> Result<crate::causal::Anchor, crate::causal::Invalid> {
-        let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
-            return Err(crate::causal::Invalid::NotCollaborative);
-        };
-        let text = doc.get_text(typed_key("text", path));
-        let length = u64::try_from(text.len_unicode()).unwrap_or(u64::MAX);
-        // Bind the position to the operation that wrote the character before
-        // it. That is what survives concurrent edits: an offset does not, and a
-        // caret that does not survive a concurrent edit is worse than no caret.
-        let anchored_to = if position == 0 || length == 0 {
-            None
-        } else {
-            text.get_cursor(
-                usize::try_from(position.min(length))
-                    .unwrap_or(usize::MAX)
-                    .saturating_sub(1),
-                loro::cursor::Side::Right,
-            )
-            .and_then(|cursor| cursor.id)
-            .map(|id| crate::causal::OpHead {
-                writer: id.peer,
-                sequence: id.counter,
-            })
-        };
-        Ok(crate::causal::Anchor {
-            format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-            body: body_digest(key),
-            path: path.to_string(),
-            anchored_to,
-            offset: position,
-            after: true,
-            taken_at: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
-        })
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => anchor_in_doc(doc, key, path, position),
+            Some(BodyState::FrozenCollab(frozen)) => frozen
+                .doc(None)
+                .map_err(|_| crate::causal::Invalid::Engine)
+                .and_then(|doc| anchor_in_doc(&doc, key, path, position)),
+            _ => Err(crate::causal::Invalid::NotCollaborative),
+        }
     }
 
     pub fn resolve(
@@ -1887,55 +2265,13 @@ impl Engine {
         key: &Key,
         anchor: &crate::causal::Anchor,
     ) -> crate::causal::AnchorResolution {
-        use crate::causal::AnchorResolution;
-        if anchor.body != body_digest(key) {
-            return AnchorResolution::Drifted;
-        }
-        let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
-            return AnchorResolution::Drifted;
-        };
-        let text = doc.get_text(typed_key("text", &anchor.path));
-        let length = u64::try_from(text.len_unicode()).unwrap_or(u64::MAX);
-
-        // An anchor at the very start is the one position concurrent edits
-        // cannot move.
-        let Some(head) = anchor.anchored_to else {
-            return AnchorResolution::Resolved(anchor.offset.min(length));
-        };
-        let cursor = loro::cursor::Cursor::new(
-            Some(loro::ID {
-                peer: head.writer,
-                counter: head.sequence,
-            }),
-            loro::ContainerID::Root {
-                name: typed_key("text", &anchor.path).into(),
-                container_type: loro::ContainerType::Text,
-            },
-            if anchor.after {
-                loro::cursor::Side::Right
-            } else {
-                loro::cursor::Side::Left
-            },
-            usize::try_from(anchor.offset).unwrap_or(usize::MAX),
-        );
-        match doc.get_cursor_pos(&cursor) {
-            // The anchor bound to the character *before* the caret, so a live
-            // resolution sits one past it — and only a live one. When the
-            // anchored character is gone the engine answers with the gap it
-            // left, flipping the side; adding one to that puts the caret a
-            // character to the right of where it belongs. `Drifted` is what
-            // this case is documented to be, and it is what a renderer can act
-            // on.
-            Ok(position) if position.current.side == loro::cursor::Side::Right => {
-                let resolved = u64::try_from(position.current.pos)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1)
-                    .min(length);
-                AnchorResolution::Resolved(resolved)
-            }
-            Ok(_) => AnchorResolution::Drifted,
-            // An anchor older than what this replica retains.
-            Err(_) => AnchorResolution::Drifted,
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => resolve_in_doc(doc, key, anchor),
+            Some(BodyState::FrozenCollab(frozen)) => frozen
+                .doc(None)
+                .map(|doc| resolve_in_doc(&doc, key, anchor))
+                .unwrap_or(crate::causal::AnchorResolution::Drifted),
+            _ => crate::causal::AnchorResolution::Drifted,
         }
     }
 
@@ -1943,26 +2279,131 @@ impl Engine {
         self.bodies.get(key).and_then(|s| s.export().ok())
     }
 
+    /// Freeze one immutable read image. Cold collaborative Bodies share their
+    /// canonical export and compact version with the Engine; only one of the
+    /// bounded mutation-hot documents must serialize here.
+    pub fn body_snapshot(&self, key: &Key) -> Result<Option<BodySnapshot>, Failure> {
+        match self.bodies.get(key) {
+            None => Ok(None),
+            Some(BodyState::Atomic(bytes)) => Ok(Some(BodySnapshot::from_atomic(bytes.clone()))),
+            Some(BodyState::FrozenCollab(frozen)) => Ok(Some(BodySnapshot::from_frozen(frozen))),
+            Some(BodyState::Collab(doc)) => {
+                let frozen = FrozenCollab::from_doc(doc)?;
+                Ok(Some(BodySnapshot::from_frozen(&frozen)))
+            }
+        }
+    }
+
+    /// Adopt a Body image whose material has already been interpreted and
+    /// verified by another Engine in the same recovery pipeline.
+    ///
+    /// An empty target installs the immutable Arc payload and its verified
+    /// Version cell directly. This is the cold-start handoff: Replica can prove
+    /// durable material once, then populate its long-lived Engine without
+    /// importing the same full snapshot a second time. If this Engine already
+    /// has collaborative state, ordinary CRDT import performs the required
+    /// merge; exact duplicates remain allocation-free and unchanged.
+    pub fn import_verified_snapshot(
+        &mut self,
+        key: &Key,
+        snapshot: &BodySnapshot,
+    ) -> Result<crate::causal::ImportStatus, Failure> {
+        use crate::causal::ImportStatus;
+
+        snapshot
+            .version()
+            .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
+        match &snapshot.export {
+            SnapshotExport::Atomic(bytes) => {
+                if matches!(
+                    self.bodies.get(key),
+                    Some(BodyState::Collab(_) | BodyState::FrozenCollab(_))
+                ) {
+                    return Err(Failure::TypeConflict);
+                }
+                let applied = !matches!(
+                    self.bodies.get(key),
+                    Some(BodyState::Atomic(current)) if current.as_ref() == bytes.as_ref()
+                );
+                if applied {
+                    self.bodies
+                        .insert(key.clone(), BodyState::Atomic(bytes.clone()));
+                }
+                Ok(ImportStatus {
+                    applied,
+                    pending: false,
+                })
+            }
+            SnapshotExport::Collaborative(bytes) => {
+                if matches!(self.bodies.get(key), Some(BodyState::Atomic(_))) {
+                    return Err(Failure::TypeConflict);
+                }
+                if self.bodies.get(key).is_none() {
+                    self.bodies.insert(
+                        key.clone(),
+                        BodyState::FrozenCollab(FrozenCollab {
+                            export: bytes.clone(),
+                            version: snapshot.version.clone(),
+                        }),
+                    );
+                    return Ok(ImportStatus {
+                        applied: true,
+                        pending: false,
+                    });
+                }
+                if matches!(
+                    self.bodies.get(key),
+                    Some(BodyState::FrozenCollab(current))
+                        if current.export.as_ref() == bytes.as_ref()
+                ) {
+                    return Ok(ImportStatus {
+                        applied: false,
+                        pending: false,
+                    });
+                }
+                let doc = self.collab_doc(key, true)?.ok_or(Failure::TypeConflict)?;
+                let before = doc.oplog_frontiers();
+                let status = doc
+                    .import(bytes.as_ref())
+                    .map_err(|_| Failure::Invalid(commit::Invalid::Merge))?;
+                Ok(ImportStatus {
+                    applied: before != doc.oplog_frontiers(),
+                    pending: status.pending.is_some(),
+                })
+            }
+        }
+    }
+
     pub fn import_body(
         &mut self,
         key: &Key,
         export: &BodyExport,
     ) -> Result<Option<Receipt>, Failure> {
+        let thaw = matches!(
+            (self.bodies.get(key), export),
+            (
+                Some(BodyState::FrozenCollab(frozen)),
+                BodyExport::Collaborative(snapshot)
+            ) if frozen.export.as_ref() != snapshot.as_slice()
+        );
+        if thaw {
+            self.make_hot(key)?;
+        }
         let changed = match (self.bodies.get(key), export) {
             // Atomic replacement — policy for concurrent atomic writes is
             // Replica's, decided before this call.
             (Some(BodyState::Atomic(current)), BodyExport::Atomic(bytes)) => {
-                if current == bytes {
+                if current.as_ref() == bytes.as_slice() {
                     false
                 } else {
                     self.bodies
-                        .insert(key.clone(), BodyState::Atomic(bytes.clone()));
+                        .insert(key.clone(), BodyState::Atomic(bytes.clone().into()));
                     true
                 }
             }
             (None, BodyExport::Atomic(bytes)) => {
                 self.bodies
-                    .insert(key.clone(), BodyState::Atomic(bytes.clone()));
+                    .insert(key.clone(), BodyState::Atomic(bytes.clone().into()));
                 true
             }
             // Collaborative causal merge: already-known material is unchanged.
@@ -1972,14 +2413,23 @@ impl Engine {
                     .map_err(|_| Failure::Invalid(commit::Invalid::Merge))?;
                 doc.oplog_frontiers().encode() != before
             }
-            (None, BodyExport::Collaborative(_)) => {
+            (Some(BodyState::FrozenCollab(frozen)), BodyExport::Collaborative(snapshot)) => {
+                frozen.export.as_ref() != snapshot.as_slice()
+            }
+            (None, BodyExport::Collaborative(snapshot)) => {
+                let frozen = FrozenCollab::new(snapshot.clone().into());
+                // Validate the interchange boundary before installing it. The
+                // verified Version is retained in the same compact cell shared
+                // by future read snapshots; malformed bytes never become an
+                // empty causal coordinate.
+                frozen.version()?;
                 self.bodies
-                    .insert(key.clone(), BodyState::from_export(export)?);
+                    .insert(key.clone(), BodyState::FrozenCollab(frozen));
                 true
             }
             // A model mismatch at the same key is a type conflict, refused.
             (Some(BodyState::Atomic(_)), BodyExport::Collaborative(_))
-            | (Some(BodyState::Collab(_)), BodyExport::Atomic(_)) => {
+            | (Some(BodyState::Collab(_) | BodyState::FrozenCollab(_)), BodyExport::Atomic(_)) => {
                 return Err(Failure::TypeConflict)
             }
         };
@@ -1988,13 +2438,53 @@ impl Engine {
         }
         let mut touched = std::collections::BTreeSet::new();
         touched.insert(key.clone());
-        Ok(Some(Receipt::new(self.causal_for(&touched), 0)))
+        Ok(Some(Receipt::new(self.causal_for(&touched)?, 0)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cold_checkpoint_seed_defers_import_until_worker_export() {
+        let mut engine = Engine::new();
+        let key = Key::from_bytes(b"body/cold-checkpoint".to_vec());
+        engine
+            .commit(Transaction::new(
+                "seed",
+                vec![Op::RegisterSet {
+                    key: key.clone(),
+                    path: "title".into(),
+                    value: vec![b'x'; 1024 * 1024],
+                }],
+            ))
+            .unwrap();
+        let export = match engine.export_body(&key).unwrap() {
+            BodyExport::Collaborative(bytes) => Arc::<[u8]>::from(bytes),
+            BodyExport::Atomic(_) => panic!("collaborative fixture"),
+        };
+        let frozen = FrozenCollab::new(export);
+        let version = Arc::clone(&frozen.version);
+        engine
+            .bodies
+            .insert(key.clone(), BodyState::FrozenCollab(frozen));
+
+        let seed = engine.checkpoint_seed(&key).unwrap();
+        assert!(
+            version.get().is_none(),
+            "capturing a cold seed must not import the retained snapshot"
+        );
+        let artifact = seed.export().unwrap();
+        assert!(
+            version.get().is_some(),
+            "the worker-side export may discover and memoize the version"
+        );
+        assert!(matches!(
+            artifact,
+            crate::causal::Artifact::Checkpoint { .. }
+        ));
+    }
 
     #[test]
     fn a_body_export_carries_exactly_one_body() {
@@ -2550,5 +3040,255 @@ mod tests {
         // The causal token advances between commits.
         assert_ne!(r1.causal(), r2.causal());
         assert_eq!(fabric.read(&key), None);
+    }
+
+    #[test]
+    fn prepared_candidate_is_readable_and_rolls_back_only_touched_bodies() {
+        let mut fabric = Engine::new();
+        let changed = Key::from_bytes(b"body/changed".to_vec());
+        let untouched = Key::from_bytes(b"body/untouched".to_vec());
+        fabric
+            .commit(Transaction::new(
+                "seed",
+                vec![
+                    Op::PutCanonical {
+                        key: changed.clone(),
+                        value: b"old".to_vec(),
+                    },
+                    Op::PutCanonical {
+                        key: untouched.clone(),
+                        value: b"stable".to_vec(),
+                    },
+                ],
+            ))
+            .unwrap();
+
+        let prepared = fabric
+            .prepare(Transaction::new(
+                "candidate",
+                vec![Op::PutCanonical {
+                    key: changed.clone(),
+                    value: b"candidate".to_vec(),
+                }],
+            ))
+            .unwrap();
+        assert_eq!(fabric.read(&changed).as_deref(), Some(&b"candidate"[..]));
+        assert_eq!(fabric.read(&untouched).as_deref(), Some(&b"stable"[..]));
+        fabric.rollback(prepared).unwrap();
+        assert_eq!(fabric.read(&changed).as_deref(), Some(&b"old"[..]));
+        assert_eq!(fabric.read(&untouched).as_deref(), Some(&b"stable"[..]));
+    }
+
+    #[test]
+    fn immutable_snapshots_share_atomic_and_frozen_collaborative_payloads() {
+        let mut fabric = Engine::new();
+        let atomic = Key::from_bytes(b"body/atomic-shared".to_vec());
+        fabric
+            .commit(Transaction::new(
+                "atomic",
+                vec![Op::PutCanonical {
+                    key: atomic.clone(),
+                    value: vec![7; 4096],
+                }],
+            ))
+            .unwrap();
+        let atomic_engine = match fabric.bodies.get(&atomic).unwrap() {
+            BodyState::Atomic(bytes) => bytes.clone(),
+            _ => panic!("atomic Body changed model"),
+        };
+        let atomic_snapshot = fabric.body_snapshot(&atomic).unwrap().unwrap();
+        let SnapshotExport::Atomic(atomic_read) = &atomic_snapshot.export else {
+            panic!("atomic snapshot changed model");
+        };
+        assert!(Arc::ptr_eq(&atomic_engine, atomic_read));
+
+        let collaborative = Key::from_bytes(b"body/collaborative-shared".to_vec());
+        let mut source = Engine::new();
+        source
+            .commit(Transaction::new(
+                "text",
+                vec![Op::TextSplice {
+                    key: collaborative.clone(),
+                    path: "description".into(),
+                    index: 0,
+                    delete: 0,
+                    insert: "shared".into(),
+                }],
+            ))
+            .unwrap();
+        fabric
+            .import_body(&collaborative, &source.export_body(&collaborative).unwrap())
+            .unwrap();
+        let frozen = match fabric.bodies.get(&collaborative).unwrap() {
+            BodyState::FrozenCollab(frozen) => frozen.clone(),
+            _ => panic!("import retained a live collaborative document"),
+        };
+        let collaborative_snapshot = fabric.body_snapshot(&collaborative).unwrap().unwrap();
+        let SnapshotExport::Collaborative(collaborative_read) = &collaborative_snapshot.export
+        else {
+            panic!("collaborative snapshot changed model");
+        };
+        assert!(Arc::ptr_eq(&frozen.export, collaborative_read));
+        assert!(Arc::ptr_eq(
+            &frozen.version,
+            &collaborative_snapshot.version
+        ));
+    }
+
+    #[test]
+    fn read_only_projection_does_not_inflate_a_frozen_body() {
+        let key = Key::from_bytes(b"body/read-cold".to_vec());
+        let mut source = Engine::new();
+        source
+            .commit(Transaction::new(
+                "text",
+                vec![Op::TextSplice {
+                    key: key.clone(),
+                    path: "description".into(),
+                    index: 0,
+                    delete: 0,
+                    insert: "cold".into(),
+                }],
+            ))
+            .unwrap();
+        let mut replica = Engine::new();
+        replica
+            .import_body(&key, &source.export_body(&key).unwrap())
+            .unwrap();
+
+        assert!(replica.hot.is_empty());
+        assert!(matches!(
+            replica.bodies.get(&key),
+            Some(BodyState::FrozenCollab(_))
+        ));
+        assert_eq!(
+            replica.read_collaborative(&key).unwrap().texts["description"],
+            "cold"
+        );
+        assert!(replica.hot.is_empty());
+        assert!(matches!(
+            replica.bodies.get(&key),
+            Some(BodyState::FrozenCollab(_))
+        ));
+    }
+
+    #[test]
+    fn verified_snapshot_handoff_shares_payload_without_a_second_import() {
+        let key = Key::from_bytes(b"body/recovered".to_vec());
+        let mut proof = Engine::new();
+        proof
+            .commit(Transaction::new(
+                "text",
+                vec![Op::TextSplice {
+                    key: key.clone(),
+                    path: "description".into(),
+                    index: 0,
+                    delete: 0,
+                    insert: "verified".into(),
+                }],
+            ))
+            .unwrap();
+        let verified = proof.body_snapshot(&key).unwrap().unwrap();
+        let expected_version = verified.version().unwrap();
+
+        let mut recovered = Engine::new();
+        let status = recovered.import_verified_snapshot(&key, &verified).unwrap();
+        assert!(status.applied);
+        assert!(!status.pending);
+        let frozen = match recovered.bodies.get(&key).unwrap() {
+            BodyState::FrozenCollab(frozen) => frozen,
+            _ => panic!("verified recovery inflated a live document"),
+        };
+        let SnapshotExport::Collaborative(expected_export) = &verified.export else {
+            panic!("proof snapshot changed model");
+        };
+        assert!(Arc::ptr_eq(&frozen.export, expected_export));
+        assert!(Arc::ptr_eq(&frozen.version, &verified.version));
+        assert_eq!(recovered.version(&key).unwrap(), expected_version);
+        assert!(recovered.hot.is_empty());
+    }
+
+    #[test]
+    fn repeated_edits_reuse_one_hot_doc_and_lru_bounds_all_live_docs() {
+        let mut fabric = Engine::new();
+        let repeated = Key::from_bytes(b"body/repeated".to_vec());
+        fabric
+            .commit(Transaction::new(
+                "seed",
+                vec![Op::TextSplice {
+                    key: repeated.clone(),
+                    path: "description".into(),
+                    index: 0,
+                    delete: 0,
+                    insert: "x".into(),
+                }],
+            ))
+            .unwrap();
+        let first_doc = match fabric.bodies.get(&repeated).unwrap() {
+            BodyState::Collab(doc) => doc as *const loro::LoroDoc,
+            _ => panic!("finalize cooled the mutation-hot Body"),
+        };
+        for index in 1..8u64 {
+            fabric
+                .commit(Transaction::new(
+                    "edit",
+                    vec![Op::TextSplice {
+                        key: repeated.clone(),
+                        path: "description".into(),
+                        index,
+                        delete: 0,
+                        insert: "x".into(),
+                    }],
+                ))
+                .unwrap();
+            let next_doc = match fabric.bodies.get(&repeated).unwrap() {
+                BodyState::Collab(doc) => doc as *const loro::LoroDoc,
+                _ => panic!("a repeated edit re-froze its live document"),
+            };
+            assert_eq!(first_doc, next_doc, "the live LoroDoc was replaced");
+        }
+
+        for ordinal in 0..(MAX_HOT_COLLABORATIVE_BODIES + 17) {
+            let key = Key::from_bytes(format!("body/lru/{ordinal:04}").into_bytes());
+            fabric
+                .commit(Transaction::new(
+                    "edit",
+                    vec![Op::TextSplice {
+                        key,
+                        path: "description".into(),
+                        index: 0,
+                        delete: 0,
+                        insert: "x".into(),
+                    }],
+                ))
+                .unwrap();
+        }
+        let live = fabric
+            .bodies
+            .values()
+            .filter(|body| matches!(body, BodyState::Collab(_)))
+            .count();
+        assert_eq!(fabric.hot.len(), MAX_HOT_COLLABORATIVE_BODIES);
+        assert_eq!(live, MAX_HOT_COLLABORATIVE_BODIES);
+        assert!(matches!(
+            fabric.bodies.get(&repeated),
+            Some(BodyState::FrozenCollab(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_collaborative_snapshot_never_becomes_an_empty_version() {
+        let key = Key::from_bytes(b"body/malformed".to_vec());
+        let snapshot =
+            BodySnapshot::from_export(&key, BodyExport::Collaborative(vec![0xff, 0x00, 0x7f]))
+                .unwrap();
+        assert!(snapshot.version().is_err());
+
+        let mut fabric = Engine::new();
+        assert!(fabric.import_verified_snapshot(&key, &snapshot).is_err());
+        assert!(fabric
+            .import_body(&key, &BodyExport::Collaborative(vec![0xff, 0x00, 0x7f]),)
+            .is_err());
+        assert!(!fabric.bodies.contains_key(&key));
     }
 }

@@ -230,10 +230,14 @@ schemas.
 Mechanics does not interpret product roles. Engine does not know authority,
 transport, or product meaning. Comms moves bytes but cannot legitimize them.
 
-Only Engine names Loro. One collaborative Body maps to one Loro document, but
-Loro is an implementation detail behind the generic `Engine` contract. Replica
-is the Body graph authority and is the only layer allowed to turn validated
-transactions into Engine changes.
+Only Engine names Loro. One collaborative Body has one independent Loro causal
+history, but a live `LoroDoc` is a bounded mutation cache rather than the stored
+shape of every Body. Cold Bodies are immutable Arc-backed exports plus compact
+causal Versions; read generations share those exports and decode a projection
+only for an explicitly visited Body. Atomic Bodies use the same Arc sharing.
+Loro remains an implementation detail behind the generic `Engine` contract.
+Replica is the Body graph authority and is the only layer allowed to turn
+validated transactions into Engine changes.
 
 ## 3. Mechanics and authority
 
@@ -278,14 +282,16 @@ Local mutation follows one path:
 
 ```text
 signed World action
-  -> Session pins authority frontier + Manifest root
+  -> Session pins authority frontier + WorldPublicationId
   -> World returns Body operations + demand
   -> Runtime contains the operations
   -> Mechanics authorizes and produces a bound receipt
+  -> Replica prepares causal artifacts + candidate Body image
+  -> Runtime builds the candidate corpus and read publication
   -> Replica commits transaction and replacement Manifest
-  -> Engine applies collaborative changes
+  -> Runtime atomically swaps snapshot + corpus + coordinates
   -> durable acknowledgment
-  -> Observation publication
+  -> bounded value-free change Observation
 ```
 
 The Manifest rename is the authoritative Body-plane commit point. The journal
@@ -297,6 +303,21 @@ state. It never heuristically repairs partial data.
 An acknowledged mutation is durable before it is observed. If the filesystem
 cannot determine whether the authoritative rename became durable, the operation
 returns `OutcomeUnknown`; the Station must reopen and must not blindly retry.
+
+Preparation is not an optimistic mutation of the live collaborative writer.
+Every fallible product condition is checked first; candidate Body material and
+its extracted corpus remain unpublished until the durable commit succeeds. An
+unexpected Engine or extractor failure discards that candidate while readers
+continue to pin the prior publication. There is no fallible derived-work gap
+after a successful local commit.
+
+Remote truth follows the same publication rules but cannot be gated by installed
+World code: Contact convergence must remain possible for opaque relays. Replica
+first validates and durably adopts the exact remote transaction graph. Runtime
+then installs either the matching ready World publication or an explicit
+`Building`/`Unavailable` read head when the exact implementation, extractor, or
+key is absent. It never serves the prior publication under the new root or
+implementation identity.
 
 Engine supplies generic collaborative primitives: registers, maps, stable-id
 lists, text, add-wins sets, counters, and atomic Bodies. Convergence of a
@@ -380,12 +401,29 @@ same transaction. `issues_work` is the separate generic lifecycle facade for
 inspect, watch, cancel, continue, and resume. Astrolabe may present either
 surface, but neither contract is owned by Astrolabe or requires its harness.
 Continue commits a fresh visible Attempt by deriving a bounded `Try` from a
-completed Attempt's durable Offer, enforcement, limit, and fence evidence.
-Resume additionally requires the exact committed checkpoint and a Spec whose
-resume contract is `Checkpoint`; the current Issues verification Spec is
-`Restart`, so its supported next action is continue. A Started-only Run still
-waits for a scheduler to publish its first Offer: the application control seam
-never invents scheduling coordinates from issue state.
+completed Attempt's durable Offer (when one exists), enforcement, limit, and
+fence evidence. Resume additionally requires the exact committed checkpoint
+and a Spec whose resume contract is `Checkpoint`; the current Issues
+verification Spec is `Restart`, so its supported next action is continue. A
+Started-only Run waits for this Station's exclusive drain. The drain cites
+live Offer news and a Ready when both exist; otherwise it commits a
+Station-only first `Try` — no Offer, no derived OfferId, no enforcement
+artifact. A prior-epoch `Leased` that never began is failed `Unknown` so
+another Attempt can proceed. The application control seam never invents
+scheduling coordinates from issue state. Signed Offer news is a standalone
+envelope (`exec::Offer`) that a `Try` may cite as evidence; it is not a
+reserved Body, not a reservation, and not a ranking of Stations.
+`Session::announce` holds that news on the Station activation and evaluates
+the claimed Specs' offer demand. First-use Tries that cite an Offer must
+find live news and a nonce-bound Ready; the Ready is consumed only after
+`Leased` is durable. Continue copies historical Offer coordinates: live
+news still authorizes the offer demand but does not require a new Ready;
+expired news still pays the offer demand. `Session::publish_build` writes a
+signed Build envelope into the reserved Build Body. That is identity, not a
+dispatch gate and not a ranking of Builds.
+Inspect/watch expose failure class and returned output ContentRefs so an
+attached actor can continue, cancel, or `issues_accept_check` from those
+facts without reading output bytes.
 Returned verification evidence becomes issue truth only through
 `issues_accept_check`, which validates Runtime's typed Outcome and atomically
 records the report, verdict, optional Done transition, history, and `Accepted`
@@ -397,15 +435,23 @@ into a package-owned `AccessPlan`; root control can only commit generic
 activation likewise carries an explicit World id. Neither root verb names an
 Issues role, project, or singleton bundled product.
 
-The client package also owns reply decoding. The head and the MCP adapter carry
-the decoded product value out as JSON and apply typed failure semantics; they do
-not inspect it. Product response variants, boards, issue detail, inbox wording,
-and JSON shape do not appear in root control.
+The client package also owns reply decoding and may compile a friendly
+product-level read into Runtime's typed Find DAG. `ClientInvocation::Find` still
+enters the host's authenticated Session; the package cannot supply principal,
+authority, or bypass gates. The head and MCP adapter carry the decoded product
+value out as JSON and apply typed failure semantics; they do not inspect it.
+Product response variants, boards, issue detail, inbox wording, and JSON shape
+do not appear in root control.
 
 A Session binds a local identity to one World at an active Station. Queries and
-mutations are authorized independently. Query results are computed from one
-Manifest root and authority frontier; a derived cache must be keyed by that
-complete root. Cache entries are disposable and cannot become replicated truth.
+mutations are authorized independently. It pins one immutable
+`WorldPublication` containing the Replica snapshot, shared extracted corpus,
+and complete Manifest/implementation/extractor/materialization coordinates.
+Find applies request-specific gates to that principal-neutral corpus before any
+traversal, scoring, count, or packing. Viewer, product adapter, control, Exec,
+and MCP are access paths to this same Session primitive, not independent data
+sources. Cache entries and analytical artifacts bind the complete publication;
+they are disposable and cannot become replicated truth.
 
 Remote adoption never invokes World code. Replica verifies transaction
 structure, protected payload commitments, historical Mechanics receipts,
@@ -465,19 +511,17 @@ Engine defines convergence mechanics; IssuesWorld defines issue semantics.
   predecessor-bound transition records; concurrent heads are a typed conflict
   resolved by an authorized successor rather than silently delegated to LWW.
 - Comments that support replies, reactions, edits, or moderation are first-class
-  Bodies. Replies bind an immutable parent comment id, reactions are actor-keyed
-  add-wins membership, and editable text uses revision heads.
+  record Bodies. Replies bind an immutable parent comment id, reactions are
+  LWW register Bodies keyed by the exact `(issue, comment, emoji, actor)` tuple,
+  and editable text uses revision heads.
 - Durable semantic events are immutable records used for history and inbox
   projection; engine oplogs are never a product history API.
 
 These are product-schema choices. They do not add issue-specific types to
-Engine, Replica, Runtime, or Mechanics.
-
-The merged IssuesWorld still stores status in a register and comments in the
-Issue Body's event/list representation. Those converge, but they do not yet
-implement transition-head conflicts or first-class reply/reaction/edit semantics.
-This is a known IssuesWorld conformance gap, not a reason to change Engine's
-baseline algebra.
+Engine, Replica, Runtime, or Mechanics. V4 applies the same record-addressed
+rule to project topology, schedule, triage, updates, memberships, and immutable
+Spec/Baseline revisions; the shared corpus is their directory and query surface,
+not another source of truth.
 
 ## 8. Security posture
 

@@ -24,14 +24,15 @@ use replica::body::Schema;
 use replica::body::{BodyKey, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub use crate::action::{IdempotencyKey, RequestId, SignedWorldAction, WorldActionHeader};
 pub use crate::implementation::Implementation;
 pub use crate::registry::{Builder, Catalog, Declaration, Refusal};
 pub use crate::session::{
-    CommittedEffect, Conflict, Failure, Interruption, Observation, ObservationCursor,
-    ObservationStream, WorldGeneration, WorldSnapshotId, DEFAULT_OBSERVATION_CAPACITY,
-    MAX_OBSERVATION_CAPACITY,
+    AffectedWorldPublication, CommittedEffect, Conflict, Failure, Interruption, Observation,
+    ObservationCursor, ObservationStream, WorldGeneration, WorldSnapshotId,
+    DEFAULT_OBSERVATION_CAPACITY, MAX_OBSERVATION_CAPACITY,
 };
 
 /// A World-owned semantic rejection. These values are deterministic decisions
@@ -55,6 +56,10 @@ pub enum Rejection {
     /// thing. The remedy is `world_upgrade`, and only a message that names the
     /// cause can name the remedy.
     NoActiveImplementation,
+    /// Authority selected an exact implementation for which this Station has
+    /// no matching executable package. Runtime must never invoke other code
+    /// under that implementation's receipts.
+    ImplementationUnavailable,
     Conflict,
     LimitExceeded,
     StateCorrupt,
@@ -414,7 +419,8 @@ pub struct Descriptor {
     /// that shipped before Find existed.
     pub find_schemas: Vec<crate::find::Schema>,
     /// Exact package bindings for the declared Body sources. These coordinates
-    /// are checked one-to-one at composition; F0 does not invoke them.
+    /// are checked one-to-one at composition and invoked only while building
+    /// an immutable publication corpus.
     pub find_extractors: Vec<crate::find::Extractor>,
     /// Callable Exec contracts. Empty omits the Exec descriptor section and
     /// preserves the implementation identity of Worlds that do not adopt it.
@@ -437,6 +443,12 @@ pub struct Query {
     pub schema: replica::body::SchemaId,
     pub schema_version: u32,
     pub payload: Vec<u8>,
+    /// Exact semantic read publication. `None` selects the authority-active
+    /// current publication; `Some` resolves the installed implementation and
+    /// extractor contract named here and never reinterprets the root with the
+    /// ambient package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<crate::publication::PublicationId>,
 }
 
 /// A runtime-owned create declaration: the immutable schema binding for a Body
@@ -531,6 +543,11 @@ pub struct Projection {
     pub schema_version: u32,
     pub bytes: Vec<u8>,
     pub frontier: replica::frontier::ReplicaFrontier,
+    /// Runtime stamps the exact immutable read image after the World callback.
+    /// Worlds return `None`; a Projection returned by Session always carries
+    /// `Some`, including implementation, extractor, and local materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<crate::publication::WorldPublicationId>,
     /// The canonical read demand this query required (mandatory, non-empty).
     /// Runtime evaluates it at the pinned frontier and returns no projection
     /// on denial.
@@ -683,6 +700,26 @@ pub trait BodyReader {
     /// deterministic instance of a schema exists).
     fn bodies_with_schema(&self, world: &WorldId, schema: &SchemaId) -> Vec<BodyKey>;
 
+    /// One canonical page of readable Body keys at a World/schema coordinate.
+    ///
+    /// Production snapshot readers seek the persistent schema directory, so
+    /// work is proportional to schema versions plus returned keys rather than
+    /// all Bodies. The default preserves detached test readers without making
+    /// a performance promise; hosted [`Context`] values are backed by the
+    /// indexed implementation.
+    fn body_keys_page_with_schema(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        after: Option<&BodyKey>,
+        limit: usize,
+    ) -> Vec<BodyKey> {
+        let mut keys = self.bodies_with_schema(world, schema);
+        keys.sort();
+        let start = after.map_or(0, |after| keys.partition_point(|key| key <= after));
+        keys.into_iter().skip(start).take(limit).collect()
+    }
+
     /// A Body's position in its collaborative history.
     ///
     /// Opaque and orderable, and never the convergence engine's own type. A
@@ -734,6 +771,113 @@ pub trait BodyReader {
     }
 }
 
+/// Runtime-owned, read-only access to the shared Find publication selected for
+/// one World callback. Implementations never receive a Corpus or authority
+/// object: the capability is already pinned to an immutable publication and
+/// its principal gates, and every call re-enters Runtime's bounded evaluator.
+pub trait FindReader: Send + Sync {
+    fn publication(&self) -> crate::publication::WorldPublicationId;
+    fn find(&self, query: crate::find::Query) -> Result<crate::find::Answer, crate::find::Failure>;
+}
+
+/// Cloneable, read-only access to one already-authorized immutable Find image.
+///
+/// Unlike [`Context`], this handle may be moved to a bounded product worker.
+/// It owns the exact publication and evaluated gate set, so deferred analytics
+/// neither re-enter Session nor consult whatever publication is current later.
+/// Every read still crosses the declared Find evaluator and its admission
+/// bounds; no Corpus or ungated storage surface is exposed.
+#[derive(Clone)]
+pub struct FindHandle {
+    reader: Arc<dyn FindReader>,
+}
+
+impl std::fmt::Debug for FindHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FindHandle")
+            .field("publication", &self.publication())
+            .finish_non_exhaustive()
+    }
+}
+
+impl FindHandle {
+    pub(crate) fn new(reader: Arc<dyn FindReader>) -> Self {
+        Self { reader }
+    }
+
+    pub fn publication(&self) -> crate::publication::WorldPublicationId {
+        self.reader.publication()
+    }
+
+    pub fn find(
+        &self,
+        query: crate::find::Query,
+    ) -> Result<crate::find::Answer, crate::find::Failure> {
+        self.reader.find(query)
+    }
+}
+
+/// Principal-neutral read capability supplied to a declared Find extractor.
+///
+/// Extraction may derive shared corpus facts from one immutable publication;
+/// it cannot see an actor, device, grant, clock, mutable Replica, or network.
+/// Disclosure is represented by Gate references on the emitted rows and is
+/// applied later for each requesting principal.
+pub struct ExtractionContext<'a> {
+    reads: &'a dyn BodyReader,
+    world: &'a WorldId,
+    publication: crate::publication::WorldPublicationId,
+}
+
+impl<'a> ExtractionContext<'a> {
+    pub(crate) fn new(
+        reads: &'a dyn BodyReader,
+        world: &'a WorldId,
+        publication: crate::publication::WorldPublicationId,
+    ) -> Self {
+        Self {
+            reads,
+            world,
+            publication,
+        }
+    }
+
+    pub fn manifest_root(&self) -> [u8; 32] {
+        self.publication.publication.manifest_root
+    }
+
+    /// The complete immutable read coordinate this extraction will publish
+    /// into. Manifest identity alone is insufficient because implementation,
+    /// extractor declaration, and Station-local readability may move
+    /// independently.
+    pub fn world_publication_id(&self) -> crate::publication::WorldPublicationId {
+        self.publication
+    }
+
+    pub fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>> {
+        (key.world == *self.world)
+            .then(|| self.reads.read_body(key))
+            .flatten()
+    }
+
+    pub fn read_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
+        if key.world != *self.world {
+            return Err(fabric::projection::Failure::NotCollaborative);
+        }
+        self.reads.read_collaborative_body(key)
+    }
+
+    pub fn body_stamp(&self, key: &BodyKey) -> Option<Vec<u8>> {
+        (key.world == *self.world)
+            .then(|| self.reads.body_stamp(key))
+            .flatten()
+    }
+}
+
 /// The bounded capability handed to World callbacks. It exposes the principal
 /// facts, authorized reads of the stable committed snapshot (during a query),
 /// and **nothing** below the boundary: no CRDT internals, no mutable storage, no keys, no
@@ -747,9 +891,13 @@ pub struct Context<'a> {
     /// The committed Manifest root this callback is pinned to (the parent of a
     /// submitted transaction; the snapshot root of a query).
     manifest_root: [u8; 32],
+    world_publication: Option<crate::publication::WorldPublicationId>,
+    find: Option<FindHandle>,
 }
 
 impl<'a> Context<'a> {
+    /// Largest durable migration/admin page accepted by one callback.
+    pub const MAX_BODY_KEY_PAGE: usize = 4_096;
     /// Construct a context over a principal's facts with no read access (submit
     /// authorizes and stages; it does not read the snapshot).
     pub fn new(principal: &'a PrincipalFacts) -> Self {
@@ -759,6 +907,8 @@ impl<'a> Context<'a> {
             outcome_world: None,
             request: None,
             manifest_root: [0u8; 32],
+            world_publication: None,
+            find: None,
         }
     }
 
@@ -775,12 +925,33 @@ impl<'a> Context<'a> {
             outcome_world: None,
             request: None,
             manifest_root,
+            world_publication: None,
+            find: None,
         }
     }
 
     /// Construct the capability used by a hosted World callback. Outcome
     /// access is bound to that World and cannot name another namespace.
     pub(crate) fn with_world_reads(
+        principal: &'a PrincipalFacts,
+        reads: &'a dyn BodyReader,
+        publication: crate::publication::WorldPublicationId,
+        world: &'a WorldId,
+        find: FindHandle,
+    ) -> Self {
+        Self {
+            principal,
+            reads: Some(reads),
+            outcome_world: Some(world),
+            request: None,
+            manifest_root: publication.publication.manifest_root,
+            world_publication: Some(publication),
+            find: Some(find),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_world_reads_for_test(
         principal: &'a PrincipalFacts,
         reads: &'a dyn BodyReader,
         manifest_root: [u8; 32],
@@ -792,6 +963,8 @@ impl<'a> Context<'a> {
             outcome_world: Some(world),
             request: None,
             manifest_root,
+            world_publication: None,
+            find: None,
         }
     }
 
@@ -804,22 +977,63 @@ impl<'a> Context<'a> {
     pub(crate) fn with_world_submission(
         principal: &'a PrincipalFacts,
         reads: &'a dyn BodyReader,
-        manifest_root: [u8; 32],
+        publication: crate::publication::WorldPublicationId,
         world: &'a WorldId,
         request: crate::action::RequestId,
+        find: FindHandle,
     ) -> Self {
         Self {
             principal,
             reads: Some(reads),
             outcome_world: Some(world),
             request: Some(request),
-            manifest_root,
+            manifest_root: publication.publication.manifest_root,
+            world_publication: Some(publication),
+            find: Some(find),
         }
     }
 
     /// The committed Manifest root this callback is pinned to.
     pub fn manifest_root(&self) -> [u8; 32] {
         self.manifest_root
+    }
+
+    /// The complete immutable World read coordinate selected for this hosted
+    /// callback. Detached fixture contexts do not claim one.
+    pub fn world_publication_id(&self) -> Option<crate::publication::WorldPublicationId> {
+        self.world_publication
+    }
+
+    /// Run one declared, bounded query against this callback's exact shared
+    /// publication and already-evaluated principal gates. No mutable or
+    /// ungated Corpus access crosses the World boundary.
+    pub fn find(
+        &self,
+        query: crate::find::Query,
+    ) -> Result<crate::find::Answer, crate::find::Failure> {
+        let find = self
+            .find
+            .as_ref()
+            .ok_or(crate::find::Failure::Unavailable)?;
+        if self.world_publication != Some(find.publication()) {
+            return Err(crate::find::Failure::Unavailable);
+        }
+        find.find(query)
+    }
+
+    /// Detach this callback's exact, gated Find capability for bounded
+    /// background projection work. Creating the handle is O(1); extraction or
+    /// traversal begins only when the worker calls [`FindHandle::find`].
+    pub fn deferred_find(&self) -> Option<FindHandle> {
+        self.find.clone()
+    }
+
+    /// The authenticated persistent action coordinate for this submission.
+    /// Query and detached contexts return `None`. A World may use these bytes
+    /// only as deterministic input to its own domain-separated identity
+    /// derivation; Runtime still owns mutation admission and Body containment.
+    pub fn request_id(&self) -> Option<crate::action::RequestId> {
+        self.request
     }
 
     /// The stable Run id Runtime will assign to `command` in this submission.
@@ -848,6 +1062,26 @@ impl<'a> Context<'a> {
         self.reads
             .map(|r| r.bodies_with_schema(world, schema))
             .unwrap_or_default()
+    }
+
+    /// Seek one bounded, publication-pinned page of Body keys for a schema.
+    /// `after` is an exclusive durable BodyKey cursor, not a process-local
+    /// iterator or Find cursor; callers persist `(phase, after)` and resubmit
+    /// the next batch explicitly.
+    pub fn body_keys_page_with_schema(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        after: Option<&BodyKey>,
+        limit: usize,
+    ) -> Result<Vec<BodyKey>, Rejection> {
+        if limit == 0 || limit > Self::MAX_BODY_KEY_PAGE {
+            return Err(Rejection::LimitExceeded);
+        }
+        Ok(self
+            .reads
+            .map(|reader| reader.body_keys_page_with_schema(world, schema, after, limit))
+            .unwrap_or_default())
     }
 
     /// The derived facts for the docked principal. A World authorizes against
@@ -977,9 +1211,23 @@ pub trait World: Send + Sync + 'static {
     ///
     /// Runtime composition requires one binding for every declared source and
     /// refuses missing, extra, duplicated, or cross-wired coordinates. The
-    /// executable callback arrives with the evaluator after F0.
+    /// ABI and semantic digest are part of the extractor contract; changing
+    /// executable meaning changes the publication identity.
     fn find_extractors(&self) -> &[crate::find::Extractor] {
         &[]
+    }
+
+    /// Derive this package's principal-neutral Find rows for one exact Body
+    /// source binding. Runtime invokes it only for coordinates declared by
+    /// [`Self::find_extractors`] and validates the returned body/schema/gates
+    /// before a publication becomes ready.
+    fn extract(
+        &self,
+        _ctx: &ExtractionContext<'_>,
+        _extractor: &crate::find::Extractor,
+        _body: &BodyKey,
+    ) -> Result<crate::find::BodyExtraction, Rejection> {
+        Err(Rejection::ContractViolation)
     }
 
     /// Callable Exec Specs implemented by this World package.

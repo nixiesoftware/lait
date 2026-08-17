@@ -1,6 +1,6 @@
 # Astrolabe webOS receiver
 
-This is the production frame receiver for LG webOS 6.0+ (Chromium 79+) under
+This is the production receiver for LG webOS 6.0+ (Chromium 79+) under
 the Astrolabe Display protocol-major-1 contract. It does not contain a reviewer
 demo, a fake pairing code, a World client, or a generic URL player.
 
@@ -19,12 +19,14 @@ On first launch the receiver:
 6. commits only an enrolled receiver credential—not an assignment or any
    Space/World authority.
 
-After enrollment it negotiates bounded frame capability, obtains single-use
+After enrollment it negotiates bounded frame and MSE live capability, obtains single-use
 challenges, authenticates every program/change/asset request with HMAC-SHA-256,
 verifies the complete program revision, streams within the declared byte bound,
 checks asset SHA-256 and decoded dimensions, atomically swaps its in-memory
 staging set, advances with `performance.now()`, and applies native offline,
 partial, unavailable, stale, revoked, unsupported, and re-pair states.
+Eligible live assignments consume the coordinator's assignment-bound CMAF
+stream through MSE; no generic URL or player surface is exposed.
 
 The proof key is encrypted with a non-extractable AES-GCM key kept in IndexedDB.
 The exact persistence behavior and key backing remain a physical webOS 6.0+

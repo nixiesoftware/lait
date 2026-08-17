@@ -3937,6 +3937,8 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "unicode-normalization",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -6013,6 +6015,7 @@ dependencies = [
  "fabric",
  "fs2",
  "getrandom 0.3.4",
+ "imbl",
  "journal",
  "mechanics",
  "postcard",

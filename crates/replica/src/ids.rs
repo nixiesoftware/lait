@@ -9,6 +9,8 @@
 //!   World code cannot choose the randomness.
 //! - [`BodyKey`] — `{ world, body }`, the durable addressable key of a Body.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 /// Lowercase-only, unpadded RFC 4648 base32 for [`BodyId`] rendering. The
@@ -29,7 +31,7 @@ fn base32_nopad_lower() -> data_encoding::Encoding {
 /// means dot-separated labels, each a nonempty `[a-z0-9-]` run that neither
 /// starts nor ends with `-`, and at least two labels (one dot).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct WorldId(String);
+pub struct WorldId(Arc<str>);
 
 impl WorldId {
     /// Validate and wrap a World id in canonical reverse-domain form.
@@ -57,7 +59,7 @@ impl WorldId {
                 return None;
             }
         }
-        Some(Self(s.to_string()))
+        Some(Self(Arc::from(s)))
     }
 
     pub fn as_str(&self) -> &str {
@@ -96,11 +98,11 @@ fn valid_schema_grammar(s: &str) -> bool {
 
 /// A schema identity — 1–63 lowercase ASCII `[a-z0-9][a-z0-9._-]*`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct SchemaId(String);
+pub struct SchemaId(Arc<str>);
 
 impl SchemaId {
     pub fn parse(s: &str) -> Option<Self> {
-        valid_schema_grammar(s).then(|| Self(s.to_string()))
+        valid_schema_grammar(s).then(|| Self(Arc::from(s)))
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -118,11 +120,11 @@ impl std::fmt::Display for SchemaId {
 
 /// An encoding identity — the same grammar as [`SchemaId`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct EncodingId(String);
+pub struct EncodingId(Arc<str>);
 
 impl EncodingId {
     pub fn parse(s: &str) -> Option<Self> {
-        valid_schema_grammar(s).then(|| Self(s.to_string()))
+        valid_schema_grammar(s).then(|| Self(Arc::from(s)))
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -215,6 +217,99 @@ mod tests {
         assert!(WorldId::parse("a.b-").is_none(), "trailing hyphen in label");
         assert!(WorldId::parse("a.b_c").is_none(), "underscore not allowed");
         assert!(WorldId::parse(&format!("a.{}", "x".repeat(63))).is_none());
+    }
+
+    #[test]
+    fn cloned_text_ids_share_owned_bytes_without_global_interning() {
+        let world = WorldId::parse("com.example.product").expect("world");
+        let schema = SchemaId::parse("issue.v1").expect("schema");
+        let world_clone = world.clone();
+        let schema_clone = schema.clone();
+        assert!(std::ptr::eq(world.as_str(), world_clone.as_str()));
+        assert!(std::ptr::eq(schema.as_str(), schema_clone.as_str()));
+    }
+
+    #[cfg(windows)]
+    fn resident_bytes() -> usize {
+        #[repr(C)]
+        struct Counters {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> *mut core::ffi::c_void;
+            fn K32GetProcessMemoryInfo(
+                process: *mut core::ffi::c_void,
+                counters: *mut Counters,
+                size: u32,
+            ) -> i32;
+        }
+        let mut counters = Counters {
+            cb: u32::try_from(std::mem::size_of::<Counters>()).expect("counter size"),
+            page_fault_count: 0,
+            peak_working_set_size: 0,
+            working_set_size: 0,
+            quota_peak_paged_pool_usage: 0,
+            quota_paged_pool_usage: 0,
+            quota_peak_non_paged_pool_usage: 0,
+            quota_non_paged_pool_usage: 0,
+            pagefile_usage: 0,
+            peak_pagefile_usage: 0,
+        };
+        // SAFETY: exact PROCESS_MEMORY_COUNTERS layout and a valid process
+        // pseudo-handle; neither escapes the call.
+        let ok =
+            unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, counters.cb) };
+        if ok == 0 {
+            0
+        } else {
+            counters.working_set_size
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn resident_bytes() -> usize {
+        0
+    }
+
+    #[test]
+    #[ignore = "release-scale one-million BodyKey RSS fixture"]
+    fn release_scale_million_body_keys_share_world_text() {
+        const TOTAL: u32 = 1_000_000;
+        const MAX_RSS_DELTA: usize = 96 * 1024 * 1024;
+        let world = WorldId::parse("dev.lait.issues").expect("world");
+        let before = resident_bytes();
+        let keys = (0..TOTAL)
+            .map(|number| {
+                let mut raw = [0u8; 16];
+                raw[12..].copy_from_slice(&number.to_be_bytes());
+                BodyKey::new(world.clone(), BodyId::from_bytes(raw))
+            })
+            .collect::<Vec<_>>();
+        let after = resident_bytes();
+        assert_eq!(keys.len(), TOTAL as usize);
+        assert!(std::ptr::eq(
+            keys[0].world.as_str(),
+            keys[keys.len() - 1].world.as_str()
+        ));
+        let delta = after.saturating_sub(before);
+        assert!(
+            delta <= MAX_RSS_DELTA,
+            "million BodyKey RSS regressed: {delta} > {MAX_RSS_DELTA}"
+        );
+        eprintln!(
+            "body-key-scale keys={TOTAL} rss_mib={:.1} bytes_per_key={} world_allocations=1",
+            delta as f64 / (1024.0 * 1024.0),
+            std::mem::size_of::<BodyKey>(),
+        );
     }
 
     #[test]

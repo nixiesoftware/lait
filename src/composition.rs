@@ -41,7 +41,12 @@ pub use issues::{
 pub fn package() -> WorldPackage {
     let control = Arc::new(issues_app::IssuesCallHandler);
     let projector = Arc::new(IssuesProjector::default());
-    let exec = runtime::exec::Package::new().with_spec(issues::contract::verify_spec());
+    let spec = issues::contract::verify_spec();
+    let build = issues::contract::verify_build(implementation_id());
+    let exec = runtime::exec::Package::new()
+        .with_spec(spec)
+        .with_build(build.clone())
+        .with_handler(issues::handler::verify_handler(&build));
     WorldPackage::new(Arc::new(IssuesWorld::new()), implementation_id())
         .with_control(control)
         .with_exec(exec)
@@ -119,6 +124,7 @@ impl ObservationProjector for SignageProjector {
                 schema: signage::contract::program_schema(),
                 schema_version: signage::contract::PROGRAM_SCHEMA_VERSION,
                 payload: serde_json::to_vec(&signage::SignageQuery::Programs).ok()?,
+                publication: None,
             })
             .ok()?;
         let signage::SignageProjection::Programs { programs } =

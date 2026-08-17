@@ -1,16 +1,16 @@
 //! C1.3 / G4 — the canonical Body/store representation, through the public API.
 //!
 //! Proves the durable Replica addresses **canonical objects** — signed
-//! transaction records, sealed protected Body payloads, idempotency receipts,
-//! and Manifest root/index — rather than one opaque engine snapshot; that no
-//! plaintext Body payload is at rest; that receipts and replay survive a cold
-//! reopen; and that exact incorporation (signed transaction + descriptor-bound
-//! payloads) converges, refuses illegitimate material, retains unknown material
-//! opaquely and byte-identically, and resolves concurrent atomic writes
-//! deterministically.
+//! transaction records, protected Fabric artifact closures, idempotency
+//! receipts, and Manifest root/index — rather than one opaque engine snapshot;
+//! that no plaintext Body material is at rest; that receipts and replay survive
+//! a cold reopen; and that exact incorporation (signed transaction +
+//! descriptor-bound artifacts) converges, refuses illegitimate material,
+//! retains unknown material opaquely and byte-identically, and resolves
+//! concurrent atomic writes deterministically.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::body::{
@@ -19,7 +19,8 @@ use crate::body::{
 use crate::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use crate::frontier::AuthorityFrontier;
 use crate::transaction::{
-    ActionOutcome, CommitAuthorization, CommitContext, SeedSigner, Transaction,
+    ActionOutcome, CommitAuthorization, CommitContext, PreparedActionOutcome, SeedSigner,
+    Transaction,
 };
 use crate::Replica;
 use mechanics::authorization::AuthorizedBodyKey;
@@ -30,6 +31,57 @@ const EPOCH: [u8; 16] = [3u8; 16];
 const EPOCH_KEY: [u8; 32] = [4u8; 32];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+fn resident_bytes() -> usize {
+    #[repr(C)]
+    struct Counters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn K32GetProcessMemoryInfo(
+            process: *mut core::ffi::c_void,
+            counters: *mut Counters,
+            size: u32,
+        ) -> i32;
+    }
+    let mut counters = Counters {
+        cb: u32::try_from(std::mem::size_of::<Counters>()).expect("counter size"),
+        page_fault_count: 0,
+        peak_working_set_size: 0,
+        working_set_size: 0,
+        quota_peak_paged_pool_usage: 0,
+        quota_paged_pool_usage: 0,
+        quota_peak_non_paged_pool_usage: 0,
+        quota_non_paged_pool_usage: 0,
+        pagefile_usage: 0,
+        peak_pagefile_usage: 0,
+    };
+    // SAFETY: this is the Windows PROCESS_MEMORY_COUNTERS layout and the
+    // pseudo-handle is valid for the duration of the call.
+    let ok =
+        unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, counters.cb) };
+    if ok == 0 {
+        0
+    } else {
+        counters.working_set_size
+    }
+}
+
+#[cfg(not(windows))]
+fn resident_bytes() -> usize {
+    0
+}
 
 fn temp_store(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -47,6 +99,46 @@ fn keys() -> Arc<StaticBodyKeys> {
     Arc::new(StaticBodyKeys::new(
         AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
     ))
+}
+
+struct RotatingBodyKeys {
+    second: AtomicBool,
+}
+
+impl RotatingBodyKeys {
+    fn new() -> Self {
+        Self {
+            second: AtomicBool::new(false),
+        }
+    }
+
+    fn rotate(&self) {
+        self.second.store(true, Ordering::SeqCst);
+    }
+}
+
+impl crate::body::BodyKeySource for RotatingBodyKeys {
+    fn sealing_key(&self) -> Option<AuthorizedBodyKey> {
+        if self.second.load(Ordering::SeqCst) {
+            Some(AuthorizedBodyKey::for_authorized_epoch(
+                [8u8; 16], [18u8; 32],
+            ))
+        } else {
+            Some(AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY))
+        }
+    }
+
+    fn opening_key(&self, epoch: &[u8; 16]) -> Option<AuthorizedBodyKey> {
+        if epoch == &EPOCH {
+            Some(AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY))
+        } else if epoch == &[8u8; 16] {
+            Some(AuthorizedBodyKey::for_authorized_epoch(
+                [8u8; 16], [18u8; 32],
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 fn world() -> WorldId {
@@ -254,6 +346,143 @@ fn a_durable_commit_survives_cold_reopen_with_receipts_and_replay() {
 }
 
 #[test]
+fn prepared_action_is_queryable_before_publish_and_drop_is_exact_rollback() {
+    let dir = temp_store("prepared-action");
+    let mut replica = open(&dir);
+    let prior = replica.read_snapshot();
+    let prior_root = replica.manifest_root();
+    let prior_frontier = replica.frontier();
+    let request = [22u8; 16];
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    let ctx = CommitContext {
+        space: &space,
+        signer: &signer,
+        authority_frontier: authority_frontier(),
+    };
+    let authorizer = test_auth();
+    let auth = CommitAuthorization {
+        actor: "actor",
+        parent_manifest_root: prior_root,
+        demand: test_demand(),
+        intent_digest: [7u8; 32],
+        authorizer: &authorizer,
+    };
+    let ops = vec![(
+        body(1),
+        Op::ReplaceAtomic {
+            value: b"candidate".to_vec(),
+        },
+    )];
+    let bindings = vec![(body(1), atomic_binding())];
+
+    {
+        let outcome = replica
+            .prepare_action(
+                &ctx,
+                &auth,
+                &world(),
+                &device(),
+                &request,
+                &[7u8; 32],
+                b"effect".to_vec(),
+                vec![body(1)],
+                "replace",
+                &ops,
+                &bindings,
+                &[],
+            )
+            .unwrap();
+        match outcome {
+            PreparedActionOutcome::Prepared(prepared) => {
+                let candidate = prepared.candidate_snapshot(&prior).unwrap();
+                assert_eq!(candidate.read(&body(1)), Some(b"candidate".to_vec()));
+                assert_eq!(
+                    candidate.body_keys_with_schema_version(
+                        &world(),
+                        &SchemaId::parse("blob").unwrap(),
+                        1,
+                    ),
+                    vec![body(1)]
+                );
+                assert!(prior
+                    .body_keys_with_schema_version(&world(), &SchemaId::parse("blob").unwrap(), 1,)
+                    .is_empty());
+                assert_ne!(candidate.root(), prior.root());
+                drop(prepared);
+            }
+            PreparedActionOutcome::Replayed(_) => panic!("fresh request must prepare"),
+        }
+    }
+
+    // Candidate extraction rejected it: neither the live semantic image nor
+    // the durable coordinate, frontier, or idempotency scope changed.
+    assert_eq!(replica.read(&body(1)), None);
+    assert_eq!(replica.manifest_root(), prior_root);
+    assert_eq!(replica.frontier(), prior_frontier);
+    assert_eq!(
+        replica
+            .lookup_action(&space, &world(), &device(), &request, &[7u8; 32])
+            .unwrap(),
+        None
+    );
+
+    let candidate_root;
+    let receipt;
+    {
+        let outcome = replica
+            .prepare_action(
+                &ctx,
+                &auth,
+                &world(),
+                &device(),
+                &request,
+                &[7u8; 32],
+                b"effect".to_vec(),
+                vec![body(1)],
+                "replace",
+                &ops,
+                &bindings,
+                &[],
+            )
+            .unwrap();
+        match outcome {
+            PreparedActionOutcome::Prepared(prepared) => {
+                let candidate = prepared.candidate_snapshot(&prior).unwrap();
+                candidate_root = candidate.root();
+                receipt = prepared.finalize(&ctx).unwrap();
+            }
+            PreparedActionOutcome::Replayed(_) => panic!("rolled-back request must be fresh"),
+        }
+    }
+    assert_eq!(replica.manifest_root(), candidate_root);
+    assert_eq!(replica.read(&body(1)), Some(b"candidate".to_vec()));
+
+    let replay = commit(&mut replica, request, "replace", &ops, &bindings).unwrap();
+    assert_eq!(replay, ActionOutcome::Replayed(receipt.clone()));
+
+    drop(replica);
+    let reopened = open(&dir);
+    assert_eq!(reopened.manifest_root(), candidate_root);
+    assert_eq!(reopened.read(&body(1)), Some(b"candidate".to_vec()));
+    assert_eq!(
+        reopened.read_snapshot().body_keys_with_schema_version(
+            &world(),
+            &SchemaId::parse("blob").unwrap(),
+            1,
+        ),
+        vec![body(1)]
+    );
+    assert_eq!(
+        reopened
+            .lookup_action(&space, &world(), &device(), &request, &[7u8; 32])
+            .unwrap(),
+        Some(receipt)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
     let dir = temp_store("objects");
     let mut r = open(&dir);
@@ -301,12 +530,10 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
         classified += 1;
         // At rest, no plaintext Body payload anywhere.
         let needle = b"the plaintext title";
-        if is_protected {
-            assert!(
-                !bytes.windows(needle.len()).any(|w| w == needle.as_slice()),
-                "protected object leaks plaintext"
-            );
-        }
+        assert!(
+            !bytes.windows(needle.len()).any(|w| w == needle.as_slice()),
+            "a durable object leaks plaintext Body material"
+        );
     }
     assert_eq!(classified, required.len());
     let _ = std::fs::remove_dir_all(&dir);
@@ -342,7 +569,7 @@ fn exact_incorporation_converges_two_replicas() {
     let outcome = b
         .incorporate(&ctx, tx, payloads, &WriterAuthorized)
         .unwrap();
-    assert_eq!(outcome.accepted, 1);
+    assert_eq!(outcome.accepted, 1, "{outcome:?}");
     assert!(outcome.advanced());
     assert_eq!(b.read_collaborative(&body(3)).unwrap().counters["votes"], 4);
 
@@ -384,6 +611,144 @@ fn exact_incorporation_converges_two_replicas() {
         b.read_collaborative(&body(3)).unwrap().counters["votes"],
         10,
         "B durably holds A's incorporated 4 plus its own 6"
+    );
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+#[test]
+fn a_cold_peer_accepts_a_complete_artifact_closure_out_of_dependency_order() {
+    let dir_a = temp_store("artifact-order-a");
+    let dir_b = temp_store("artifact-order-b");
+    let mut a = open(&dir_a);
+    let mut b = open(&dir_b);
+
+    commit(
+        &mut a,
+        [71u8; 16],
+        "checkpoint",
+        &counter_ops(&body(71), 2),
+        &[(body(71), collab_binding())],
+    )
+    .unwrap();
+    commit(
+        &mut a,
+        [72u8; 16],
+        "delta",
+        &counter_ops(&body(71), 3),
+        &[(body(71), collab_binding())],
+    )
+    .unwrap();
+
+    let mut material = a.export_material().unwrap();
+    let (tx, payloads) = material.first_mut().expect("latest signed head");
+    let (key, pack) = payloads.first_mut().expect("one Body closure");
+    let descriptor = tx
+        .core
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.key() == *key)
+        .expect("signed Body descriptor");
+    let mut hostile = pack.clone();
+    hostile[3..11].fill(0xff);
+    assert!(crate::replica::decode_artifact_pack(descriptor, &hostile).is_err());
+    let mut envelopes =
+        crate::replica::decode_artifact_pack(descriptor, pack).expect("artifact pack");
+    assert!(envelopes.len() >= 2, "checkpoint plus delta");
+    envelopes.reverse();
+    *pack = crate::replica::encode_artifact_pack(&envelopes).expect("reordered delivery pack");
+
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    let ctx = CommitContext {
+        space: &space,
+        signer: &signer,
+        authority_frontier: authority_frontier(),
+    };
+    let outcome = b
+        .incorporate(&ctx, tx, payloads, &WriterAuthorized)
+        .unwrap();
+    assert_eq!(outcome.accepted, 1, "{outcome:?}");
+    assert_eq!(
+        b.read_collaborative(&body(71)).unwrap().counters["votes"],
+        5
+    );
+
+    drop(b);
+    let b = open(&dir_b);
+    assert_eq!(
+        b.read_collaborative(&body(71)).unwrap().counters["votes"],
+        5,
+        "the cold peer reconstructs from signed refs, independent of delivery order"
+    );
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+#[test]
+fn one_signed_closure_may_span_authorized_key_epochs() {
+    let dir_a = temp_store("artifact-epochs-a");
+    let dir_b = temp_store("artifact-epochs-b");
+    let rotating = Arc::new(RotatingBodyKeys::new());
+    let mut a = Replica::open(&dir_a, rotating.clone()).unwrap();
+    a.set_supported(supported());
+
+    commit(
+        &mut a,
+        [73u8; 16],
+        "old epoch checkpoint",
+        &counter_ops(&body(73), 4),
+        &[(body(73), collab_binding())],
+    )
+    .unwrap();
+    rotating.rotate();
+    commit(
+        &mut a,
+        [74u8; 16],
+        "new epoch delta",
+        &counter_ops(&body(73), 6),
+        &[(body(73), collab_binding())],
+    )
+    .unwrap();
+
+    let material = a.export_material().unwrap();
+    let (tx, payloads) = material.first().unwrap();
+    let (key, pack) = payloads.first().unwrap();
+    let descriptor = tx
+        .core
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.key() == *key)
+        .expect("signed Body descriptor");
+    let envelopes = crate::replica::decode_artifact_pack(descriptor, pack).unwrap();
+    let epochs: std::collections::BTreeSet<[u8; 16]> = envelopes
+        .iter()
+        .map(|envelope| mechanics::authorization::body_epoch_id(envelope).unwrap())
+        .collect();
+    assert_eq!(epochs, std::collections::BTreeSet::from([EPOCH, [8u8; 16]]));
+
+    let mut b = Replica::open(&dir_b, rotating.clone()).unwrap();
+    b.set_supported(supported());
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    let ctx = CommitContext {
+        space: &space,
+        signer: &signer,
+        authority_frontier: authority_frontier(),
+    };
+    b.incorporate(&ctx, tx, payloads, &WriterAuthorized)
+        .unwrap();
+    assert_eq!(
+        b.read_collaborative(&body(73)).unwrap().counters["votes"],
+        10
+    );
+    drop(b);
+
+    let mut b = Replica::open(&dir_b, rotating).unwrap();
+    b.set_supported(supported());
+    assert_eq!(
+        b.read_collaborative(&body(73)).unwrap().counters["votes"],
+        10
     );
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);
@@ -695,4 +1060,369 @@ fn the_engine_export_envelope_is_gone() {
         crate::convergence::ConvergenceOutcome,
         crate::transaction::commit::Failure,
     > = Replica::incorporate;
+}
+
+#[test]
+fn a_prebuilt_checkpoint_installs_without_a_hard_threshold_cliff() {
+    let mut r = Replica::loro().with_keys(keys());
+    r.set_supported(supported());
+    let key = body(42);
+    commit(
+        &mut r,
+        [40u8; 16],
+        "create-hot-body",
+        &counter_ops(&key, 1),
+        &[(key.clone(), collab_binding())],
+    )
+    .unwrap();
+
+    let mut ordinary = Vec::new();
+    for sequence in 1u16..=192 {
+        let mut request = [0u8; 16];
+        request[..2].copy_from_slice(&sequence.to_be_bytes());
+        request[2] = 41;
+        let started = std::time::Instant::now();
+        commit(&mut r, request, "hot-edit", &counter_ops(&key, 1), &[]).unwrap();
+        ordinary.push(started.elapsed());
+    }
+
+    // The soft watermark edit publishes first; checkpoint construction then
+    // runs independently of the committing Replica borrow.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    commit(
+        &mut r,
+        [42u8; 16],
+        "install-prebuilt-checkpoint",
+        &counter_ops(&key, 1),
+        &[],
+    )
+    .unwrap();
+    let install = started.elapsed();
+
+    let material = r.export_material().unwrap();
+    let descriptor = material[0]
+        .0
+        .core
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.key() == key)
+        .unwrap();
+    assert_eq!(
+        descriptor.artifact_refs().count(),
+        2,
+        "ready checkpoint + the installing edit; the 192-artifact prefix is gone"
+    );
+
+    ordinary.sort();
+    let p99 = ordinary[ordinary.len() * 99 / 100];
+    let ceiling = std::cmp::max(
+        p99.saturating_mul(20),
+        std::time::Duration::from_millis(250),
+    );
+    eprintln!("checkpoint action p99={p99:?} install={install:?} ceiling={ceiling:?}");
+    assert!(
+        install <= ceiling,
+        "installing ready material must stay in the ordinary-action timing class"
+    );
+}
+
+#[test]
+fn thousands_of_hot_bodies_use_one_bounded_checkpoint_executor() {
+    use crate::replica::CheckpointExecutor;
+
+    const WORKERS: usize = 2;
+    const QUEUE: usize = 8;
+    const HOT_BODIES: usize = 4_096;
+
+    let executor = CheckpointExecutor::new(WORKERS, QUEUE);
+    assert_eq!(executor._workers, WORKERS);
+    let release = Arc::new(AtomicBool::new(false));
+    let active = Arc::new(AtomicUsize::new(0));
+    let maximum = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let seeds_captured = AtomicUsize::new(0);
+    let mut admitted = 0usize;
+
+    for _ in 0..HOT_BODIES {
+        let Some(permit) = executor.try_reserve() else {
+            continue;
+        };
+        // This counter stands in for the synchronous `checkpoint_seed` call:
+        // production reserves at this exact point, before a frozen Body can be
+        // imported or a live document cloned.
+        seeds_captured.fetch_add(1, Ordering::SeqCst);
+        let release = Arc::clone(&release);
+        let active = Arc::clone(&active);
+        let maximum = Arc::clone(&maximum);
+        let completed = Arc::clone(&completed);
+        let work = Box::new(move || {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut observed = maximum.load(Ordering::SeqCst);
+            while now > observed {
+                match maximum.compare_exchange(observed, now, Ordering::SeqCst, Ordering::SeqCst) {
+                    Ok(_) => break,
+                    Err(current) => observed = current,
+                }
+            }
+            while !release.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            active.fetch_sub(1, Ordering::SeqCst);
+            completed.fetch_add(1, Ordering::SeqCst);
+        });
+        if permit.submit(work).is_ok() {
+            admitted += 1;
+        }
+    }
+
+    assert!(
+        seeds_captured.load(Ordering::SeqCst) <= WORKERS + QUEUE,
+        "seed capture itself must be bounded, not only worker execution"
+    );
+    assert!(
+        admitted <= WORKERS + QUEUE,
+        "a burst may occupy only the fixed workers and bounded queue"
+    );
+    release.store(true, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while completed.load(Ordering::SeqCst) != admitted && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(completed.load(Ordering::SeqCst), admitted);
+    assert!(maximum.load(Ordering::SeqCst) <= WORKERS);
+    eprintln!(
+        "checkpoint burst: offered={HOT_BODIES} admitted={admitted} seeds={} max_active={}",
+        seeds_captured.load(Ordering::SeqCst),
+        maximum.load(Ordering::SeqCst)
+    );
+}
+
+fn read_snapshot_record_scale(total: u32) {
+    use crate::replica::ReadSnapshot;
+
+    const MAX_RSS_BYTES_PER_BODY: usize = 4 * 1024;
+    const MAX_STARTUP: std::time::Duration = std::time::Duration::from_secs(60);
+
+    // Manufacture one real collaborative export, then give every record its
+    // own Arc-backed copy. Equal facts are deliberately not shared here: cold
+    // recovery currently obtains one verified Artifact/BodySnapshot per Body,
+    // so sharing the template Arc would understate production residency.
+    let template_key = fabric::Key::from_bytes(b"record-template".to_vec());
+    let mut template_engine = fabric::Engine::new();
+    template_engine
+        .commit(fabric::Transaction::new(
+            "record-template",
+            vec![
+                fabric::Op::CreateBody {
+                    key: template_key.clone(),
+                },
+                fabric::Op::RegisterSet {
+                    key: template_key.clone(),
+                    path: "kind".to_owned(),
+                    value: b"relation".to_vec(),
+                },
+            ],
+        ))
+        .expect("template commit");
+    let template = template_engine
+        .export_body(&template_key)
+        .expect("collaborative export");
+    let export_bytes = match &template {
+        fabric::BodyExport::Collaborative(bytes) => bytes.len(),
+        fabric::BodyExport::Atomic(_) => panic!("template must be collaborative"),
+    };
+    drop(template_engine);
+
+    let binding = collab_binding();
+    let before = resident_bytes();
+    let started = std::time::Instant::now();
+    let snapshot = ReadSnapshot::from_body_rows_for_test((0..total).map(|number| {
+        let mut body_id = [0u8; 16];
+        body_id[..4].copy_from_slice(&number.to_be_bytes());
+        let key = BodyKey::new(world(), BodyId::from_bytes(body_id));
+        let body = fabric::BodySnapshot::from_export(&template_key, template.clone())
+            .expect("valid collaborative image");
+        (key, binding.clone(), number.to_be_bytes().to_vec(), body)
+    }));
+    let elapsed = started.elapsed();
+    let after = resident_bytes();
+    let rss = after.saturating_sub(before);
+    let rss_per_body = rss / usize::try_from(total).expect("body count");
+
+    assert_eq!(snapshot.body_count(), u64::from(total));
+    assert!(
+        elapsed <= MAX_STARTUP,
+        "record read-image startup regressed: {elapsed:?} > {MAX_STARTUP:?}"
+    );
+    if rss != 0 {
+        assert!(
+            rss_per_body <= MAX_RSS_BYTES_PER_BODY,
+            "record read-image RSS/Body regressed: {rss_per_body} > {MAX_RSS_BYTES_PER_BODY}"
+        );
+    }
+    eprintln!(
+        "read-snapshot-record-scale bodies={total} export_bytes={export_bytes} startup_ms={} rss_mib={:.1} rss_bytes_per_body={rss_per_body}",
+        elapsed.as_millis(),
+        rss as f64 / (1024.0 * 1024.0),
+    );
+}
+
+#[test]
+fn schema_body_pages_merge_versions_without_skip_or_duplicate() {
+    use crate::replica::ReadSnapshot;
+
+    let fabric_key = fabric::Key::from_bytes(b"schema-page".to_vec());
+    let snapshot = ReadSnapshot::from_body_rows_for_test((0u8..7).map(|number| {
+        let key = BodyKey::new(world(), BodyId::from_bytes([number; 16]));
+        let mut binding = atomic_binding();
+        binding.schema = SchemaId::parse("paged").unwrap();
+        binding.schema_version = 1 + u32::from(number % 2);
+        let body = fabric::BodySnapshot::from_export(
+            &fabric_key,
+            fabric::BodyExport::Atomic(vec![number]),
+        )
+        .unwrap();
+        (key, binding, vec![number], body)
+    }));
+    let schema = SchemaId::parse("paged").unwrap();
+    let first = snapshot.body_keys_page_with_schema(&world(), &schema, None, 3);
+    assert_eq!(first.len(), 3);
+    let second = snapshot.body_keys_page_with_schema(&world(), &schema, first.last(), 3);
+    let third = snapshot.body_keys_page_with_schema(&world(), &schema, second.last(), 3);
+    let mut all = first;
+    all.extend(second);
+    all.extend(third);
+    assert_eq!(all.len(), 7);
+    assert!(all.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+#[ignore = "release-scale one-record-per-Body ReadSnapshot residency fixture"]
+fn read_snapshot_100k_record_bodies() {
+    read_snapshot_record_scale(100_000);
+}
+
+#[test]
+#[ignore = "release-scale one-record-per-Body ReadSnapshot residency fixture"]
+fn read_snapshot_1m_record_bodies() {
+    read_snapshot_record_scale(1_000_000);
+}
+
+fn incompressible_ascii(bytes: usize) -> String {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut out = String::with_capacity(bytes);
+    for _ in 0..bytes {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push(char::from(
+            b'!' + u8::try_from(state % 90).expect("printable"),
+        ));
+    }
+    out
+}
+
+#[test]
+#[ignore = "release hot-Body durable publication and retained-generation fixture"]
+fn a_one_megabyte_issue_stays_in_the_bounded_action_class_across_64_generations() {
+    const TEXT_BYTES: usize = 1024 * 1024;
+    const GENERATIONS: usize = 64;
+    const MAX_ACTION: std::time::Duration = std::time::Duration::from_millis(500);
+    const MAX_SNAPSHOT: std::time::Duration = std::time::Duration::from_millis(150);
+    const MAX_RETAINED_RSS: usize = 256 * 1024 * 1024;
+
+    let dir = temp_store("hot-issue");
+    let mut replica = open(&dir);
+    let key = body(77);
+    let text = incompressible_ascii(TEXT_BYTES);
+    let mut initial_ops = vec![(key.clone(), Op::Create)];
+    for (chunk, bytes) in text.as_bytes().chunks(64 * 1024).enumerate() {
+        initial_ops.push((
+            key.clone(),
+            Op::TextSplice {
+                path: "description".to_owned(),
+                index: u64::try_from(chunk * 64 * 1024).expect("chunk offset"),
+                delete: 0,
+                insert: std::str::from_utf8(bytes)
+                    .expect("ASCII fixture")
+                    .to_owned(),
+            },
+        ));
+    }
+    commit(
+        &mut replica,
+        [70u8; 16],
+        "large-issue",
+        &initial_ops,
+        &[(key.clone(), collab_binding())],
+    )
+    .expect("large issue commit");
+
+    let mut current = replica.read_snapshot();
+    let mut retained = vec![current.clone()];
+    let before = resident_bytes();
+    let mut actions = Vec::with_capacity(GENERATIONS);
+    let mut snapshots = Vec::with_capacity(GENERATIONS);
+    for generation in 0..GENERATIONS {
+        let mut request = [0u8; 16];
+        request[..8].copy_from_slice(&(generation as u64 + 1).to_be_bytes());
+        request[8] = 71;
+        let action_started = std::time::Instant::now();
+        commit(
+            &mut replica,
+            request,
+            "single-scalar-edit",
+            &[(
+                (key.clone()),
+                Op::TextSplice {
+                    path: "description".to_owned(),
+                    index: u64::try_from(generation).expect("index"),
+                    delete: 1,
+                    insert: if generation % 2 == 0 { "x" } else { "y" }.to_owned(),
+                },
+            )],
+            &[],
+        )
+        .expect("durable scalar edit");
+        actions.push(action_started.elapsed());
+
+        let snapshot_started = std::time::Instant::now();
+        current = replica.advance_read_snapshot(&current, std::slice::from_ref(&key));
+        snapshots.push(snapshot_started.elapsed());
+        retained.push(current.clone());
+    }
+    let after = resident_bytes();
+    let retained_rss = after.saturating_sub(before);
+    actions.sort();
+    snapshots.sort();
+    let action_p99 = actions[actions.len() * 99 / 100];
+    let snapshot_p99 = snapshots[snapshots.len() * 99 / 100];
+    assert!(
+        action_p99 <= MAX_ACTION,
+        "durable action p99={action_p99:?}"
+    );
+    assert!(
+        snapshot_p99 <= MAX_SNAPSHOT,
+        "snapshot publication p99={snapshot_p99:?}"
+    );
+    if retained_rss != 0 {
+        assert!(
+            retained_rss <= MAX_RETAINED_RSS,
+            "64 retained generations used {:.1} MiB",
+            retained_rss as f64 / (1024.0 * 1024.0)
+        );
+    }
+    let view = current
+        .read_collaborative(&key)
+        .expect("current collaborative view");
+    assert_eq!(view.texts["description"].len(), TEXT_BYTES);
+    eprintln!(
+        "hot-issue-durable text_mib=1 generations={} action_p99_us={} snapshot_p99_us={} retained_rss_mib={:.1}",
+        retained.len(),
+        action_p99.as_micros(),
+        snapshot_p99.as_micros(),
+        retained_rss as f64 / (1024.0 * 1024.0),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

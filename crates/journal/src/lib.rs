@@ -281,6 +281,18 @@ pub struct Store {
     commits_since_sweep: u32,
 }
 
+/// Cloneable, immutable access to content-addressed journal objects.
+///
+/// A Reader captures only the object directory, never the mutable Manifest or
+/// recovery journal. Callers use it after pinning their own semantic index
+/// roots under the owning writer lock, then perform potentially deep reads
+/// without holding that writer. Objects are verified by content address on
+/// every read.
+#[derive(Debug, Clone)]
+pub struct Reader {
+    root: PathBuf,
+}
+
 /// How many commits may pass before the store collects what they orphaned.
 ///
 /// A sweep walks the object directory once, so doing it per commit would put an
@@ -468,6 +480,15 @@ impl Store {
     #[cfg(any(test, feature = "fault-injection"))]
     pub fn set_fault_injector(&mut self, injector: Box<dyn Fn(&str) -> bool + Send>) {
         self.injector = Some(injector);
+    }
+
+    /// Pin a read-only object handle. Semantic roots must be captured by the
+    /// caller at the same commit point; this handle deliberately cannot read
+    /// or mutate the live Manifest.
+    pub fn reader(&self) -> Reader {
+        Reader {
+            root: self.root.clone(),
+        }
     }
 
     /// The current manifest, if any commit has completed.
@@ -1090,5 +1111,31 @@ impl Store {
             let _ = self.sweep();
         }
         Ok(sequence)
+    }
+}
+
+impl Reader {
+    /// Read one immutable object by content address.
+    pub fn read(&self, hash: &[u8; 32]) -> Result<Vec<u8>, Failure> {
+        let path = self.root.join(OBJECTS_DIR).join(hex(hash));
+        let bytes = std::fs::read(&path).map_err(|error| {
+            tracing::warn!(%error, object = %hex(hash), "journal object is absent");
+            Failure::Integrity(Defect::MissingObject)
+        })?;
+        if object_hash(&bytes) != *hash {
+            return Err(Failure::Integrity(Defect::CorruptObject));
+        }
+        Ok(bytes)
+    }
+
+    /// Read and length-check an immutable object.
+    pub fn read_object(&self, object: &Object) -> Result<Vec<u8>, Failure> {
+        let bytes = self.read(&object.hash)?;
+        let length =
+            u64::try_from(bytes.len()).map_err(|_| Failure::Integrity(Defect::CorruptObject))?;
+        if length != object.len {
+            return Err(Failure::Integrity(Defect::CorruptObject));
+        }
+        Ok(bytes)
     }
 }

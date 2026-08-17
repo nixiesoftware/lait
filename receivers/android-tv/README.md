@@ -27,5 +27,10 @@ presented leaf, retains hostname verification, refuses redirects, and exposes
 only bounded `/head/v1/` requests to the bundled surface. It never calls the
 WebView SSL-error bypass API.
 
+Live CMAF playback is available only when the coordinator has a Web-PKI
+certificate that the WebView can validate. A private pinned-certificate build
+therefore negotiates the Frame tier; the app-local Java trust manager cannot be
+inherited safely by the WebView-owned WebSocket.
+
 The application ID is `com.nixiesoftware.astrolabe`; confirm Play Console
 ownership before the first published artifact.

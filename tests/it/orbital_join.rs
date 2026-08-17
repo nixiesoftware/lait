@@ -131,6 +131,7 @@ fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: q.to_json(),
+            publication: None,
         })
         .unwrap()
         .bytes;

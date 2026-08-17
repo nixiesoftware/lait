@@ -107,6 +107,7 @@ impl World for KvWorld {
             schema_version: 1,
             bytes: ctx.read_body(&self.body(&key)).unwrap_or_default(),
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -378,6 +379,7 @@ fn restart_and_cross_epoch_cursors_reset() {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: b"a".to_vec(),
+            publication: None,
         })
         .unwrap();
     assert_eq!(projection.bytes, b"1");

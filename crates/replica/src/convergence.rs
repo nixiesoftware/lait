@@ -84,8 +84,9 @@ pub struct StagedContactMaterial {
     /// belongs to is decided by the signed root that reaches it and not by the
     /// frame that carried it. A node no root reaches is simply never read.
     pub manifest_nodes: Vec<Vec<u8>>,
-    /// Received protected Body payloads: `(transaction id, key, envelope)`.
-    /// The transaction id is the full signed-envelope digest.
+    /// Received protected artifact packs: `(transaction id, key, pack)`.
+    /// The transaction id is the full signed-envelope digest; its public
+    /// descriptor names every protected artifact the pack must contain.
     pub bodies: Vec<([u8; 32], crate::ids::BodyKey, Vec<u8>)>,
 }
 
@@ -191,7 +192,8 @@ pub struct ValidatedContactBundle {
     pub(crate) descriptors: Vec<crate::content::ContentDescriptor>,
 }
 
-/// The bundle's validated transactions with their per-Body payloads.
+/// The bundle's validated transactions with their per-Body protected artifact
+/// packs.
 pub(crate) type BundleUnits = Vec<(
     crate::transaction::Transaction,
     Vec<(crate::ids::BodyKey, Vec<u8>)>,

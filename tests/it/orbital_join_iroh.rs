@@ -135,6 +135,7 @@ fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: q.to_json(),
+            publication: None,
         })
         .unwrap()
         .bytes;
@@ -295,6 +296,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: IssueQuery::Snapshot.to_json(),
+                publication: None,
             })
             .unwrap()
             .bytes;

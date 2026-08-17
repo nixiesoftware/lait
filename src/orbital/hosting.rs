@@ -918,6 +918,62 @@ impl StationHost {
         }
     }
 
+    /// Drain the local Exec outbox for this Session's World.
+    ///
+    /// Product submit already committed any `Started` Run. Dispatch is a
+    /// separate durable step owned by this Station activation, not by the
+    /// product RPC that staged the Start.
+    fn drain_exec_session(&self, session: &Session, identity: &LocalIdentity) {
+        let world = session.world_id();
+        let Ok(implementation) = self.station.active_implementation(world, identity) else {
+            return;
+        };
+        let Some(host) = self.worlds.host_for(world, implementation) else {
+            return;
+        };
+        if let Err(error) = host.perform(session, |bytes| {
+            let mut reader = std::io::Cursor::new(bytes);
+            self.station
+                .content_write(
+                    identity,
+                    runtime::world::RequestId::mint().as_bytes(),
+                    &mut reader,
+                )
+                .map_err(|error| runtime::world::Failure::PersistenceCause {
+                    operation: "exec.perform.output",
+                    reason: error.to_string(),
+                })
+        }) {
+            tracing::warn!(%error, world = %world, "local Exec perform did not complete");
+        }
+    }
+
+    fn drain_exec(&self) {
+        let worlds: Vec<_> = self.worlds.world_ids().cloned().collect();
+        for world in worlds {
+            if !self.ensure_world_session(&world) {
+                continue;
+            }
+            self.worlds.with_primary(&world, |session| {
+                self.drain_exec_session(session, &self.identity);
+            });
+        }
+    }
+
+    async fn exec_drain_loop(self: Arc<Self>) {
+        let mut tick = self.station.exec_tick();
+        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = self.shutdown.notified() => break,
+                _ = tick.changed() => {}
+                _ = interval.tick() => {}
+            }
+            self.drain_exec();
+        }
+    }
+
     /// Which present peers each nudge reaches.
     ///
     /// Pulled out of `deliver_nudges` because this is the whole policy and the rest
@@ -1109,7 +1165,7 @@ impl StationHost {
             }
             RequestOwner::Station => self.dispatch_station(req),
             RequestOwner::Work => self.dispatch_work(req, act_as),
-            RequestOwner::Observation => self.dispatch_observation(req),
+            RequestOwner::Observation => self.dispatch_observation(req, act_as),
             RequestOwner::Lifecycle => self.dispatch_lifecycle(req),
         }
     }
@@ -1278,7 +1334,7 @@ impl StationHost {
                 let Some(world_id) = WorldId::parse(&world) else {
                     return Response::err("invalid World id");
                 };
-                let Some(host) = self.worlds.host(&world_id) else {
+                let Some(host) = self.worlds.preferred_host(&world_id) else {
                     return Response::not_found(format!("World '{world}' is not hosted"));
                 };
                 let ours = *host.reviewed_implementation();
@@ -2036,9 +2092,10 @@ impl StationHost {
     }
 
     /// Generic status and subscription projection surfaces.
-    fn dispatch_observation(&self, req: Request) -> Response {
+    fn dispatch_observation(&self, req: Request, act_as: Option<&str>) -> Response {
         match req {
             Request::Status => self.status(),
+            Request::Find { world, query } => self.dispatch_find(&world, query, act_as),
             // What this Orbit's store holds. Read from the Replica this
             // activation already opened and from the bytes already sitting in
             // the store directory, so answering costs nothing beyond what
@@ -2065,6 +2122,85 @@ impl StationHost {
             other => Response::err(format!(
                 "request is not an observation operation: {other:?}"
             )),
+        }
+    }
+
+    fn dispatch_find(
+        &self,
+        world: &str,
+        query: runtime::find::Query,
+        act_as: Option<&str>,
+    ) -> Response {
+        let Some(world) = WorldId::parse(world) else {
+            return Response::invalid("invalid World id");
+        };
+        if !self.worlds.contains(&world) {
+            return Response::not_found(format!("World '{world}' is not hosted"));
+        }
+        let seed = match self.acting_seed(act_as) {
+            Ok(seed) => seed,
+            Err(response) => return response,
+        };
+        let result = if act_as.is_none() {
+            if !self.ensure_world_session(&world) {
+                return Response::denied(
+                    "not admitted to this space yet — complete admission before using Find",
+                );
+            }
+            self.worlds
+                .with_primary(&world, |session| session.find(query))
+                .unwrap_or(Err(runtime::find::Failure::Interrupted))
+        } else {
+            let identity = Runtime::identity_from_seed(&seed);
+            match self
+                .worlds
+                .with_agent(&self.station, &world, &identity, |session| {
+                    session.find(query)
+                }) {
+                Ok(result) => result,
+                Err(_) => {
+                    return Response::denied(
+                        "this agent identity holds no standing in the space yet — a human member \
+                         must sponsor it before it can use Find",
+                    );
+                }
+            }
+        };
+        match result {
+            Ok(answer) => Response::Find { answer },
+            Err(runtime::find::Failure::Invalid(error)) => {
+                Response::invalid(format!("invalid Find query: {error}"))
+            }
+            Err(runtime::find::Failure::PrincipalDenied) => {
+                Response::denied("the acting identity has no standing for this Find")
+            }
+            Err(runtime::find::Failure::AuthorityUnavailable(detail)) => {
+                Response::err(format!("Find authority is unavailable: {detail}"))
+            }
+            Err(runtime::find::Failure::PolicyExceeded) => {
+                Response::invalid("Find exceeds the declared or Station resource bound")
+            }
+            Err(runtime::find::Failure::PublicationUnavailable) => {
+                Response::not_found("the requested Find publication is unavailable")
+            }
+            Err(runtime::find::Failure::PublicationExpired) => Response::not_found(
+                "the Find cursor's retained publication expired; restart the query",
+            ),
+            Err(runtime::find::Failure::PaginationUnsupported) => {
+                Response::invalid("this Find query shape does not support cursor pagination")
+            }
+            Err(runtime::find::Failure::CursorCapacityExceeded) => Response::err(
+                "the Station cannot retain another Find cursor publication; retry later",
+            ),
+            Err(runtime::find::Failure::NoActiveImplementation) => {
+                Response::invalid("the World has no active implementation")
+            }
+            Err(runtime::find::Failure::ImplementationUnavailable) => {
+                Response::invalid("the exact World implementation required by Find is unavailable")
+            }
+            Err(runtime::find::Failure::Interrupted | runtime::find::Failure::Unavailable) => {
+                Response::err("Find is temporarily unavailable")
+            }
         }
     }
 
@@ -2775,6 +2911,7 @@ impl StationHost {
         let idle_window = idle_window_from_env();
         let mut idle_tick = tokio::time::interval(Duration::from_millis(500));
         let mut connections = tokio::task::JoinSet::new();
+        let drain = tokio::spawn(self.clone().exec_drain_loop());
         loop {
             tokio::select! {
                 _ = self.shutdown.notified() => break,
@@ -2819,6 +2956,7 @@ impl StationHost {
         // Wake and join every task retaining the host before the runner tries
         // to consume it and return the Station to Orbit.
         self.begin_stop();
+        let _ = drain.await;
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(result) = connections.join_next().await {
                 if let Err(error) = result {
@@ -3286,6 +3424,7 @@ impl StationHost {
             seq: record.sequence,
             reset: record.reset,
             invalidations,
+            change: record.change.clone(),
             authority_advanced: record.authority,
             // Authority alone advances no feed: it is membership news, and
             // `Activity` projects the World's own history. One record can

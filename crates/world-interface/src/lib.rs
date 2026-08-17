@@ -161,19 +161,36 @@ pub struct LocalInvocation {
     pub input: Value,
 }
 
+/// Shape one admitted Runtime Find answer for a product-owned client surface.
+///
+/// Runtime owns evaluation and the exact answer type. The product owns the
+/// names, cursor spelling, and row envelope it publishes to an agent or human.
+/// Keeping this as an in-process function pointer avoids teaching the host any
+/// product vocabulary while still refusing adapters that reinterpret raw JSON.
+pub type FindResponsePresenter = fn(runtime::find::Answer) -> Result<Value, Failure>;
+
 /// The target selected by a parsed product invocation.
 #[derive(Debug, Clone)]
 pub enum ClientInvocationKind {
     World(Call),
+    /// One product-owned convenience query compiled to Runtime's common Find
+    /// algebra. The host still supplies actor, device, authority and Station
+    /// coordinates; a package can select fields but cannot bypass admission.
+    Find {
+        query: runtime::find::Query,
+        presenter: Option<FindResponsePresenter>,
+    },
     Local(LocalInvocation),
 }
 
 /// A parsed product invocation with package-owned policy metadata.
 ///
-/// `Local` operations may compose World calls with working-tree, filesystem,
-/// caller-local state, or generic Space-authority facilities. The shell
-/// enforces the declared whole-operation access and confirmation policy, then
-/// routes execution back through the package without interpreting its name.
+/// `Find` operations let a package compile friendly product filters to the
+/// common Runtime query algebra. `Local` operations may compose World calls
+/// with working-tree, filesystem, caller-local state, or generic
+/// Space-authority facilities. The shell enforces the declared whole-operation
+/// access and confirmation policy, then routes execution without interpreting
+/// product vocabulary.
 #[derive(Debug, Clone)]
 pub struct ClientInvocation {
     world: WorldId,
@@ -207,6 +224,40 @@ impl ClientInvocation {
                 operation: operation.into(),
                 input,
             }),
+        }
+    }
+
+    /// Construct a read-only package invocation over Runtime Find.
+    pub fn find(world: WorldId, query: runtime::find::Query) -> Self {
+        Self {
+            world,
+            access: ClientAccess::Query,
+            confirmation_question: None,
+            kind: ClientInvocationKind::Find {
+                query,
+                presenter: None,
+            },
+        }
+    }
+
+    /// Construct a read-only Find invocation with product-owned presentation.
+    ///
+    /// The host still evaluates the same admitted query and raw root Find
+    /// remains available through [`Self::find`]. Only the successful answer's
+    /// outer client representation changes.
+    pub fn find_presented(
+        world: WorldId,
+        query: runtime::find::Query,
+        presenter: FindResponsePresenter,
+    ) -> Self {
+        Self {
+            world,
+            access: ClientAccess::Query,
+            confirmation_question: None,
+            kind: ClientInvocationKind::Find {
+                query,
+                presenter: Some(presenter),
+            },
         }
     }
 
@@ -401,6 +452,20 @@ impl PresentationResolution {
 pub trait ClientHost: Send + Sync {
     fn local_root(&self) -> &Path;
     fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply>;
+    /// Evaluate a package-compiled query through the host's authenticated
+    /// Runtime Find path. Hosts that are intentionally limited to legacy World
+    /// projections may retain the typed refusal; native heads override this.
+    fn call_find<'a>(
+        &'a self,
+        _world: WorldId,
+        _query: runtime::find::Query,
+    ) -> ClientFuture<'a, Value> {
+        Box::pin(async {
+            Err(Failure::new(
+                "this client host does not expose Runtime Find",
+            ))
+        })
+    }
     /// Inspect or request product-neutral durable Run lifecycle transitions.
     ///
     /// The DTO is owned by Runtime Exec. Packages remain responsible for the
@@ -1244,6 +1309,18 @@ impl WorldClientPackage {
                         .await
                         .unwrap_or(decoded))
                 }
+                ClientInvocationKind::Find { query, presenter } => {
+                    let value = host.call_find(self.world.clone(), query).await?;
+                    let Some(present) = presenter else {
+                        return Ok(value);
+                    };
+                    let answer = serde_json::from_value(value).map_err(|error| {
+                        Failure::new(format!(
+                            "host returned an invalid Runtime Find answer: {error}"
+                        ))
+                    })?;
+                    present(answer)
+                }
                 ClientInvocationKind::Local(local) => {
                     let handler = self.local_handler.ok_or_else(|| {
                         Failure::new(format!(
@@ -1710,7 +1787,7 @@ mod tests {
         assert!(clean.check().is_ok());
     }
 
-    /// Both kinds classify themselves, so a head's own policy never has to
+    /// Every kind classifies itself, so a head's own policy never has to
     /// choose between guessing and refusing everything it cannot see into.
     #[test]
     fn every_invocation_declares_an_access_class() {

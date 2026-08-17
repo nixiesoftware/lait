@@ -36,7 +36,8 @@ pub mod router;
 
 pub use protocol::{
     classify_failure, decode_call, decode_reply, encode_call, encode_reply, AccessAssignment,
-    BoardPos, Filter, IssuesErrorKind, IssuesRequest, IssuesResponse, OPERATION, VERSION,
+    BoardPos, ChangeEffect, ChangeOperation, ChangeProject, Filter, IssuesErrorKind, IssuesRequest,
+    IssuesResponse, OPERATION, VERSION,
 };
 pub use router::{IssueRouter, IssuesCallHandler, RouterFacts};
 

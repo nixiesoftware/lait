@@ -173,10 +173,9 @@ impl Connection {
 ///
 /// Narrow on purpose. The Live plane could hold an `Arc<StationCore>` and reach
 /// everything, and then the cost of every caret would be invisible at the seam
-/// that pays it. Two methods make the price legible: both take the exclusive
-/// commit lock, which is not a choice — `RwLock<T>: Sync` requires `T: Sync`
-/// and the Replica holds a `dyn Engine + Send` that is not. `with_replica`
-/// records the arithmetic that bounds it.
+/// that pays it. Two methods make the price legible: each briefly pins the
+/// immutable read image, then performs anchor work without holding the commit
+/// lock or entering the mutable Replica.
 pub trait AnchorSource: Send + Sync {
     /// Mint an anchor at a position, so a browser that can only send an offset
     /// has something that survives concurrent edits.

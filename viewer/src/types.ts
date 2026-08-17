@@ -952,6 +952,58 @@ export interface RoutedInvalidation {
   planes: DirtyPlane[];
 }
 
+/** Authenticated authorship for one durable operation. */
+export interface DurableAttribution {
+  operation: number[];
+  actor: string;
+  device: string;
+}
+
+export type DurableMutation =
+  | "Atomic"
+  | "Register"
+  | "Map"
+  | "List"
+  | "Text"
+  | "Set"
+  | "Counter"
+  | "Lifecycle"
+  | "Tree"
+  | "Log";
+
+export interface DurableStableTextRange {
+  /** Exact scalar range in the Observation's committed publication. */
+  start: number;
+  end: number;
+  /** Canonical Fabric anchors for server-side re-resolution after later edits. */
+  start_anchor: number[];
+  end_anchor: number[];
+  deleted: number;
+  inserted: number;
+  inserted_bytes: number;
+}
+
+/** Value-free description of one operation in the committed Body batch. */
+export interface DurablePathChange {
+  mutation: DurableMutation;
+  path?: string | null;
+  locator?: string | null;
+  text?: DurableStableTextRange | null;
+}
+
+export type DurableDetail = { Exact: DurablePathChange[] } | "Dirty";
+
+export interface DurableBodyChange {
+  body: { world: string; body: number[] };
+  detail: DurableDetail;
+}
+
+/** Same durable feedback vocabulary for human, agent, CLI and API writes. */
+export interface DurableChange {
+  attribution?: DurableAttribution | null;
+  bodies: DurableBodyChange[];
+}
+
 /**
  * A dirty-set frame, tagged with the space it rang for.
  *
@@ -969,6 +1021,12 @@ export interface SpaceDoorbell {
   seq: number;
   reset: boolean;
   invalidations: RoutedInvalidation[];
+  /**
+   * Exact paths/ranges when bounded, otherwise an explicit Body-dirty marker.
+   * No product values ride this stream; authoritative state is fetched after
+   * the publication notification.
+   */
+  change?: DurableChange;
   /**
    * Membership, roles, devices or keys advanced. Its own flag, not a catalog
    * plane: authority is not in the catalog and can move with no Body touched.

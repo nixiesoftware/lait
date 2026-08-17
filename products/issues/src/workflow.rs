@@ -156,6 +156,9 @@ impl WorkflowBody {
         if self.project_id.is_empty() || self.project_id.len() > MAX_PROJECT_ID {
             return Err("invalid project id".into());
         }
+        if !super::contract::valid_name(&self.name) {
+            return Err("invalid workflow name".into());
+        }
         if self.states.is_empty() {
             return Err("a workflow needs at least one state".into());
         }
@@ -166,7 +169,17 @@ impl WorkflowBody {
         }
         state_ids.sort();
         for s in &self.states {
-            if !matches!(s.category.as_str(), "backlog" | "active" | "done") {
+            if s.state_id.is_empty()
+                || s.state_id.len() > 64
+                || !s.state_id.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                })
+                || !super::contract::valid_name(&s.name)
+                || s.color.len() > super::contract::MAX_PRESENTATION_TOKEN_BYTES
+                || !matches!(s.category.as_str(), "backlog" | "active" | "done")
+            {
                 return Err(format!("unknown state category `{}`", s.category));
             }
         }

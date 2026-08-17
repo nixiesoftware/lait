@@ -51,9 +51,11 @@ mod action;
 mod admission;
 pub mod beacon;
 mod budget;
+pub mod change;
 mod contact_driver;
 mod content_host;
 pub mod coordinates;
+pub(crate) mod corpus;
 /// The identity-scoped correspondence dial tone (`lait/correspondence/1`).
 pub mod correspondence;
 #[cfg(test)]
@@ -62,6 +64,7 @@ mod dto;
 pub mod exec;
 mod fetch;
 pub mod find;
+pub(crate) mod find_evaluator;
 pub mod generation;
 mod implementation;
 #[cfg(test)]
@@ -74,6 +77,7 @@ pub mod plane;
 mod plane_driver;
 mod plane_stream;
 pub mod poison;
+pub mod publication;
 mod registry;
 mod session;
 pub mod signal;

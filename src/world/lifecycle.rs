@@ -281,6 +281,7 @@ mod tests {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: contract::IssueQuery::Snapshot.to_json(),
+                publication: None,
             })
             .expect("snapshot");
         let value: serde_json::Value =

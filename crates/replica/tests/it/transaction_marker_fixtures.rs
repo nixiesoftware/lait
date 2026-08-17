@@ -1,10 +1,9 @@
 //! Transaction envelope protection-boundary matrix for the semantic-named
-//! transaction, `lait/body-transaction/2`.
+//! transaction, `lait/body-transaction/3`.
 
 use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
 use mechanics::ids::SpaceId;
-use replica::body::ContentCommitment;
-use replica::body::{BodyId, EncodingId, SchemaId, WorldId};
+use replica::body::{BodyId, EncodingId, SchemaId, WorldId, MUTATION_ATOMIC};
 use replica::frontier::AuthorityFrontier as AF;
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
 use replica::transaction::{
@@ -38,13 +37,27 @@ fn demand() -> Vec<u8> {
 }
 
 fn descriptor(body: [u8; 16], payload: &[u8]) -> Descriptor {
+    let base = ReplicaFrontier::EMPTY;
     Descriptor {
         world: world(),
         body: BodyId::from_bytes(body),
         schema: SchemaId::parse("issue").unwrap(),
         schema_version: 1,
         encoding: EncodingId::parse("lait.body.v1").unwrap(),
-        content_commitment: ContentCommitment::over_protected_payload(payload).as_bytes(),
+        mutation_model: MUTATION_ATOMIC,
+        base_frontier: base,
+        resulting_frontier: ReplicaFrontier::new([9u8; 32], 1),
+        material: fabric::Material {
+            format_version: fabric::CAUSAL_FORMAT_VERSION,
+            checkpoint: fabric::ArtifactRef {
+                hash: journal::object_content_hash(payload),
+                len: payload.len() as u64,
+            },
+            delta_tail: Vec::new(),
+            history_root: None,
+            history_count: 0,
+            version: fabric::Version::empty(),
+        },
     }
 }
 
@@ -91,19 +104,26 @@ fn valid_transaction_verifies_and_roundtrips() {
 }
 
 #[test]
-fn opaque_ciphertext_commitment_check_needs_no_key() {
-    // An opaque retainer validates the ciphertext against the descriptor with no
-    // decryption key and no plaintext hash.
+fn opaque_artifact_reference_check_needs_no_key() {
+    // An opaque retainer validates the protected artifact by content address;
+    // no decryption key or plaintext hash is involved.
     let d = descriptor([0u8; 16], b"the-ciphertext");
-    assert!(d.commits_to(b"the-ciphertext"));
-    assert!(!d.commits_to(b"other-ciphertext"));
+    let reference = d.artifact_refs().next().unwrap();
+    assert_eq!(
+        reference.hash,
+        journal::object_content_hash(b"the-ciphertext")
+    );
+    assert_ne!(
+        reference.hash,
+        journal::object_content_hash(b"other-ciphertext")
+    );
 }
 
 #[test]
 fn version_and_algorithm_rejection() {
     let mut tx = valid_tx();
-    tx.core.version = 2;
-    assert_eq!(tx.verify(), Err(Error::UnsupportedVersion(2)));
+    tx.core.version = 3;
+    assert_eq!(tx.verify(), Err(Error::UnsupportedVersion(3)));
     let mut tx = valid_tx();
     tx.signature_algorithm = 9;
     assert_eq!(tx.verify(), Err(Error::UnsupportedSignatureAlgorithm(9)));

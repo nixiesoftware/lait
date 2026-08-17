@@ -203,6 +203,16 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
         },
         &facts(),
     );
+    let project_id = match router.route(Request::ProjectList, &facts()).0 {
+        Response::Projects { projects } => projects
+            .into_iter()
+            .find(|project| project.key == "CLIENT")
+            .expect("client project")
+            .id
+            .as_str()
+            .to_owned(),
+        response => panic!("expected project list, got {response:?}"),
+    };
     let create = |title: &str| {
         let (reply, _) = router.route(
             Request::IssueNew {
@@ -225,9 +235,25 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
     };
     let foundation = create("Connect to a served World");
     let workspace = create("Operate the local workspace");
+    let geometry_query = || runtime::world::Query {
+        schema: issues::contract::issue_schema(),
+        schema_version: issues::contract::ISSUE_SCHEMA_VERSION,
+        payload: issues::contract::IssueQuery::Geometry {
+            project: project_id.clone(),
+            roots: vec![],
+            page: Some(issues::geometry::GeometryPageRequest::first(
+                issues::geometry::GeometrySection::Edges,
+                16,
+            )),
+        }
+        .to_json(),
+        publication: None,
+    };
     let before_link = session
-        .snapshot_id()
-        .expect("generation before topology edit");
+        .query(geometry_query())
+        .expect("generation before topology edit")
+        .publication
+        .map(|publication| publication.publication);
 
     let (linked, _) = router.route(
         Request::IssueLink {
@@ -241,36 +267,56 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
         matches!(linked, Response::Ref { .. }),
         "link reply: {linked:?}"
     );
-
-    let (current, _) = router.route(
-        Request::Geometry {
-            project: "CLIENT".into(),
-            roots: vec![],
-            generation: None,
-        },
-        &facts(),
-    );
-    let Response::Geometry(current) = current else {
-        panic!("expected current geometry, got {current:?}");
+    // Resolve the human project key once through the router's product
+    // snapshot, then use the canonical id selected by deterministic fixtures.
+    // Geometry itself is now a bounded artifact response: summary and one
+    // explicit page, never a whole graph serialized by accident.
+    let current: issues::contract::GeometryProjection = serde_json::from_slice(
+        &session
+            .query(geometry_query())
+            .expect("current geometry")
+            .bytes,
+    )
+    .expect("current geometry response");
+    let current_summary = current.summary.as_ref().expect("ready summary");
+    assert_eq!(current_summary.nodes, 2);
+    assert_eq!(current_summary.components, 1);
+    assert_eq!(current_summary.edges, 1);
+    let Some(issues::geometry::GeometryPage {
+        rows: issues::geometry::GeometryRows::Edges(edges),
+        ..
+    }) = current.page.as_ref()
+    else {
+        panic!("expected current edge page, got {:?}", current.page);
     };
-    assert_eq!(current.nodes.len(), 2);
-    assert_eq!(current.components.len(), 1);
-    assert_eq!(current.edges.len(), 1);
-    assert_eq!(current.edges[0].relation, "blocks");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].relation, issues::geometry::RelationKind::Blocks);
 
-    let (historical, _) = router.route(
-        Request::Geometry {
-            project: "CLIENT".into(),
-            roots: vec![],
-            generation: Some(before_link.to_hex()),
-        },
-        &facts(),
-    );
-    let Response::Geometry(historical) = historical else {
-        panic!("expected historical geometry, got {historical:?}");
+    let historical: issues::contract::GeometryProjection = serde_json::from_slice(
+        &session
+            .query({
+                let mut query = geometry_query();
+                query.publication = before_link;
+                query
+            })
+            .expect("historical geometry")
+            .bytes,
+    )
+    .expect("historical geometry response");
+    let historical_summary = historical.summary.as_ref().expect("ready summary");
+    assert_eq!(historical_summary.nodes, 2);
+    assert_eq!(historical_summary.components, 2);
+    assert_eq!(historical_summary.edges, 0);
+    let Some(issues::geometry::GeometryPage {
+        rows: issues::geometry::GeometryRows::Edges(edges),
+        ..
+    }) = historical.page.as_ref()
+    else {
+        panic!("expected historical edge page, got {:?}", historical.page);
     };
-    assert_eq!(historical.nodes.len(), 2);
-    assert_eq!(historical.components.len(), 2);
-    assert!(historical.edges.is_empty());
-    assert_eq!(historical.generation, before_link.to_hex());
+    assert!(edges.is_empty());
+    assert_eq!(
+        historical.source.publication.manifest_root,
+        before_link.expect("before publication").manifest_root
+    );
 }

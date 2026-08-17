@@ -132,6 +132,9 @@ pub fn build_revision(
     if body.role_id.is_empty() || body.role_id.len() > MAX_ROLE_ID {
         return Err(Invalid::BadRoleId);
     }
+    if !super::contract::valid_name(&body.name) || !super::contract::valid_text(&body.description) {
+        return Err(Invalid::BodyTooLarge);
+    }
     if predecessors.len() > MAX_PREDECESSORS {
         return Err(Invalid::TooManyPredecessors);
     }

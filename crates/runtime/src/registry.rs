@@ -40,6 +40,9 @@ pub enum Declaration {
 /// Why registration was rejected at `build()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
+    /// Application composition installed multiple implementations for one
+    /// World without selecting exactly one formation/default package.
+    AmbiguousWorldDefault(WorldId),
     /// Two Worlds registered the same [`WorldId`].
     DuplicateWorld(WorldId),
     /// A World declared the same `(schema id, version)` twice.
@@ -136,12 +139,18 @@ impl std::error::Error for Refusal {}
 struct Hosted {
     descriptor: Descriptor,
     world: Arc<dyn World>,
+    /// Authority-reviewed package identity. `None` exists only for the
+    /// low-level Runtime builder used by embedders and tests; application
+    /// composition always registers the reviewed identity.
+    reviewed_implementation: Option<[u8; 32]>,
 }
 
-/// The frozen, immutable set of hosted Worlds. Lookup is by [`WorldId`].
+/// The frozen, immutable set of hosted World implementations. Authority
+/// selects the active implementation; retained publications may resolve any
+/// other exact package still installed in this catalog.
 #[derive(Clone)]
 pub struct Catalog {
-    worlds: Arc<BTreeMap<WorldId, Arc<Hosted>>>,
+    worlds: Arc<BTreeMap<WorldId, BTreeMap<Option<[u8; 32]>, Arc<Hosted>>>>,
 }
 
 // `Hosted` holds `Arc<dyn World>`, which is not `Debug`; the registry only ever
@@ -171,12 +180,77 @@ impl Catalog {
 
     /// The implementation for a hosted World, if any.
     pub fn world(&self, id: &WorldId) -> Option<Arc<dyn World>> {
-        self.worlds.get(id).map(|h| h.world.clone())
+        let implementations = self.worlds.get(id)?;
+        (implementations.len() == 1).then(|| {
+            implementations
+                .values()
+                .next()
+                .map(|hosted| hosted.world.clone())
+        })?
     }
 
-    /// The reviewed descriptor for a hosted World, if any.
+    /// Resolve executable code for the exact implementation authority made
+    /// active. A reviewed package is never returned under a different id.
+    pub fn world_for(&self, id: &WorldId, implementation: [u8; 32]) -> Option<Arc<dyn World>> {
+        let implementations = self.worlds.get(id)?;
+        implementations
+            .get(&Some(implementation))
+            .map(|hosted| hosted.world.clone())
+    }
+
+    /// Resolve the explicitly unreviewed embedder registration, if present.
+    ///
+    /// This is deliberately separate from [`Self::world_for`]: an unreviewed
+    /// package has no authority-reviewed implementation coordinate and must
+    /// never be made to impersonate an arbitrary digest. Runtime's low-level
+    /// embedding mode may use this for its current Session only; retained
+    /// publication lookup is always exact.
+    pub(crate) fn unreviewed_world(&self, id: &WorldId) -> Option<Arc<dyn World>> {
+        self.worlds
+            .get(id)?
+            .get(&None)
+            .map(|hosted| hosted.world.clone())
+    }
+
+    /// The descriptor for a World with exactly one installed implementation.
+    /// Call [`Self::descriptor_for`] when resolving authority or a retained
+    /// publication coordinate.
     pub fn descriptor(&self, id: &WorldId) -> Option<&Descriptor> {
-        self.worlds.get(id).map(|h| &h.descriptor)
+        let implementations = self.worlds.get(id)?;
+        (implementations.len() == 1).then(|| {
+            implementations
+                .values()
+                .next()
+                .map(|hosted| &hosted.descriptor)
+        })?
+    }
+
+    /// Resolve the descriptor at one exact authority-reviewed implementation.
+    pub fn descriptor_for(&self, id: &WorldId, implementation: [u8; 32]) -> Option<&Descriptor> {
+        let implementations = self.worlds.get(id)?;
+        implementations
+            .get(&Some(implementation))
+            .map(|hosted| &hosted.descriptor)
+    }
+
+    /// Descriptor paired with [`Self::unreviewed_world`]. It has no exact
+    /// implementation identity and is therefore not a historical resolver.
+    pub(crate) fn unreviewed_descriptor(&self, id: &WorldId) -> Option<&Descriptor> {
+        self.worlds
+            .get(id)?
+            .get(&None)
+            .map(|hosted| &hosted.descriptor)
+    }
+
+    /// Every installed descriptor for a World, ordered by exact implementation
+    /// identity. Used at activation to declare the union of readable Body
+    /// schemas without choosing an implementation implicitly.
+    pub fn descriptors(&self, id: &WorldId) -> impl Iterator<Item = &Descriptor> {
+        self.worlds
+            .get(id)
+            .into_iter()
+            .flat_map(|implementations| implementations.values())
+            .map(|hosted| &hosted.descriptor)
     }
 
     /// The hosted World ids, in canonical order.
@@ -202,7 +276,26 @@ impl Builder {
     /// masks a duplicate.
     pub fn register(mut self, world: Arc<dyn World>) -> Self {
         let descriptor = world.descriptor();
-        self.pending.push(Hosted { descriptor, world });
+        self.pending.push(Hosted {
+            descriptor,
+            world,
+            reviewed_implementation: None,
+        });
+        self
+    }
+
+    /// Register executable code under the exact authority-reviewed identity.
+    pub fn register_reviewed(
+        mut self,
+        world: Arc<dyn World>,
+        reviewed_implementation: [u8; 32],
+    ) -> Self {
+        let descriptor = world.descriptor();
+        self.pending.push(Hosted {
+            descriptor,
+            world,
+            reviewed_implementation: Some(reviewed_implementation),
+        });
         self
     }
 
@@ -210,7 +303,12 @@ impl Builder {
     /// versions, registration/impl mismatch, invalid limits, contradictory
     /// upgrade claims, and invalid or duplicated scope/signal declarations.
     pub fn build(self) -> Result<Catalog, Refusal> {
-        let mut worlds: BTreeMap<WorldId, Arc<Hosted>> = BTreeMap::new();
+        let mut worlds: BTreeMap<WorldId, BTreeMap<Option<[u8; 32]>, Arc<Hosted>>> =
+            BTreeMap::new();
+        let mut body_contracts: BTreeMap<
+            (WorldId, replica::body::SchemaId, u32),
+            replica::body::Schema,
+        > = BTreeMap::new();
         for hosted in self.pending {
             let id = hosted.descriptor.id.clone();
 
@@ -338,7 +436,27 @@ impl Builder {
             validate_find(&id, &hosted.descriptor)?;
             validate_exec(&id, &hosted.descriptor)?;
 
-            if worlds.insert(id.clone(), Arc::new(hosted)).is_some() {
+            for schema in &hosted.descriptor.schemas {
+                let coordinate = (id.clone(), schema.id.clone(), schema.version);
+                if body_contracts
+                    .insert(coordinate, schema.clone())
+                    .is_some_and(|prior| prior != *schema)
+                {
+                    return Err(Refusal::DuplicateSchemaVersion {
+                        world: id.clone(),
+                        schema: schema.id.as_str().to_string(),
+                        version: schema.version,
+                    });
+                }
+            }
+
+            let implementation = hosted.reviewed_implementation;
+            if worlds
+                .entry(id.clone())
+                .or_default()
+                .insert(implementation, Arc::new(hosted))
+                .is_some()
+            {
                 return Err(Refusal::DuplicateWorld(id));
             }
         }
@@ -426,32 +544,43 @@ fn validate_find(world: &WorldId, descriptor: &Descriptor) -> Result<(), Refusal
                     source: source.clone(),
                 });
             }
-            declared.insert(Extractor {
-                schema: canonical.reference.clone(),
-                source: source.clone(),
-            });
+            declared.insert((canonical.reference.clone(), source.clone()));
         }
     }
 
     let mut supplied = std::collections::BTreeSet::new();
     for extractor in &descriptor.find_extractors {
-        if !supplied.insert(extractor.clone()) {
+        let coordinate = (extractor.schema.clone(), extractor.source.clone());
+        if extractor.abi_version != crate::find::EXTRACTOR_ABI_VERSION
+            || extractor.semantic_digest == [0; 32]
+        {
+            return Err(Refusal::InvalidFindDeclaration {
+                world: world.clone(),
+                schema: extractor.schema.clone(),
+            });
+        }
+        if !supplied.insert(coordinate.clone()) {
             return Err(Refusal::DuplicateFindExtractor {
                 world: world.clone(),
                 extractor: extractor.clone(),
             });
         }
-        if !declared.contains(extractor) {
+        if !declared.contains(&coordinate) {
             return Err(Refusal::ExtraFindExtractor {
                 world: world.clone(),
                 extractor: extractor.clone(),
             });
         }
     }
-    if let Some(extractor) = declared.difference(&supplied).next() {
+    if let Some((schema, source)) = declared.difference(&supplied).next() {
         return Err(Refusal::MissingFindExtractor {
             world: world.clone(),
-            extractor: extractor.clone(),
+            extractor: Extractor {
+                schema: schema.clone(),
+                source: source.clone(),
+                abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+                semantic_digest: [0; 32],
+            },
         });
     }
     Ok(())
@@ -675,6 +804,8 @@ mod tests {
                 declaration.sources.iter().cloned().map(|source| Extractor {
                     schema: declaration.reference.clone(),
                     source,
+                    abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+                    semantic_digest: [0x51; 32],
                 })
             })
             .collect();
@@ -712,6 +843,8 @@ mod tests {
         let extractor = Extractor {
             schema: declaration.reference.clone(),
             source: declaration.sources[0].clone(),
+            abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+            semantic_digest: [0x52; 32],
         };
         Arc::new(TestWorld {
             id: WorldId::parse("com.example.product").unwrap(),
@@ -734,6 +867,40 @@ mod tests {
         let id = WorldId::parse("com.example.product").unwrap();
         assert!(registry.contains(&id));
         assert!(registry.world(&id).is_some());
+    }
+
+    #[test]
+    fn reviewed_world_resolves_only_under_its_exact_implementation() {
+        let world = test_world("com.example.product", vec![schema("issue", 1, vec![])]);
+        let registry = Builder::new()
+            .register_reviewed(world, [7; 32])
+            .build()
+            .unwrap();
+        let id = WorldId::parse("com.example.product").unwrap();
+
+        assert!(registry.world_for(&id, [7; 32]).is_some());
+        assert!(registry.world_for(&id, [8; 32]).is_none());
+    }
+
+    #[test]
+    fn multiple_reviewed_implementations_resolve_exactly_without_an_implicit_current() {
+        let old = test_world("com.example.product", vec![schema("issue", 1, vec![])]);
+        let current = test_world("com.example.product", vec![schema("issue", 1, vec![])]);
+        let registry = Builder::new()
+            .register_reviewed(old, [7; 32])
+            .register_reviewed(current, [8; 32])
+            .build()
+            .unwrap();
+        let id = WorldId::parse("com.example.product").unwrap();
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.world(&id).is_none());
+        assert!(registry.descriptor(&id).is_none());
+        assert!(registry.world_for(&id, [7; 32]).is_some());
+        assert!(registry.world_for(&id, [8; 32]).is_some());
+        assert!(registry.world_for(&id, [9; 32]).is_none());
+        assert!(registry.descriptor_for(&id, [7; 32]).is_some());
+        assert_eq!(registry.descriptors(&id).count(), 2);
     }
 
     #[test]
@@ -799,6 +966,8 @@ mod tests {
         let extractor = Extractor {
             schema: declaration.reference.clone(),
             source: declaration.sources[0].clone(),
+            abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+            semantic_digest: [0x55; 32],
         };
         assert!(Builder::new()
             .register(find_world(
@@ -816,7 +985,10 @@ mod tests {
             missing,
             Refusal::MissingFindExtractor {
                 world: WorldId::parse("com.example.product").unwrap(),
-                extractor: extractor.clone(),
+                extractor: Extractor {
+                    semantic_digest: [0; 32],
+                    ..extractor.clone()
+                },
             }
         );
 
@@ -826,6 +998,8 @@ mod tests {
                 version: 1,
             },
             source: extractor.source.clone(),
+            abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+            semantic_digest: [0x53; 32],
         };
         assert!(matches!(
             Builder::new()
@@ -840,6 +1014,8 @@ mod tests {
         let duplicated = Extractor {
             schema: declaration.reference.clone(),
             source: declaration.sources[0].clone(),
+            abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+            semantic_digest: [0x54; 32],
         };
         assert!(matches!(
             Builder::new()

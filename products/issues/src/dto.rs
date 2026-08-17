@@ -636,6 +636,8 @@ pub struct CheckDto {
     pub state: String,
     pub by: String,
     pub ts: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub package_filled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

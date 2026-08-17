@@ -144,6 +144,7 @@ fn list_titles(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Vec<Strin
                     me: None,
                 }
                 .to_json(),
+                publication: None,
             },
         )
         .expect("list");

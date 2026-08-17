@@ -189,6 +189,47 @@ impl SignedSubmitDto {
 }
 json_codec!(SignedSubmitDto);
 
+/// Portable semantic World publication coordinate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PublicationIdDto {
+    pub manifest_root_hex: String,
+    pub implementation_digest_hex: String,
+    pub extractor_schema_digest_hex: String,
+}
+
+impl PublicationIdDto {
+    fn validate(&self) -> Result<(), Invalid> {
+        for value in [
+            &self.manifest_root_hex,
+            &self.implementation_digest_hex,
+            &self.extractor_schema_digest_hex,
+        ] {
+            check_len(value)?;
+            check_hex32(value)?;
+        }
+        Ok(())
+    }
+}
+
+/// Complete Station-local read publication coordinate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WorldPublicationIdDto {
+    pub publication: PublicationIdDto,
+    pub materialization: u64,
+}
+
+impl WorldPublicationIdDto {
+    fn validate(&self) -> Result<(), Invalid> {
+        self.publication.validate()?;
+        if self.materialization == 0 {
+            return Err(Invalid::BadIdentifier);
+        }
+        Ok(())
+    }
+}
+
 /// A query request DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -198,6 +239,8 @@ pub struct QueryRequestDto {
     pub schema: String,
     pub schema_version: u32,
     pub payload_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationIdDto>,
 }
 
 impl QueryRequestDto {
@@ -205,7 +248,11 @@ impl QueryRequestDto {
         check_version(self.protocol_version)?;
         check_world(&self.world)?;
         check_schema_id(&self.schema)?;
-        check_b64_payload(&self.payload_b64)
+        check_b64_payload(&self.payload_b64)?;
+        if let Some(publication) = &self.publication {
+            publication.validate()?;
+        }
+        Ok(())
     }
 }
 json_codec!(QueryRequestDto);
@@ -223,6 +270,7 @@ pub struct CommittedEffectDto {
     pub frontier_transaction_count: u64,
     /// Hex of the touched 16-byte Body ids.
     pub scope_body_ids_hex: Vec<String>,
+    pub publication: WorldPublicationIdDto,
 }
 
 impl CommittedEffectDto {
@@ -235,7 +283,7 @@ impl CommittedEffectDto {
             check_len(id)?;
             check_hex16(id)?;
         }
-        Ok(())
+        self.publication.validate()
     }
 }
 json_codec!(CommittedEffectDto);
@@ -251,6 +299,7 @@ pub struct ProjectionDto {
     pub bytes_b64: String,
     pub frontier_root_hex: String,
     pub frontier_transaction_count: u64,
+    pub publication: WorldPublicationIdDto,
 }
 
 impl ProjectionDto {
@@ -259,7 +308,8 @@ impl ProjectionDto {
         check_schema_id(&self.schema)?;
         check_b64_payload(&self.bytes_b64)?;
         check_len(&self.frontier_root_hex)?;
-        check_hex32(&self.frontier_root_hex)
+        check_hex32(&self.frontier_root_hex)?;
+        self.publication.validate()
     }
 }
 json_codec!(ProjectionDto);
@@ -351,6 +401,7 @@ impl ErrorDto {
             // recovery UX off "denied"; the message carries the remedy.
             E::Denied(_) => "denied",
             E::NoActiveImplementation => "no-active-implementation",
+            E::ImplementationUnavailable => "implementation-unavailable",
             E::Conflict => "conflict",
             E::LimitExceeded => "limit-exceeded",
             E::StateCorrupt => "world-state-corrupt",
@@ -378,6 +429,8 @@ pub fn schema_bundle() -> serde_json::Value {
     }
     add!(SubmitRequestDto, "SubmitRequestDto");
     add!(SignedSubmitDto, "SignedSubmitDto");
+    add!(PublicationIdDto, "PublicationIdDto");
+    add!(WorldPublicationIdDto, "WorldPublicationIdDto");
     add!(QueryRequestDto, "QueryRequestDto");
     add!(CommittedEffectDto, "CommittedEffectDto");
     add!(ProjectionDto, "ProjectionDto");
@@ -453,6 +506,17 @@ pub fn identifier_schemas() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn publication() -> WorldPublicationIdDto {
+        WorldPublicationIdDto {
+            publication: PublicationIdDto {
+                manifest_root_hex: "11".repeat(32),
+                implementation_digest_hex: "22".repeat(32),
+                extractor_schema_digest_hex: "33".repeat(32),
+            },
+            materialization: 1,
+        }
+    }
 
     fn sample() -> SubmitRequestDto {
         SubmitRequestDto {
@@ -543,6 +607,7 @@ mod tests {
             frontier_root_hex: "ab".repeat(31),
             frontier_transaction_count: 3,
             scope_body_ids_hex: vec![],
+            publication: publication(),
         };
         assert_eq!(
             CommittedEffectDto::from_json(&e.to_json()),
@@ -568,6 +633,7 @@ mod tests {
             schema: "note".into(),
             schema_version: 1,
             payload_b64: "AA==".into(),
+            publication: Some(publication().publication),
         };
         assert_eq!(QueryRequestDto::from_json(&q.to_json()).unwrap(), q);
         let p = ProjectionDto {
@@ -577,6 +643,7 @@ mod tests {
             bytes_b64: "AA==".into(),
             frontier_root_hex: "ab".repeat(32),
             frontier_transaction_count: 1,
+            publication: publication(),
         };
         assert_eq!(ProjectionDto::from_json(&p.to_json()).unwrap(), p);
         let c = ObservationCursorDto {

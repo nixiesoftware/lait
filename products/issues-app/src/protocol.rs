@@ -8,6 +8,32 @@ use serde_json::Value;
 pub const OPERATION: &str = "issues.control";
 pub const VERSION: u32 = 2;
 
+/// Portable semantic publication coordinate. All three digests are mandatory:
+/// a Manifest root alone does not identify the World implementation or the
+/// extractor contract that gave the corpus its meaning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PublicationCoordinate {
+    pub manifest_root: String,
+    pub implementation_digest: String,
+    pub extractor_schema_digest: String,
+}
+
+impl PublicationCoordinate {
+    pub fn parse(&self) -> Option<runtime::publication::PublicationId> {
+        fn digest(value: &str) -> Option<[u8; 32]> {
+            let bytes = data_encoding::HEXLOWER.decode(value.as_bytes()).ok()?;
+            bytes.as_slice().try_into().ok()
+        }
+        Some(runtime::publication::PublicationId::new(
+            digest(&self.manifest_root)?,
+            digest(&self.implementation_digest)?,
+            runtime::publication::ExtractorSchemaDigest::from_digest(digest(
+                &self.extractor_schema_digest,
+            )?),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "at", rename_all = "snake_case")]
 pub enum BoardPos {
@@ -51,6 +77,38 @@ pub struct AccessAssignment {
     pub resource: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ChangeProject {
+    Existing { project: String },
+    Created { operation: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ChangeOperation {
+    ProjectCreate {
+        name: String,
+        key: String,
+        color: String,
+    },
+    SpecCreate {
+        project: ChangeProject,
+        kind: issues::spec::Kind,
+        title: String,
+        text: String,
+        #[serde(default)]
+        links: Vec<issues::spec::Link>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeEffect {
+    pub operation: u16,
+    pub kind: String,
+    pub id: String,
+}
+
 /// Issues-owned application requests.
 ///
 /// The tagged JSON representation is also the Issues web-client contract. All
@@ -58,6 +116,11 @@ pub struct AccessAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum IssuesRequest {
+    /// Atomically lower dependent project/Spec creation through one product
+    /// planner and one Runtime publication.
+    ChangeSet {
+        operations: Vec<ChangeOperation>,
+    },
     /// Audit which current Blueprint records still depend on compatibility
     /// readers instead of native relation, Plan, and generation structures.
     StructureStatus,
@@ -223,14 +286,18 @@ pub enum IssuesRequest {
     ProjectGraph {
         project: String,
     },
-    /// Deterministic Issue morphology for a Plan seed. `generation` is an
-    /// optional 64-hex World snapshot root; absent means current.
+    /// Deterministic Issue morphology for a Plan seed. `publication` selects
+    /// one exact semantic corpus; absence means the authority-active current
+    /// publication. `page` is bounded and artifact-pinned by its cursor.
     Geometry {
         project: String,
         #[serde(default)]
         roots: Vec<String>,
         #[serde(default)]
-        generation: Option<String>,
+        publication: Option<PublicationCoordinate>,
+        #[serde(default)]
+        #[schemars(with = "Option<serde_json::Value>")]
+        page: Option<issues::geometry::GeometryPageRequest>,
     },
     IssueStart {
         reff: String,
@@ -245,6 +312,7 @@ pub enum IssuesRequest {
     Verify {
         reff: String,
         source: String,
+        #[serde(default)]
         build: String,
     },
     /// Accept one returned verification report into issue truth.
@@ -632,6 +700,9 @@ pub enum IssuesRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssuesResponse {
+    ChangeSet {
+        results: Vec<ChangeEffect>,
+    },
     Ok {
         message: Option<String>,
     },
@@ -650,7 +721,7 @@ pub enum IssuesResponse {
     Board(Box<issues::dto::BoardView>),
     Graph(Box<issues::dto::GraphView>),
     ProjectGraph(Box<issues::dto::ProjectGraphView>),
-    Geometry(Box<issues::geometry::GeometryView>),
+    Geometry(Box<issues::contract::GeometryProjection>),
     Activity {
         events: Vec<issues::dto::ActivityEvent>,
         /// The resume token for the next pull. A pull that returned nothing
@@ -873,7 +944,8 @@ impl IssuesRequest {
             | BaselineShow { .. }
             | BaselineHistory { .. }
             | Packet { .. } => Access::Query,
-            StructureMigrate
+            ChangeSet { .. }
+            | StructureMigrate
             | IssueNew { .. }
             | IssueEdit { .. }
             | IssueTextSplice { .. }
@@ -1048,7 +1120,11 @@ mod tests {
             spec: "spc_01JV0IUE".into(),
             project: "prj_01JUM4INOC41PRQOF2B082EB87".into(),
             kind: issues::spec::Kind::Requirement,
-            generation: String::new(),
+            publication: runtime::publication::PublicationId::new(
+                [1; 32],
+                [2; 32],
+                runtime::publication::ExtractorSchemaDigest::from_digest([3; 32]),
+            ),
             title: "Login is race-free".into(),
             text: String::new(),
             state: issues::spec::State::Draft,

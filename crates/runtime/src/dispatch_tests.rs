@@ -124,10 +124,22 @@ fn submit_as(
 struct NoteWorld {
     id: WorldId,
     schemas: Vec<Schema>,
+    find_schemas: Vec<crate::find::Schema>,
+    find_extractors: Vec<crate::find::Extractor>,
 }
 
 impl NoteWorld {
     fn new() -> Self {
+        let find_schema = note_find_schema();
+        let find_extractor = crate::find::Extractor {
+            schema: find_schema.reference.clone(),
+            source: crate::find::SourceRef {
+                name: SchemaId::parse("note").unwrap(),
+                version: 1,
+            },
+            abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+            semantic_digest: [0x31; 32],
+        };
         Self {
             id: WorldId::parse("com.example.notes").unwrap(),
             schemas: vec![Schema {
@@ -137,6 +149,8 @@ impl NoteWorld {
                 mutation: MutationModel::Atomic,
                 readable_predecessors: vec![],
             }],
+            find_schemas: vec![find_schema],
+            find_extractors: vec![find_extractor],
         }
     }
 }
@@ -147,6 +161,50 @@ impl World for NoteWorld {
     }
     fn schemas(&self) -> &[Schema] {
         &self.schemas
+    }
+    fn find_schemas(&self) -> &[crate::find::Schema] {
+        &self.find_schemas
+    }
+    fn find_extractors(&self) -> &[crate::find::Extractor] {
+        &self.find_extractors
+    }
+    fn extract(
+        &self,
+        ctx: &crate::world::ExtractionContext<'_>,
+        extractor: &crate::find::Extractor,
+        body: &BodyKey,
+    ) -> Result<crate::find::BodyExtraction, Rejection> {
+        if extractor != &self.find_extractors[0] {
+            return Err(Rejection::ContractViolation);
+        }
+        let value = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+        let text = String::from_utf8(value).map_err(|_| Rejection::StateCorrupt)?;
+        let schema = self.find_schemas[0].reference.clone();
+        let field = self.find_schemas[0].fields[0].reference.clone();
+        let terms = text
+            .split_whitespace()
+            .map(|term| Arc::<[u8]>::from(term.to_lowercase().into_bytes()))
+            .collect();
+        Ok(crate::find::BodyExtraction {
+            body: body.clone(),
+            stamp: ctx.body_stamp(body).unwrap_or_default(),
+            nodes: vec![crate::find::ExtractedNode {
+                key: crate::find::NodeKey {
+                    schema,
+                    node: crate::find::NodeId::new(b"note".to_vec())
+                        .map_err(|_| Rejection::ContractViolation)?,
+                },
+                gate: None,
+                fields: vec![crate::find::ExtractedField {
+                    reference: field,
+                    value: crate::find::Value::text(text),
+                    gate: None,
+                    terms,
+                }],
+                edges: Vec::new(),
+                features: Vec::new(),
+            }],
+        })
     }
     fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         if intent.schema.as_str() != "note" {
@@ -184,6 +242,7 @@ impl World for NoteWorld {
             schema_version: 1,
             bytes: text.to_uppercase().into_bytes(),
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -197,8 +256,8 @@ fn note_registration() -> (Descriptor, Arc<dyn World>) {
         limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
-        find_schemas: Vec::new(),
-        find_extractors: Vec::new(),
+        find_schemas: world.find_schemas().to_vec(),
+        find_extractors: world.find_extractors().to_vec(),
         exec_specs: Vec::new(),
     };
     (reg, Arc::new(world))
@@ -236,6 +295,15 @@ impl World for DescribedWorld {
 
     fn find_extractors(&self) -> &[crate::find::Extractor] {
         self.inner.find_extractors()
+    }
+
+    fn extract(
+        &self,
+        ctx: &crate::world::ExtractionContext<'_>,
+        extractor: &crate::find::Extractor,
+        body: &BodyKey,
+    ) -> Result<crate::find::BodyExtraction, Rejection> {
+        self.inner.extract(ctx, extractor, body)
     }
 
     fn exec_specs(&self) -> &[crate::exec::Spec] {
@@ -296,7 +364,7 @@ fn exec_schema(name: &str) -> crate::exec::SchemaRef {
 
 fn exec_limits() -> crate::exec::Limits {
     crate::exec::Limits {
-        attempts: 1,
+        attempts: 3,
         events: 16,
         checkpoints: 0,
         child_runs: 1,
@@ -341,10 +409,15 @@ struct ExecAtomicWorld {
     id: WorldId,
     schemas: Vec<Schema>,
     specs: Vec<crate::exec::Spec>,
+    build: crate::exec::BuildId,
 }
 
 impl ExecAtomicWorld {
     fn new() -> Self {
+        Self::with_build(crate::exec::BuildId::from_bytes([0x32; 32]))
+    }
+
+    fn with_build(build: crate::exec::BuildId) -> Self {
         Self {
             id: WorldId::parse("com.example.exec-atomic").unwrap(),
             schemas: vec![Schema {
@@ -355,6 +428,7 @@ impl ExecAtomicWorld {
                 readable_predecessors: Vec::new(),
             }],
             specs: vec![exec_spec()],
+            build,
         }
     }
 
@@ -386,7 +460,7 @@ impl World for ExecAtomicWorld {
             content_refs: Vec::new(),
             exec: vec![crate::exec::Cmd::Start(crate::exec::Start {
                 spec,
-                build: crate::exec::BuildId::from_bytes([0x32; 32]),
+                build: self.build,
                 input: crate::exec::Input {
                     inline: intent.payload.clone(),
                     content: Vec::new(),
@@ -419,6 +493,7 @@ impl World for ExecAtomicWorld {
             bytes: ctx.read_body(&self.product_body()).unwrap_or_default(),
             frontier: ReplicaFrontier::EMPTY,
             demand: exec_demand("request.read"),
+            publication: None,
         })
     }
 }
@@ -438,6 +513,42 @@ fn find_bound(value: u64) -> crate::find::Bound {
     }
 }
 
+fn note_find_schema() -> crate::find::Schema {
+    let schema = crate::find::SchemaRef {
+        name: SchemaId::parse("note").unwrap(),
+        version: 1,
+    };
+    let analyzer = crate::find::AnalyzerRef {
+        schema: schema.clone(),
+        name: SchemaId::parse("token").unwrap(),
+    };
+    crate::find::Schema {
+        reference: schema.clone(),
+        sources: vec![crate::find::SourceRef {
+            name: SchemaId::parse("note").unwrap(),
+            version: 1,
+        }],
+        fields: vec![crate::find::Field {
+            reference: crate::find::FieldRef {
+                schema: schema.clone(),
+                name: SchemaId::parse("text").unwrap(),
+            },
+            kind: crate::find::FieldKind::Text,
+            analyzer: Some(analyzer.clone()),
+        }],
+        edges: Vec::new(),
+        gates: Vec::new(),
+        analyzers: vec![crate::find::Analyzer {
+            reference: analyzer,
+            configuration: b"test.token".to_vec(),
+        }],
+        features: Vec::new(),
+        ops: crate::find::OpSet::SEEK,
+        modes: crate::find::ModeSet::EXACT,
+        bound: find_bound(100),
+    }
+}
+
 fn find_query(value: u64) -> crate::find::Query {
     let schema = crate::find::SchemaRef {
         name: SchemaId::parse("note").unwrap(),
@@ -445,7 +556,7 @@ fn find_query(value: u64) -> crate::find::Query {
     };
     crate::find::Query {
         schema: schema.clone(),
-        root: None,
+        publication: None,
         mode: crate::find::Mode::Exact,
         steps: vec![crate::find::Step {
             id: crate::find::StepId::new(1).unwrap(),
@@ -462,6 +573,9 @@ fn find_query(value: u64) -> crate::find::Query {
         }],
         output: crate::find::StepId::new(1).unwrap(),
         bound: find_bound(value),
+        page_size: u32::try_from(value)
+            .unwrap_or(crate::find::MAX_PAGE_SIZE)
+            .clamp(1, crate::find::MAX_PAGE_SIZE),
         cursor: None,
     }
 }
@@ -513,6 +627,7 @@ fn world_mutation_and_started_run_commit_as_one_durable_effect() {
             schema: SchemaId::parse("agent.request").unwrap(),
             schema_version: 1,
             payload: Vec::new(),
+            publication: None,
         })
         .unwrap();
     assert_eq!(projection.bytes, payload);
@@ -629,9 +744,616 @@ fn invalid_start_rolls_back_the_companion_world_mutation() {
             schema: SchemaId::parse("agent.request").unwrap(),
             schema_version: 1,
             payload: Vec::new(),
+            publication: None,
         })
         .unwrap();
     assert!(projection.bytes.is_empty());
+}
+
+fn exec_signed_build(world: &WorldId) -> crate::exec::Build {
+    let spec = exec_spec();
+    let seed = [0x61; 32];
+    crate::exec::Build {
+        id: crate::exec::BuildId::from_bytes([0; 32]),
+        world: world.clone(),
+        world_build: [0; 32],
+        spec: crate::exec::SchemaRef {
+            name: spec.name,
+            version: spec.version,
+        },
+        handler: replica::content::ContentRef {
+            content_id: [0x62; 32],
+        },
+        dependencies: None,
+        environment: [0x63; 32],
+        config: Vec::new(),
+        checkpoint: None,
+        replay_commands: None,
+        compatible_from: Vec::new(),
+        publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+        signature: crate::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&seed),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&seed)
+    .unwrap()
+}
+
+struct EchoHandler {
+    binding: crate::exec::HandlerBinding,
+}
+
+impl crate::exec::Handler for EchoHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        _context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        Ok(crate::exec::Candidate {
+            output: exec_schema("agent.output"),
+            inline: b"ok".to_vec(),
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: crate::exec::TerminalClass::Succeeded,
+            usage: Vec::new(),
+            evidence: Vec::new(),
+        })
+    }
+}
+
+struct PanicHandler {
+    binding: crate::exec::HandlerBinding,
+}
+
+impl crate::exec::Handler for PanicHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        _context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        panic!("inherited Began must not re-enter a handler");
+    }
+}
+
+fn exec_package(
+    build: &crate::exec::Build,
+    handler: Arc<dyn crate::exec::Handler>,
+) -> crate::exec::Package {
+    crate::exec::Package::new()
+        .with_spec(exec_spec())
+        .with_build(build.clone())
+        .with_handler(handler)
+}
+
+fn echo_package(build: &crate::exec::Build) -> crate::exec::Package {
+    exec_package(
+        build,
+        Arc::new(EchoHandler {
+            binding: crate::exec::HandlerBinding {
+                spec: build.spec.clone(),
+                build: build.id,
+                artifact: build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+        }),
+    )
+}
+
+#[test]
+fn local_perform_commits_try_began_and_returned() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0x64; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"perform locally".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+
+    let package = echo_package(&build);
+    let report = session
+        .perform(&package, |_| {
+            panic!("this handler stages no output content");
+        })
+        .unwrap();
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Tried { .. })));
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Began { .. })));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0x65; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(state.attempts.len(), 1);
+    assert_eq!(state.attempts[0].returned.len(), 1);
+    assert!(state.unresolved);
+    assert!(state.accepted.is_empty());
+
+    let idle = session
+        .perform(&package, |_| {
+            panic!("a Returned Attempt is not invoked again");
+        })
+        .unwrap();
+    assert!(idle.steps.is_empty());
+}
+
+fn announced_offer(
+    session: &crate::session::Session,
+    identity: &LocalIdentity,
+    build: crate::exec::BuildId,
+    expiry: u64,
+) -> crate::exec::Offer {
+    crate::exec::Offer {
+        id: crate::exec::OfferId::from_bytes([0; 16]),
+        space: session.space_id().clone(),
+        station: mechanics::station::Key::from_device(identity.device()).unwrap(),
+        station_epoch: session.epoch(),
+        actor: ActorId::from_incept_hash(&"a".repeat(64)),
+        device: identity.device().clone(),
+        world: session.world_id().clone(),
+        world_build: session.implementation(),
+        builds: vec![crate::exec::OfferedBuild {
+            id: build,
+            spec: exec_schema("agent.implement"),
+        }],
+        resources: vec![crate::exec::Resource {
+            name: SchemaId::parse(crate::exec::MEMORY_BYTES).unwrap(),
+            amount: 65_536,
+        }],
+        backend: SchemaId::parse("in-process.rust").unwrap(),
+        enforcement: crate::exec::Enforcement::Advisory,
+        resident: Vec::new(),
+        availability: crate::exec::Availability::Ready,
+        epoch: 1,
+        expiry,
+        publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+        signature: crate::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&WRITER_SEED),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&WRITER_SEED)
+    .unwrap()
+}
+
+#[test]
+fn announced_offer_news_is_lossy_and_does_not_own_a_run() {
+    let _clock = mechanics::wallclock::Frozen::at_millis(1_000);
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+
+    let live = announced_offer(&session, &identity, build.id, 2_000);
+    let id = session.announce(live.clone()).expect("valid news is held");
+    assert_eq!(id, live.id);
+    assert_eq!(session.news(id).map(|held| held.id), Some(id));
+
+    let challenge = session.challenge(id).expect("live news can be challenged");
+    let answer = crate::exec::Ready::sign(&challenge, &WRITER_SEED).unwrap();
+    assert_eq!(session.ready(answer).expect("signed Ready is held"), id);
+    assert!(matches!(
+        session.ready(crate::exec::Ready::sign(&challenge, &WRITER_SEED).unwrap()),
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    ));
+
+    let mut foreign = live.clone();
+    foreign.station = mechanics::station::Key::from_key_bytes([0x99; 32]);
+    foreign = foreign.sign(&WRITER_SEED).unwrap();
+    assert!(matches!(
+        session.announce(foreign),
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    ));
+
+    let expired = announced_offer(&session, &identity, build.id, 500);
+    assert!(matches!(
+        session.announce(expired),
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    ));
+
+    let request = crate::action::RequestId::from_bytes([0x85; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"offer is not ownership".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let report = session
+        .perform(&echo_package(&build), |_| {
+            panic!("this handler stages no output content");
+        })
+        .unwrap();
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Tried { .. })));
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id,
+                run,
+            },
+            [0x89; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(state.attempts.len(), 1);
+    assert_eq!(state.attempts[0].offer, Some(id));
+    assert_eq!(state.attempts[0].returned.len(), 1);
+}
+
+#[test]
+fn published_build_is_durable_identity_and_does_not_rerank_open_runs() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+
+    let published = session
+        .publish_build(build.clone())
+        .expect("a signed Build publishes into the reserved Body");
+    assert_eq!(published, build.id);
+    assert_eq!(
+        session
+            .published_build(build.id)
+            .expect("published Build is readable")
+            .map(|held| held.id),
+        Some(build.id)
+    );
+    assert_eq!(
+        session
+            .publish_build(build.clone())
+            .expect("same envelope is idempotent"),
+        build.id
+    );
+
+    let request = crate::action::RequestId::from_bytes([0x86; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"pin this Build".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let crate::exec::WorkReply::State(before) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0x87; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(before.build, build.id);
+
+    let mut later = build.clone();
+    later.environment = [0x99; 32];
+    later = later.sign(&[0x61; 32]).unwrap();
+    assert_ne!(later.id, build.id);
+    session
+        .publish_build(later)
+        .expect("a different Build id publishes beside the pinned one");
+
+    let crate::exec::WorkReply::State(after) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id,
+                run,
+            },
+            [0x88; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(after.build, build.id);
+}
+
+#[test]
+fn prior_epoch_leased_without_began_is_failed_and_retried() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: world.descriptor(),
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = crate::lifecycle::Runtime::open(
+        temp_root(),
+        registry,
+        Arc::new(SeedAuthority),
+        test_keys(),
+    );
+    let orbit = rt.create().unwrap();
+    let space = orbit.space_id().clone();
+    let station = orbit.open(Activation::default()).unwrap();
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"recover leased without began".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = echo_package(&build);
+    let (run, attempt) = session.test_lease(&package).unwrap();
+    let orbit = station.vacate().unwrap();
+    drop(orbit);
+
+    let station = rt
+        .acquire(&space)
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let report = session
+        .perform(&package, |_| {
+            panic!("this handler stages no output content");
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            run: failed_run,
+            attempt: failed_attempt,
+            class: crate::exec::FailureClass::Unknown,
+        } if *failed_run == run && *failed_attempt == attempt
+    )));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+}
+
+#[test]
+fn inherited_began_is_failed_not_retried() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"recover inherited begin".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let binding = crate::exec::HandlerBinding {
+        spec: build.spec.clone(),
+        build: build.id,
+        artifact: build.handler,
+        role: None,
+        links: Vec::new(),
+    };
+    let package = exec_package(&build, Arc::new(PanicHandler { binding }));
+    let (run, attempt) = session.test_lease_and_begin(&package).unwrap();
+    let report = session
+        .perform(&package, |_| {
+            panic!("recovery must not ingest output");
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            run: failed_run,
+            attempt: failed_attempt,
+            class: crate::exec::FailureClass::Unknown,
+        } if *failed_run == run && *failed_attempt == attempt
+    )));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Tried { run: next_run, attempt: next_attempt }
+            if *next_run == run && *next_attempt != attempt
+    )));
+}
+
+#[test]
+fn unknown_recovery_retries_once_then_a_return_is_idle() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"recover then return".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let package = echo_package(&build);
+    let (run, attempt) = session.test_lease_and_begin(&package).unwrap();
+    let report = session
+        .perform(&package, |_| {
+            panic!("this handler stages no output content");
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            run: failed_run,
+            attempt: failed_attempt,
+            class: crate::exec::FailureClass::Unknown,
+        } if *failed_run == run && *failed_attempt == attempt
+    )));
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+
+    let idle = session
+        .perform(&package, |_| {
+            panic!("a Returned Attempt is not another outbox retry");
+        })
+        .unwrap();
+    assert!(idle.steps.is_empty());
+}
+
+#[test]
+fn handler_failure_is_not_an_automatic_retry() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"handler failure is terminal for the outbox".to_vec(),
+        },
+    )
+    .unwrap();
+
+    let binding = crate::exec::HandlerBinding {
+        spec: build.spec.clone(),
+        build: build.id,
+        artifact: build.handler,
+        role: None,
+        links: Vec::new(),
+    };
+    let package = exec_package(&build, Arc::new(PanicHandler { binding }));
+    let report = session
+        .perform(&package, |_| {
+            panic!("a panicking handler stages no output");
+        })
+        .unwrap();
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed {
+            class: crate::exec::FailureClass::Backend,
+            ..
+        }
+    )));
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .filter(|step| matches!(step, crate::exec::PerformStep::Tried { .. }))
+            .count(),
+        1
+    );
+
+    let idle = session
+        .perform(&package, |_| {
+            panic!("handler failure must not mint another outbox Attempt");
+        })
+        .unwrap();
+    assert!(idle.steps.is_empty());
 }
 
 #[test]
@@ -646,6 +1368,7 @@ fn test_world_submits_and_queries_through_dispatch() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(empty.bytes, b"");
@@ -672,6 +1395,7 @@ fn test_world_submits_and_queries_through_dispatch() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(proj.bytes, b"HELLO");
@@ -715,6 +1439,7 @@ fn many_sessions_dock_independently_without_owning_the_station() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"ok".to_vec(),
+            publication: None,
         })
         .is_ok());
     // The Station survives its Sessions and can still go dormant.
@@ -733,6 +1458,7 @@ fn dormancy_terminates_sessions() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"x".to_vec(),
+            publication: None,
         }),
         Err(SessionFailure::Interrupted)
     );
@@ -752,6 +1478,7 @@ fn a_session_cannot_stop_the_station() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"ok".to_vec(),
+            publication: None,
         })
         .is_ok());
     // A tracked task panicking does not stop the Station's ability to go dormant.
@@ -767,6 +1494,8 @@ fn a_session_cannot_stop_the_station() {
 struct PanicWorld {
     id: WorldId,
     schemas: Vec<Schema>,
+    find_schemas: Vec<crate::find::Schema>,
+    find_extractors: Vec<crate::find::Extractor>,
 }
 impl World for PanicWorld {
     fn id(&self) -> WorldId {
@@ -774,6 +1503,12 @@ impl World for PanicWorld {
     }
     fn schemas(&self) -> &[Schema] {
         &self.schemas
+    }
+    fn find_schemas(&self) -> &[crate::find::Schema] {
+        &self.find_schemas
+    }
+    fn find_extractors(&self) -> &[crate::find::Extractor] {
+        &self.find_extractors
     }
     fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
         panic!("world callback panics")
@@ -793,6 +1528,16 @@ fn find_derives_ambient_coordinates_without_entering_the_world() {
         mutation: MutationModel::Atomic,
         readable_predecessors: vec![],
     }];
+    let find_schema = note_find_schema();
+    let find_extractor = crate::find::Extractor {
+        schema: find_schema.reference.clone(),
+        source: crate::find::SourceRef {
+            name: SchemaId::parse("note").unwrap(),
+            version: 1,
+        },
+        abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+        semantic_digest: [0x32; 32],
+    };
     let reg = Descriptor {
         id: id.clone(),
         implementation_version: Version(1),
@@ -800,8 +1545,8 @@ fn find_derives_ambient_coordinates_without_entering_the_world() {
         limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
-        find_schemas: Vec::new(),
-        find_extractors: Vec::new(),
+        find_schemas: vec![find_schema.clone()],
+        find_extractors: vec![find_extractor.clone()],
         exec_specs: Vec::new(),
     };
     let station = station_with(
@@ -809,15 +1554,17 @@ fn find_derives_ambient_coordinates_without_entering_the_world() {
         Arc::new(PanicWorld {
             id: id.clone(),
             schemas,
+            find_schemas: vec![find_schema],
+            find_extractors: vec![find_extractor],
         }),
     );
     let session = station.dock(&id, &writer()).unwrap();
     let before = station.frontier();
 
-    assert_eq!(
-        session.find(find_query(1)),
-        Err(crate::find::Failure::Unavailable)
-    );
+    let answer = session.find(find_query(1)).unwrap();
+    assert!(answer.rows().is_empty());
+    assert_eq!(answer.coordinates().world, id);
+    assert_eq!(answer.coordinates().root, station.frontier().root);
 
     let mut resumed = find_query(1);
     let hostile_coordinates = crate::find::Coordinates {
@@ -826,6 +1573,8 @@ fn find_derives_ambient_coordinates_without_entering_the_world() {
         world: id.clone(),
         implementation: [7; 32],
         root: [8; 32],
+        extractor_schema_digest: crate::publication::ExtractorSchemaDigest::from_digest([6; 32]),
+        materialization: crate::publication::MaterializationId::from_u64(1).unwrap(),
         actor: ActorId::from_incept_hash(&"f".repeat(64)),
         device: mechanics::actor::device_from_seed(&WRITER_SEED),
         authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![9]),
@@ -873,10 +1622,531 @@ fn station_find_policy_can_only_tighten_a_query() {
         session.find(find_query(2)),
         Err(crate::find::Failure::PolicyExceeded)
     );
+    assert!(session.find(find_query(1)).unwrap().rows().is_empty());
+}
+
+#[test]
+fn historical_find_uses_the_exact_installed_implementation_after_activation_moves() {
+    struct SwitchingAuthority {
+        implementation: std::sync::Mutex<[u8; 32]>,
+    }
+
+    impl AuthorityView for SwitchingAuthority {
+        fn resolve(&self, _device: &DeviceId) -> Option<PrincipalResolution> {
+            Some(PrincipalResolution {
+                actor: ActorId::from_incept_hash(&"a".repeat(64)),
+                authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
+            })
+        }
+
+        fn active_implementation(
+            &self,
+            _world: &WorldId,
+            _authority_frontier: &AuthorityFrontier,
+        ) -> Result<Option<[u8; 32]>, String> {
+            Ok(Some(*self.implementation.lock().unwrap()))
+        }
+    }
+
+    struct VersionedNoteWorld {
+        inner: NoteWorld,
+        extractor: Vec<crate::find::Extractor>,
+        marker: &'static str,
+    }
+
+    impl VersionedNoteWorld {
+        fn new(semantic: u8, marker: &'static str) -> Self {
+            let inner = NoteWorld::new();
+            let mut extractor = inner.find_extractors().to_vec();
+            extractor[0].semantic_digest = [semantic; 32];
+            Self {
+                inner,
+                extractor,
+                marker,
+            }
+        }
+    }
+
+    impl World for VersionedNoteWorld {
+        fn id(&self) -> WorldId {
+            self.inner.id()
+        }
+
+        fn schemas(&self) -> &[Schema] {
+            self.inner.schemas()
+        }
+
+        fn find_schemas(&self) -> &[crate::find::Schema] {
+            self.inner.find_schemas()
+        }
+
+        fn find_extractors(&self) -> &[crate::find::Extractor] {
+            &self.extractor
+        }
+
+        fn extract(
+            &self,
+            ctx: &crate::world::ExtractionContext<'_>,
+            extractor: &crate::find::Extractor,
+            body: &BodyKey,
+        ) -> Result<crate::find::BodyExtraction, Rejection> {
+            if extractor != &self.extractor[0] {
+                return Err(Rejection::ContractViolation);
+            }
+            let value = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+            let text = format!(
+                "{} {}",
+                self.marker,
+                String::from_utf8(value).map_err(|_| Rejection::StateCorrupt)?
+            );
+            let schema = self.find_schemas()[0].reference.clone();
+            Ok(crate::find::BodyExtraction {
+                body: body.clone(),
+                stamp: ctx.body_stamp(body).unwrap_or_default(),
+                nodes: vec![crate::find::ExtractedNode {
+                    key: crate::find::NodeKey {
+                        schema: schema.clone(),
+                        node: crate::find::NodeId::new(b"note".to_vec())
+                            .map_err(|_| Rejection::ContractViolation)?,
+                    },
+                    gate: None,
+                    fields: vec![crate::find::ExtractedField {
+                        reference: self.find_schemas()[0].fields[0].reference.clone(),
+                        value: crate::find::Value::text(text.clone()),
+                        gate: None,
+                        terms: text
+                            .split_whitespace()
+                            .map(|term| Arc::<[u8]>::from(term.as_bytes()))
+                            .collect(),
+                    }],
+                    edges: Vec::new(),
+                    features: Vec::new(),
+                }],
+            })
+        }
+
+        fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+            self.inner.submit(ctx, intent)
+        }
+
+        fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+            let mut projection = self.inner.query(ctx, query)?;
+            projection.bytes = format!(
+                "{}:{}",
+                self.marker,
+                String::from_utf8(projection.bytes).map_err(|_| Rejection::StateCorrupt)?
+            )
+            .into_bytes();
+            Ok(projection)
+        }
+    }
+
+    let v1 = [0x71; 32];
+    let v2 = [0x72; 32];
+    let authority = Arc::new(SwitchingAuthority {
+        implementation: std::sync::Mutex::new(v1),
+    });
+    let old: Arc<dyn World> = Arc::new(VersionedNoteWorld::new(0x41, "old"));
+    let current: Arc<dyn World> = Arc::new(VersionedNoteWorld::new(0x42, "new"));
+    let world = old.id();
+    let registry = Builder::new()
+        .register_reviewed(old, v1)
+        .register_reviewed(current, v2)
+        .build()
+        .unwrap();
+    let runtime = Runtime::open(temp_root(), registry, authority.clone(), test_keys());
+    let station = runtime
+        .create()
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let old_session = station.dock(&world, &writer()).unwrap();
+    submit_as(
+        &old_session,
+        &writer(),
+        Intent {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: b"body".to_vec(),
+        },
+    )
+    .unwrap();
+    let mut old_query = find_query(10);
+    if let crate::find::Op::Seek(crate::find::Seek::Term { text, .. }) = &mut old_query.steps[0].op
+    {
+        *text = "old".to_owned();
+    }
+    let old_publication = old_session
+        .find(old_query.clone())
+        .unwrap()
+        .coordinates()
+        .publication();
+
+    *authority.implementation.lock().unwrap() = v2;
+    old_session.publish_authority_advanced();
+    let current_session = station.dock(&world, &writer()).unwrap();
+
+    old_query.publication = Some(old_publication);
+    let historical = current_session.find(old_query).unwrap();
+    assert_eq!(historical.rows().len(), 1);
+    assert_eq!(historical.coordinates().implementation, v1);
+    assert_eq!(historical.coordinates().publication(), old_publication);
+
+    let historical_projection = current_session
+        .query(Query {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: Vec::new(),
+            publication: Some(old_publication),
+        })
+        .unwrap();
+    assert_eq!(historical_projection.bytes, b"old:BODY");
     assert_eq!(
-        session.find(find_query(1)),
-        Err(crate::find::Failure::Unavailable)
+        historical_projection
+            .publication
+            .expect("exact query publication")
+            .publication,
+        old_publication
     );
+    let current_projection = current_session
+        .query(Query {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: Vec::new(),
+            publication: None,
+        })
+        .unwrap();
+    assert_eq!(current_projection.bytes, b"new:BODY");
+
+    let mut current_query = find_query(10);
+    if let crate::find::Op::Seek(crate::find::Seek::Term { text, .. }) =
+        &mut current_query.steps[0].op
+    {
+        *text = "new".to_owned();
+    }
+    let current = current_session.find(current_query).unwrap();
+    assert_eq!(current.rows().len(), 1);
+    assert_eq!(current.coordinates().implementation, v2);
+}
+
+#[test]
+fn active_cursor_lease_survives_hot_publication_eviction_then_expires_typed() {
+    struct PagedWorld {
+        inner: NoteWorld,
+    }
+
+    impl World for PagedWorld {
+        fn id(&self) -> WorldId {
+            self.inner.id()
+        }
+
+        fn schemas(&self) -> &[Schema] {
+            self.inner.schemas()
+        }
+
+        fn find_schemas(&self) -> &[crate::find::Schema] {
+            self.inner.find_schemas()
+        }
+
+        fn find_extractors(&self) -> &[crate::find::Extractor] {
+            self.inner.find_extractors()
+        }
+
+        fn extract(
+            &self,
+            ctx: &crate::world::ExtractionContext<'_>,
+            extractor: &crate::find::Extractor,
+            body: &BodyKey,
+        ) -> Result<crate::find::BodyExtraction, Rejection> {
+            if extractor != &self.find_extractors()[0] {
+                return Err(Rejection::ContractViolation);
+            }
+            let text = String::from_utf8(ctx.read_body(body).ok_or(Rejection::StateCorrupt)?)
+                .map_err(|_| Rejection::StateCorrupt)?;
+            let schema = self.find_schemas()[0].reference.clone();
+            let field = self.find_schemas()[0].fields[0].reference.clone();
+            let nodes = [b"a".as_slice(), b"b".as_slice()]
+                .into_iter()
+                .map(|id| crate::find::ExtractedNode {
+                    key: crate::find::NodeKey {
+                        schema: schema.clone(),
+                        node: crate::find::NodeId::new(id.to_vec()).unwrap(),
+                    },
+                    gate: None,
+                    fields: vec![crate::find::ExtractedField {
+                        reference: field.clone(),
+                        value: crate::find::Value::text(text.clone()),
+                        gate: None,
+                        terms: vec![Arc::from(b"page".as_slice())],
+                    }],
+                    edges: Vec::new(),
+                    features: Vec::new(),
+                })
+                .collect();
+            Ok(crate::find::BodyExtraction {
+                body: body.clone(),
+                stamp: ctx.body_stamp(body).unwrap_or_default(),
+                nodes,
+            })
+        }
+
+        fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+            self.inner.submit(ctx, intent)
+        }
+
+        fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+            self.inner.query(ctx, query)
+        }
+    }
+
+    let world: Arc<dyn World> = Arc::new(PagedWorld {
+        inner: NoteWorld::new(),
+    });
+    let id = world.id();
+    let registry = Builder::new().register(world).build().unwrap();
+    let runtime = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
+    let station = runtime
+        .create()
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let session = station.dock(&id, &writer()).unwrap();
+    submit_as(
+        &session,
+        &writer(),
+        Intent {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: b"first".to_vec(),
+        },
+    )
+    .unwrap();
+    let mut first_query = find_query(10);
+    first_query.page_size = 1;
+    if let crate::find::Op::Seek(crate::find::Seek::Term { text, .. }) =
+        &mut first_query.steps[0].op
+    {
+        *text = "page".to_owned();
+    }
+    let first = session.find(first_query.clone()).unwrap();
+    assert_eq!(first.rows().len(), 1);
+    let cursor = first.next_cursor().cloned().expect("second page cursor");
+
+    // Exceed both hot-generation and hot-publication count caps. The active
+    // continuation retains its exact Arc under the separate byte-bounded
+    // lease table and does not become an arbitrary current read.
+    for index in 0..=crate::session::CACHED_WORLD_PUBLICATIONS {
+        submit_as(
+            &session,
+            &writer(),
+            Intent {
+                schema: SchemaId::parse("note").unwrap(),
+                schema_version: 1,
+                payload: index.to_string().into_bytes(),
+            },
+        )
+        .unwrap();
+    }
+    let mut continued = first_query.clone();
+    continued.cursor = Some(cursor.clone());
+    let second = session.find(continued.clone()).unwrap();
+    assert_eq!(second.rows().len(), 1);
+    assert_ne!(second.rows()[0].key, first.rows()[0].key);
+
+    session.expire_cursor_leases_for_test();
+    assert_eq!(
+        session.find(continued),
+        Err(crate::find::Failure::PublicationExpired)
+    );
+}
+
+#[test]
+fn cold_exact_package_extraction_does_not_hold_the_station_writer() {
+    struct FixedImplementationAuthority([u8; 32]);
+    impl AuthorityView for FixedImplementationAuthority {
+        fn resolve(&self, _device: &DeviceId) -> Option<PrincipalResolution> {
+            Some(PrincipalResolution {
+                actor: ActorId::from_incept_hash(&"a".repeat(64)),
+                authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
+            })
+        }
+
+        fn active_implementation(
+            &self,
+            _world: &WorldId,
+            _authority_frontier: &AuthorityFrontier,
+        ) -> Result<Option<[u8; 32]>, String> {
+            Ok(Some(self.0))
+        }
+    }
+
+    struct BlockingPackage {
+        inner: NoteWorld,
+        extractor: Vec<crate::find::Extractor>,
+        block: Option<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>,
+        started: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl BlockingPackage {
+        fn new(
+            semantic: u8,
+            block: Option<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>,
+            started: Option<std::sync::mpsc::Sender<()>>,
+        ) -> Self {
+            let inner = NoteWorld::new();
+            let mut extractor = inner.find_extractors().to_vec();
+            extractor[0].semantic_digest = [semantic; 32];
+            Self {
+                inner,
+                extractor,
+                block,
+                started,
+            }
+        }
+    }
+
+    impl World for BlockingPackage {
+        fn id(&self) -> WorldId {
+            self.inner.id()
+        }
+        fn schemas(&self) -> &[Schema] {
+            self.inner.schemas()
+        }
+        fn find_schemas(&self) -> &[crate::find::Schema] {
+            self.inner.find_schemas()
+        }
+        fn find_extractors(&self) -> &[crate::find::Extractor] {
+            &self.extractor
+        }
+        fn extract(
+            &self,
+            ctx: &crate::world::ExtractionContext<'_>,
+            extractor: &crate::find::Extractor,
+            body: &BodyKey,
+        ) -> Result<crate::find::BodyExtraction, Rejection> {
+            if extractor != &self.extractor[0] {
+                return Err(Rejection::ContractViolation);
+            }
+            if let Some(started) = &self.started {
+                let _ = started.send(());
+            }
+            if let Some(block) = &self.block {
+                let (released, wake) = &**block;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            }
+            let text = String::from_utf8(ctx.read_body(body).ok_or(Rejection::StateCorrupt)?)
+                .map_err(|_| Rejection::StateCorrupt)?;
+            let schema = self.find_schemas()[0].reference.clone();
+            Ok(crate::find::BodyExtraction {
+                body: body.clone(),
+                stamp: ctx.body_stamp(body).unwrap_or_default(),
+                nodes: vec![crate::find::ExtractedNode {
+                    key: crate::find::NodeKey {
+                        schema,
+                        node: crate::find::NodeId::new(b"note".to_vec()).unwrap(),
+                    },
+                    gate: None,
+                    fields: vec![crate::find::ExtractedField {
+                        reference: self.find_schemas()[0].fields[0].reference.clone(),
+                        value: crate::find::Value::text(text.clone()),
+                        gate: None,
+                        terms: vec![Arc::from(text.into_bytes())],
+                    }],
+                    edges: Vec::new(),
+                    features: Vec::new(),
+                }],
+            })
+        }
+        fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+            self.inner.submit(ctx, intent)
+        }
+        fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+            self.inner.query(ctx, query)
+        }
+    }
+
+    let v1 = [0x81; 32];
+    let v2 = [0x82; 32];
+    let block = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let old = Arc::new(BlockingPackage::new(
+        0x61,
+        Some(block.clone()),
+        Some(started_tx),
+    ));
+    let old_digest = crate::publication::ExtractorSchemaDigest::derive(
+        old.find_schemas(),
+        old.find_extractors(),
+    )
+    .unwrap();
+    let current = Arc::new(BlockingPackage::new(0x62, None, None));
+    let world = current.id();
+    let registry = Builder::new()
+        .register_reviewed(old, v1)
+        .register_reviewed(current, v2)
+        .build()
+        .unwrap();
+    let runtime = Runtime::open(
+        temp_root(),
+        registry,
+        Arc::new(FixedImplementationAuthority(v2)),
+        test_keys(),
+    );
+    let station = runtime
+        .create()
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let session = Arc::new(station.dock(&world, &writer()).unwrap());
+    submit_as(
+        &session,
+        &writer(),
+        Intent {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: b"q".to_vec(),
+        },
+    )
+    .unwrap();
+    let old_root = session.snapshot_id().unwrap().root;
+    let mut historical = find_query(1);
+    historical.publication = Some(crate::publication::PublicationId::new(
+        old_root, v1, old_digest,
+    ));
+    let find_session = session.clone();
+    let find = std::thread::spawn(move || find_session.find(historical));
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("historical extractor entered");
+
+    let (committed_tx, committed_rx) = std::sync::mpsc::channel();
+    let submit_session = session.clone();
+    std::thread::spawn(move || {
+        let result = submit_as(
+            &submit_session,
+            &writer(),
+            Intent {
+                schema: SchemaId::parse("note").unwrap(),
+                schema_version: 1,
+                payload: b"later".to_vec(),
+            },
+        );
+        let _ = committed_tx.send(result);
+    });
+    committed_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("user action must not wait behind historical extraction")
+        .unwrap();
+
+    let (released, wake) = &*block;
+    *released.lock().unwrap() = true;
+    wake.notify_all();
+    let answer = find.join().unwrap().unwrap();
+    assert_eq!(answer.coordinates().root, old_root);
+    assert_eq!(answer.coordinates().implementation, v1);
 }
 
 #[test]
@@ -926,6 +2196,8 @@ fn a_world_panic_is_contained_and_does_not_end_the_station() {
     let world: Arc<dyn World> = Arc::new(PanicWorld {
         id: id.clone(),
         schemas,
+        find_schemas: Vec::new(),
+        find_extractors: Vec::new(),
     });
     let station = station_with(reg, world);
     let session = station.dock(&id, &writer()).unwrap();
@@ -1040,6 +2312,7 @@ fn an_acknowledged_commit_survives_a_crash_without_dormancy() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(proj.bytes, b"ACK'D THEN CRASH");
@@ -1082,6 +2355,7 @@ fn commits_made_during_an_activation_survive_wait_exit() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(proj.bytes, b"SURVIVES WAIT");
@@ -1126,6 +2400,7 @@ fn committed_bodies_survive_dormancy_and_reactivation() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(proj.bytes, b"DURABLE");
@@ -1303,6 +2578,7 @@ fn runtime_stamps_the_projection_frontier() {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(proj.frontier, committed.frontier);
@@ -1392,6 +2668,7 @@ impl World for BoardWorld {
             schema_version: 1,
             bytes: format!("{activity}:{}", comments.join(",")).into_bytes(),
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -1411,6 +2688,7 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
         schema: SchemaId::parse("card").unwrap(),
         schema_version: 1,
         payload: vec![],
+        publication: None,
     };
     let intent = |text: &str| Intent {
         schema: SchemaId::parse("card").unwrap(),
@@ -1419,11 +2697,18 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
     };
 
     submit_as(&session, &writer(), intent("first comment")).unwrap();
-    let first_generation = session.snapshot_id().unwrap();
+    let first_publication = session
+        .query(query())
+        .unwrap()
+        .publication
+        .expect("Runtime stamps exact publication")
+        .publication;
     submit_as(&session, &writer(), intent("second comment")).unwrap();
     let proj = session.query(query()).unwrap();
     assert_eq!(proj.bytes, b"2:first comment,second comment");
-    let historical = session.query_at(&first_generation, query()).unwrap();
+    let mut historical_query = query();
+    historical_query.publication = Some(first_publication);
+    let historical = session.query(historical_query).unwrap();
     assert_eq!(historical.bytes, b"1:first comment");
 
     // Collaborative Bodies survive dormancy + reactivation like atomic ones.
@@ -1437,8 +2722,199 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
     let session = station.dock(&id, &writer()).unwrap();
     let proj = session.query(query()).unwrap();
     assert_eq!(proj.bytes, b"2:first comment,second comment");
-    let historical = session.query_at(&first_generation, query()).unwrap();
+    let mut historical_query = query();
+    historical_query.publication = Some(first_publication);
+    let historical = session.query(historical_query).unwrap();
     assert_eq!(historical.bytes, b"1:first comment");
+}
+
+struct TextFeedbackWorld {
+    id: WorldId,
+    schemas: Vec<Schema>,
+}
+
+impl TextFeedbackWorld {
+    fn new() -> Self {
+        Self {
+            id: WorldId::parse("com.example.text-feedback").unwrap(),
+            schemas: vec![Schema {
+                id: SchemaId::parse("document").unwrap(),
+                version: 1,
+                encoding: EncodingId::parse("collab").unwrap(),
+                mutation: MutationModel::Collaborative(
+                    replica::body::CollaborativeSchema::default(),
+                ),
+                readable_predecessors: Vec::new(),
+            }],
+        }
+    }
+
+    fn body(&self) -> BodyKey {
+        BodyKey::new(self.id.clone(), BodyId::from_bytes([0x54; 16]))
+    }
+}
+
+impl World for TextFeedbackWorld {
+    fn id(&self) -> WorldId {
+        self.id.clone()
+    }
+
+    fn schemas(&self) -> &[Schema] {
+        &self.schemas
+    }
+
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let body = self.body();
+        let operations = match intent.payload.as_slice() {
+            b"init" => vec![(
+                body.clone(),
+                Op::TextSplice {
+                    path: "text".into(),
+                    index: 0,
+                    delete: 0,
+                    insert: "abcdef".into(),
+                },
+            )],
+            b"edit" => vec![
+                (
+                    body.clone(),
+                    Op::TextSplice {
+                        path: "text".into(),
+                        index: 1,
+                        delete: 2,
+                        insert: "X".into(),
+                    },
+                ),
+                (
+                    body.clone(),
+                    Op::TextSplice {
+                        path: "text".into(),
+                        index: 2,
+                        delete: 1,
+                        insert: "YY".into(),
+                    },
+                ),
+            ],
+            b"shift" => vec![(
+                body.clone(),
+                Op::TextSplice {
+                    path: "text".into(),
+                    index: 0,
+                    delete: 0,
+                    insert: "Z".into(),
+                },
+            )],
+            b"delete" => vec![(
+                body.clone(),
+                Op::TextSplice {
+                    path: "text".into(),
+                    index: 2,
+                    delete: 1,
+                    insert: String::new(),
+                },
+            )],
+            _ => return Err(Rejection::InvalidRequest),
+        };
+        Ok(Effect {
+            content_refs: Vec::new(),
+            exec: Vec::new(),
+            demand: any_demand(),
+            operations,
+            bodies: vec![body],
+            effect: Vec::new(),
+            declarations: Vec::new(),
+        })
+    }
+
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+        let anchors: Vec<Vec<u8>> =
+            postcard::from_bytes(&query.payload).map_err(|_| Rejection::InvalidRequest)?;
+        let positions: Vec<Option<u64>> = anchors
+            .iter()
+            .map(|bytes| {
+                let anchor = fabric::Anchor::decode_canonical(bytes).ok()?;
+                match ctx.resolve_anchor(&self.body(), &anchor) {
+                    fabric::AnchorResolution::Resolved(position) => Some(position),
+                    fabric::AnchorResolution::Drifted => None,
+                }
+            })
+            .collect();
+        Ok(Projection {
+            demand: any_demand(),
+            schema: SchemaId::parse("document").unwrap(),
+            schema_version: 1,
+            bytes: postcard::to_stdvec(&positions).unwrap(),
+            frontier: ReplicaFrontier::EMPTY,
+            publication: None,
+        })
+    }
+}
+
+#[test]
+fn prepared_text_feedback_carries_candidate_offsets_and_stable_anchors() {
+    let world = Arc::new(TextFeedbackWorld::new());
+    let id = world.id();
+    let registry = Builder::new().register(world).build().unwrap();
+    let runtime = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
+    let station = runtime
+        .create()
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let session = station.dock(&id, &writer()).unwrap();
+    let mut observations = session.observe(None);
+    assert!(observations.try_next().unwrap().unwrap().reset);
+    let intent = |payload: &'static [u8]| Intent {
+        schema: SchemaId::parse("document").unwrap(),
+        schema_version: 1,
+        payload: payload.to_vec(),
+    };
+
+    submit_as(&session, &writer(), intent(b"init")).unwrap();
+    observations.try_next().unwrap().unwrap();
+    let committed = submit_as(&session, &writer(), intent(b"edit")).unwrap();
+    let observed = observations.try_next().unwrap().unwrap();
+    assert_eq!(observed.frontier, committed.frontier);
+    let crate::change::Detail::Exact(changes) = &observed.change.bodies[0].detail else {
+        panic!("prepared local text feedback must be exact")
+    };
+    let ranges: Vec<_> = changes
+        .iter()
+        .map(|change| change.text.as_ref().unwrap())
+        .collect();
+    assert_eq!((ranges[0].start, ranges[0].end), (1, 2));
+    assert_eq!((ranges[1].start, ranges[1].end), (2, 4));
+
+    let anchors: Vec<Vec<u8>> = ranges
+        .iter()
+        .flat_map(|range| [range.start_anchor.clone(), range.end_anchor.clone()])
+        .collect();
+    let resolve = |anchors: &[Vec<u8>]| -> Vec<Option<u64>> {
+        let projection = session
+            .query(Query {
+                schema: SchemaId::parse("document").unwrap(),
+                schema_version: 1,
+                payload: postcard::to_stdvec(anchors).unwrap(),
+                publication: None,
+            })
+            .unwrap();
+        postcard::from_bytes(&projection.bytes).unwrap()
+    };
+    assert_eq!(resolve(&anchors), vec![Some(1), Some(2), Some(2), Some(4)]);
+
+    // A later insertion shifts every retained anchor through the convergent
+    // history; the candidate offsets remain the exact coordinates of their
+    // stamped Observation and are intentionally not rewritten.
+    submit_as(&session, &writer(), intent(b"shift")).unwrap();
+    assert_eq!(resolve(&anchors), vec![Some(2), Some(3), Some(3), Some(5)]);
+
+    // Deleting anchored material may collapse or drift the old range, but it
+    // must never resolve to an unrelated plausible position. Fabric's total
+    // resolution contract reports the honest post-delete state.
+    submit_as(&session, &writer(), intent(b"delete")).unwrap();
+    let deleted = resolve(&anchors);
+    assert!(deleted[0].is_none() || deleted[0] == Some(2));
+    assert!(deleted[1].is_none() || deleted[1] == Some(2));
 }
 
 /// A World registering BOTH mutation models but staging collaborative ops from
@@ -1592,6 +3068,7 @@ fn an_identical_signed_replay_returns_the_original_result_without_reapplying() {
             schema: SchemaId::parse("card").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(

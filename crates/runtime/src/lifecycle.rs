@@ -98,12 +98,22 @@ pub enum Failure {
     Persistence(Persistence),
     StationDormant,
     PrincipalDenied,
+    NoActiveImplementation(WorldId),
+    ImplementationUnavailable {
+        world: WorldId,
+        implementation: [u8; 32],
+    },
+    AuthorityUnavailable(String),
     /// The activation's Find policy failed validation. Carries the refusal:
     /// `Policy` has one field today, but `find::Invalid` names fifteen ways a
     /// contract can be refused, and a discard here is how a diagnosable
     /// refusal becomes one word the moment the policy grows a second field —
     /// the exact defect the error-context ratchet exists to stop.
     InvalidFindPolicy(crate::find::Invalid),
+    /// A hosted World's extractor declaration could not be reduced to the
+    /// canonical digest that binds publications and cursors.
+    InvalidExtractorSchema(crate::find::Invalid),
+    WorldPublicationUnavailable(WorldId),
     UnknownWorld(WorldId),
 }
 
@@ -569,7 +579,7 @@ impl Orbit {
         // material as interpretable versus opaque.
         let mut supported = replica::body::SupportedSchemas::new();
         for id in self.registry.ids() {
-            if let Some(reg) = self.registry.descriptor(id) {
+            for reg in self.registry.descriptors(id) {
                 for schema in &reg.schemas {
                     let model = match schema.mutation {
                         replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
@@ -935,6 +945,12 @@ impl Station {
         self.epoch
     }
 
+    /// Watch for durable Exec outbox work. The Station host drains on this
+    /// tick; product RPCs do not.
+    pub fn exec_tick(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.core.exec_tick()
+    }
+
     /// What a World declared at registration.
     ///
     /// Narrower than handing out the registry: a caller outside this crate needs
@@ -943,6 +959,27 @@ impl Station {
     /// business.
     pub fn descriptor(&self, world: &WorldId) -> Option<&crate::world::Descriptor> {
         self.registry.descriptor(world)
+    }
+
+    /// Resolve the exact World implementation authority selects for this
+    /// principal at its current frontier. Application routing uses this before
+    /// choosing among multiple installed exact package hosts.
+    pub fn active_implementation(
+        &self,
+        world: &WorldId,
+        identity: &LocalIdentity,
+    ) -> Result<[u8; 32], Failure> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err(Failure::StationDormant);
+        }
+        let resolution = self
+            .authority
+            .resolve(identity.device())
+            .ok_or(Failure::PrincipalDenied)?;
+        self.authority
+            .active_implementation(world, &resolution.authority_frontier)
+            .map_err(Failure::AuthorityUnavailable)?
+            .ok_or_else(|| Failure::NoActiveImplementation(world.clone()))
     }
 
     /// What this Station currently believes about who is doing what.
@@ -1146,14 +1183,39 @@ impl Station {
             space: self.space_id().clone(),
             authority_frontier: resolution.authority_frontier,
         };
+        let active_implementation = self
+            .authority
+            .active_implementation(world_id, &principal.authority_frontier)
+            .map_err(Failure::AuthorityUnavailable)?
+            .ok_or_else(|| Failure::NoActiveImplementation(world_id.clone()))?;
         let world = self
             .registry
-            .world(world_id)
-            .ok_or_else(|| Failure::UnknownWorld(world_id.clone()))?;
+            .world_for(world_id, active_implementation)
+            .or_else(|| self.registry.unreviewed_world(world_id))
+            .ok_or_else(|| Failure::ImplementationUnavailable {
+                world: world_id.clone(),
+                implementation: active_implementation,
+            })?;
         let registration = self
             .registry
-            .descriptor(world_id)
+            .descriptor_for(world_id, active_implementation)
+            .or_else(|| self.registry.unreviewed_descriptor(world_id))
             .ok_or_else(|| Failure::UnknownWorld(world_id.clone()))?;
+        let extractor_schema_digest = crate::publication::ExtractorSchemaDigest::derive(
+            &registration.find_schemas,
+            &registration.find_extractors,
+        )
+        .map_err(Failure::InvalidExtractorSchema)?;
+        self.core
+            .ensure_world_publication(
+                &world,
+                world_id,
+                active_implementation,
+                extractor_schema_digest,
+                &registration.find_schemas,
+                &registration.find_extractors,
+            )
+            .map_err(|_| Failure::WorldPublicationUnavailable(world_id.clone()))?;
         Ok(Session::new(
             self.store.space().clone(),
             world_id.clone(),
@@ -1163,10 +1225,13 @@ impl Station {
             self.epoch,
             registration.limits,
             registration.schemas.clone(),
+            active_implementation,
+            extractor_schema_digest,
             self.find_policy,
             self.alive.clone(),
             self.core.clone(),
             self.authority.clone(),
+            self.registry.clone(),
         ))
     }
 

@@ -144,6 +144,7 @@ impl World for KvWorld {
             schema_version: 1,
             bytes: ctx.read_body(&self.body(&key)).unwrap_or_default(),
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -239,6 +240,7 @@ fn read_kv(station: &Station, key: &str) -> Vec<u8> {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: key.as_bytes().to_vec(),
+            publication: None,
         })
         .unwrap()
         .bytes

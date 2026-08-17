@@ -75,6 +75,18 @@ pub const DOCUMENT_SCHEMA_VERSION: u32 = 1;
 /// Internal discriminator on canonical issue source. Client renderers collapse
 /// it; semantic APIs never ask callers to supply it.
 pub const DOCUMENT_PREFIX: &str = "// lait-document:1\n";
+/// Maximum UTF-8 bytes for a human-facing issue or triage title.
+pub const MAX_TITLE_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 bytes for a human-facing entity name.
+pub const MAX_NAME_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 bytes for one prose field extracted into the shared corpus.
+pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+/// Project and initiative summaries share a Body with hot scalar metadata.
+/// Their deliberately small ceiling keeps a scalar edit's whole-Body copy
+/// bounded; long-form planning prose belongs in a Spec/Plan revision Body.
+pub const MAX_METADATA_DESCRIPTION_BYTES: usize = 16 * 1024;
+/// Maximum UTF-8 bytes for compact color/icon-like presentation tokens.
+pub const MAX_PRESENTATION_TOKEN_BYTES: usize = 256;
 /// The longest reaction emoji accepted, in UTF-8 bytes (a ZWJ family sequence
 /// fits; a paragraph does not).
 pub const MAX_REACTION_EMOJI_BYTES: usize = 32;
@@ -122,6 +134,18 @@ pub const MAX_ATTACHMENT_NAME_BYTES: usize = 180;
 pub const TRIAGE_OUTCOMES: [&str; 3] = ["accepted", "declined", "duplicate"];
 /// The self-reported health labels (project updates, initiatives).
 pub const HEALTH_LABELS: [&str; 3] = ["on_track", "at_risk", "off_track"];
+
+pub fn valid_title(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= MAX_TITLE_BYTES
+}
+
+pub fn valid_name(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= MAX_NAME_BYTES
+}
+
+pub const fn valid_text(value: &str) -> bool {
+    value.len() <= MAX_TEXT_BYTES
+}
 
 pub fn world_id() -> WorldId {
     WorldId::parse(PRODUCT_WORLD).expect("product world id")
@@ -245,11 +269,49 @@ pub fn verify_limits() -> runtime::exec::Limits {
     }
 }
 
-/// `issue.verify/v1`: one pinned repository input and one report output.
+/// Bundled in-process verifier Build for `issue.verify/v1`.
 ///
-/// Build publication is intentionally not claimed here. Until E4 lands, the
-/// caller supplies an exact Build id which Runtime binds into the Run; dispatch
-/// still refuses to imply that the Build was published or attested.
+/// Build publication is identity, not a dispatch gate. Runtime binds the
+/// exact caller-selected Build id into the Run and still refuses to imply
+/// that the Build was published or attested. The bundled handler is selected
+/// from the application package. Callers of `issues_verify` may name this id
+/// explicitly or omit it so the application package fills it in.
+pub fn verify_build(world_build: [u8; 32]) -> runtime::exec::Build {
+    let seed = *blake3::hash(b"lait/issues/verify-build-seed/1").as_bytes();
+    let publisher = mechanics::ids::ActorId::from_incept_hash(
+        &data_encoding::HEXLOWER.encode(blake3::hash(b"lait/issues/verify-publisher/1").as_bytes()),
+    );
+    let handler = replica::content::ContentRef {
+        content_id: *blake3::hash(b"lait/issues/verify-handler/1").as_bytes(),
+    };
+    runtime::exec::Build {
+        id: runtime::exec::BuildId::from_bytes([0; 32]),
+        world: replica::body::WorldId::parse(PRODUCT_WORLD).expect("product World id"),
+        world_build,
+        spec: verify_spec_ref(),
+        handler,
+        dependencies: None,
+        environment: *blake3::hash(b"lait/issues/verify-environment/1").as_bytes(),
+        config: Vec::new(),
+        checkpoint: None,
+        replay_commands: None,
+        compatible_from: Vec::new(),
+        publisher,
+        signature: runtime::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&seed),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&seed)
+    .expect("bundled verify Build signs")
+}
+
+/// Canonical lowercase hex of [`verify_build`] for the given World implementation.
+pub fn verify_build_hex(world_build: [u8; 32]) -> String {
+    data_encoding::HEXLOWER.encode(&verify_build(world_build).id.as_bytes())
+}
+
 pub fn verify_spec() -> runtime::exec::Spec {
     let contributor = demand_contributor();
     runtime::exec::Spec {
@@ -745,6 +807,46 @@ pub enum Pos {
     After { doc: String },
 }
 
+pub const CHANGE_SET_MAX_OPERATIONS: usize = 64;
+pub const CHANGE_SET_MAX_BYTES: usize = 512 * 1_024;
+
+/// A project coordinate inside one atomic Issues change set. Later operations
+/// may address a project created by an earlier ordinal without a client-side
+/// create/read/create loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ChangeProject {
+    Existing { project: String },
+    Created { operation: u16 },
+}
+
+/// The first canonical bounded batch vocabulary. New operation kinds extend
+/// this product-owned planner; they never expose Runtime Body operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ChangeOperation {
+    ProjectCreate {
+        name: String,
+        key: String,
+        color: String,
+    },
+    SpecCreate {
+        project: ChangeProject,
+        kind: crate::spec::Kind,
+        title: String,
+        text: String,
+        #[serde(default)]
+        links: Vec<crate::spec::Link>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeResult {
+    pub operation: u16,
+    pub kind: String,
+    pub id: String,
+}
+
 /// A label minted by this transaction (create-on-first-use).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewLabel {
@@ -790,6 +892,14 @@ pub struct DocumentSplice {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum IssueIntent {
+    /// Preflight and lower a bounded, ordered product mutation as one Runtime
+    /// action. Entity identities derive from this action's RequestId plus the
+    /// operation ordinal, so retries are byte- and identity-idempotent.
+    ChangeSet {
+        operations: Vec<ChangeOperation>,
+        /// Signed client fact used for authored revision ordering.
+        ts: u64,
+    },
     /// The ONE founder-only, crash-resumable formation intent: it atomically
     /// creates the deterministic Catalog with the captured display name,
     /// initialization timestamp, initial project, the built-in role
@@ -825,6 +935,16 @@ pub enum IssueIntent {
     /// changing lifecycle state. It is idempotent; once the visible state is
     /// fully materialized it stages no operations.
     StructureMigrate {
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Advance the decisive v3 -> v4 physical migration by one bounded atomic
+    /// batch. A durable cursor and immutable audit entry ride the same
+    /// transaction as the copied facts; callers repeat until the effect is an
+    /// idempotent no-op. Batching is required by the substrate's 4,096-op /
+    /// 1-MiB transaction ceiling and is not exposed as product truth.
+    V4Migrate {
         actor: String,
         device: String,
         ts: u64,
@@ -1037,6 +1157,10 @@ pub enum IssueIntent {
         run: String,
         source: String,
         build: String,
+        /// True when the application package filled `build` because the caller
+        /// omitted it. False means the caller named the Build.
+        #[serde(default)]
+        package_filled: bool,
         actor: String,
         device: String,
         ts: u64,
@@ -1573,6 +1697,10 @@ pub enum IssueQuery {
         project: String,
         #[serde(default)]
         roots: Vec<String>,
+        /// Optional bounded artifact page. Absence returns only readiness and
+        /// summary; no query can accidentally serialize the full graph.
+        #[serde(default)]
+        page: Option<crate::geometry::GeometryPageRequest>,
     },
     History {
         doc: String,
@@ -1689,15 +1817,6 @@ pub enum IssueQuery {
         doc: String,
         id: String,
     },
-    /// Everything the doorbell needs to describe one ring, read at ONE pinned
-    /// snapshot: a digest per catalog plane, and the doc→project index.
-    ///
-    /// The World answers this because the World owns the catalog's schema — it
-    /// is the only thing that knows a "milestone" is a plane and which project
-    /// it belongs to. The daemon compares digests between rings and never learns
-    /// what any of them mean. Both halves come from one query so they cannot
-    /// describe two different roots.
-    RingDigest,
 }
 
 /// A bounded audit of Blueprint's current structural representation.
@@ -1727,41 +1846,20 @@ pub struct StructureReport {
     pub complete: bool,
 }
 
-/// One catalog plane and the digest of its committed contents.
+/// Publication-pinned, bounded geometry response. The compact artifact never
+/// crosses the World boundary wholesale; callers receive its readiness,
+/// constant-size summary, and at most one explicitly requested page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PlaneDigest {
-    /// Nested rather than flattened: `flatten` does not compose with
-    /// `deny_unknown_fields`, and silently produces a decoder that rejects
-    /// perfectly good input — which is how a "fail visibly" contract turns into
-    /// a doorbell that reports nothing at all.
-    pub plane: crate::dto::CatalogScope,
-    pub digest: String,
-}
-
-/// One doc and the project it belongs to, as the ring index names it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RingDoc {
-    pub doc: String,
-    pub project_id: String,
-    pub project_key: String,
-}
-
-/// The reply to [`IssueQuery::RingDigest`] — everything the doorbell needs to
-/// describe one ring, read at ONE pinned snapshot.
-///
-/// A typed contract on purpose. This used to be hand-built `serde_json::Value`
-/// parsed permissively on the other side, which meant a plane the daemon could
-/// not understand was silently skipped — and a plane that never fires is exactly
-/// the failure this whole dirty-set exists to prevent. Now a malformed or
-/// unrecognised plane fails the decode, and the daemon rings coarsely and
-/// visibly rather than quietly dropping it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RingDigestView {
-    pub planes: Vec<PlaneDigest>,
-    pub docs: Vec<RingDoc>,
+pub struct GeometryProjection {
+    pub key: crate::geometry::GeometryArtifactKey,
+    pub source: runtime::publication::WorldPublicationId,
+    pub estimate: crate::geometry::GeometryEstimate,
+    pub readiness: crate::geometry::GeometryReadiness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<crate::geometry::GeometrySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<crate::geometry::GeometryPage>,
 }
 
 impl IssueQuery {
@@ -1778,6 +1876,12 @@ impl IssueQuery {
 pub struct VerifyInput {
     pub doc: String,
     pub source: String,
+}
+
+impl VerifyInput {
+    pub fn from_json(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
 }
 
 /// Canonical inline result of an `issue.verify/v1` handler.
@@ -1802,6 +1906,9 @@ pub struct CheckRecord {
     pub state: String,
     pub by: String,
     pub ts: u64,
+    /// The application package named this Build because the caller omitted it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub package_filled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1821,6 +1928,9 @@ pub struct IssueEffect {
     /// Whether the intent was an idempotent no-op (nothing staged).
     #[serde(default)]
     pub unchanged: bool,
+    /// Ordered per-operation effects for [`IssueIntent::ChangeSet`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<ChangeResult>,
 }
 
 impl IssueEffect {
@@ -1958,55 +2068,6 @@ pub fn default_workflow() -> Vec<serde_json::Value> {
 }
 
 #[cfg(test)]
-mod ring_digest_tests {
-    use super::*;
-    use crate::dto::CatalogScope;
-
-    /// The contract must survive its own serializer.
-    ///
-    /// This exists because it did not. An earlier shape used `#[serde(flatten)]`
-    /// to merge the project into a scope and `deny_unknown_fields` to make an
-    /// unknown plane loud — a combination serde does not support, which produced
-    /// a decoder that rejected the encoder's own output. Every doorbell went out
-    /// empty and every test that asserted a dirty-set failed at once. A
-    /// "fail visibly" contract is only worth having if valid input survives it.
-    #[test]
-    fn a_ring_digest_survives_its_own_round_trip() {
-        let view = RingDigestView {
-            planes: vec![
-                PlaneDigest {
-                    plane: CatalogScope::Labels,
-                    digest: "abc".into(),
-                },
-                PlaneDigest {
-                    plane: CatalogScope::Boards {
-                        project_id: "prj_1".into(),
-                        project_key: "ENG".into(),
-                    },
-                    digest: "def".into(),
-                },
-            ],
-            docs: vec![RingDoc {
-                doc: "iss_1".into(),
-                project_id: "prj_1".into(),
-                project_key: "ENG".into(),
-            }],
-        };
-        let bytes = serde_json::to_vec(&view).expect("encode");
-        let back: RingDigestView = serde_json::from_slice(&bytes).expect("decode its own output");
-        assert_eq!(view, back);
-    }
-
-    /// And a plane this build does not know must fail LOUDLY rather than be
-    /// skipped — a silently dropped plane is a resource that never refreshes.
-    #[test]
-    fn an_unknown_plane_fails_the_decode() {
-        let json = br#"{"planes":[{"plane":{"scope":"from_the_future"},"digest":"x"}],"docs":[]}"#;
-        assert!(serde_json::from_slice::<RingDigestView>(json).is_err());
-    }
-}
-
-#[cfg(test)]
 mod verify_contract_tests {
     use super::*;
 
@@ -2029,6 +2090,23 @@ mod verify_contract_tests {
         assert_ne!(pass.digest().unwrap(), other_report.digest().unwrap());
         assert_ne!(pass.digest().unwrap(), other_size.digest().unwrap());
         assert!(verify_candidate("unknown", report(1), 100).is_none());
+    }
+}
+
+#[cfg(test)]
+mod product_bound_tests {
+    use super::*;
+
+    #[test]
+    fn issue_and_entity_text_bounds_are_utf8_byte_bounds() {
+        assert!(valid_title("a"));
+        assert!(!valid_title("   "));
+        assert!(valid_title(&"x".repeat(MAX_TITLE_BYTES)));
+        assert!(!valid_title(&"é".repeat(MAX_TITLE_BYTES)));
+        assert!(valid_name(&"n".repeat(MAX_NAME_BYTES)));
+        assert!(!valid_name(&"n".repeat(MAX_NAME_BYTES + 1)));
+        assert!(valid_text(&"x".repeat(MAX_TEXT_BYTES)));
+        assert!(!valid_text(&"x".repeat(MAX_TEXT_BYTES + 1)));
     }
 }
 

@@ -1,13 +1,13 @@
 //! `Transaction` — the signed Body-transaction envelope, its core, and
-//! its descriptors (`lait/body-transaction/2`), the protection boundary.
+//! its descriptors (`lait/body-transaction/3`), the protection boundary.
 //!
 //! A transaction is a device-signed **envelope** over two parts:
 //!
 //! - the [`Core`]: Space, parent Manifest root, resulting
 //!   Replica frontier, referenced authority frontier, acting principal,
 //!   canonical authorization demand, intent/operations digests, and the
-//!   ordered BodyKey-sorted set of public [`Descriptor`]s with their
-//!   ciphertext commitments;
+//!   ordered BodyKey-sorted set of public [`Descriptor`]s with their bounded
+//!   Fabric artifact closures;
 //! - the mechanics-derived **authorization receipt**
 //!   ([`mechanics::authorization::AuthorizationReceipt`], canonical bytes), which
 //!   binds the core digest, the demand, the evidence, the checkpoint
@@ -20,8 +20,9 @@
 //! **full signed-envelope digest is the transaction id** referenced by
 //! Manifest entries and request receipts.
 //!
-//! There is no plaintext hash anywhere: the commitment is ciphertext-only
-//! ([`crate::body::ContentCommitment`]), which avoids an equality oracle.
+//! Artifact references commit only to protected envelopes. Body plaintext is
+//! neither signed nor hashed on this public surface, avoiding an equality
+//! oracle while still letting an opaque Station prove closure completeness.
 //!
 //! **Two levels of verification, deliberately separate.**
 //! [`Transaction::verify`] is the *opaque structural* check any Station
@@ -34,7 +35,8 @@
 //! and then consults the mechanics-provided [`AuthoritySource`].
 
 pub use crate::replica::{
-    ActionOutcome, CommitAuthorization, CommitContext, StaticAuthorizer, TransactionAuthorizer,
+    ActionOutcome, CommitAuthorization, CommitContext, PreparedAction, PreparedActionOutcome,
+    StaticAuthorizer, TransactionAuthorizer,
 };
 
 /// Typed failures produced while committing or incorporating a transaction.
@@ -48,16 +50,15 @@ use mechanics::authorization::AuthorizationReceipt;
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
 
-use crate::body::ContentCommitment;
 use crate::frontier::{AuthorityFrontier, ReplicaFrontier};
 use crate::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 
 /// The signing domain for a Body transaction envelope.
-pub const BODY_TRANSACTION_DOMAIN: &[u8] = b"lait/body-transaction/2";
+pub const BODY_TRANSACTION_DOMAIN: &[u8] = b"lait/body-transaction/3";
 /// BLAKE3 derive-key context for the core digest.
-const CORE_DIGEST_CONTEXT: &str = "lait.body-transaction-core.v1";
+const CORE_DIGEST_CONTEXT: &str = "lait.body-transaction-core.v2";
 /// BLAKE3 derive-key context for the transaction id (full envelope digest).
-const TRANSACTION_ID_CONTEXT: &str = "lait.body-transaction-id.v1";
+const TRANSACTION_ID_CONTEXT: &str = "lait.body-transaction-id.v2";
 /// Ed25519 algorithm tag.
 pub const SIG_ALG_ED25519: u8 = 1;
 /// Maximum descriptors in one transaction.
@@ -79,7 +80,15 @@ pub struct Descriptor {
     pub schema: SchemaId,
     pub schema_version: u32,
     pub encoding: EncodingId,
-    pub content_commitment: [u8; 32],
+    /// The declared mutation model; public so an opaque retainer can apply the
+    /// same deterministic head/concurrency rules as an interpreting replica.
+    pub mutation_model: u8,
+    /// The per-Body author chain this head advances.
+    pub base_frontier: ReplicaFrontier,
+    pub resulting_frontier: ReplicaFrontier,
+    /// The complete bounded Fabric closure. Its references address protected
+    /// artifact envelopes, never plaintext.
+    pub material: fabric::Material,
 }
 
 impl Descriptor {
@@ -88,12 +97,9 @@ impl Descriptor {
         BodyKey::new(self.world.clone(), self.body.clone())
     }
 
-    /// Whether a protected payload's ciphertext matches this descriptor's
-    /// commitment — the ciphertext-only content check an opaque retainer runs
-    /// before any decryption is attempted.
-    pub fn commits_to(&self, protected_payload: &[u8]) -> bool {
-        ContentCommitment::over_protected_payload(protected_payload).as_bytes()
-            == self.content_commitment
+    /// Artifact references in canonical import order: checkpoint, then tail.
+    pub fn artifact_refs(&self) -> impl Iterator<Item = &fabric::ArtifactRef> {
+        std::iter::once(&self.material.checkpoint).chain(&self.material.delta_tail)
     }
 }
 
@@ -163,6 +169,12 @@ pub enum Error {
     UnsortedOrDuplicate,
     /// The demand bytes are absent or non-canonical.
     BadDemand,
+    /// A descriptor's Fabric closure is malformed, duplicated, or unbounded.
+    BadMaterial,
+    /// A descriptor declares an unknown mutation model.
+    BadMutationModel,
+    /// The per-Body chain does not advance by exactly one transaction.
+    BadBodyFrontier,
     /// The authorization receipt is undecodable or does not bind this exact
     /// core (actor, device, Space, frontier, parent root, digests).
     ReceiptUnbound(ReceiptField),
@@ -320,7 +332,7 @@ impl Transaction {
         authorize: impl FnOnce(&Core) -> Result<Vec<u8>, mechanics::authorization::Refusal>,
     ) -> Result<Self, mechanics::authorization::Refusal> {
         let core = Core {
-            version: 1,
+            version: 2,
             space: space_bytes(request.space).ok_or(mechanics::authorization::Refusal::Denied(
                 mechanics::authorization::DenialReason::Internal("space id is not valid bytes"),
             ))?,
@@ -381,8 +393,11 @@ impl Transaction {
     /// committing signature. This does **not** prove authority — use
     /// [`Self::verify_authorized`] before retaining or incorporating.
     pub fn verify(&self) -> Result<(), Error> {
+        if self.encode().len() > MAX_TRANSACTION {
+            return Err(Error::NonCanonical);
+        }
         let core = &self.core;
-        if core.version != 1 {
+        if core.version != 2 {
             return Err(Error::UnsupportedVersion(core.version));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
@@ -403,6 +418,30 @@ impl Transaction {
             let [left, right] = window else { continue };
             if left.key() >= right.key() {
                 return Err(Error::UnsortedOrDuplicate);
+            }
+        }
+        for descriptor in &core.descriptors {
+            descriptor
+                .material
+                .validate()
+                .map_err(|_| Error::BadMaterial)?;
+            if !matches!(
+                descriptor.mutation_model,
+                crate::protected::MUTATION_ATOMIC | crate::protected::MUTATION_COLLABORATIVE
+            ) {
+                return Err(Error::BadMutationModel);
+            }
+            if descriptor.resulting_frontier.transaction_count
+                != descriptor.base_frontier.transaction_count.saturating_add(1)
+            {
+                return Err(Error::BadBodyFrontier);
+            }
+            let mut references = std::collections::BTreeSet::new();
+            if !descriptor
+                .artifact_refs()
+                .all(|reference| references.insert((reference.hash, reference.len)))
+            {
+                return Err(Error::BadMaterial);
             }
         }
         // The demand must be present and canonical.

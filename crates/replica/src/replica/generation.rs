@@ -17,12 +17,31 @@ use crate::receipt::RequestReceipt;
 const PRIOR_META_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorBodyHead {
+    tx: [u8; 32],
+    descriptor_hash: [u8; 32],
+    tx_commitment: [u8; 32],
+    protected: Option<Object>,
+    transaction: Option<Object>,
+    protected_len: u64,
+    tx_len: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorBodyRecord {
+    binding: super::BodyBinding,
+    chain: ReplicaFrontier,
+    heads: Vec<PriorBodyHead>,
+    interpreted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PriorMeta {
     version: u8,
     space: Option<mechanics::ids::SpaceId>,
     frontier: ReplicaFrontier,
     quota: QuotaConfig,
-    bodies: Vec<(BodyKey, BodyRecord)>,
+    bodies: Vec<(BodyKey, PriorBodyRecord)>,
     receipts: Vec<(Vec<u8>, Object)>,
     manifest_root: Option<Object>,
     manifest_pages: Vec<Object>,
@@ -70,19 +89,15 @@ pub fn build_prior(
         return Err(Failure::Integrity(Defect::Encoding));
     }
 
-    let mut bodies = BTreeMap::new();
+    // A whole-Body signed head cannot be rewritten into an ArtifactRef closure
+    // without its author. Pre-v1 migrations replay non-empty Bodies through a
+    // current Replica instead of manufacturing a signature here.
+    if !prior.bodies.is_empty() {
+        return Err(Failure::Integrity(Defect::Encoding));
+    }
+    let bodies: BTreeMap<BodyKey, BodyRecord> = BTreeMap::new();
     let mut added = Vec::new();
     let mut required = BTreeSet::new();
-    for (key, record) in prior.bodies {
-        if record.heads.is_empty() || bodies.insert(key.clone(), record.clone()).is_some() {
-            return Err(Failure::Integrity(Defect::Encoding));
-        }
-        for reference in record_references(&record)? {
-            if required.insert(reference.hash) {
-                added.push(source.read_object(&reference).map_err(map_journal)?);
-            }
-        }
-    }
 
     let mut receipts = BTreeMap::new();
     for (scope, reference) in prior.receipts {
@@ -301,21 +316,6 @@ fn verify_target(
         return Err(Failure::Integrity(Defect::Encoding));
     }
     Ok(())
-}
-
-fn record_references(record: &BodyRecord) -> Result<Vec<Object>, Failure> {
-    let mut references = Vec::with_capacity(record.heads.len().saturating_mul(2));
-    for head in &record.heads {
-        let protected = head
-            .protected
-            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-        let transaction = head
-            .transaction
-            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-        references.push(protected);
-        references.push(transaction);
-    }
-    Ok(references)
 }
 
 fn semantic_evidence(

@@ -188,6 +188,7 @@ impl Driver {
                     me: None,
                 }
                 .to_json(),
+                publication: None,
             })
             .unwrap()
             .bytes;

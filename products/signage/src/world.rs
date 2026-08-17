@@ -131,6 +131,7 @@ impl World for SignageWorld {
             schema_version: contract::PROGRAM_SCHEMA_VERSION,
             bytes: serde_json::to_vec(&projection).map_err(|_| Rejection::ContractViolation)?,
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
             demand: contract::demand_read(),
         })
     }

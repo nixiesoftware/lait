@@ -138,7 +138,12 @@ impl Endpoint {
 /// Astrolabe clients can inspect its receiver surfaces, two-party enrollment,
 /// exact assignments, and receiver health, and can approve, assign, revoke,
 /// or reject through the daemon-scoped display verbs.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 13;
+///
+/// v14: typed Runtime Find requests and exact publication-stamped answers are
+/// available on the shared control path. This is a decisive pre-v1 cutoff:
+/// silently falling back to a World-wide legacy query would violate both the
+/// query semantics and the latency contract.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 14;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
 ///
@@ -225,7 +230,7 @@ impl BuildFingerprint {
 /// than failing once. The minimum moves with the version rather than trailing
 /// it — a v10 daemon answers the book's verbs with "unknown variant" instead
 /// of a version complaint, which is a worse failure than being told to stop.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 13;
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 14;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -692,6 +697,16 @@ pub enum Request {
         request: runtime::exec::WorkRequest,
         /// Host-minted 128-bit persistent idempotency coordinate (32 hex).
         operation: String,
+    },
+    /// Execute one typed, bounded read over a World's exact published corpus.
+    /// Viewer, CLI, and agent heads all enter the same Runtime evaluator; the
+    /// daemon derives principal and authority coordinates. Omitted publication
+    /// selects the current read image; a supplied full PublicationId is
+    /// validated against retained immutable material rather than reinterpreted.
+    Find {
+        world: String,
+        #[schemars(with = "serde_json::Value")]
+        query: runtime::find::Query,
     },
     /// Which Worlds this Orbit has activated, with what a client needs to draw
     /// and open each one.
@@ -1492,6 +1507,10 @@ pub fn classify(req: &Request) -> RequestOwner {
         // ---- Work: Runtime-owned durable Run lifecycle ----
         Request::Work { .. } => Work,
 
+        // Find is a read projection over the immutable publication owned by
+        // the Station, not a World callback and not lifecycle work.
+        Request::Find { .. } => Observation,
+
         // ---- Station: connect/neighbor/Contact ----
         // Live and Signals sit here for the same reason Who does: both read
         // state the Station's own delivery planes hold, and neither is a
@@ -1576,6 +1595,23 @@ pub fn station_route(address: OrbitAddress) -> ControlRoute {
 /// the compile-time guard for new variants.
 pub fn representative_requests() -> Vec<Request> {
     let s = String::new;
+    let find_bound = runtime::find::Bound {
+        decoded_bodies: 1,
+        postings_read: 1,
+        edges_visited: 1,
+        nodes_visited: 1,
+        paths_retained: 1,
+        candidates_per_branch: 1,
+        score_evaluations: 1,
+        projected_bytes: 1,
+        packed_tokens: 1,
+        wall_millis: 1,
+    };
+    #[allow(
+        clippy::expect_used,
+        reason = "representative protocol fixtures use compile-time valid identifiers"
+    )]
+    let find_step = runtime::find::StepId::new(1).expect("one is a nonzero Step id");
     vec![
         Request::DisplayStatus,
         Request::DisplayPairingApprove {
@@ -1615,6 +1651,32 @@ pub fn representative_requests() -> Vec<Request> {
                 run: runtime::exec::RunId::from_bytes([0; 16]),
             },
             operation: s(),
+        },
+        Request::Find {
+            world: "com.example.find".to_owned(),
+            query: runtime::find::Query {
+                #[allow(
+                    clippy::expect_used,
+                    reason = "a compile-time literal in canonical schema-id form"
+                )]
+                schema: runtime::find::SchemaRef {
+                    name: replica::body::SchemaId::parse("example")
+                        .expect("a well-formed representative Schema id"),
+                    version: 1,
+                },
+                publication: None,
+                mode: runtime::find::Mode::Exact,
+                steps: vec![runtime::find::Step {
+                    id: find_step,
+                    input: Vec::new(),
+                    op: runtime::find::Op::Seek(runtime::find::Seek::Source),
+                    bound: find_bound,
+                }],
+                output: find_step,
+                bound: find_bound,
+                page_size: 100,
+                cursor: None,
+            },
         },
         Request::MemberAdd {
             who: s(),
@@ -1921,6 +1983,11 @@ pub enum Response {
     /// receive Runtime's exact type; no World payload crosses this route.
     Work {
         reply: runtime::exec::WorkReply,
+    },
+    /// One exact Runtime Find answer, including full publication and authority
+    /// coordinates plus actual resource usage.
+    Find {
+        answer: runtime::find::Answer,
     },
     /// The membership audit log (reply to [`Request::MemberLog`]).
     MemberLog {
@@ -2347,6 +2414,11 @@ pub struct Doorbell {
     /// plane names are only meaningful inside that boundary.
     #[serde(default)]
     pub invalidations: Vec<RoutedInvalidation>,
+    /// Bounded, value-free feedback from the same durable operation. Human and
+    /// agent writes arrive here with the same authenticated actor/device and
+    /// path/range vocabulary; state is still read from the publication.
+    #[serde(default)]
+    pub change: runtime::change::DurableChange,
     /// Membership, roles, devices or keys advanced.
     ///
     /// Its own flag, not a catalog scope: authority is not in the catalog Body,
@@ -3891,6 +3963,14 @@ mod tests {
             older.to_string().contains("stop that daemon"),
             "an out-of-window daemon must name the way out; got: {older}",
         );
+    }
+
+    #[test]
+    fn runtime_find_is_present_in_the_generated_observation_route() {
+        let rows = routing_rows();
+        assert!(rows
+            .iter()
+            .any(|(command, owner)| command == "find" && *owner == "observation"));
     }
 
     fn build(version: &str, exe: &str, built: u64) -> BuildFingerprint {

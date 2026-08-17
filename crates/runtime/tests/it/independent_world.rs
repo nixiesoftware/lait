@@ -261,6 +261,7 @@ impl World for MultiWorld {
             schema_version: 1,
             bytes,
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -424,6 +425,7 @@ fn query_json(session: &Session, value: serde_json::Value) -> Vec<u8> {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: serde_json::to_vec(&value).unwrap(),
+            publication: None,
         })
         .unwrap()
         .bytes

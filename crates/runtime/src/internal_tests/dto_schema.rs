@@ -9,8 +9,20 @@
 
 use runtime::dto::{
     CommittedEffectDto, ErrorDto, Invalid, ObservationCursorDto, ObservationDto, ProjectionDto,
-    QueryRequestDto, SignedSubmitDto, SubmitRequestDto, DTO_PROTOCOL_VERSION,
+    PublicationIdDto, QueryRequestDto, SignedSubmitDto, SubmitRequestDto, WorldPublicationIdDto,
+    DTO_PROTOCOL_VERSION,
 };
+
+fn publication() -> WorldPublicationIdDto {
+    WorldPublicationIdDto {
+        publication: PublicationIdDto {
+            manifest_root_hex: "11".repeat(32),
+            implementation_digest_hex: "22".repeat(32),
+            extractor_schema_digest_hex: "33".repeat(32),
+        },
+        materialization: 1,
+    }
+}
 
 fn schema_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -190,6 +202,7 @@ fn canonical_positive_examples_roundtrip_bidirectionally() {
             schema: "note".into(),
             schema_version: 1,
             payload_b64: "AA==".into(),
+            publication: Some(publication().publication),
         },
         QueryRequestDto
     );
@@ -200,6 +213,7 @@ fn canonical_positive_examples_roundtrip_bidirectionally() {
             frontier_root_hex: "ab".repeat(32),
             frontier_transaction_count: 3,
             scope_body_ids_hex: vec!["0b".repeat(16)],
+            publication: publication(),
         },
         CommittedEffectDto
     );
@@ -211,6 +225,7 @@ fn canonical_positive_examples_roundtrip_bidirectionally() {
             bytes_b64: "aGVsbG8=".into(),
             frontier_root_hex: "cd".repeat(32),
             frontier_transaction_count: 9,
+            publication: publication(),
         },
         ProjectionDto
     );
