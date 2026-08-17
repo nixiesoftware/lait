@@ -70,11 +70,11 @@ struct StageRecord {
 }
 
 #[derive(Debug, Serialize)]
-struct FileRecord {
-    path: String,
-    blake3: String,
-    size: u64,
-    executable: bool,
+pub(crate) struct FileRecord {
+    pub(crate) path: String,
+    pub(crate) blake3: String,
+    pub(crate) size: u64,
+    pub(crate) executable: bool,
 }
 
 /// The platform entry binary inside a tree, from the target string rather
@@ -284,7 +284,7 @@ fn stage_into(
 }
 
 /// A scratch name no concurrent run or recycled pid can collide with.
-fn scratch_name(prefix: &str) -> String {
+pub(crate) fn scratch_name(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
     format!(
@@ -300,7 +300,7 @@ fn scratch_name(prefix: &str) -> String {
 /// The bytes were already proven against the signed manifest, but paths are
 /// still refused rather than trusted: an absolute path or a `..` component
 /// is a malformed archive, not an instruction.
-fn extract_tree(bytes: &[u8], into: &Path) -> Result<Vec<FileRecord>> {
+pub(crate) fn extract_tree(bytes: &[u8], into: &Path) -> Result<Vec<FileRecord>> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     let mut files = Vec::new();
     for entry in archive.entries().context("read the tree archive")? {

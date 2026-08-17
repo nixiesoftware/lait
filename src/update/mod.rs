@@ -16,6 +16,7 @@ pub mod feed;
 pub mod runtime;
 pub mod tree;
 pub mod watch;
+pub mod world;
 
 use std::path::{Path, PathBuf};
 

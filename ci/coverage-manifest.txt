@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1972
-pr-platform    1541
-nightly        2000
+pr             1979
+pr-platform    1548
+nightly        2007
 mutants        98
 
 [gates]
@@ -660,6 +660,13 @@ lait update::watch::tests::a_standing_round_trips_and_absence_is_its_own_answer
 lait update::watch::tests::an_install_root_is_recognised_only_by_its_whole_shape
 lait update::watch::tests::every_feed_failure_keeps_its_own_kind_and_none_reads_as_current
 lait update::watch::tests::the_period_is_spread_so_two_daemons_do_not_stay_together
+lait update::world::tests::a_bundle_already_staged_at_this_version_is_not_fetched_again
+lait update::world::tests::a_newer_bundle_replaces_the_prior_one_whole
+lait update::world::tests::a_release_with_no_bundle_for_this_runtime_is_withheld_rather_than_refused
+lait update::world::tests::a_signed_bundle_for_this_runtime_is_staged_under_its_runtime_name
+lait update::world::tests::a_tampered_bundle_fails_the_digest_and_stages_nothing
+lait update::world::tests::a_world_channel_sits_beside_the_products_and_under_the_same_rules
+lait update::world::tests::an_over_long_bundle_is_refused_by_size_before_the_digest_is_reached
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
 lait-feed::bin/lait-feed tests::a_stable_channel_never_takes_a_prerelease
 lait-feed::bin/lait-feed tests::a_world_id_that_is_not_a_reverse_domain_is_refused

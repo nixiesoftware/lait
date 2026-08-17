@@ -210,6 +210,30 @@ where
     }
 }
 
+/// Check every World this build hosts, and stage any head published for this
+/// runtime.
+///
+/// Separate from the client check and never able to fail it: a World's
+/// publisher and the product's are different parties on different cadences,
+/// so one channel being unreachable, unpublished, or compromised must not
+/// stop the other from being asked. Each outcome is logged and nothing is
+/// prompted — a staged head becomes live at the next head that starts, which
+/// is the same "applied at a boundary" rule the client tree follows.
+fn check_worlds(identity: &Path, channel: feed::Channel) {
+    let runtime = super::runtime::runtime_version();
+    let heads = crate::serve::head::bundles_root(identity);
+    for (world, _, _) in crate::composition::bundled_world_surfaces() {
+        match super::world::check(&world, &runtime, &heads, channel) {
+            Ok(outcome) => tracing::debug!(%world, ?outcome, "world head checked"),
+            // Named, never folded into the client's standing: "this World's
+            // channel could not be asked" is a different fact from anything
+            // the product's channel said, and collapsing them would report a
+            // World's outage as the product's.
+            Err(error) => tracing::warn!(%world, %error, "a world head could not be staged"),
+        }
+    }
+}
+
 /// The ordinary check, against the real feed and the real host.
 fn check(identity: &Path, root: &Path) -> Standing {
     let channel = feed::Channel::current();
@@ -223,6 +247,7 @@ fn check(identity: &Path, root: &Path) -> Standing {
         root,
     );
     record(identity, &standing);
+    check_worlds(identity, channel);
     standing
 }
 
