@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
+// These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `env_flag`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -119,6 +119,42 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.stopHead({
     required String id,
   }) = ActionRequest_StopHead;
+
+  /// Send a message to a person, over the configured carrier.
+  const factory ActionRequest.sendMessage({
+    required String to,
+    required String body,
+  }) = ActionRequest_SendMessage;
+
+  /// Ask the carrier for anything waiting, and file it into conversations.
+  const factory ActionRequest.collectMail() = ActionRequest_CollectMail;
+
+  /// Block a person at the carrier, so no device of theirs lands again. Also
+  /// how an incoming stranger is dismissed.
+  const factory ActionRequest.blockSender({
+    required String person,
+  }) = ActionRequest_BlockSender;
+
+  /// Accept an unknown correspondent into the address book.
+  const factory ActionRequest.acceptContact({
+    required String person,
+  }) = ActionRequest_AcceptContact;
+
+  /// Open a conversation as a tab, and focus it. What a click in the address
+  /// book asks for.
+  const factory ActionRequest.openConversation({
+    required String person,
+  }) = ActionRequest_OpenConversation;
+
+  /// Focus an already-open conversation tab.
+  const factory ActionRequest.focusConversation({
+    required String person,
+  }) = ActionRequest_FocusConversation;
+
+  /// Close a conversation tab.
+  const factory ActionRequest.closeConversation({
+    required String person,
+  }) = ActionRequest_CloseConversation;
 
   /// Forget an Orbit. The store is left alone; this is registry-only.
   const factory ActionRequest.forgetOrbit({
@@ -369,6 +405,59 @@ class CardRow {
           presence == other.presence;
 }
 
+/// One message in a conversation. The chat draws a custom component per `kind`.
+class ChatMessageRow {
+  /// True if this identity sent it — which side of the chat it is drawn on.
+  final bool mine;
+
+  /// `message` (text) or `invitation`. The chat draws each with its own
+  /// component: one is read, the other acted on.
+  final String kind;
+
+  /// The text, for a message. `None` for an invitation.
+  final String? body;
+
+  /// When it was written, unix seconds.
+  final BigInt sentAt;
+
+  /// The proven signer's device, for a received message.
+  final String fromDevice;
+
+  /// Whether the carrier's word matched the proof. `false` is not wrong but is
+  /// worth surfacing rather than hiding.
+  final bool provenanceAgrees;
+
+  const ChatMessageRow({
+    required this.mine,
+    required this.kind,
+    this.body,
+    required this.sentAt,
+    required this.fromDevice,
+    required this.provenanceAgrees,
+  });
+
+  @override
+  int get hashCode =>
+      mine.hashCode ^
+      kind.hashCode ^
+      body.hashCode ^
+      sentAt.hashCode ^
+      fromDevice.hashCode ^
+      provenanceAgrees.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ChatMessageRow &&
+          runtimeType == other.runtimeType &&
+          mine == other.mine &&
+          kind == other.kind &&
+          body == other.body &&
+          sentAt == other.sentAt &&
+          fromDevice == other.fromDevice &&
+          provenanceAgrees == other.provenanceAgrees;
+}
+
 /// Everything a surface can draw, as of one moment.
 ///
 /// Sent whole. There is no partial update and no patch protocol, because a
@@ -409,6 +498,10 @@ class ClientView {
   /// `None` until the book has been read once. Empty cards is a book
   /// that answered and holds nothing, not an unread book.
   final BookFacts? book;
+
+  /// This identity's correspondence — the mailbox and the arrival standing.
+  /// `None` until read once, distinct from a mailbox that answered empty.
+  final CorrespondenceFacts? correspondence;
   final List<NoticeRow> notices;
   final List<FailureRow> failures;
 
@@ -433,6 +526,7 @@ class ClientView {
     required this.orbits,
     this.space,
     this.book,
+    this.correspondence,
     required this.notices,
     required this.failures,
     required this.inFlight,
@@ -453,6 +547,7 @@ class ClientView {
       orbits.hashCode ^
       space.hashCode ^
       book.hashCode ^
+      correspondence.hashCode ^
       notices.hashCode ^
       failures.hashCode ^
       inFlight.hashCode ^
@@ -475,10 +570,144 @@ class ClientView {
           orbits == other.orbits &&
           space == other.space &&
           book == other.book &&
+          correspondence == other.correspondence &&
           notices == other.notices &&
           failures == other.failures &&
           inFlight == other.inFlight &&
           mcp == other.mcp;
+}
+
+/// One person one can message, with each device that is them.
+class ContactRow {
+  final String id;
+  final String name;
+  final List<String> devices;
+
+  /// In the book (a friend) vs an unadded stranger who wrote first. Parts the
+  /// normal contact list from the incoming section.
+  final bool added;
+
+  /// An agent rather than a person — wears the AI mark.
+  final bool isAgent;
+
+  /// If this is a contact's agent, whose, and their name for the label.
+  final String? parentId;
+  final String? parentName;
+
+  /// Unread received messages — the badge. Zero once opened.
+  final int unread;
+
+  const ContactRow({
+    required this.id,
+    required this.name,
+    required this.devices,
+    required this.added,
+    required this.isAgent,
+    this.parentId,
+    this.parentName,
+    required this.unread,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      devices.hashCode ^
+      added.hashCode ^
+      isAgent.hashCode ^
+      parentId.hashCode ^
+      parentName.hashCode ^
+      unread.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ContactRow &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          devices == other.devices &&
+          added == other.added &&
+          isAgent == other.isAgent &&
+          parentId == other.parentId &&
+          parentName == other.parentName &&
+          unread == other.unread;
+}
+
+/// One conversation: who it is with, and every message either way.
+class ConversationRow {
+  final String peerId;
+  final String peerName;
+  final List<ChatMessageRow> messages;
+
+  const ConversationRow({
+    required this.peerId,
+    required this.peerName,
+    required this.messages,
+  });
+
+  @override
+  int get hashCode => peerId.hashCode ^ peerName.hashCode ^ messages.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConversationRow &&
+          runtimeType == other.runtimeType &&
+          peerId == other.peerId &&
+          peerName == other.peerName &&
+          messages == other.messages;
+}
+
+/// A person's correspondence, drawn as conversations rather than an inbox.
+///
+/// `None` on `ClientView` until it has been read once — the same
+/// loading-versus-empty distinction the book keeps.
+class CorrespondenceFacts {
+  /// This identity's own device id on the plane — the address a correspondent
+  /// writes to. `None` until the plane is known.
+  final String? myDevice;
+
+  /// The people this identity can reach. A person folds all their devices into
+  /// one contact, and a click on one opens a chat.
+  final List<ContactRow> contacts;
+
+  /// One transcript per person, mixing sent and received.
+  final List<ConversationRow> conversations;
+
+  /// Which conversations are open as tabs, in tab order. Shared state, so a
+  /// click in the address book opens the tab the chat window draws.
+  final List<String> openTabs;
+
+  /// The focused tab, if any.
+  final String? activeTab;
+
+  const CorrespondenceFacts({
+    this.myDevice,
+    required this.contacts,
+    required this.conversations,
+    required this.openTabs,
+    this.activeTab,
+  });
+
+  @override
+  int get hashCode =>
+      myDevice.hashCode ^
+      contacts.hashCode ^
+      conversations.hashCode ^
+      openTabs.hashCode ^
+      activeTab.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CorrespondenceFacts &&
+          runtimeType == other.runtimeType &&
+          myDevice == other.myDevice &&
+          contacts == other.contacts &&
+          conversations == other.conversations &&
+          openTabs == other.openTabs &&
+          activeTab == other.activeTab;
 }
 
 class DeviceRow {

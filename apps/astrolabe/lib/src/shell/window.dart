@@ -363,10 +363,13 @@ class AstrolabeWindowFrame extends StatefulWidget {
     double? maximumWidth,
     this.maximisable = true,
     this.mergedCaption = false,
+    // A window whose chrome IS its tabs — a browser, a terminal, the chat —
+    // draws them here, in the caption band beside the system controls, instead
+    // of a title. When given, the title is not drawn.
+    this.captionBuilder,
     this.closePolicy = AstrolabeWindowClosePolicy.close,
     this.chrome = const NativeWindowControlHost(),
-  })  : captionBuilder = null,
-        captionTrailing = null,
+  })  : captionTrailing = null,
         wordmark = null,
         wordmarkMinWidth = null,
         captionHeight = kBarHeight,
@@ -583,6 +586,25 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
               trailing: widget.captionTrailing,
               wordmark: widget.wordmark,
               wordmarkMinWidth: widget.wordmarkMinWidth,
+              height: widget.captionHeight,
+              bottomBorder: widget.captionBottomBorder,
+              maximised: _maximised,
+              chrome: widget.chrome,
+              onToggleMaximise: widget.maximisable ? _toggleMaximise : null,
+              closePolicy: widget.closePolicy,
+              onClose: _close,
+            )
+          // A secondary window that draws its own caption content — the chat's
+          // browser-style tabs — uses the same caption widget with no wordmark,
+          // so the tabs sit in the band beside the system controls rather than
+          // below them.
+          else if (widget.captionBuilder != null)
+            _PrimaryCaption(
+              title: null,
+              builder: widget.captionBuilder,
+              trailing: widget.captionTrailing,
+              wordmark: null,
+              wordmarkMinWidth: null,
               height: widget.captionHeight,
               bottomBorder: widget.captionBottomBorder,
               maximised: _maximised,

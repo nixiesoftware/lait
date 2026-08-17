@@ -26,6 +26,87 @@ use lait_workbench::{
 };
 
 use crate::client::book::BookSnapshot;
+
+/// The App-owned model of this identity's correspondence.
+///
+/// Correspondence is drawn as **conversations**, never an inbox: a person is
+/// reached from the address book, and a click opens a chat. This holds the
+/// people one can reach, the transcript of each conversation, and which
+/// conversations are open as tabs — all whole values the core replaces, because
+/// Dart holds no correspondence state of its own.
+#[derive(Debug, Clone, Default)]
+pub struct Correspondence {
+    /// This identity's own device on the plane — the address a correspondent
+    /// writes to.
+    pub my_device: Option<String>,
+    /// The people this identity can hold a conversation with. A person folds all
+    /// of their devices into one entry; a message from any of them is one
+    /// conversation.
+    pub contacts: Vec<Contact>,
+    /// One transcript per person, in send order, mixing what was sent and
+    /// received.
+    pub conversations: Vec<Conversation>,
+    /// Which conversations are open as tabs, in tab order. Shared state, so a
+    /// click in the address book opens the tab the chat window then draws.
+    pub open_tabs: Vec<String>,
+    /// The focused tab, if any.
+    pub active_tab: Option<String>,
+}
+
+/// A person one can message, with every device that is them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contact {
+    /// Stable person id — what a tab is keyed on.
+    pub id: String,
+    /// The name a person reads.
+    pub name: String,
+    /// Every device that is this person. A message from any is this person's.
+    pub devices: Vec<String>,
+    /// Whether this person is in the address book. An **added** contact sits in
+    /// the normal list; an **unadded** one (a stranger who wrote first) sits in
+    /// the incoming section, the way Steam parts friends from requests.
+    pub added: bool,
+    /// Whether this correspondent is an agent rather than a person — it wears
+    /// the AI mark.
+    pub is_agent: bool,
+    /// If this is a contact's agent, whose. `None` for a person or a standalone
+    /// agent.
+    pub parent_id: Option<String>,
+    /// The name of the parent, when there is one, so a surface can say "Ada's
+    /// assistant" without a second lookup.
+    pub parent_name: Option<String>,
+    /// How many received messages have not been seen — the unread badge. Cleared
+    /// when the conversation is opened.
+    pub unread: u32,
+}
+
+/// One person's conversation: who it is with, and every message either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conversation {
+    pub peer_id: String,
+    pub peer_name: String,
+    pub messages: Vec<ChatMessage>,
+}
+
+/// One message in a conversation, sent or received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessage {
+    /// True if this identity sent it, false if it was received. Drives which
+    /// side of the chat it is drawn on.
+    pub mine: bool,
+    /// The message kind, so the chat draws a custom component per type:
+    /// `message` (text) or `invitation`.
+    pub kind: String,
+    /// The text, for a `message`. `None` for an invitation.
+    pub body: Option<String>,
+    /// When it was written, unix seconds.
+    pub sent_at: u64,
+    /// The device it was written by — the proven signer for a received message.
+    pub from_device: String,
+    /// Whether the carrier's word matched the proof, for a received message.
+    /// Always true for a sent one.
+    pub provenance_agrees: bool,
+}
 use crate::client::heads::McpBindingOutcome;
 use crate::client::host::HostContext;
 use crate::client::library::{LaunchTicket, LibraryEntry, WorldStanding};
@@ -74,6 +155,9 @@ pub struct App {
     space: Option<SpaceView>,
     /// The identity's address book. `None` until the first successful read.
     book: Option<BookSnapshot>,
+    /// This identity's correspondence, once read. `None` before the first read —
+    /// loading, not an empty mailbox.
+    correspondence: Option<Correspondence>,
     /// What passive presence sampling last measured. `None` until a pass has
     /// run; a pass that could not run leaves the last measurement in place,
     /// under the staleness the model already wears.
@@ -164,6 +248,7 @@ impl App {
             Update::Presentation(presentation) => self.absorb_presentation(*presentation),
             Update::PresentationEnded => self.presentation = None,
             Update::Book(book) => self.book = Some(book),
+            Update::Correspondence(correspondence) => self.correspondence = Some(correspondence),
             Update::Presence(presence) => self.presence = Some(presence),
             Update::Signal(signal) => self.consume(&signal),
             Update::Done { key, outcome } => {
@@ -397,6 +482,14 @@ impl App {
 
     pub fn book(&self) -> Option<&BookSnapshot> {
         self.book.as_ref()
+    }
+
+    pub fn correspondence(&self) -> Option<&Correspondence> {
+        self.correspondence.as_ref()
+    }
+
+    pub fn absorb_correspondence(&mut self, correspondence: Correspondence) {
+        self.correspondence = Some(correspondence);
     }
 
     pub fn presence(&self) -> Option<&crate::client::presence::PresenceMap> {

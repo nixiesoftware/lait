@@ -82,6 +82,9 @@ pub struct ClientView {
     /// `None` until the book has been read once. Empty cards is a book
     /// that answered and holds nothing, not an unread book.
     pub book: Option<BookFacts>,
+    /// This identity's correspondence — the mailbox and the arrival standing.
+    /// `None` until read once, distinct from a mailbox that answered empty.
+    pub correspondence: Option<CorrespondenceFacts>,
     pub notices: Vec<NoticeRow>,
     pub failures: Vec<FailureRow>,
     /// The keys of actions asked for and not yet answered. A control whose key
@@ -579,6 +582,72 @@ pub struct BookFacts {
     pub suggestions: Vec<SuggestionRow>,
 }
 
+/// A person's correspondence, drawn as conversations rather than an inbox.
+///
+/// `None` on `ClientView` until it has been read once — the same
+/// loading-versus-empty distinction the book keeps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrespondenceFacts {
+    /// This identity's own device id on the plane — the address a correspondent
+    /// writes to. `None` until the plane is known.
+    pub my_device: Option<String>,
+    /// The people this identity can reach. A person folds all their devices into
+    /// one contact, and a click on one opens a chat.
+    pub contacts: Vec<ContactRow>,
+    /// One transcript per person, mixing sent and received.
+    pub conversations: Vec<ConversationRow>,
+    /// Which conversations are open as tabs, in tab order. Shared state, so a
+    /// click in the address book opens the tab the chat window draws.
+    pub open_tabs: Vec<String>,
+    /// The focused tab, if any.
+    pub active_tab: Option<String>,
+}
+
+/// One person one can message, with each device that is them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContactRow {
+    pub id: String,
+    pub name: String,
+    pub devices: Vec<String>,
+    /// In the book (a friend) vs an unadded stranger who wrote first. Parts the
+    /// normal contact list from the incoming section.
+    pub added: bool,
+    /// An agent rather than a person — wears the AI mark.
+    pub is_agent: bool,
+    /// If this is a contact's agent, whose, and their name for the label.
+    pub parent_id: Option<String>,
+    pub parent_name: Option<String>,
+    /// Unread received messages — the badge. Zero once opened.
+    pub unread: u32,
+}
+
+/// One conversation: who it is with, and every message either way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationRow {
+    pub peer_id: String,
+    pub peer_name: String,
+    pub messages: Vec<ChatMessageRow>,
+}
+
+/// One message in a conversation. The chat draws a custom component per `kind`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatMessageRow {
+    /// True if this identity sent it — which side of the chat it is drawn on.
+    pub mine: bool,
+    /// `message` (text) or `invitation`. The chat draws each with its own
+    /// component: one is read, the other acted on.
+    pub kind: String,
+    /// The text, for a message. `None` for an invitation.
+    pub body: Option<String>,
+    /// When it was written, unix seconds.
+    pub sent_at: u64,
+    /// The proven signer's device, for a received message.
+    pub from_device: String,
+    /// Whether the carrier's word matched the proof. `false` is not wrong but is
+    /// worth surfacing rather than hiding.
+    pub provenance_agrees: bool,
+}
+
 /// One staged suggestion from a card-exchange file. Review is the only way
 /// into the book, so this carries exactly what the person must judge.
 #[derive(Debug, Clone, PartialEq)]
@@ -694,6 +763,35 @@ pub enum ActionRequest {
     StartHead,
     StopHead {
         id: String,
+    },
+    /// Send a message to a person, over the configured carrier.
+    SendMessage {
+        to: String,
+        body: String,
+    },
+    /// Ask the carrier for anything waiting, and file it into conversations.
+    CollectMail,
+    /// Block a person at the carrier, so no device of theirs lands again. Also
+    /// how an incoming stranger is dismissed.
+    BlockSender {
+        person: String,
+    },
+    /// Accept an unknown correspondent into the address book.
+    AcceptContact {
+        person: String,
+    },
+    /// Open a conversation as a tab, and focus it. What a click in the address
+    /// book asks for.
+    OpenConversation {
+        person: String,
+    },
+    /// Focus an already-open conversation tab.
+    FocusConversation {
+        person: String,
+    },
+    /// Close a conversation tab.
+    CloseConversation {
+        person: String,
     },
     /// Forget an Orbit. The store is left alone; this is registry-only.
     ForgetOrbit {
@@ -838,6 +936,13 @@ impl ActionRequest {
             Self::ReadSpace { orbit } => Action::ReadSpace(space_ref(orbit)),
             Self::StartHead => Action::StartHead,
             Self::StopHead { id } => Action::StopHead(id),
+            Self::SendMessage { to, body } => Action::SendMessage { to, body },
+            Self::CollectMail => Action::CollectMail,
+            Self::BlockSender { person } => Action::BlockSender(person),
+            Self::AcceptContact { person } => Action::AcceptContact(person),
+            Self::OpenConversation { person } => Action::OpenConversation(person),
+            Self::FocusConversation { person } => Action::FocusConversation(person),
+            Self::CloseConversation { person } => Action::CloseConversation(person),
             Self::ForgetOrbit { space } => Action::OrbitForget { space },
             Self::BookPut { card, name, note } => Action::BookPut { card, name, note },
             Self::BookDelete { card } => Action::BookDelete { card },
@@ -1049,14 +1154,19 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
 
     let (woken, wakeups) = channel();
     let wake = woken.clone();
-    let runtime = Runtime::start(
-        Config::new(state_root.clone(), sidecar.clone()),
-        move || {
-            // A failed send means the pump is gone, which happens only on the
-            // way out. Nothing to report and nobody to report it to.
-            let _ = wake.send(());
-        },
-    )
+    let mut config = Config::new(state_root.clone(), sidecar.clone());
+    // A standalone launch, set by the environment: come up without the identity
+    // daemon rather than waiting on one. `env_flag` so `1`, `true`, `on` and
+    // `yes` all read the same, and an empty or absent value stays off.
+    config.skip_sidecar = env_flag("LAIT_SKIP_SIDECAR");
+    // Opt in to the in-process correspondence fixture — off by default, so
+    // correspondence refuses honestly until a real carrier exists.
+    config.correspondence_demo = env_flag("LAIT_CORRESPONDENCE_DEMO");
+    let runtime = Runtime::start(config, move || {
+        // A failed send means the pump is gone, which happens only on the
+        // way out. Nothing to report and nobody to report it to.
+        let _ = wake.send(());
+    })
     .map_err(|error| error.to_string())?;
 
     let _ = CORE.set(Mutex::new(Core {
@@ -1085,6 +1195,46 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
         })
         .map_err(|error| format!("start the projection pump: {error}"))?;
     Ok(())
+}
+
+/// Whether an environment variable reads as set. `1`, `true`, `on`, `yes`
+/// (any case) are on; absent, empty, and everything else are off.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        )
+    })
+}
+
+#[cfg(test)]
+mod env_flag_tests {
+    use super::env_flag;
+
+    /// The flag reads the truthy spellings and nothing else. A unique variable
+    /// name per case keeps these independent of one another and of any other
+    /// test touching the environment.
+    #[test]
+    fn env_flag_reads_the_truthy_spellings_only() {
+        for (raw, want) in [
+            ("1", true),
+            ("TRUE", true),
+            ("On", true),
+            (" yes ", true),
+            ("0", false),
+            ("off", false),
+            ("", false),
+            ("nope", false),
+        ] {
+            let name = format!("LAIT_TEST_ENV_FLAG_{}", raw.trim().to_ascii_uppercase());
+            // SAFETY: a test-only variable this test owns; no other test reads it.
+            unsafe { std::env::set_var(&name, raw) };
+            assert_eq!(env_flag(&name), want, "{raw:?} should read as {want}");
+            unsafe { std::env::remove_var(&name) };
+        }
+        assert!(!env_flag("LAIT_TEST_ENV_FLAG_DEFINITELY_ABSENT"));
+    }
 }
 
 fn attach_to(core: &Mutex<Core>, state_root: &Path, sidecar: &Path) -> Result<(), String> {
@@ -1260,6 +1410,7 @@ fn empty() -> ClientView {
         orbits: Vec::new(),
         space: None,
         book: None,
+        correspondence: None,
         notices: Vec::new(),
         failures: Vec::new(),
         in_flight: Vec::new(),
@@ -1622,6 +1773,45 @@ fn project(app: &App) -> ClientView {
                     handles: s.handles.clone(),
                 })
                 .collect(),
+        }),
+        correspondence: app.correspondence().map(|corr| CorrespondenceFacts {
+            my_device: corr.my_device.clone(),
+            contacts: corr
+                .contacts
+                .iter()
+                .map(|contact| ContactRow {
+                    id: contact.id.clone(),
+                    name: contact.name.clone(),
+                    devices: contact.devices.clone(),
+                    added: contact.added,
+                    is_agent: contact.is_agent,
+                    parent_id: contact.parent_id.clone(),
+                    parent_name: contact.parent_name.clone(),
+                    unread: contact.unread,
+                })
+                .collect(),
+            conversations: corr
+                .conversations
+                .iter()
+                .map(|conversation| ConversationRow {
+                    peer_id: conversation.peer_id.clone(),
+                    peer_name: conversation.peer_name.clone(),
+                    messages: conversation
+                        .messages
+                        .iter()
+                        .map(|message| ChatMessageRow {
+                            mine: message.mine,
+                            kind: message.kind.clone(),
+                            body: message.body.clone(),
+                            sent_at: message.sent_at,
+                            from_device: message.from_device.clone(),
+                            provenance_agrees: message.provenance_agrees,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            open_tabs: corr.open_tabs.clone(),
+            active_tab: corr.active_tab.clone(),
         }),
         notices: app
             .notices()

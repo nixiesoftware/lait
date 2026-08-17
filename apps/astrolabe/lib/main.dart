@@ -16,6 +16,7 @@ import 'package:window_manager/window_manager.dart';
 import 'src/core/client.dart';
 import 'src/settings/window.dart';
 import 'src/shell/book.dart';
+import 'src/shell/correspondence.dart';
 import 'src/shell/displays.dart';
 import 'src/shell/host.dart';
 import 'src/shell/shell.dart';
@@ -61,6 +62,11 @@ Future<void> main(List<String> arguments) async {
     if (isDisplaysEngine(arguments)) {
       final client = await Client.start();
       runApp(DisplaysApp(client: client));
+      return;
+    }
+    if (isCorrespondenceEngine(arguments)) {
+      final client = await Client.start();
+      runApp(CorrespondenceApp(client: client));
       return;
     }
     if (!isBookEngine(arguments)) {

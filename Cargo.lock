@@ -363,6 +363,7 @@ dependencies = [
  "addressbook",
  "anyhow",
  "blake3",
+ "correspondence",
  "data-encoding",
  "flate2",
  "flutter_rust_bridge",

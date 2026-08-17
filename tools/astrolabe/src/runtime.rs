@@ -126,6 +126,16 @@ pub enum Action {
     /// Start the browser head this client opens Worlds through.
     StartHead,
     StopHead(String),
+    SendMessage {
+        to: String,
+        body: String,
+    },
+    CollectMail,
+    BlockSender(String),
+    AcceptContact(String),
+    OpenConversation(String),
+    FocusConversation(String),
+    CloseConversation(String),
     SpaceFound {
         home: String,
         name: String,
@@ -231,6 +241,13 @@ impl Action {
             Self::Administer { at, operation } => format!("space:{}:{}", at.space, operation.key()),
             Self::StartHead => "head.start".into(),
             Self::StopHead(id) => format!("head.stop:{id}"),
+            Self::SendMessage { to, .. } => format!("correspondence.send:{to}"),
+            Self::CollectMail => "correspondence.collect".into(),
+            Self::BlockSender(person) => format!("correspondence.block:{person}"),
+            Self::AcceptContact(person) => format!("correspondence.accept:{person}"),
+            Self::OpenConversation(person) => format!("correspondence.open:{person}"),
+            Self::FocusConversation(person) => format!("correspondence.focus:{person}"),
+            Self::CloseConversation(person) => format!("correspondence.close:{person}"),
             Self::SpaceFound { home, .. } => format!("space.found:{home}"),
             Self::SpaceEnter { home, .. } => format!("space.enter:{home}"),
             Self::DeviceConsent { .. } => "device.consent".into(),
@@ -304,6 +321,13 @@ impl Action {
             Self::Administer { operation, .. } => operation.what(),
             Self::StartHead => "start a head".into(),
             Self::StopHead(id) => format!("stop head {id}"),
+            Self::SendMessage { to, .. } => format!("send a message to {to}"),
+            Self::CollectMail => "collect what is waiting".into(),
+            Self::BlockSender(person) => format!("block {person}"),
+            Self::AcceptContact(person) => format!("accept {person}"),
+            Self::OpenConversation(person) => format!("open a chat with {person}"),
+            Self::FocusConversation(person) => format!("focus the chat with {person}"),
+            Self::CloseConversation(person) => format!("close the chat with {person}"),
             Self::SpaceFound { name, .. } => format!("found the Space '{name}'"),
             Self::SpaceEnter { .. } => "enter a Space from an invite".into(),
             Self::DeviceConsent { .. } => "sign this machine's consent".into(),
@@ -377,6 +401,10 @@ pub enum Update {
     /// screen showing nothing rather than a client that is no longer a screen.
     PresentationEnded,
     Book(crate::client::book::BookSnapshot),
+    /// This identity's mailbox and arrival standing, after a correspondence
+    /// action moved it. A whole snapshot, like [`Book`]: the model is pushed,
+    /// never mutated in place by a surface.
+    Correspondence(crate::model::Correspondence),
     /// What passive presence sampling measured this pass — including which
     /// Spaces answered at all, so absence keeps its kind.
     Presence(crate::client::presence::PresenceMap),
@@ -524,6 +552,19 @@ struct Worker {
     /// Where the screen preference lives, so a machine that was a screen comes
     /// back as one.
     state_root: std::path::PathBuf,
+    /// The opt-in front-end validation fixture, present only under
+    /// `LAIT_CORRESPONDENCE_DEMO`. When absent, correspondence is not connected
+    /// to any carrier and every correspondence action refuses honestly. Behind a
+    /// `Mutex` because the `Worker` is shared across the tasks that answer
+    /// actions.
+    correspondence: Option<std::sync::Mutex<crate::client::correspondence::DemoCarrier>>,
+}
+
+/// Unix seconds, for the clocks the correspondence crate takes as arguments.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 async fn serve(
@@ -534,6 +575,7 @@ async fn serve(
 ) {
     // Read before the supervisor starts, because the config is moved into it.
     let state_root = config.state_root.clone();
+    let correspondence_demo = config.correspondence_demo;
     let remembered = crate::screen::load(&state_root);
     let (client, signals) = match Client::start(config).await {
         Ok(started) => started,
@@ -579,6 +621,9 @@ async fn serve(
                 .map(Into::into),
         ),
         state_root,
+        correspondence: correspondence_demo.then(|| {
+            std::sync::Mutex::new(crate::client::correspondence::DemoCarrier::new(now_secs()))
+        }),
     });
 
     // A machine that was a screen comes back as one, before the first read.
@@ -646,8 +691,43 @@ impl Worker {
         send(&self.updates, self.wake.as_ref(), update);
     }
 
+    /// Mutate the correspondence fixture under its lock and push the fresh
+    /// snapshot. One place holds the lock, snapshots, and emits, so every
+    /// correspondence handler is one line and none forgets to push the view.
+    ///
+    /// With the fixture absent — the default, no `LAIT_CORRESPONDENCE_DEMO` —
+    /// correspondence is connected to no carrier, so this refuses honestly
+    /// rather than pretending an action landed.
+    fn correspond(
+        &self,
+        act: impl FnOnce(&mut crate::client::correspondence::DemoCarrier) -> ClientResult<()>,
+    ) -> ClientResult<()> {
+        let Some(fixture) = self.correspondence.as_ref() else {
+            return Err(ClientError::refused("correspondence is not connected yet"));
+        };
+        let snapshot = {
+            let mut correspondence = fixture
+                .lock()
+                .map_err(|_| ClientError::internal("the correspondence lock is poisoned"))?;
+            act(&mut correspondence)?;
+            correspondence.snapshot()
+        };
+        self.send(Update::Correspondence(snapshot));
+        Ok(())
+    }
+
     /// Re-read everything that is not delivered by the stream.
     async fn refresh(&self) {
+        // When the fixture is present, the chat shows its world as it stands,
+        // before anything that awaits: it depends on neither the supervisor nor
+        // a daemon, so the conversations are there the instant the window opens
+        // even while the identity is still attaching. Absent, there is nothing
+        // to show and no carrier to ask.
+        if let Some(fixture) = self.correspondence.as_ref() {
+            if let Ok(correspondence) = fixture.lock() {
+                self.send(Update::Correspondence(correspondence.snapshot()));
+            }
+        }
         self.send(Update::Snapshot(Box::new(
             self.client.supervisor().snapshot().await,
         )));
@@ -938,6 +1018,62 @@ impl Worker {
                         format!("head {id} had already exited ({status})"),
                     )),
                 }
+            }
+            Action::SendMessage { to, body } => {
+                // The loopback carrier holds the real seam: compose, sign, seal,
+                // and deposit under an unforgeable egress witness. When the
+                // daemon hands the client a Space-hosted carrier this same call
+                // points at it — the surface never learns which is underneath.
+                let now = now_secs();
+                self.correspond(|correspondence| correspondence.send(to, body, now))?;
+                Ok(Outcome::Silent)
+            }
+            Action::CollectMail => {
+                let now = now_secs();
+                self.correspond(|correspondence| {
+                    correspondence.collect(now);
+                    Ok(())
+                })?;
+                Ok(Outcome::Silent)
+            }
+            Action::BlockSender(person) => {
+                let now = now_secs();
+                self.correspond(|correspondence| correspondence.block(person, now))?;
+                Ok(Outcome::Said(format!("blocked {person}")))
+            }
+            Action::AcceptContact(person) => {
+                let person = person.clone();
+                self.correspond(move |correspondence| {
+                    correspondence.accept(&person);
+                    Ok(())
+                })?;
+                Ok(Outcome::Said("added to contacts".into()))
+            }
+            // Opening, focusing and closing tabs are shared-model navigation:
+            // a click in one window moves the tab the chat window then draws.
+            Action::OpenConversation(person) => {
+                let person = person.clone();
+                self.correspond(move |correspondence| {
+                    correspondence.open(&person);
+                    Ok(())
+                })?;
+                Ok(Outcome::Silent)
+            }
+            Action::FocusConversation(person) => {
+                let person = person.clone();
+                self.correspond(move |correspondence| {
+                    correspondence.focus(&person);
+                    Ok(())
+                })?;
+                Ok(Outcome::Silent)
+            }
+            Action::CloseConversation(person) => {
+                let person = person.clone();
+                self.correspond(move |correspondence| {
+                    correspondence.close(&person);
+                    Ok(())
+                })?;
+                Ok(Outcome::Silent)
             }
             Action::SpaceFound { home, name, nick } => {
                 client.space_found(home, name, nick.clone()).await?;

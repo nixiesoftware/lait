@@ -20,6 +20,10 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# The correspondence plane: the mailbox, the letter, and the arrival watch. The
+# client is where a person reads and writes correspondence, so it holds the
+# mailbox and projects it, the same way it holds the address book.
+correspondence = { path = "../../crates/correspondence" }
 lait = { path = "../.." }
 lait-workbench = { path = "../workbench" }
 addressbook = { path = "../../crates/addressbook" }

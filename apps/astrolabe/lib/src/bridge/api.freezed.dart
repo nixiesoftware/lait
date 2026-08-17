@@ -62,6 +62,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_ReadSpace value)? readSpace,
     TResult Function(ActionRequest_StartHead value)? startHead,
     TResult Function(ActionRequest_StopHead value)? stopHead,
+    TResult Function(ActionRequest_SendMessage value)? sendMessage,
+    TResult Function(ActionRequest_CollectMail value)? collectMail,
+    TResult Function(ActionRequest_BlockSender value)? blockSender,
+    TResult Function(ActionRequest_AcceptContact value)? acceptContact,
+    TResult Function(ActionRequest_OpenConversation value)? openConversation,
+    TResult Function(ActionRequest_FocusConversation value)? focusConversation,
+    TResult Function(ActionRequest_CloseConversation value)? closeConversation,
     TResult Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
     TResult Function(ActionRequest_BookPut value)? bookPut,
     TResult Function(ActionRequest_BookDelete value)? bookDelete,
@@ -119,6 +126,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead(_that);
       case ActionRequest_StopHead() when stopHead != null:
         return stopHead(_that);
+      case ActionRequest_SendMessage() when sendMessage != null:
+        return sendMessage(_that);
+      case ActionRequest_CollectMail() when collectMail != null:
+        return collectMail(_that);
+      case ActionRequest_BlockSender() when blockSender != null:
+        return blockSender(_that);
+      case ActionRequest_AcceptContact() when acceptContact != null:
+        return acceptContact(_that);
+      case ActionRequest_OpenConversation() when openConversation != null:
+        return openConversation(_that);
+      case ActionRequest_FocusConversation() when focusConversation != null:
+        return focusConversation(_that);
+      case ActionRequest_CloseConversation() when closeConversation != null:
+        return closeConversation(_that);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that);
       case ActionRequest_BookPut() when bookPut != null:
@@ -203,6 +224,16 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_ReadSpace value) readSpace,
     required TResult Function(ActionRequest_StartHead value) startHead,
     required TResult Function(ActionRequest_StopHead value) stopHead,
+    required TResult Function(ActionRequest_SendMessage value) sendMessage,
+    required TResult Function(ActionRequest_CollectMail value) collectMail,
+    required TResult Function(ActionRequest_BlockSender value) blockSender,
+    required TResult Function(ActionRequest_AcceptContact value) acceptContact,
+    required TResult Function(ActionRequest_OpenConversation value)
+        openConversation,
+    required TResult Function(ActionRequest_FocusConversation value)
+        focusConversation,
+    required TResult Function(ActionRequest_CloseConversation value)
+        closeConversation,
     required TResult Function(ActionRequest_ForgetOrbit value) forgetOrbit,
     required TResult Function(ActionRequest_BookPut value) bookPut,
     required TResult Function(ActionRequest_BookDelete value) bookDelete,
@@ -264,6 +295,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead(_that);
       case ActionRequest_StopHead():
         return stopHead(_that);
+      case ActionRequest_SendMessage():
+        return sendMessage(_that);
+      case ActionRequest_CollectMail():
+        return collectMail(_that);
+      case ActionRequest_BlockSender():
+        return blockSender(_that);
+      case ActionRequest_AcceptContact():
+        return acceptContact(_that);
+      case ActionRequest_OpenConversation():
+        return openConversation(_that);
+      case ActionRequest_FocusConversation():
+        return focusConversation(_that);
+      case ActionRequest_CloseConversation():
+        return closeConversation(_that);
       case ActionRequest_ForgetOrbit():
         return forgetOrbit(_that);
       case ActionRequest_BookPut():
@@ -339,6 +384,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_ReadSpace value)? readSpace,
     TResult? Function(ActionRequest_StartHead value)? startHead,
     TResult? Function(ActionRequest_StopHead value)? stopHead,
+    TResult? Function(ActionRequest_SendMessage value)? sendMessage,
+    TResult? Function(ActionRequest_CollectMail value)? collectMail,
+    TResult? Function(ActionRequest_BlockSender value)? blockSender,
+    TResult? Function(ActionRequest_AcceptContact value)? acceptContact,
+    TResult? Function(ActionRequest_OpenConversation value)? openConversation,
+    TResult? Function(ActionRequest_FocusConversation value)? focusConversation,
+    TResult? Function(ActionRequest_CloseConversation value)? closeConversation,
     TResult? Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
     TResult? Function(ActionRequest_BookPut value)? bookPut,
     TResult? Function(ActionRequest_BookDelete value)? bookDelete,
@@ -395,6 +447,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead(_that);
       case ActionRequest_StopHead() when stopHead != null:
         return stopHead(_that);
+      case ActionRequest_SendMessage() when sendMessage != null:
+        return sendMessage(_that);
+      case ActionRequest_CollectMail() when collectMail != null:
+        return collectMail(_that);
+      case ActionRequest_BlockSender() when blockSender != null:
+        return blockSender(_that);
+      case ActionRequest_AcceptContact() when acceptContact != null:
+        return acceptContact(_that);
+      case ActionRequest_OpenConversation() when openConversation != null:
+        return openConversation(_that);
+      case ActionRequest_FocusConversation() when focusConversation != null:
+        return focusConversation(_that);
+      case ActionRequest_CloseConversation() when closeConversation != null:
+        return closeConversation(_that);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that);
       case ActionRequest_BookPut() when bookPut != null:
@@ -477,6 +543,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String orbit)? readSpace,
     TResult Function()? startHead,
     TResult Function(String id)? stopHead,
+    TResult Function(String to, String body)? sendMessage,
+    TResult Function()? collectMail,
+    TResult Function(String person)? blockSender,
+    TResult Function(String person)? acceptContact,
+    TResult Function(String person)? openConversation,
+    TResult Function(String person)? focusConversation,
+    TResult Function(String person)? closeConversation,
     TResult Function(String space)? forgetOrbit,
     TResult Function(String? card, String name, String? note)? bookPut,
     TResult Function(String card)? bookDelete,
@@ -545,6 +618,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead();
       case ActionRequest_StopHead() when stopHead != null:
         return stopHead(_that.id);
+      case ActionRequest_SendMessage() when sendMessage != null:
+        return sendMessage(_that.to, _that.body);
+      case ActionRequest_CollectMail() when collectMail != null:
+        return collectMail();
+      case ActionRequest_BlockSender() when blockSender != null:
+        return blockSender(_that.person);
+      case ActionRequest_AcceptContact() when acceptContact != null:
+        return acceptContact(_that.person);
+      case ActionRequest_OpenConversation() when openConversation != null:
+        return openConversation(_that.person);
+      case ActionRequest_FocusConversation() when focusConversation != null:
+        return focusConversation(_that.person);
+      case ActionRequest_CloseConversation() when closeConversation != null:
+        return closeConversation(_that.person);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that.space);
       case ActionRequest_BookPut() when bookPut != null:
@@ -642,6 +729,13 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(String orbit) readSpace,
     required TResult Function() startHead,
     required TResult Function(String id) stopHead,
+    required TResult Function(String to, String body) sendMessage,
+    required TResult Function() collectMail,
+    required TResult Function(String person) blockSender,
+    required TResult Function(String person) acceptContact,
+    required TResult Function(String person) openConversation,
+    required TResult Function(String person) focusConversation,
+    required TResult Function(String person) closeConversation,
     required TResult Function(String space) forgetOrbit,
     required TResult Function(String? card, String name, String? note) bookPut,
     required TResult Function(String card) bookDelete,
@@ -718,6 +812,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead();
       case ActionRequest_StopHead():
         return stopHead(_that.id);
+      case ActionRequest_SendMessage():
+        return sendMessage(_that.to, _that.body);
+      case ActionRequest_CollectMail():
+        return collectMail();
+      case ActionRequest_BlockSender():
+        return blockSender(_that.person);
+      case ActionRequest_AcceptContact():
+        return acceptContact(_that.person);
+      case ActionRequest_OpenConversation():
+        return openConversation(_that.person);
+      case ActionRequest_FocusConversation():
+        return focusConversation(_that.person);
+      case ActionRequest_CloseConversation():
+        return closeConversation(_that.person);
       case ActionRequest_ForgetOrbit():
         return forgetOrbit(_that.space);
       case ActionRequest_BookPut():
@@ -807,6 +915,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String orbit)? readSpace,
     TResult? Function()? startHead,
     TResult? Function(String id)? stopHead,
+    TResult? Function(String to, String body)? sendMessage,
+    TResult? Function()? collectMail,
+    TResult? Function(String person)? blockSender,
+    TResult? Function(String person)? acceptContact,
+    TResult? Function(String person)? openConversation,
+    TResult? Function(String person)? focusConversation,
+    TResult? Function(String person)? closeConversation,
     TResult? Function(String space)? forgetOrbit,
     TResult? Function(String? card, String name, String? note)? bookPut,
     TResult? Function(String card)? bookDelete,
@@ -874,6 +989,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead();
       case ActionRequest_StopHead() when stopHead != null:
         return stopHead(_that.id);
+      case ActionRequest_SendMessage() when sendMessage != null:
+        return sendMessage(_that.to, _that.body);
+      case ActionRequest_CollectMail() when collectMail != null:
+        return collectMail();
+      case ActionRequest_BlockSender() when blockSender != null:
+        return blockSender(_that.person);
+      case ActionRequest_AcceptContact() when acceptContact != null:
+        return acceptContact(_that.person);
+      case ActionRequest_OpenConversation() when openConversation != null:
+        return openConversation(_that.person);
+      case ActionRequest_FocusConversation() when focusConversation != null:
+        return focusConversation(_that.person);
+      case ActionRequest_CloseConversation() when closeConversation != null:
+        return closeConversation(_that.person);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that.space);
       case ActionRequest_BookPut() when bookPut != null:
@@ -1606,6 +1735,429 @@ class _$ActionRequest_StopHeadCopyWithImpl<$Res>
       id: null == id
           ? _self.id
           : id // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_SendMessage extends ActionRequest {
+  const ActionRequest_SendMessage({required this.to, required this.body})
+      : super._();
+
+  final String to;
+  final String body;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_SendMessageCopyWith<ActionRequest_SendMessage> get copyWith =>
+      _$ActionRequest_SendMessageCopyWithImpl<ActionRequest_SendMessage>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_SendMessage &&
+            (identical(other.to, to) || other.to == to) &&
+            (identical(other.body, body) || other.body == body));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, to, body);
+
+  @override
+  String toString() {
+    return 'ActionRequest.sendMessage(to: $to, body: $body)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_SendMessageCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_SendMessageCopyWith(ActionRequest_SendMessage value,
+          $Res Function(ActionRequest_SendMessage) _then) =
+      _$ActionRequest_SendMessageCopyWithImpl;
+  @useResult
+  $Res call({String to, String body});
+}
+
+/// @nodoc
+class _$ActionRequest_SendMessageCopyWithImpl<$Res>
+    implements $ActionRequest_SendMessageCopyWith<$Res> {
+  _$ActionRequest_SendMessageCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_SendMessage _self;
+  final $Res Function(ActionRequest_SendMessage) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? to = null,
+    Object? body = null,
+  }) {
+    return _then(ActionRequest_SendMessage(
+      to: null == to
+          ? _self.to
+          : to // ignore: cast_nullable_to_non_nullable
+              as String,
+      body: null == body
+          ? _self.body
+          : body // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_CollectMail extends ActionRequest {
+  const ActionRequest_CollectMail() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_CollectMail);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.collectMail()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BlockSender extends ActionRequest {
+  const ActionRequest_BlockSender({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BlockSenderCopyWith<ActionRequest_BlockSender> get copyWith =>
+      _$ActionRequest_BlockSenderCopyWithImpl<ActionRequest_BlockSender>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BlockSender &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.blockSender(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BlockSenderCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BlockSenderCopyWith(ActionRequest_BlockSender value,
+          $Res Function(ActionRequest_BlockSender) _then) =
+      _$ActionRequest_BlockSenderCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_BlockSenderCopyWithImpl<$Res>
+    implements $ActionRequest_BlockSenderCopyWith<$Res> {
+  _$ActionRequest_BlockSenderCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BlockSender _self;
+  final $Res Function(ActionRequest_BlockSender) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_BlockSender(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_AcceptContact extends ActionRequest {
+  const ActionRequest_AcceptContact({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_AcceptContactCopyWith<ActionRequest_AcceptContact>
+      get copyWith => _$ActionRequest_AcceptContactCopyWithImpl<
+          ActionRequest_AcceptContact>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_AcceptContact &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.acceptContact(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_AcceptContactCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_AcceptContactCopyWith(
+          ActionRequest_AcceptContact value,
+          $Res Function(ActionRequest_AcceptContact) _then) =
+      _$ActionRequest_AcceptContactCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_AcceptContactCopyWithImpl<$Res>
+    implements $ActionRequest_AcceptContactCopyWith<$Res> {
+  _$ActionRequest_AcceptContactCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_AcceptContact _self;
+  final $Res Function(ActionRequest_AcceptContact) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_AcceptContact(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_OpenConversation extends ActionRequest {
+  const ActionRequest_OpenConversation({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_OpenConversationCopyWith<ActionRequest_OpenConversation>
+      get copyWith => _$ActionRequest_OpenConversationCopyWithImpl<
+          ActionRequest_OpenConversation>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_OpenConversation &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.openConversation(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_OpenConversationCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_OpenConversationCopyWith(
+          ActionRequest_OpenConversation value,
+          $Res Function(ActionRequest_OpenConversation) _then) =
+      _$ActionRequest_OpenConversationCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_OpenConversationCopyWithImpl<$Res>
+    implements $ActionRequest_OpenConversationCopyWith<$Res> {
+  _$ActionRequest_OpenConversationCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_OpenConversation _self;
+  final $Res Function(ActionRequest_OpenConversation) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_OpenConversation(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_FocusConversation extends ActionRequest {
+  const ActionRequest_FocusConversation({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_FocusConversationCopyWith<ActionRequest_FocusConversation>
+      get copyWith => _$ActionRequest_FocusConversationCopyWithImpl<
+          ActionRequest_FocusConversation>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_FocusConversation &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.focusConversation(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_FocusConversationCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_FocusConversationCopyWith(
+          ActionRequest_FocusConversation value,
+          $Res Function(ActionRequest_FocusConversation) _then) =
+      _$ActionRequest_FocusConversationCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_FocusConversationCopyWithImpl<$Res>
+    implements $ActionRequest_FocusConversationCopyWith<$Res> {
+  _$ActionRequest_FocusConversationCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_FocusConversation _self;
+  final $Res Function(ActionRequest_FocusConversation) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_FocusConversation(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_CloseConversation extends ActionRequest {
+  const ActionRequest_CloseConversation({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_CloseConversationCopyWith<ActionRequest_CloseConversation>
+      get copyWith => _$ActionRequest_CloseConversationCopyWithImpl<
+          ActionRequest_CloseConversation>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_CloseConversation &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.closeConversation(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_CloseConversationCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_CloseConversationCopyWith(
+          ActionRequest_CloseConversation value,
+          $Res Function(ActionRequest_CloseConversation) _then) =
+      _$ActionRequest_CloseConversationCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_CloseConversationCopyWithImpl<$Res>
+    implements $ActionRequest_CloseConversationCopyWith<$Res> {
+  _$ActionRequest_CloseConversationCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_CloseConversation _self;
+  final $Res Function(ActionRequest_CloseConversation) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_CloseConversation(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }
