@@ -521,14 +521,26 @@ class _ActionPanel extends StatelessWidget {
     // This World's own head. One process per World, so running is a fact about
     // this row rather than about whichever head happened to come up first.
     final heads = _servingWorld(view, showing.worldMount);
-    final running = !opening && heads.isNotEmpty;
-    final activeOrigin = heads.isEmpty ? null : heads.first.origin;
+    // A *live* head, not merely a listed one. This was `heads.isNotEmpty`, which is
+    // the same presence-for-liveness mistake `_lifecycle` had: an exited head stays
+    // listed, so a crashed World offered "Go to" and handed over an origin nothing
+    // was serving.
+    final live = heads.where((head) => head.state == 'running').toList();
+    final running = !opening && live.isNotEmpty;
+    // The origin of a head that is actually up. `heads.first` could name the dead
+    // one, which is the worst version of this — an address a person is invited to
+    // follow, to nothing.
+    final activeOrigin = live.isEmpty ? null : live.first.origin;
     // Stopping is offered against an *owned* head and nothing else. A head
     // this client did not start belongs to whoever ran it, and ownership is
     // the boundary the supervisor enforces — a control that pretended
     // otherwise would be a button whose refusal is the only way to learn it
     // was never ours.
     final stoppable = _stoppable(view, showing.worldMount);
+    // Note `_stoppable` deliberately still matches a *listed* owned head rather
+    // than only a live one: stopping a head that has exited is how its entry is
+    // cleared, and the supervisor answers that case distinctly ("had already
+    // exited") rather than pretending it stopped something.
     final stopping =
         stoppable != null && view.inFlight.contains(ActionKeys.stopHead(stoppable.id));
 
@@ -1293,7 +1305,7 @@ HeadRow? _stoppable(ClientView view, String mount) {
   return null;
 }
 
-enum _Lifecycle { opening, running, ready, unavailable }
+enum _Lifecycle { opening, running, stopped, unknown, ready, unavailable }
 
 ({
   String label,
@@ -1314,6 +1326,19 @@ enum _Lifecycle { opening, running, ready, unavailable }
         description: 'This World\'s head is up and ready to view.',
         variant: BadgeVariant.success,
         dot: BadgeDotTone.success,
+      ),
+    _Lifecycle.stopped => (
+        label: 'Stopped',
+        description: 'This World\'s head exited. Launch starts a new one.',
+        variant: BadgeVariant.outline,
+        dot: BadgeDotTone.neutral,
+      ),
+    _Lifecycle.unknown => (
+        label: 'Unknown',
+        description: 'This World\'s head could not be checked, so whether it is '
+            'running is not known.',
+        variant: BadgeVariant.muted,
+        dot: BadgeDotTone.warning,
       ),
     _Lifecycle.ready => (
         label: 'Ready',
@@ -1336,10 +1361,22 @@ _Lifecycle _lifecycle(ClientView view, LibraryRow row) {
   // honest state is still Running.
   if (_opening(view, row)) return _Lifecycle.opening;
   if (row.opensAt == null) return _Lifecycle.unavailable;
-  if (_servingWorld(view, row.worldMount).isNotEmpty) {
-    return _Lifecycle.running;
-  }
-  return _Lifecycle.ready;
+
+  // Read from the head's own state, never from the fact that a row exists.
+  //
+  // Presence is not liveness, and treating it as liveness was the defect: an
+  // exited head *stays* listed so a person can see that the thing they opened
+  // died, so counting rows painted a crashed World as Running — with a tooltip
+  // offering to take them to it. The supervisor has polled and answered; this is
+  // where the answer has to be believed.
+  final heads = _servingWorld(view, row.worldMount);
+  if (heads.isEmpty) return _Lifecycle.ready;
+  if (heads.any((head) => head.state == 'running')) return _Lifecycle.running;
+  // Not running, and not nothing. `unknown` outranks `exited` because a head
+  // nobody could poll may still be serving, and saying "Stopped" about one would
+  // be the same confident guess in the other direction.
+  if (heads.any((head) => head.state == 'unknown')) return _Lifecycle.unknown;
+  return _Lifecycle.stopped;
 }
 
 bool _opening(ClientView view, LibraryRow row) {
@@ -1354,6 +1391,9 @@ String _openTooltip(LibraryRow row, {required bool running}) {
   }
   return running
       ? 'Take me to the running World'
+      // Covers Stopped and Unknown as well as Ready: in all three, pressing this
+      // starts a head rather than reaching one, and promising a handoff to a World
+      // that exited is the lie the state field was added to end.
       : 'Start this World and hand it to my browser';
 }
 

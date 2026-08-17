@@ -428,6 +428,24 @@ pub struct HeadRow {
     /// own, which is what that ceremony is for.
     pub origin: Option<String>,
     pub owned: bool,
+    /// What the supervisor can say about this head *now*.
+    ///
+    /// `running`, `exited` or `unknown`. Carried because without it a surface has
+    /// only row *presence* to go on, and presence is not liveness: exited heads stay
+    /// listed so a person can see the thing they opened died, so a surface counting
+    /// rows paints a crashed head as Running. `HeadState` was added underneath and
+    /// stopped here, one hop short of the only place the lie was visible.
+    ///
+    /// A string like `DeviceRow::state`, not the enum: this crosses a generated
+    /// bridge, and a new variant should widen a match on the far side rather than
+    /// break the binding.
+    pub state: String,
+    /// Why the state could not be established, when it could not.
+    ///
+    /// `Some` only for `unknown`, exactly as `DeviceRow::degraded` carries only a
+    /// real degradation. A surface that can say *why* it cannot tell is the whole
+    /// difference between a third state and a shrug.
+    pub state_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1470,6 +1488,16 @@ fn project(app: &App) -> ClientView {
                     .as_deref()
                     .map(|url| url.split('?').next().unwrap_or(url).to_owned()),
                 owned: matches!(head.ownership, lait_workbench::Ownership::Owned),
+                state: match &head.state {
+                    lait_workbench::HeadState::Running => "running".to_owned(),
+                    lait_workbench::HeadState::Exited { .. } => "exited".to_owned(),
+                    lait_workbench::HeadState::Unknown { .. } => "unknown".to_owned(),
+                },
+                state_detail: match &head.state {
+                    lait_workbench::HeadState::Running => None,
+                    lait_workbench::HeadState::Exited { status } => Some(status.clone()),
+                    lait_workbench::HeadState::Unknown { why } => Some(why.clone()),
+                },
             })
             .collect(),
         devices: app

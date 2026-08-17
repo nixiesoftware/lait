@@ -76,6 +76,7 @@ const HeadRow _identityHead = HeadRow(
   world: 'issues',
   origin: 'http://127.0.0.1:52713/',
   owned: true,
+  state: 'running',
 );
 
 /// A real 1×1 PNG. `Image.memory` runs its bytes through the actual decoder,
@@ -419,6 +420,83 @@ void main() {
     expect(asked, isEmpty);
   });
 
+
+  testWidgets('a head that exited reads Stopped, not Running', (tester) async {
+    // The lie this closes: an exited head *stays* listed so a person can see the
+    // thing they opened died, and the Library derived Running from the row being
+    // there. So a crashed World painted "Running — up and ready to view", with a
+    // tooltip offering to take them to it.
+    //
+    // The supervisor polls and answers; this asserts the answer is what the badge
+    // reads, rather than the fact that a row exists.
+    await _pump(
+      tester,
+      _view(
+        library: [_row(opensAt: '/issues')],
+        heads: const [
+          HeadRow(
+            id: 'identity:default:issues',
+            kind: 'browser',
+            world: 'issues',
+            origin: 'http://127.0.0.1:52713/',
+            owned: true,
+            state: 'exited',
+            stateDetail: 'exit status: 1',
+          ),
+        ],
+      ),
+    );
+
+    // The observable is which control the row offers, because that is what a
+    // person acts on. STOP is offered only against a head that is up; a crashed
+    // World must offer to LAUNCH a new one instead of to stop a dead one or to
+    // "Go to" an address nothing is serving.
+    expect(
+      find.text('STOP'),
+      findsNothing,
+      reason: 'a head that exited is not something to stop',
+    );
+    expect(
+      find.text('LAUNCH'),
+      findsOneWidget,
+      reason: 'a crashed World must offer to start again, not to be visited',
+    );
+  });
+
+  testWidgets('a head nobody could poll reads Unknown rather than either',
+      (tester) async {
+    // Third state, and it outranks Stopped on purpose: a head nobody could poll
+    // may still be serving, so calling it Stopped would be the same confident
+    // guess pointed the other way.
+    await _pump(
+      tester,
+      _view(
+        library: [_row(opensAt: '/issues')],
+        heads: const [
+          HeadRow(
+            id: 'identity:default:issues',
+            kind: 'browser',
+            world: 'issues',
+            origin: 'http://127.0.0.1:52713/',
+            owned: true,
+            state: 'unknown',
+            stateDetail: 'poll head process: No child processes',
+          ),
+        ],
+      ),
+    );
+
+    // Unknown is not running, so the row must not offer a handoff to it. It is
+    // also not proof of death, which is why the copy in `_lifecycleCopy` says the
+    // head could not be checked rather than that it stopped.
+    expect(
+      find.text('STOP'),
+      findsNothing,
+      reason: 'a head nobody could poll must not be presented as running',
+    );
+    expect(find.text('LAUNCH'), findsOneWidget);
+  });
+
   testWidgets('a serving head is one solid split control — STOP, then Go to',
       (tester) async {
     // "Running" is the identity head's own liveness: the destination is up,
@@ -539,6 +617,7 @@ void main() {
             world: 'issues',
             origin: 'http://127.0.0.1:7717/',
             owned: false,
+  state: 'running',
           ),
         ],
       ),
@@ -986,6 +1065,7 @@ void main() {
             kind: 'browser',
             origin: 'http://127.0.0.1:52713/',
             owned: true,
+  state: 'running',
           ),
         ],
       ),

@@ -874,6 +874,8 @@ impl SseDecode for crate::api::HeadRow {
         let mut var_world = <Option<String>>::sse_decode(deserializer);
         let mut var_origin = <Option<String>>::sse_decode(deserializer);
         let mut var_owned = <bool>::sse_decode(deserializer);
+        let mut var_state = <String>::sse_decode(deserializer);
+        let mut var_stateDetail = <Option<String>>::sse_decode(deserializer);
         return crate::api::HeadRow {
             id: var_id,
             kind: var_kind,
@@ -881,6 +883,8 @@ impl SseDecode for crate::api::HeadRow {
             world: var_world,
             origin: var_origin,
             owned: var_owned,
+            state: var_state,
+            state_detail: var_stateDetail,
         };
     }
 }
@@ -2402,6 +2406,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::HeadRow {
             self.world.into_into_dart().into_dart(),
             self.origin.into_into_dart().into_dart(),
             self.owned.into_into_dart().into_dart(),
+            self.state.into_into_dart().into_dart(),
+            self.state_detail.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -3318,6 +3324,8 @@ impl SseEncode for crate::api::HeadRow {
         <Option<String>>::sse_encode(self.world, serializer);
         <Option<String>>::sse_encode(self.origin, serializer);
         <bool>::sse_encode(self.owned, serializer);
+        <String>::sse_encode(self.state, serializer);
+        <Option<String>>::sse_encode(self.state_detail, serializer);
     }
 }
 
