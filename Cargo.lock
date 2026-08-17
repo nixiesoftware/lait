@@ -1170,6 +1170,7 @@ dependencies = [
 name = "correspondence"
 version = "0.7.8"
 dependencies = [
+ "addressbook",
  "axum",
  "blake3",
  "data-encoding",
