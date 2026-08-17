@@ -25,7 +25,8 @@ use std::collections::BTreeMap;
 
 use mechanics::ids::DeviceId;
 use mechanics::kinship::{
-    Claim, DeviceLink, Entry, KinshipLog, Party, ProfileId, Projection, Refusal, Standing,
+    Audience, Avowal, Claim, DeviceLink, Entry, KinshipLog, Party, ProfileId, Projection, Refusal,
+    Standing,
 };
 use serde::{Deserialize, Serialize};
 
@@ -150,6 +151,66 @@ impl Registry {
             }
         }
         Ok(profile)
+    }
+
+    /// Avow this identity's live devices reachable to `audience`, so a
+    /// correspondent can learn them from a projection.
+    ///
+    /// The `Own` device links never leave the device; this is how a profile
+    /// *chooses* what a correspondent may see. One of the owner's devices signs
+    /// (`seed`), which is the profile vouching for the set — the head over the
+    /// resulting log carries that signature, and that is what the reader trusts.
+    ///
+    /// The **whole** live set is avowed today: the "flat, and say so" answer to
+    /// CORR-27. Whether a person's device set has a correspondence *subset* is a
+    /// decision that is deliberately not made here; when it is, this is the one
+    /// call that changes. Returns how many devices were newly avowed.
+    pub fn avow_reachable(
+        &mut self,
+        profile: &ProfileId,
+        audience: Audience,
+        seed: &[u8; 32],
+        epoch: u64,
+        nonce: [u8; 16],
+    ) -> Result<usize, RegistryError> {
+        let devices = match self.holdings.get(profile) {
+            Some(Holding::Authored(log)) => log.devices(),
+            _ => return Err(RegistryError::NotHeld),
+        };
+        let mut avowed = 0usize;
+        for (index, device) in devices.into_iter().enumerate() {
+            // A distinct nonce per device, so two avowals are two entries rather
+            // than one. Bounded by the device-set bound the log already enforces.
+            let mut per = nonce;
+            per[15] ^= u8::try_from(index & 0xff).unwrap_or(0);
+            let avowal = Avowal::seal(
+                seed,
+                Party::Device(device),
+                Claim::Profile(profile.clone()),
+                audience.clone(),
+                epoch,
+                per,
+            )?;
+            self.extend(profile, Entry::Avow(avowal))?;
+            avowed += 1;
+        }
+        Ok(avowed)
+    }
+
+    /// Project one of this identity's authored profiles for a reader — the
+    /// audience-scoped bodies plus a signed head over the whole log, ready to
+    /// hand a correspondent who will [`Registry::absorb`] it.
+    pub fn project(
+        &self,
+        profile: &ProfileId,
+        seed: &[u8; 32],
+        epoch: u64,
+        reader: &Standing,
+    ) -> Result<Projection, RegistryError> {
+        match self.holdings.get(profile) {
+            Some(Holding::Authored(log)) => Ok(log.project(seed, epoch, reader)?),
+            _ => Err(RegistryError::NotHeld),
+        }
     }
 
     /// The device set a held profile resolves to now.
@@ -369,6 +430,68 @@ mod tests {
         let mut expected = vec![device_from_seed(&A), device_from_seed(&B)];
         expected.sort();
         assert_eq!(bob.resolve(&profile).as_deref(), Some(expected.as_slice()));
+    }
+
+    /// The whole reach handshake in the two calls a caller actually makes: Alice
+    /// avows her set reachable to Bob and projects; Bob absorbs and resolves.
+    #[test]
+    fn the_reach_handshake_in_two_calls() {
+        let (link, _) = genesis();
+        let mut alice = Registry::new();
+        let profile = alice.found(link).expect("found");
+        // A third device, so the avowed set is more than the genesis pair.
+        let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
+        alice.extend(&profile, Entry::Link(third)).expect("extend");
+
+        let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
+        let n = alice
+            .avow_reachable(&profile, to_bob, &A, 5, [3u8; 16])
+            .expect("avow");
+        assert_eq!(n, 3, "all three live devices avowed");
+
+        let projection = alice
+            .project(&profile, &A, 5, &bob_standing())
+            .expect("project");
+
+        let mut bob = Registry::new();
+        bob.absorb(projection, &bob_standing()).expect("absorb");
+
+        let mut expected = vec![
+            device_from_seed(&A),
+            device_from_seed(&B),
+            device_from_seed(&C),
+        ];
+        expected.sort();
+        assert_eq!(bob.resolve(&profile).as_deref(), Some(expected.as_slice()));
+    }
+
+    /// A retired device is not avowed reachable — the correspondence set follows
+    /// the live set.
+    #[test]
+    fn avow_reachable_follows_the_live_set() {
+        let (link, _) = genesis();
+        let mut alice = Registry::new();
+        let profile = alice.found(link).expect("found");
+        let retire = Retirement::seal(&A, device_from_seed(&B), 3, [9u8; 16]).expect("retire");
+        alice
+            .extend(&profile, Entry::Retire(retire))
+            .expect("extend");
+
+        let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
+        let n = alice
+            .avow_reachable(&profile, to_bob, &A, 5, [3u8; 16])
+            .expect("avow");
+        assert_eq!(n, 1, "only A remains live");
+
+        let projection = alice
+            .project(&profile, &A, 5, &bob_standing())
+            .expect("project");
+        let mut bob = Registry::new();
+        bob.absorb(projection, &bob_standing()).expect("absorb");
+        assert_eq!(
+            bob.resolve(&profile).as_deref(),
+            Some([device_from_seed(&A)].as_slice())
+        );
     }
 
     /// A projection Bob is not the audience of carries no avowal bodies, so he
