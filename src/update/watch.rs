@@ -289,7 +289,14 @@ fn check_worlds(identity: &Path, channel: feed::Channel) {
     let worlds = crate::serve::head::worlds_root(identity);
     for (world, _, _) in crate::composition::bundled_world_surfaces() {
         match super::world::check(&world, &worlds, channel) {
-            Ok(outcome) => tracing::debug!(%world, ?outcome, "world bundle checked"),
+            Ok(outcome) => {
+                // Recorded, not only logged. A World is published in seconds
+                // and this period is hours, so between the two a machine is
+                // behind — and until this line the only place that fact
+                // existed was a log nobody draws.
+                super::world::note(&worlds, &world, &outcome, now());
+                tracing::debug!(%world, ?outcome, "world bundle checked");
+            }
             // Named, never folded into the client's standing: "this World's
             // channel could not be asked" is a different fact from anything
             // the product's channel said, and collapsing them would report a

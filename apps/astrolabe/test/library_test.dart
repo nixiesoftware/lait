@@ -51,6 +51,7 @@ LibraryRow _row({
   String? tagline,
   int? version,
   List<WorldPersonRow>? people,
+  WorldUpdateRow? update,
 }) =>
     LibraryRow(
       key: mount,
@@ -60,6 +61,7 @@ LibraryRow _row({
       version: version,
       tagline: tagline,
       people: people,
+      update: update,
     );
 
 /// The one head an identity serves its Worlds through. `orbit` stays null —
@@ -795,5 +797,149 @@ void main() {
     expect(find.text('AGENT BINDING'), findsNothing);
     expect(find.text('Write binding'), findsNothing);
     expect(asked, isEmpty);
+  });
+
+/// The Library's one measured fact, and the four ways of not knowing it.
+///
+/// The install list is compiled in and cannot go stale. What a World's own
+/// channel holds is measured and can — so this is the one place the surface
+/// draws something a daemon supplied, and every uncertainty has to fall back
+/// to the row that was drawn before any of it existed.
+  testWidgets('a World the channel is ahead of offers UPDATE, not LAUNCH',
+      (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            update: const WorldUpdateRow(
+              serving: '0.9.0',
+              available: '0.9.1',
+              behind: true,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(
+      find.text('LAUNCH'),
+      findsNothing,
+      reason: 'the launch control must be replaced, not accompanied — two '
+          'controls is a choice nobody asked for',
+    );
+
+    await tester.tap(find.text('UPDATE'));
+    await tester.pump();
+
+    // Same silhouette as LAUNCH, different coat and mark. The size assertions
+    // are the ones that keep the band from moving when a World goes behind.
+    expect(tester.widget<Text>(find.text('UPDATE')).style?.fontSize, 20);
+    expect(tester.widget<Icon>(find.byIcon(AppIcons.refresh)).size, 20);
+    final slab = tester.widget<Lit>(
+      find.ancestor(of: find.text('UPDATE'), matching: find.byType(Lit)),
+    );
+    expect(slab.baseColor, kUpdateSlabFill);
+    expect(
+      slab.baseColor,
+      isNot(kLaunchSlabFill),
+      reason: 'the colour that starts a World is wearing the act that '
+          'replaces one',
+    );
+    expect(tester.widget<Text>(find.text('UPDATE')).style?.color, kUpdateSlabInk);
+
+    expect(asked, hasLength(1));
+    expect(
+      asked.single,
+      const ActionRequest.updateWorld(world: 'issues'),
+      reason: 'the update asked for a World other than the row it is on',
+    );
+  });
+
+  testWidgets('a World with nothing newer keeps LAUNCH', (tester) async {
+    await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            update: const WorldUpdateRow(
+              serving: '0.9.0',
+              available: '0.9.0',
+              behind: false,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(find.text('LAUNCH'), findsOneWidget);
+    expect(find.text('UPDATE'), findsNothing);
+  });
+
+  testWidgets('a World nothing has ever checked keeps LAUNCH', (tester) async {
+    await _pump(tester, _view(library: [_row()]));
+
+    expect(
+      find.text('UPDATE'),
+      findsNothing,
+      reason: 'absence of a check is not an update waiting — a row nothing '
+          'has measured must draw what it drew before any of this existed',
+    );
+    expect(find.text('LAUNCH'), findsOneWidget);
+  });
+
+  testWidgets('a bundle this build cannot run is never offered as an update',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            update: const WorldUpdateRow(
+              serving: '0.9.0',
+              available: '1.0.0',
+              behind: false,
+              unmet: ['lait.control >=14, <15'],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(
+      find.text('UPDATE'),
+      findsNothing,
+      reason: 'pressing this would be refused on arrival, which teaches a '
+          'person to distrust the control',
+    );
+    expect(find.text('LAUNCH'), findsOneWidget);
+  });
+
+  testWidgets('an update in flight disables the control and says so',
+      (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            update: const WorldUpdateRow(
+              serving: '0.9.0',
+              available: '0.9.1',
+              behind: true,
+            ),
+          ),
+        ],
+        inFlight: [ActionKeys.updateWorld('issues')],
+      ),
+    );
+
+    expect(find.text('UPDATING'), findsOneWidget);
+    expect(find.text('UPDATE'), findsNothing);
+    expect(
+      asked,
+      isEmpty,
+      reason: 'a control whose action is already in flight must not queue a '
+          'second one',
+    );
   });
 }

@@ -119,6 +119,106 @@ pub fn staged(worlds: &Path, world: &str) -> Option<StagedBundle> {
     serde_json::from_slice(&bytes).ok()
 }
 
+fn standing_path(worlds: &Path, world: &str) -> PathBuf {
+    world_root(worlds, world).join("standing.json")
+}
+
+/// What this machine last learned about one World's channel.
+///
+/// Beside the staged bundle rather than inside it, for the same reason
+/// `current.json` is beside it: everything under `current/` may be *served*,
+/// and a served tree holds only what its publisher put there.
+///
+/// This exists because the daemon's period is hours long and a World is
+/// published in seconds. Between the two, a machine is behind and has no way
+/// to say so — the outcome of a check was written to a log and nowhere a
+/// surface could read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Standing {
+    /// The bundle version serving now. `None` is the embedded floor, which is
+    /// a real answer and not an absent one.
+    pub serving: Option<String>,
+    /// The version this World's channel named at the last completed check.
+    /// `None` when the channel could not be asked or named nothing for us.
+    pub channel: Option<String>,
+    /// Unix seconds of that check.
+    pub checked_at: u64,
+    /// Set when the channel's release is proven and this build cannot run it,
+    /// naming every unmet requirement. Whatever was already in place keeps
+    /// serving; this is a refusal, not a fault.
+    #[serde(default)]
+    pub unmet: Option<Vec<String>>,
+}
+
+impl Standing {
+    /// True only when the channel is *known* to hold a bundle this machine is
+    /// not serving, and this build could run it.
+    ///
+    /// Every uncertainty answers false. A machine that has never checked is
+    /// not behind, a channel that could not be asked is not behind, and a
+    /// bundle this build cannot run is not something a person can act on —
+    /// offering an update that would be refused on arrival is worse than
+    /// offering none.
+    pub fn behind(&self) -> bool {
+        if self.unmet.is_some() {
+            return false;
+        }
+        match (&self.channel, &self.serving) {
+            (Some(channel), Some(serving)) => channel != serving,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+}
+
+/// What this machine last learned about a World, when it has ever asked.
+pub fn standing(worlds: &Path, world: &str) -> Option<Standing> {
+    let bytes = std::fs::read(standing_path(worlds, world)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Record what a check came to, so a surface can read it later.
+///
+/// Best-effort by design: a standing that could not be written is a surface
+/// that says nothing, which is the same thing it says before the first check.
+/// Failing the check over it would trade a working update for a missing note.
+pub fn note(worlds: &Path, world: &str, outcome: &Outcome, now: u64) {
+    let serving = staged(worlds, world).map(|bundle| bundle.version);
+    let standing = match outcome {
+        Outcome::Staged { version } | Outcome::Current { version } => Standing {
+            serving: Some(version.clone()),
+            channel: Some(version.clone()),
+            checked_at: now,
+            unmet: None,
+        },
+        Outcome::Unmet { version, why } => Standing {
+            serving,
+            channel: Some(version.clone()),
+            checked_at: now,
+            unmet: Some(why.clone()),
+        },
+        // The channel answered and holds nothing for this World. Not a
+        // failure, and emphatically not "behind": there is nothing to be
+        // behind.
+        Outcome::NothingPublished { .. } => Standing {
+            serving,
+            channel: None,
+            checked_at: now,
+            unmet: None,
+        },
+    };
+    let path = standing_path(worlds, world);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    if let Ok(bytes) = serde_json::to_vec(&standing) {
+        let _ = std::fs::write(&path, bytes);
+    }
+}
+
 /// The pointer URL of a World's channel.
 pub fn pointer_url(base: &str, world: &str, channel: feed::Channel) -> String {
     format!(
@@ -1004,6 +1104,119 @@ mod tests {
         assert_eq!(
             std::fs::read(live_dir(worlds.path(), other).join("index.html")).expect("the second"),
             b"the other head"
+        );
+    }
+
+    /// The whole point of the recorded standing is that a surface can draw an
+    /// update control from it — so every way of *not knowing* must answer
+    /// "not behind". A control offered on a guess is worse than none, because
+    /// pressing it produces nothing and teaches the person to distrust it.
+    #[test]
+    fn only_a_known_newer_bundle_this_build_can_run_is_behind() {
+        let known = |channel: Option<&str>, serving: Option<&str>, unmet: Option<Vec<String>>| {
+            Standing {
+                serving: serving.map(str::to_string),
+                channel: channel.map(str::to_string),
+                checked_at: 1,
+                unmet,
+            }
+            .behind()
+        };
+
+        assert!(
+            known(Some("0.9.1"), Some("0.9.0"), None),
+            "a channel ahead of what is serving is the one case that is behind"
+        );
+        assert!(
+            known(Some("0.9.0"), None, None),
+            "a published bundle with only the embedded floor serving is behind"
+        );
+        assert!(
+            !known(Some("0.9.0"), Some("0.9.0"), None),
+            "the channel and the serving bundle agree; nothing to offer"
+        );
+        assert!(
+            !known(None, Some("0.9.0"), None),
+            "a channel that named nothing for us is not a channel that is ahead"
+        );
+        assert!(
+            !known(None, None, None),
+            "a machine that has never learned anything is not behind"
+        );
+        assert!(
+            !known(
+                Some("1.0.0"),
+                Some("0.9.0"),
+                Some(vec!["control >=3".into()])
+            ),
+            "a bundle this build cannot run is not an update a person can take"
+        );
+    }
+
+    /// A refusal must not erase what is still serving. The invariant is that
+    /// the previous bundle keeps serving when a newer one is unmet, and the
+    /// standing is what a surface reads to say so.
+    #[test]
+    fn an_unmet_bundle_records_the_refusal_and_keeps_naming_what_serves() {
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        std::fs::create_dir_all(live_dir(worlds.path(), WORLD)).expect("a live tree");
+        std::fs::write(
+            record_path(worlds.path(), WORLD),
+            serde_json::to_vec(&StagedBundle {
+                world: WORLD.to_string(),
+                version: "0.9.0".into(),
+                files: 1,
+            })
+            .expect("a record"),
+        )
+        .expect("write the record");
+
+        note(
+            worlds.path(),
+            WORLD,
+            &Outcome::Unmet {
+                version: "1.0.0".into(),
+                why: vec!["control >=3, <4".into()],
+            },
+            1_700_000_000,
+        );
+
+        let standing = standing(worlds.path(), WORLD).expect("a standing was recorded");
+        assert_eq!(standing.serving.as_deref(), Some("0.9.0"));
+        assert_eq!(standing.channel.as_deref(), Some("1.0.0"));
+        assert_eq!(
+            standing.unmet.as_deref(),
+            Some(&["control >=3, <4".to_string()][..])
+        );
+        assert!(
+            !standing.behind(),
+            "an unmet bundle must not render as an update waiting to be taken"
+        );
+    }
+
+    /// `note` is written beside the served tree, never inside it — a marker
+    /// under `current/` is reachable at a URL, and a served tree holds only
+    /// what its publisher put there.
+    #[test]
+    fn the_standing_is_recorded_beside_the_served_tree_and_never_within_it() {
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        note(
+            worlds.path(),
+            WORLD,
+            &Outcome::Current {
+                version: "0.9.0".into(),
+            },
+            1_700_000_000,
+        );
+        assert!(
+            standing_path(worlds.path(), WORLD).is_file(),
+            "no standing was written"
+        );
+        assert!(
+            !live_dir(worlds.path(), WORLD)
+                .join("standing.json")
+                .is_file(),
+            "the standing landed inside the served tree, where it is reachable at a URL"
         );
     }
 }
