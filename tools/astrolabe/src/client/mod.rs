@@ -20,6 +20,7 @@ pub mod library;
 pub mod presence;
 pub mod space;
 pub mod storage;
+pub mod update;
 
 pub use error::{ClientError, ClientResult};
 pub use library::{Artwork, LaunchTicket, LibraryEntry};

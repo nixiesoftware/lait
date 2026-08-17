@@ -21,6 +21,7 @@ members = [
     "tools/astrolabe",
     "tools/astrolabe-ios",
     "tools/feed",
+    "tools/stub",
 ]
 # Two packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.
@@ -248,6 +249,12 @@ zip = { version = "6", default-features = false, features = ["deflate"] }
 # `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (inherit exactly the
 # three handles we name — `daemon_spawn`), which std only exposes as an unstable
 # feature. Already present transitively (iroh/tokio); declared directly for those.
+# The staged-swap primitives. The stub owns them because the stub must stay
+# free of the engine; the engine using them is the other direction and is what
+# lets macOS — which has no stub — apply from the daemon.
+[target.'cfg(target_os = "macos")'.dependencies]
+astrolabe-stub = { path = "tools/stub" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -292,6 +299,7 @@ libc = "0.2"
 libc = "0.2"
 
 [dev-dependencies]
+tempfile = "3"
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
 replica = { path = "crates/replica", features = ["fault-injection"] }
 issues-app = { package = "lait-issues-app", path = "products/issues-app", features = ["fault-injection"] }

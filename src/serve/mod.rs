@@ -24,6 +24,7 @@
 
 pub mod auth;
 mod content;
+pub mod head;
 pub mod orbits;
 pub mod policy;
 mod socket;
@@ -74,6 +75,10 @@ fn cookie_name(port: u16) -> String {
 
 struct App {
     guard: Guard,
+    /// Where this head's web bundle is read from: an activated World bundle
+    /// when one is staged and matches this build's runtime version, and the
+    /// compiled-in floor otherwise.
+    head: head::Source,
     directory: Catalog,
     daemon: Client,
     /// Which identity this server serves, carried rather than re-derived from
@@ -218,7 +223,21 @@ pub async fn run_until(
     // Created before anything that has to watch it. Every long-lived response
     // and every background task selects on this one channel.
     let (stop, _) = tokio::sync::watch::channel(false);
+    // The head serves the compiled-in floor unless a payload is staged for
+    // the World this build presents. Resolved once at start: a payload that
+    // arrives later becomes live at the next head, which is the same
+    // "applied at a boundary" rule the client tree follows.
+    let head = selection
+        .identity_dir()
+        .map(|identity| {
+            head::activate(
+                &head::worlds_root(&identity),
+                crate::composition::PRODUCT_WORLD,
+            )
+        })
+        .unwrap_or_default();
     let app = Arc::new(App {
+        head,
         guard: Guard::new(token.clone(), bound.port()),
         directory: Catalog::new(identity, agents_base, self_contained),
         daemon: daemon.clone(),
@@ -729,7 +748,7 @@ async fn index(
         let cookie = format!("{}={token}; Path=/; HttpOnly; SameSite=Strict", app.cookie);
         return ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response();
     }
-    shell::index(launched_by_client(&app, &headers))
+    shell::index(launched_by_client(&app, &headers), &app.head)
 }
 
 /// Any non-`/api` path: an embedded asset, or the SPA entry.
@@ -738,7 +757,7 @@ async fn static_asset(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
-    shell::asset(uri.path(), launched_by_client(&app, &headers))
+    shell::asset(uri.path(), launched_by_client(&app, &headers), &app.head)
 }
 
 /// What a client asks for when it wants to open a World.
@@ -1298,6 +1317,7 @@ mod tests {
     fn app(token: &str) -> Router {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
+            head: head::Source::embedded(),
             guard: Guard::new(token.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
@@ -1316,6 +1336,7 @@ mod tests {
     fn app_with_tickets(token: &str) -> (Router, Arc<App>) {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         let state = Arc::new(App {
+            head: head::Source::embedded(),
             guard: Guard::new(token.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
@@ -1584,6 +1605,7 @@ mod tests {
 
         let orbit = resolved.address.orbit.as_str().to_string();
         let router = router(Arc::new(App {
+            head: head::Source::embedded(),
             guard: Guard::new(HOSTED_TOKEN.into(), 7717),
             directory,
             daemon: Client::at(std::path::PathBuf::from("/nonexistent-for-tests")),
@@ -1780,6 +1802,7 @@ mod gate_coverage {
     fn app() -> Router {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
+            head: head::Source::embedded(),
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
@@ -1944,6 +1967,7 @@ mod gate_coverage {
         // it would pass whether or not the stop signal works.
         let doorbells = tokio::sync::broadcast::channel(4).0;
         let app = Arc::new(App {
+            head: head::Source::embedded(),
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
