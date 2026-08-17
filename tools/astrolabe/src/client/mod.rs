@@ -19,6 +19,7 @@ pub mod http;
 pub mod launch;
 pub mod library;
 pub mod presence;
+pub mod reach;
 pub mod space;
 pub mod storage;
 pub mod update;
