@@ -626,19 +626,20 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
     let expected: &[(&str, &[&str])] = &[
         (
             "correspondence",
-            // The seam itself is the crate root — `Carrier`, `Sealed`, `Missed`.
-            // Only the contractors behind it get modules, and both entries here
-            // are contractors: the in-process carrier that lets the send and
-            // receive paths be tested with no network and no protocol, and the
-            // hosted one that speaks to a `lait-post` over HTTP.
+            // The carrier seam is the crate root — `Carrier`, `Sealed`, `Missed`.
+            // Two kinds of module hang off it, and both are legitimate:
             //
-            // A third entry should be another contractor and nothing else. A
-            // *concept* appearing in this list would mean the seam had grown an
-            // opinion about delivery, which is the thing it exists not to have —
-            // and it is what `comms` keeps out by the same rule, where `iroh` and
-            // `mem` are two contractors and `policy` is the one exception that
-            // says so in its own doc.
-            &["mem", "post"],
+            // Contractors — `mem` (in-process, for tests) and `post` (the hosted
+            // `lait-post` over HTTP). A new one here should be another contractor.
+            //
+            // The plane's own concepts — `letter` (what crosses: an invitation or
+            // a message, sealed and signed), `mailbox` (the local inbox of opened
+            // letters), and `watch` (noticing an arrival on a timer). These are the
+            // correspondence domain, the same way `actor`/`egress`/`kinship` are
+            // mechanics' domain — a concept crate names its concepts. What must not
+            // appear is a *delivery-mechanism* opinion leaking up from a contractor
+            // into the seam, which is the thing the seam exists not to have.
+            &["letter", "mailbox", "mem", "post", "watch"],
         ),
         ("fabric", &[]),
         ("journal", &[]),
