@@ -254,6 +254,38 @@ impl Carrier for PostCarrier {
         let dropped: DroppedCount = self.post("/acknowledge", &signed)?;
         Ok(dropped.dropped)
     }
+
+    fn block(
+        &mut self,
+        by: &Egress<'_>,
+        sender: &DeviceId,
+        blocked: bool,
+        _now: u64,
+    ) -> Result<(), Refused> {
+        // Only on one's own mailbox, and this carrier signs as exactly one device.
+        // The same fence deposit keeps: the witness names whose key, and a carrier
+        // that could block on a mailbox it cannot sign for would be acting on
+        // somebody else's authority.
+        if by.device() != self.signer.device() {
+            return Err(Refused::Unreachable(format!(
+                "this carrier can only block for {}",
+                self.signer.device().short()
+            )));
+        }
+        let challenge = self.challenge(by.device())?;
+        let signed = lait_post::sign::block(&self.signer.seed, &challenge, sender.clone(), blocked);
+        let _: BlockAck = self.post("/block", &signed)?;
+        Ok(())
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct BlockAck {
+    #[allow(
+        dead_code,
+        reason = "presence of a decodable body is the signal, not its contents"
+    )]
+    blocked: bool,
 }
 
 /// The deposit reply, named as the service names it.

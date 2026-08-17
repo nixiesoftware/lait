@@ -59,6 +59,23 @@ pub trait Store {
     fn drop_all(&mut self, device: &DeviceId, ids: &[String]) -> anyhow::Result<usize>;
     /// Drop everything past its window. Returns how many went.
     fn sweep(&mut self, now: u64) -> anyhow::Result<usize>;
+
+    /// Record, or clear, `recipient`'s block of `sender`.
+    ///
+    /// Recipient-owned state: only the recipient authors it, and the carrier
+    /// stores it without adjudicating — it holds no key and decides nothing about
+    /// who anybody is. Idempotent, because a block is a set membership: blocking a
+    /// sender already blocked, or clearing one already clear, is a no-op, which is
+    /// what makes a replayed request harmless.
+    fn set_block(
+        &mut self,
+        recipient: &DeviceId,
+        sender: &DeviceId,
+        blocked: bool,
+    ) -> anyhow::Result<()>;
+
+    /// Whether `recipient` has blocked `sender`.
+    fn is_blocked(&self, recipient: &DeviceId, sender: &DeviceId) -> anyhow::Result<bool>;
 }
 
 /// A deterministic id for a deposit: the content, so the same envelope
@@ -79,7 +96,7 @@ pub trait Store {
 /// Unframed concatenation is safe here only because every field ahead of
 /// `sealed` is fixed width — two 64-char ids and two integers. Anything
 /// variable-length added above `sealed` needs framing first.
-fn deposit_id(sender: &DeviceId, envelope: &Envelope) -> String {
+pub(crate) fn deposit_id(sender: &DeviceId, envelope: &Envelope) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"lait/post/1/deposit-id");
     hasher.update(sender.as_str().as_bytes());
@@ -96,6 +113,8 @@ pub struct MemStore {
     /// Keyed by recipient, then by deposit id — so a fetch is one lookup and
     /// never a scan of everybody's mail.
     held: BTreeMap<DeviceId, BTreeMap<String, Deposited>>,
+    /// Per recipient, the senders they have blocked.
+    blocks: BTreeMap<DeviceId, std::collections::BTreeSet<DeviceId>>,
 }
 
 impl Store for MemStore {
@@ -157,6 +176,33 @@ impl Store for MemStore {
         self.held.retain(|_, box_of| !box_of.is_empty());
         Ok(gone)
     }
+
+    fn set_block(
+        &mut self,
+        recipient: &DeviceId,
+        sender: &DeviceId,
+        blocked: bool,
+    ) -> anyhow::Result<()> {
+        if blocked {
+            self.blocks
+                .entry(recipient.clone())
+                .or_default()
+                .insert(sender.clone());
+        } else if let Some(set) = self.blocks.get_mut(recipient) {
+            set.remove(sender);
+            if set.is_empty() {
+                self.blocks.remove(recipient);
+            }
+        }
+        Ok(())
+    }
+
+    fn is_blocked(&self, recipient: &DeviceId, sender: &DeviceId) -> anyhow::Result<bool> {
+        Ok(self
+            .blocks
+            .get(recipient)
+            .is_some_and(|set| set.contains(sender)))
+    }
 }
 
 /// On disk: one directory per recipient, one file per deposit.
@@ -178,12 +224,38 @@ impl FsStore {
         Ok(Self { root })
     }
 
-    fn box_dir(&self, device: &DeviceId) -> PathBuf {
+    fn box_hash(device: &DeviceId) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"lait/post/1/mailbox");
         hasher.update(device.as_str().as_bytes());
+        data_encoding::HEXLOWER.encode(&hasher.finalize().as_bytes()[..16])
+    }
+
+    fn box_dir(&self, device: &DeviceId) -> PathBuf {
+        self.root.join(Self::box_hash(device))
+    }
+
+    /// Where a recipient's block list lives.
+    ///
+    /// A `.blocks` *file*, not a directory, and beside the mailbox dirs on
+    /// purpose: [`FsStore::sweep`] walks the root and treats each entry as a
+    /// mailbox, so a `read_dir` on a file fails and the block file is skipped —
+    /// it is never mistaken for expired mail and collected. Named by the same
+    /// hash as the mailbox, so the filesystem is no more a list of who blocks
+    /// whom than it is a list of who holds a mailbox.
+    fn blocks_file(&self, recipient: &DeviceId) -> PathBuf {
         self.root
-            .join(data_encoding::HEXLOWER.encode(&hasher.finalize().as_bytes()[..16]))
+            .join(format!("{}.blocks", Self::box_hash(recipient)))
+    }
+
+    fn read_blocks(&self, recipient: &DeviceId) -> std::collections::BTreeSet<DeviceId> {
+        std::fs::read_to_string(self.blocks_file(recipient))
+            .map(|text| {
+                text.lines()
+                    .filter_map(DeviceId::parse)
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -293,6 +365,45 @@ impl Store for FsStore {
             let _ = std::fs::remove_dir(mailbox.path());
         }
         Ok(gone)
+    }
+
+    fn set_block(
+        &mut self,
+        recipient: &DeviceId,
+        sender: &DeviceId,
+        blocked: bool,
+    ) -> anyhow::Result<()> {
+        let mut set = self.read_blocks(recipient);
+        let changed = if blocked {
+            set.insert(sender.clone())
+        } else {
+            set.remove(sender)
+        };
+        if !changed {
+            // Already in the wanted state. A no-op write would still touch the
+            // disk on every replayed request, so it is skipped — the idempotence
+            // is real, not just observable.
+            return Ok(());
+        }
+        let path = self.blocks_file(recipient);
+        if set.is_empty() {
+            // The last block cleared: the file goes, so an unblocked recipient
+            // leaves no standing record of ever having blocked anybody.
+            let _ = std::fs::remove_file(&path);
+            return Ok(());
+        }
+        let body: String = set
+            .iter()
+            .map(|device| format!("{}\n", device.as_str()))
+            .collect();
+        let staged = path.with_extension("blocks.staged");
+        std::fs::write(&staged, body)?;
+        std::fs::rename(staged, path)?;
+        Ok(())
+    }
+
+    fn is_blocked(&self, recipient: &DeviceId, sender: &DeviceId) -> anyhow::Result<bool> {
+        Ok(self.read_blocks(recipient).contains(sender))
     }
 }
 

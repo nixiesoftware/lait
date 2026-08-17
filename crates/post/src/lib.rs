@@ -47,6 +47,7 @@ pub use store::{Deposited, FsStore, MemStore, Store};
 const DEPOSIT_DOMAIN: &[u8] = b"lait/post/1/deposit";
 const FETCH_DOMAIN: &[u8] = b"lait/post/1/fetch";
 const ACK_DOMAIN: &[u8] = b"lait/post/1/acknowledge";
+const BLOCK_DOMAIN: &[u8] = b"lait/post/1/block";
 
 /// The largest envelope the Post will hold. An invitation is ~1.5 KB and a
 /// first message is small; this is generous by three orders of magnitude and
@@ -331,6 +332,27 @@ pub mod sign {
         }
     }
 
+    /// Author a block, or unblock, of a sender.
+    ///
+    /// Challenge-answered like a fetch: the nonce is the service's, so this cannot
+    /// be minted offline and replayed, and `blocked` rides inside the signature.
+    pub fn block(
+        seed: &[u8; 32],
+        challenge: &Challenge,
+        target: super::DeviceId,
+        blocked: bool,
+    ) -> super::SignedBlock {
+        let mut request = super::SignedBlock {
+            device: challenge.device.clone(),
+            target,
+            blocked,
+            nonce: challenge.nonce,
+            signature: [0u8; 64],
+        };
+        request.signature = mechanics::actor::sign_detached(seed, &request.preimage());
+        request
+    }
+
     /// Confirm exactly these deposits.
     ///
     /// The ids are inside the signature, so a captured acknowledgement cannot be
@@ -349,6 +371,40 @@ pub mod sign {
         ack.signature = mechanics::actor::sign_detached(seed, &ack.preimage());
         let _ = ACK_DOMAIN;
         ack
+    }
+}
+
+/// A recipient's authenticated block, or unblock, of a sender.
+///
+/// Recipient-owned: `device` is the recipient authoring it, `target` is the sender
+/// being blocked, and the recipient's signature is the whole authority — the
+/// carrier holds no key and decides nothing about who anyone is. Challenge-gated
+/// like a fetch, so a captured block cannot be replayed to *un*block after the
+/// recipient has re-blocked: the nonce is single-use, and `blocked` is inside the
+/// signature so it cannot be flipped on a captured request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedBlock {
+    pub device: DeviceId,
+    pub target: DeviceId,
+    /// `true` blocks, `false` clears. One request for both, because the freshness
+    /// and the authority are identical and a second verb would be a second place
+    /// to get the preimage wrong.
+    pub blocked: bool,
+    #[serde(with = "hex_nonce")]
+    pub nonce: [u8; 32],
+    #[serde(with = "hex_signature")]
+    pub signature: [u8; 64],
+}
+
+impl SignedBlock {
+    fn preimage(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(160);
+        framed(&mut out, BLOCK_DOMAIN);
+        framed(&mut out, self.device.as_str().as_bytes());
+        framed(&mut out, self.target.as_str().as_bytes());
+        framed(&mut out, &[u8::from(self.blocked)]);
+        framed(&mut out, &self.nonce);
+        out
     }
 }
 
@@ -493,10 +549,32 @@ impl<S: Store> Post<S> {
         // would let anyone spend somebody else's allowance by forging their id.
         self.admit_deposit(&request.sender, &request.envelope.recipient, now)?;
 
-        let id = self
+        // A blocked sender is refused where it matters — the material never
+        // reaches the recipient's device, which is the whole point of blocking at
+        // the carrier rather than the client. The check is *after* rate admission
+        // and returns an ordinary id, so a blocked sender's request is
+        // indistinguishable from an accepted one: it is rate-limited the same, it
+        // answers the same, and it can never tell it was dropped.
+        //
+        // Residual, written down rather than papered over: the mailbox never fills
+        // from a blocked sender's drops, so a determined flooder who deposits far
+        // past the ceiling to a mailbox it knows is empty and never meets
+        // `AtCapacity` can infer a block. That is a weak, expensive, detectable
+        // signal, and it is the honest boundary of what an accept-shaped refusal
+        // can hide — far less than the client-side alternative leaks, which is the
+        // material itself.
+        let blocked = self
             .store
-            .put(&request.sender, &request.envelope, now)
+            .is_blocked(&request.envelope.recipient, &request.sender)
             .map_err(|_| Refusal::Unavailable)?;
+
+        let id = if blocked {
+            crate::store::deposit_id(&request.sender, &request.envelope)
+        } else {
+            self.store
+                .put(&request.sender, &request.envelope, now)
+                .map_err(|_| Refusal::Unavailable)?
+        };
         self.recent
             .entry(request.sender.clone())
             .or_default()
@@ -602,6 +680,24 @@ impl<S: Store> Post<S> {
         verify(&request.device, &request.preimage(), &request.signature)?;
         self.store
             .drop_all(&request.device, &request.deposits)
+            .map_err(|_| Refusal::Unavailable)
+    }
+
+    /// Block, or unblock, a sender on the authenticated recipient's own say-so.
+    ///
+    /// The recipient proves the device with a challenge answer, exactly as a fetch
+    /// does, so a block is as fresh and as unforgeable as reading the mailbox is.
+    /// The target's spelling is validated here for the same reason the recipient's
+    /// is everywhere else: a block keyed on a non-canonical string would silently
+    /// fail to match the canonical sender it was meant to stop.
+    pub fn block(&mut self, request: &SignedBlock, now: u64) -> Result<(), Refusal> {
+        device_key(&request.device)?;
+        device_key(&request.target)?;
+        let challenge = self.take_challenge(&request.nonce, &request.device, now)?;
+        let _ = &challenge;
+        verify(&request.device, &request.preimage(), &request.signature)?;
+        self.store
+            .set_block(&request.device, &request.target, request.blocked)
             .map_err(|_| Refusal::Unavailable)
     }
 
@@ -1028,6 +1124,125 @@ mod tests {
         // false: at the ceiling this used to refuse everybody forever.
         post.challenge(&device_from_seed(&[99u8; 32]), NOW)
             .expect("a fresh device must still be able to ask at the ceiling");
+    }
+
+    /// A blocked sender's letter never reaches the recipient, and the sender
+    /// cannot tell.
+    #[test]
+    fn a_blocked_sender_is_refused_where_it_matters_and_cannot_tell() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let sender = device_from_seed(&SENDER_SEED);
+        let mut post = Post::new(MemStore::default());
+
+        // The recipient blocks the sender, on the recipient's own signature.
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        let block = sign::block(&RECIPIENT_SEED, &challenge, sender.clone(), true);
+        post.block(&block, NOW)
+            .expect("a recipient may block a sender");
+
+        // The deposit still answers Ok with an ordinary id — indistinguishable
+        // from acceptance, which is the point.
+        let accepted = post
+            .deposit(
+                &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"unwanted")),
+                NOW,
+            )
+            .expect("a blocked deposit is accept-shaped");
+        assert!(!accepted.is_empty());
+
+        // And the recipient's mailbox holds nothing: the material never landed.
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        let waiting = post
+            .fetch(&answer(&RECIPIENT_SEED, &challenge), NOW)
+            .expect("fetch");
+        assert!(
+            waiting.is_empty(),
+            "a blocked sender's material must never occupy the recipient's device"
+        );
+    }
+
+    /// Unblocking restores delivery.
+    #[test]
+    fn unblocking_a_sender_lets_their_next_letter_through() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let sender = device_from_seed(&SENDER_SEED);
+        let mut post = Post::new(MemStore::default());
+
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        post.block(
+            &sign::block(&RECIPIENT_SEED, &challenge, sender.clone(), true),
+            NOW,
+        )
+        .expect("block");
+
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        post.block(
+            &sign::block(&RECIPIENT_SEED, &challenge, sender.clone(), false),
+            NOW,
+        )
+        .expect("unblock");
+
+        post.deposit(
+            &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"welcome back")),
+            NOW,
+        )
+        .expect("deposit");
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        let waiting = post
+            .fetch(&answer(&RECIPIENT_SEED, &challenge), NOW)
+            .expect("fetch");
+        assert_eq!(waiting.len(), 1, "an unblocked sender is delivered again");
+    }
+
+    /// A captured block cannot be replayed to un-block after a re-block.
+    #[test]
+    fn a_block_request_is_single_use() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let sender = device_from_seed(&SENDER_SEED);
+        let mut post = Post::new(MemStore::default());
+
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        let block = sign::block(&RECIPIENT_SEED, &challenge, sender, true);
+        post.block(&block, NOW).expect("first use");
+        assert_eq!(
+            post.block(&block, NOW),
+            Err(Refusal::UnknownChallenge),
+            "the challenge is spent, so a replay cannot re-apply a stale request"
+        );
+    }
+
+    /// Only the recipient can block on their own mailbox.
+    #[test]
+    fn a_block_not_signed_by_the_recipient_is_refused() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let sender = device_from_seed(&SENDER_SEED);
+        let mut post = Post::new(MemStore::default());
+
+        // A challenge for the recipient's device, answered by a stranger's seed.
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        let forged = sign::block(&STRANGER_SEED, &challenge, sender, true);
+        assert_eq!(
+            post.block(&forged, NOW),
+            Err(Refusal::BadSignature),
+            "a block is authority over one's own mailbox, and the signature is that authority"
+        );
+    }
+
+    /// A non-canonical target is refused before anything is stored.
+    #[test]
+    fn a_block_targeting_a_non_canonical_spelling_is_refused() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let shouted =
+            DeviceId::from_key_string(device_from_seed(&SENDER_SEED).as_str().to_ascii_uppercase());
+        let mut post = Post::new(MemStore::default());
+
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        let block = sign::block(&RECIPIENT_SEED, &challenge, shouted, true);
+        assert_eq!(
+            post.block(&block, NOW),
+            Err(Refusal::UnusableDevice),
+            "a block keyed on a non-canonical spelling would not match the canonical sender"
+        );
     }
 
     #[test]

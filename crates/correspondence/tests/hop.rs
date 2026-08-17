@@ -371,3 +371,107 @@ fn the_reply_ceiling_covers_a_full_mailbox() {
         correspondence::post::max_reply()
     );
 }
+
+/// Blocking works across a real carrier: a blocked sender's letter never lands,
+/// and unblocking restores it.
+///
+/// The carrier-side half of what makes a readable address survivable. Runs against
+/// a local Post, and against the deployed one under `POST_SMOKE_URL`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocked_sender_is_refused_at_a_real_carrier() {
+    let (base, _root) = serve().await;
+
+    let space = SpaceId::mint(&SystemUlidSource);
+    let (sender_event, sender_actor) = incept(&SENDER_SEED, 1, &space);
+    let (recipient_event, recipient_actor) = incept(&RECIPIENT_SEED, 2, &space);
+    let plane = actor::replay(&space, &[sender_event, recipient_event]);
+    let sender_device = device_from_seed(&SENDER_SEED);
+    let recipient_device = device_from_seed(&RECIPIENT_SEED);
+
+    // The recipient blocks the sender, on the recipient's own witnessed authority.
+    let recipient_standing =
+        egress::authorize(&plane, &recipient_actor, &recipient_device).expect("recipient");
+    let sender_for_block = sender_device.clone();
+    tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(RECIPIENT_SEED));
+        carrier.block(&recipient_standing, &sender_for_block, true, now())
+    })
+    .expect("block over HTTP");
+
+    // The sender deposits — accept-shaped — and the recipient collects nothing.
+    let sender_standing = egress::authorize(&plane, &sender_actor, &sender_device).expect("sender");
+    let sealed = seal_to_devices(
+        std::slice::from_ref(&recipient_device),
+        CONTEXT,
+        b"unwanted",
+    )
+    .expect("seal");
+    let envelope = Sealed {
+        recipient: recipient_device.clone(),
+        bytes: serde_json::to_vec(&sealed).expect("encode"),
+        expires_at: now() + 3600,
+        construction: 1,
+    };
+    tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(SENDER_SEED));
+        carrier.deposit(&sender_standing, &envelope, now())
+    })
+    .expect("a blocked deposit is accept-shaped");
+
+    let base_for_read = base.clone();
+    let blocked_view = tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base_for_read, Signer::new(RECIPIENT_SEED));
+        carrier.collect(&device_from_seed(&RECIPIENT_SEED), now())
+    });
+    match blocked_view {
+        Missed::Held(held) => assert!(
+            held.is_empty(),
+            "a blocked sender's material must never reach the recipient's device"
+        ),
+        Missed::Unasked(why) => panic!("the carrier could not be asked: {why}"),
+    }
+
+    // Unblock, and the next letter lands.
+    let recipient_standing =
+        egress::authorize(&plane, &recipient_actor, &recipient_device).expect("recipient");
+    let sender_for_unblock = sender_device.clone();
+    tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(RECIPIENT_SEED));
+        carrier.block(&recipient_standing, &sender_for_unblock, false, now())
+    })
+    .expect("unblock over HTTP");
+
+    let sealed = seal_to_devices(std::slice::from_ref(&recipient_device), CONTEXT, b"welcome")
+        .expect("seal");
+    let envelope = Sealed {
+        recipient: recipient_device.clone(),
+        bytes: serde_json::to_vec(&sealed).expect("encode"),
+        expires_at: now() + 3600,
+        construction: 1,
+    };
+    tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(SENDER_SEED));
+        carrier.deposit(&sender_standing, &envelope, now())
+    })
+    .expect("deposit");
+
+    let after = tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(RECIPIENT_SEED));
+        carrier.collect(&device_from_seed(&RECIPIENT_SEED), now())
+    });
+    assert_eq!(
+        after.held().map(<[_]>::len),
+        Some(1),
+        "an unblocked sender is delivered again"
+    );
+
+    // Clean up after ourselves on a shared deployed carrier: acknowledge the one
+    // letter so the mailbox is left as empty as we found it.
+    if let Missed::Held(held) = after {
+        let ids: Vec<String> = held.iter().map(|w| w.id.clone()).collect();
+        let _ = tokio::task::block_in_place(|| {
+            let mut carrier = PostCarrier::new(base.clone(), Signer::new(RECIPIENT_SEED));
+            carrier.acknowledge(&device_from_seed(&RECIPIENT_SEED), &ids, now())
+        });
+    }
+}

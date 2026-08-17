@@ -15,7 +15,10 @@ use axum::{Json, Router};
 use mechanics::ids::DeviceId;
 use serde::Deserialize;
 
-use crate::{Challenge, Deposited, FsStore, Post, Refusal, SignedAck, SignedDeposit, SignedFetch};
+use crate::{
+    Challenge, Deposited, FsStore, Post, Refusal, SignedAck, SignedBlock, SignedDeposit,
+    SignedFetch,
+};
 
 /// The Post, shared across handlers.
 pub type Shared = Arc<Mutex<Post<FsStore>>>;
@@ -35,6 +38,7 @@ pub fn router(shared: Shared) -> Router {
         .route("/deposit", post(deposit))
         .route("/fetch", post(fetch))
         .route("/acknowledge", post(acknowledge))
+        .route("/block", post(block))
         .with_state(shared)
 }
 
@@ -112,5 +116,17 @@ async fn acknowledge(
     held(&shared)
         .acknowledge(&request, now())
         .map(|dropped| Json(serde_json::json!({ "dropped": dropped })))
+        .map_err(refused)
+}
+
+async fn block(
+    State(shared): State<Shared>,
+    Json(request): Json<SignedBlock>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<Refusal>)> {
+    held(&shared)
+        .block(&request, now())
+        // An empty object rather than nothing: a body a client can decode is a
+        // reply it can tell apart from a truncated one.
+        .map(|()| Json(serde_json::json!({ "blocked": true })))
         .map_err(refused)
 }

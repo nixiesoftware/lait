@@ -239,6 +239,27 @@ pub trait Carrier {
         ids: &[String],
         now: u64,
     ) -> Result<usize, Refused>;
+
+    /// Block, or unblock, a sender on the recipient's own authority.
+    ///
+    /// `by` is the recipient, proven — the same `Egress` witness a deposit takes,
+    /// for the same reason: authority over a mailbox is a key, and this is where
+    /// the key is shown. A carrier that let anyone block anyone would be deciding
+    /// who may reach whom, which is exactly the adjudication a carrier must not do.
+    ///
+    /// Blocking lives on the seam rather than being a Post detail because it is
+    /// what makes a readable address survivable: the address is an
+    /// unsolicited-contact surface the moment it exists, and a block that refused
+    /// material *at the carrier* is the difference between a stranger costing you a
+    /// glance and costing you your device. A review queue built above this seam
+    /// calls it without caring which contractor is behind it.
+    fn block(
+        &mut self,
+        by: &Egress<'_>,
+        sender: &DeviceId,
+        blocked: bool,
+        now: u64,
+    ) -> Result<(), Refused>;
 }
 
 /// Check what any carrier may check before it has moved a byte.

@@ -47,6 +47,8 @@ pub struct MemCarrier {
     held: BTreeMap<DeviceId, BTreeMap<String, Waiting>>,
     /// When set, every operation answers as if the carrier were unreachable.
     unreachable: Option<String>,
+    /// Per recipient, the senders they have blocked.
+    blocked: BTreeMap<DeviceId, std::collections::BTreeSet<DeviceId>>,
 }
 
 impl MemCarrier {
@@ -96,8 +98,19 @@ impl Carrier for MemCarrier {
         // is wrong with it rather than being told to come back later.
         admissible(sealed, now)?;
 
-        let mailbox = self.held.entry(sealed.recipient.clone()).or_default();
         let id = deposit_id(from.device(), sealed);
+        // A blocked sender is refused where it matters: the id is returned so the
+        // request is indistinguishable from acceptance, and nothing is stored.
+        // Same shape as the Post, so a caller cannot tell the two carriers apart.
+        if self
+            .blocked
+            .get(&sealed.recipient)
+            .is_some_and(|set| set.contains(from.device()))
+        {
+            return Ok(id);
+        }
+
+        let mailbox = self.held.entry(sealed.recipient.clone()).or_default();
         // A retry is the same deposit. Checked before the ceiling, or a full
         // mailbox would start refusing the redelivery of something it already
         // holds.
@@ -153,6 +166,31 @@ impl Carrier for MemCarrier {
             }
         }
         Ok(gone)
+    }
+
+    fn block(
+        &mut self,
+        by: &Egress<'_>,
+        sender: &DeviceId,
+        blocked: bool,
+        _now: u64,
+    ) -> Result<(), Refused> {
+        if let Some(why) = &self.unreachable {
+            return Err(Refused::Unreachable(why.clone()));
+        }
+        let recipient = by.device().clone();
+        if blocked {
+            self.blocked
+                .entry(recipient)
+                .or_default()
+                .insert(sender.clone());
+        } else if let Some(set) = self.blocked.get_mut(&recipient) {
+            set.remove(sender);
+            if set.is_empty() {
+                self.blocked.remove(&recipient);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -390,6 +428,77 @@ mod tests {
         // Expired material occupies the mailbox until it is swept.
         assert!(carrier.sweep(NOW + 7200) >= MAX_MAILBOX);
         assert_eq!(carrier.holding(&recipient), 0);
+    }
+
+    /// A blocked sender's letter never lands, through the seam.
+    ///
+    /// The same property the Post has, at the seam so a review queue can rely on it
+    /// without knowing which carrier is behind it. The recipient blocks; the sender
+    /// deposits and is answered as if accepted; the mailbox holds nothing.
+    #[test]
+    fn a_blocked_sender_reaches_the_recipient_with_nothing() {
+        let space = SpaceId::mint(&SystemUlidSource);
+        let (e_alice, alice) = incept(1, &space);
+        let (e_bob, bob) = incept(2, &space);
+        let plane = actor::replay(&space, &[e_alice, e_bob]);
+        let alice_standing =
+            egress::authorize(&plane, &alice, &device_from_seed(&seed(1))).expect("alice");
+        let bob_standing =
+            egress::authorize(&plane, &bob, &device_from_seed(&seed(2))).expect("bob");
+
+        let alice_device = device_from_seed(&seed(1));
+        let bob_device = device_from_seed(&seed(2));
+        let mut carrier = MemCarrier::new();
+
+        // Bob blocks Alice, on Bob's own authority.
+        carrier
+            .block(&bob_standing, &alice_device, true, NOW)
+            .expect("bob may block alice");
+
+        // Alice deposits to Bob — accept-shaped.
+        carrier
+            .deposit(&alice_standing, &envelope_to(&bob_device, b"unwanted"), NOW)
+            .expect("a blocked deposit is accept-shaped");
+
+        // Bob holds nothing.
+        assert_eq!(
+            carrier.collect(&bob_device, NOW),
+            Missed::Held(vec![]),
+            "a blocked sender's material must not occupy the recipient's mailbox"
+        );
+
+        // Bob unblocks; the next letter lands.
+        carrier
+            .block(&bob_standing, &alice_device, false, NOW)
+            .expect("unblock");
+        carrier
+            .deposit(&alice_standing, &envelope_to(&bob_device, b"welcome"), NOW)
+            .expect("deposit");
+        assert_eq!(
+            carrier.collect(&bob_device, NOW).held().map(<[_]>::len),
+            Some(1),
+            "an unblocked sender is delivered again"
+        );
+    }
+
+    /// A carrier will not block on a mailbox it cannot sign for.
+    #[test]
+    fn a_carrier_refuses_to_block_for_a_device_it_is_not() {
+        // MemCarrier signs for nobody, so its block authority is the witness alone —
+        // it accepts any `by`. This property is the PostCarrier's, asserted in the
+        // hop test; here we pin the seam shape: block takes a witness, not a bare
+        // device, so "who is blocking" cannot be forged by naming.
+        let space = SpaceId::mint(&SystemUlidSource);
+        let (e_alice, alice) = incept(1, &space);
+        let plane = actor::replay(&space, &[e_alice]);
+        let alice_standing =
+            egress::authorize(&plane, &alice, &device_from_seed(&seed(1))).expect("alice");
+        let mut carrier = MemCarrier::new();
+        // The witness is required to reach `block` at all; there is no path that
+        // blocks by a device name a caller supplies.
+        carrier
+            .block(&alice_standing, &device_from_seed(&seed(9)), true, NOW)
+            .expect("a witness-bearing block is accepted");
     }
 
     /// Structural refusals are decided locally, before anything is stored.
