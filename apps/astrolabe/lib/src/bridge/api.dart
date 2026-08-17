@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -216,6 +216,35 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.displayDeviceRevoke({
     required String device,
   }) = ActionRequest_DisplayDeviceRevoke;
+
+  /// Make this machine a screen.
+  ///
+  /// Pressing the control is the whole of the consent — there is no dialog
+  /// in front of it, because being asked *what to show* before you are a
+  /// screen is the wrong order. Nothing is enrolled and nothing is
+  /// committed: this client is already a member of the Space it will draw,
+  /// so there is no stranger to issue a credential to. Leaving is
+  /// [`ActionRequest::LeavePresentation`].
+  const factory ActionRequest.enterPresentation() =
+      ActionRequest_EnterPresentation;
+
+  /// Point this screen at one exact surface. Dispatched from inside the
+  /// mode, never as a precondition for entering it.
+  const factory ActionRequest.presentHere({
+    required String orbit,
+    required String world,
+    required String surface,
+    required String input,
+    required String title,
+  }) = ActionRequest_PresentHere;
+
+  /// Ask the current selection again. What a refresh boundary and a manual
+  /// nudge both do.
+  const factory ActionRequest.presentRefresh() = ActionRequest_PresentRefresh;
+
+  /// Stop being a screen.
+  const factory ActionRequest.leavePresentation() =
+      ActionRequest_LeavePresentation;
 }
 
 /// The identity's address book, as last read.
@@ -347,6 +376,11 @@ class ClientView {
   /// The daemon-owned, self-hosted display coordinator. `None` until its
   /// first authoritative read lands.
   final DisplayFacts? display;
+
+  /// This machine as a screen. `Some` *is* Big Picture — whether or not it
+  /// has drawn anything yet — so a surface reads presence here rather than
+  /// keeping a mode flag of its own that could disagree.
+  final PresentationFacts? presentation;
   final List<HeadRow> heads;
   final List<DeviceRow> devices;
   final List<StorageRow> storage;
@@ -378,6 +412,7 @@ class ClientView {
     this.library_,
     this.host,
     this.display,
+    this.presentation,
     required this.heads,
     required this.devices,
     required this.storage,
@@ -397,6 +432,7 @@ class ClientView {
       library_.hashCode ^
       host.hashCode ^
       display.hashCode ^
+      presentation.hashCode ^
       heads.hashCode ^
       devices.hashCode ^
       storage.hashCode ^
@@ -418,6 +454,7 @@ class ClientView {
           library_ == other.library_ &&
           host == other.host &&
           display == other.display &&
+          presentation == other.presentation &&
           heads == other.heads &&
           devices == other.devices &&
           storage == other.storage &&
@@ -609,6 +646,10 @@ class DisplayFacts {
   final List<DisplayAssignmentRow> assignments;
   final List<DisplayPairingRow> pendingPairings;
 
+  /// `None` from a daemon that predates the custody split — not reported, as
+  /// distinct from reported-as-none.
+  final DisplayIdentifierCustodyRow? identifierCustody;
+
   const DisplayFacts({
     required this.instance,
     required this.label,
@@ -619,6 +660,7 @@ class DisplayFacts {
     required this.devices,
     required this.assignments,
     required this.pendingPairings,
+    this.identifierCustody,
   });
 
   @override
@@ -631,7 +673,8 @@ class DisplayFacts {
       surfaces.hashCode ^
       devices.hashCode ^
       assignments.hashCode ^
-      pendingPairings.hashCode;
+      pendingPairings.hashCode ^
+      identifierCustody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -646,7 +689,8 @@ class DisplayFacts {
           surfaces == other.surfaces &&
           devices == other.devices &&
           assignments == other.assignments &&
-          pendingPairings == other.pendingPairings;
+          pendingPairings == other.pendingPairings &&
+          identifierCustody == other.identifierCustody;
 }
 
 class DisplayHealthRow {
@@ -706,6 +750,34 @@ class DisplayHealthRow {
           driftResidualMs == other.driftResidualMs &&
           correctionEvents == other.correctionEvents &&
           pipelineUnobservable == other.pipelineUnobservable;
+}
+
+/// How many ways back into this coordinator's identifier key exist, and whether
+/// any survives the machine.
+///
+/// Carried on the ordinary status projection rather than a settings page: the
+/// moment an operator wants this is after the machine is gone, and a fact only
+/// reachable from the lost machine is not a fact they have.
+class DisplayIdentifierCustodyRow {
+  /// Kinds of unlock path, never material.
+  final List<String> slots;
+  final bool portable;
+
+  const DisplayIdentifierCustodyRow({
+    required this.slots,
+    required this.portable,
+  });
+
+  @override
+  int get hashCode => slots.hashCode ^ portable.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DisplayIdentifierCustodyRow &&
+          runtimeType == other.runtimeType &&
+          slots == other.slots &&
+          portable == other.portable;
 }
 
 class DisplayPairingRow {
@@ -1226,6 +1298,166 @@ enum PresenceView {
   /// is "no Space that names it could be asked".
   offline,
   ;
+}
+
+/// What a screen was pointed at.
+class PresentationChoice {
+  final String orbit;
+  final String world;
+  final String surface;
+
+  /// What to call this on screen while it is loading or refusing.
+  final String title;
+
+  const PresentationChoice({
+    required this.orbit,
+    required this.world,
+    required this.surface,
+    required this.title,
+  });
+
+  @override
+  int get hashCode =>
+      orbit.hashCode ^ world.hashCode ^ surface.hashCode ^ title.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresentationChoice &&
+          runtimeType == other.runtimeType &&
+          orbit == other.orbit &&
+          world == other.world &&
+          surface == other.surface &&
+          title == other.title;
+}
+
+/// This machine as a screen. Present exactly when Big Picture is on.
+///
+/// Being a screen and showing something are separate facts, so `chosen` is
+/// optional: a screen entered and not yet pointed at anything is a real state
+/// with its own surface, not a half-built one.
+class PresentationFacts {
+  final PresentationChoice? chosen;
+
+  /// The last verified render, kept across a failed re-ask so a screen goes
+  /// stale rather than dark.
+  final PresentedProgram? program;
+
+  /// Why the last attempt did not answer. Travels *beside* `program`, never
+  /// instead of it — "stale, and here is why" and "nothing to show" are
+  /// different things to tell somebody standing in front of a screen.
+  final String? failure;
+
+  const PresentationFacts({
+    this.chosen,
+    this.program,
+    this.failure,
+  });
+
+  @override
+  int get hashCode => chosen.hashCode ^ program.hashCode ^ failure.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresentationFacts &&
+          runtimeType == other.runtimeType &&
+          chosen == other.chosen &&
+          program == other.program &&
+          failure == other.failure;
+}
+
+class PresentedItem {
+  final String id;
+  final int? durationMs;
+  final String assessment;
+  final String? spokenSummary;
+  final PresentedScene scene;
+
+  const PresentedItem({
+    required this.id,
+    this.durationMs,
+    required this.assessment,
+    this.spokenSummary,
+    required this.scene,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      durationMs.hashCode ^
+      assessment.hashCode ^
+      spokenSummary.hashCode ^
+      scene.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresentedItem &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          durationMs == other.durationMs &&
+          assessment == other.assessment &&
+          spokenSummary == other.spokenSummary &&
+          scene == other.scene;
+}
+
+class PresentedProgram {
+  /// `current`, `partial`, or `unavailable`.
+  final String assessment;
+  final List<String> partialReasons;
+
+  /// `hold_last`, `loop`, `poll_at_end`, or `blank_at_end`.
+  final String cycle;
+  final int? refreshAfterMs;
+  final List<PresentedItem> items;
+
+  const PresentedProgram({
+    required this.assessment,
+    required this.partialReasons,
+    required this.cycle,
+    this.refreshAfterMs,
+    required this.items,
+  });
+
+  @override
+  int get hashCode =>
+      assessment.hashCode ^
+      partialReasons.hashCode ^
+      cycle.hashCode ^
+      refreshAfterMs.hashCode ^
+      items.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresentedProgram &&
+          runtimeType == other.runtimeType &&
+          assessment == other.assessment &&
+          partialReasons == other.partialReasons &&
+          cycle == other.cycle &&
+          refreshAfterMs == other.refreshAfterMs &&
+          items == other.items;
+}
+
+@freezed
+sealed class PresentedScene with _$PresentedScene {
+  const PresentedScene._();
+
+  const factory PresentedScene.frame({
+    /// `png`, `jpeg`, or `webp`.
+    required String mediaType,
+    required int width,
+    required int height,
+    required Uint8List bytes,
+  }) = PresentedScene_Frame;
+  const factory PresentedScene.blank({
+    /// `source_unavailable`, `unsupported`, or `program_ended`.
+    required String reason,
+  }) = PresentedScene_Blank;
+  const factory PresentedScene.unsupported({
+    required String output,
+  }) = PresentedScene_Unsupported;
 }
 
 /// The Space somebody is administering, as it last answered.

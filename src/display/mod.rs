@@ -20,7 +20,7 @@ pub use cmaf::{
     CmafTrackPackager, Failure as CmafFailure,
 };
 pub use compiler::{CompiledProgram, PlaybackAlignment, ProgramCompiler};
-pub use coordinator::DisplayCoordinator;
+pub use coordinator::{DisplayCoordinator, SurfaceRender};
 pub use hls::{Failure as HlsFailure, HlsCatalogPackager, HlsRenditionDescription, HlsSegment};
 pub use http::{display_http_router, serve_display_https, DisplayHttpState};
 pub use live::{LiveMediaHub, LiveMediaPacket, LiveMediaSnapshot, LiveMediaTrack, LiveTransport};
@@ -30,6 +30,6 @@ pub use pairing::{
 pub use runtime::DisplayRuntime;
 pub use store::{
     AssignmentRecord, AssignmentSync, CoordinatorPolicy, CoordinatorSecrets, CoordinatorStore,
-    DeviceRecord, SourceGrant,
+    Custodian, DeviceRecord, IdentifierCustody, IdentifierCustodyStatus, SourceGrant,
 };
 pub use tls::{DisplayTlsIdentity, DEFAULT_DISPLAY_PORT};

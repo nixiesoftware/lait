@@ -80,7 +80,10 @@ Future<void> main(List<String> arguments) async {
     astrolabeWindowOptions(
       size: _widest,
       minimumSize: _narrowest,
-      maximumSize: _widest,
+      // No ceiling. It existed to keep a launcher from filling a 4K display,
+      // and `maximumSize` clamps `ptMaxTrackSize` — which fought not only a
+      // maximise but the fullscreen Big Picture needs. A window that cannot
+      // leave its ceiling cannot become a screen.
       title: 'Astrolabe',
     ),
     maximisable: kClientMaximisable,

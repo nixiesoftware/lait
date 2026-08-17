@@ -50,6 +50,13 @@ class _WindowControlHost implements WindowControlHost {
 
   @override
   Future<void> toggleMaximize() async => maximizeToggles++;
+
+  /// What the surface last asserted about the display. `null` is "never
+  /// asked", which is a different fact from "asked for windowed".
+  bool? fullScreen;
+
+  @override
+  Future<void> setFullScreen(bool full) async => fullScreen = full;
 }
 
 /// What one pump produced: what the shell asked the core for, and what it
@@ -243,25 +250,68 @@ void _drawnChrome() {
     expect(pumped.menus, isEmpty);
   }, variant: _windows);
 
-  testWidgets('the client window offers no maximise', (tester) async {
+  testWidgets('the client window can fill a display', (tester) async {
     final chrome = _WindowControlHost();
     await _pump(tester, onToggleTheme: () {}, chrome: chrome);
 
-    // One fact, read here by the caption and in `main` by the HWND: a
-    // launcher does not fill a display. The gesture follows the same flag,
-    // so a double-click on the band cannot zoom what the button refuses.
+    // This asserted the opposite until Big Picture. The old reasoning was
+    // sound — a launcher filling a 4K display is empty page around one card —
+    // but it was enforced with a size ceiling, and `maximumSize` clamps
+    // `ptMaxTrackSize`, so the same constraint that kept the Library small
+    // stopped the client ever becoming a screen.
+    //
+    // One fact still, read here by the caption and in `main` by the HWND.
     final frame =
         tester.widget<AstrolabeWindowFrame>(find.byType(AstrolabeWindowFrame));
-    expect(frame.maximisable, isFalse);
-    expect(chrome.maximizeToggles, isZero);
+    expect(frame.maximisable, isTrue);
 
-    // Absence, not a disabled control — a greyed button advertises a
-    // capability the window does not have. The other two are still drawn,
-    // so this cannot pass by the whole cluster having gone missing.
-    expect(find.bySemanticsLabel('Maximise'), findsNothing);
-    expect(find.bySemanticsLabel('Restore'), findsNothing);
+    // Drawn, not merely permitted: the caption and the HWND agree, which is
+    // the property that flag exists to hold in either direction.
+    expect(find.bySemanticsLabel('Maximise'), findsOneWidget);
     expect(find.bySemanticsLabel('Minimise'), findsOneWidget);
     expect(find.bySemanticsLabel('Close'), findsOneWidget);
+  }, variant: _windows);
+
+  testWidgets('the caption offers a screen, and it is not the maximise control',
+      (tester) async {
+    await _pump(tester, onToggleTheme: () {});
+
+    // Two controls that both make the window larger would be one control too
+    // many. Big Picture is a mode — this machine showing a World rather than
+    // launching one — so it carries its own mark and its own label, beside a
+    // maximise that keeps meaning what it means everywhere else.
+    expect(find.bySemanticsLabel('Present on this screen'), findsOneWidget);
+    expect(find.bySemanticsLabel('Maximise'), findsOneWidget);
+  }, variant: _windows);
+
+  testWidgets('the screen control is appended to the window controls, not '
+      'floating in the caption', (tester) async {
+    await _pump(tester, onToggleTheme: () {});
+
+    final screen =
+        tester.getRect(find.bySemanticsLabel('Present on this screen'));
+    final minimise = tester.getRect(find.bySemanticsLabel('Minimise'));
+    final wordmark = tester.getRect(find.bySemanticsLabel('Astrolabe settings'));
+    final bar = tester.getRect(find.byType(AstrolabeWindowFrame));
+
+    // Right of the wordmark and immediately left of the cluster — not
+    // right-aligned inside a region that ends wherever the caption's content
+    // happens to end, which is how it came to sit in the middle of the bar.
+    expect(screen.left, greaterThan(wordmark.right));
+    expect(screen.right, lessThanOrEqualTo(minimise.left + 0.5));
+
+    // And nearer the cluster than the wordmark, so "appended" is measured
+    // rather than merely ordered.
+    expect(
+      minimise.left - screen.right,
+      lessThan(screen.left - wordmark.right),
+    );
+
+    // The corner still belongs to close. Nothing of ours may sit between the
+    // window's own controls and the edge they are aimed at.
+    final close = tester.getRect(find.bySemanticsLabel('Close'));
+    expect(close.right, closeTo(bar.right, 0.5));
+    expect(screen.right, lessThan(close.left));
   }, variant: _windows);
 }
 

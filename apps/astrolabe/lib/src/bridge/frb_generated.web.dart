@@ -60,6 +60,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DisplayHealthRow dco_decode_box_autoadd_display_health_row(dynamic raw);
 
   @protected
+  DisplayIdentifierCustodyRow
+      dco_decode_box_autoadd_display_identifier_custody_row(dynamic raw);
+
+  @protected
   DisplaySyncMode dco_decode_box_autoadd_display_sync_mode(dynamic raw);
 
   @protected
@@ -73,6 +77,15 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresenceView dco_decode_box_autoadd_presence_view(dynamic raw);
+
+  @protected
+  PresentationChoice dco_decode_box_autoadd_presentation_choice(dynamic raw);
+
+  @protected
+  PresentationFacts dco_decode_box_autoadd_presentation_facts(dynamic raw);
+
+  @protected
+  PresentedProgram dco_decode_box_autoadd_presented_program(dynamic raw);
 
   @protected
   SpaceRow dco_decode_box_autoadd_space_row(dynamic raw);
@@ -109,6 +122,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayHealthRow dco_decode_display_health_row(dynamic raw);
+
+  @protected
+  DisplayIdentifierCustodyRow dco_decode_display_identifier_custody_row(
+      dynamic raw);
 
   @protected
   DisplayPairingRow dco_decode_display_pairing_row(dynamic raw);
@@ -193,6 +210,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<OrbitRow> dco_decode_list_orbit_row(dynamic raw);
 
   @protected
+  List<PresentedItem> dco_decode_list_presented_item(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -232,6 +252,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   DisplayHealthRow? dco_decode_opt_box_autoadd_display_health_row(dynamic raw);
 
   @protected
+  DisplayIdentifierCustodyRow?
+      dco_decode_opt_box_autoadd_display_identifier_custody_row(dynamic raw);
+
+  @protected
   DisplaySyncMode? dco_decode_opt_box_autoadd_display_sync_mode(dynamic raw);
 
   @protected
@@ -245,6 +269,16 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresenceView? dco_decode_opt_box_autoadd_presence_view(dynamic raw);
+
+  @protected
+  PresentationChoice? dco_decode_opt_box_autoadd_presentation_choice(
+      dynamic raw);
+
+  @protected
+  PresentationFacts? dco_decode_opt_box_autoadd_presentation_facts(dynamic raw);
+
+  @protected
+  PresentedProgram? dco_decode_opt_box_autoadd_presented_program(dynamic raw);
 
   @protected
   SpaceRow? dco_decode_opt_box_autoadd_space_row(dynamic raw);
@@ -278,6 +312,21 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresenceView dco_decode_presence_view(dynamic raw);
+
+  @protected
+  PresentationChoice dco_decode_presentation_choice(dynamic raw);
+
+  @protected
+  PresentationFacts dco_decode_presentation_facts(dynamic raw);
+
+  @protected
+  PresentedItem dco_decode_presented_item(dynamic raw);
+
+  @protected
+  PresentedProgram dco_decode_presented_program(dynamic raw);
+
+  @protected
+  PresentedScene dco_decode_presented_scene(dynamic raw);
 
   @protected
   SpaceRow dco_decode_space_row(dynamic raw);
@@ -357,6 +406,11 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  DisplayIdentifierCustodyRow
+      sse_decode_box_autoadd_display_identifier_custody_row(
+          SseDeserializer deserializer);
+
+  @protected
   DisplaySyncMode sse_decode_box_autoadd_display_sync_mode(
       SseDeserializer deserializer);
 
@@ -372,6 +426,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresenceView sse_decode_box_autoadd_presence_view(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentationChoice sse_decode_box_autoadd_presentation_choice(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentationFacts sse_decode_box_autoadd_presentation_facts(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentedProgram sse_decode_box_autoadd_presented_program(
       SseDeserializer deserializer);
 
   @protected
@@ -411,6 +477,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayHealthRow sse_decode_display_health_row(SseDeserializer deserializer);
+
+  @protected
+  DisplayIdentifierCustodyRow sse_decode_display_identifier_custody_row(
+      SseDeserializer deserializer);
 
   @protected
   DisplayPairingRow sse_decode_display_pairing_row(
@@ -502,6 +572,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<OrbitRow> sse_decode_list_orbit_row(SseDeserializer deserializer);
 
   @protected
+  List<PresentedItem> sse_decode_list_presented_item(
+      SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -547,6 +621,11 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  DisplayIdentifierCustodyRow?
+      sse_decode_opt_box_autoadd_display_identifier_custody_row(
+          SseDeserializer deserializer);
+
+  @protected
   DisplaySyncMode? sse_decode_opt_box_autoadd_display_sync_mode(
       SseDeserializer deserializer);
 
@@ -563,6 +642,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresenceView? sse_decode_opt_box_autoadd_presence_view(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentationChoice? sse_decode_opt_box_autoadd_presentation_choice(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentationFacts? sse_decode_opt_box_autoadd_presentation_facts(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentedProgram? sse_decode_opt_box_autoadd_presented_program(
       SseDeserializer deserializer);
 
   @protected
@@ -600,6 +691,22 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresenceView sse_decode_presence_view(SseDeserializer deserializer);
+
+  @protected
+  PresentationChoice sse_decode_presentation_choice(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentationFacts sse_decode_presentation_facts(SseDeserializer deserializer);
+
+  @protected
+  PresentedItem sse_decode_presented_item(SseDeserializer deserializer);
+
+  @protected
+  PresentedProgram sse_decode_presented_program(SseDeserializer deserializer);
+
+  @protected
+  PresentedScene sse_decode_presented_scene(SseDeserializer deserializer);
 
   @protected
   SpaceRow sse_decode_space_row(SseDeserializer deserializer);
@@ -682,6 +789,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       DisplayHealthRow self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_display_identifier_custody_row(
+      DisplayIdentifierCustodyRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_display_sync_mode(
       DisplaySyncMode self, SseSerializer serializer);
 
@@ -699,6 +810,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_box_autoadd_presence_view(
       PresenceView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_presentation_choice(
+      PresentationChoice self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_presentation_facts(
+      PresentationFacts self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_presented_program(
+      PresentedProgram self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_space_row(
@@ -740,6 +863,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_display_health_row(
       DisplayHealthRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_identifier_custody_row(
+      DisplayIdentifierCustodyRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_display_pairing_row(
@@ -837,6 +964,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_list_orbit_row(List<OrbitRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_presented_item(
+      List<PresentedItem> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
       Uint8List self, SseSerializer serializer);
 
@@ -884,6 +1015,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       DisplayHealthRow? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_display_identifier_custody_row(
+      DisplayIdentifierCustodyRow? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_display_sync_mode(
       DisplaySyncMode? self, SseSerializer serializer);
 
@@ -902,6 +1037,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_opt_box_autoadd_presence_view(
       PresenceView? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_presentation_choice(
+      PresentationChoice? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_presentation_facts(
+      PresentationFacts? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_presented_program(
+      PresentedProgram? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_space_row(
@@ -941,6 +1088,25 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_presence_view(PresenceView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presentation_choice(
+      PresentationChoice self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presentation_facts(
+      PresentationFacts self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presented_item(PresentedItem self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presented_program(
+      PresentedProgram self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presented_scene(
+      PresentedScene self, SseSerializer serializer);
 
   @protected
   void sse_encode_space_row(SpaceRow self, SseSerializer serializer);

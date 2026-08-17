@@ -439,6 +439,29 @@ impl SseDecode for crate::api::ActionRequest {
                 let mut var_device = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::DisplayDeviceRevoke { device: var_device };
             }
+            29 => {
+                return crate::api::ActionRequest::EnterPresentation;
+            }
+            30 => {
+                let mut var_orbit = <String>::sse_decode(deserializer);
+                let mut var_world = <String>::sse_decode(deserializer);
+                let mut var_surface = <String>::sse_decode(deserializer);
+                let mut var_input = <String>::sse_decode(deserializer);
+                let mut var_title = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::PresentHere {
+                    orbit: var_orbit,
+                    world: var_world,
+                    surface: var_surface,
+                    input: var_input,
+                    title: var_title,
+                };
+            }
+            31 => {
+                return crate::api::ActionRequest::PresentRefresh;
+            }
+            32 => {
+                return crate::api::ActionRequest::LeavePresentation;
+            }
             _ => {
                 unimplemented!("");
             }
@@ -509,6 +532,8 @@ impl SseDecode for crate::api::ClientView {
         let mut var_library_ = <Option<Vec<crate::api::LibraryRow>>>::sse_decode(deserializer);
         let mut var_host = <Option<crate::api::HostFacts>>::sse_decode(deserializer);
         let mut var_display = <Option<crate::api::DisplayFacts>>::sse_decode(deserializer);
+        let mut var_presentation =
+            <Option<crate::api::PresentationFacts>>::sse_decode(deserializer);
         let mut var_heads = <Vec<crate::api::HeadRow>>::sse_decode(deserializer);
         let mut var_devices = <Vec<crate::api::DeviceRow>>::sse_decode(deserializer);
         let mut var_storage = <Vec<crate::api::StorageRow>>::sse_decode(deserializer);
@@ -525,6 +550,7 @@ impl SseDecode for crate::api::ClientView {
             library: var_library_,
             host: var_host,
             display: var_display,
+            presentation: var_presentation,
             heads: var_heads,
             devices: var_devices,
             storage: var_storage,
@@ -628,6 +654,8 @@ impl SseDecode for crate::api::DisplayFacts {
         let mut var_assignments = <Vec<crate::api::DisplayAssignmentRow>>::sse_decode(deserializer);
         let mut var_pendingPairings =
             <Vec<crate::api::DisplayPairingRow>>::sse_decode(deserializer);
+        let mut var_identifierCustody =
+            <Option<crate::api::DisplayIdentifierCustodyRow>>::sse_decode(deserializer);
         return crate::api::DisplayFacts {
             instance: var_instance,
             label: var_label,
@@ -638,6 +666,7 @@ impl SseDecode for crate::api::DisplayFacts {
             devices: var_devices,
             assignments: var_assignments,
             pending_pairings: var_pendingPairings,
+            identifier_custody: var_identifierCustody,
         };
     }
 }
@@ -668,6 +697,18 @@ impl SseDecode for crate::api::DisplayHealthRow {
             drift_residual_ms: var_driftResidualMs,
             correction_events: var_correctionEvents,
             pipeline_unobservable: var_pipelineUnobservable,
+        };
+    }
+}
+
+impl SseDecode for crate::api::DisplayIdentifierCustodyRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_slots = <Vec<String>>::sse_decode(deserializer);
+        let mut var_portable = <bool>::sse_decode(deserializer);
+        return crate::api::DisplayIdentifierCustodyRow {
+            slots: var_slots,
+            portable: var_portable,
         };
     }
 }
@@ -1051,6 +1092,18 @@ impl SseDecode for Vec<crate::api::OrbitRow> {
     }
 }
 
+impl SseDecode for Vec<crate::api::PresentedItem> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::PresentedItem>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1216,6 +1269,19 @@ impl SseDecode for Option<crate::api::DisplayHealthRow> {
     }
 }
 
+impl SseDecode for Option<crate::api::DisplayIdentifierCustodyRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::DisplayIdentifierCustodyRow>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::DisplaySyncMode> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1265,6 +1331,39 @@ impl SseDecode for Option<crate::api::PresenceView> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::PresenceView>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::PresentationChoice> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::PresentationChoice>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::PresentationFacts> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::PresentationFacts>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::PresentedProgram> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::PresentedProgram>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1396,6 +1495,104 @@ impl SseDecode for crate::api::PresenceView {
             2 => crate::api::PresenceView::Offline,
             _ => unreachable!("Invalid variant for PresenceView: {}", inner),
         };
+    }
+}
+
+impl SseDecode for crate::api::PresentationChoice {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_orbit = <String>::sse_decode(deserializer);
+        let mut var_world = <String>::sse_decode(deserializer);
+        let mut var_surface = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        return crate::api::PresentationChoice {
+            orbit: var_orbit,
+            world: var_world,
+            surface: var_surface,
+            title: var_title,
+        };
+    }
+}
+
+impl SseDecode for crate::api::PresentationFacts {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_chosen = <Option<crate::api::PresentationChoice>>::sse_decode(deserializer);
+        let mut var_program = <Option<crate::api::PresentedProgram>>::sse_decode(deserializer);
+        let mut var_failure = <Option<String>>::sse_decode(deserializer);
+        return crate::api::PresentationFacts {
+            chosen: var_chosen,
+            program: var_program,
+            failure: var_failure,
+        };
+    }
+}
+
+impl SseDecode for crate::api::PresentedItem {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_durationMs = <Option<u32>>::sse_decode(deserializer);
+        let mut var_assessment = <String>::sse_decode(deserializer);
+        let mut var_spokenSummary = <Option<String>>::sse_decode(deserializer);
+        let mut var_scene = <crate::api::PresentedScene>::sse_decode(deserializer);
+        return crate::api::PresentedItem {
+            id: var_id,
+            duration_ms: var_durationMs,
+            assessment: var_assessment,
+            spoken_summary: var_spokenSummary,
+            scene: var_scene,
+        };
+    }
+}
+
+impl SseDecode for crate::api::PresentedProgram {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_assessment = <String>::sse_decode(deserializer);
+        let mut var_partialReasons = <Vec<String>>::sse_decode(deserializer);
+        let mut var_cycle = <String>::sse_decode(deserializer);
+        let mut var_refreshAfterMs = <Option<u32>>::sse_decode(deserializer);
+        let mut var_items = <Vec<crate::api::PresentedItem>>::sse_decode(deserializer);
+        return crate::api::PresentedProgram {
+            assessment: var_assessment,
+            partial_reasons: var_partialReasons,
+            cycle: var_cycle,
+            refresh_after_ms: var_refreshAfterMs,
+            items: var_items,
+        };
+    }
+}
+
+impl SseDecode for crate::api::PresentedScene {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_mediaType = <String>::sse_decode(deserializer);
+                let mut var_width = <u32>::sse_decode(deserializer);
+                let mut var_height = <u32>::sse_decode(deserializer);
+                let mut var_bytes = <Vec<u8>>::sse_decode(deserializer);
+                return crate::api::PresentedScene::Frame {
+                    media_type: var_mediaType,
+                    width: var_width,
+                    height: var_height,
+                    bytes: var_bytes,
+                };
+            }
+            1 => {
+                let mut var_reason = <String>::sse_decode(deserializer);
+                return crate::api::PresentedScene::Blank { reason: var_reason };
+            }
+            2 => {
+                let mut var_output = <String>::sse_decode(deserializer);
+                return crate::api::PresentedScene::Unsupported { output: var_output };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 
@@ -1750,6 +1947,24 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             crate::api::ActionRequest::DisplayDeviceRevoke { device } => {
                 [29.into_dart(), device.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::ActionRequest::EnterPresentation => [29.into_dart()].into_dart(),
+            crate::api::ActionRequest::PresentHere {
+                orbit,
+                world,
+                surface,
+                input,
+                title,
+            } => [
+                30.into_dart(),
+                orbit.into_into_dart().into_dart(),
+                world.into_into_dart().into_dart(),
+                surface.into_into_dart().into_dart(),
+                input.into_into_dart().into_dart(),
+                title.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::PresentRefresh => [31.into_dart()].into_dart(),
+            crate::api::ActionRequest::LeavePresentation => [32.into_dart()].into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -1815,6 +2030,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::ClientView {
             self.library.into_into_dart().into_dart(),
             self.host.into_into_dart().into_dart(),
             self.display.into_into_dart().into_dart(),
+            self.presentation.into_into_dart().into_dart(),
             self.heads.into_into_dart().into_dart(),
             self.devices.into_into_dart().into_dart(),
             self.storage.into_into_dart().into_dart(),
@@ -1921,6 +2137,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::DisplayFacts {
             self.devices.into_into_dart().into_dart(),
             self.assignments.into_into_dart().into_dart(),
             self.pending_pairings.into_into_dart().into_dart(),
+            self.identifier_custody.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1955,6 +2172,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::DisplayHealthRow>
     for crate::api::DisplayHealthRow
 {
     fn into_into_dart(self) -> crate::api::DisplayHealthRow {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::DisplayIdentifierCustodyRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.slots.into_into_dart().into_dart(),
+            self.portable.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::DisplayIdentifierCustodyRow
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::DisplayIdentifierCustodyRow>
+    for crate::api::DisplayIdentifierCustodyRow
+{
+    fn into_into_dart(self) -> crate::api::DisplayIdentifierCustodyRow {
         self
     }
 }
@@ -2305,6 +2543,123 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::PresenceView> for crate::api:
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::PresentationChoice {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.orbit.into_into_dart().into_dart(),
+            self.world.into_into_dart().into_dart(),
+            self.surface.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::PresentationChoice
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::PresentationChoice>
+    for crate::api::PresentationChoice
+{
+    fn into_into_dart(self) -> crate::api::PresentationChoice {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::PresentationFacts {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.chosen.into_into_dart().into_dart(),
+            self.program.into_into_dart().into_dart(),
+            self.failure.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::PresentationFacts {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::PresentationFacts>
+    for crate::api::PresentationFacts
+{
+    fn into_into_dart(self) -> crate::api::PresentationFacts {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::PresentedItem {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.duration_ms.into_into_dart().into_dart(),
+            self.assessment.into_into_dart().into_dart(),
+            self.spoken_summary.into_into_dart().into_dart(),
+            self.scene.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::PresentedItem {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::PresentedItem> for crate::api::PresentedItem {
+    fn into_into_dart(self) -> crate::api::PresentedItem {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::PresentedProgram {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.assessment.into_into_dart().into_dart(),
+            self.partial_reasons.into_into_dart().into_dart(),
+            self.cycle.into_into_dart().into_dart(),
+            self.refresh_after_ms.into_into_dart().into_dart(),
+            self.items.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::PresentedProgram {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::PresentedProgram>
+    for crate::api::PresentedProgram
+{
+    fn into_into_dart(self) -> crate::api::PresentedProgram {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::PresentedScene {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::api::PresentedScene::Frame {
+                media_type,
+                width,
+                height,
+                bytes,
+            } => [
+                0.into_dart(),
+                media_type.into_into_dart().into_dart(),
+                width.into_into_dart().into_dart(),
+                height.into_into_dart().into_dart(),
+                bytes.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::PresentedScene::Blank { reason } => {
+                [1.into_dart(), reason.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::PresentedScene::Unsupported { output } => {
+                [2.into_dart(), output.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::PresentedScene {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::PresentedScene> for crate::api::PresentedScene {
+    fn into_into_dart(self) -> crate::api::PresentedScene {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::SpaceRow {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -2633,6 +2988,29 @@ impl SseEncode for crate::api::ActionRequest {
                 <i32>::sse_encode(29, serializer);
                 <String>::sse_encode(device, serializer);
             }
+            crate::api::ActionRequest::EnterPresentation => {
+                <i32>::sse_encode(29, serializer);
+            }
+            crate::api::ActionRequest::PresentHere {
+                orbit,
+                world,
+                surface,
+                input,
+                title,
+            } => {
+                <i32>::sse_encode(30, serializer);
+                <String>::sse_encode(orbit, serializer);
+                <String>::sse_encode(world, serializer);
+                <String>::sse_encode(surface, serializer);
+                <String>::sse_encode(input, serializer);
+                <String>::sse_encode(title, serializer);
+            }
+            crate::api::ActionRequest::PresentRefresh => {
+                <i32>::sse_encode(31, serializer);
+            }
+            crate::api::ActionRequest::LeavePresentation => {
+                <i32>::sse_encode(32, serializer);
+            }
             _ => {
                 unimplemented!("");
             }
@@ -2683,6 +3061,7 @@ impl SseEncode for crate::api::ClientView {
         <Option<Vec<crate::api::LibraryRow>>>::sse_encode(self.library, serializer);
         <Option<crate::api::HostFacts>>::sse_encode(self.host, serializer);
         <Option<crate::api::DisplayFacts>>::sse_encode(self.display, serializer);
+        <Option<crate::api::PresentationFacts>>::sse_encode(self.presentation, serializer);
         <Vec<crate::api::HeadRow>>::sse_encode(self.heads, serializer);
         <Vec<crate::api::DeviceRow>>::sse_encode(self.devices, serializer);
         <Vec<crate::api::StorageRow>>::sse_encode(self.storage, serializer);
@@ -2752,6 +3131,10 @@ impl SseEncode for crate::api::DisplayFacts {
         <Vec<crate::api::DisplayReceiverRow>>::sse_encode(self.devices, serializer);
         <Vec<crate::api::DisplayAssignmentRow>>::sse_encode(self.assignments, serializer);
         <Vec<crate::api::DisplayPairingRow>>::sse_encode(self.pending_pairings, serializer);
+        <Option<crate::api::DisplayIdentifierCustodyRow>>::sse_encode(
+            self.identifier_custody,
+            serializer,
+        );
     }
 }
 
@@ -2769,6 +3152,14 @@ impl SseEncode for crate::api::DisplayHealthRow {
         <i32>::sse_encode(self.drift_residual_ms, serializer);
         <u32>::sse_encode(self.correction_events, serializer);
         <bool>::sse_encode(self.pipeline_unobservable, serializer);
+    }
+}
+
+impl SseEncode for crate::api::DisplayIdentifierCustodyRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<String>>::sse_encode(self.slots, serializer);
+        <bool>::sse_encode(self.portable, serializer);
     }
 }
 
@@ -3079,6 +3470,16 @@ impl SseEncode for Vec<crate::api::OrbitRow> {
     }
 }
 
+impl SseEncode for Vec<crate::api::PresentedItem> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::PresentedItem>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3216,6 +3617,16 @@ impl SseEncode for Option<crate::api::DisplayHealthRow> {
     }
 }
 
+impl SseEncode for Option<crate::api::DisplayIdentifierCustodyRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::DisplayIdentifierCustodyRow>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::DisplaySyncMode> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3262,6 +3673,36 @@ impl SseEncode for Option<crate::api::PresenceView> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::PresenceView>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::PresentationChoice> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::PresentationChoice>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::PresentationFacts> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::PresentationFacts>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::PresentedProgram> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::PresentedProgram>::sse_encode(value, serializer);
         }
     }
 }
@@ -3380,6 +3821,78 @@ impl SseEncode for crate::api::PresenceView {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::PresentationChoice {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.orbit, serializer);
+        <String>::sse_encode(self.world, serializer);
+        <String>::sse_encode(self.surface, serializer);
+        <String>::sse_encode(self.title, serializer);
+    }
+}
+
+impl SseEncode for crate::api::PresentationFacts {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<crate::api::PresentationChoice>>::sse_encode(self.chosen, serializer);
+        <Option<crate::api::PresentedProgram>>::sse_encode(self.program, serializer);
+        <Option<String>>::sse_encode(self.failure, serializer);
+    }
+}
+
+impl SseEncode for crate::api::PresentedItem {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <Option<u32>>::sse_encode(self.duration_ms, serializer);
+        <String>::sse_encode(self.assessment, serializer);
+        <Option<String>>::sse_encode(self.spoken_summary, serializer);
+        <crate::api::PresentedScene>::sse_encode(self.scene, serializer);
+    }
+}
+
+impl SseEncode for crate::api::PresentedProgram {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.assessment, serializer);
+        <Vec<String>>::sse_encode(self.partial_reasons, serializer);
+        <String>::sse_encode(self.cycle, serializer);
+        <Option<u32>>::sse_encode(self.refresh_after_ms, serializer);
+        <Vec<crate::api::PresentedItem>>::sse_encode(self.items, serializer);
+    }
+}
+
+impl SseEncode for crate::api::PresentedScene {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::PresentedScene::Frame {
+                media_type,
+                width,
+                height,
+                bytes,
+            } => {
+                <i32>::sse_encode(0, serializer);
+                <String>::sse_encode(media_type, serializer);
+                <u32>::sse_encode(width, serializer);
+                <u32>::sse_encode(height, serializer);
+                <Vec<u8>>::sse_encode(bytes, serializer);
+            }
+            crate::api::PresentedScene::Blank { reason } => {
+                <i32>::sse_encode(1, serializer);
+                <String>::sse_encode(reason, serializer);
+            }
+            crate::api::PresentedScene::Unsupported { output } => {
+                <i32>::sse_encode(2, serializer);
+                <String>::sse_encode(output, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 

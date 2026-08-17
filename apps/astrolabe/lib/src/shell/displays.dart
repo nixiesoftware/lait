@@ -194,11 +194,69 @@ class _Coordinator extends StatelessWidget {
             label: 'CERTIFICATE SHA-256',
             value: display.certificateSha256,
           ),
+          t.gap.y(Space.xs),
+          _IdentifierCustody(custody: display.identifierCustody),
         ],
       ),
     );
   }
 }
+
+/// What it would cost to lose this machine.
+///
+/// Stated on the coordinator card rather than behind a settings page, because
+/// the moment an operator wants this fact is after the machine is gone — and a
+/// warning only reachable from the lost machine is not a warning.
+class _IdentifierCustody extends StatelessWidget {
+  const _IdentifierCustody({required this.custody});
+
+  /// `null` when the coordinator did not report — a daemon older than the
+  /// custody split. Drawn as unmeasured rather than as no unlock paths: the
+  /// second is a warning worth raising, and raising it about a coordinator
+  /// nobody asked would be an alarm with nothing behind it.
+  final DisplayIdentifierCustodyRow? custody;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final held = custody;
+    if (held == null) {
+      return _Fact(
+        label: 'IDENTIFIER KEY UNLOCKS',
+        value: 'not reported by this coordinator',
+      );
+    }
+    final paths =
+        held.slots.isEmpty ? 'none' : held.slots.map(_slotName).join(', ');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _Fact(label: 'IDENTIFIER KEY UNLOCKS', value: paths),
+        t.gap.y(Space.xs),
+        Text(
+          held.portable
+              ? 'Losing every unlock path invalidates the item and asset '
+                  'identifiers already delivered to paired screens. They '
+                  'would each need pairing again.'
+              : 'Every unlock path is bound to this machine. Losing this '
+                  'profile invalidates the item and asset identifiers '
+                  'already delivered to paired screens, and they would each '
+                  'need pairing again. Add a passphrase or a second device.',
+          style: context.labelStyle.copyWith(
+            color: held.portable ? context.text.l700 : context.text.l900,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+String _slotName(String slot) => switch (slot) {
+      'recovery-key' => 'this identity',
+      'passphrase' => 'a passphrase',
+      'windows-dpapi' => 'this Windows profile',
+      _ => slot,
+    };
 
 String _receiverBootstrap(DisplayFacts display) => jsonEncode({
       'protocol_major': 1,

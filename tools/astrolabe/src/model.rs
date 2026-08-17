@@ -59,6 +59,9 @@ pub struct App {
     /// Self-hosted receiver enrollment, assignments, and health. `None` until
     /// the identity daemon's display service has answered once.
     display: Option<lait::control::DisplayCoordinatorView>,
+    /// This machine as a screen. `None` is not Big Picture; `Some` is, whether
+    /// or not it has drawn anything yet.
+    presentation: Option<Presentation>,
     /// The last MCP binding authored or previewed. Held because a preview is
     /// only useful if it stays on screen long enough to be read.
     mcp: Option<McpBindingOutcome>,
@@ -158,6 +161,8 @@ impl App {
             Update::Heads(heads) => self.heads = heads,
             Update::Context(context) => self.absorb_context(*context),
             Update::Display(display) => self.display = Some(*display),
+            Update::Presentation(presentation) => self.absorb_presentation(*presentation),
+            Update::PresentationEnded => self.presentation = None,
             Update::Book(book) => self.book = Some(book),
             Update::Presence(presence) => self.presence = Some(presence),
             Update::Signal(signal) => self.consume(&signal),
@@ -347,6 +352,29 @@ impl App {
         self.display.as_ref()
     }
 
+    pub fn presentation(&self) -> Option<&Presentation> {
+        self.presentation.as_ref()
+    }
+
+    /// Keep the last verified render across a failed re-ask, and only for the
+    /// *same* selection.
+    ///
+    /// A screen that has been showing a program should not go dark because one
+    /// re-ask timed out; it should say it is stale. But a selection that
+    /// changed has no claim on the previous one's pixels — inheriting them
+    /// would draw one program under another program's name, which is worse
+    /// than an empty screen because it is legible and wrong.
+    fn absorb_presentation(&mut self, mut next: Presentation) {
+        if next.rendered.is_none() && next.selection.is_some() {
+            if let Some(held) = self.presentation.as_ref() {
+                if held.selection == next.selection {
+                    next.rendered.clone_from(&held.rendered);
+                }
+            }
+        }
+        self.presentation = Some(next);
+    }
+
     pub fn mcp(&self) -> Option<&McpBindingOutcome> {
         self.mcp.as_ref()
     }
@@ -527,6 +555,47 @@ fn describe_exit(report: &ExitReport) -> String {
         said = format!("{said} — still running: {}", left.join(", "));
     }
     said
+}
+
+/// This machine acting as a screen.
+///
+/// The *member* profile: the client holds the Space these pixels came from, so
+/// there is no pairing, no credential and no assignment behind this — only a
+/// choice made here, which is why leaving is always available and revocation is
+/// simply the Query no longer answering.
+#[derive(Debug, Clone)]
+pub struct Presentation {
+    /// What this screen was told to show, or `None` for a screen that has been
+    /// entered and not yet pointed at anything.
+    ///
+    /// Being a screen and showing something are separate facts. Requiring a
+    /// selection to enter would make the mode a property of the content, which
+    /// is backwards: a person presses the control to *become* a screen, and
+    /// choosing is what they do once they are one.
+    pub selection: Option<PresentationSelection>,
+    /// The last successful render. Kept across a failed refresh, so a screen
+    /// that briefly could not be re-asked keeps showing what it last verified
+    /// instead of going blank on a stumble.
+    pub rendered: Option<lait::control::DisplayPresentationView>,
+    /// Why the last attempt did not answer. Held *beside* `rendered` rather
+    /// than replacing it: "this is stale and here is why" and "there is nothing
+    /// to show" are different things to tell somebody standing in front of a
+    /// screen.
+    pub failure: Option<String>,
+}
+
+/// What a member screen was told to show. Exactly the tuple an assignment
+/// commits, minus everything an assignment adds for a stranger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationSelection {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    /// The package's own input, uncanonicalized. The daemon hands it to the
+    /// package's canonicalizer; nothing here inspects it.
+    pub input: String,
+    /// What to call this on screen while it is loading or refusing.
+    pub title: String,
 }
 
 #[cfg(test)]

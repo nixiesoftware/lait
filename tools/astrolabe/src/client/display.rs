@@ -1,8 +1,8 @@
 //! Native Astrolabe control of the self-hosted display coordinator.
 
 use lait::control::{
-    ControlRoute, DisplayAssignmentSyncSetting, DisplayCoordinatorView, DisplayStaleActionSetting,
-    DisplayThemeSetting, Request, Response,
+    ControlRoute, DisplayAssignmentSyncSetting, DisplayCoordinatorView, DisplayPresentationView,
+    DisplayStaleActionSetting, DisplayThemeSetting, Request, Response,
 };
 
 use super::{Client, ClientError, ClientResult};
@@ -114,6 +114,46 @@ impl Client {
                 .orbit
                 .to_string(),
         )
+    }
+
+    /// Render one surface for this machine's own screen.
+    ///
+    /// Unlike [`Client::display_assignment_put`] this commits nothing, so there
+    /// is no handle to return and nothing to revoke afterwards. The Orbit
+    /// selector is resolved the same way, because the daemon's display requests
+    /// take a local Orbit id and a Space id is the mistake that makes every one
+    /// of them fail.
+    pub async fn display_present(
+        &self,
+        selection: &crate::model::PresentationSelection,
+    ) -> ClientResult<DisplayPresentationView> {
+        let input: serde_json::Value = if selection.input.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&selection.input).map_err(|error| {
+                ClientError::invalid(format!("display input is not JSON: {error}"))
+            })?
+        };
+        let orbit = self.display_orbit(&selection.orbit).await?;
+        match self
+            .display_request(Request::DisplayPresent {
+                orbit,
+                world: selection.world.clone(),
+                surface: selection.surface.clone(),
+                input,
+                theme: DisplayThemeSetting::Dark,
+                width: 1920,
+                height: 1080,
+                scale_milli: 1000,
+                locale: "en".into(),
+            })
+            .await?
+        {
+            Response::DisplayPresentation(view) => Ok(*view),
+            other => Err(ClientError::internal(format!(
+                "unexpected display presentation reply: {other:?}"
+            ))),
+        }
     }
 
     pub async fn display_assignment_revoke(&self, assignment: String) -> ClientResult<()> {
