@@ -24,9 +24,33 @@
 ; set changes, this file is where it is noticed — which is the intent. The
 ; check that it stayed true lives in `tools/astrolabe/tests/packaging.rs`.
 ;
+; ---------------------------------------------------------------------------
+; The layout, and why the launcher does not move
+;
+; The installed program is a *stub* at the install root and a tree beneath it:
+;
+;   $INSTDIR\astrolabe.exe     the stub. The shortcut target, the protocol
+;                              handler, the icon, and the path that never moves
+;   $INSTDIR\current\          the release: the astrolabe+lait pair, flat
+;   $INSTDIR\previous\         the prior release, kept bootable for rollback
+;   $INSTDIR\staged\           a verified release waiting for the next launch
+;
+; The stub takes the *name* astrolabe.exe deliberately. Every shell artifact —
+; the Start Menu shortcut, the `lait:` command, DisplayIcon, and any taskbar
+; pin a person makes — keys on a path, and a path that changed per release is
+; the single most expensive mistake in this space: Squirrel's app-1.0.0 /
+; app-1.0.1 layout broke firewall rules, antivirus exclusions, GPU preferences
+; and tray pinning, and it had to grow a routine that rewrote users' pinned
+; shortcuts on every update. Nothing here may point into current\.
+;
+; The pair still sits flat and together inside current\, because that is where
+; `sidecar::resolve` looks — relative to the running executable — and
+; `update::custody_of` is its inverse. The stub is never between them.
+;
 ; Build:
 ;   flutter build windows --release            (in apps/astrolabe)
-;   makensis -DVERSION=<x.y.z> -DSTAGE=<dir> packaging\windows\astrolabe.nsi
+;   makensis -DVERSION=<x.y.z> -DSTAGE=<dir> -DSTUB=<file> \
+;     packaging\windows\astrolabe.nsi
 ;
 ; where STAGE is the release bundle —
 ;   apps\astrolabe\build\windows\x64\runner\Release
@@ -46,6 +70,9 @@
 !endif
 !ifndef STAGE
   !error "STAGE must be passed: the Flutter release bundle directory"
+!endif
+!ifndef STUB
+  !error "STUB must be passed: the built astrolabe-stub executable"
 !endif
 
 Name "Astrolabe"
@@ -78,7 +105,17 @@ VIAddVersionKey "LegalCopyright" "MIT OR Apache-2.0"
 
 Section "Astrolabe" SecMain
   SectionIn RO
+
+  ; --- The stub -------------------------------------------------------------
+  ;
+  ; The one file an update never moves, and the only thing anything outside
+  ; this install ever points at. It verifies whatever is staged, swaps it in by
+  ; rename when no client holds the installation, and starts what is current.
   SetOutPath "$INSTDIR"
+  File "/oname=astrolabe.exe" "${STUB}"
+
+  ; --- The release ----------------------------------------------------------
+  SetOutPath "$INSTDIR\current"
 
   ; --- The two programs -----------------------------------------------------
   ;
@@ -125,7 +162,7 @@ Section "Astrolabe" SecMain
   ; than anywhere a person could act on. Recursive because `flutter_assets`
   ; nests per-package asset trees, which cannot be enumerated by hand and would
   ; go stale the first time a dependency shipped a font.
-  SetOutPath "$INSTDIR\data"
+  SetOutPath "$INSTDIR\current\data"
   File /r "${STAGE}\data\*.*"
   SetOutPath "$INSTDIR"
 
@@ -163,27 +200,28 @@ Section "Uninstall"
   ; worst possible place to conflate them.
   ;
   Delete "$INSTDIR\astrolabe.exe"
-  Delete "$INSTDIR\lait.exe"
-  Delete "$INSTDIR\THIRD-PARTY-NOTICES.md"
-  Delete "$INSTDIR\astrolabe.dll"
-  Delete "$INSTDIR\flutter_windows.dll"
-  Delete "$INSTDIR\dartjni.dll"
-  Delete "$INSTDIR\native_assets.json"
-  Delete "$INSTDIR\*_plugin.dll"
-  Delete "$INSTDIR\msvcp140*.dll"
-  Delete "$INSTDIR\vcruntime140*.dll"
-  Delete "$INSTDIR\concrt140.dll"
   Delete "$INSTDIR\uninstall.exe"
+  Delete "$INSTDIR\instance.lock"
+  Delete "$INSTDIR\staging.lock"
+  Delete "$INSTDIR\stub.log"
+  Delete "$INSTDIR\staged.manifest.json"
 
-  ; The one recursive removal, and it is bounded to the engine's own payload
-  ; directory rather than to $INSTDIR. `data\flutter_assets\` nests a tree per
-  ; package, so it cannot be enumerated — but the scope stays narrow, and
-  ; nothing a person owns has ever been written under it. $INSTDIR itself comes
-  ; off only with `RMDir`, which refuses a directory that still has something in
-  ; it: if a future build adds a file this section does not know about, the
-  ; install directory survives and says so, rather than a recursive delete
-  ; carrying away whatever else happened to be there.
-  RMDir /r "$INSTDIR\data"
+  ; Three recursive removals, each bounded to a release tree by name.
+  ;
+  ; A release is a tree the installer did not enumerate and could not: it is
+  ; whatever the update path put there, and after the first update it is not
+  ; even what this installer shipped. So the scope is stated per directory
+  ; rather than by listing files — and never as `RMDir /r "$INSTDIR"`, which
+  ; would carry away anything else that happened to be in the install root.
+  ; Nothing a person owns has ever been written under these: state lives under
+  ; the user's profile, and removal is not deletion.
+  RMDir /r "$INSTDIR\current"
+  RMDir /r "$INSTDIR\previous"
+  RMDir /r "$INSTDIR\staged"
+
+  ; $INSTDIR itself comes off only with plain `RMDir`, which refuses a
+  ; directory that still holds something: if a future build leaves a file this
+  ; section does not know about, the install directory survives and says so.
   RMDir "$INSTDIR"
 
   Delete "$SMPROGRAMS\Astrolabe.lnk"

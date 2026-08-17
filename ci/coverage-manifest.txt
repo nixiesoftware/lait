@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1996
-pr-platform    1563
-nightly        2024
+pr             1997
+pr-platform    1564
+nightly        2025
 mutants        98
 
 [gates]
@@ -154,6 +154,7 @@ astrolabe-stub tests::nothing_staged_is_the_ordinary_launch_and_touches_nothing
 astrolabe-stub tests::stale_scratch_is_swept_when_the_installation_is_claimed
 astrolabe::launch a_head_comes_up_and_mints_a_credential_worth_exactly_one_use
 astrolabe::launch a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives
+astrolabe::packaging every_shell_artifact_points_at_the_stub_and_never_into_a_release
 astrolabe::packaging no_interface_artifacts_leak_into_the_core_or_the_packaging
 astrolabe::packaging the_client_and_its_sidecar_agree_about_the_layout
 astrolabe::packaging the_dmg_refuses_a_bundle_missing_either_half_of_the_pair

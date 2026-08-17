@@ -129,6 +129,9 @@ jobs:
           }
           Write-Output "pair confirmed: $reported"
 
+      - name: Build the stub launcher
+        run: cargo build --release --locked -p astrolabe-stub --bin astrolabe-stub
+
       - name: Compile the installer
         shell: pwsh
         env:
@@ -139,7 +142,8 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $stage = (Resolve-Path "apps\astrolabe\build\windows\x64\runner\Release").Path
           Push-Location dist
-          makensis "-DVERSION=$env:VERSION" "-DVERSION_NUMERIC=$env:NUMERIC" "-DSTAGE=$stage" ..\packaging\windows\astrolabe.nsi
+          $stub = (Resolve-Path "target\release\astrolabe-stub.exe").Path
+          makensis "-DVERSION=$env:VERSION" "-DVERSION_NUMERIC=$env:NUMERIC" "-DSTAGE=$stage" "-DSTUB=$stub" ..\packaging\windows\astrolabe.nsi
           Pop-Location
           $exe = "dist\astrolabe-$env:VERSION-setup.exe"
           if (-not (Test-Path $exe)) { Write-Error "makensis produced no $exe"; exit 1 }
@@ -308,8 +312,10 @@ jobs:
         env:
           VERSION: ${{ needs.gate.outputs.version }}
         run: |
+          cargo build --release --locked -p astrolabe-stub --bin astrolabe-stub
           bash packaging/linux/make-tarball.sh \
             --bundle apps/astrolabe/build/linux/x64/release/bundle \
+            --stub target/release/astrolabe-stub \
             --version "$VERSION" \
             --target x86_64-unknown-linux-gnu \
             --out dist
