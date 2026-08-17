@@ -284,7 +284,10 @@ pub async fn run_until(
     let app = Arc::new(App {
         head,
         world: pinned_mount.clone(),
-        guard: Guard::new(token.clone(), bound.port()),
+        // The named form rides on the mount this head resolved above, so a World
+        // is reachable by its own name and not only by an address. One head, one
+        // World, one name.
+        guard: Guard::for_world(token.clone(), bound.port(), &pinned_mount),
         directory: Catalog::new(identity, agents_base, self_contained),
         daemon: daemon.clone(),
         selection,
