@@ -7,6 +7,16 @@
 //! assume a shape — the mistake the first cut of the delivery layer made when
 //! it named its staging directory after web heads.
 //!
+//! ## Only what something reads
+//!
+//! Every field here is one this crate must support forever: the format
+//! version makes *adding* one a non-event and removing one a breaking change,
+//! so the set starts at what is actually consulted. A catalog kind, a mount, a
+//! tagline, an icon and an accent were all drafted and cut — nothing read
+//! them. A World's artwork in particular is a separate problem, since a
+//! fetched bundle would carry image bytes rather than the compiled-in glyph a
+//! Library row draws today. They return when something reads them.
+//!
 //! ## The shape is borrowed, not invented
 //!
 //! Seven shipping systems — Steam, GOG Galaxy, itch.io, AppStream, Desktop
@@ -50,6 +60,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::artwork_bounds;
+
 /// The manifest format this build understands.
 ///
 /// An unknown *major* is refused by name rather than guessed at: a manifest
@@ -64,19 +76,36 @@ pub struct WorldManifest {
     pub format: u32,
     /// The World's address: reverse-domain, lowercase, immutable forever.
     pub id: String,
-    /// The namespace key that prefixes tool names and route segments.
-    ///
-    /// Machine input and published, so — like the id — it never changes. The
-    /// display name is the thing that may be renamed freely.
-    pub mount: String,
     /// This release's version.
     pub version: String,
-    /// How this World is shelved. Never how it is launched.
+    /// What to call it in a list.
+    ///
+    /// Absent falls back to the last segment of the id — which is at least a
+    /// real word rather than an address, and is what a World that has not
+    /// bothered to name itself deserves to be called.
     #[serde(default)]
-    pub kind: Kind,
-    /// What a person reads and what a client draws.
+    pub name: Option<String>,
+    /// The square mark a Library row draws, as a path into the bundle.
+    ///
+    /// Held to the same bounds a compiled-in World's artwork is held to —
+    /// a real PNG, square, and within the size a client draws — but at
+    /// staging rather than at parse, because that is where the bytes are.
     #[serde(default)]
-    pub display: Display,
+    pub mark: Option<String>,
+    /// The frame drawn behind this World's title on a detail surface, as a
+    /// path into the bundle.
+    ///
+    /// Separate from the mark because they are drawn at sizes an order apart:
+    /// detail that reads at 200 pixels is mud at 24, and art composed for 24
+    /// is four bland shapes at 200.
+    #[serde(default)]
+    pub hero: Option<String>,
+    /// The colour this World is drawn from, packed `0xRRGGBB`.
+    ///
+    /// A seed, not an asset: a client derives whatever it needs from this one
+    /// number, locally.
+    #[serde(default)]
+    pub accent: Option<u32>,
     /// What the host must offer for this World to run at all.
     #[serde(default)]
     pub requires: Vec<Requirement>,
@@ -89,40 +118,13 @@ pub struct WorldManifest {
     pub launch: Vec<Launch>,
 }
 
-/// The catalog kind. Deliberately closed and deliberately small: it decides
-/// shelving, and anything it decided about launching would be a second,
-/// weaker copy of [`Launch`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
-    /// Something a person opens.
-    #[default]
-    Application,
-    /// Something that supports other work rather than being the work.
-    Tool,
-    /// Something that runs without being opened.
-    Service,
-    /// A kind this build does not know. Shelved generically, never hidden —
-    /// an unreadable kind must not make a World disappear.
-    #[serde(other)]
-    Unknown,
-}
-
-/// What a client draws for this World before anything is opened.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Display {
-    /// What to call it in a list.
-    #[serde(default)]
-    pub name: String,
-    /// One line saying what it is for.
-    #[serde(default)]
-    pub tagline: Option<String>,
-    /// A glyph a row can draw without loading anything.
-    #[serde(default)]
-    pub icon: Option<String>,
-    /// The colour it is drawn from, packed `0xRRGGBB`.
-    #[serde(default)]
-    pub accent: Option<u32>,
+impl WorldManifest {
+    /// What to call this World.
+    pub fn display_name(&self) -> &str {
+        self.name
+            .as_deref()
+            .unwrap_or_else(|| self.id.rsplit('.').next().unwrap_or(&self.id))
+    }
 }
 
 /// A fact the host must offer, and the range this World runs against.
@@ -192,15 +194,6 @@ impl std::fmt::Display for Unmet {
 pub struct Launch {
     /// Stable, publisher-chosen, and the address a deep link uses.
     pub id: String,
-    /// What a person reads.
-    #[serde(default)]
-    pub label: String,
-    /// What sort of thing this is — an open vocabulary on purpose. A role
-    /// this build does not recognise is drawn generically and *never*
-    /// hidden, because a client that hides what it cannot name teaches
-    /// publishers to lie about what they ship.
-    #[serde(default)]
-    pub role: Option<String>,
     /// Whether a client offers this entry, and how prominently.
     #[serde(default)]
     pub present: Present,
@@ -312,8 +305,14 @@ impl WorldManifest {
                 manifest.id
             ));
         }
-        if manifest.mount.is_empty() {
-            return Err("world.json declares no mount".to_string());
+        for (kind, path) in [("mark", &manifest.mark), ("hero", &manifest.hero)] {
+            let Some(path) = path else { continue };
+            if path.is_empty() || path.starts_with('/') || path.contains("..") {
+                return Err(format!(
+                    "world.json points its {kind} at {path:?}, which is not a path inside \
+                     the bundle"
+                ));
+            }
         }
         let mut seen = BTreeMap::new();
         for entry in &manifest.launch {
@@ -402,7 +401,6 @@ mod tests {
         serde_json::json!({
             "format": 1,
             "id": "world.lait.issues",
-            "mount": "issues",
             "version": "0.8.0",
         })
     }
@@ -415,7 +413,6 @@ mod tests {
             parsed.offerable("linux", "x86_64").is_empty(),
             "a World with nothing to launch offered something"
         );
-        assert_eq!(parsed.kind, Kind::Application);
     }
 
     #[test]
@@ -429,14 +426,38 @@ mod tests {
         );
     }
 
-    /// An unknown kind must shelve generically and never hide a World: a
-    /// client that hides what it cannot name teaches publishers to misdeclare.
     #[test]
-    fn an_unknown_kind_is_read_as_unknown_rather_than_refused() {
+    fn artwork_must_be_named_as_a_path_inside_the_bundle() {
+        for kind in ["mark", "hero"] {
+            for path in ["/etc/passwd", "../escape.png", ""] {
+                let mut doc = minimal();
+                doc[kind] = serde_json::json!(path);
+                let error = manifest(doc).expect_err("an escaping artwork path must refuse");
+                assert!(
+                    error.contains("inside the bundle"),
+                    "{kind} {path:?}: {error}"
+                );
+            }
+        }
         let mut doc = minimal();
-        doc["kind"] = serde_json::json!("holodeck");
-        let parsed = manifest(doc).expect("an unknown kind is not fatal");
-        assert_eq!(parsed.kind, Kind::Unknown);
+        doc["mark"] = serde_json::json!("art/mark.png");
+        doc["hero"] = serde_json::json!("art/hero.png");
+        doc["accent"] = serde_json::json!(0x31_7A_6D);
+        let parsed = manifest(doc).expect("artwork inside the bundle is valid");
+        assert_eq!(parsed.mark.as_deref(), Some("art/mark.png"));
+        assert_eq!(parsed.accent, Some(0x31_7A_6D));
+    }
+
+    /// A World that has not named itself is called something readable rather
+    /// than being drawn as an address.
+    #[test]
+    fn a_world_without_a_name_falls_back_to_the_last_segment_of_its_id() {
+        let unnamed = manifest(minimal()).expect("a manifest without a name is valid");
+        assert_eq!(unnamed.display_name(), "issues");
+
+        let mut doc = minimal();
+        doc["name"] = serde_json::json!("Issues");
+        assert_eq!(manifest(doc).expect("valid").display_name(), "Issues");
     }
 
     #[test]

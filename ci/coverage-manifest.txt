@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2006
-pr-platform    1573
-nightly        2034
+pr             2008
+pr-platform    1575
+nightly        2036
 mutants        98
 
 [gates]
@@ -680,6 +680,7 @@ lait update::world::tests::a_signed_bundle_that_runs_here_is_staged_under_its_ow
 lait update::world::tests::a_tampered_bundle_fails_the_digest_and_stages_nothing
 lait update::world::tests::a_world_channel_sits_beside_the_products_and_under_the_same_rules
 lait update::world::tests::an_over_long_bundle_is_refused_by_size_before_the_digest_is_reached
+lait update::world::tests::declared_artwork_must_be_carried_and_must_meet_the_bounds
 lait update::world::tests::two_worlds_stage_side_by_side_without_touching_each_other
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
 lait-feed::bin/lait-feed tests::a_bundle_that_declares_another_world_or_version_is_refused
@@ -2049,9 +2050,10 @@ world-interface manifest::tests::a_manifest_from_a_future_format_is_refused_by_n
 world-interface manifest::tests::a_requirement_survives_changes_it_does_not_name
 world-interface manifest::tests::a_web_target_may_not_address_outside_the_bundle
 world-interface manifest::tests::a_world_that_offers_no_way_in_is_a_statement_rather_than_an_omission
+world-interface manifest::tests::a_world_without_a_name_falls_back_to_the_last_segment_of_its_id
 world-interface manifest::tests::an_exec_target_may_not_address_outside_the_bundle
-world-interface manifest::tests::an_unknown_kind_is_read_as_unknown_rather_than_refused
 world-interface manifest::tests::an_unsupported_target_is_kept_and_never_offered
+world-interface manifest::tests::artwork_must_be_named_as_a_path_inside_the_bundle
 world-interface manifest::tests::conditions_live_on_the_entry_so_one_release_serves_every_host
 world-interface manifest::tests::every_unmet_requirement_is_reported_and_each_kind_says_which_it_is
 world-interface manifest::tests::the_primary_entry_is_offered_first_and_hidden_ones_never

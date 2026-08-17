@@ -823,34 +823,40 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// finding them here means finding them at the build that ships the World —
 /// which is the only place a person who can fix the image is still looking.
 fn validate_artwork(world: &WorldId, kind: &str, bytes: &[u8]) -> Result<(), Failure> {
+    artwork_bounds(kind, bytes).map_err(|why| Failure::new(format!("World '{world}' {why}")))
+}
+
+/// The bounds every artwork is held to, wherever it came from.
+///
+/// A compiled-in World meets these at the build that ships it; a World fetched
+/// from a feed meets them when its bundle is staged. One function, because two
+/// tiers of World with two standards for their own artwork is how a fetched
+/// World comes to draw a row a compiled-in one could not.
+pub fn artwork_bounds(kind: &str, bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() {
-        return Err(Failure::new(format!(
-            "World '{world}' declares an empty {kind}"
-        )));
+        return Err(format!("declares an empty {kind}"));
     }
     if bytes.len() > MAX_ARTWORK_BYTES {
-        return Err(Failure::new(format!(
-            "World '{world}' declares a {kind} of {} bytes; an artwork stops at {MAX_ARTWORK_BYTES}",
+        return Err(format!(
+            "declares a {kind} of {} bytes; an artwork stops at {MAX_ARTWORK_BYTES}",
             bytes.len()
-        )));
+        ));
     }
     let Some((width, height)) = png_dimensions(bytes) else {
-        return Err(Failure::new(format!(
-            "World '{world}' declares a {kind} that is not a PNG"
-        )));
+        return Err(format!("declares a {kind} that is not a PNG"));
     };
     // Square, because every surface that draws one draws it in a square: a
     // 3:1 banner in a mark's plate is either stretched or cropped, and which
     // of the two happens would be the client deciding what the World meant.
     if width != height {
-        return Err(Failure::new(format!(
-            "World '{world}' declares a {width}×{height} {kind}; an artwork is square"
-        )));
+        return Err(format!(
+            "declares a {width}×{height} {kind}; an artwork is square"
+        ));
     }
     if width > MAX_ARTWORK_SIDE {
-        return Err(Failure::new(format!(
-            "World '{world}' declares a {kind} {width} wide; an artwork stops at {MAX_ARTWORK_SIDE}"
-        )));
+        return Err(format!(
+            "declares a {kind} {width} wide; an artwork stops at {MAX_ARTWORK_SIDE}"
+        ));
     }
     Ok(())
 }

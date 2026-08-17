@@ -240,6 +240,20 @@ fn stage_into(
         );
     }
 
+    // Artwork is held to the bounds a compiled-in World meets at its build:
+    // a real PNG, square, within the size a client draws. Checked here
+    // because here is where the bytes are, and checked at all because two
+    // tiers of World with two standards for their own artwork is how a
+    // fetched World comes to draw a row a compiled-in one could not.
+    for (kind, declared) in [("mark", &manifest.mark), ("hero", &manifest.hero)] {
+        let Some(relative) = declared else { continue };
+        let bytes = std::fs::read(scratch.join(relative)).with_context(|| {
+            format!("the {world} bundle declares a {kind} at {relative} and does not carry it")
+        })?;
+        world_interface::manifest::artwork_bounds(kind, &bytes)
+            .map_err(|why| anyhow!("the {world} bundle {why}"))?;
+    }
+
     let unmet = manifest.unmet(offers);
     if !unmet.is_empty() {
         // Refused, not failed. The publisher shipped for a host this is not,
@@ -547,6 +561,102 @@ mod tests {
         );
         assert_eq!(
             stage(&objects, &resolved, &host, worlds.path()).expect("stages"),
+            Outcome::Staged {
+                version: "0.1.0".into()
+            }
+        );
+    }
+
+    /// A World that declares artwork it does not ship, or ships a banner where
+    /// a square mark belongs, is refused — the same bounds a compiled-in
+    /// World's artwork meets at its build.
+    #[test]
+    fn declared_artwork_must_be_carried_and_must_meet_the_bounds() {
+        fn png(side: u32, other: u32) -> Vec<u8> {
+            let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            bytes.extend_from_slice(&13u32.to_be_bytes());
+            bytes.extend_from_slice(b"IHDR");
+            bytes.extend_from_slice(&side.to_be_bytes());
+            bytes.extend_from_slice(&other.to_be_bytes());
+            bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+            bytes
+        }
+        let declaring = |art: serde_json::Value| {
+            serde_json::json!({
+                "format": 1, "id": WORLD, "version": "0.1.0",
+                "mark": art,
+                "launch": [],
+            })
+            .to_string()
+            .into_bytes()
+        };
+
+        // Declared and not carried.
+        let archive = bundle(
+            "w-0.1.0",
+            &[(
+                "world.json".into(),
+                declaring(serde_json::json!("art/mark.png")),
+            )],
+        );
+        let (objects, pubkey) = sealed(
+            "0.1.0",
+            &archive,
+            archive.len() as u64,
+            &blake3::hash(&archive).to_hex().to_string(),
+        );
+        let resolved = resolve(&objects, pubkey);
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        let error = stage(&objects, &resolved, &offers(13), worlds.path())
+            .expect_err("undelivered artwork must refuse")
+            .to_string();
+        assert!(error.contains("does not carry it"), "{error}");
+
+        // Carried, and the wrong shape.
+        let archive = bundle(
+            "w-0.1.0",
+            &[
+                (
+                    "world.json".into(),
+                    declaring(serde_json::json!("art/mark.png")),
+                ),
+                ("art/mark.png".into(), png(300, 100)),
+            ],
+        );
+        let (objects, pubkey) = sealed(
+            "0.1.0",
+            &archive,
+            archive.len() as u64,
+            &blake3::hash(&archive).to_hex().to_string(),
+        );
+        let resolved = resolve(&objects, pubkey);
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        let error = stage(&objects, &resolved, &offers(13), worlds.path())
+            .expect_err("a banner where a mark belongs must refuse")
+            .to_string();
+        assert!(error.contains("square"), "{error}");
+
+        // Carried and square: staged.
+        let archive = bundle(
+            "w-0.1.0",
+            &[
+                (
+                    "world.json".into(),
+                    declaring(serde_json::json!("art/mark.png")),
+                ),
+                ("art/mark.png".into(), png(196, 196)),
+            ],
+        );
+        let (objects, pubkey) = sealed(
+            "0.1.0",
+            &archive,
+            archive.len() as u64,
+            &blake3::hash(&archive).to_hex().to_string(),
+        );
+        let resolved = resolve(&objects, pubkey);
+        let worlds = tempfile::tempdir().expect("a worlds root");
+        assert_eq!(
+            stage(&objects, &resolved, &offers(13), worlds.path()).expect("stages"),
             Outcome::Staged {
                 version: "0.1.0".into()
             }
