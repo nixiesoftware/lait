@@ -33,7 +33,7 @@ permissions:
 jobs:
   sign:
     name: GPG-sign source + checksums
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, lait]
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&

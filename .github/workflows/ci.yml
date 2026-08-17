@@ -51,7 +51,7 @@ jobs:
   # this job rebuilds and fails if the result differs from what's in git.
   viewer:
     name: viewer
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       # SHA-pinned like every other action here: a tag is mutable, and CI is
       # exactly where you don't want a dependency that can change under you.
@@ -123,7 +123,7 @@ jobs:
   # Linux, every push: the whole suite except what the nightly tier owns.
   test:
     name: test (linux)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -234,8 +234,12 @@ jobs:
   # `[profile.pr-platform]` — every crate's unit tests (where every cfg-gated
   # island in this workspace lives) plus the integration tests that drive a
   # real daemon over a real control channel. 935 tests, eleven binaries.
+  # Parked 2026-08-17: private-repo window — no MacBook, no Windows workstation,
+  # no GitHub-hosted macos/windows. Linux self-hosted on idpnode1 is the only
+  # compute. Restore the matrix when an OS seam runner exists again.
   platform:
     name: platform (${{ matrix.os }})
+    if: false
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -351,7 +355,7 @@ jobs:
   # coverage change becomes a reviewable diff instead of a surprise.
   coverage-manifest:
     name: coverage manifest
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)
@@ -495,7 +499,7 @@ jobs:
   # collapse above as its own job.
   schema-contract:
     name: schema contract (language-neutral)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       # A venv, not system pip: PEP-668 "externally-managed" images (e.g. the
@@ -514,8 +518,8 @@ jobs:
   # depend on.
   orbital-complete:
     name: orbital-complete
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [test, platform, viewer, coverage-manifest, schema-contract]
+    runs-on: [self-hosted, lait]
+    needs: [test, viewer, coverage-manifest, schema-contract]
     if: always()
     steps:
       - name: Assert every dependency succeeded
@@ -532,7 +536,7 @@ jobs:
   # before that. If this breaks, either the floor moved or a dep raised its MSRV.
   msrv:
     name: msrv (1.92)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       # dtolnay/rust-toolchain@1.92.0 (branch head at time of pinning) — the same
@@ -561,7 +565,7 @@ jobs:
   # drift in transitively.
   supply-chain:
     name: cargo-deny
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: cargo-deny
@@ -575,7 +579,7 @@ jobs:
   # tag is pushed. It only PLANS — it never builds or publishes.
   release-dry-run:
     name: release dry-run (dist plan)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install dist
@@ -605,7 +609,7 @@ jobs:
   # CI here rather than stranding users on a binary that cannot update itself.
   updater-contract:
     name: self-updater archive contract
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -663,7 +667,7 @@ jobs:
   # and silently break a publish job weeks later at release time.
   packaging:
     name: packaging manifests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, lait]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
