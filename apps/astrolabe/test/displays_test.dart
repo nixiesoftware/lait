@@ -13,6 +13,30 @@ const _fingerprint =
     '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const _certificatePem = '-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n';
 
+ClientView _viewWithCustody(DisplayIdentifierCustodyRow? custody) => ClientView(
+      loading: false,
+      library_: const [],
+      heads: const [],
+      devices: const [],
+      storage: const [],
+      orbits: const [],
+      notices: const [],
+      failures: const [],
+      inFlight: const [],
+      display: DisplayFacts(
+        instance: '0123456789abcdef0123456789abcdef',
+        label: 'Astrolabe on studio-pc',
+        origin: 'https://192.0.2.10:7443',
+        certificateSha256: _fingerprint,
+        certificatePem: _certificatePem,
+        surfaces: const [],
+        devices: const [],
+        assignments: const [],
+        pendingPairings: const [],
+        identifierCustody: custody,
+      ),
+    );
+
 ClientView _view() => const ClientView(
       loading: false,
       library_: [],
@@ -33,6 +57,10 @@ ClientView _view() => const ClientView(
         devices: [],
         assignments: [],
         pendingPairings: [],
+        identifierCustody: DisplayIdentifierCustodyRow(
+          slots: ['recovery-key'],
+          portable: true,
+        ),
       ),
     );
 
@@ -81,6 +109,90 @@ void main() {
         'certificate_pem': _certificatePem,
         'rendezvous': null,
       },
+    );
+  });
+
+  testWidgets('a coordinator with no way off this machine says so',
+      (tester) async {
+    tester.view.physicalSize = const Size(900, 760);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: covalenceTheme(const ThemeConfig()),
+        home: ClientScope(
+          client: Client.canned(
+            _viewWithCustody(const DisplayIdentifierCustodyRow(
+              slots: ['windows-dpapi'],
+              portable: false,
+            )),
+          ),
+          child: const Scaffold(body: DisplaysPage()),
+        ),
+      ),
+    );
+
+    // The unlock paths are named, and the consequence is stated before the
+    // machine is gone rather than after.
+    expect(find.textContaining('this Windows profile'), findsOneWidget);
+    expect(
+      find.textContaining('Every unlock path is bound to this machine'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('need pairing again'), findsOneWidget);
+  });
+
+  testWidgets('a coordinator that never reported custody is not accused of '
+      'having none', (tester) async {
+    tester.view.physicalSize = const Size(900, 760);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: covalenceTheme(const ThemeConfig()),
+        home: ClientScope(
+          client: Client.canned(_viewWithCustody(null)),
+          child: const Scaffold(body: DisplaysPage()),
+        ),
+      ),
+    );
+
+    // A daemon older than the custody split sends no such field. Unmeasured,
+    // not zero — the warning belongs to a coordinator that answered.
+    expect(find.textContaining('not reported'), findsOneWidget);
+    expect(
+      find.textContaining('Every unlock path is bound to this machine'),
+      findsNothing,
+    );
+  });
+
+  testWidgets('a portable coordinator states the cost without the warning',
+      (tester) async {
+    tester.view.physicalSize = const Size(900, 760);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: covalenceTheme(const ThemeConfig()),
+        home: ClientScope(
+          client: Client.canned(
+            _viewWithCustody(const DisplayIdentifierCustodyRow(
+              slots: ['recovery-key', 'passphrase'],
+              portable: true,
+            )),
+          ),
+          child: const Scaffold(body: DisplaysPage()),
+        ),
+      ),
+    );
+
+    expect(find.textContaining('this identity, a passphrase'), findsOneWidget);
+    expect(
+      find.textContaining('Every unlock path is bound to this machine'),
+      findsNothing,
     );
   });
 }

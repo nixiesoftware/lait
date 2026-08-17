@@ -362,6 +362,7 @@ version = "0.1.0"
 dependencies = [
  "addressbook",
  "anyhow",
+ "data-encoding",
  "flutter_rust_bridge",
  "fs2",
  "jiff",

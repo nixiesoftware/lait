@@ -577,7 +577,15 @@ mod tests {
     #[test]
     fn approval_enrolls_only_after_receiver_proves_the_new_key() {
         let root = root();
-        let store = Arc::new(CoordinatorStore::open(&root, [7; 32]).unwrap());
+        let seed = [42u8; 32];
+        let custodian = crate::display::Custodian {
+            device: mechanics::actor::device_from_seed(&seed),
+            unlock: mechanics::authorization::custody::UnlockKey::RecoveryKey {
+                seed,
+                me: mechanics::actor::device_from_seed(&seed),
+            },
+        };
+        let store = Arc::new(CoordinatorStore::open(&root, [7; 32], &custodian).unwrap());
         let fingerprint = CoordinatorFingerprint::parse("aa".repeat(32)).unwrap();
         let service = DisplayPairingService::new(
             store.clone(),

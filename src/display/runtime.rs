@@ -21,7 +21,132 @@ use super::{
     serve_display_https, CoordinatorStore, DisplayCoordinator, DisplayHttpState,
     DisplayPairingService, DisplayTlsIdentity, DEFAULT_DISPLAY_PORT,
 };
-use super::{AssignmentRecord, AssignmentSync, SourceGrant};
+use super::{AssignmentRecord, AssignmentSync, Custodian, SourceGrant};
+
+/// How far ahead a member screen asks a surface to resolve.
+///
+/// An attached receiver negotiates this, because it has to stage assets before
+/// it can show them across an outage. A member screen re-asks whenever it wants
+/// to and is never offline from its own Space, so the horizon only has to cover
+/// one comfortable presentation window.
+const MEMBER_HORIZON_MS: u32 = 300_000;
+
+/// Project a rendered surface for a member screen.
+///
+/// Assessment is carried through rather than folded into the items: an empty
+/// program and an unavailable source are different facts, and a surface that
+/// showed them the same way would be the false-disconnection defect wearing
+/// display clothes.
+fn present_view(
+    world: &str,
+    surface: &str,
+    projection: world_interface::display::DisplayProjection,
+) -> crate::control::DisplayPresentationView {
+    use crate::control::{
+        DisplayPresentationItemView, DisplayPresentationSceneView, DisplayPresentationView,
+    };
+    use world_interface::display::{
+        BlankReason, DisplayAssessment, DisplayPartialReason, FrameMediaType, ProgramCycle,
+        RenderedScene,
+    };
+
+    // Spelled out rather than derived from serde naming: these strings are a
+    // wire vocabulary a surface reads, and tying them to a representation
+    // nobody declared would let a rename in `world-interface` change what the
+    // screen is told without anything failing.
+    fn reason_name(reason: &DisplayPartialReason) -> String {
+        match reason {
+            DisplayPartialReason::ProvisionalData => "provisional_data",
+            DisplayPartialReason::CorruptRecords => "corrupt_records",
+            DisplayPartialReason::IncompleteProjection => "incomplete_projection",
+            DisplayPartialReason::DegradedSource => "degraded_source",
+        }
+        .to_string()
+    }
+
+    fn assessed(assessment: &DisplayAssessment) -> (String, Vec<String>) {
+        match assessment {
+            DisplayAssessment::Current => ("current".into(), Vec::new()),
+            DisplayAssessment::Partial(reasons) => {
+                ("partial".into(), reasons.iter().map(reason_name).collect())
+            }
+            DisplayAssessment::Unavailable => ("unavailable".into(), Vec::new()),
+        }
+    }
+
+    let (assessment, partial_reasons) = assessed(&projection.assessment);
+    DisplayPresentationView {
+        world: world.to_string(),
+        surface: surface.to_string(),
+        assessment,
+        partial_reasons,
+        cycle: match projection.program.cycle {
+            ProgramCycle::HoldLast => "hold_last",
+            ProgramCycle::Loop => "loop",
+            ProgramCycle::PollAtEnd => "poll_at_end",
+            ProgramCycle::BlankAtEnd => "blank_at_end",
+        }
+        .to_string(),
+        refresh_after_ms: projection.program.refresh_after_ms,
+        items: projection
+            .program
+            .items
+            .into_iter()
+            .map(|item| {
+                let (item_assessment, _) = assessed(&item.assessment);
+                DisplayPresentationItemView {
+                    id: item.id,
+                    duration_ms: item.duration_ms,
+                    assessment: item_assessment,
+                    spoken_summary: item.spoken_summary,
+                    scene: match item.scene {
+                        RenderedScene::Frame(frame) => DisplayPresentationSceneView::Frame {
+                            media_type: match frame.media_type {
+                                FrameMediaType::Png => "png",
+                                FrameMediaType::Jpeg => "jpeg",
+                                FrameMediaType::WebP => "webp",
+                            }
+                            .to_string(),
+                            width: frame.width,
+                            height: frame.height,
+                            bytes_base64: data_encoding::BASE64.encode(&frame.bytes),
+                        },
+                        RenderedScene::Blank(reason) => DisplayPresentationSceneView::Blank {
+                            reason: match reason {
+                                BlankReason::SourceUnavailable => "source_unavailable",
+                                BlankReason::Unsupported => "unsupported",
+                                BlankReason::ProgramEnded => "program_ended",
+                            }
+                            .to_string(),
+                        },
+                        // Live media terminates at the coordinator's own edge,
+                        // which a member screen does not run. Refuse visibly
+                        // rather than draw something else.
+                        RenderedScene::Media(_) => DisplayPresentationSceneView::Unsupported {
+                            output: "media".into(),
+                        },
+                    },
+                }
+            })
+            .collect(),
+    }
+}
+
+/// The identity daemon as the coordinator's custodian.
+///
+/// One place builds this, so the device a slot is sealed to and the key that
+/// opens it can never disagree — a mismatch would present as a coordinator that
+/// mints assignments it cannot read back after a restart.
+fn custodian(device_seed: &[u8; 32]) -> Custodian {
+    let device = mechanics::actor::device_from_seed(device_seed);
+    Custodian {
+        unlock: mechanics::authorization::custody::UnlockKey::RecoveryKey {
+            seed: *device_seed,
+            me: device.clone(),
+        },
+        device,
+    }
+}
 
 /// The display services owned by the identity-scoped daemon.
 pub struct DisplayRuntime {
@@ -34,11 +159,24 @@ pub struct DisplayRuntime {
 }
 
 impl DisplayRuntime {
-    pub fn open(root: &Path, router: Arc<crate::orbits::Router>) -> Result<Self> {
+    /// `device_seed` is the identity daemon's own seed. It is the coordinator's
+    /// first custodian: the identifier key is sealed to the device that seed
+    /// names, so losing the operating-system profile costs the machine's
+    /// convenience unlock and not the key, and a restore onto another profile
+    /// with the same identity opens it.
+    pub fn open(
+        root: &Path,
+        router: Arc<crate::orbits::Router>,
+        device_seed: &[u8; 32],
+    ) -> Result<Self> {
         let mut identifier_key = [0u8; 32];
         getrandom::fill(&mut identifier_key).context("mint display identifier key")?;
         let store_root = root.join("state");
-        let store = Arc::new(CoordinatorStore::open(&store_root, identifier_key)?);
+        let store = Arc::new(CoordinatorStore::open(
+            &store_root,
+            identifier_key,
+            &custodian(device_seed),
+        )?);
         let tls = Arc::new(DisplayTlsIdentity::load_or_create(
             &root.join("tls"),
             "Astrolabe",
@@ -78,11 +216,44 @@ impl DisplayRuntime {
         .await
     }
 
-    pub fn handle_control(
+    /// Async because one request — [`Request::DisplayPresent`] — reaches the
+    /// World, and the member render path is the same async path an attached
+    /// receiver's compilation takes. Everything else here answers from durable
+    /// state and completes immediately.
+    pub async fn handle_control(
         &self,
         request: &crate::control::Request,
     ) -> Option<crate::control::Response> {
         use crate::control::{Request, Response};
+
+        if let Request::DisplayPresent {
+            orbit,
+            world,
+            surface,
+            input,
+            theme,
+            width,
+            height,
+            scale_milli,
+            locale,
+        } = request
+        {
+            let rendered = self
+                .present_for_member(
+                    orbit,
+                    world,
+                    surface,
+                    input.clone(),
+                    *theme,
+                    *width,
+                    *height,
+                    *scale_milli,
+                    locale.clone(),
+                )
+                .await
+                .map(|view| Response::DisplayPresentation(Box::new(view)));
+            return Some(rendered.unwrap_or_else(|error| Response::err(format!("{error:#}"))));
+        }
 
         let result = match request {
             Request::DisplayStatus => self.status().map(|view| Response::Display(Box::new(view))),
@@ -138,6 +309,64 @@ impl DisplayRuntime {
             _ => return None,
         };
         Some(result.unwrap_or_else(|error| Response::err(format!("{error:#}"))))
+    }
+
+    /// Render one surface for this machine's own screen.
+    ///
+    /// The controller supplies the World, the surface and the input; the daemon
+    /// supplies the Orbit resolution and the required-Query classification, as
+    /// it does for an assignment. What it deliberately does *not* supply is a
+    /// receiver — nothing is stored, and the answer is good for exactly the
+    /// call that asked for it.
+    #[allow(clippy::too_many_arguments)]
+    async fn present_for_member(
+        &self,
+        orbit: &str,
+        world: &str,
+        surface: &str,
+        input: serde_json::Value,
+        theme: crate::control::DisplayThemeSetting,
+        width: u32,
+        height: u32,
+        scale_milli: u16,
+        locale: String,
+    ) -> Result<crate::control::DisplayPresentationView> {
+        let world_id = WorldId::parse(world).context("parse display World")?;
+        let surface_id = DisplaySurfaceId::new(surface.to_string())
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let package = self
+            .registry
+            .package_for_world(&world_id)
+            .context("display World is not bundled by this build")?;
+        let registered = package
+            .display_surface(&surface_id)
+            .context("display surface is not bundled by this build")?;
+        // The package canonicalizes its own input exactly once, here as at
+        // assignment: the generic path never normalizes arbitrary JSON.
+        let canonical = (registered.canonicalize_input)(input)
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .context("canonicalize display input")?;
+
+        let want = super::SurfaceRender {
+            orbit: orbit.to_string(),
+            space: None,
+            world: world_id,
+            surface: surface_id,
+            input: canonical,
+            theme: match theme {
+                crate::control::DisplayThemeSetting::Light => DisplayTheme::Light,
+                crate::control::DisplayThemeSetting::Dark => DisplayTheme::Dark,
+                crate::control::DisplayThemeSetting::HighContrast => DisplayTheme::HighContrast,
+            },
+            width,
+            height,
+            scale_milli,
+            locale,
+            horizon_ms: MEMBER_HORIZON_MS,
+            now_unix_ms: mechanics::wallclock::now_millis(),
+        };
+        let projection = self.coordinator.render_for_member(&want).await?;
+        Ok(present_view(world, surface, projection))
     }
 
     fn status(&self) -> Result<crate::control::DisplayCoordinatorView> {
@@ -239,6 +468,7 @@ impl DisplayRuntime {
                 expires_at_unix_ms: pairing.expires_at_unix_ms,
             })
             .collect();
+        let custody = self.store.identifier_custody()?;
         Ok(DisplayCoordinatorView {
             instance: self.tls.instance().instance.clone(),
             label: self.tls.instance().label.clone(),
@@ -249,6 +479,10 @@ impl DisplayRuntime {
             devices,
             assignments,
             pending_pairings,
+            identifier_custody: Some(crate::control::DisplayIdentifierCustodyView {
+                slots: custody.slots,
+                portable: custody.portable,
+            }),
         })
     }
 
@@ -486,4 +720,130 @@ fn random_hex<const N: usize>() -> Result<String> {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes).context("obtain display assignment randomness")?;
     Ok(data_encoding::HEXLOWER.encode(&bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::DisplayPresentationSceneView;
+    use world_interface::display::{
+        BlankReason, DisplayAssessment, DisplayPartialReason, DisplayProjection, DisplayResourceId,
+        FrameMediaType, MediaProtocol, ProgramCycle, RenderedFrame, RenderedMedia, RenderedProgram,
+        RenderedProgramItem, RenderedScene,
+    };
+
+    fn item(id: &str, scene: RenderedScene) -> RenderedProgramItem {
+        RenderedProgramItem {
+            id: id.to_string(),
+            duration_ms: Some(5_000),
+            scene,
+            assessment: DisplayAssessment::Current,
+            spoken_summary: None,
+        }
+    }
+
+    fn projection(items: Vec<RenderedProgramItem>) -> DisplayProjection {
+        DisplayProjection {
+            program: RenderedProgram {
+                items,
+                cycle: ProgramCycle::Loop,
+                refresh_after_ms: Some(60_000),
+            },
+            assessment: DisplayAssessment::Current,
+            spoken_summary: None,
+        }
+    }
+
+    #[test]
+    fn a_frame_reaches_a_member_screen_as_bytes_and_its_declared_dimensions() {
+        let view = present_view(
+            "wrl_x",
+            "signage.program",
+            projection(vec![item(
+                "one",
+                RenderedScene::Frame(RenderedFrame {
+                    media_type: FrameMediaType::Png,
+                    width: 1920,
+                    height: 1080,
+                    bytes: b"not-really-a-png".to_vec(),
+                }),
+            )]),
+        );
+
+        assert_eq!(view.assessment, "current");
+        assert_eq!(view.cycle, "loop");
+        let DisplayPresentationSceneView::Frame {
+            media_type,
+            width,
+            height,
+            bytes_base64,
+        } = &view.items[0].scene
+        else {
+            panic!("a frame did not project as a frame");
+        };
+        assert_eq!(media_type, "png");
+        assert_eq!((*width, *height), (1920, 1080));
+        assert_eq!(
+            data_encoding::BASE64
+                .decode(bytes_base64.as_bytes())
+                .unwrap(),
+            b"not-really-a-png"
+        );
+    }
+
+    #[test]
+    fn live_media_refuses_visibly_rather_than_drawing_something_else() {
+        // The live edge is coordinator machinery a member screen does not run.
+        // Dropping the item would leave a program that silently lost a scene,
+        // and substituting a blank would claim the source was unavailable when
+        // it is this screen that cannot draw it.
+        let view = present_view(
+            "wrl_x",
+            "signage.program",
+            projection(vec![item(
+                "live",
+                RenderedScene::Media(RenderedMedia {
+                    protocol: MediaProtocol::Mse,
+                    resource: DisplayResourceId::new("res".to_string()).unwrap(),
+                    live: true,
+                }),
+            )]),
+        );
+
+        assert_eq!(view.items.len(), 1, "an undrawable item was dropped");
+        assert!(matches!(
+            &view.items[0].scene,
+            DisplayPresentationSceneView::Unsupported { output } if output == "media"
+        ));
+    }
+
+    #[test]
+    fn a_degraded_source_keeps_its_reasons_instead_of_reading_as_empty() {
+        let mut degraded = projection(vec![item(
+            "blank",
+            RenderedScene::Blank(BlankReason::SourceUnavailable),
+        )]);
+        degraded.assessment = DisplayAssessment::Partial(
+            [
+                DisplayPartialReason::DegradedSource,
+                DisplayPartialReason::ProvisionalData,
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let view = present_view("wrl_x", "signage.program", degraded);
+        assert_eq!(view.assessment, "partial");
+        assert!(view
+            .partial_reasons
+            .contains(&"degraded_source".to_string()));
+        assert!(view
+            .partial_reasons
+            .contains(&"provisional_data".to_string()));
+        assert!(matches!(
+            &view.items[0].scene,
+            DisplayPresentationSceneView::Blank { reason }
+                if reason == "source_unavailable"
+        ));
+    }
 }

@@ -58,6 +58,14 @@ pub enum Action {
     OpenWorld {
         entry_path: String,
     },
+    /// Become a screen. Pressing the control *is* the consent; nothing is
+    /// chosen yet and nothing needs to be.
+    EnterPresentation,
+    /// Point this screen at one exact surface.
+    PresentHere(Box<crate::model::PresentationSelection>),
+    /// Re-ask the current selection.
+    PresentRefresh,
+    LeavePresentation,
     StartDevice(String),
     StopDevice(String),
     RestartDevice(String),
@@ -205,6 +213,10 @@ impl Action {
             Self::ReadEvents { .. } => "history.events".into(),
             Self::ReadTransitions { .. } => "history.connections".into(),
             Self::ReadSpace(at) => format!("space.read:{}", at.space),
+            Self::EnterPresentation => "present.enter".into(),
+            Self::PresentHere(_) => "present.choose".into(),
+            Self::PresentRefresh => "present.refresh".into(),
+            Self::LeavePresentation => "present.leave".into(),
             Self::Administer { at, operation } => format!("space:{}:{}", at.space, operation.key()),
             Self::StartHead => "head.start".into(),
             Self::StopHead(id) => format!("head.stop:{id}"),
@@ -266,6 +278,10 @@ impl Action {
             } => format!("remove {id} and delete its data"),
             Self::RemoveDevice { id, .. } => format!("remove {id}"),
             Self::CreateDevice { id, .. } => format!("add device {id}"),
+            Self::EnterPresentation => "become a screen".into(),
+            Self::PresentHere(selection) => format!("present {}", selection.title),
+            Self::PresentRefresh => "refresh what this screen shows".into(),
+            Self::LeavePresentation => "leave Big Picture".into(),
             Self::RenameDevice { id, label } => format!("rename {id} to '{label}'"),
             Self::StopAllOwned => "stop everything this client owns".into(),
             Self::ReadLogs { device, .. } => format!("read {device}'s log"),
@@ -324,6 +340,16 @@ pub enum Update {
     Heads(Vec<HeadFacts>),
     Context(Box<HostContext>),
     Display(Box<lait::control::DisplayCoordinatorView>),
+    /// What this machine's own screen is presenting, and what it last answered.
+    ///
+    /// Carries the selection as well as the render, because a presentation that
+    /// failed still has to say *what* it was trying to show — a fullscreen
+    /// surface reporting only "something went wrong" is the absence that does
+    /// not say which kind.
+    Presentation(Box<crate::model::Presentation>),
+    /// Big Picture is over. Distinct from an empty presentation, which is a
+    /// screen showing nothing rather than a client that is no longer a screen.
+    PresentationEnded,
     Book(crate::client::book::BookSnapshot),
     /// What passive presence sampling measured this pass — including which
     /// Spaces answered at all, so absence keeps its kind.
@@ -462,6 +488,13 @@ struct Worker {
     client: Client,
     updates: UnboundedSender<Update>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// What this machine's screen is currently told to show.
+    ///
+    /// Held here rather than read back from a surface: a refresh must ask for
+    /// the same thing the person chose, and a selection that round-tripped
+    /// through the interface is a second copy that can disagree with the first
+    /// exactly when a render is failing.
+    presenting: std::sync::Mutex<Option<crate::model::PresentationSelection>>,
 }
 
 async fn serve(
@@ -506,6 +539,7 @@ async fn serve(
         client,
         updates,
         wake,
+        presenting: std::sync::Mutex::new(None),
     });
 
     // The first read happens *after* the stream exists, which `Client::start`
@@ -618,6 +652,31 @@ impl Worker {
         if let Ok(display) = self.client.display_status().await {
             self.send(Update::Display(Box::new(display)));
         }
+    }
+
+    fn set_presenting(&self, selection: Option<crate::model::PresentationSelection>) {
+        if let Ok(mut held) = self.presenting.lock() {
+            *held = selection;
+        }
+    }
+
+    /// Ask the daemon for one render and publish whatever came back.
+    ///
+    /// A failure is published rather than raised, and *beside* whatever was
+    /// last drawn. A screen that has been showing a program for an hour should
+    /// not go dark because one re-ask timed out — but it must not pretend the
+    /// re-ask succeeded either, which is why both halves travel together.
+    async fn render_presentation(&self, selection: crate::model::PresentationSelection) {
+        let rendered = self.client.display_present(&selection).await;
+        let (view, failure) = match rendered {
+            Ok(view) => (Some(view), None),
+            Err(error) => (None, Some(format!("{error}"))),
+        };
+        self.send(Update::Presentation(Box::new(crate::model::Presentation {
+            selection: Some(selection),
+            rendered: view,
+            failure,
+        })));
     }
 
     async fn carry_out(&self, action: Action) {
@@ -873,6 +932,37 @@ impl Worker {
                 client.display_device_revoke(device.clone()).await?;
                 Ok(Outcome::Said(format!("revoked display device {device}")))
             }
+            Action::EnterPresentation => {
+                self.set_presenting(None);
+                // A screen with nothing on it yet, published so the surface
+                // has something to draw the moment the control is pressed.
+                self.send(Update::Presentation(Box::new(crate::model::Presentation {
+                    selection: None,
+                    rendered: None,
+                    failure: None,
+                })));
+                Ok(Outcome::Silent)
+            }
+            Action::PresentHere(selection) => {
+                self.set_presenting(Some((**selection).clone()));
+                self.render_presentation((**selection).clone()).await;
+                Ok(Outcome::Silent)
+            }
+            Action::PresentRefresh => {
+                let held = self.presenting.lock().ok().and_then(|held| held.clone());
+                // Refusing rather than guessing: a refresh with nothing
+                // selected is a surface asking for a screen that was already
+                // left, and drawing *something* would be worse than nothing.
+                if let Some(selection) = held {
+                    self.render_presentation(selection).await;
+                }
+                Ok(Outcome::Silent)
+            }
+            Action::LeavePresentation => {
+                self.set_presenting(None);
+                self.send(Update::PresentationEnded);
+                Ok(Outcome::Silent)
+            }
             Action::Exit(request) => {
                 let report = crate::lifecycle::exit(client.supervisor(), *request).await;
                 Ok(Outcome::Exited(Box::new(report)))
@@ -895,6 +985,13 @@ impl Action {
                 | Self::ReadEvents { .. }
                 | Self::ReadTransitions { .. }
                 | Self::ReadSpace(_)
+                // Presenting reads a World and writes nothing, and it already
+                // publishes its own update. A full re-read behind every frame
+                // boundary would put a snapshot of the whole machine on the
+                // path of a screen refresh.
+                | Self::PresentHere(_)
+                | Self::PresentRefresh
+                | Self::LeavePresentation
         )
     }
 }

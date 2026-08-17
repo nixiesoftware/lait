@@ -84,6 +84,10 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     TResult Function(ActionRequest_DisplayDeviceRevoke value)?
         displayDeviceRevoke,
+    TResult Function(ActionRequest_EnterPresentation value)? enterPresentation,
+    TResult Function(ActionRequest_PresentHere value)? presentHere,
+    TResult Function(ActionRequest_PresentRefresh value)? presentRefresh,
+    TResult Function(ActionRequest_LeavePresentation value)? leavePresentation,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -150,6 +154,14 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that);
+      case ActionRequest_EnterPresentation() when enterPresentation != null:
+        return enterPresentation(_that);
+      case ActionRequest_PresentHere() when presentHere != null:
+        return presentHere(_that);
+      case ActionRequest_PresentRefresh() when presentRefresh != null:
+        return presentRefresh(_that);
+      case ActionRequest_LeavePresentation() when leavePresentation != null:
+        return leavePresentation(_that);
       case _:
         return orElse();
     }
@@ -206,6 +218,13 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     required TResult Function(ActionRequest_DisplayDeviceRevoke value)
         displayDeviceRevoke,
+    required TResult Function(ActionRequest_EnterPresentation value)
+        enterPresentation,
+    required TResult Function(ActionRequest_PresentHere value) presentHere,
+    required TResult Function(ActionRequest_PresentRefresh value)
+        presentRefresh,
+    required TResult Function(ActionRequest_LeavePresentation value)
+        leavePresentation,
   }) {
     final _that = this;
     switch (_that) {
@@ -267,6 +286,14 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke():
         return displayDeviceRevoke(_that);
+      case ActionRequest_EnterPresentation():
+        return enterPresentation(_that);
+      case ActionRequest_PresentHere():
+        return presentHere(_that);
+      case ActionRequest_PresentRefresh():
+        return presentRefresh(_that);
+      case ActionRequest_LeavePresentation():
+        return leavePresentation(_that);
     }
   }
 
@@ -318,6 +345,10 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     TResult? Function(ActionRequest_DisplayDeviceRevoke value)?
         displayDeviceRevoke,
+    TResult? Function(ActionRequest_EnterPresentation value)? enterPresentation,
+    TResult? Function(ActionRequest_PresentHere value)? presentHere,
+    TResult? Function(ActionRequest_PresentRefresh value)? presentRefresh,
+    TResult? Function(ActionRequest_LeavePresentation value)? leavePresentation,
   }) {
     final _that = this;
     switch (_that) {
@@ -383,6 +414,14 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that);
+      case ActionRequest_EnterPresentation() when enterPresentation != null:
+        return enterPresentation(_that);
+      case ActionRequest_PresentHere() when presentHere != null:
+        return presentHere(_that);
+      case ActionRequest_PresentRefresh() when presentRefresh != null:
+        return presentRefresh(_that);
+      case ActionRequest_LeavePresentation() when leavePresentation != null:
+        return leavePresentation(_that);
       case _:
         return null;
     }
@@ -446,6 +485,12 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     TResult Function(String assignment)? displayAssignmentRevoke,
     TResult Function(String device)? displayDeviceRevoke,
+    TResult Function()? enterPresentation,
+    TResult Function(String orbit, String world, String surface, String input,
+            String title)?
+        presentHere,
+    TResult Function()? presentRefresh,
+    TResult Function()? leavePresentation,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -525,6 +570,15 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_EnterPresentation() when enterPresentation != null:
+        return enterPresentation();
+      case ActionRequest_PresentHere() when presentHere != null:
+        return presentHere(
+            _that.orbit, _that.world, _that.surface, _that.input, _that.title);
+      case ActionRequest_PresentRefresh() when presentRefresh != null:
+        return presentRefresh();
+      case ActionRequest_LeavePresentation() when leavePresentation != null:
+        return leavePresentation();
       case _:
         return orElse();
     }
@@ -597,6 +651,12 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     required TResult Function(String assignment) displayAssignmentRevoke,
     required TResult Function(String device) displayDeviceRevoke,
+    required TResult Function() enterPresentation,
+    required TResult Function(String orbit, String world, String surface,
+            String input, String title)
+        presentHere,
+    required TResult Function() presentRefresh,
+    required TResult Function() leavePresentation,
   }) {
     final _that = this;
     switch (_that) {
@@ -671,6 +731,15 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke():
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_EnterPresentation():
+        return enterPresentation();
+      case ActionRequest_PresentHere():
+        return presentHere(
+            _that.orbit, _that.world, _that.surface, _that.input, _that.title);
+      case ActionRequest_PresentRefresh():
+        return presentRefresh();
+      case ActionRequest_LeavePresentation():
+        return leavePresentation();
     }
   }
 
@@ -732,6 +801,12 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     TResult? Function(String assignment)? displayAssignmentRevoke,
     TResult? Function(String device)? displayDeviceRevoke,
+    TResult? Function()? enterPresentation,
+    TResult? Function(String orbit, String world, String surface, String input,
+            String title)?
+        presentHere,
+    TResult? Function()? presentRefresh,
+    TResult? Function()? leavePresentation,
   }) {
     final _that = this;
     switch (_that) {
@@ -810,6 +885,15 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_EnterPresentation() when enterPresentation != null:
+        return enterPresentation();
+      case ActionRequest_PresentHere() when presentHere != null:
+        return presentHere(
+            _that.orbit, _that.world, _that.surface, _that.input, _that.title);
+      case ActionRequest_PresentRefresh() when presentRefresh != null:
+        return presentRefresh();
+      case ActionRequest_LeavePresentation() when leavePresentation != null:
+        return leavePresentation();
       case _:
         return null;
     }
@@ -2856,6 +2940,611 @@ class _$ActionRequest_DisplayDeviceRevokeCopyWithImpl<$Res>
       device: null == device
           ? _self.device
           : device // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_EnterPresentation extends ActionRequest {
+  const ActionRequest_EnterPresentation() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_EnterPresentation);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.enterPresentation()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_PresentHere extends ActionRequest {
+  const ActionRequest_PresentHere(
+      {required this.orbit,
+      required this.world,
+      required this.surface,
+      required this.input,
+      required this.title})
+      : super._();
+
+  final String orbit;
+  final String world;
+  final String surface;
+  final String input;
+  final String title;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_PresentHereCopyWith<ActionRequest_PresentHere> get copyWith =>
+      _$ActionRequest_PresentHereCopyWithImpl<ActionRequest_PresentHere>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_PresentHere &&
+            (identical(other.orbit, orbit) || other.orbit == orbit) &&
+            (identical(other.world, world) || other.world == world) &&
+            (identical(other.surface, surface) || other.surface == surface) &&
+            (identical(other.input, input) || other.input == input) &&
+            (identical(other.title, title) || other.title == title));
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(runtimeType, orbit, world, surface, input, title);
+
+  @override
+  String toString() {
+    return 'ActionRequest.presentHere(orbit: $orbit, world: $world, surface: $surface, input: $input, title: $title)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_PresentHereCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_PresentHereCopyWith(ActionRequest_PresentHere value,
+          $Res Function(ActionRequest_PresentHere) _then) =
+      _$ActionRequest_PresentHereCopyWithImpl;
+  @useResult
+  $Res call(
+      {String orbit, String world, String surface, String input, String title});
+}
+
+/// @nodoc
+class _$ActionRequest_PresentHereCopyWithImpl<$Res>
+    implements $ActionRequest_PresentHereCopyWith<$Res> {
+  _$ActionRequest_PresentHereCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_PresentHere _self;
+  final $Res Function(ActionRequest_PresentHere) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? orbit = null,
+    Object? world = null,
+    Object? surface = null,
+    Object? input = null,
+    Object? title = null,
+  }) {
+    return _then(ActionRequest_PresentHere(
+      orbit: null == orbit
+          ? _self.orbit
+          : orbit // ignore: cast_nullable_to_non_nullable
+              as String,
+      world: null == world
+          ? _self.world
+          : world // ignore: cast_nullable_to_non_nullable
+              as String,
+      surface: null == surface
+          ? _self.surface
+          : surface // ignore: cast_nullable_to_non_nullable
+              as String,
+      input: null == input
+          ? _self.input
+          : input // ignore: cast_nullable_to_non_nullable
+              as String,
+      title: null == title
+          ? _self.title
+          : title // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_PresentRefresh extends ActionRequest {
+  const ActionRequest_PresentRefresh() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_PresentRefresh);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.presentRefresh()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_LeavePresentation extends ActionRequest {
+  const ActionRequest_LeavePresentation() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_LeavePresentation);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.leavePresentation()';
+  }
+}
+
+/// @nodoc
+mixin _$PresentedScene {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is PresentedScene);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'PresentedScene()';
+  }
+}
+
+/// @nodoc
+class $PresentedSceneCopyWith<$Res> {
+  $PresentedSceneCopyWith(PresentedScene _, $Res Function(PresentedScene) __);
+}
+
+/// Adds pattern-matching-related methods to [PresentedScene].
+extension PresentedScenePatterns on PresentedScene {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(PresentedScene_Frame value)? frame,
+    TResult Function(PresentedScene_Blank value)? blank,
+    TResult Function(PresentedScene_Unsupported value)? unsupported,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame() when frame != null:
+        return frame(_that);
+      case PresentedScene_Blank() when blank != null:
+        return blank(_that);
+      case PresentedScene_Unsupported() when unsupported != null:
+        return unsupported(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(PresentedScene_Frame value) frame,
+    required TResult Function(PresentedScene_Blank value) blank,
+    required TResult Function(PresentedScene_Unsupported value) unsupported,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame():
+        return frame(_that);
+      case PresentedScene_Blank():
+        return blank(_that);
+      case PresentedScene_Unsupported():
+        return unsupported(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(PresentedScene_Frame value)? frame,
+    TResult? Function(PresentedScene_Blank value)? blank,
+    TResult? Function(PresentedScene_Unsupported value)? unsupported,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame() when frame != null:
+        return frame(_that);
+      case PresentedScene_Blank() when blank != null:
+        return blank(_that);
+      case PresentedScene_Unsupported() when unsupported != null:
+        return unsupported(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String mediaType, int width, int height, Uint8List bytes)?
+        frame,
+    TResult Function(String reason)? blank,
+    TResult Function(String output)? unsupported,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame() when frame != null:
+        return frame(_that.mediaType, _that.width, _that.height, _that.bytes);
+      case PresentedScene_Blank() when blank != null:
+        return blank(_that.reason);
+      case PresentedScene_Unsupported() when unsupported != null:
+        return unsupported(_that.output);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(
+            String mediaType, int width, int height, Uint8List bytes)
+        frame,
+    required TResult Function(String reason) blank,
+    required TResult Function(String output) unsupported,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame():
+        return frame(_that.mediaType, _that.width, _that.height, _that.bytes);
+      case PresentedScene_Blank():
+        return blank(_that.reason);
+      case PresentedScene_Unsupported():
+        return unsupported(_that.output);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String mediaType, int width, int height, Uint8List bytes)?
+        frame,
+    TResult? Function(String reason)? blank,
+    TResult? Function(String output)? unsupported,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame() when frame != null:
+        return frame(_that.mediaType, _that.width, _that.height, _that.bytes);
+      case PresentedScene_Blank() when blank != null:
+        return blank(_that.reason);
+      case PresentedScene_Unsupported() when unsupported != null:
+        return unsupported(_that.output);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class PresentedScene_Frame extends PresentedScene {
+  const PresentedScene_Frame(
+      {required this.mediaType,
+      required this.width,
+      required this.height,
+      required this.bytes})
+      : super._();
+
+  /// `png`, `jpeg`, or `webp`.
+  final String mediaType;
+  final int width;
+  final int height;
+  final Uint8List bytes;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $PresentedScene_FrameCopyWith<PresentedScene_Frame> get copyWith =>
+      _$PresentedScene_FrameCopyWithImpl<PresentedScene_Frame>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is PresentedScene_Frame &&
+            (identical(other.mediaType, mediaType) ||
+                other.mediaType == mediaType) &&
+            (identical(other.width, width) || other.width == width) &&
+            (identical(other.height, height) || other.height == height) &&
+            const DeepCollectionEquality().equals(other.bytes, bytes));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, mediaType, width, height,
+      const DeepCollectionEquality().hash(bytes));
+
+  @override
+  String toString() {
+    return 'PresentedScene.frame(mediaType: $mediaType, width: $width, height: $height, bytes: $bytes)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $PresentedScene_FrameCopyWith<$Res>
+    implements $PresentedSceneCopyWith<$Res> {
+  factory $PresentedScene_FrameCopyWith(PresentedScene_Frame value,
+          $Res Function(PresentedScene_Frame) _then) =
+      _$PresentedScene_FrameCopyWithImpl;
+  @useResult
+  $Res call({String mediaType, int width, int height, Uint8List bytes});
+}
+
+/// @nodoc
+class _$PresentedScene_FrameCopyWithImpl<$Res>
+    implements $PresentedScene_FrameCopyWith<$Res> {
+  _$PresentedScene_FrameCopyWithImpl(this._self, this._then);
+
+  final PresentedScene_Frame _self;
+  final $Res Function(PresentedScene_Frame) _then;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? mediaType = null,
+    Object? width = null,
+    Object? height = null,
+    Object? bytes = null,
+  }) {
+    return _then(PresentedScene_Frame(
+      mediaType: null == mediaType
+          ? _self.mediaType
+          : mediaType // ignore: cast_nullable_to_non_nullable
+              as String,
+      width: null == width
+          ? _self.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as int,
+      height: null == height
+          ? _self.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as int,
+      bytes: null == bytes
+          ? _self.bytes
+          : bytes // ignore: cast_nullable_to_non_nullable
+              as Uint8List,
+    ));
+  }
+}
+
+/// @nodoc
+
+class PresentedScene_Blank extends PresentedScene {
+  const PresentedScene_Blank({required this.reason}) : super._();
+
+  /// `source_unavailable`, `unsupported`, or `program_ended`.
+  final String reason;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $PresentedScene_BlankCopyWith<PresentedScene_Blank> get copyWith =>
+      _$PresentedScene_BlankCopyWithImpl<PresentedScene_Blank>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is PresentedScene_Blank &&
+            (identical(other.reason, reason) || other.reason == reason));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, reason);
+
+  @override
+  String toString() {
+    return 'PresentedScene.blank(reason: $reason)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $PresentedScene_BlankCopyWith<$Res>
+    implements $PresentedSceneCopyWith<$Res> {
+  factory $PresentedScene_BlankCopyWith(PresentedScene_Blank value,
+          $Res Function(PresentedScene_Blank) _then) =
+      _$PresentedScene_BlankCopyWithImpl;
+  @useResult
+  $Res call({String reason});
+}
+
+/// @nodoc
+class _$PresentedScene_BlankCopyWithImpl<$Res>
+    implements $PresentedScene_BlankCopyWith<$Res> {
+  _$PresentedScene_BlankCopyWithImpl(this._self, this._then);
+
+  final PresentedScene_Blank _self;
+  final $Res Function(PresentedScene_Blank) _then;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? reason = null,
+  }) {
+    return _then(PresentedScene_Blank(
+      reason: null == reason
+          ? _self.reason
+          : reason // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class PresentedScene_Unsupported extends PresentedScene {
+  const PresentedScene_Unsupported({required this.output}) : super._();
+
+  final String output;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $PresentedScene_UnsupportedCopyWith<PresentedScene_Unsupported>
+      get copyWith =>
+          _$PresentedScene_UnsupportedCopyWithImpl<PresentedScene_Unsupported>(
+              this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is PresentedScene_Unsupported &&
+            (identical(other.output, output) || other.output == output));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, output);
+
+  @override
+  String toString() {
+    return 'PresentedScene.unsupported(output: $output)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $PresentedScene_UnsupportedCopyWith<$Res>
+    implements $PresentedSceneCopyWith<$Res> {
+  factory $PresentedScene_UnsupportedCopyWith(PresentedScene_Unsupported value,
+          $Res Function(PresentedScene_Unsupported) _then) =
+      _$PresentedScene_UnsupportedCopyWithImpl;
+  @useResult
+  $Res call({String output});
+}
+
+/// @nodoc
+class _$PresentedScene_UnsupportedCopyWithImpl<$Res>
+    implements $PresentedScene_UnsupportedCopyWith<$Res> {
+  _$PresentedScene_UnsupportedCopyWithImpl(this._self, this._then);
+
+  final PresentedScene_Unsupported _self;
+  final $Res Function(PresentedScene_Unsupported) _then;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? output = null,
+  }) {
+    return _then(PresentedScene_Unsupported(
+      output: null == output
+          ? _self.output
+          : output // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

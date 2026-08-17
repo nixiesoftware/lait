@@ -90,6 +90,16 @@ abstract class WindowControlHost {
   Future<void> minimize();
   Future<void> toggleMaximize();
   Future<bool> isMaximized();
+
+  /// Cover the display, or stop covering it.
+  ///
+  /// Distinct from [toggleMaximize], and the distinction is the whole reason
+  /// this exists: a maximised window keeps its frame and leaves the taskbar
+  /// over it, which is a large window rather than a screen. Big Picture needs
+  /// the display, and it is an assertion rather than a toggle so that entering
+  /// twice is entering once.
+  Future<void> setFullScreen(bool full);
+
   Future<void> startDragging();
   Future<void> hide();
   Future<void> close();
@@ -116,6 +126,9 @@ class ManagerWindowControlHost implements WindowControlHost {
 
   @override
   Future<bool> isMaximized() => windowManager.isMaximized();
+
+  @override
+  Future<void> setFullScreen(bool full) => windowManager.setFullScreen(full);
 
   @override
   Future<void> startDragging() => windowManager.startDragging();
@@ -165,6 +178,15 @@ class NativeWindowControlHost implements WindowControlHost {
   @override
   Future<bool> isMaximized() async =>
       await _channel.invokeMethod<bool>('is_maximized') ?? false;
+
+  /// Sub-engine windows do not present.
+  ///
+  /// Big Picture belongs to the primary window, which is the one carrying the
+  /// client's identity and its Space. A book or settings window covering the
+  /// display would be a second screen nobody chose, so this refuses by doing
+  /// nothing rather than growing a runner method to support it.
+  @override
+  Future<void> setFullScreen(bool full) async {}
 
   @override
   Future<void> startDragging() => _channel.invokeMethod<void>('start_drag');
@@ -259,15 +281,26 @@ WindowOptions astrolabeWindowOptions({
   );
 }
 
-/// Whether the client window may ever be maximised. It may not: it is a
-/// launcher, and a launcher filling a 4K display is a window of empty page
-/// around one card.
+/// Whether the client window may ever be maximised.
+///
+/// It may. This was `false`, and the reasoning was sound while it held: a
+/// launcher filling a 4K display is a window of empty page around one card, so
+/// the window refused the shape rather than being resized back out of it.
+///
+/// Big Picture ended that. A window that cannot leave its ceiling cannot become
+/// a screen, and `maximumSize` clamps `ptMaxTrackSize` — so the ceiling fought
+/// not just a maximise but the fullscreen the presentation surface needs. The
+/// constraint was protecting the Library's proportions and paying for it with
+/// the client's ability to be the thing REACH-31 calls a member screen.
+///
+/// The Library's proportions are now a layout concern, where they belong: it
+/// centres its own content rather than relying on the window to be small.
 ///
 /// One constant, read by both halves — the native configuration in `main` and
 /// the chrome in the shell. Two literals would be two places to disagree, and
 /// a caption offering maximise over a window that refuses it is the same
 /// defect as the reverse.
-const bool kClientMaximisable = false;
+const bool kClientMaximisable = true;
 
 /// Shows a configured Astrolabe window without repeating platform setup at
 /// each process entrypoint.
@@ -302,6 +335,7 @@ class AstrolabeWindowFrame extends StatefulWidget {
     required this.closePolicy,
     this.title,
     this.captionBuilder,
+    this.captionTrailing,
     this.wordmark,
     this.wordmarkMinWidth,
     this.captionHeight = kBarHeight,
@@ -332,6 +366,7 @@ class AstrolabeWindowFrame extends StatefulWidget {
     this.closePolicy = AstrolabeWindowClosePolicy.close,
     this.chrome = const NativeWindowControlHost(),
   })  : captionBuilder = null,
+        captionTrailing = null,
         wordmark = null,
         wordmarkMinWidth = null,
         captionHeight = kBarHeight,
@@ -352,6 +387,21 @@ class AstrolabeWindowFrame extends StatefulWidget {
   final WindowChromeRole role;
   final String? title;
   final AstrolabeCaptionBuilder? captionBuilder;
+
+  /// Utility controls that sit immediately before the window's own, at the
+  /// trailing edge.
+  ///
+  /// A slot rather than something the caption builder right-aligns for itself:
+  /// the builder is handed an [Expanded] region, so anything it pushes right
+  /// lands at the end of *that* region, which is not the same as the end of
+  /// the bar once a wordmark or a title has taken its share. Two things wanted
+  /// the trailing edge and only one can have it by alignment.
+  ///
+  /// It never gets the corner. [CaptionControls] stays flush against it,
+  /// because a maximised window's corner is the easiest pixel on the screen to
+  /// hit and a cluster inset from it by even a point gives that up.
+  final Widget? captionTrailing;
+
   final OwnedWindowConfiguration? ownedConfiguration;
 
   /// Whether this window offers maximise at all. When false, the caption
@@ -530,6 +580,7 @@ class _AstrolabeWindowFrameState extends State<AstrolabeWindowFrame>
             _PrimaryCaption(
               title: widget.title,
               builder: widget.captionBuilder,
+              trailing: widget.captionTrailing,
               wordmark: widget.wordmark,
               wordmarkMinWidth: widget.wordmarkMinWidth,
               height: widget.captionHeight,
@@ -584,6 +635,7 @@ class _PrimaryCaption extends StatelessWidget {
   const _PrimaryCaption({
     required this.title,
     required this.builder,
+    required this.trailing,
     required this.wordmark,
     required this.wordmarkMinWidth,
     required this.height,
@@ -597,6 +649,7 @@ class _PrimaryCaption extends StatelessWidget {
 
   final String? title;
   final AstrolabeCaptionBuilder? builder;
+  final Widget? trailing;
   final Widget? wordmark;
   final double? wordmarkMinWidth;
   final double height;
@@ -688,6 +741,10 @@ class _PrimaryCaption extends StatelessWidget {
                         ),
                       ),
                     ],
+                    // Trailing utilities, then the window's own controls, then
+                    // the corner. On macOS the system's controls are at the
+                    // *leading* edge, so this is simply the end of the bar.
+                    if (trailing != null) trailing!,
                     if (!systemDrawsWindowControls)
                       CaptionControls(
                         height: height,

@@ -67,6 +67,10 @@ pub struct ClientView {
     /// The daemon-owned, self-hosted display coordinator. `None` until its
     /// first authoritative read lands.
     pub display: Option<DisplayFacts>,
+    /// This machine as a screen. `Some` *is* Big Picture — whether or not it
+    /// has drawn anything yet — so a surface reads presence here rather than
+    /// keeping a mode flag of its own that could disagree.
+    pub presentation: Option<PresentationFacts>,
     pub heads: Vec<HeadRow>,
     pub devices: Vec<DeviceRow>,
     pub storage: Vec<StorageRow>,
@@ -203,6 +207,92 @@ pub struct DisplayFacts {
     pub devices: Vec<DisplayReceiverRow>,
     pub assignments: Vec<DisplayAssignmentRow>,
     pub pending_pairings: Vec<DisplayPairingRow>,
+    /// `None` from a daemon that predates the custody split — not reported, as
+    /// distinct from reported-as-none.
+    pub identifier_custody: Option<DisplayIdentifierCustodyRow>,
+}
+
+/// This machine as a screen. Present exactly when Big Picture is on.
+///
+/// Being a screen and showing something are separate facts, so `chosen` is
+/// optional: a screen entered and not yet pointed at anything is a real state
+/// with its own surface, not a half-built one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentationFacts {
+    pub chosen: Option<PresentationChoice>,
+    /// The last verified render, kept across a failed re-ask so a screen goes
+    /// stale rather than dark.
+    pub program: Option<PresentedProgram>,
+    /// Why the last attempt did not answer. Travels *beside* `program`, never
+    /// instead of it — "stale, and here is why" and "nothing to show" are
+    /// different things to tell somebody standing in front of a screen.
+    pub failure: Option<String>,
+}
+
+/// What a screen was pointed at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentationChoice {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    /// What to call this on screen while it is loading or refusing.
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentedProgram {
+    /// `current`, `partial`, or `unavailable`.
+    pub assessment: String,
+    pub partial_reasons: Vec<String>,
+    /// `hold_last`, `loop`, `poll_at_end`, or `blank_at_end`.
+    pub cycle: String,
+    pub refresh_after_ms: Option<u32>,
+    pub items: Vec<PresentedItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentedItem {
+    pub id: String,
+    pub duration_ms: Option<u32>,
+    pub assessment: String,
+    pub spoken_summary: Option<String>,
+    pub scene: PresentedScene,
+}
+
+/// What one item draws.
+///
+/// `Unsupported` is a scene rather than an omission: a program that quietly
+/// dropped what this screen cannot draw would be a shorter program nobody
+/// authored.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PresentedScene {
+    Frame {
+        /// `png`, `jpeg`, or `webp`.
+        media_type: String,
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+    },
+    Blank {
+        /// `source_unavailable`, `unsupported`, or `program_ended`.
+        reason: String,
+    },
+    Unsupported {
+        output: String,
+    },
+}
+
+/// How many ways back into this coordinator's identifier key exist, and whether
+/// any survives the machine.
+///
+/// Carried on the ordinary status projection rather than a settings page: the
+/// moment an operator wants this is after the machine is gone, and a fact only
+/// reachable from the lost machine is not a fact they have.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayIdentifierCustodyRow {
+    /// Kinds of unlock path, never material.
+    pub slots: Vec<String>,
+    pub portable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -632,6 +722,29 @@ pub enum ActionRequest {
     DisplayDeviceRevoke {
         device: String,
     },
+    /// Make this machine a screen.
+    ///
+    /// Pressing the control is the whole of the consent — there is no dialog
+    /// in front of it, because being asked *what to show* before you are a
+    /// screen is the wrong order. Nothing is enrolled and nothing is
+    /// committed: this client is already a member of the Space it will draw,
+    /// so there is no stranger to issue a credential to. Leaving is
+    /// [`ActionRequest::LeavePresentation`].
+    EnterPresentation,
+    /// Point this screen at one exact surface. Dispatched from inside the
+    /// mode, never as a precondition for entering it.
+    PresentHere {
+        orbit: String,
+        world: String,
+        surface: String,
+        input: String,
+        title: String,
+    },
+    /// Ask the current selection again. What a refresh boundary and a manual
+    /// nudge both do.
+    PresentRefresh,
+    /// Stop being a screen.
+    LeavePresentation,
 }
 
 impl ActionRequest {
@@ -741,6 +854,22 @@ impl ActionRequest {
                 Action::DisplayAssignmentRevoke(assignment)
             }
             Self::DisplayDeviceRevoke { device } => Action::DisplayDeviceRevoke(device),
+            Self::EnterPresentation => Action::EnterPresentation,
+            Self::PresentHere {
+                orbit,
+                world,
+                surface,
+                input,
+                title,
+            } => Action::PresentHere(Box::new(crate::model::PresentationSelection {
+                orbit,
+                world,
+                surface,
+                input,
+                title,
+            })),
+            Self::PresentRefresh => Action::PresentRefresh,
+            Self::LeavePresentation => Action::LeavePresentation,
         })
     }
 }
@@ -1044,6 +1173,7 @@ fn empty() -> ClientView {
         library: None,
         host: None,
         display: None,
+        presentation: None,
         heads: Vec::new(),
         devices: Vec::new(),
         storage: Vec::new(),
@@ -1189,6 +1319,69 @@ fn project(app: &App) -> ClientView {
                     expires_at_unix_ms: pairing.expires_at_unix_ms,
                 })
                 .collect(),
+            identifier_custody: display.identifier_custody.as_ref().map(|custody| {
+                DisplayIdentifierCustodyRow {
+                    slots: custody.slots.clone(),
+                    portable: custody.portable,
+                }
+            }),
+        }),
+        presentation: app.presentation().map(|presenting| PresentationFacts {
+            chosen: presenting
+                .selection
+                .as_ref()
+                .map(|selection| PresentationChoice {
+                    orbit: selection.orbit.clone(),
+                    world: selection.world.clone(),
+                    surface: selection.surface.clone(),
+                    title: selection.title.clone(),
+                }),
+            failure: presenting.failure.clone(),
+            program: presenting.rendered.as_ref().map(|view| PresentedProgram {
+                assessment: view.assessment.clone(),
+                partial_reasons: view.partial_reasons.clone(),
+                cycle: view.cycle.clone(),
+                refresh_after_ms: view.refresh_after_ms,
+                items: view
+                    .items
+                    .iter()
+                    .map(|item| PresentedItem {
+                        id: item.id.clone(),
+                        duration_ms: item.duration_ms,
+                        assessment: item.assessment.clone(),
+                        spoken_summary: item.spoken_summary.clone(),
+                        scene: match &item.scene {
+                            lait::control::DisplayPresentationSceneView::Frame {
+                                media_type,
+                                width,
+                                height,
+                                bytes_base64,
+                            } => PresentedScene::Frame {
+                                media_type: media_type.clone(),
+                                width: *width,
+                                height: *height,
+                                // Decoded once here rather than in Dart: the
+                                // interface receives a whole view on every
+                                // pump, and base64 is the transport's problem
+                                // rather than the screen's.
+                                bytes: data_encoding::BASE64
+                                    .decode(bytes_base64.as_bytes())
+                                    .unwrap_or_default(),
+                            },
+                            lait::control::DisplayPresentationSceneView::Blank { reason } => {
+                                PresentedScene::Blank {
+                                    reason: reason.clone(),
+                                }
+                            }
+                            lait::control::DisplayPresentationSceneView::Unsupported { output } => {
+                                PresentedScene::Unsupported {
+                                    output: output.clone(),
+                                }
+                            }
+                        },
+                    })
+                    .collect(),
+            }),
         }),
         heads: app
             .heads()

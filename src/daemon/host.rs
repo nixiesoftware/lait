@@ -684,7 +684,7 @@ impl Listener {
                 Flow::Next(reader, write_half)
             }
             (ControlRoute::Daemon, request) => {
-                let response = match self.display.handle_control(&request) {
+                let response = match self.display.handle_control(&request).await {
                     Some(response) => response,
                     None => crate::orbits::bootstrap::dispatch(&self.router, request)
                         .await
@@ -970,10 +970,11 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    fn new(router: Arc<Router>, home: &Path) -> Result<Self> {
+    fn new(router: Arc<Router>, home: &Path, device_seed: &[u8; 32]) -> Result<Self> {
         let display = Arc::new(crate::display::DisplayRuntime::open(
             &home.join("display"),
             router.clone(),
+            device_seed,
         )?);
         Ok(Self {
             endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),
@@ -1047,9 +1048,13 @@ impl Stop {
 }
 
 impl Runner {
-    pub(crate) fn start(home: PathBuf, router: Arc<Router>) -> Result<Self> {
+    /// `device_seed` is this identity's own seed, threaded through as a value
+    /// rather than re-read here: the daemon is the identity singleton, and a
+    /// second read is a second chance to disagree about which identity is
+    /// running.
+    pub(crate) fn start(home: PathBuf, router: Arc<Router>, device_seed: [u8; 32]) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
-        let daemon = Arc::new(Daemon::new(router, &home)?);
+        let daemon = Arc::new(Daemon::new(router, &home, &device_seed)?);
         Ok(Self {
             home,
             daemon,
@@ -1095,7 +1100,7 @@ pub async fn run_lait_daemon(
     // boot, deliberately — never as a side effect of a later write (the
     // address book's author path is load-only by design).
     std::fs::create_dir_all(&identity)?;
-    crate::config::load_or_create_identity(&identity)?;
+    let device_seed = crate::config::load_or_create_identity(&identity)?;
     let config_root = crate::config::config_root()?;
     let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&config_root);
@@ -1104,7 +1109,7 @@ pub async fn run_lait_daemon(
         Catalog::new(identity, agents_base, self_contained),
         packages,
     ));
-    let runner = Runner::start(home, router)?;
+    let runner = Runner::start(home, router, device_seed)?;
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -1468,6 +1473,7 @@ pub(crate) fn runner_with_factory(
             factory,
             crate::world::packages(),
         )),
+        [0x5a; 32],
     )
 }
 
