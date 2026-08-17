@@ -3896,6 +3896,7 @@ version = "0.8.0"
 dependencies = [
  "addressbook",
  "anyhow",
+ "astrolabe-stub",
  "async-trait",
  "axum",
  "blake3",

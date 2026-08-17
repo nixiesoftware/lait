@@ -249,6 +249,12 @@ zip = { version = "6", default-features = false, features = ["deflate"] }
 # `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (inherit exactly the
 # three handles we name — `daemon_spawn`), which std only exposes as an unstable
 # feature. Already present transitively (iroh/tokio); declared directly for those.
+# The staged-swap primitives. The stub owns them because the stub must stay
+# free of the engine; the engine using them is the other direction and is what
+# lets macOS — which has no stub — apply from the daemon.
+[target.'cfg(target_os = "macos")'.dependencies]
+astrolabe-stub = { path = "tools/stub" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

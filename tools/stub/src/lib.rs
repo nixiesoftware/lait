@@ -167,7 +167,7 @@ fn entry_name() -> &'static str {
 /// Say a condition where a person can find it: stderr now, `stub.log`
 /// durably. Never fails — a report that could abort the launch would turn
 /// every disk hiccup into a client that does not start.
-fn say(root: &Path, message: &str) {
+pub(crate) fn say(root: &Path, message: &str) {
     eprintln!("astrolabe-stub: {message}");
     if let Ok(mut log) = fs::OpenOptions::new()
         .create(true)
@@ -195,7 +195,7 @@ fn lock_file(path: &Path) -> std::io::Result<fs::File> {
 /// meets an orphan of its own name, and a rename onto an existing directory
 /// is an error there. The counter closes the within-process case; [`sweep`]
 /// clears whatever a lost delete leaves behind.
-fn scratch_name(prefix: &str) -> String {
+pub(crate) fn scratch_name(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
     format!(
@@ -250,7 +250,7 @@ pub fn claim(root: &Path) -> std::io::Result<Option<Claim>> {
 /// non-ASCII path. Counting is exactly as strong — every named file is
 /// opened and hashed *by path*, so a rename shows up as a missing file and a
 /// stowaway shows up as a surplus.
-fn verify_staged(root: &Path) -> Result<StageManifest, String> {
+pub(crate) fn verify_staged(root: &Path) -> Result<StageManifest, String> {
     let manifest_bytes = fs::read(root.join(STAGE_MANIFEST))
         .map_err(|error| format!("the stage manifest could not be read: {error}"))?;
     let manifest: StageManifest = serde_json::from_slice(&manifest_bytes)

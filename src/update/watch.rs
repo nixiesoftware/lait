@@ -126,6 +126,31 @@ pub fn install_root() -> Option<PathBuf> {
     install_root_of(&std::env::current_exe().ok()?)
 }
 
+/// The application bundle this binary ships inside, on macOS.
+///
+/// The one platform with no stub: the person put `Astrolabe.app` where they
+/// wanted it, Launch Services and the Dock key on that path, and the bundle
+/// itself is what an update replaces. So the live application is found by
+/// asking where this daemon is running from rather than by a layout rule —
+/// `/Applications` is a convention, not a guarantee.
+#[cfg(target_os = "macos")]
+pub fn live_bundle_of(executable: &Path) -> Option<PathBuf> {
+    executable
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .extension()
+                .is_some_and(|extension| extension == "app")
+        })
+        .map(Path::to_path_buf)
+}
+
+/// The application bundle the running daemon ships inside.
+#[cfg(target_os = "macos")]
+pub fn live_bundle() -> Option<PathBuf> {
+    live_bundle_of(&std::env::current_exe().ok()?)
+}
+
 /// Read the recorded standing, or `None` when no check has ever completed.
 pub fn standing(identity: &Path) -> Option<Standing> {
     let bytes = std::fs::read(identity.join(STANDING_FILE)).ok()?;
@@ -246,9 +271,44 @@ fn check(identity: &Path, root: &Path) -> Standing {
         root,
     );
     record(identity, &standing);
+    apply_if_this_platform_has_no_stub(root);
     check_worlds(identity, channel);
     standing
 }
+
+/// On macOS, apply what was just staged.
+///
+/// Every other platform has a stub that applies at the next launch, which is
+/// the moment nothing is running. macOS has no stub — the person launches the
+/// `.app` itself — so the daemon is the only thing positioned to do it, and
+/// it may: a process running inside a bundle survives that bundle being
+/// exchanged, which `bundle::exchange` measures rather than assumes.
+///
+/// Under the claim, always. The claim is what "a client is alive here" means,
+/// and a swap under a live client would leave that client's sidecar
+/// resolution pointing into a bundle that moved.
+#[cfg(target_os = "macos")]
+fn apply_if_this_platform_has_no_stub(root: &Path) {
+    let Some(live) = live_bundle() else {
+        // Not running from inside a bundle: a developer's build, or a lait
+        // installed on its own. There is no application to replace.
+        return;
+    };
+    match astrolabe_stub::claim(root) {
+        Ok(Some(claim)) => {
+            let outcome = astrolabe_stub::bundle::apply_staged(root, &live, &claim);
+            tracing::debug!(?outcome, application = %live.display(), "staged application applied");
+        }
+        // A live client holds the installation. The stage keeps, and the next
+        // period tries again — the same deferral the stub makes at a launch.
+        Ok(None) => tracing::debug!("a client holds this installation; the stage waits"),
+        Err(error) => tracing::warn!(%error, "the installation could not be claimed"),
+    }
+}
+
+/// Every other platform: the stub applies at the next launch.
+#[cfg(not(target_os = "macos"))]
+fn apply_if_this_platform_has_no_stub(_root: &Path) {}
 
 /// How long to wait before the next check: the period, stretched one time in
 /// five, plus a spread of up to a minute so two daemons started together do
@@ -461,6 +521,33 @@ mod tests {
             install_root_of(&built),
             None,
             "a build directory was read as an installation"
+        );
+    }
+
+    /// The application is found by asking where this daemon runs from, not by
+    /// assuming `/Applications`: the person put the bundle where they wanted
+    /// it, and a rule that guessed would update a copy nobody launches.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_live_application_is_the_bundle_this_daemon_ships_inside() {
+        let root = tempfile::tempdir().expect("a scratch dir");
+        let inside = root
+            .path()
+            .join("Elsewhere")
+            .join("Astrolabe.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("lait");
+        assert_eq!(
+            live_bundle_of(&inside),
+            Some(root.path().join("Elsewhere").join("Astrolabe.app")),
+            "the daemon did not find the bundle it ships inside"
+        );
+        // A developer's build is not inside a bundle, and inventing one would
+        // replace something nobody installed.
+        assert_eq!(
+            live_bundle_of(&root.path().join("target").join("debug").join("lait")),
+            None
         );
     }
 

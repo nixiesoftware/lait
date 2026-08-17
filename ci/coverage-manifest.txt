@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2001
-pr-platform    1568
-nightly        2029
+pr             2005
+pr-platform    1572
+nightly        2033
 mutants        98
 
 [gates]
@@ -139,7 +139,10 @@ astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
 astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
 astrolabe-stub bundle::tests::a_program_running_inside_the_bundle_survives_the_exchange
+astrolabe-stub bundle::tests::a_tampered_staged_bundle_is_refused_and_the_live_application_is_untouched
+astrolabe-stub bundle::tests::a_verified_staged_bundle_becomes_live_and_the_old_one_becomes_previous
 astrolabe-stub bundle::tests::an_absent_path_is_an_error_rather_than_a_silent_no_op
+astrolabe-stub bundle::tests::an_application_that_is_not_where_it_was_installed_is_refused_by_name
 astrolabe-stub bundle::tests::paths_on_two_volumes_are_refused_by_name_and_change_nothing
 astrolabe-stub bundle::tests::two_bundles_exchange_places_in_one_operation
 astrolabe-stub tests::a_claim_is_exclusive_and_a_second_launch_defers_rather_than_applying
@@ -665,6 +668,7 @@ lait update::watch::tests::a_release_that_cannot_be_staged_is_available_rather_t
 lait update::watch::tests::a_standing_round_trips_and_absence_is_its_own_answer
 lait update::watch::tests::an_install_root_is_recognised_only_by_its_whole_shape
 lait update::watch::tests::every_feed_failure_keeps_its_own_kind_and_none_reads_as_current
+lait update::watch::tests::the_live_application_is_the_bundle_this_daemon_ships_inside
 lait update::watch::tests::the_period_is_spread_so_two_daemons_do_not_stay_together
 lait update::world::tests::a_bundle_already_staged_at_this_version_is_not_fetched_again
 lait update::world::tests::a_bundle_survives_a_host_change_it_does_not_name

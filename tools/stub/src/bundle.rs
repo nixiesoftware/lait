@@ -253,6 +253,125 @@ mod tests {
         let _ = control.wait();
     }
 
+    /// The whole macOS apply: a verified staged bundle becomes the live
+    /// application, and the outgoing one becomes the rollback by the same
+    /// exchange rather than by a copy that could fail on its own.
+    #[test]
+    fn a_verified_staged_bundle_becomes_live_and_the_old_one_becomes_previous() {
+        let root = tempfile::tempdir().expect("a scratch identity");
+        let applications = tempfile::tempdir().expect("a scratch /Applications");
+        let live = tree(applications.path(), "Astrolabe.app", b"the live one");
+
+        // The staged bundle, as `update::tree` leaves it: `staged/` beside a
+        // manifest, holding the .app's own contents.
+        let staged = root.path().join(crate::STAGED_DIR);
+        std::fs::create_dir_all(staged.join("Contents/MacOS")).expect("a staged bundle");
+        let entry = staged.join("Contents/MacOS/marker");
+        std::fs::write(&entry, b"the new one").expect("its marker");
+        let manifest = crate::StageManifest {
+            version: "0.9.0".into(),
+            entry: "Contents/MacOS/marker".into(),
+            files: vec![crate::StagedFile {
+                path: "Contents/MacOS/marker".into(),
+                blake3: blake3::hash(b"the new one").to_hex().to_string(),
+                size: 11,
+                executable: false,
+            }],
+        };
+        std::fs::write(
+            root.path().join(crate::STAGE_MANIFEST),
+            serde_json::to_vec(&manifest).expect("a manifest encodes"),
+        )
+        .expect("a stage manifest");
+
+        let claim = crate::claim(root.path())
+            .expect("the claim file opens")
+            .expect("nothing holds this installation");
+        assert_eq!(
+            apply_staged(root.path(), &live, &claim),
+            crate::Outcome::Applied {
+                version: "0.9.0".into()
+            }
+        );
+        assert_eq!(
+            std::fs::read(live.join("Contents/MacOS/marker")).expect("the live marker"),
+            b"the new one",
+            "the staged application did not become live"
+        );
+        assert_eq!(
+            std::fs::read(
+                root.path()
+                    .join(crate::PREVIOUS_DIR)
+                    .join("Contents/MacOS/marker")
+            )
+            .expect("the kept marker"),
+            b"the live one",
+            "the outgoing application was not kept as the rollback"
+        );
+        assert!(
+            !root.path().join(crate::STAGE_MANIFEST).exists(),
+            "a consumed stage manifest was left behind"
+        );
+    }
+
+    #[test]
+    fn a_tampered_staged_bundle_is_refused_and_the_live_application_is_untouched() {
+        let root = tempfile::tempdir().expect("a scratch identity");
+        let applications = tempfile::tempdir().expect("a scratch /Applications");
+        let live = tree(applications.path(), "Astrolabe.app", b"the live one");
+
+        let staged = root.path().join(crate::STAGED_DIR);
+        std::fs::create_dir_all(staged.join("Contents/MacOS")).expect("a staged bundle");
+        std::fs::write(staged.join("Contents/MacOS/marker"), b"tampered!!!")
+            .expect("the tampered marker");
+        let manifest = crate::StageManifest {
+            version: "0.9.0".into(),
+            entry: "Contents/MacOS/marker".into(),
+            files: vec![crate::StagedFile {
+                path: "Contents/MacOS/marker".into(),
+                blake3: blake3::hash(b"the new one").to_hex().to_string(),
+                size: 11,
+                executable: false,
+            }],
+        };
+        std::fs::write(
+            root.path().join(crate::STAGE_MANIFEST),
+            serde_json::to_vec(&manifest).expect("a manifest encodes"),
+        )
+        .expect("a stage manifest");
+
+        let claim = crate::claim(root.path())
+            .expect("the claim file opens")
+            .expect("nothing holds this installation");
+        let crate::Outcome::Refused { reason } = apply_staged(root.path(), &live, &claim) else {
+            panic!("a tampered bundle was applied");
+        };
+        assert!(reason.contains("verification failed"), "{reason}");
+        assert_eq!(
+            std::fs::read(live.join("Contents/MacOS/marker")).expect("the live marker"),
+            b"the live one",
+            "a refused bundle changed the live application"
+        );
+    }
+
+    /// An application the person moved is a condition to say, not to guess at.
+    #[test]
+    fn an_application_that_is_not_where_it_was_installed_is_refused_by_name() {
+        let root = tempfile::tempdir().expect("a scratch identity");
+        let staged = root.path().join(crate::STAGED_DIR);
+        std::fs::create_dir_all(staged.join("Contents/MacOS")).expect("a staged bundle");
+        std::fs::write(root.path().join(crate::STAGE_MANIFEST), b"{}").expect("a manifest");
+        let claim = crate::claim(root.path())
+            .expect("the claim file opens")
+            .expect("nothing holds this installation");
+        let crate::Outcome::Refused { reason } =
+            apply_staged(root.path(), &root.path().join("gone.app"), &claim)
+        else {
+            panic!("an absent application was applied to");
+        };
+        assert!(reason.contains("was moved"), "{reason}");
+    }
+
     #[test]
     fn an_absent_path_is_an_error_rather_than_a_silent_no_op() {
         let root = tempfile::tempdir().expect("a scratch volume");
@@ -281,5 +400,107 @@ mod tests {
             b"live",
             "a refused exchange changed the live bundle"
         );
+    }
+}
+
+/// Apply a staged bundle to the live application, when one is staged and
+/// nothing holds the installation.
+///
+/// The tree-swap shape the stub performs on Windows and Linux does not fit
+/// here: there is no install root holding `current/`, because the live
+/// application *is* `/Applications/Astrolabe.app` and the person put it
+/// there. So the staged tree lives beside the identity, the live application
+/// stays where it is, and the two are exchanged.
+///
+/// The exchange leaves the outgoing application where the staged one was, and
+/// that is what becomes `previous/` — the rollback is a product of the same
+/// syscall rather than a copy that could fail on its own.
+///
+/// `root` is the directory holding `staged/`, `previous/` and the stage
+/// manifest; `live` is the application bundle to replace.
+pub fn apply_staged(root: &Path, live: &Path, _claim: &crate::Claim) -> crate::Outcome {
+    use crate::Outcome;
+
+    let staged = root.join(crate::STAGED_DIR);
+    if !root.join(crate::STAGE_MANIFEST).is_file() {
+        return Outcome::NothingStaged;
+    }
+    if !staged.is_dir() {
+        // The residue of an apply whose last cleanup lost a race. Clearing it
+        // is the repair; leaving it makes every launch report a refusal about
+        // a release that does not exist.
+        let _ = std::fs::remove_file(root.join(crate::STAGE_MANIFEST));
+        let how = "a stage manifest without its bundle was cleared".to_string();
+        crate::say(root, &how);
+        return Outcome::Recovered { how };
+    }
+    if !live.is_dir() {
+        let reason = format!(
+            "the live application is not at {} — this installation was moved, \
+             and an update cannot guess where to",
+            live.display()
+        );
+        crate::say(root, &reason);
+        return Outcome::Refused { reason };
+    }
+
+    // Verify before swap, exactly as the tree path does: the manifest is the
+    // record staging wrote, and a marker is never trusted in place of the
+    // bytes it describes.
+    let manifest = match crate::verify_staged(root) {
+        Ok(manifest) => manifest,
+        Err(reason) => {
+            crate::say(root, &reason);
+            return Outcome::Refused { reason };
+        }
+    };
+
+    match exchange(live, &staged) {
+        Ok(Replaced::Swapped) => {}
+        Ok(Replaced::Unsupported { why }) => {
+            // Said, never forced. An application on a volume that cannot do
+            // this is a fact about the machine, and copying a bundle over
+            // itself is exactly the non-atomic replacement that orphans the
+            // Dock's tiles.
+            crate::say(root, &why);
+            return Outcome::Refused { reason: why };
+        }
+        Err(error) => {
+            let reason = format!("the application could not be exchanged: {error}");
+            crate::say(root, &reason);
+            return Outcome::Refused { reason };
+        }
+    }
+
+    // Past here the new application is live. Neither cleanup below may report
+    // that as a failure: a completed update told as a refusal is the defect
+    // the tree path's ordering already exists to prevent.
+    let previous = root.join(crate::PREVIOUS_DIR);
+    if previous.exists() {
+        let aside = root.join(crate::scratch_name("previous.trash-"));
+        if std::fs::rename(&previous, &aside).is_ok() {
+            let _ = std::fs::remove_dir_all(&aside);
+        }
+    }
+    if std::fs::rename(&staged, &previous).is_err() {
+        crate::say(
+            root,
+            "the outgoing application could not be kept as the rollback; it will be \
+             cleared at the next apply",
+        );
+    }
+    if std::fs::remove_file(root.join(crate::STAGE_MANIFEST)).is_err() {
+        crate::say(
+            root,
+            "the consumed stage manifest could not be removed; it will be cleared at \
+             the next apply",
+        );
+    }
+    crate::say(
+        root,
+        &format!("applied the staged {} application", manifest.version),
+    );
+    Outcome::Applied {
+        version: manifest.version,
     }
 }
