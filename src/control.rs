@@ -2186,6 +2186,14 @@ pub enum HostReply {
         /// permitted to run — when the release declares a satisfiable one.
         #[serde(default)]
         floor: Option<String>,
+        /// What the resident staging watcher last learned about this
+        /// installation's channel (CLIENT-66).
+        ///
+        /// `None` means no check has ever completed here — which is neither
+        /// "up to date" nor "could not ask", and is why absence is left as
+        /// absence rather than encoded as a variant.
+        #[serde(default)]
+        standing: Option<crate::update::watch::Standing>,
     },
     /// The daemon accepted the reply's own last instruction and is stopping.
     Restarting {

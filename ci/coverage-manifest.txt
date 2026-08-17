@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1953
-pr-platform    1527
-nightly        1981
+pr             1959
+pr-platform    1533
+nightly        1987
 mutants        98
 
 [gates]
@@ -646,6 +646,12 @@ lait update::tree::tests::an_artifact_longer_than_the_manifest_says_is_refused_b
 lait update::tree::tests::restaging_replaces_the_prior_stage_whole
 lait update::tree::tests::the_entry_name_is_computable_for_every_target_from_any_host
 lait update::tree::tests::the_stage_layout_names_are_the_contract_the_stub_reads
+lait update::watch::tests::a_channel_with_nothing_newer_is_current_and_downloads_nothing
+lait update::watch::tests::a_release_that_cannot_be_staged_is_available_rather_than_current
+lait update::watch::tests::a_standing_round_trips_and_absence_is_its_own_answer
+lait update::watch::tests::an_install_root_is_recognised_only_by_its_whole_shape
+lait update::watch::tests::every_feed_failure_keeps_its_own_kind_and_none_reads_as_current
+lait update::watch::tests::the_period_is_spread_so_two_daemons_do_not_stay_together
 lait world::lifecycle::tests::formation_resumes_exact_signed_action_after_each_private_fault
 lait-issues contract::ring_digest_tests::a_ring_digest_survives_its_own_round_trip
 lait-issues contract::ring_digest_tests::an_unknown_plane_fails_the_decode

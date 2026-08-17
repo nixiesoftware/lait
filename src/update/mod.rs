@@ -14,6 +14,7 @@
 
 pub mod feed;
 pub mod tree;
+pub mod watch;
 
 use std::path::{Path, PathBuf};
 

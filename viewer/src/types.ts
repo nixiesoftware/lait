@@ -1313,6 +1313,20 @@ export type HostRequest =
   | { cmd: "book_resolve"; orbit: string; handles: string[] };
 
 /** `control.rs` `HostReply`, tagged by `host` inside a `kind: "host"` response. */
+/**
+ * `update::watch::Standing` — what a machine knows about its channel as of
+ * the last completed check. Every arm is its own fact: "could not ask", a
+ * verification refusal, and a replayed stale pointer are three different
+ * things, and only `current` may be rendered as up to date.
+ */
+export type UpdateStanding =
+  | { standing: "current"; channel_version: string }
+  | { standing: "available"; version: string }
+  | { standing: "staged"; version: string }
+  | { standing: "could_not_ask"; why: string }
+  | { standing: "refused"; why: string }
+  | { standing: "stale"; why: string };
+
 export type HostReply =
   | {
       host: "founded";
@@ -1358,6 +1372,13 @@ export type HostReply =
        * "you are up to date".
        */
       managed_by?: string | null;
+      /**
+       * What the resident staging watcher last learned about this
+       * installation's channel. Absent means no check has ever completed —
+       * which is neither "up to date" nor "could not ask", and must not be
+       * rendered as either.
+       */
+      standing?: UpdateStanding | null;
     }
   | { host: "restarting"; pid?: number | null }
   | {

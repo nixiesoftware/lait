@@ -44,6 +44,11 @@ pub const STAGED_DIR: &str = "staged";
 /// with the stub's constant of the same name.
 pub const STAGING_LOCK: &str = "staging.lock";
 
+/// The live tree's directory name in the install root. Must agree with the
+/// stub's `CURRENT_DIR`; it is spelled here because the daemon recognises an
+/// installation by this shape.
+pub const LIVE_DIR: &str = "current";
+
 /// What was staged, for the caller's report.
 #[derive(Debug)]
 pub struct StagedTree {
@@ -167,6 +172,25 @@ where
     let staged_result = stage_verified_bytes(&bytes, &version, target, root);
     let _ = fs2::FileExt::unlock(&lock);
     staged_result
+}
+
+/// The version a staged tree is waiting to become, when one is waiting.
+///
+/// Reads only the manifest's own claim: this is a cheap "is there anything
+/// here" question, and the stub is what proves the tree against it before
+/// anything is swapped.
+pub fn staged_version(root: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Claim {
+        version: String,
+    }
+    let bytes = std::fs::read(root.join(STAGE_MANIFEST)).ok()?;
+    if !root.join(STAGED_DIR).is_dir() {
+        return None;
+    }
+    serde_json::from_slice::<Claim>(&bytes)
+        .ok()
+        .map(|c| c.version)
 }
 
 /// Everything after the bytes are proven: extract, check the shape, put the
