@@ -362,14 +362,15 @@ fn apply_if_this_platform_has_no_stub(_root: &Path) {}
 /// How long to wait before the next check: the period, stretched one time in
 /// five, plus a spread of up to a minute so two daemons started together do
 /// not stay together.
-fn next_delay(period: Duration) -> Duration {
+fn next_delay(period: Duration, spread: Duration) -> Duration {
     let stretch = if draw() < 0.2 {
         1.0 + MAX_STRETCH * draw()
     } else {
         1.0
     };
-    let spread = MAX_SPREAD.mul_f64(draw());
-    period.mul_f64(stretch).saturating_add(spread)
+    period
+        .mul_f64(stretch)
+        .saturating_add(spread.mul_f64(draw()))
 }
 
 /// A number in `[0, 1)`. From `getrandom` because this workspace carries no
@@ -395,7 +396,7 @@ fn draw() -> f64 {
 /// installation never starts this at all — there is nowhere to stage to, and
 /// inventing one would put a client tree beside a developer's `target/`.
 pub async fn serve(identity: PathBuf, root: PathBuf, stop: tokio::sync::watch::Receiver<bool>) {
-    serve_checking(identity, root, stop, CHECK_PERIOD, check).await;
+    serve_checking(identity, root, stop, CHECK_PERIOD, MAX_SPREAD, check).await;
 }
 
 /// The loop itself, with its period and its check supplied.
@@ -411,12 +412,13 @@ async fn serve_checking(
     root: PathBuf,
     mut stop: tokio::sync::watch::Receiver<bool>,
     period: Duration,
+    spread: Duration,
     check: fn(&Path, &Path) -> Standing,
 ) {
     tracing::info!(root = %root.display(), "staging updates for this installation");
     // The first check is spread too, so a fleet restarted together by a
     // reboot or a deploy does not arrive at the host together either.
-    let mut delay = MAX_SPREAD.mul_f64(draw()).min(period);
+    let mut delay = spread.mul_f64(draw()).min(period);
     loop {
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
@@ -430,7 +432,7 @@ async fn serve_checking(
             Ok(standing) => tracing::debug!(?standing, "channel checked"),
             Err(error) => tracing::warn!(%error, "the staging check panicked"),
         }
-        delay = next_delay(period);
+        delay = next_delay(period, spread);
     }
 }
 
@@ -670,7 +672,7 @@ mod tests {
     #[test]
     fn the_period_is_spread_so_two_daemons_do_not_stay_together() {
         let period = Duration::from_secs(1000);
-        let delays: Vec<Duration> = (0..64).map(|_| next_delay(period)).collect();
+        let delays: Vec<Duration> = (0..64).map(|_| next_delay(period, MAX_SPREAD)).collect();
         assert!(
             delays.iter().any(|delay| *delay != delays[0]),
             "every delay was identical, so nothing is spreading the fleet"
@@ -709,38 +711,45 @@ mod tests {
     /// service in `Daemon::serve` shares. It does not assert that the daemon
     /// spawns it — `spawn_staging` is the remaining joint, and it is guarded by
     /// `an_install_root_is_recognised_only_by_its_whole_shape` on one side.
-    #[tokio::test(start_paused = true)]
+    ///
+    /// Real time, not a paused clock. The first cut paused it and advanced past
+    /// several periods, which failed seven runs in eight: the check runs on
+    /// `spawn_blocking`, and a blocking pool thread has no relationship to a
+    /// clock the test is moving by hand. Both timing figures are parameters of
+    /// the loop instead, so the test can pick milliseconds and wait for the
+    /// real thing to happen.
+    #[tokio::test]
     async fn the_loop_comes_back_round_on_its_period_and_stops_when_told() {
         REACHED.store(0, std::sync::atomic::Ordering::SeqCst);
         let identity = tempfile::tempdir().expect("an identity directory");
         let root = tempfile::tempdir().expect("an install root");
         let (stop, receiver) = tokio::sync::watch::channel(false);
-        let period = Duration::from_secs(60);
 
         let loops = tokio::spawn(serve_checking(
             identity.path().to_path_buf(),
             root.path().to_path_buf(),
             receiver,
-            period,
+            Duration::from_millis(5),
+            Duration::from_millis(1),
             counting_check,
         ));
 
-        // Paused time: advancing past several periods is what a real machine
-        // does over hours, without the test taking them.
-        for _ in 0..4 {
-            tokio::time::advance(period.mul_f64(1.0 + MAX_STRETCH) + MAX_SPREAD).await;
-            tokio::task::yield_now().await;
+        // Waited for rather than assumed: a loaded CI box is slow, and the
+        // assertion is that the loop comes back at all, not that it comes back
+        // within a number this test invented.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while REACHED.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the loop reached its check {} time(s) in ten seconds at a 5ms \
+                 period — a watcher that checks once is not a watcher",
+                REACHED.load(std::sync::atomic::Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let reached = REACHED.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(
-            reached >= 2,
-            "the loop reached its check {reached} time(s) across four periods — \
-             a watcher that checks once is not a watcher"
-        );
 
         stop.send(true).expect("the stop signal is received");
-        tokio::time::advance(period.mul_f64(2.0)).await;
-        tokio::time::timeout(Duration::from_secs(5), loops)
+        tokio::time::timeout(Duration::from_secs(10), loops)
             .await
             .expect("the loop did not end on the stop signal, so a shutdown would hang")
             .expect("the loop panicked");
