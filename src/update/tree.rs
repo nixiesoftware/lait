@@ -84,6 +84,11 @@ pub(crate) struct FileRecord {
 fn entry_for(target: &str) -> &'static str {
     if target.contains("-windows-") {
         "astrolabe.exe"
+    } else if target.contains("-apple-") {
+        // On macOS the tree *is* the bundle's contents: the unit of
+        // replacement is the .app, exchanged whole by `bundle::exchange`,
+        // so the pair lives where a bundle keeps it.
+        "Contents/MacOS/astrolabe"
     } else {
         "astrolabe"
     }
@@ -95,6 +100,8 @@ fn entry_for(target: &str) -> &'static str {
 fn sidecar_for(target: &str) -> &'static str {
     if target.contains("-windows-") {
         "lait.exe"
+    } else if target.contains("-apple-") {
+        "Contents/MacOS/lait"
     } else {
         "lait"
     }
@@ -723,12 +730,13 @@ mod tests {
     fn the_entry_name_is_computable_for_every_target_from_any_host() {
         assert_eq!(entry_for("x86_64-pc-windows-msvc"), "astrolabe.exe");
         assert_eq!(sidecar_for("x86_64-pc-windows-msvc"), "lait.exe");
-        for target in [
-            "aarch64-apple-darwin",
-            "x86_64-apple-darwin",
-            "aarch64-unknown-linux-gnu",
-            "x86_64-unknown-linux-gnu",
-        ] {
+        // macOS keeps the pair inside the bundle, because there the bundle is
+        // what gets replaced rather than a `current/` tree.
+        for target in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            assert_eq!(entry_for(target), "Contents/MacOS/astrolabe");
+            assert_eq!(sidecar_for(target), "Contents/MacOS/lait");
+        }
+        for target in ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] {
             assert_eq!(entry_for(target), "astrolabe");
             assert_eq!(sidecar_for(target), "lait");
         }

@@ -41,6 +41,14 @@ use std::path::{Path, PathBuf};
 /// missing any of these: a release that quietly dropped a platform would strand
 /// that platform's installed base on the previous version with no error
 /// anywhere.
+/// The targets a release tree is built for. Fewer than lait's own matrix:
+/// a tree carries the Flutter client, which ships where the client ships.
+const TREE_TARGETS: &[&str] = &[
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+];
+
 const LAIT_TARGETS: &[(&str, &str)] = &[
     ("x86_64-pc-windows-msvc", "zip"),
     ("aarch64-apple-darwin", "tar.gz"),
@@ -301,8 +309,41 @@ fn manifest(args: &[String]) -> Result<()> {
                 dir.display()
             );
         }
-        bundles.insert("astrolabe".to_string(), astrolabe_version);
+        bundles.insert("astrolabe".to_string(), astrolabe_version.clone());
         artifacts.insert("astrolabe".to_string(), astrolabe);
+
+        // The trees an updater consumes, keyed by target triple. The
+        // installers above are what a person runs once; these are what every
+        // machine already running swaps in. A release carrying the first
+        // without the second can be installed and never updated from, which
+        // is the state this feed spent a month in.
+        let mut trees = BTreeMap::new();
+        for target in TREE_TARGETS {
+            let name = format!("astrolabe-tree-{astrolabe_version}-{target}.tar.gz");
+            let path = dir.join(&name);
+            if !path.is_file() {
+                eprintln!("lait-feed: NOTE — no {name}; publishing without a {target} tree");
+                continue;
+            }
+            let (digest, size) = hash_file(&path)?;
+            trees.insert(
+                (*target).to_string(),
+                Artifact {
+                    url: format!("{base}/releases/{version}/{name}"),
+                    blake3: digest,
+                    size,
+                },
+            );
+        }
+        if trees.is_empty() {
+            bail!(
+                "--astrolabe {astrolabe_version} given but {} holds no release tree — \
+                 a release nobody can update to is worse than no release",
+                dir.display()
+            );
+        }
+        bundles.insert("astrolabe-tree".to_string(), astrolabe_version);
+        artifacts.insert("astrolabe-tree".to_string(), trees);
     }
 
     let manifest = Manifest {

@@ -132,6 +132,15 @@ jobs:
       - name: Build the stub launcher
         run: cargo build --release --locked -p astrolabe-stub --bin astrolabe-stub
 
+      - name: Pack the release tree
+        shell: bash
+        run: |
+          bash packaging/make-tree.sh \
+            --stage "apps/astrolabe/build/windows/x64/runner/Release" \
+            --version "${{ needs.gate.outputs.version }}" \
+            --target x86_64-pc-windows-msvc \
+            --out dist
+
       - name: Compile the installer
         shell: pwsh
         env:
@@ -163,10 +172,12 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
         run: |
           set -euo pipefail
+          tree="dist/astrolabe-tree-$VERSION-x86_64-pc-windows-msvc.tar.gz"
           gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
             "dist/astrolabe-$VERSION-setup.exe" \
-            "dist/astrolabe-$VERSION-setup.exe.sha256"
-          echo "installer attached to $TAG"
+            "dist/astrolabe-$VERSION-setup.exe.sha256" \
+            "$tree" "$tree.sha256"
+          echo "installer and release tree attached to $TAG"
 
   installer-macos:
     name: astrolabe macos disk image
@@ -257,6 +268,23 @@ jobs:
             --out dist \
             --notarize ci-notary
 
+      # Packed from the signed, stapled bundle in the DMG's staging copy — the
+      # tree an updater swaps in must be the same artifact a person installs,
+      # notarisation and all, or the first self-update would replace a
+      # notarised app with an unnotarised one.
+      - name: Pack the release tree
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          hdiutil attach "dist/astrolabe-$VERSION.dmg" -nobrowse -quiet -mountpoint "$RUNNER_TEMP/dmg"
+          bash packaging/make-tree.sh \
+            --stage "$RUNNER_TEMP/dmg/Astrolabe.app" \
+            --version "$VERSION" \
+            --target aarch64-apple-darwin \
+            --out dist
+          hdiutil detach "$RUNNER_TEMP/dmg" -quiet
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -269,10 +297,12 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
         run: |
           set -euo pipefail
+          tree="dist/astrolabe-tree-$VERSION-aarch64-apple-darwin.tar.gz"
           gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
             "dist/astrolabe-$VERSION.dmg" \
-            "dist/astrolabe-$VERSION.dmg.sha256"
-          echo "disk image attached to $TAG"
+            "dist/astrolabe-$VERSION.dmg.sha256" \
+            "$tree" "$tree.sha256"
+          echo "disk image and release tree attached to $TAG"
 
   installer-linux:
     name: astrolabe linux bundle
@@ -312,6 +342,11 @@ jobs:
         env:
           VERSION: ${{ needs.gate.outputs.version }}
         run: |
+          bash packaging/make-tree.sh \
+            --stage apps/astrolabe/build/linux/x64/release/bundle \
+            --version "$VERSION" \
+            --target x86_64-unknown-linux-gnu \
+            --out dist
           cargo build --release --locked -p astrolabe-stub --bin astrolabe-stub
           bash packaging/linux/make-tarball.sh \
             --bundle apps/astrolabe/build/linux/x64/release/bundle \
@@ -333,6 +368,7 @@ jobs:
         run: |
           set -euo pipefail
           asset="dist/astrolabe-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          tree="dist/astrolabe-tree-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
           gh release upload "$TAG" --repo "${{ github.repository }}" --clobber \
-            "$asset" "$asset.sha256"
-          echo "Linux bundle attached to $TAG"
+            "$asset" "$asset.sha256" "$tree" "$tree.sha256"
+          echo "Linux bundle and release tree attached to $TAG"
