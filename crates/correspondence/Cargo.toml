@@ -39,6 +39,9 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 tokio = { version = "1", default-features = false, features = ["time", "sync", "macros", "rt"] }
 
 [dev-dependencies]
+# The kinship lookup registry: proving a sender resolves a recipient by profile
+# alone, sharing no Space, then reaches them over the carrier. Dev-only.
+addressbook = { path = "../addressbook" }
 # For the invitation hop test: a real, self-authenticating `SignedCoordinates` to
 # carry and verify. Dev-only — the crate itself never names `runtime`, because an
 # invitation is opaque bytes to the carriage and self-authenticating to the reader.
