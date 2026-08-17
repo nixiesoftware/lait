@@ -57,7 +57,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, runner: [self-hosted, lait] }
+          - { target: x86_64-unknown-linux-gnu, runner: namespace-profile-nixiesoftware }
+          # arm64 Linux builds natively on GitHub's hosted arm64 runner.
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -94,7 +96,6 @@ jobs:
 
   macos:
     name: build ${{ matrix.target }}
-    if: false
     runs-on: macos-15
     permissions:
       contents: read
@@ -144,7 +145,6 @@ jobs:
 
   windows:
     name: build x86_64-pc-windows-msvc
-    if: false
     runs-on: windows-2025
     permissions:
       contents: read

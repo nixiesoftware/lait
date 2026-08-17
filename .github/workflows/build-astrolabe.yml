@@ -53,7 +53,7 @@ env:
 jobs:
   gate:
     name: resolve the release tag
-    runs-on: [self-hosted, lait]
+    runs-on: ubuntu-latest
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -89,7 +89,6 @@ jobs:
   installer:
     name: astrolabe windows installer
     needs: gate
-    if: false
     runs-on: windows-latest
     steps:
       # Build from the TAG, not from main: the installer must carry the release
@@ -195,7 +194,6 @@ jobs:
   installer-macos:
     name: astrolabe macos disk image
     needs: gate
-    if: false
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -321,7 +319,7 @@ jobs:
   installer-linux:
     name: astrolabe linux bundle
     needs: gate
-    runs-on: [self-hosted, lait]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
