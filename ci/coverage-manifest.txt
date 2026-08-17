@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1964
-pr-platform    1533
-nightly        1992
+pr             1972
+pr-platform    1541
+nightly        2000
 mutants        98
 
 [gates]
@@ -551,6 +551,12 @@ lait serve::gate_coverage::an_open_event_stream_ends_when_the_server_is_told_to_
 lait serve::gate_coverage::an_unregistered_path_does_not_accept_a_query_credential
 lait serve::gate_coverage::every_registered_route_is_behind_the_gate
 lait serve::gate_coverage::the_fallback_is_gated_too
+lait serve::head::tests::a_bundle_for_another_runtime_is_never_activated
+lait serve::head::tests::a_bundle_that_vanishes_underneath_falls_back_rather_than_failing
+lait serve::head::tests::a_root_with_no_bundle_for_this_runtime_serves_the_floor
+lait serve::head::tests::an_activated_bundle_answers_and_an_absent_path_falls_through
+lait serve::head::tests::nothing_outside_the_bundle_is_readable_through_it
+lait serve::head::tests::the_embedded_floor_is_the_source_when_nothing_is_activated
 lait serve::policy::tests::a_storage_read_is_a_read_and_belongs_to_a_space_not_to_the_host_plane
 lait serve::policy::tests::reads_are_reads
 lait serve::policy::tests::runtime_work_classifies_its_typed_operation_not_its_transport_envelope
@@ -625,6 +631,8 @@ lait update::feed::tests::garbage_is_invalid_not_a_verification_failure
 lait update::feed::tests::the_pinned_keys_are_well_formed_and_distinct
 lait update::feed::tests::the_real_test_channel_resolves_with_the_pinned_key
 lait update::feed::tests::the_stable_channel_refuses_a_prerelease_even_when_the_pointer_names_one
+lait update::runtime::tests::every_input_moves_the_token
+lait update::runtime::tests::the_runtime_version_is_stable_within_a_build_and_shaped_for_a_manifest_key
 lait update::tests::a_binary_beside_a_client_is_that_client_s_to_replace
 lait update::tests::a_channel_offering_nothing_newer_stages_nothing_and_is_not_an_error
 lait update::tests::a_running_executable_replaces_itself_with_the_staged_bytes

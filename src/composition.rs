@@ -267,3 +267,28 @@ pub fn bundled_client_packages() -> WorldClientRegistry {
 pub fn implementation_id() -> [u8; 32] {
     issues_app::lifecycle::implementation_id()
 }
+
+/// Every World this build hosts: its id, the reviewed implementation it runs,
+/// and the DTO schema version its web head decodes.
+///
+/// One more thing only a composition root can answer, and it exists so the
+/// runtime version (`update::runtime`) can fingerprint what a World's web head
+/// could break against *without any other file naming a product* — the
+/// invariant `tests/it/product_independence.rs` enforces, which is what caught
+/// the first version of this: `update::runtime` reached for
+/// `issues::dto::SCHEMA_VERSION` directly and made itself the second file in
+/// `src/**` that knows a product's name.
+pub fn bundled_world_surfaces() -> Vec<(String, [u8; 32], u32)> {
+    vec![
+        (
+            PRODUCT_WORLD.to_string(),
+            implementation_id(),
+            issues::dto::SCHEMA_VERSION,
+        ),
+        (
+            signage::contract::world_id().as_str().to_string(),
+            signage_app::implementation_id(),
+            signage::contract::PROGRAM_SCHEMA_VERSION,
+        ),
+    ]
+}

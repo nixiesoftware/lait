@@ -13,6 +13,7 @@
 //! before that restart: the updater stages bytes, it never launches them.
 
 pub mod feed;
+pub mod runtime;
 pub mod tree;
 pub mod watch;
 
