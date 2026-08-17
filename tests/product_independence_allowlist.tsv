@@ -22,6 +22,7 @@
 src/composition.rs	CatalogScope	D
 src/composition.rs	ImplementationCoordinate	D
 src/composition.rs	InitialProject	D
+src/composition.rs	MOUNT	D
 src/composition.rs	IssuesCallHandler	D
 src/composition.rs	PROGRAM_SCHEMA_VERSION	D
 src/composition.rs	Programs	D

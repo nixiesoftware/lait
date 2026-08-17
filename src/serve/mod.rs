@@ -224,11 +224,25 @@ pub async fn run_until(
     // this head is refuses to be one, rather than coming up, announcing an
     // address, and answering for whatever mount a request happens to name.
     //
-    // The same `pin` `lait mcp` uses, so the ladder is identical: an explicit
-    // pin, then $LAIT_WORLD, then the sole World a build hosts — and a refusal
-    // that names the mounts when there is more than one and no pin.
-    let pinned = crate::world::client_packages()
-        .pin(world.as_deref())
+    // The same `pin` `lait mcp` uses, with one difference that is the whole
+    // reason this is not a bare `pin` call: **its last rung is different, because
+    // the two heads answer to different callers.**
+    //
+    // `pin(None)` refuses when a build hosts several Worlds, and for MCP that is
+    // right — an editor binding names its World, and picking one for an agent
+    // would put words in somebody's mouth. A browser head's caller is a person
+    // typing `lait`, and refusing them because the build ships two Worlds is not
+    // a safety property, it is the documented entry point declining to start.
+    //
+    // So this ladder ends one rung further down, at the composition's declared
+    // primary. `--world` still selects any World, which is what gives each one
+    // its own head; the default only decides which one bare `lait` opens.
+    let registry = crate::world::client_packages();
+    let requested = world.as_deref().or_else(|| {
+        (registry.packages().count() > 1).then_some(crate::composition::PRODUCT_WORLD_MOUNT)
+    });
+    let pinned = registry
+        .pin(requested)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let pinned_mount = pinned.mount().to_owned();
     // Identity scoping, resolved once at startup from the invocation's own
