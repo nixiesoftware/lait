@@ -48,6 +48,11 @@ fn refused(refusal: Refusal) -> (StatusCode, Json<Refusal>) {
         Refusal::UnknownChallenge | Refusal::ChallengeExpired => StatusCode::CONFLICT,
         Refusal::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         Refusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        // 429 rather than 503: the remedy is to ask again later, and the caller
+        // should not be able to tell a mailbox that is full from a sender that is
+        // going too fast. One status for one remedy, which is the whole reason
+        // this arm is coarse.
+        Refusal::AtCapacity => StatusCode::TOO_MANY_REQUESTS,
     };
     (status, Json(refusal))
 }

@@ -38,6 +38,23 @@ pub trait Store {
     fn put(&mut self, sender: &DeviceId, envelope: &Envelope, now: u64) -> anyhow::Result<String>;
     /// Everything waiting for this device that has not expired.
     fn list(&self, device: &DeviceId, now: u64) -> anyhow::Result<Vec<Deposited>>;
+    /// How many deposits this device is holding, expired ones included.
+    ///
+    /// Separate from [`Store::list`], and deliberately a different question.
+    /// `list` answers what is *deliverable*; this answers what *occupies the
+    /// mailbox*, which is what a capacity ceiling is about — material past its
+    /// window still costs bytes until the sweep collects it.
+    ///
+    /// It is also the only shape a filesystem store can answer cheaply. Expiry
+    /// lives inside each record, so filtering on it would mean decoding every
+    /// file on every deposit, and a ceiling that reads the whole mailbox to
+    /// decide whether the mailbox is full is the amplifier it exists to prevent.
+    /// Counting names is O(entries) and touches no contents.
+    ///
+    /// The consequence, stated so nobody has to infer it: a mailbox at its
+    /// ceiling frees itself when [`Post::sweep`] runs, not the instant a window
+    /// lapses.
+    fn count(&self, device: &DeviceId) -> anyhow::Result<usize>;
     /// Drop the named deposits belonging to this device. Returns how many went.
     fn drop_all(&mut self, device: &DeviceId, ids: &[String]) -> anyhow::Result<usize>;
     /// Drop everything past its window. Returns how many went.
@@ -111,6 +128,10 @@ impl Store for MemStore {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    fn count(&self, device: &DeviceId) -> anyhow::Result<usize> {
+        Ok(self.held.get(device).map(BTreeMap::len).unwrap_or(0))
     }
 
     fn drop_all(&mut self, device: &DeviceId, ids: &[String]) -> anyhow::Result<usize> {
@@ -207,6 +228,18 @@ impl Store for FsStore {
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
+    }
+
+    fn count(&self, device: &DeviceId) -> anyhow::Result<usize> {
+        let Ok(entries) = std::fs::read_dir(self.box_dir(device)) else {
+            // No directory is no mailbox, which is zero rather than an error —
+            // the first deposit to a device is the thing that creates one.
+            return Ok(0);
+        };
+        Ok(entries
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
+            .count())
     }
 
     fn drop_all(&mut self, device: &DeviceId, ids: &[String]) -> anyhow::Result<usize> {

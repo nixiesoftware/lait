@@ -62,6 +62,45 @@ pub const CHALLENGE_TTL: u64 = 60;
 /// that asks for a century.
 pub const MAX_RETENTION: u64 = 30 * 24 * 60 * 60;
 
+/// The most deposits one mailbox may hold.
+///
+/// **This is the load-bearing bound, and the only one that holds against a
+/// determined depositor.** Anyone may write to anyone — that is what makes a
+/// first contact possible — so without a per-recipient ceiling one mailbox is
+/// write amplification any stranger can drive. With `MAX_ENVELOPE` this states
+/// the worst case a single recipient can cost: 256 × 256 KiB, or 64 MiB.
+///
+/// Counted over what the mailbox holds rather than what is still deliverable, so
+/// a full mailbox recovers when [`Post::sweep`] collects expired material — not
+/// the instant a window lapses, and not only when someone fetches. See
+/// [`Store::count`] for why that is both the cheap question and the honest one.
+pub const MAX_MAILBOX_DEPOSITS: usize = 256;
+
+/// How many deposits one sender may make inside [`RATE_WINDOW`].
+///
+/// Weaker than it looks, deliberately stated: a sender id is self-declared and
+/// self-signed, so anyone willing to mint device keys can have as many senders
+/// as they like. This bounds an honest client's retries and gives abuse control
+/// the subject the deposit signature exists to provide. It is not the fence —
+/// [`MAX_MAILBOX_DEPOSITS`] is.
+pub const MAX_DEPOSITS_PER_WINDOW: usize = 32;
+
+/// The window [`MAX_DEPOSITS_PER_WINDOW`] is counted over, in seconds.
+pub const RATE_WINDOW: u64 = 60;
+
+/// The most senders whose recent deposits are tracked at once.
+///
+/// The rate table is the same class of hazard as the challenge map: state an
+/// unauthenticated caller can grow. Bounded for that reason.
+pub const MAX_TRACKED_SENDERS: usize = 4096;
+
+/// The most challenges outstanding at once.
+///
+/// `challenge` is free and unauthenticated, so the map behind it is reachable
+/// state that anyone can grow. Expiry alone is not a bound — it runs on the next
+/// call and on the sweep, and between those the map is whatever arrived.
+pub const MAX_OUTSTANDING_CHALLENGES: usize = 16_384;
+
 /// Why the Post refused.
 ///
 /// Each arm names a different remedy, which is the reason they are not one
@@ -91,6 +130,21 @@ pub enum Refusal {
     /// The store could not answer. Never rendered as "nothing waiting" — an
     /// absence that could not be measured is not an absence.
     Unavailable,
+    /// At capacity. Ask again later.
+    ///
+    /// **Deliberately coarse, and the one arm that is.** A full mailbox, a
+    /// sender over its window, and a full rate table are one answer on purpose:
+    /// telling a depositor which one it hit would tell it about the *recipient's*
+    /// state, and `plane::live` already refuses to report a full outbox to a
+    /// sender for exactly that reason — it would leak the receiver's queue depth
+    /// to whoever is filling it.
+    ///
+    /// So this surface splits the difference rather than picking a side of the
+    /// `admission`-coarse / `Refusal`-precise tension: structural faults name
+    /// themselves, because their remedy is "send it properly" and knowing that
+    /// leaks nothing about anyone else. Capacity does not, because its remedy is
+    /// "later" whichever limit was reached.
+    AtCapacity,
 }
 
 impl std::fmt::Display for Refusal {
@@ -253,6 +307,12 @@ pub struct Post<S: Store> {
     store: S,
     /// Issued challenges, by nonce. Single-use: answering removes it.
     outstanding: HashMap<[u8; 32], Challenge>,
+    /// Deposit timestamps per sender, newest last, pruned to [`RATE_WINDOW`].
+    ///
+    /// In memory like `outstanding`, and with the same consequence: a restart
+    /// forgets every window. That is the honest shape for a single instance, and
+    /// the note in `main.rs` about horizontal scaling covers both.
+    recent: HashMap<DeviceId, Vec<u64>>,
 }
 
 impl<S: Store> Post<S> {
@@ -260,6 +320,7 @@ impl<S: Store> Post<S> {
         Self {
             store,
             outstanding: HashMap::new(),
+            recent: HashMap::new(),
         }
     }
 
@@ -281,6 +342,13 @@ impl<S: Store> Post<S> {
             issued_at: now,
         };
         self.expire_challenges(now);
+        // Expire first, then bound. Refusing the newest rather than evicting the
+        // oldest follows `signal::OfferQueue`: what is already outstanding may be
+        // about to be answered, and dropping it to make room for an arrival would
+        // let a prober invalidate real challenges by asking for more.
+        if self.outstanding.len() >= MAX_OUTSTANDING_CHALLENGES {
+            return Err(Refusal::AtCapacity);
+        }
         self.outstanding.insert(nonce, challenge.clone());
         Ok(challenge)
     }
@@ -301,9 +369,69 @@ impl<S: Store> Post<S> {
             &request.envelope.preimage(&request.sender),
             &request.signature,
         )?;
-        self.store
+
+        // Capacity is checked after the signature and never before it. An
+        // unsigned deposit must not be able to consume a sender's window or
+        // learn a mailbox is full, and charging the window before verifying
+        // would let anyone spend somebody else's allowance by forging their id.
+        self.admit_deposit(&request.sender, &request.envelope.recipient, now)?;
+
+        let id = self
+            .store
             .put(&request.sender, &request.envelope, now)
-            .map_err(|_| Refusal::Unavailable)
+            .map_err(|_| Refusal::Unavailable)?;
+        self.recent
+            .entry(request.sender.clone())
+            .or_default()
+            .push(now);
+        Ok(id)
+    }
+
+    /// Whether this sender may deposit to this recipient right now.
+    ///
+    /// Two ceilings and one bound on the bookkeeping itself, in the order that
+    /// costs least. Nothing here is recorded — the window is charged only once
+    /// the store has actually accepted the envelope, so a deposit the store
+    /// refuses does not spend the sender's allowance.
+    fn admit_deposit(
+        &mut self,
+        sender: &DeviceId,
+        recipient: &DeviceId,
+        now: u64,
+    ) -> Result<(), Refusal> {
+        self.prune_recent(now);
+
+        if let Some(seen) = self.recent.get(sender) {
+            if seen.len() >= MAX_DEPOSITS_PER_WINDOW {
+                return Err(Refusal::AtCapacity);
+            }
+        } else if self.recent.len() >= MAX_TRACKED_SENDERS {
+            // A new sender with nowhere to record it. Refusing rather than
+            // admitting untracked is the only safe direction: admitting would
+            // make filling this table the way to switch the rate limit off.
+            return Err(Refusal::AtCapacity);
+        }
+
+        // What occupies the mailbox, expired included — see `Store::count`. A
+        // mailbox at its ceiling frees itself on the next sweep rather than
+        // waiting for a fetch that may never come.
+        let held = self
+            .store
+            .count(recipient)
+            .map_err(|_| Refusal::Unavailable)?;
+        if held >= MAX_MAILBOX_DEPOSITS {
+            return Err(Refusal::AtCapacity);
+        }
+        Ok(())
+    }
+
+    /// Drop deposit marks older than [`RATE_WINDOW`], and senders left with none.
+    fn prune_recent(&mut self, now: u64) {
+        let floor = now.saturating_sub(RATE_WINDOW);
+        self.recent.retain(|_, seen| {
+            seen.retain(|at| *at > floor);
+            !seen.is_empty()
+        });
     }
 
     /// Return what is waiting, to a device that proves it is that device.
@@ -514,6 +642,135 @@ mod tests {
             .expect("fetch");
         assert_eq!(waiting.len(), 1, "one spelling, one mailbox, one letter");
         assert_eq!(waiting[0].envelope.sealed, b"canonical");
+    }
+
+    #[test]
+    fn a_sender_over_its_window_is_refused_and_recovers_when_the_window_lapses() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let mut post = Post::new(MemStore::default());
+
+        for n in 0..MAX_DEPOSITS_PER_WINDOW {
+            let body = format!("letter {n}");
+            post.deposit(
+                &signed_deposit(&SENDER_SEED, envelope_to(&recipient, body.as_bytes())),
+                NOW,
+            )
+            .expect("inside the window");
+        }
+
+        assert_eq!(
+            post.deposit(
+                &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"one too many")),
+                NOW
+            ),
+            Err(Refusal::AtCapacity),
+            "a sender past its allowance is refused"
+        );
+
+        // The window is a window, not a quota: past it the marks are pruned.
+        post.deposit(
+            &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"after the window")),
+            NOW + RATE_WINDOW + 1,
+        )
+        .expect("the window lapsed");
+    }
+
+    #[test]
+    fn a_forged_deposit_cannot_spend_the_window_of_the_sender_it_names() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let sender = device_from_seed(&SENDER_SEED);
+        let mut post = Post::new(MemStore::default());
+
+        // Signed by a stranger, claiming to be SENDER. If capacity were charged
+        // before the signature check, anyone could exhaust anybody's allowance by
+        // spelling their name.
+        for n in 0..MAX_DEPOSITS_PER_WINDOW * 2 {
+            let body = format!("forgery {n}");
+            let mut forged =
+                signed_deposit(&STRANGER_SEED, envelope_to(&recipient, body.as_bytes()));
+            forged.sender = sender.clone();
+            assert_eq!(
+                post.deposit(&forged, NOW),
+                Err(Refusal::BadSignature),
+                "a forgery is named as one"
+            );
+        }
+
+        post.deposit(
+            &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"mine")),
+            NOW,
+        )
+        .expect("the named sender's own allowance was never touched");
+    }
+
+    #[test]
+    fn a_full_mailbox_is_refused_the_same_way_a_fast_sender_is() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let mut post = Post::new(MemStore::default());
+
+        // Spread across senders so the mailbox ceiling is what binds, not the
+        // per-sender window. Eight senders at the window's limit fills 256.
+        let senders = MAX_MAILBOX_DEPOSITS / MAX_DEPOSITS_PER_WINDOW;
+        for s in 0..senders {
+            let seed = [(100 + s) as u8; 32];
+            for n in 0..MAX_DEPOSITS_PER_WINDOW {
+                let body = format!("from {s} number {n}");
+                post.deposit(
+                    &signed_deposit(&seed, envelope_to(&recipient, body.as_bytes())),
+                    NOW,
+                )
+                .expect("under the ceiling");
+            }
+        }
+
+        // A fresh sender, well inside its own window, refused by the recipient's
+        // ceiling — and told nothing that distinguishes the two.
+        assert_eq!(
+            post.deposit(
+                &signed_deposit(&[200u8; 32], envelope_to(&recipient, b"no room")),
+                NOW
+            ),
+            Err(Refusal::AtCapacity),
+            "the ceiling binds regardless of how many senders share the work"
+        );
+
+        // Another device's mailbox is unaffected: the ceiling is per recipient.
+        post.deposit(
+            &signed_deposit(
+                &[200u8; 32],
+                envelope_to(&device_from_seed(&[7u8; 32]), b"fine"),
+            ),
+            NOW,
+        )
+        .expect("one full mailbox does not close the Post");
+    }
+
+    #[test]
+    fn outstanding_challenges_are_bounded_and_the_newest_is_the_one_refused() {
+        let mut post = Post::new(MemStore::default());
+        let mut issued = Vec::new();
+        for n in 0..MAX_OUTSTANDING_CHALLENGES {
+            let device = device_from_seed(&[(n % 251) as u8; 32]);
+            issued.push(post.challenge(&device, NOW).expect("under the bound"));
+        }
+
+        assert_eq!(
+            post.challenge(&device_from_seed(&RECIPIENT_SEED), NOW),
+            Err(Refusal::AtCapacity),
+            "a free unauthenticated mint must not be able to grow this without limit"
+        );
+
+        // The refusal cost nothing that was already outstanding: an issued
+        // challenge is still answerable, which is why the newest is refused
+        // rather than the oldest evicted.
+        let first = issued.first().expect("at least one");
+        let seed = [0u8; 32];
+        assert_eq!(
+            post.take_challenge(&first.nonce, &device_from_seed(&seed), NOW)
+                .map(|c| c.device),
+            Ok(device_from_seed(&seed)),
+            "the queue full of real challenges kept them"
+        );
     }
 
     #[test]
