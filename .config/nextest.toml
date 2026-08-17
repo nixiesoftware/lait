@@ -34,11 +34,13 @@ retries = 0
 # default being widened for everyone. Widening it here would buy one test some
 # headroom at the cost of every genuinely wedged test taking longer to surface.
 #
-# This budget assumes DEPENDENCIES ARE BUILT OPTIMIZED — see
-# `[profile.dev.package."*"]` in Cargo.toml. Tests inherit the `dev` profile, and
-# with unoptimized curve25519-dalek/frost-ed25519 the ceremony tests (real DKG +
-# threshold signing) take ~115s each and get terminated here. If these start
-# timing out, check that profile before reaching for a larger budget.
+# This budget assumes THE MEASURED RUNTIME BOUNDARIES ARE BUILT OPTIMIZED — see
+# the named curve25519/FROST and Signage PNG package overrides in Cargo.toml.
+# Tests inherit the `dev` profile. Without the crypto overrides the ceremony
+# tests (real DKG + threshold signing) take ~115s each; without the PNG
+# overrides the real Astrolabe receiver misses its first-health deadline. If
+# these start timing out, check those overrides before reaching for a larger
+# budget.
 slow-timeout = { period = "30s", terminate-after = 3 }
 
 # Only the suites that put real traffic on a real relay belong in the network
@@ -184,8 +186,8 @@ retries = 1
 # important than a DTO fixture; it is a thing to learn about within a day
 # rather than within a minute.
 
-# The heavy set, measured on an idle 12-core dev box with dependencies built
-# optimized (the `[profile.dev.package."*"]` note in Cargo.toml):
+# The heavy set, measured on an idle 12-core dev box with the crypto boundary
+# optimized (the named curve25519/FROST package overrides in Cargo.toml):
 #
 #   mechanics frontier_isolation_tests  143 s
 #   mechanics sparse_ceremony_tests     133 s
