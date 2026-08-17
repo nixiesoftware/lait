@@ -63,7 +63,7 @@ fn a_sender_reaches_a_recipient_by_profile_with_no_shared_space() {
     // ── Alice publishes a profile and makes her devices reachable to Bob ──
     let mut alice = Registry::new();
     let genesis = DeviceLink::seal(&ALICE_A, &ALICE_B, [7u8; 16], 1).expect("link");
-    let profile = alice.found(genesis).expect("found");
+    let profile = alice.found(genesis.clone()).expect("found");
 
     let to_bob = Audience::Correspondent(Party::Device(bob_device.clone()));
     let avowed = alice
@@ -82,7 +82,9 @@ fn a_sender_reaches_a_recipient_by_profile_with_no_shared_space() {
 
     // ── Bob learns Alice from the projection and resolves her devices ──
     let mut bob = Registry::new();
-    let learned = bob.absorb(projection, &bob_standing).expect("absorb");
+    let learned = bob
+        .absorb(projection, &genesis, &bob_standing)
+        .expect("absorb");
     assert_eq!(learned, profile);
     let recipients = bob.resolve(&profile).expect("resolved");
     assert_eq!(recipients.len(), 2, "Bob resolved both of Alice's devices");
@@ -146,9 +148,8 @@ fn any_avowed_device_opens_the_same_sealed_letter() {
     // Alice's set, resolved the same way.
     let bob_device = device_from_seed(&BOB);
     let mut alice = Registry::new();
-    let profile = alice
-        .found(DeviceLink::seal(&ALICE_A, &ALICE_B, [7u8; 16], 1).expect("link"))
-        .expect("found");
+    let genesis = DeviceLink::seal(&ALICE_A, &ALICE_B, [7u8; 16], 1).expect("link");
+    let profile = alice.found(genesis.clone()).expect("found");
     alice
         .avow_reachable(
             &profile,
@@ -165,7 +166,7 @@ fn any_avowed_device_opens_the_same_sealed_letter() {
         };
         let projection = alice.project(&profile, &ALICE_A, 5, &bob_standing).unwrap();
         let mut bob = Registry::new();
-        bob.absorb(projection, &bob_standing).unwrap();
+        bob.absorb(projection, &genesis, &bob_standing).unwrap();
         bob.resolve(&profile).unwrap()
     };
 
@@ -184,4 +185,127 @@ fn any_avowed_device_opens_the_same_sealed_letter() {
     let opened = Letter::open(&ALICE_B, &device_from_seed(&ALICE_B), &sealed)
         .expect("the other device opens the same envelope");
     assert_eq!(opened.from, bob_device);
+}
+
+// ── The same reach, carried over a real HTTP carrier ───────────────────────────
+
+use correspondence::post::{PostCarrier, Signer};
+use lait_post::http::{router, Shared};
+use lait_post::{FsStore, Post};
+use std::sync::{Arc, Mutex};
+
+/// Real seconds — a networked carrier checks a deposit's window against its own
+/// clock, so a fixed timestamp would be refused as an unusable expiry.
+fn wall_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs()
+}
+
+/// A local `lait-post` over HTTP, or the deployed one when `POST_SMOKE_URL` is set.
+async fn serve() -> (String, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("a deposit root");
+    if let Ok(remote) = std::env::var("POST_SMOKE_URL") {
+        return (remote.trim_end_matches('/').to_owned(), dir);
+    }
+    let store = FsStore::open(dir.path()).expect("open the store");
+    let shared: Shared = Arc::new(Mutex::new(Post::new(store)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router(shared)).await;
+    });
+    (format!("http://127.0.0.1:{port}"), dir)
+}
+
+/// Reach resolved through kinship, then carried over a real HTTP `PostCarrier`:
+/// Bob deposits to the device his resolution named, Alice fetches it there. The
+/// only thing that told Bob where to send was Alice's profile.
+#[tokio::test(flavor = "multi_thread")]
+async fn reach_by_profile_then_carry_over_a_real_post() {
+    let (base, _root) = serve().await;
+    let bob_device = device_from_seed(&BOB);
+
+    // Alice publishes; Bob resolves — the kinship half, identical to in-process.
+    let mut alice = Registry::new();
+    let genesis = DeviceLink::seal(&ALICE_A, &ALICE_B, [7u8; 16], 1).expect("link");
+    let profile = alice.found(genesis.clone()).expect("found");
+    alice
+        .avow_reachable(
+            &profile,
+            Audience::Correspondent(Party::Device(bob_device.clone())),
+            &ALICE_A,
+            5,
+            [3u8; 16],
+        )
+        .expect("avow");
+    let bob_standing = Standing {
+        device: Some(bob_device.clone()),
+        ..Standing::default()
+    };
+    let projection = alice.project(&profile, &ALICE_A, 5, &bob_standing).unwrap();
+    let mut bob = Registry::new();
+    bob.absorb(projection, &genesis, &bob_standing).unwrap();
+    let recipients = bob.resolve(&profile).expect("resolved");
+    let addressed = recipients[0].clone();
+    let alice_seed = if addressed == device_from_seed(&ALICE_A) {
+        ALICE_A
+    } else {
+        ALICE_B
+    };
+
+    // Bob seals and deposits over HTTP under his egress.
+    let letter = Letter::compose(
+        &BOB,
+        Content::Message {
+            body: "carried, not in-process".into(),
+        },
+        wall_now(),
+    );
+    let sealed = letter
+        .seal_to_devices(&recipients, &addressed, wall_now() + 3600)
+        .expect("seal");
+
+    let space = SpaceId::mint(&SystemUlidSource);
+    let (bob_events, bob_actor) = incept(&BOB, 9, &space);
+    let plane = actor::replay(&space, &bob_events);
+    let bob_egress = egress::authorize(&plane, &bob_actor, &bob_device).expect("bob's key");
+
+    // `block_in_place`, not `spawn_blocking`: the egress borrows the plane and
+    // cannot move into a 'static closure — the staleness guarantee, working.
+    let base_deposit = base.clone();
+    let id = tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base_deposit, Signer::new(BOB));
+        carrier.deposit(&bob_egress, &sealed, wall_now())
+    })
+    .expect("deposit over HTTP");
+    assert!(!id.is_empty());
+
+    // Alice fetches on the addressed device, authorized by her own key.
+    let base_read = base.clone();
+    let addressed_read = addressed.clone();
+    let waiting = tokio::task::block_in_place(move || {
+        let mut carrier = PostCarrier::new(base_read, Signer::new(alice_seed));
+        carrier.collect(&addressed_read, wall_now())
+    });
+    let held = match &waiting {
+        Missed::Held(held) => held,
+        Missed::Unasked(why) => panic!("the carrier could not be asked: {why}"),
+    };
+    assert_eq!(
+        held.len(),
+        1,
+        "the letter Bob addressed by resolution is waiting"
+    );
+
+    let mut mailbox = Mailbox::new();
+    assert_eq!(mailbox.ingest(&alice_seed, &addressed, held), 1);
+    let received = mailbox.letters();
+    assert_eq!(
+        received[0].letter.from, bob_device,
+        "the proven sender is Bob"
+    );
 }

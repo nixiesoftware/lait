@@ -38,6 +38,11 @@ pub enum RegistryError {
     NotHeld,
     /// A kinship artifact refused verification.
     Kinship(Refusal),
+    /// The projection could not be anchored to the profile: the genesis link
+    /// does not hash to the claimed profile, or the head was signed by a device
+    /// the genesis does not name. Without this check a holder of a public
+    /// profile id could forge a projection and substitute the device set.
+    Unanchored,
     /// Persisted bytes could not be encoded or decoded.
     Codec,
 }
@@ -47,6 +52,9 @@ impl std::fmt::Display for RegistryError {
         match self {
             Self::NotHeld => f.write_str("no such profile is held"),
             Self::Kinship(refusal) => write!(f, "kinship refused: {refusal}"),
+            Self::Unanchored => {
+                f.write_str("the projection is not anchored to the profile's genesis")
+            }
             Self::Codec => f.write_str("registry bytes are not decodable"),
         }
     }
@@ -120,18 +128,40 @@ impl Registry {
         }
     }
 
-    /// Learn (or refresh) a correspondent's profile from a signed projection.
+    /// Learn (or refresh) a correspondent's profile from a signed projection,
+    /// anchored to its self-certifying genesis.
     ///
-    /// The projection is admitted only if it *verifies* for this reader — head
-    /// signed, every body listed in it, and no admissible body silently dropped.
+    /// The `genesis` link is the anchor a correspondent is handed alongside the
+    /// projection. Three things must hold before a single device is believed,
+    /// and the first two are what stop a holder of the public profile id from
+    /// forging a device set:
+    ///
+    /// 1. the genesis hashes to exactly this profile (`ProfileId::from_genesis`),
+    /// 2. the projection's head was signed by a device the genesis *names* — so
+    ///    the vouching key is provably one of the profile's own roots, not any
+    ///    key an attacker minted,
+    /// 3. the projection then verifies for this reader — head signed, every body
+    ///    listed, no admissible body silently dropped.
+    ///
     /// A newer projection (higher head epoch) replaces an older known one; an
-    /// authored holding is never overwritten, because this identity's own log is
-    /// always the fuller truth about its own profile.
+    /// authored holding is never overwritten.
     pub fn absorb(
         &mut self,
         projection: Projection,
+        genesis: &DeviceLink,
         reader: &Standing,
     ) -> Result<ProfileId, RegistryError> {
+        // Anchor first: the head signer must be a genesis root of *this* profile.
+        genesis.verify()?;
+        let bytes = postcard::to_stdvec(genesis).map_err(|_| RegistryError::Codec)?;
+        if ProfileId::from_genesis(&bytes) != projection.profile {
+            return Err(RegistryError::Unanchored);
+        }
+        let head = projection.head.as_ref().ok_or(RegistryError::Unanchored)?;
+        if !genesis.devices.contains(&head.by) {
+            return Err(RegistryError::Unanchored);
+        }
+
         projection.verify(reader)?;
         // verify established the head is present; take its epoch for freshness.
         let epoch = projection.head.as_ref().map_or(0, |head| head.epoch);
@@ -192,7 +222,7 @@ impl Registry {
                 per,
             )?;
             self.extend(profile, Entry::Avow(avowal))?;
-            avowed += 1;
+            avowed = avowed.saturating_add(1);
         }
         Ok(avowed)
     }
@@ -260,22 +290,45 @@ impl Registry {
     }
 }
 
-/// The devices a correspondent avowed into `profile`, drawn from a projection's
-/// already-admitted bodies.
+/// The devices a correspondent avowed into `profile` in their **latest
+/// publication**.
 ///
 /// Every body was verified and audience-checked when the projection was
-/// absorbed, and inclusion in the signed head is the profile's own device
-/// vouching for the membership — so the trust is the head signature, not each
-/// avowal's signer. This collects the device subjects of the `Claim::Profile`
-/// avowals that name this exact profile.
+/// absorbed, and the head signer was anchored to a genesis root — so the trust
+/// is that anchored head, not each avowal's signer. This collects the device
+/// subjects of the `Claim::Profile` avowals naming this profile *at the highest
+/// avowal epoch present*, not the union across epochs.
+///
+/// Taking only the latest publication is what lets a set **shrink**: a device
+/// retired from the owner's own links is `Own`-audience and never reaches a
+/// correspondent, so the correspondent learns the removal the one way it can —
+/// the owner re-avows the whole live set at a new epoch, and that publication
+/// supersedes the old. Unioning across epochs would make a correspondent's set
+/// grow forever and never drop a compromised device.
 fn reachable_devices(profile: &ProfileId, projection: &Projection) -> Vec<DeviceId> {
+    // The epoch of the most recent Claim::Profile avowal for this profile.
+    let latest = projection
+        .bodies
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Avow(avowal) => match &avowal.claim {
+                Claim::Profile(claimed) if claimed == profile => Some(avowal.epoch),
+                _ => None,
+            },
+            _ => None,
+        })
+        .max();
+    let Some(latest) = latest else {
+        return Vec::new();
+    };
+
     let mut devices: Vec<DeviceId> = Vec::new();
     for entry in &projection.bodies {
         let Entry::Avow(avowal) = entry else { continue };
         let Claim::Profile(claimed) = &avowal.claim else {
             continue;
         };
-        if claimed != profile {
+        if claimed != profile || avowal.epoch != latest {
             continue;
         }
         if let Party::Device(device) = &avowal.subject {
@@ -400,7 +453,7 @@ mod tests {
         // Alice authors her profile.
         let (link, _) = genesis();
         let mut alice = Registry::new();
-        let profile = alice.found(link).expect("found");
+        let profile = alice.found(link.clone()).expect("found");
 
         // She avows A and B into her profile, to Bob specifically.
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
@@ -425,7 +478,9 @@ mod tests {
 
         // Bob absorbs and resolves.
         let mut bob = Registry::new();
-        let learned = bob.absorb(projection, &bob_standing()).expect("absorb");
+        let learned = bob
+            .absorb(projection, &link, &bob_standing())
+            .expect("absorb");
         assert_eq!(learned, profile);
         let mut expected = vec![device_from_seed(&A), device_from_seed(&B)];
         expected.sort();
@@ -438,7 +493,7 @@ mod tests {
     fn the_reach_handshake_in_two_calls() {
         let (link, _) = genesis();
         let mut alice = Registry::new();
-        let profile = alice.found(link).expect("found");
+        let profile = alice.found(link.clone()).expect("found");
         // A third device, so the avowed set is more than the genesis pair.
         let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
         alice.extend(&profile, Entry::Link(third)).expect("extend");
@@ -454,7 +509,8 @@ mod tests {
             .expect("project");
 
         let mut bob = Registry::new();
-        bob.absorb(projection, &bob_standing()).expect("absorb");
+        bob.absorb(projection, &link, &bob_standing())
+            .expect("absorb");
 
         let mut expected = vec![
             device_from_seed(&A),
@@ -471,7 +527,7 @@ mod tests {
     fn avow_reachable_follows_the_live_set() {
         let (link, _) = genesis();
         let mut alice = Registry::new();
-        let profile = alice.found(link).expect("found");
+        let profile = alice.found(link.clone()).expect("found");
         let retire = Retirement::seal(&A, device_from_seed(&B), 3, [9u8; 16]).expect("retire");
         alice
             .extend(&profile, Entry::Retire(retire))
@@ -487,7 +543,8 @@ mod tests {
             .project(&profile, &A, 5, &bob_standing())
             .expect("project");
         let mut bob = Registry::new();
-        bob.absorb(projection, &bob_standing()).expect("absorb");
+        bob.absorb(projection, &link, &bob_standing())
+            .expect("absorb");
         assert_eq!(
             bob.resolve(&profile).as_deref(),
             Some([device_from_seed(&A)].as_slice())
@@ -500,7 +557,7 @@ mod tests {
     fn a_stranger_absorbs_a_projection_but_reaches_nothing() {
         let (link, _) = genesis();
         let mut alice = Registry::new();
-        let profile = alice.found(link).expect("found");
+        let profile = alice.found(link.clone()).expect("found");
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
         let avowal = Avowal::seal(
             &A,
@@ -525,7 +582,7 @@ mod tests {
         let projection = log.project(&A, 5, &stranger).expect("project");
 
         let mut them = Registry::new();
-        them.absorb(projection, &stranger).expect("absorb");
+        them.absorb(projection, &link, &stranger).expect("absorb");
         assert_eq!(
             them.resolve(&profile),
             Some(Vec::new()),
@@ -534,55 +591,152 @@ mod tests {
     }
 
     /// A newer projection replaces an older known one; an older one does not
-    /// regress it.
+    /// regress it. Each publication avows the whole live set at one epoch, so a
+    /// device that joined between them is present in the newer and absent in the
+    /// older — and absorbing the older must not shrink the known set.
     #[test]
     fn absorb_takes_the_newer_projection_and_never_regresses() {
         let (link, _) = genesis();
         let mut alice = Registry::new();
-        let profile = alice.found(link).expect("found");
+        let profile = alice.found(link.clone()).expect("found");
         let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
 
-        // Epoch 5: only A reachable.
-        let a5 = Avowal::seal(
-            &A,
-            Party::Device(device_from_seed(&A)),
-            Claim::Profile(profile.clone()),
-            to_bob.clone(),
-            5,
-            [1u8; 16],
-        )
-        .expect("avow");
-        alice.extend(&profile, Entry::Avow(a5)).expect("extend");
-        let Holding::Authored(log5) = alice.holdings.get(&profile).unwrap().clone() else {
-            panic!()
-        };
-        let p5 = log5.project(&A, 5, &bob_standing()).expect("project");
+        // Epoch 5: the live pair {A, B} avowed and projected.
+        alice
+            .avow_reachable(&profile, to_bob.clone(), &A, 5, [1u8; 16])
+            .expect("avow");
+        let p5 = alice
+            .project(&profile, &A, 5, &bob_standing())
+            .expect("project");
 
-        // Epoch 9: A and B reachable.
-        let b9 = Avowal::seal(
-            &A,
-            Party::Device(device_from_seed(&B)),
-            Claim::Profile(profile.clone()),
-            to_bob,
-            9,
-            [2u8; 16],
-        )
-        .expect("avow");
-        alice.extend(&profile, Entry::Avow(b9)).expect("extend");
-        let Holding::Authored(log9) = alice.holdings.get(&profile).unwrap() else {
-            panic!()
-        };
-        let p9 = log9.project(&A, 9, &bob_standing()).expect("project");
+        // A device joins, and the fuller set {A, B, C} is avowed at a later epoch.
+        let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
+        alice.extend(&profile, Entry::Link(third)).expect("extend");
+        alice
+            .avow_reachable(&profile, to_bob, &A, 9, [2u8; 16])
+            .expect("avow");
+        let p9 = alice
+            .project(&profile, &A, 9, &bob_standing())
+            .expect("project");
 
         let mut bob = Registry::new();
-        bob.absorb(p9, &bob_standing()).expect("absorb newer");
-        assert_eq!(bob.resolve(&profile).map(|s| s.len()), Some(2));
-        // Absorbing the older projection must not shrink Bob's view.
-        bob.absorb(p5, &bob_standing()).expect("absorb older");
+        bob.absorb(p9, &link, &bob_standing())
+            .expect("absorb newer");
+        assert_eq!(bob.resolve(&profile).map(|s| s.len()), Some(3));
+        // Absorbing the older projection must not shrink Bob's view back to two.
+        bob.absorb(p5, &link, &bob_standing())
+            .expect("absorb older");
         assert_eq!(
             bob.resolve(&profile).map(|s| s.len()),
-            Some(2),
+            Some(3),
             "an older projection does not regress the known set"
+        );
+    }
+
+    // ── The anchor: a forged or mis-signed projection cannot substitute devices ──
+
+    /// A head signed by a device the genesis does not name is refused, even
+    /// though the projection itself verifies. Only the self-certifying roots may
+    /// vouch — a later-added or attacker-controlled device cannot head a
+    /// projection and inject a device set. (Finding 0.)
+    #[test]
+    fn a_projection_headed_by_a_non_genesis_device_is_unanchored() {
+        let (link, _) = genesis();
+        let mut alice = Registry::new();
+        let profile = alice.found(link.clone()).expect("found");
+        // C is a real device of Alice's, added by a link — but it is not a
+        // genesis root.
+        let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
+        alice.extend(&profile, Entry::Link(third)).expect("extend");
+        let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
+        alice
+            .avow_reachable(&profile, to_bob, &A, 5, [3u8; 16])
+            .expect("avow");
+
+        // Alice signs the projection's head with C, not a genesis device.
+        let projection = alice
+            .project(&profile, &C, 5, &bob_standing())
+            .expect("project");
+        assert_eq!(projection.head.as_ref().unwrap().by, device_from_seed(&C));
+
+        let mut bob = Registry::new();
+        assert!(matches!(
+            bob.absorb(projection, &link, &bob_standing()),
+            Err(RegistryError::Unanchored)
+        ));
+        assert!(
+            !bob.holds(&profile),
+            "nothing was learned from a mis-anchored head"
+        );
+    }
+
+    /// A projection for one profile cannot be anchored with a different
+    /// genesis: the genesis must hash to the very profile it claims. An attacker
+    /// holding a public profile id cannot present their own genesis for it.
+    #[test]
+    fn a_mismatched_genesis_is_unanchored() {
+        // Alice's real profile and a valid projection for it.
+        let alice_link = DeviceLink::seal(&A, &B, [7u8; 16], 1).expect("link");
+        let mut alice = Registry::new();
+        let profile = alice.found(alice_link).expect("found");
+        let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
+        alice
+            .avow_reachable(&profile, to_bob, &A, 5, [3u8; 16])
+            .expect("avow");
+        let projection = alice
+            .project(&profile, &A, 5, &bob_standing())
+            .expect("project");
+
+        // Mallory presents a genesis of his own — it hashes to a different id.
+        let mallory_link = DeviceLink::seal(&C, &BOB, [1u8; 16], 1).expect("link");
+        let mut bob = Registry::new();
+        assert!(matches!(
+            bob.absorb(projection, &mallory_link, &bob_standing()),
+            Err(RegistryError::Unanchored)
+        ));
+    }
+
+    /// Retire a device *after* it was avowed reachable: the owner re-avows the
+    /// smaller live set at a new epoch, and the correspondent's resolution
+    /// shrinks to it. Without latest-publication semantics the retired device
+    /// would linger in Bob's set forever. (Q2.)
+    #[test]
+    fn a_device_retired_after_avowing_is_dropped_on_the_next_publication() {
+        let (link, _) = genesis();
+        let mut alice = Registry::new();
+        let profile = alice.found(link.clone()).expect("found");
+        let to_bob = Audience::Correspondent(Party::Device(device_from_seed(&BOB)));
+
+        // Epoch 5: both A and B avowed reachable.
+        alice
+            .avow_reachable(&profile, to_bob.clone(), &A, 5, [3u8; 16])
+            .expect("avow");
+        let mut bob = Registry::new();
+        let p5 = alice
+            .project(&profile, &A, 5, &bob_standing())
+            .expect("project");
+        bob.absorb(p5, &link, &bob_standing()).expect("absorb");
+        assert_eq!(bob.resolve(&profile).map(|s| s.len()), Some(2), "A and B");
+
+        // B is retired (Own — never reaches Bob), then the live set is re-avowed.
+        let retire = Retirement::seal(&A, device_from_seed(&B), 6, [9u8; 16]).expect("retire");
+        alice
+            .extend(&profile, Entry::Retire(retire))
+            .expect("extend");
+        alice
+            .avow_reachable(&profile, to_bob, &A, 9, [4u8; 16])
+            .expect("re-avow");
+        let p9 = alice
+            .project(&profile, &A, 9, &bob_standing())
+            .expect("project");
+        bob.absorb(p9, &link, &bob_standing())
+            .expect("absorb newer");
+
+        let live = bob.resolve(&profile).expect("held");
+        assert_eq!(
+            live.as_slice(),
+            [device_from_seed(&A)].as_slice(),
+            "B dropped"
         );
     }
 }
