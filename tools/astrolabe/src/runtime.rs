@@ -517,6 +517,9 @@ struct Worker {
     /// through the interface is a second copy that can disagree with the first
     /// exactly when a render is failing.
     presenting: std::sync::Mutex<Option<crate::model::PresentationSelection>>,
+    /// Where the screen preference lives, so a machine that was a screen comes
+    /// back as one.
+    state_root: std::path::PathBuf,
 }
 
 async fn serve(
@@ -525,6 +528,9 @@ async fn serve(
     wake: Arc<dyn Fn() + Send + Sync>,
     mut actions: UnboundedReceiver<Action>,
 ) {
+    // Read before the supervisor starts, because the config is moved into it.
+    let state_root = config.state_root.clone();
+    let remembered = crate::screen::load(&state_root);
     let (client, signals) = match Client::start(config).await {
         Ok(started) => started,
         Err(error) => {
@@ -561,8 +567,23 @@ async fn serve(
         client,
         updates,
         wake,
-        presenting: std::sync::Mutex::new(None),
+        presenting: std::sync::Mutex::new(
+            remembered
+                .as_ref()
+                .filter(|held| held.presenting)
+                .and_then(|held| held.selection.clone())
+                .map(Into::into),
+        ),
+        state_root,
     });
+
+    // A machine that was a screen comes back as one, before the first read.
+    // Ordering matters: coming up as the Library and *then* switching would
+    // show a person the client for a frame, which reads as a client that
+    // forgot and changed its mind.
+    if remembered.is_some_and(|held| held.presenting) {
+        worker.restore_presentation().await;
+    }
 
     // The first read happens *after* the stream exists, which `Client::start`
     // guarantees by handing both back together. Reading first would open a
@@ -691,7 +712,29 @@ impl Worker {
 
     fn set_presenting(&self, selection: Option<crate::model::PresentationSelection>) {
         if let Ok(mut held) = self.presenting.lock() {
-            *held = selection;
+            held.clone_from(&selection);
+        }
+        // A preference is not worth failing an action over: the person asked
+        // to present, and remembering it is the lesser half of that.
+        if let Err(error) = crate::screen::save(&self.state_root, selection.as_ref()) {
+            tracing::warn!(%error, "could not record this machine as a screen");
+        }
+    }
+
+    /// Come back as the screen this machine was.
+    ///
+    /// The mode is restored first and the render follows, so a person whose
+    /// selection no longer resolves lands on a screen saying why rather than on
+    /// a Library that silently dropped their choice.
+    async fn restore_presentation(&self) {
+        let held = self.presenting.lock().ok().and_then(|held| held.clone());
+        match held {
+            Some(selection) => self.render_presentation(selection).await,
+            None => self.send(Update::Presentation(Box::new(crate::model::Presentation {
+                selection: None,
+                rendered: None,
+                failure: None,
+            }))),
         }
     }
 
@@ -1012,7 +1055,15 @@ impl Worker {
                 Ok(Outcome::Silent)
             }
             Action::LeavePresentation => {
-                self.set_presenting(None);
+                if let Ok(mut held) = self.presenting.lock() {
+                    *held = None;
+                }
+                // Recorded rather than forgotten: leaving is a decision, and a
+                // cleared file says so where a deleted one would be
+                // indistinguishable from never having entered.
+                if let Err(error) = crate::screen::clear(&self.state_root) {
+                    tracing::warn!(%error, "could not record leaving Big Picture");
+                }
                 self.send(Update::PresentationEnded);
                 Ok(Outcome::Silent)
             }
