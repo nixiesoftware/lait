@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2009
-pr-platform    1576
-nightly        2037
+pr             2015
+pr-platform    1582
+nightly        2043
 mutants        98
 
 [gates]
@@ -94,6 +94,12 @@ astrolabe client::space::tests::two_asks_about_two_members_are_two_things_in_fli
 astrolabe client::storage::tests::an_absent_figure_says_which_kind_of_absent_it_is
 astrolabe client::storage::tests::an_unknown_transfer_total_is_not_zero_and_not_done
 astrolabe client::storage::tests::an_unmeasured_footprint_is_absent_rather_than_zero
+astrolabe client::update::tests::a_clock_behind_the_staging_time_is_quiet_rather_than_urgent
+astrolabe client::update::tests::a_machine_that_has_never_checked_says_nothing_rather_than_up_to_date
+astrolabe client::update::tests::a_verification_failure_and_a_replayed_pointer_both_ask_for_attention
+astrolabe client::update::tests::declared_work_in_flight_holds_the_request_and_names_what_is_holding_it
+astrolabe client::update::tests::staging_is_silent_and_so_is_a_channel_that_could_not_be_asked
+astrolabe client::update::tests::the_request_gets_more_insistent_the_longer_a_release_has_waited
 astrolabe lifecycle::tests::a_stopped_external_device_is_not_reported_as_left_running
 astrolabe lifecycle::tests::an_external_daemon_survives_either_exit
 astrolabe lifecycle::tests::closing_the_window_keeps_the_device_serving
