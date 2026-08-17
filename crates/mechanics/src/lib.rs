@@ -54,6 +54,7 @@ mod compile;
 mod crypto;
 mod custody;
 mod demand;
+pub mod egress;
 
 mod dkg;
 mod expand;
