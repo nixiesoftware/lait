@@ -475,3 +475,207 @@ async fn a_blocked_sender_is_refused_at_a_real_carrier() {
         });
     }
 }
+
+/// Two people who share no Space hold a conversation across a real carrier.
+///
+/// "Instant messaging", at the mechanism: a sealed, signed message crosses, is
+/// read, and is replied to. Each letter is confidential (sealed to the
+/// recipient's device) and authentic (signed by the sender, verified on open),
+/// and neither party is in the other's Space — the whole point of the plane.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_strangers_exchange_sealed_messages() {
+    use correspondence::{Content, Letter};
+
+    let (base, _root) = serve().await;
+
+    let space = SpaceId::mint(&SystemUlidSource);
+    let (alice_event, alice_actor) = incept(&SENDER_SEED, 1, &space);
+    let (bob_event, bob_actor) = incept(&RECIPIENT_SEED, 2, &space);
+    let plane = actor::replay(&space, &[alice_event, bob_event]);
+    let alice_device = device_from_seed(&SENDER_SEED);
+    let bob_device = device_from_seed(&RECIPIENT_SEED);
+
+    // Alice writes to Bob.
+    let hello = Letter::compose(
+        &SENDER_SEED,
+        Content::Message {
+            body: "are you there?".into(),
+        },
+        now(),
+    );
+    let sealed = hello.seal_to(&bob_device, now() + 3600).expect("seal");
+    let alice_standing = egress::authorize(&plane, &alice_actor, &alice_device).expect("alice");
+    tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(SENDER_SEED));
+        carrier.deposit(&alice_standing, &sealed, now())
+    })
+    .expect("deposit alice's message");
+
+    // Bob collects, opens, verifies, reads.
+    let base_bob = base.clone();
+    let for_bob = tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base_bob, Signer::new(RECIPIENT_SEED));
+        carrier.collect(&device_from_seed(&RECIPIENT_SEED), now())
+    });
+    let waiting = for_bob.held().expect("asked").to_vec();
+    assert_eq!(waiting.len(), 1);
+    let opened = Letter::open(&RECIPIENT_SEED, &bob_device, &waiting[0].sealed)
+        .expect("bob opens and the signature verifies");
+    assert_eq!(
+        opened.from, alice_device,
+        "the message is from alice, proven"
+    );
+    match &opened.content {
+        Content::Message { body } => assert_eq!(body, "are you there?"),
+        other => panic!("expected a message, got {other:?}"),
+    }
+    let hello_id = waiting[0].id.clone();
+
+    // Bob replies.
+    let reply = Letter::compose(
+        &RECIPIENT_SEED,
+        Content::Message {
+            body: "I am. hello.".into(),
+        },
+        now(),
+    );
+    let sealed = reply.seal_to(&alice_device, now() + 3600).expect("seal");
+    let bob_standing = egress::authorize(&plane, &bob_actor, &bob_device).expect("bob");
+    tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(RECIPIENT_SEED));
+        carrier.deposit(&bob_standing, &sealed, now())
+    })
+    .expect("deposit bob's reply");
+
+    // Alice reads the reply.
+    let base_alice = base.clone();
+    let for_alice = tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base_alice, Signer::new(SENDER_SEED));
+        carrier.collect(&device_from_seed(&SENDER_SEED), now())
+    });
+    let reply_waiting = for_alice.held().expect("asked").to_vec();
+    assert_eq!(reply_waiting.len(), 1);
+    let opened = Letter::open(&SENDER_SEED, &alice_device, &reply_waiting[0].sealed)
+        .expect("alice opens the reply");
+    assert_eq!(opened.from, bob_device);
+    match &opened.content {
+        Content::Message { body } => assert_eq!(body, "I am. hello."),
+        other => panic!("expected a message, got {other:?}"),
+    }
+    let reply_id = reply_waiting[0].id.clone();
+
+    // Leave the shared carrier as empty as we found it.
+    let _ = tokio::task::block_in_place(|| {
+        let mut a = PostCarrier::new(base.clone(), Signer::new(RECIPIENT_SEED));
+        let _ = a.acknowledge(&bob_device, std::slice::from_ref(&hello_id), now());
+        let mut b = PostCarrier::new(base.clone(), Signer::new(SENDER_SEED));
+        b.acknowledge(&alice_device, std::slice::from_ref(&reply_id), now())
+    });
+}
+
+/// A real, self-authenticating invitation crosses the carrier and verifies.
+///
+/// "Invitation working", end to end: a `SignedCoordinates` minted by a founder,
+/// sealed inside a letter, deposited, collected, opened — and then it
+/// self-authenticates against its own Space id, needing no prior state, which is
+/// exactly the property that lets it ride any carrier and lets a total stranger
+/// check it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_invitation_crosses_the_carrier_and_self_authenticates() {
+    use correspondence::{Content, Letter};
+    use runtime::coordinates::{
+        ApproachRoute, CoordinatesAdmission, CoordinatesPayload, SignedCoordinates,
+    };
+
+    const FOUNDER_SEED: [u8; 32] = [71u8; 32];
+    const RECOVERY_SEED: [u8; 32] = [72u8; 32];
+    const STATION_SEED: [u8; 32] = [73u8; 32];
+    const SALT: [u8; 16] = [9u8; 16];
+
+    let (base, _root) = serve().await;
+
+    // Found a Space and mint a genuine invitation into it.
+    let rc = mechanics::space::recovery_commit(&mechanics::space::recovery_pub_of(&RECOVERY_SEED))
+        .expect("recovery commit");
+    let founder_device = mechanics::space::recovery_pub_of(&FOUNDER_SEED);
+    let ws = mechanics::space::derive_space_id(&founder_device, &SALT, &rc);
+    let (incept_event, _actor) =
+        mechanics::actor::incept_single(&FOUNDER_SEED, &ws, [1u8; 16], [2u8; 16], None);
+    let station_key = device_from_seed(&STATION_SEED)
+        .key_bytes()
+        .expect("station key");
+    let payload = CoordinatesPayload {
+        space: <[u8; 29]>::try_from(ws.as_str().as_bytes()).expect("space bytes"),
+        salt: SALT,
+        recovery_root: rc,
+        founder_inception: postcard::to_stdvec(&incept_event).expect("encode inception"),
+        display_name_hint: "A Space".into(),
+        approach_station: station_key,
+        approach_nick_hint: "host".into(),
+        approach_routes: vec![ApproachRoute::DirectIpv4 {
+            ip: [10, 0, 0, 1],
+            port: 4242,
+        }],
+        admission: CoordinatesAdmission::None,
+    };
+    let invitation = SignedCoordinates::sign(payload, &STATION_SEED);
+    // It self-authenticates before it is even sent — the property the letter is
+    // only the carriage for.
+    invitation
+        .verify()
+        .expect("a freshly minted invitation verifies");
+
+    // Alice seals it to Bob and deposits it.
+    let space = SpaceId::mint(&SystemUlidSource);
+    let (alice_event, alice_actor) = incept(&SENDER_SEED, 1, &space);
+    let plane = actor::replay(&space, &[alice_event]);
+    let alice_device = device_from_seed(&SENDER_SEED);
+    let bob_device = device_from_seed(&RECIPIENT_SEED);
+
+    let letter = Letter::compose(
+        &SENDER_SEED,
+        Content::Invitation {
+            coordinates: invitation.encode(),
+        },
+        now(),
+    );
+    let sealed = letter.seal_to(&bob_device, now() + 3600).expect("seal");
+    let alice_standing = egress::authorize(&plane, &alice_actor, &alice_device).expect("alice");
+    tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(SENDER_SEED));
+        carrier.deposit(&alice_standing, &sealed, now())
+    })
+    .expect("deposit the invitation");
+
+    // Bob collects, opens, and the invitation self-authenticates for him — a
+    // stranger to that Space, with no prior state.
+    let base_bob = base.clone();
+    let for_bob = tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base_bob, Signer::new(RECIPIENT_SEED));
+        carrier.collect(&device_from_seed(&RECIPIENT_SEED), now())
+    });
+    let waiting = for_bob.held().expect("asked").to_vec();
+    assert_eq!(waiting.len(), 1);
+    let opened =
+        Letter::open(&RECIPIENT_SEED, &bob_device, &waiting[0].sealed).expect("bob opens it");
+    let carried = match &opened.content {
+        Content::Invitation { coordinates } => {
+            SignedCoordinates::decode_canonical(coordinates).expect("decode the carried invitation")
+        }
+        other => panic!("expected an invitation, got {other:?}"),
+    };
+    let verified = carried
+        .verify()
+        .expect("the carried invitation self-authenticates for a stranger");
+    assert_eq!(
+        verified.space.as_str(),
+        ws.as_str(),
+        "it is an invitation to the Space it was minted for"
+    );
+
+    let ack_id = waiting[0].id.clone();
+    let _ = tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base.clone(), Signer::new(RECIPIENT_SEED));
+        carrier.acknowledge(&bob_device, std::slice::from_ref(&ack_id), now())
+    });
+}

@@ -304,8 +304,7 @@ impl SignedAck {
 /// because the wire format is.
 pub mod sign {
     use super::{
-        Challenge, DeviceId, Envelope, SignedAck, SignedDeposit, SignedFetch, ACK_DOMAIN,
-        FETCH_DOMAIN,
+        Challenge, Envelope, SignedAck, SignedDeposit, SignedFetch, ACK_DOMAIN, FETCH_DOMAIN,
     };
 
     /// Sign a deposit as `seed`'s device.

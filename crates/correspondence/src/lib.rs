@@ -80,10 +80,14 @@ use mechanics::egress::Egress;
 use mechanics::ids::DeviceId;
 use serde::{Deserialize, Serialize};
 
+pub mod letter;
+pub mod mailbox;
 pub mod mem;
 pub mod post;
 pub mod watch;
 
+pub use letter::{Content, Letter};
+pub use mailbox::{Mailbox, Received};
 pub use mem::MemCarrier;
 pub use post::PostCarrier;
 

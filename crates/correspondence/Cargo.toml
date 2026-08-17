@@ -39,6 +39,10 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 tokio = { version = "1", default-features = false, features = ["time", "sync", "macros", "rt"] }
 
 [dev-dependencies]
+# For the invitation hop test: a real, self-authenticating `SignedCoordinates` to
+# carry and verify. Dev-only — the crate itself never names `runtime`, because an
+# invitation is opaque bytes to the carriage and self-authenticating to the reader.
+runtime = { path = "../runtime" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "test-util"] }
 axum = "0.8"
 tempfile = "3"
