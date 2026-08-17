@@ -48,20 +48,24 @@ pub struct WorldStanding {
 ///
 /// Keyed by World id. Empty when there is no identity bound yet, which is the
 /// same answer as "nothing has been checked" and draws the same way.
-pub fn world_standings(
-    identity: Option<&Path>,
-    entries: &[LibraryEntry],
-) -> BTreeMap<String, WorldStanding> {
+///
+/// Enumerates the Worlds itself rather than taking the Library's rows, because
+/// this is sampled on the host tick — once a second, beside the two control
+/// round trips already there — and a signature that needed the rows would have
+/// made the cheap half depend on the expensive one. Two small file reads per
+/// World; the Library is a handful of rows and never a corpus.
+pub fn world_standings(identity: Option<&Path>) -> BTreeMap<String, WorldStanding> {
     let Some(identity) = identity else {
         return BTreeMap::new();
     };
     let worlds = lait::serve::head::worlds_root(identity);
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let standing = lait::update::world::standing(&worlds, &entry.world)?;
+    lait::composition::bundled_client_packages()
+        .packages()
+        .filter_map(|package| {
+            let world = package.world().as_str().to_string();
+            let standing = lait::update::world::standing(&worlds, &world)?;
             Some((
-                entry.world.clone(),
+                world,
                 WorldStanding {
                     behind: standing.behind(),
                     serving: standing.serving,

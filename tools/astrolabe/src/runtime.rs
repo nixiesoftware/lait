@@ -584,15 +584,7 @@ impl Worker {
         self.send(Update::Heads(self.client.heads()));
         // The Library is compiled in — the install list — so reading it can
         // neither fail nor go stale against a daemon.
-        let library = self.client.get_library();
-        // What each of those Worlds' channels last said, which is measured and
-        // therefore can. Read from the identity's own directory rather than
-        // asked for over a plane: the standing is a fact on disk precisely so
-        // the client and the daemon need not be alive at the same moment.
-        self.send(Update::WorldStandings(
-            crate::client::library::world_standings(self.client.identity(), &library),
-        ));
-        self.send(Update::Library(library));
+        self.send(Update::Library(self.client.get_library()));
         match self.client.get_storage().await {
             Ok(facts) => self.send(Update::Storage(facts)),
             Err(error) => self.fail(None, "read storage", error),
@@ -631,6 +623,19 @@ impl Worker {
     /// without waiting for F5. A missed sample keeps the last context —
     /// flooding a failure every second is not a sampling failure, it is noise.
     async fn sample_host(&self) {
+        // What each World's channel last said. Sampled here rather than only
+        // on a re-read because CLIENT-66 asks for the staged state to be
+        // visible *the moment staging completes* — a fact that only arrived on
+        // F5 would be one a person had to know to go looking for, which is the
+        // opposite of an evergreen client.
+        //
+        // Two small file reads beside two control round trips already on this
+        // tick. It is a disk read rather than a subscription for the reason
+        // the standing is a file at all: the daemon writes it whether or not a
+        // client is running, so there is no event to have missed.
+        self.send(Update::WorldStandings(
+            crate::client::library::world_standings(self.client.identity_dir().as_deref()),
+        ));
         if let Ok(context) = self.client.host_context().await {
             self.send(Update::Context(Box::new(context)));
         }
@@ -668,7 +673,7 @@ impl Worker {
             // the same reason every other network read here is: a World host
             // that is slow must not hold a frame.
             Action::UpdateWorld { world } => {
-                let Some(identity) = client.identity().map(std::path::Path::to_path_buf) else {
+                let Some(identity) = client.identity_dir() else {
                     return Err(ClientError::invalid(
                         "no identity is bound, so there is no World to update".to_string(),
                     ));

@@ -108,6 +108,19 @@ impl Client {
         self.inner.identity.as_deref()
     }
 
+    /// The identity directory this client's daemon actually keeps state under.
+    ///
+    /// Not [`Self::identity`], and the difference is the whole reason this
+    /// exists: that field is the *override* (`--home`), and it is `None` for
+    /// the ordinary per-user identity — which is every normal launch. Reading
+    /// a daemon-written fact through it would have found nothing on exactly
+    /// the machines that have one.
+    pub fn identity_dir(&self) -> Option<PathBuf> {
+        selection_for(self.inner.identity.as_deref())
+            .identity_dir()
+            .ok()
+    }
+
     /// A control-protocol client for this identity's daemon.
     ///
     /// Built per call rather than held: the daemon is an always-running local
