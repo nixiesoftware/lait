@@ -12,6 +12,9 @@ replica = { path = "../replica" }
 runtime = { path = "../runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Requirement ranges: a World names a host fact and the versions it runs
+# against, so a fact moving for an unrelated reason leaves it working.
+semver = "1"
 sha2 = "0.10"
 tracing = "0.1"
 

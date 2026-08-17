@@ -156,13 +156,16 @@ and a real process.**
 platform-independent — `cargo metadata` resolves every target — so regenerate it
 wherever you are.
 
-## The coverage manifest cannot be regenerated on Windows
+## The coverage manifest can only be regenerated on Linux
 
 `ci/coverage-manifest.txt` records every test id. Adding or renaming a test fails
 the `coverage manifest` CI job until it is refreshed, and
-`bash ci/coverage-manifest.sh --update` **refuses to run on Windows** by design —
-`cfg(unix)` tests do not exist here and regenerating would record their absence
-as coverage loss. Push, let the job fail, and take the file it uploads:
+`bash ci/coverage-manifest.sh --update` **refuses to run anywhere but Linux** by
+design — Linux is where the check runs, and no other platform lists the same
+ids. Windows drops the `cfg(unix)` tests and would record their absence as
+coverage loss; macOS adds eight `cfg(target_os = "macos")` ones (the bundle
+exchange, and the daemon's own bundle check) and would write a superset the
+check rejects. Push, let the job fail, and take the file it uploads:
 
 ```sh
 gh run download <run-id> -n coverage-manifest -D <dir>   # coverage-manifest.txt.actual

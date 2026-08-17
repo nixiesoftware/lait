@@ -362,6 +362,9 @@ version = "0.1.0"
 dependencies = [
  "addressbook",
  "anyhow",
+ "blake3",
+ "data-encoding",
+ "flate2",
  "flutter_rust_bridge",
  "fs2",
  "jiff",
@@ -374,6 +377,7 @@ dependencies = [
  "schedule",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio",
  "tracing",
@@ -406,6 +410,18 @@ dependencies = [
  "tokio",
  "tracing",
  "uniffi",
+]
+
+[[package]]
+name = "astrolabe-stub"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "fs2",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3849,10 +3865,11 @@ dependencies = [
 
 [[package]]
 name = "lait"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "addressbook",
  "anyhow",
+ "astrolabe-stub",
  "async-trait",
  "axum",
  "blake3",
@@ -3897,6 +3914,7 @@ dependencies = [
  "sha2 0.10.9",
  "syn 2.0.117",
  "tar",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -3917,10 +3935,15 @@ dependencies = [
  "anyhow",
  "blake3",
  "data-encoding",
+ "flate2",
+ "lait",
  "mechanics",
  "semver",
  "serde",
  "serde_json",
+ "tar",
+ "tempfile",
+ "world-interface",
 ]
 
 [[package]]
@@ -9022,6 +9045,7 @@ dependencies = [
  "replica",
  "runtime",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

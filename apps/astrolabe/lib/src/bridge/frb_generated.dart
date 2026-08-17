@@ -252,94 +252,98 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           entryPath: dco_decode_String(raw[1]),
         );
       case 2:
+        return ActionRequest_UpdateWorld(
+          world: dco_decode_String(raw[1]),
+        );
+      case 3:
         return ActionRequest_StartDevice(
           id: dco_decode_String(raw[1]),
         );
-      case 3:
+      case 4:
         return ActionRequest_StopDevice(
           id: dco_decode_String(raw[1]),
         );
-      case 4:
+      case 5:
         return ActionRequest_RestartDevice(
           id: dco_decode_String(raw[1]),
         );
-      case 5:
+      case 6:
         return ActionRequest_ForceStopDevice(
           id: dco_decode_String(raw[1]),
         );
-      case 6:
-        return ActionRequest_StopAllOwned();
       case 7:
+        return ActionRequest_StopAllOwned();
+      case 8:
         return ActionRequest_RemoveDevice(
           id: dco_decode_String(raw[1]),
           deleteData: dco_decode_bool(raw[2]),
         );
-      case 8:
+      case 9:
         return ActionRequest_ReadSpace(
           orbit: dco_decode_String(raw[1]),
         );
-      case 9:
-        return ActionRequest_StartHead();
       case 10:
+        return ActionRequest_StartHead();
+      case 11:
         return ActionRequest_StopHead(
           id: dco_decode_String(raw[1]),
         );
-      case 11:
+      case 12:
         return ActionRequest_ForgetOrbit(
           space: dco_decode_String(raw[1]),
         );
-      case 12:
+      case 13:
         return ActionRequest_BookPut(
           card: dco_decode_opt_String(raw[1]),
           name: dco_decode_String(raw[2]),
           note: dco_decode_opt_String(raw[3]),
         );
-      case 13:
+      case 14:
         return ActionRequest_BookDelete(
           card: dco_decode_String(raw[1]),
         );
-      case 14:
+      case 15:
         return ActionRequest_BookSetPicture(
           card: dco_decode_String(raw[1]),
           path: dco_decode_opt_String(raw[2]),
         );
-      case 15:
+      case 16:
         return ActionRequest_BookMerge(
           from: dco_decode_String(raw[1]),
           into: dco_decode_String(raw[2]),
         );
-      case 16:
+      case 17:
         return ActionRequest_BookClaimSelf(
           card: dco_decode_String(raw[1]),
         );
-      case 17:
+      case 18:
         return ActionRequest_BookLink(
           card: dco_decode_String(raw[1]),
           handle: dco_decode_String(raw[2]),
         );
-      case 18:
+      case 19:
         return ActionRequest_BookUnlink(
           card: dco_decode_String(raw[1]),
           handle: dco_decode_String(raw[2]),
         );
-      case 19:
+      case 20:
         return ActionRequest_BookExport(
           path: dco_decode_String(raw[1]),
           cards: dco_decode_opt_list_String(raw[2]),
         );
-      case 20:
+      case 21:
         return ActionRequest_BookImport(
           path: dco_decode_String(raw[1]),
         );
-      case 21:
+      case 22:
         return ActionRequest_BookAccept(
           suggestion: dco_decode_String(raw[1]),
         );
-      case 22:
+      case 23:
         return ActionRequest_BookDismiss(
           suggestion: dco_decode_String(raw[1]),
         );
-      case 23:
+      case 24:
         return ActionRequest_InstallMcp(
           client: dco_decode_String(raw[1]),
           scope: dco_decode_opt_String(raw[2]),
@@ -350,16 +354,16 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           world: dco_decode_opt_String(raw[7]),
           preview: dco_decode_bool(raw[8]),
         );
-      case 24:
+      case 25:
         return ActionRequest_DisplayPairingApprove(
           pairing: dco_decode_String(raw[1]),
           label: dco_decode_String(raw[2]),
         );
-      case 25:
+      case 26:
         return ActionRequest_DisplayPairingReject(
           pairing: dco_decode_String(raw[1]),
         );
-      case 26:
+      case 27:
         return ActionRequest_DisplayAssignmentPut(
           device: dco_decode_String(raw[1]),
           orbit: dco_decode_String(raw[2]),
@@ -374,11 +378,11 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           staticDelayMs: dco_decode_i_32(raw[11]),
           expiresAtUnixMs: dco_decode_opt_box_autoadd_u_64(raw[12]),
         );
-      case 27:
+      case 28:
         return ActionRequest_DisplayAssignmentRevoke(
           assignment: dco_decode_String(raw[1]),
         );
-      case 28:
+      case 29:
         return ActionRequest_DisplayDeviceRevoke(
           device: dco_decode_String(raw[1]),
         );
@@ -496,6 +500,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   BigInt dco_decode_box_autoadd_u_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_u_64(raw);
+  }
+
+  @protected
+  WorldUpdateRow dco_decode_box_autoadd_world_update_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_world_update_row(raw);
   }
 
   @protected
@@ -779,8 +789,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   LibraryRow dco_decode_library_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return LibraryRow(
       key: dco_decode_String(arr[0]),
       worldMount: dco_decode_String(arr[1]),
@@ -790,6 +800,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       tagline: dco_decode_opt_String(arr[5]),
       accent: dco_decode_opt_box_autoadd_u_32(arr[6]),
       people: dco_decode_opt_list_world_person_row(arr[7]),
+      update: dco_decode_opt_box_autoadd_world_update_row(arr[8]),
     );
   }
 
@@ -1038,6 +1049,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  WorldUpdateRow? dco_decode_opt_box_autoadd_world_update_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_world_update_row(raw);
+  }
+
+  @protected
   List<String>? dco_decode_opt_list_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_list_String(raw);
@@ -1200,6 +1217,20 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  WorldUpdateRow dco_decode_world_update_row(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return WorldUpdateRow(
+      serving: dco_decode_opt_String(arr[0]),
+      available: dco_decode_opt_String(arr[1]),
+      behind: dco_decode_bool(arr[2]),
+      unmet: dco_decode_opt_list_String(arr[3]),
+    );
+  }
+
+  @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_String(deserializer);
@@ -1232,77 +1263,80 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         var var_entryPath = sse_decode_String(deserializer);
         return ActionRequest_Open(entryPath: var_entryPath);
       case 2:
-        var var_id = sse_decode_String(deserializer);
-        return ActionRequest_StartDevice(id: var_id);
+        var var_world = sse_decode_String(deserializer);
+        return ActionRequest_UpdateWorld(world: var_world);
       case 3:
         var var_id = sse_decode_String(deserializer);
-        return ActionRequest_StopDevice(id: var_id);
+        return ActionRequest_StartDevice(id: var_id);
       case 4:
         var var_id = sse_decode_String(deserializer);
-        return ActionRequest_RestartDevice(id: var_id);
+        return ActionRequest_StopDevice(id: var_id);
       case 5:
         var var_id = sse_decode_String(deserializer);
-        return ActionRequest_ForceStopDevice(id: var_id);
+        return ActionRequest_RestartDevice(id: var_id);
       case 6:
-        return ActionRequest_StopAllOwned();
+        var var_id = sse_decode_String(deserializer);
+        return ActionRequest_ForceStopDevice(id: var_id);
       case 7:
+        return ActionRequest_StopAllOwned();
+      case 8:
         var var_id = sse_decode_String(deserializer);
         var var_deleteData = sse_decode_bool(deserializer);
         return ActionRequest_RemoveDevice(
             id: var_id, deleteData: var_deleteData);
-      case 8:
+      case 9:
         var var_orbit = sse_decode_String(deserializer);
         return ActionRequest_ReadSpace(orbit: var_orbit);
-      case 9:
-        return ActionRequest_StartHead();
       case 10:
+        return ActionRequest_StartHead();
+      case 11:
         var var_id = sse_decode_String(deserializer);
         return ActionRequest_StopHead(id: var_id);
-      case 11:
+      case 12:
         var var_space = sse_decode_String(deserializer);
         return ActionRequest_ForgetOrbit(space: var_space);
-      case 12:
+      case 13:
         var var_card = sse_decode_opt_String(deserializer);
         var var_name = sse_decode_String(deserializer);
         var var_note = sse_decode_opt_String(deserializer);
         return ActionRequest_BookPut(
             card: var_card, name: var_name, note: var_note);
-      case 13:
+      case 14:
         var var_card = sse_decode_String(deserializer);
         return ActionRequest_BookDelete(card: var_card);
-      case 14:
+      case 15:
         var var_card = sse_decode_String(deserializer);
         var var_path = sse_decode_opt_String(deserializer);
         return ActionRequest_BookSetPicture(card: var_card, path: var_path);
-      case 15:
+      case 16:
         var var_from = sse_decode_String(deserializer);
         var var_into = sse_decode_String(deserializer);
         return ActionRequest_BookMerge(from: var_from, into: var_into);
-      case 16:
-        var var_card = sse_decode_String(deserializer);
-        return ActionRequest_BookClaimSelf(card: var_card);
       case 17:
         var var_card = sse_decode_String(deserializer);
-        var var_handle = sse_decode_String(deserializer);
-        return ActionRequest_BookLink(card: var_card, handle: var_handle);
+        return ActionRequest_BookClaimSelf(card: var_card);
       case 18:
         var var_card = sse_decode_String(deserializer);
         var var_handle = sse_decode_String(deserializer);
-        return ActionRequest_BookUnlink(card: var_card, handle: var_handle);
+        return ActionRequest_BookLink(card: var_card, handle: var_handle);
       case 19:
+        var var_card = sse_decode_String(deserializer);
+        var var_handle = sse_decode_String(deserializer);
+        return ActionRequest_BookUnlink(card: var_card, handle: var_handle);
+      case 20:
         var var_path = sse_decode_String(deserializer);
         var var_cards = sse_decode_opt_list_String(deserializer);
         return ActionRequest_BookExport(path: var_path, cards: var_cards);
-      case 20:
+      case 21:
         var var_path = sse_decode_String(deserializer);
         return ActionRequest_BookImport(path: var_path);
-      case 21:
-        var var_suggestion = sse_decode_String(deserializer);
-        return ActionRequest_BookAccept(suggestion: var_suggestion);
       case 22:
         var var_suggestion = sse_decode_String(deserializer);
-        return ActionRequest_BookDismiss(suggestion: var_suggestion);
+        return ActionRequest_BookAccept(suggestion: var_suggestion);
       case 23:
+        var var_suggestion = sse_decode_String(deserializer);
+        return ActionRequest_BookDismiss(suggestion: var_suggestion);
+      case 24:
         var var_client = sse_decode_String(deserializer);
         var var_scope = sse_decode_opt_String(deserializer);
         var var_name = sse_decode_String(deserializer);
@@ -1320,15 +1354,15 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
             project: var_project,
             world: var_world,
             preview: var_preview);
-      case 24:
+      case 25:
         var var_pairing = sse_decode_String(deserializer);
         var var_label = sse_decode_String(deserializer);
         return ActionRequest_DisplayPairingApprove(
             pairing: var_pairing, label: var_label);
-      case 25:
+      case 26:
         var var_pairing = sse_decode_String(deserializer);
         return ActionRequest_DisplayPairingReject(pairing: var_pairing);
-      case 26:
+      case 27:
         var var_device = sse_decode_String(deserializer);
         var var_orbit = sse_decode_String(deserializer);
         var var_world = sse_decode_String(deserializer);
@@ -1354,11 +1388,11 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
             syncMode: var_syncMode,
             staticDelayMs: var_staticDelayMs,
             expiresAtUnixMs: var_expiresAtUnixMs);
-      case 27:
+      case 28:
         var var_assignment = sse_decode_String(deserializer);
         return ActionRequest_DisplayAssignmentRevoke(
             assignment: var_assignment);
-      case 28:
+      case 29:
         var var_device = sse_decode_String(deserializer);
         return ActionRequest_DisplayDeviceRevoke(device: var_device);
       default:
@@ -1483,6 +1517,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_u_64(deserializer));
+  }
+
+  @protected
+  WorldUpdateRow sse_decode_box_autoadd_world_update_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_world_update_row(deserializer));
   }
 
   @protected
@@ -1828,6 +1869,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_tagline = sse_decode_opt_String(deserializer);
     var var_accent = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_people = sse_decode_opt_list_world_person_row(deserializer);
+    var var_update = sse_decode_opt_box_autoadd_world_update_row(deserializer);
     return LibraryRow(
         key: var_key,
         worldMount: var_worldMount,
@@ -1836,7 +1878,8 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         version: var_version,
         tagline: var_tagline,
         accent: var_accent,
-        people: var_people);
+        people: var_people,
+        update: var_update);
   }
 
   @protected
@@ -2269,6 +2312,18 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  WorldUpdateRow? sse_decode_opt_box_autoadd_world_update_row(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_world_update_row(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -2455,6 +2510,20 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  WorldUpdateRow sse_decode_world_update_row(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_serving = sse_decode_opt_String(deserializer);
+    var var_available = sse_decode_opt_String(deserializer);
+    var var_behind = sse_decode_bool(deserializer);
+    var var_unmet = sse_decode_opt_list_String(deserializer);
+    return WorldUpdateRow(
+        serving: var_serving,
+        available: var_available,
+        behind: var_behind,
+        unmet: var_unmet);
+  }
+
+  @protected
   void sse_encode_AnyhowException(
       AnyhowException self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2489,81 +2558,84 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case ActionRequest_Open(entryPath: final entryPath):
         sse_encode_i_32(1, serializer);
         sse_encode_String(entryPath, serializer);
-      case ActionRequest_StartDevice(id: final id):
+      case ActionRequest_UpdateWorld(world: final world):
         sse_encode_i_32(2, serializer);
-        sse_encode_String(id, serializer);
-      case ActionRequest_StopDevice(id: final id):
+        sse_encode_String(world, serializer);
+      case ActionRequest_StartDevice(id: final id):
         sse_encode_i_32(3, serializer);
         sse_encode_String(id, serializer);
-      case ActionRequest_RestartDevice(id: final id):
+      case ActionRequest_StopDevice(id: final id):
         sse_encode_i_32(4, serializer);
         sse_encode_String(id, serializer);
-      case ActionRequest_ForceStopDevice(id: final id):
+      case ActionRequest_RestartDevice(id: final id):
         sse_encode_i_32(5, serializer);
         sse_encode_String(id, serializer);
-      case ActionRequest_StopAllOwned():
+      case ActionRequest_ForceStopDevice(id: final id):
         sse_encode_i_32(6, serializer);
+        sse_encode_String(id, serializer);
+      case ActionRequest_StopAllOwned():
+        sse_encode_i_32(7, serializer);
       case ActionRequest_RemoveDevice(
           id: final id,
           deleteData: final deleteData
         ):
-        sse_encode_i_32(7, serializer);
+        sse_encode_i_32(8, serializer);
         sse_encode_String(id, serializer);
         sse_encode_bool(deleteData, serializer);
       case ActionRequest_ReadSpace(orbit: final orbit):
-        sse_encode_i_32(8, serializer);
+        sse_encode_i_32(9, serializer);
         sse_encode_String(orbit, serializer);
       case ActionRequest_StartHead():
-        sse_encode_i_32(9, serializer);
-      case ActionRequest_StopHead(id: final id):
         sse_encode_i_32(10, serializer);
+      case ActionRequest_StopHead(id: final id):
+        sse_encode_i_32(11, serializer);
         sse_encode_String(id, serializer);
       case ActionRequest_ForgetOrbit(space: final space):
-        sse_encode_i_32(11, serializer);
+        sse_encode_i_32(12, serializer);
         sse_encode_String(space, serializer);
       case ActionRequest_BookPut(
           card: final card,
           name: final name,
           note: final note
         ):
-        sse_encode_i_32(12, serializer);
+        sse_encode_i_32(13, serializer);
         sse_encode_opt_String(card, serializer);
         sse_encode_String(name, serializer);
         sse_encode_opt_String(note, serializer);
       case ActionRequest_BookDelete(card: final card):
-        sse_encode_i_32(13, serializer);
+        sse_encode_i_32(14, serializer);
         sse_encode_String(card, serializer);
       case ActionRequest_BookSetPicture(card: final card, path: final path):
-        sse_encode_i_32(14, serializer);
+        sse_encode_i_32(15, serializer);
         sse_encode_String(card, serializer);
         sse_encode_opt_String(path, serializer);
       case ActionRequest_BookMerge(from: final from, into: final into):
-        sse_encode_i_32(15, serializer);
+        sse_encode_i_32(16, serializer);
         sse_encode_String(from, serializer);
         sse_encode_String(into, serializer);
       case ActionRequest_BookClaimSelf(card: final card):
-        sse_encode_i_32(16, serializer);
-        sse_encode_String(card, serializer);
-      case ActionRequest_BookLink(card: final card, handle: final handle):
         sse_encode_i_32(17, serializer);
         sse_encode_String(card, serializer);
-        sse_encode_String(handle, serializer);
-      case ActionRequest_BookUnlink(card: final card, handle: final handle):
+      case ActionRequest_BookLink(card: final card, handle: final handle):
         sse_encode_i_32(18, serializer);
         sse_encode_String(card, serializer);
         sse_encode_String(handle, serializer);
-      case ActionRequest_BookExport(path: final path, cards: final cards):
+      case ActionRequest_BookUnlink(card: final card, handle: final handle):
         sse_encode_i_32(19, serializer);
+        sse_encode_String(card, serializer);
+        sse_encode_String(handle, serializer);
+      case ActionRequest_BookExport(path: final path, cards: final cards):
+        sse_encode_i_32(20, serializer);
         sse_encode_String(path, serializer);
         sse_encode_opt_list_String(cards, serializer);
       case ActionRequest_BookImport(path: final path):
-        sse_encode_i_32(20, serializer);
+        sse_encode_i_32(21, serializer);
         sse_encode_String(path, serializer);
       case ActionRequest_BookAccept(suggestion: final suggestion):
-        sse_encode_i_32(21, serializer);
+        sse_encode_i_32(22, serializer);
         sse_encode_String(suggestion, serializer);
       case ActionRequest_BookDismiss(suggestion: final suggestion):
-        sse_encode_i_32(22, serializer);
+        sse_encode_i_32(23, serializer);
         sse_encode_String(suggestion, serializer);
       case ActionRequest_InstallMcp(
           client: final client,
@@ -2575,7 +2647,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           world: final world,
           preview: final preview
         ):
-        sse_encode_i_32(23, serializer);
+        sse_encode_i_32(24, serializer);
         sse_encode_String(client, serializer);
         sse_encode_opt_String(scope, serializer);
         sse_encode_String(name, serializer);
@@ -2588,11 +2660,11 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           pairing: final pairing,
           label: final label
         ):
-        sse_encode_i_32(24, serializer);
+        sse_encode_i_32(25, serializer);
         sse_encode_String(pairing, serializer);
         sse_encode_String(label, serializer);
       case ActionRequest_DisplayPairingReject(pairing: final pairing):
-        sse_encode_i_32(25, serializer);
+        sse_encode_i_32(26, serializer);
         sse_encode_String(pairing, serializer);
       case ActionRequest_DisplayAssignmentPut(
           device: final device,
@@ -2608,7 +2680,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           staticDelayMs: final staticDelayMs,
           expiresAtUnixMs: final expiresAtUnixMs
         ):
-        sse_encode_i_32(26, serializer);
+        sse_encode_i_32(27, serializer);
         sse_encode_String(device, serializer);
         sse_encode_String(orbit, serializer);
         sse_encode_String(world, serializer);
@@ -2622,10 +2694,10 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         sse_encode_i_32(staticDelayMs, serializer);
         sse_encode_opt_box_autoadd_u_64(expiresAtUnixMs, serializer);
       case ActionRequest_DisplayAssignmentRevoke(assignment: final assignment):
-        sse_encode_i_32(27, serializer);
+        sse_encode_i_32(28, serializer);
         sse_encode_String(assignment, serializer);
       case ActionRequest_DisplayDeviceRevoke(device: final device):
-        sse_encode_i_32(28, serializer);
+        sse_encode_i_32(29, serializer);
         sse_encode_String(device, serializer);
     }
   }
@@ -2746,6 +2818,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_64(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_world_update_row(
+      WorldUpdateRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_world_update_row(self, serializer);
   }
 
   @protected
@@ -2973,6 +3052,7 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_opt_String(self.tagline, serializer);
     sse_encode_opt_box_autoadd_u_32(self.accent, serializer);
     sse_encode_opt_list_world_person_row(self.people, serializer);
+    sse_encode_opt_box_autoadd_world_update_row(self.update, serializer);
   }
 
   @protected
@@ -3336,6 +3416,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_world_update_row(
+      WorldUpdateRow? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_world_update_row(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_list_String(
       List<String>? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -3482,5 +3573,15 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_opt_box_autoadd_presence_view(self.presence, serializer);
     sse_encode_bool(self.agent, serializer);
     sse_encode_bool(self.here, serializer);
+  }
+
+  @protected
+  void sse_encode_world_update_row(
+      WorldUpdateRow self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_String(self.serving, serializer);
+    sse_encode_opt_String(self.available, serializer);
+    sse_encode_bool(self.behind, serializer);
+    sse_encode_opt_list_String(self.unmet, serializer);
   }
 }

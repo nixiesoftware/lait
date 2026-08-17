@@ -41,3 +41,19 @@ apps/astrolabe/windows/flutter/ephemeral/
 # `pubspec.lock` to the path sources: that lock is local truth, not project
 # truth, so restore it before committing.
 apps/astrolabe/pubspec_overrides.yaml
+
+# Local node state for a store rooted at the repo (the `orbital/` layout), the
+# sibling of the `.lait/` rule above. A Space store is a person's data and a
+# signing identity; it is never repository content.
+/orbital/
+/agents/
+/daemon.lock
+/daemon.pid
+
+# Deprecated local scratch: plans live in lait, not in markdown (CLAUDE.md).
+/docs/plans/
+
+# Personal archives that happen to be unpacked in the working tree.
+/takeout-*.zip
+
+.DS_Store

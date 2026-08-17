@@ -55,14 +55,15 @@ fn the_installer_places_both_binaries_in_one_directory() {
         script.contains(r#"File "${STAGE}\lait.exe""#),
         "the installer does not install the lait.exe sidecar"
     );
-    // Both are written after one `SetOutPath "$INSTDIR"`, which is what makes
-    // them siblings — the property `sidecar::resolve` depends on. Matched on
-    // the whole directive, so the header comment naming the same file cannot
-    // stand in for the line that installs it.
+    // Both are written after one `SetOutPath "$INSTDIR\current"`, which is
+    // what makes them siblings — the property `sidecar::resolve` depends on,
+    // and `update::custody_of` is its inverse. Matched on the whole directive,
+    // so the header comment naming the same file cannot stand in for the line
+    // that installs it.
     let script = directives();
     let out = script
-        .find(r#"SetOutPath "$INSTDIR""#)
-        .expect("an out path");
+        .find(r#"SetOutPath "$INSTDIR\current""#)
+        .expect("the release out path");
     let client = script
         .find(r#"File "${STAGE}\astrolabe.exe""#)
         .expect("the client");
@@ -73,6 +74,55 @@ fn the_installer_places_both_binaries_in_one_directory() {
         out < client && out < daemon,
         "the binaries are not installed into the same directory"
     );
+
+    // And the stub is not between them: it takes the root name, so the
+    // shortcut, the protocol command and any pin a person makes keep the path
+    // they have always had while the release beneath moves.
+    assert!(
+        script.contains(r#"File "/oname=astrolabe.exe" "${STUB}""#),
+        "the installer does not place the stub at the install root"
+    );
+    let stub = script
+        .find(r#"File "/oname=astrolabe.exe" "${STUB}""#)
+        .expect("the stub");
+    assert!(
+        stub < out,
+        "the stub is installed after the release, so it would land inside it"
+    );
+}
+
+/// Nothing outside the install may point into a release directory.
+///
+/// The most expensive mistake in this space, by evidence: Squirrel's
+/// `app-1.0.0` / `app-1.0.1` layout broke firewall rules, antivirus
+/// exclusions, GPU preferences and tray pinning, and it had to grow a routine
+/// that rewrote users' pinned shortcuts on every update. Every shell artifact
+/// here keys on `$INSTDIR\astrolabe.exe`, which no update ever moves.
+#[test]
+fn every_shell_artifact_points_at_the_stub_and_never_into_a_release() {
+    let script = directives();
+    for artifact in [
+        r#"CreateShortcut "$SMPROGRAMS\Astrolabe.lnk" "$INSTDIR\astrolabe.exe""#,
+        r#"WriteRegStr HKCU "Software\Classes\lait\DefaultIcon" "" "$INSTDIR\astrolabe.exe,0""#,
+        r#"WriteRegStr HKCU "Software\Classes\lait\shell\open\command" "" '"$INSTDIR\astrolabe.exe" "%1"'"#,
+    ] {
+        assert!(
+            script.contains(artifact),
+            "a shell artifact does not point at the stub: {artifact}"
+        );
+    }
+    for line in script.lines() {
+        let line = line.trim();
+        let points_outward = line.starts_with("CreateShortcut")
+            || line.starts_with("WriteRegStr")
+            || line.starts_with("WriteRegDWORD");
+        assert!(
+            !(points_outward && line.contains(r#"$INSTDIR\current"#)),
+            "a shell artifact points into a release directory, which is what \
+             breaks pins, firewall rules and antivirus exclusions on the first \
+             update: {line}"
+        );
+    }
 }
 
 /// Nothing from a retired stack survives in the installer.
@@ -111,8 +161,9 @@ fn the_installer_carries_the_whole_flutter_bundle() {
         // The undecorated window and the tray icon are plugins, not framework.
         r#"File "${STAGE}\*_plugin.dll""#,
         // `data\` is resolved by path relative to the executable, so it has to
-        // arrive under that name and no other.
-        r#"SetOutPath "$INSTDIR\data""#,
+        // arrive under that name and no other — beside the runner, inside the
+        // release.
+        r#"SetOutPath "$INSTDIR\current\data""#,
         r#"File /r "${STAGE}\data\*.*""#,
     ] {
         assert!(
@@ -180,27 +231,41 @@ fn uninstalling_removes_the_program_and_never_the_persons_data() {
         );
     }
 
-    // Recursive removal is allowed in exactly one place: the engine's own
-    // payload directory.
+    // Recursive removal is allowed for the release trees, by name, and
+    // nowhere else.
     //
-    // Under revision 6 this test forbade `RMDir /r` outright, and that was the
-    // right rule for an installer that placed two files. Revision 7's bundle
-    // nests `data\flutter_assets\<package>\...`, which cannot be enumerated —
-    // so the rule becomes a bound rather than a ban. `$INSTDIR` itself still
-    // comes off with plain `RMDir`, which refuses a non-empty directory: an
-    // unknown file left behind fails the uninstall visibly instead of being
-    // swept away with everything around it.
+    // Under revision 6 this test forbade `RMDir /r` outright, which was right
+    // for an installer that placed two files. Revision 7's bundle nests
+    // `data\flutter_assets\<package>\...`; the staged-swap layout adds three
+    // trees whose contents are whatever the *update path* put there, and after
+    // the first update are not what any installer shipped. So the rule is a
+    // bound rather than a ban, and the bound is stated per directory.
+    // `$INSTDIR` itself still comes off with plain `RMDir`, which refuses a
+    // non-empty directory: an unknown file left behind fails the uninstall
+    // visibly instead of being swept away with everything around it.
+    let allowed = [
+        r#""$INSTDIR\current""#,
+        r#""$INSTDIR\previous""#,
+        r#""$INSTDIR\staged""#,
+    ];
     for line in uninstall.lines() {
         let line = line.trim();
         let Some(target) = line.strip_prefix("RMDir /r ") else {
             continue;
         };
-        assert_eq!(
-            target.trim(),
-            r#""$INSTDIR\data""#,
+        assert!(
+            allowed.contains(&target.trim()),
             "the uninstaller recursively removes {target}, which is wider than \
-             the engine payload — that is how a store gets destroyed by an \
+             a release tree — that is how a store gets destroyed by an \
              uninstall nobody read"
+        );
+    }
+    // And every release tree is actually removed: a tree left behind is an
+    // install directory that survives its own uninstall.
+    for tree in allowed {
+        assert!(
+            uninstall.contains(&format!("RMDir /r {tree}")),
+            "the uninstaller leaves {tree} behind"
         );
     }
 }
@@ -212,6 +277,39 @@ fn the_installer_asks_for_no_elevation() {
     assert!(
         directives().contains("RequestExecutionLevel user"),
         "the installer requests elevation it does not need"
+    );
+}
+
+/// The installer lands where the caller told it to, not beside this script.
+///
+/// NSIS resolves a relative `OutFile` against the *script's* directory, not the
+/// working directory. So `cd dist && makensis ..\packaging\windows\astrolabe.nsi`
+/// compiled a perfectly good installer into `packaging\windows\` while the
+/// release job looked in `dist\`, found nothing, and reported "makensis produced
+/// no installer" — a success that read as a build failure. Three releases
+/// (v0.8.0, v0.8.1, v0.8.2) shipped a macOS DMG and no Windows installer before
+/// anyone read the compile log far enough to see `Output:` naming the wrong
+/// directory.
+///
+/// The fix is that the caller passes `OUTDIR` absolute. This asserts the script
+/// honours it, because a relative `OutFile` fails silently in exactly the
+/// direction that looks like somebody else's bug.
+#[test]
+fn the_installer_is_written_where_the_caller_asked() {
+    let script = directives();
+    let out_file = script
+        .lines()
+        .find(|line| line.trim_start().starts_with("OutFile"))
+        .expect("the script declares an OutFile");
+    assert!(
+        out_file.contains("${OUTDIR}"),
+        "OutFile is relative to the script directory, so the caller's output \
+         directory is ignored and the installer lands beside the .nsi: {out_file}"
+    );
+    assert!(
+        script.contains("!define OUTDIR"),
+        "OUTDIR has no default, so a standalone `makensis astrolabe.nsi` errors \
+         on an undefined symbol instead of writing beside the script"
     );
 }
 
@@ -284,16 +382,18 @@ fn the_installer_ships_the_third_party_notices() {
         repo_root().join("THIRD-PARTY-NOTICES.md").is_file(),
         "there is nothing for the installer to carry"
     );
-    // And it goes when the program goes. A notices file left behind names a
-    // program that is no longer there.
+    // And it goes when the program goes. The notices ship inside the release,
+    // so they leave with the tree rather than by a `Delete` of their own — a
+    // file named individually here would be one the update path could move
+    // out from under.
     let uninstall = directives()
         .split("Section \"Uninstall\"")
         .nth(1)
         .expect("an uninstall section")
         .to_owned();
     assert!(
-        uninstall.contains(r#"Delete "$INSTDIR\THIRD-PARTY-NOTICES.md""#),
-        "uninstalling leaves the notices behind"
+        uninstall.contains(r#"RMDir /r "$INSTDIR\current""#),
+        "uninstalling leaves the release, and the notices in it, behind"
     );
 }
 
@@ -455,8 +555,19 @@ fn the_linux_bundle_refuses_a_missing_or_mismatched_pair() {
 fn the_linux_package_carries_the_whole_flutter_bundle_and_notices() {
     let script = linux_directives();
     assert!(
-        script.contains(r#"cp -a "$BUNDLE/." "$STAGED/""#),
+        script.contains(r#"cp -a "$BUNDLE/." "$STAGED/current/""#),
         "the Linux package enumerates a partial Flutter bundle"
+    );
+    // The stub takes the root name, and the release sits beneath it — the
+    // same shape as Windows, for the same reason: a path outside the install
+    // must not move when a release does.
+    assert!(
+        script.contains(r#"cp "$STUB" "$STAGED/astrolabe""#),
+        "the Linux package does not place the stub at the archive root"
+    );
+    assert!(
+        script.contains(r#"mkdir "$STAGED/current""#),
+        "the Linux package does not place the release under current/"
     );
     assert!(
         script.contains(r#"cp "$REPO/THIRD-PARTY-NOTICES.md""#),
@@ -464,8 +575,11 @@ fn the_linux_package_carries_the_whole_flutter_bundle_and_notices() {
     );
     assert!(
         script.contains(r#"find "$STAGED" -type f -exec chmod 0644 {} +"#)
-            && script.contains(r#"chmod 0755 "$STAGED/astrolabe" "$STAGED/lait""#),
-        "the Linux package inherits host-specific file modes"
+            && script.contains(
+                r#"chmod 0755 "$STAGED/astrolabe" "$STAGED/current/astrolabe" "$STAGED/current/lait""#
+            ),
+        "the Linux package inherits host-specific file modes, or leaves the \
+         stub or a half of the pair unexecutable"
     );
 }
 

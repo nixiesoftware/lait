@@ -638,7 +638,15 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
         // Blocking by nature (HTTP, archive extract, file swap) and slow enough
         // that it must not hold the reactor while it runs.
         Request::HostUpdate => {
+            // The standing is read here rather than inside `update::run`,
+            // because it is a fact about the *installation* — written by the
+            // resident watcher on its own period — and not a result of this
+            // request. A sidecar's `run` refuses to replace itself and says
+            // who owns it; what the person actually needs to know in that
+            // case is whether their client has a release waiting.
+            let identity = router.catalog().identity().to_path_buf();
             blocking(move || {
+                let standing = crate::update::watch::standing(&identity);
                 crate::update::run().map(|updated| HostReply::Updated {
                     from: updated.from,
                     to: updated.to,
@@ -647,6 +655,7 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
                     available: updated.available,
                     floor: updated.floor,
                     managed_by: updated.managed_by,
+                    standing,
                 })
             })
             .await
