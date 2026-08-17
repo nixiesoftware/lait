@@ -284,3 +284,90 @@ async fn a_carrier_refuses_a_witness_for_a_device_it_cannot_sign_as() {
         "the refusal must name the mismatch: {refused}"
     );
 }
+
+/// A full mailbox is still collectable.
+///
+/// The bound that matters most, and the one that was wrong. `collect` reads the
+/// reply into memory under a ceiling, so if a mailbox can hold more than the
+/// ceiling can carry, a stranger can fill it and the recipient can never read
+/// *any* of it — and because `take()` truncates silently, the failure arrives as
+/// `Missed::Unasked`, so the person is told their carrier is unreachable while it
+/// is up and holding their mail. Unrecoverable through the client, too:
+/// `acknowledge` needs deposit ids and the only source of ids is `collect`.
+///
+/// So this fills a mailbox to the carrier's own ceiling with maximal envelopes and
+/// insists the whole thing comes back. It is the relationship between the bounds
+/// under test, not any one number.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mailbox_filled_to_its_ceiling_is_still_collectable() {
+    let (base, _root) = serve().await;
+
+    let space = SpaceId::mint(&SystemUlidSource);
+    let (sender_event, sender_actor) = incept(&SENDER_SEED, 1, &space);
+    let plane = actor::replay(&space, &[sender_event]);
+    let sender_device = device_from_seed(&SENDER_SEED);
+    let recipient_device = device_from_seed(&RECIPIENT_SEED);
+    let standing = egress::authorize(&plane, &sender_actor, &sender_device).expect("hers");
+
+    // Worst-case bytes: every byte >= 100 costs four characters as a JSON number,
+    // so a payload of 0xff is the most expensive encoding of a maximal envelope.
+    // Deliberately not random — the bound has to hold for the worst case, and a
+    // test that used average bytes would pass while the real ceiling did not.
+    let filler = vec![0xffu8; correspondence::MAX_SEALED];
+    let expires = now() + 3600;
+
+    // A handful rather than the full ceiling: enough to exceed a wrong bound by a
+    // wide margin, few enough that the test stays seconds rather than minutes. The
+    // arithmetic relationship is asserted separately and exactly.
+    let letters = 24;
+    for n in 0..letters {
+        let mut bytes = filler.clone();
+        // Distinct content, or the content-addressed id collapses them into one.
+        bytes[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        let envelope = Sealed {
+            recipient: recipient_device.clone(),
+            bytes,
+            expires_at: expires,
+            construction: 1,
+        };
+        tokio::task::block_in_place(|| {
+            let mut carrier = PostCarrier::new(base.clone(), Signer::new(SENDER_SEED));
+            carrier.deposit(&standing, &envelope, now())
+        })
+        .unwrap_or_else(|error| panic!("deposit {n} of {letters}: {error}"));
+    }
+
+    let base_for_read = base.clone();
+    let collected = tokio::task::block_in_place(|| {
+        let mut carrier = PostCarrier::new(base_for_read, Signer::new(RECIPIENT_SEED));
+        carrier.collect(&device_from_seed(&RECIPIENT_SEED), now())
+    });
+
+    match collected {
+        Missed::Held(held) => assert_eq!(
+            held.len(),
+            letters,
+            "every letter in a mailbox must be collectable"
+        ),
+        Missed::Unasked(why) => panic!(
+            "a mailbox holding {letters} maximal letters could not be collected, so a \
+             stranger can censor a device by filling it: {why}"
+        ),
+    }
+}
+
+/// The reply ceiling must cover the worst mailbox the carrier will accept.
+///
+/// Asserted as arithmetic rather than left to a comment, because the two constants
+/// live in different crates and drifted the moment they were written: the doc said
+/// `MAX_SEALED × MAX_MAILBOX` and the code multiplied by 64.
+#[test]
+fn the_reply_ceiling_covers_a_full_mailbox() {
+    let worst = correspondence::post::worst_reply_bytes();
+    assert!(
+        correspondence::post::max_reply() >= worst,
+        "a full mailbox encodes to {worst} bytes and the reply ceiling is {}; the \
+         difference is a censorship window",
+        correspondence::post::max_reply()
+    );
+}

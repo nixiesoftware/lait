@@ -10,6 +10,7 @@ mod coordinator;
 mod hls;
 mod http;
 
+pub use http::serve_display_on;
 /// The two the daemon needs to tell "the port is taken" from "our service
 /// broke". Re-exported rather than opening the module: everything else in there
 /// is the HTTPS surface itself, which has one caller.

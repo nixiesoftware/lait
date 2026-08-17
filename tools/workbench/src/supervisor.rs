@@ -143,8 +143,38 @@ struct Inner {
     /// and never will be — an MCP head is spawned by an agent's harness, so
     /// there is no handle for this map to hold.
     heads: StdMutex<BTreeMap<String, OwnedHead>>,
+    /// Head keys with a spawn in flight.
+    ///
+    /// The map alone cannot exclude a second spawn, because `spawn_head` checks it,
+    /// then releases the lock for up to `READY_TIMEOUT` while a process starts and
+    /// announces itself, then inserts. Two concurrent asks for one World both passed
+    /// the check, both started a real head, and the second `insert` dropped the first
+    /// `OwnedHead` — which neither kills nor waits, so it became an orphan holding a
+    /// port and a live run credential, unlistable and unstoppable.
+    ///
+    /// A reservation taken under the same lock as the check closes the window
+    /// without holding a lock across the wait. This is what actually prevents two
+    /// heads for one World; keying by mount was necessary and never sufficient.
+    starting: StdMutex<std::collections::BTreeSet<String>>,
     start_timeout: Duration,
     stop_timeout: Duration,
+}
+
+/// Holds a head key's spawn reservation, and gives it back however the spawn ends.
+///
+/// A guard rather than a `remove` at each exit, because `spawn_head` has several —
+/// the announce timeout, a spawn error, and success — and the one that would be
+/// forgotten is the one that matters: a reservation left behind by a failed spawn
+/// makes that World unstartable for the life of the process.
+struct Reservation<'a> {
+    starting: &'a StdMutex<std::collections::BTreeSet<String>>,
+    id: String,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        lock_recovering(self.starting).remove(&self.id);
+    }
 }
 
 /// The sampler is owned by the supervisor it samples, so it cannot outlive one.
@@ -419,6 +449,7 @@ impl Supervisor {
                 observation: Mutex::new(()),
                 observer: StdMutex::new(None),
                 heads: StdMutex::new(BTreeMap::new()),
+                starting: StdMutex::new(std::collections::BTreeSet::new()),
                 start_timeout,
                 stop_timeout,
             }),
@@ -1446,14 +1477,29 @@ impl Supervisor {
         home: Option<PathBuf>,
         world: Option<&str>,
     ) -> Result<HeadFacts, SupervisorError> {
+        // Check and reserve together, under one lock, so a concurrent ask cannot
+        // pass the check while this one is still starting a process.
         {
             let heads = lock_recovering(&self.inner.heads);
+            let mut starting = lock_recovering(&self.inner.starting);
             if heads.contains_key(&id) {
                 return Err(SupervisorError::AlreadyExists(format!(
                     "head '{id}' is already running"
                 )));
             }
+            if !starting.insert(id.clone()) {
+                return Err(SupervisorError::AlreadyExists(format!(
+                    "head '{id}' is already starting"
+                )));
+            }
         }
+        // Released on every exit from here, including the error paths — a
+        // reservation that outlived a failed spawn would make that World
+        // permanently unstartable.
+        let _reservation = Reservation {
+            starting: &self.inner.starting,
+            id: id.clone(),
+        };
 
         let executable = self.inner.executable.clone();
         let facts_id = id.clone();
@@ -2341,6 +2387,56 @@ mod tests {
         assert!(
             !lock_recovering(&supervisor.inner.heads).contains_key(&id),
             "the dead entry must be taken out of the map so a spawn can replace it"
+        );
+    }
+
+    /// Two concurrent asks for one World start one head, not two.
+    ///
+    /// The window this closes was 20 seconds wide and invisible to every other test:
+    /// `spawn_head` checked the map, released the lock while a real process started
+    /// and announced itself, then inserted. Two asks both passed the check, both
+    /// started a `lait`, and the second insert dropped the first `OwnedHead` —
+    /// which neither kills nor waits — leaving an orphan holding a port and a live
+    /// run credential, unlistable and unstoppable.
+    ///
+    /// Keying by mount was claimed to have fixed this and did not: the key was never
+    /// the hole. Concurrency was.
+    ///
+    /// Asserted through the reservation rather than by spawning two real heads: the
+    /// property is mutual exclusion over one key, and a test that raced two binaries
+    /// would be slow and would only *usually* interleave the way that matters.
+    #[tokio::test]
+    async fn two_concurrent_asks_for_one_world_do_not_both_start_a_head() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+        let id = identity_head_id(Some(directory.path()), "issues");
+
+        // Stand in for a spawn already in flight for this key, which is exactly the
+        // state the old code could not represent.
+        lock_recovering(&supervisor.inner.starting).insert(id.clone());
+
+        let second = supervisor
+            .start_identity_head(Some(directory.path()), "issues")
+            .await;
+        match second {
+            Err(SupervisorError::AlreadyExists(said)) => assert!(
+                said.contains("already starting"),
+                "the second ask must be told a spawn is in flight, not handed a \
+                 second head: {said}"
+            ),
+            other => panic!(
+                "a second concurrent ask was not excluded: {:?}",
+                other.map(|facts| facts.id)
+            ),
+        }
+
+        // And the reservation is given back, so a failed or finished spawn does not
+        // make the World permanently unstartable.
+        lock_recovering(&supervisor.inner.starting).remove(&id);
+        assert!(
+            !lock_recovering(&supervisor.inner.starting).contains(&id),
+            "a reservation must not outlive its spawn"
         );
     }
 

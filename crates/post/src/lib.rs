@@ -99,7 +99,26 @@ pub const MAX_TRACKED_SENDERS: usize = 4096;
 /// `challenge` is free and unauthenticated, so the map behind it is reachable
 /// state that anyone can grow. Expiry alone is not a bound — it runs on the next
 /// call and on the sweep, and between those the map is whatever arrived.
+///
+/// **Reaching it evicts the oldest rather than refusing the newest**, and the
+/// first version of this bound got that backwards with a confident comment about
+/// following `signal::OfferQueue`. The analogy does not transfer: there the
+/// population is authenticated peers, and here it is whoever can send a GET. So
+/// refusing the newest handed the entire map to whoever asked first and fastest —
+/// 16,384 free requests and *no device on the service could fetch or acknowledge
+/// anything*, because a challenge is the only way to reach either. A bound that
+/// converts a rate-limit bypass into total unavailability, with the attacker
+/// choosing, is worse than the thing it was guarding.
 pub const MAX_OUTSTANDING_CHALLENGES: usize = 16_384;
+
+/// The most challenges one device may have outstanding.
+///
+/// The bound that actually does the work, because it is per-subject: a challenge
+/// is single-use and lives [`CHALLENGE_TTL`] seconds, so an honest client needs
+/// one or two at a time and a flood needs thousands of *distinct device keys* to
+/// reach the global ceiling. Small enough to make one key useless as a filler,
+/// generous enough for a client retrying across a slow link.
+pub const MAX_CHALLENGES_PER_DEVICE: usize = 8;
 
 /// Why the Post refused.
 ///
@@ -166,6 +185,18 @@ pub struct Envelope {
     /// The device this copy is sealed to.
     pub recipient: DeviceId,
     /// The sealed bytes. Opaque here, by construction.
+    ///
+    /// Hex on the wire, like every other byte field in this file. It was a bare
+    /// `Vec<u8>` and serde renders one as a JSON *array of decimal numbers* — four
+    /// characters for any byte above 99, so a maximal envelope encoded to about
+    /// four times its size while the signature beside it was already hex. That is
+    /// not only waste: a client reading a mailbox under a byte ceiling found the
+    /// ceiling four times tighter than the arithmetic it was derived from, which
+    /// turned a full mailbox into an uncollectable one.
+    ///
+    /// Two rather than four, and the encoding is now visible in the type instead of
+    /// being a property of serde's default nobody had computed.
+    #[serde(with = "hex_payload")]
     pub sealed: Vec<u8>,
     /// When this stops being worth holding, unix seconds. Taken from the
     /// payload's own validity window rather than invented as a carrier policy.
@@ -407,12 +438,33 @@ impl<S: Store> Post<S> {
             issued_at: now,
         };
         self.expire_challenges(now);
-        // Expire first, then bound. Refusing the newest rather than evicting the
-        // oldest follows `signal::OfferQueue`: what is already outstanding may be
-        // about to be answered, and dropping it to make room for an arrival would
-        // let a prober invalidate real challenges by asking for more.
-        if self.outstanding.len() >= MAX_OUTSTANDING_CHALLENGES {
+
+        // Per device first, because that is the bound with a subject. One key
+        // cannot crowd the map, and a caller that is genuinely retrying is under
+        // this long before anybody notices.
+        let held = self
+            .outstanding
+            .values()
+            .filter(|outstanding| outstanding.device == *device)
+            .count();
+        if held >= MAX_CHALLENGES_PER_DEVICE {
             return Err(Refusal::AtCapacity);
+        }
+
+        // Then the global ceiling, which **evicts** rather than refuses. Dropping
+        // the oldest costs whoever held it one extra round trip — a challenge is
+        // single-use and short-lived, so re-asking is the ordinary recovery.
+        // Refusing instead would let anyone with a socket stop every fetch on the
+        // service, which is a far worse answer than making one client ask twice.
+        if self.outstanding.len() >= MAX_OUTSTANDING_CHALLENGES {
+            if let Some(oldest) = self
+                .outstanding
+                .iter()
+                .min_by_key(|(nonce, held)| (held.issued_at, **nonce))
+                .map(|(nonce, _)| *nonce)
+            {
+                self.outstanding.remove(&oldest);
+            }
         }
         self.outstanding.insert(nonce, challenge.clone());
         Ok(challenge)
@@ -471,10 +523,33 @@ impl<S: Store> Post<S> {
                 return Err(Refusal::AtCapacity);
             }
         } else if self.recent.len() >= MAX_TRACKED_SENDERS {
-            // A new sender with nowhere to record it. Refusing rather than
-            // admitting untracked is the only safe direction: admitting would
-            // make filling this table the way to switch the rate limit off.
-            return Err(Refusal::AtCapacity);
+            // A new sender with nowhere to record it. **Evict the least recently
+            // active**, rather than refuse.
+            //
+            // The first version refused, with a comment calling that "the only safe
+            // direction" because admitting untracked would make filling the table a
+            // way to switch the rate limit off. That reasoning was one step short: a
+            // sender id is a self-minted key, so 4,096 throwaway keys with one
+            // 1-byte deposit each filled this table and *every honest first contact
+            // on the service was refused* — at 68 requests a second, indefinitely.
+            //
+            // Evicting gives up a bounded amount of rate-limit accuracy: the evicted
+            // sender's window resets, so a determined flooder can cycle keys to keep
+            // a fresh allowance. That was always true — the window never bound a
+            // key-minting attacker, which is why `MAX_MAILBOX_DEPOSITS` is named as
+            // the fence and this is named as an honest client's brake. Trading the
+            // brake's precision for the service's availability is the right way
+            // round.
+            if let Some(stalest) = self
+                .recent
+                .iter()
+                .min_by_key(|(sender, seen)| {
+                    (seen.iter().max().copied().unwrap_or(0), (*sender).clone())
+                })
+                .map(|(sender, _)| sender.clone())
+            {
+                self.recent.remove(&stalest);
+            }
         }
 
         // What occupies the mailbox, expired included — see `Store::count`. A
@@ -567,6 +642,28 @@ impl<S: Store> Post<S> {
     /// the test that says they do not accumulate.
     pub fn outstanding_challenges(&self) -> usize {
         self.outstanding.len()
+    }
+}
+
+/// A variable-length byte string as lower-case hex.
+///
+/// The same shape as [`hex_signature`] and [`hex_nonce`], for the one field that
+/// did not have it. Permissive on the way in for the reason those are: a peer that
+/// upper-cases its hex is spelling the same bytes, and the *bytes* are what this
+/// carries — unlike a `DeviceId`, where the string is an identity and a second
+/// spelling splits a mailbox.
+mod hex_payload {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&data_encoding::HEXLOWER.encode(value))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        data_encoding::HEXLOWER_PERMISSIVE
+            .decode(text.as_bytes())
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -719,6 +816,93 @@ mod tests {
         assert_eq!(waiting[0].envelope.sealed, b"canonical");
     }
 
+    /// Filling the challenge map must not stop everybody else fetching.
+    ///
+    /// The vector this closes was self-inflicted and total: `challenge` is a free,
+    /// unauthenticated GET for *any* device key, so 16,384 requests filled the map,
+    /// and because a challenge is the only way to reach `fetch` or `acknowledge`, no
+    /// device on the service could collect its mail. A bound that hands an attacker
+    /// a service-wide off switch is not a bound.
+    #[test]
+    fn a_flood_of_challenges_does_not_stop_a_real_device_collecting() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let mut post = Post::new(MemStore::default());
+        post.deposit(
+            &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"waiting")),
+            NOW,
+        )
+        .expect("deposit");
+
+        // Distinct keys, because the per-device cap is what makes one key useless
+        // for this. Well past the global ceiling.
+        for n in 0..(MAX_OUTSTANDING_CHALLENGES + 512) {
+            let filler = device_from_seed(&blake3::hash(&n.to_le_bytes()).into());
+            // Some will be refused by the per-device cap once a key repeats; what
+            // matters is that the map never becomes a wall for somebody else.
+            let _ = post.challenge(&filler, NOW);
+        }
+
+        // The real device can still get one, and still read its mail.
+        let challenge = post
+            .challenge(&recipient, NOW)
+            .expect("a real device must still be able to ask");
+        let waiting = post
+            .fetch(&answer(&RECIPIENT_SEED, &challenge), NOW)
+            .expect("and still be able to fetch");
+        assert_eq!(waiting.len(), 1, "the letter is still collectable");
+    }
+
+    /// One key cannot hoard the challenge map.
+    #[test]
+    fn one_device_is_capped_and_does_not_crowd_the_map() {
+        let mut post = Post::new(MemStore::default());
+        let greedy = device_from_seed(&[7u8; 32]);
+        for _ in 0..MAX_CHALLENGES_PER_DEVICE {
+            post.challenge(&greedy, NOW).expect("under its own cap");
+        }
+        assert_eq!(
+            post.challenge(&greedy, NOW),
+            Err(Refusal::AtCapacity),
+            "one device past its cap is refused, and this is the refusal that is \
+             per-subject rather than service-wide"
+        );
+
+        // Somebody else is unaffected, which is the whole point of a per-subject cap.
+        post.challenge(&device_from_seed(&[8u8; 32]), NOW)
+            .expect("another device is not charged for the first one's appetite");
+    }
+
+    /// Filling the rate table must not stop everybody else depositing.
+    ///
+    /// The sibling of the challenge flood, and equally self-inflicted: a sender id
+    /// is a self-minted key, so `MAX_TRACKED_SENDERS` throwaway keys refused every
+    /// honest first contact on the service.
+    #[test]
+    fn a_flood_of_senders_does_not_stop_a_real_sender_depositing() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let mut post = Post::new(MemStore::default());
+
+        for n in 0..(MAX_TRACKED_SENDERS + 64) {
+            let seed: [u8; 32] = blake3::hash(&(n as u64).to_le_bytes()).into();
+            let body = format!("filler {n}");
+            // Each to its own recipient, so the mailbox ceiling is not what binds.
+            let target =
+                device_from_seed(&blake3::hash(&(n as u64 + 1_000_000).to_le_bytes()).into());
+            post.deposit(
+                &signed_deposit(&seed, envelope_to(&target, body.as_bytes())),
+                NOW,
+            )
+            .unwrap_or_else(|error| panic!("filler {n} was refused: {error}"));
+        }
+
+        // A sender the table has never seen still gets through.
+        post.deposit(
+            &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"a first contact")),
+            NOW,
+        )
+        .expect("an honest first contact must not be refused because strangers were busy");
+    }
+
     #[test]
     fn a_sender_over_its_window_is_refused_and_recovers_when_the_window_lapses() {
         let recipient = device_from_seed(&RECIPIENT_SEED);
@@ -820,32 +1004,30 @@ mod tests {
         .expect("one full mailbox does not close the Post");
     }
 
+    /// The challenge map stays bounded, and never becomes a wall.
+    ///
+    /// This test previously asserted the opposite of what it should have — that the
+    /// *newest* request is refused at the ceiling — and it passed, which is how the
+    /// service-wide fetch denial shipped. The bound is still worth pinning; what it
+    /// must pin is that the map is bounded **and** that reaching the bound costs an
+    /// arbitrary caller nothing. Those two together are the property; either alone
+    /// is a bug that looks fine.
     #[test]
-    fn outstanding_challenges_are_bounded_and_the_newest_is_the_one_refused() {
+    fn the_challenge_map_is_bounded_without_becoming_a_wall() {
         let mut post = Post::new(MemStore::default());
-        let mut issued = Vec::new();
-        for n in 0..MAX_OUTSTANDING_CHALLENGES {
-            let device = device_from_seed(&[(n % 251) as u8; 32]);
-            issued.push(post.challenge(&device, NOW).expect("under the bound"));
+        for n in 0..(MAX_OUTSTANDING_CHALLENGES + 256) {
+            let device = device_from_seed(&blake3::hash(&(n as u64).to_le_bytes()).into());
+            let _ = post.challenge(&device, NOW);
+            assert!(
+                post.outstanding_challenges() <= MAX_OUTSTANDING_CHALLENGES,
+                "the map grew past its ceiling at {n}"
+            );
         }
 
-        assert_eq!(
-            post.challenge(&device_from_seed(&RECIPIENT_SEED), NOW),
-            Err(Refusal::AtCapacity),
-            "a free unauthenticated mint must not be able to grow this without limit"
-        );
-
-        // The refusal cost nothing that was already outstanding: an issued
-        // challenge is still answerable, which is why the newest is refused
-        // rather than the oldest evicted.
-        let first = issued.first().expect("at least one");
-        let seed = [0u8; 32];
-        assert_eq!(
-            post.take_challenge(&first.nonce, &device_from_seed(&seed), NOW)
-                .map(|c| c.device),
-            Ok(device_from_seed(&seed)),
-            "the queue full of real challenges kept them"
-        );
+        // And a device nobody has seen is still served, which is the half that was
+        // false: at the ceiling this used to refuse everybody forever.
+        post.challenge(&device_from_seed(&[99u8; 32]), NOW)
+            .expect("a fresh device must still be able to ask at the ceiling");
     }
 
     #[test]

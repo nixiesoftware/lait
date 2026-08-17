@@ -223,6 +223,30 @@ impl DisplayRuntime {
         })
     }
 
+    /// Serve on a listener the caller already took.
+    ///
+    /// The daemon binds the port to decide whether it can host displays at all, and
+    /// then hands the listener here. It used to drop it and let this rebind, which
+    /// made the probe a guess: anything taking the port in between arrived as a
+    /// bind failure on the serving path, where the degradation ladder does not run,
+    /// so the daemon died on precisely the condition the ladder exists for.
+    pub async fn serve_on(
+        &self,
+        listener: tokio::net::TcpListener,
+        stop: watch::Receiver<bool>,
+    ) -> Result<()> {
+        crate::display::serve_display_on(
+            listener,
+            DisplayHttpState {
+                coordinator: self.coordinator.clone(),
+                pairing: self.pairing.clone(),
+            },
+            self.tls.clone(),
+            stop,
+        )
+        .await
+    }
+
     pub async fn serve(&self, stop: watch::Receiver<bool>) -> Result<()> {
         serve_display_https(
             DisplayHttpState {

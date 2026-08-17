@@ -38,17 +38,51 @@ use crate::{admissible, Carrier, Missed, Refused, Sealed, Waiting};
 /// cold TLS handshake on a slow link.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How many characters one payload byte costs on the wire.
+///
+/// Hex, so two. Named rather than inlined because the reply ceiling is derived
+/// from it, and the two drifting apart is precisely what went wrong: the ceiling
+/// was written as a round multiple while the encoding was a JSON array of decimal
+/// numbers at four characters a byte.
+const WIRE_BYTES_PER_PAYLOAD_BYTE: usize = 2;
+
+/// Per-envelope JSON overhead: field names, the device ids, the signature, braces.
+///
+/// Generous on purpose. Being wrong high costs a few kilobytes of headroom; being
+/// wrong low costs a mailbox nobody can read.
+const ENVELOPE_OVERHEAD: usize = 1024;
+
+/// The worst reply a carrier may legitimately produce.
+///
+/// A full mailbox of maximal envelopes, encoded. Computed rather than asserted so
+/// the relationship between the bounds is checkable — `tests/hop.rs` asserts
+/// `max_reply() >= worst_reply_bytes()`, which is the property that was false.
+pub fn worst_reply_bytes() -> u64 {
+    let per_envelope = crate::MAX_SEALED
+        .saturating_mul(WIRE_BYTES_PER_PAYLOAD_BYTE)
+        .saturating_add(ENVELOPE_OVERHEAD);
+    u64::try_from(per_envelope.saturating_mul(crate::mem::MAX_MAILBOX)).unwrap_or(u64::MAX)
+}
+
 /// The largest reply this adapter will read into memory.
 ///
-/// A fetch returns whole envelopes, so the ceiling is the mailbox bound rather
-/// than one envelope's: [`crate::MAX_SEALED`] times [`crate::mem::MAX_MAILBOX`],
-/// with room for the JSON around them. Bounded at all because a body limit is the
-/// only thing between a hostile or broken service and this process's memory.
+/// **Derived from the mailbox bound rather than chosen**, because a ceiling lower
+/// than the worst legitimate reply is a censorship primitive, not a safety limit: a
+/// stranger fills a mailbox past what one reply can carry, every `collect` is
+/// truncated, and the recipient can never read *any* of it — nor recover, since
+/// `acknowledge` needs ids and the only source of ids is `collect`.
+///
+/// That is what this was. The doc said `MAX_SEALED × MAX_MAILBOX` and the code
+/// multiplied by 64, against a payload encoding that cost four characters a byte —
+/// so the real capacity was sixteen maximal envelopes out of a permitted 256, and
+/// seventeen signed deposits from one throwaway key silenced a device for thirty
+/// days.
+///
+/// Bounded at all because a body limit is the only thing between a hostile or
+/// broken service and this process's memory. Doubled over the worst case so the
+/// bound is a bound and not a boundary condition.
 pub fn max_reply() -> u64 {
-    // `try_from` rather than `as`: this crate denies silent conversions, and a
-    // `usize` that does not fit a `u64` is a platform where a byte ceiling is not
-    // the interesting problem. Saturating keeps the bound a bound.
-    u64::try_from(crate::MAX_SEALED.saturating_mul(64)).unwrap_or(u64::MAX)
+    worst_reply_bytes().saturating_mul(2)
 }
 
 /// Who this client can sign as.
@@ -302,12 +336,24 @@ fn translate(refusal: lait_post::Refusal) -> Refused {
 }
 
 fn read_json<R: serde::de::DeserializeOwned>(response: ureq::Response) -> Result<R, Refused> {
+    // One byte past the ceiling, so hitting it is *detectable*. `take(n)` truncates
+    // silently, so a reply over the limit arrived as a parse failure — the size
+    // bound became a mystery, and the mystery was the censorship above. Reading
+    // `n + 1` turns "too big" into a fact this can name.
+    let ceiling = max_reply();
     let mut body = Vec::new();
     response
         .into_reader()
-        .take(max_reply())
+        .take(ceiling.saturating_add(1))
         .read_to_end(&mut body)
         .map_err(|error| Refused::Unreachable(format!("read the carrier's reply: {error}")))?;
+    if u64::try_from(body.len()).unwrap_or(u64::MAX) > ceiling {
+        return Err(Refused::Unreachable(format!(
+            "the carrier's reply exceeded {ceiling} bytes, which is larger than a full \
+             mailbox should encode to — truncating it would have looked like a decode \
+             failure"
+        )));
+    }
     serde_json::from_slice(&body)
         .map_err(|error| Refused::Unreachable(format!("decode the carrier's reply: {error}")))
 }

@@ -189,9 +189,29 @@ pub fn is_port_taken(error: &anyhow::Error) -> bool {
 pub async fn serve_display_https(
     state: DisplayHttpState,
     identity: Arc<DisplayTlsIdentity>,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
 ) -> Result<()> {
     let listener = bind_display(&identity).await?;
+    serve_display_on(listener, state, identity, stop).await
+}
+
+/// Serve on a listener somebody else already took.
+///
+/// Split out because a probe is not a reservation. The daemon used to `bind_display`
+/// to decide whether it could host displays, **drop the listener**, and then let this
+/// function bind again — so anything taking the port in between arrived as a bind
+/// failure on the serving path, where the degradation ladder does not run, and the
+/// whole daemon died on exactly the condition the ladder was written for.
+///
+/// The window is not theoretical: two daemons starting close together both probe
+/// successfully, because the probes serialise, and then one of them loses the real
+/// bind and dies instead of degrading.
+pub async fn serve_display_on(
+    listener: TcpListener,
+    state: DisplayHttpState,
+    identity: Arc<DisplayTlsIdentity>,
+    mut stop: watch::Receiver<bool>,
+) -> Result<()> {
     let acceptor = TlsAcceptor::from(identity.server_config());
     let app = display_http_router(state);
     let mut connections = JoinSet::new();

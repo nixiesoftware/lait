@@ -1021,8 +1021,12 @@ impl Daemon {
         // receivers cannot reach — but the remedy was one size too large: the
         // answer to "cannot host displays" is to not host them and say so, not to
         // refuse to be a daemon.
-        match crate::display::bind_display(&self.display.tls).await {
-            Ok(listener) => drop(listener),
+        let display_listener = match crate::display::bind_display(&self.display.tls).await {
+            // Kept, not dropped. Dropping it made this a guess rather than a
+            // reservation: the port could be taken between here and the serving
+            // bind, and that failure arrives on a path where the degradation below
+            // does not run — so the daemon died on exactly the race this handles.
+            Ok(listener) => listener,
             Err(error) if crate::display::is_port_taken(&error) => {
                 tracing::warn!(
                     %error,
@@ -1037,11 +1041,12 @@ impl Daemon {
                 Self::join_staging(staging).await;
                 return Err(error).context("serve daemon display HTTPS");
             }
-        }
+        };
         let display = self.display.clone();
         let display_stop = self.endpoint.subscribe_stop();
         let endpoint = self.endpoint.clone();
-        let mut display_service = Box::pin(async move { display.serve(display_stop).await });
+        let mut display_service =
+            Box::pin(async move { display.serve_on(display_listener, display_stop).await });
         let mut control_service = Box::pin(async move { endpoint.serve(home).await });
         let outcome = tokio::select! {
             endpoint_result = &mut control_service => {

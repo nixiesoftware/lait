@@ -295,6 +295,16 @@ impl OwnedHead {
         // It would not, or could not, be asked. Force is the last rung and it is
         // still reached, because a supervisor that cannot stop a wedged process is
         // not a supervisor.
+        //
+        // The group, then the process. `Child::kill` signals one process and leaves
+        // descendants (rust-lang/rust#115241), so a forced stop that only killed the
+        // handle would leave a World's own server running — and this claim was made
+        // in `own_process_group`'s doc before the code did it, which is the kind of
+        // gap that reads as done. `force_group` answers whether it reached anything;
+        // the process kill follows either way, both because it is what reaps the
+        // handle and because a group signal that found nothing must not be mistaken
+        // for a stop.
+        force_group(&self.child);
         self.child.kill().context("stop head")?;
         self.child.wait().context("collect head")?;
         Ok(Stopped::Forced)
@@ -454,6 +464,29 @@ pub(crate) fn dead_head_for_test(id: String) -> OwnedHead {
         child,
     }
 }
+
+/// SIGKILL the head's whole process group, so descendants go with it.
+///
+/// Safe only because a daemon is no longer in a head's group: `daemon_spawn` gives
+/// the identity daemon its own, for the reason its windows branch always stated. A
+/// group kill from here before that fix would have taken the machine's daemon down
+/// with a per-World stop.
+#[cfg(unix)]
+fn force_group(child: &Child) {
+    let Ok(pid) = i32::try_from(child.id()) else {
+        return;
+    };
+    if let Some(group) = pid.checked_neg() {
+        if group != 0 {
+            // SAFETY: the documented POSIX form. `ESRCH` for a group that has
+            // already gone is a value, not undefined behaviour.
+            unsafe { libc::kill(group, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn force_group(_child: &Child) {}
 
 /// Ask a head to stop, on the channel a web page cannot reach.
 ///
