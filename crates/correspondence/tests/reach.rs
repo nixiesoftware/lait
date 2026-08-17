@@ -309,3 +309,77 @@ async fn reach_by_profile_then_carry_over_a_real_post() {
         "the proven sender is Bob"
     );
 }
+
+// ── Closing the loop: a shared Space bootstraps bidirectional in-band reach ─────
+
+use mechanics::ids::SpaceId as SpaceIdForLoop;
+
+const BOB_B: [u8; 32] = [41u8; 32];
+
+/// After first contact puts Alice and Bob in one Space (the one-time paste), they
+/// exchange profiles over the Members audience and each can reach the other
+/// in-band — no third channel again, in either direction. Each holds the other's
+/// profile in its own registry, so the reach survives leaving the Space.
+#[test]
+fn a_shared_space_closes_the_loop_both_directions() {
+    let space = SpaceIdForLoop::mint(&SystemUlidSource);
+    let member = |device: mechanics::ids::DeviceId| Standing {
+        device: Some(device),
+        spaces: vec![space.clone()],
+        ..Standing::default()
+    };
+    let alice_device = device_from_seed(&ALICE_A);
+    let bob_device = device_from_seed(&BOB);
+
+    // Alice publishes her profile to the Space's members.
+    let mut alice = Registry::new();
+    let a_genesis = DeviceLink::seal(&ALICE_A, &ALICE_B, [7u8; 16], 1).expect("link");
+    let alice_profile = alice.found(a_genesis.clone()).expect("found");
+    alice
+        .avow_reachable(
+            &alice_profile,
+            Audience::Members(space.clone()),
+            &ALICE_A,
+            5,
+            [3u8; 16],
+        )
+        .expect("avow");
+
+    // Bob publishes his.
+    let mut bob = Registry::new();
+    let b_genesis = DeviceLink::seal(&BOB, &BOB_B, [8u8; 16], 1).expect("link");
+    let bob_profile = bob.found(b_genesis.clone()).expect("found");
+    bob.avow_reachable(
+        &bob_profile,
+        Audience::Members(space.clone()),
+        &BOB,
+        5,
+        [4u8; 16],
+    )
+    .expect("avow");
+
+    // Each projects for the other as a fellow member, and absorbs it.
+    let alice_for_bob = alice
+        .project(&alice_profile, &ALICE_A, 5, &member(bob_device.clone()))
+        .expect("project");
+    let bob_for_alice = bob
+        .project(&bob_profile, &BOB, 5, &member(alice_device.clone()))
+        .expect("project");
+    bob.absorb(alice_for_bob, &a_genesis, &member(bob_device))
+        .expect("bob learns alice");
+    alice
+        .absorb(bob_for_alice, &b_genesis, &member(alice_device))
+        .expect("alice learns bob");
+
+    // The loop is closed: each resolves the other, in-band, either direction.
+    assert_eq!(
+        bob.resolve(&alice_profile).map(|d| d.len()),
+        Some(2),
+        "bob reaches alice"
+    );
+    assert_eq!(
+        alice.resolve(&bob_profile).map(|d| d.len()),
+        Some(2),
+        "alice reaches bob"
+    );
+}
