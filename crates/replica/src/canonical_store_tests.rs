@@ -381,6 +381,7 @@ fn prepared_action_is_queryable_before_publish_and_drop_is_exact_rollback() {
             .prepare_action(
                 &ctx,
                 &auth,
+                crate::receipt::Interpretation::UNSPECIFIED,
                 &world(),
                 &device(),
                 &request,
@@ -434,6 +435,7 @@ fn prepared_action_is_queryable_before_publish_and_drop_is_exact_rollback() {
             .prepare_action(
                 &ctx,
                 &auth,
+                crate::receipt::Interpretation::UNSPECIFIED,
                 &world(),
                 &device(),
                 &request,
