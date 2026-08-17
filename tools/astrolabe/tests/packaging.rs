@@ -280,6 +280,39 @@ fn the_installer_asks_for_no_elevation() {
     );
 }
 
+/// The installer lands where the caller told it to, not beside this script.
+///
+/// NSIS resolves a relative `OutFile` against the *script's* directory, not the
+/// working directory. So `cd dist && makensis ..\packaging\windows\astrolabe.nsi`
+/// compiled a perfectly good installer into `packaging\windows\` while the
+/// release job looked in `dist\`, found nothing, and reported "makensis produced
+/// no installer" — a success that read as a build failure. Three releases
+/// (v0.8.0, v0.8.1, v0.8.2) shipped a macOS DMG and no Windows installer before
+/// anyone read the compile log far enough to see `Output:` naming the wrong
+/// directory.
+///
+/// The fix is that the caller passes `OUTDIR` absolute. This asserts the script
+/// honours it, because a relative `OutFile` fails silently in exactly the
+/// direction that looks like somebody else's bug.
+#[test]
+fn the_installer_is_written_where_the_caller_asked() {
+    let script = directives();
+    let out_file = script
+        .lines()
+        .find(|line| line.trim_start().starts_with("OutFile"))
+        .expect("the script declares an OutFile");
+    assert!(
+        out_file.contains("${OUTDIR}"),
+        "OutFile is relative to the script directory, so the caller's output \
+         directory is ignored and the installer lands beside the .nsi: {out_file}"
+    );
+    assert!(
+        script.contains("!define OUTDIR"),
+        "OUTDIR has no default, so a standalone `makensis astrolabe.nsi` errors \
+         on an undefined symbol instead of writing beside the script"
+    );
+}
+
 /// The interface stays in `apps/astrolabe`, and the core stays out of it.
 ///
 /// This test used to assert that no Flutter or Dart artifact existed *anywhere*

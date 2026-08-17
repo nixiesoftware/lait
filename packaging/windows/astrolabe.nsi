@@ -74,9 +74,18 @@
 !ifndef STUB
   !error "STUB must be passed: the built astrolabe-stub executable"
 !endif
+; NSIS resolves a relative OutFile against the SCRIPT's directory, not the
+; working directory — so `cd dist && makensis ..\packaging\windows\astrolabe.nsi`
+; wrote the installer into packaging\windows\ and the caller, looking in dist\,
+; reported "makensis produced no installer" for a compile that had in fact
+; succeeded. It read like a build failure and was a path convention. The caller
+; passes OUTDIR absolute; standalone invocations keep the old behaviour.
+!ifndef OUTDIR
+  !define OUTDIR "."
+!endif
 
 Name "Astrolabe"
-OutFile "astrolabe-${VERSION}-setup.exe"
+OutFile "${OUTDIR}\astrolabe-${VERSION}-setup.exe"
 Unicode true
 
 ; Per-user by default: Astrolabe is a single-user client that manages a

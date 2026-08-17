@@ -163,10 +163,9 @@ jobs:
           }
           New-Item -ItemType Directory -Force dist | Out-Null
           $stage = (Resolve-Path "apps\astrolabe\build\windows\x64\runner\Release").Path
-          Push-Location dist
           $stub = (Resolve-Path "target\release\astrolabe-stub.exe").Path
-          & $makensis "-DVERSION=$env:VERSION" "-DVERSION_NUMERIC=$env:NUMERIC" "-DSTAGE=$stage" "-DSTUB=$stub" ..\packaging\windows\astrolabe.nsi
-          Pop-Location
+          $out = (Resolve-Path "dist").Path
+          & $makensis "-DVERSION=$env:VERSION" "-DVERSION_NUMERIC=$env:NUMERIC" "-DSTAGE=$stage" "-DSTUB=$stub" "-DOUTDIR=$out" packaging\windows\astrolabe.nsi
           $exe = "dist\astrolabe-$env:VERSION-setup.exe"
           if (-not (Test-Path $exe)) { Write-Error "makensis produced no $exe"; exit 1 }
           (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower() + "  astrolabe-$env:VERSION-setup.exe" |

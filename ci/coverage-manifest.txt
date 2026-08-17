@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2015
-pr-platform    1582
-nightly        2043
+pr             2016
+pr-platform    1583
+nightly        2044
 mutants        98
 
 [gates]
@@ -179,6 +179,7 @@ astrolabe::packaging the_installer_asks_for_no_elevation
 astrolabe::packaging the_installer_carries_nothing_from_the_retired_stacks
 astrolabe::packaging the_installer_carries_the_c_runtime
 astrolabe::packaging the_installer_carries_the_whole_flutter_bundle
+astrolabe::packaging the_installer_is_written_where_the_caller_asked
 astrolabe::packaging the_installer_places_both_binaries_in_one_directory
 astrolabe::packaging the_installer_registers_the_lait_url_scheme
 astrolabe::packaging the_installer_ships_the_third_party_notices
