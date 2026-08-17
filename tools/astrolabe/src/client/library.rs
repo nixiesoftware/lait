@@ -13,8 +13,65 @@
 //! "Issues" on start was one row being replaced by a different kind of row, not
 //! a name arriving.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use super::Client;
 use super::{ClientError, ClientResult};
+
+/// What this machine last learned about one World's channel.
+///
+/// Read from disk rather than asked for over a plane, for the same reason the
+/// product's own standing is: the fact outlives both processes, so the client
+/// and the daemon need not be alive at the same moment for it to be true.
+///
+/// Absent for a World nothing has ever checked — and absence is not "up to
+/// date". A Library row with no standing draws exactly what it drew before any
+/// of this existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldStanding {
+    /// The bundle version serving now. `None` is the embedded floor this build
+    /// ships, which is an answer rather than a gap.
+    pub serving: Option<String>,
+    /// The version the World's channel named when it was last asked.
+    pub available: Option<String>,
+    /// The channel is known to hold a bundle this machine is not serving, and
+    /// this build can run it. Every uncertainty answers false — see
+    /// `lait::update::world::Standing::behind`.
+    pub behind: bool,
+    /// A newer bundle exists that this build cannot run, each unmet
+    /// requirement named. Not actionable, and deliberately not `behind`.
+    pub unmet: Option<Vec<String>>,
+}
+
+/// What the daemon has learned about each World this build ships.
+///
+/// Keyed by World id. Empty when there is no identity bound yet, which is the
+/// same answer as "nothing has been checked" and draws the same way.
+pub fn world_standings(
+    identity: Option<&Path>,
+    entries: &[LibraryEntry],
+) -> BTreeMap<String, WorldStanding> {
+    let Some(identity) = identity else {
+        return BTreeMap::new();
+    };
+    let worlds = lait::serve::head::worlds_root(identity);
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let standing = lait::update::world::standing(&worlds, &entry.world)?;
+            Some((
+                entry.world.clone(),
+                WorldStanding {
+                    behind: standing.behind(),
+                    serving: standing.serving,
+                    available: standing.channel,
+                    unmet: standing.unmet,
+                },
+            ))
+        })
+        .collect()
+}
 
 /// One row of the Library: an installed World.
 ///

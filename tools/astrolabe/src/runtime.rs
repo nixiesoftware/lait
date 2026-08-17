@@ -58,6 +58,10 @@ pub enum Action {
     OpenWorld {
         entry_path: String,
     },
+    /// Fetch one World's newest bundle now.
+    UpdateWorld {
+        world: String,
+    },
     StartDevice(String),
     StopDevice(String),
     RestartDevice(String),
@@ -193,6 +197,7 @@ impl Action {
         match self {
             Self::Refresh => "refresh".into(),
             Self::OpenWorld { entry_path } => format!("open:{entry_path}"),
+            Self::UpdateWorld { world } => format!("world.update:{world}"),
             Self::StartDevice(id) => format!("device.start:{id}"),
             Self::StopDevice(id) => format!("device.stop:{id}"),
             Self::RestartDevice(id) => format!("device.restart:{id}"),
@@ -256,6 +261,7 @@ impl Action {
         match self {
             Self::Refresh => "re-read this machine".into(),
             Self::OpenWorld { entry_path } => format!("open {entry_path}"),
+            Self::UpdateWorld { world } => format!("update {world}"),
             Self::StartDevice(id) => format!("start {id}"),
             Self::StopDevice(id) => format!("stop {id}"),
             Self::RestartDevice(id) => format!("restart {id}"),
@@ -320,6 +326,11 @@ impl Action {
 pub enum Update {
     Snapshot(Box<WorkbenchSnapshot>),
     Library(Vec<LibraryEntry>),
+    /// What the daemon has learned about each World's channel, keyed by World
+    /// id. Separate from `Library` because the two are different kinds of
+    /// fact: the list is compiled in and cannot go stale, this is measured and
+    /// can.
+    WorldStandings(std::collections::BTreeMap<String, crate::client::library::WorldStanding>),
     Storage(Vec<StorageFacts>),
     Heads(Vec<HeadFacts>),
     Context(Box<HostContext>),
@@ -573,7 +584,15 @@ impl Worker {
         self.send(Update::Heads(self.client.heads()));
         // The Library is compiled in — the install list — so reading it can
         // neither fail nor go stale against a daemon.
-        self.send(Update::Library(self.client.get_library()));
+        let library = self.client.get_library();
+        // What each of those Worlds' channels last said, which is measured and
+        // therefore can. Read from the identity's own directory rather than
+        // asked for over a plane: the standing is a fact on disk precisely so
+        // the client and the daemon need not be alive at the same moment.
+        self.send(Update::WorldStandings(
+            crate::client::library::world_standings(self.client.identity(), &library),
+        ));
+        self.send(Update::Library(library));
         match self.client.get_storage().await {
             Ok(facts) => self.send(Update::Storage(facts)),
             Err(error) => self.fail(None, "read storage", error),
@@ -644,6 +663,52 @@ impl Worker {
             // The re-read itself is the effect, and `rereads` is what
             // carries it out. Nothing to say beyond that it happened.
             Action::Refresh => Ok(Outcome::Silent),
+            // The check both resolves the channel and stages what it finds,
+            // so this is the whole act. Blocking, and off the signal loop for
+            // the same reason every other network read here is: a World host
+            // that is slow must not hold a frame.
+            Action::UpdateWorld { world } => {
+                let Some(identity) = client.identity().map(std::path::Path::to_path_buf) else {
+                    return Err(ClientError::invalid(
+                        "no identity is bound, so there is no World to update".to_string(),
+                    ));
+                };
+                let world = world.clone();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let worlds = lait::serve::head::worlds_root(&identity);
+                    let channel = lait::update::feed::Channel::current();
+                    let found = lait::update::world::check(&world, &worlds, channel);
+                    if let Ok(found) = &found {
+                        // Record it the same way the daemon's own period does,
+                        // so the row this refreshes into agrees with the row a
+                        // later period would draw.
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |since| since.as_secs());
+                        lait::update::world::note(&worlds, &world, found, now);
+                    }
+                    found
+                })
+                .await
+                .map_err(|error| {
+                    ClientError::internal(format!("the world check panicked: {error}"))
+                })?
+                .map_err(|error| ClientError::internal(format!("{error:#}")))?;
+                Ok(Outcome::Said(match outcome {
+                    lait::update::world::Outcome::Staged { version } => {
+                        format!("updated to {version}")
+                    }
+                    lait::update::world::Outcome::Current { version } => {
+                        format!("already on {version}")
+                    }
+                    lait::update::world::Outcome::Unmet { version, why } => {
+                        format!("{version} needs {}", why.join(", "))
+                    }
+                    lait::update::world::Outcome::NothingPublished { version } => {
+                        format!("{version} carries nothing for this World")
+                    }
+                }))
+            }
             Action::OpenWorld { entry_path } => {
                 let launch = client.open_world(entry_path).await?;
                 // The browser is the person's, and this is the only place in
