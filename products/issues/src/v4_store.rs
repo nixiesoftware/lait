@@ -980,7 +980,7 @@ fn apply_triage(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rej
         let selected = resolutions
             .get(&triage)
             .and_then(|decision| choices.iter().find(|choice| &choice.decision == decision))
-            .or_else(|| (choices.len() == 1).then(|| &choices[0]));
+            .or_else(|| choices.first().filter(|_| choices.len() == 1));
         if let Some(decision) = selected {
             item.outcome = match decision.outcome {
                 v4::TriageOutcome::Accepted => "accepted",
@@ -1045,10 +1045,15 @@ fn crockford_128(mut value: u128) -> String {
     let mut out = [b'0'; 26];
     for index in (0..26).rev() {
         let digit = usize::try_from(value & 0x1f).unwrap_or(0);
-        out[index] = ALPHABET[digit];
+        if let (Some(slot), Some(glyph)) = (out.get_mut(index), ALPHABET.get(digit)) {
+            *slot = *glyph;
+        }
         value >>= 5;
     }
-    String::from_utf8(out.to_vec()).expect("Crockford alphabet is UTF-8")
+    match String::from_utf8(out.to_vec()) {
+        Ok(encoded) => encoded,
+        Err(_) => "0".repeat(26),
+    }
 }
 
 fn request_record_id(
@@ -1058,7 +1063,11 @@ fn request_record_id(
     extra: &[u8],
 ) -> Result<String, Rejection> {
     let request = ctx.request_id().ok_or(Rejection::InvalidRequest)?;
-    let mut material = Vec::with_capacity(16 + issue.as_str().len() + extra.len());
+    let mut material = Vec::with_capacity(
+        16usize
+            .saturating_add(issue.as_str().len())
+            .saturating_add(extra.len()),
+    );
     material.extend_from_slice(&request.as_bytes());
     material.extend_from_slice(issue.as_str().as_bytes());
     material.extend_from_slice(extra);
@@ -1079,7 +1088,10 @@ pub(crate) fn write_comment(
         let bytes = data_encoding::HEXLOWER
             .decode(identity.as_bytes())
             .map_err(|_| Rejection::StateCorrupt)?;
-        let raw = <[u8; 16]>::try_from(&bytes[..16]).map_err(|_| Rejection::StateCorrupt)?;
+        let raw = bytes
+            .get(..16)
+            .and_then(|head| <[u8; 16]>::try_from(head).ok())
+            .ok_or(Rejection::StateCorrupt)?;
         comment.id = Some(format!("cmt_{}", crockford_128(u128::from_be_bytes(raw))));
     }
     let id = comment.id.clone().ok_or(Rejection::StateCorrupt)?;
@@ -1454,30 +1466,26 @@ pub(crate) fn board_position(
                 })
                 .ok_or(Rejection::InvalidRequest)?;
             let rank = target.placement.position;
-            match position {
-                Some(contract::Pos::Before { .. }) => {
-                    let lower = board_neighbor(
-                        ctx,
-                        project,
-                        workflow_state,
-                        moving,
-                        true,
-                        crate::find::board_position_desc_key(project, workflow_state, &rank, doc),
-                    )?;
-                    (lower.map_or_else(String::new, |(_, rank)| rank), Some(rank))
-                }
-                Some(contract::Pos::After { .. }) => {
-                    let upper = board_neighbor(
-                        ctx,
-                        project,
-                        workflow_state,
-                        moving,
-                        false,
-                        crate::find::board_position_key(project, workflow_state, &rank, doc),
-                    )?;
-                    (rank, upper.map(|(_, rank)| rank))
-                }
-                _ => unreachable!(),
+            if matches!(position, Some(contract::Pos::After { .. })) {
+                let upper = board_neighbor(
+                    ctx,
+                    project,
+                    workflow_state,
+                    moving,
+                    false,
+                    crate::find::board_position_key(project, workflow_state, &rank, doc),
+                )?;
+                (rank, upper.map(|(_, rank)| rank))
+            } else {
+                let lower = board_neighbor(
+                    ctx,
+                    project,
+                    workflow_state,
+                    moving,
+                    true,
+                    crate::find::board_position_desc_key(project, workflow_state, &rank, doc),
+                )?;
+                (lower.map_or_else(String::new, |(_, rank)| rank), Some(rank))
             }
         }
     };
@@ -1683,18 +1691,30 @@ fn replace_text(
     let old: Vec<char> = current.chars().collect();
     let new: Vec<char> = wanted.chars().collect();
     let mut prefix = 0usize;
-    while prefix < old.len() && prefix < new.len() && old[prefix] == new[prefix] {
+    while let (Some(left), Some(right)) = (old.get(prefix), new.get(prefix)) {
+        if left != right {
+            break;
+        }
         prefix = prefix.saturating_add(1);
     }
     let mut suffix = 0usize;
-    while suffix < old.len().saturating_sub(prefix)
-        && suffix < new.len().saturating_sub(prefix)
-        && old[old.len().saturating_sub(1).saturating_sub(suffix)]
-            == new[new.len().saturating_sub(1).saturating_sub(suffix)]
-    {
-        suffix = suffix.saturating_add(1);
+    loop {
+        if suffix >= old.len().saturating_sub(prefix) || suffix >= new.len().saturating_sub(prefix)
+        {
+            break;
+        }
+        let left = old.get(old.len().saturating_sub(1).saturating_sub(suffix));
+        let right = new.get(new.len().saturating_sub(1).saturating_sub(suffix));
+        match (left, right) {
+            (Some(left), Some(right)) if left == right => {
+                suffix = suffix.saturating_add(1);
+            }
+            _ => break,
+        }
     }
-    let insert: String = new[prefix..new.len().saturating_sub(suffix)]
+    let insert: String = new
+        .get(prefix..new.len().saturating_sub(suffix))
+        .unwrap_or(&[])
         .iter()
         .collect();
     batch.operation(
@@ -2322,7 +2342,11 @@ fn offer_migration_item(
 /// offer path simple without making Batch's fields a second transaction API.
 fn candidate_delta(base: &Batch, candidate: Batch) -> Batch {
     Batch {
-        operations: candidate.operations[base.operations.len()..].to_vec(),
+        operations: candidate
+            .operations
+            .get(base.operations.len()..)
+            .unwrap_or(&[])
+            .to_vec(),
         bodies: candidate
             .bodies
             .into_iter()

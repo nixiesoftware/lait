@@ -415,7 +415,7 @@ pub struct WorldHost {
     control: Option<Arc<dyn Handler>>,
     exec: runtime::exec::Package,
     projector: Option<Arc<dyn ObservationProjector>>,
-    primary_session: Mutex<Option<Session>>,
+    primary_session: Mutex<Option<Arc<Session>>>,
     agent_sessions: Mutex<HashMap<DeviceId, Session>>,
 }
 
@@ -489,14 +489,14 @@ impl WorldHost {
     ) -> Result<(), RuntimeFailure> {
         let mut session = self.primary_session.lock_recovering();
         if session.is_none() {
-            *session = Some(station.dock(&self.world, identity)?);
+            *session = Some(Arc::new(station.dock(&self.world, identity)?));
         }
         Ok(())
     }
 
     pub fn with_primary<R>(&self, f: impl FnOnce(&Session) -> R) -> Option<R> {
-        let session = self.primary_session.lock_recovering();
-        session.as_ref().map(f)
+        let session = self.primary_session.lock_recovering().clone();
+        session.as_ref().map(|session| f(session.as_ref()))
     }
 
     /// Dock or reuse a sponsored local agent's Session, then run `f` with it.
@@ -610,9 +610,9 @@ impl WorldRouter {
     /// so Space-level adapters need exactly one Session to publish that plane.
     pub fn with_any_primary<R>(&self, f: impl FnOnce(&Session) -> R) -> Option<R> {
         for host in self.hosts.values() {
-            let session = host.primary_session.lock_recovering();
-            if let Some(session) = session.as_ref() {
-                return Some(f(session));
+            let session = host.primary_session.lock_recovering().clone();
+            if let Some(session) = session {
+                return Some(f(session.as_ref()));
             }
         }
         None
@@ -623,9 +623,9 @@ impl WorldRouter {
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
-            let session = host.primary_session.lock_recovering();
-            if let Some(session) = session.as_ref() {
-                projector.start(session, space);
+            let session = host.primary_session.lock_recovering().clone();
+            if let Some(session) = session {
+                projector.start(session.as_ref(), space);
             }
         }
     }
@@ -636,7 +636,7 @@ impl WorldRouter {
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
-            let session = host.primary_session.lock_recovering();
+            let session = host.primary_session.lock_recovering().clone();
             // A host with nothing to say is skipped, never propagated: with a
             // second bundled World this loop visits hosts that hold no session
             // on this Space at all (Signage on a board-only Space), and an
@@ -646,7 +646,7 @@ impl WorldRouter {
             // sync that never completes.
             let Some(status) = session
                 .as_ref()
-                .and_then(|session| projector.status(session))
+                .and_then(|session| projector.status(session.as_ref()))
             else {
                 continue;
             };
@@ -679,11 +679,11 @@ impl WorldRouter {
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
-            let session = host.primary_session.lock_recovering();
-            let Some(session) = session.as_ref() else {
+            let session = host.primary_session.lock_recovering().clone();
+            let Some(session) = session else {
                 continue;
             };
-            let next = projector.project(session, space, observation);
+            let next = projector.project(session.as_ref(), space, observation);
             if !next.dirty.is_empty() || !next.planes.is_empty() {
                 projected.push(RoutedInvalidation {
                     world: host.world.clone(),

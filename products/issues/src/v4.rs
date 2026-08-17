@@ -1654,8 +1654,23 @@ impl IssueAliasCoordinate {
         );
         let mut ordinal_bytes = [0u8; 8];
         ordinal_bytes.copy_from_slice(&digest[..8]);
-        let ordinal = u64::from_be_bytes(ordinal_bytes) & i64::MAX as u64;
-        Self::for_issue(ordinal.max(1), issue).expect("nonzero deterministic ordinal")
+        let high_bit_clear = u64::try_from(i64::MAX).unwrap_or(u64::MAX);
+        let ordinal = (u64::from_be_bytes(ordinal_bytes) & high_bit_clear).max(1);
+        match Self::for_issue(ordinal, issue) {
+            Ok(coordinate) => coordinate,
+            Err(_) => {
+                let digest = blake3::derive_key(
+                    "lait.issues.alias-coordinate.v1",
+                    issue.as_str().as_bytes(),
+                );
+                let mut disambiguator = [0u8; 16];
+                disambiguator.copy_from_slice(&digest[..16]);
+                Self {
+                    ordinal,
+                    disambiguator,
+                }
+            }
+        }
     }
 
     pub fn suffix(self) -> String {
@@ -1673,11 +1688,9 @@ impl IssueAliasCoordinate {
             return Err(Invalid::Field("project_key"));
         }
         self.validate()?;
-        Ok(format!(
-            "{project_key}-{}-{}",
-            self.ordinal,
-            &self.suffix()[..8]
-        ))
+        let suffix = self.suffix();
+        let short = suffix.get(..8).unwrap_or(suffix.as_str());
+        Ok(format!("{project_key}-{}-{short}", self.ordinal))
     }
 }
 
@@ -1735,7 +1748,8 @@ impl ReactionRecord {
     pub fn identity(&self) -> String {
         let mut material = Vec::new();
         for value in [&self.comment, &self.emoji, &self.actor] {
-            material.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+            material.extend_from_slice(&len.to_be_bytes());
             material.extend_from_slice(value.as_bytes());
         }
         data_encoding::HEXLOWER.encode(&blake3::derive_key(

@@ -824,7 +824,9 @@ impl GeometryExecutor {
         let receiver = Arc::new(Mutex::new(receiver));
         for ordinal in 0..workers.max(1) {
             let receiver = receiver.clone();
-            std::thread::Builder::new()
+            // A failed spawn just means this slot is empty; queries then
+            // refuse with queue saturation rather than panic the World.
+            let _ = std::thread::Builder::new()
                 .name(format!("issues-geometry-{ordinal}"))
                 .spawn(move || loop {
                     let job = receiver
@@ -835,8 +837,7 @@ impl GeometryExecutor {
                         Ok(job) => job(),
                         Err(_) => break,
                     }
-                })
-                .expect("spawn bounded Geometry worker");
+                });
         }
         Self { sender }
     }
@@ -1116,6 +1117,15 @@ impl RelationKind {
             "duplicates" => Self::Duplicates,
             "contains" => Self::Contains,
             _ => Self::Association,
+        }
+    }
+
+    fn sort_key(self) -> u8 {
+        match self {
+            Self::Blocks => 0,
+            Self::Duplicates => 1,
+            Self::Contains => 2,
+            Self::Association => 3,
         }
     }
 }
@@ -1570,11 +1580,12 @@ impl CompactGeometry {
                     .components
                     .get(usize::try_from(component.0).unwrap_or(usize::MAX))
                     .ok_or(AccessFailure::InvalidPage("component"))?;
-                let span = match request.section {
-                    GeometrySection::ComponentMembers(_) => &compact.members,
-                    GeometrySection::ComponentRoots(_) => &compact.roots,
-                    GeometrySection::ComponentTerminals(_) => &compact.terminals,
-                    _ => unreachable!(),
+                let span = if matches!(request.section, GeometrySection::ComponentMembers(_)) {
+                    &compact.members
+                } else if matches!(request.section, GeometrySection::ComponentRoots(_)) {
+                    &compact.roots
+                } else {
+                    &compact.terminals
                 };
                 member_rows(self, &self.component_members, span, start, limit)
             }
@@ -1591,10 +1602,10 @@ impl CompactGeometry {
                     .residuals
                     .get(usize::try_from(residual.0).unwrap_or(usize::MAX))
                     .ok_or(AccessFailure::InvalidPage("residual"))?;
-                let span = match request.section {
-                    GeometrySection::ResidualAt(_) => &compact.at,
-                    GeometrySection::ResidualRequires(_) => &compact.requires,
-                    _ => unreachable!(),
+                let span = if matches!(request.section, GeometrySection::ResidualRequires(_)) {
+                    &compact.requires
+                } else {
+                    &compact.at
                 };
                 member_rows(self, &self.residual_members, span, start, limit)
             }
@@ -1795,8 +1806,8 @@ fn prepare(
             })
         })
         .collect();
-    edges.sort_by_key(|edge| (edge.from, edge.relation as u8, edge.to));
-    edges.dedup_by_key(|edge| (edge.from, edge.relation as u8, edge.to));
+    edges.sort_by_key(|edge| (edge.from, edge.relation.sort_key(), edge.to));
+    edges.dedup_by_key(|edge| (edge.from, edge.relation.sort_key(), edge.to));
     let blocking_fanout = {
         let mut fanout = vec![0u64; dictionary.len()];
         for edge in &edges {

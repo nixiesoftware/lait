@@ -1135,7 +1135,7 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
     for kind in branch_kinds {
         let seek_id = find_api::StepId::new(next_id)
             .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-        next_id += 1;
+        next_id = next_id.saturating_add(1);
         let seek = if let Some(text) = &text {
             find_api::Seek::Term {
                 field: issues::find::field_ref(issues::find::field::SEARCH),
@@ -1193,7 +1193,7 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
             predicates.sort();
             let keep_id = find_api::StepId::new(next_id)
                 .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-            next_id += 1;
+            next_id = next_id.saturating_add(1);
             steps.push(find_api::Step {
                 id: keep_id,
                 input: vec![seek_id],
@@ -1203,12 +1203,12 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
             outputs.push(keep_id);
         }
     }
-    let output = if outputs.len() == 1 {
-        outputs[0]
+    let output = if let [only] = outputs.as_slice() {
+        *only
     } else {
         let merge_id = find_api::StepId::new(next_id)
             .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-        next_id += 1;
+        next_id = next_id.saturating_add(1);
         steps.push(find_api::Step {
             id: merge_id,
             input: outputs,

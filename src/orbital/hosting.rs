@@ -961,14 +961,31 @@ impl StationHost {
     }
 
     async fn exec_drain_loop(self: Arc<Self>) {
+        let mut stop_rx = self.stop_tx.subscribe();
         let mut tick = self.station.exec_tick();
         let mut interval = tokio::time::interval(Duration::from_millis(50));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first interval tick is immediate; skip it so activation and the
+        // first control call are not racing a perform pass.
+        interval.tick().await;
         loop {
+            if *stop_rx.borrow() {
+                break;
+            }
             tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
                 _ = self.shutdown.notified() => break,
-                _ = tick.changed() => {}
+                _ = tick.changed() => {
+                    let _ = *tick.borrow_and_update();
+                }
                 _ = interval.tick() => {}
+            }
+            if *stop_rx.borrow() {
+                break;
             }
             self.drain_exec();
         }
@@ -2912,8 +2929,17 @@ impl StationHost {
         let mut idle_tick = tokio::time::interval(Duration::from_millis(500));
         let mut connections = tokio::task::JoinSet::new();
         let drain = tokio::spawn(self.clone().exec_drain_loop());
+        let mut stop_rx = self.stop_tx.subscribe();
         loop {
+            if *stop_rx.borrow() {
+                break;
+            }
             tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
                 _ = self.shutdown.notified() => break,
                 _ = idle_tick.tick() => {
                     // The store watchdog (LOCAL-9): a daemon must never
@@ -2956,7 +2982,12 @@ impl StationHost {
         // Wake and join every task retaining the host before the runner tries
         // to consume it and return the Station to Orbit.
         self.begin_stop();
-        let _ = drain.await;
+        if tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .is_err()
+        {
+            tracing::warn!("exec drain loop did not stop during shutdown");
+        }
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(result) = connections.join_next().await {
                 if let Err(error) = result {
@@ -3558,6 +3589,10 @@ impl StationHost {
         // spawned but not yet have subscribed, so shutdown must replace the
         // latched value for late receivers as well.
         self.stop_tx.send_replace(true);
+        // Wake every waiter. `notify_one` alone stores a single permit, so
+        // the serve loop and the exec drain loop would race for it and the
+        // loser would keep the StationHost off the dormancy path.
+        self.shutdown.notify_waiters();
         self.shutdown.notify_one();
     }
 }
