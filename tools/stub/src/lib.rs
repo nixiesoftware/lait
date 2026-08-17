@@ -56,6 +56,8 @@
 //! stays bootable until the next *successful* swap, and is what a client
 //! that cannot start falls back to.
 
+pub mod bundle;
+
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

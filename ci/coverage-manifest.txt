@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1997
-pr-platform    1564
-nightly        2025
+pr             2001
+pr-platform    1568
+nightly        2029
 mutants        98
 
 [gates]
@@ -138,6 +138,10 @@ astrolabe tray::tests::the_first_entry_is_the_harmless_one
 astrolabe tray::tests::the_menu_never_hides_which_kind_of_leaving_it_means
 astrolabe-display-reference::bin/astrolabe-display-reference playback::tests::a_first_frame_is_flushed_and_presented_atomically
 astrolabe-ios node::tests::the_embedded_node_comes_up_steps_down_and_returns
+astrolabe-stub bundle::tests::a_program_running_inside_the_bundle_survives_the_exchange
+astrolabe-stub bundle::tests::an_absent_path_is_an_error_rather_than_a_silent_no_op
+astrolabe-stub bundle::tests::paths_on_two_volumes_are_refused_by_name_and_change_nothing
+astrolabe-stub bundle::tests::two_bundles_exchange_places_in_one_operation
 astrolabe-stub tests::a_claim_is_exclusive_and_a_second_launch_defers_rather_than_applying
 astrolabe-stub tests::a_live_tree_that_cannot_start_falls_back_to_the_previous_tree
 astrolabe-stub tests::a_manifest_that_does_not_carry_its_own_entry_is_refused

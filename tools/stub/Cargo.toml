@@ -15,6 +15,12 @@ workspace = true
 name = "astrolabe-stub"
 path = "src/main.rs"
 
+# The subject of the macOS bundle-replacement measurement: a process that
+# stays alive, built here so it is not a copied platform binary.
+[[bin]]
+name = "sleeper"
+path = "src/bin/sleeper.rs"
+
 # The chain test's reference entry binary — the "client" the stub launches
 # in tools/astrolabe/tests/launch.rs. Built, never packaged.
 [[bin]]
@@ -33,6 +39,11 @@ blake3 = "1"
 fs2 = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The macOS bundle exchange is one syscall, and it is the only place this
+# crate reaches past std.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
