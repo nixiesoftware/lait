@@ -341,22 +341,45 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
     (orbit.space.clone(), program.id)
 }
 
+/// The store path as the daemon spelled it when it registered the Orbit.
+///
+/// The same resolution `client/display.rs` performs for a real caller: ask the
+/// host for its Orbits and take the registered path, rather than assuming this
+/// process and the daemon spell one directory the same way.
+async fn registered_store(client: &Client, space: &str) -> String {
+    let context = client
+        .host_context()
+        .await
+        .expect("read the registered Orbits");
+    context
+        .orbits
+        .iter()
+        .find(|orbit| orbit.space == space)
+        .map(|orbit| orbit.path.clone())
+        .expect("the Space has a registered local Orbit")
+}
+
 async fn write_signage_program(
     client: &Client,
     store: &Path,
     space: &str,
     program: signage::SignageProgram,
 ) {
-    let space = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
-    // The Orbit id is derived from the store path *as spelled* — `normalize`
-    // settles separators, trailing slashes and Windows case, and deliberately
-    // resolves nothing — so an address built from a raw tempdir path names a
-    // different Orbit than the one the daemon registered from its canonical
-    // form, and the host answers `InvalidCall`. Linux tempdirs are already
-    // canonical, which is why this only ever bit macOS (/var -> /private/var)
-    // and Windows (8.3 short names): the exact platform split that made this
-    // seam worth running on all three.
-    let store = &store.canonicalize().expect("canonical Signage store");
+    let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    // Address the Orbit by the path the *daemon* registered, never by the one
+    // this test happens to hold. The Orbit id is derived from the path as
+    // spelled — `normalize` settles separators, trailing slashes and Windows
+    // case and deliberately resolves nothing — so two spellings of one
+    // directory are two Orbits, and the host answers `InvalidCall`. A tempdir
+    // reaches the daemon canonicalised, and neither spelling is recoverable
+    // from the other: macOS adds `/private`, and Windows `canonicalize`
+    // returns a `\\?\` UNC path the daemon never used. Production has this
+    // right (`client/display.rs` resolves through `host_context`); the test
+    // was the half that guessed, which is why it passed only where tempdirs
+    // are already canonical.
+    let store = registered_store(client, space).await;
+    let store = std::path::Path::new(&store);
+    let space = space_id;
     let call = signage_app::encode_call(&signage_app::SignageRequest::ProgramPut {
         program: program.clone(),
     })
