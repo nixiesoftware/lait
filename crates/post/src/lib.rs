@@ -73,7 +73,10 @@ pub enum Refusal {
     /// The signature did not verify against the device that claims to have
     /// made it.
     BadSignature,
-    /// The named device is not a well-formed key.
+    /// The named device is not a well-formed key, or is spelled
+    /// non-canonically. Both are one remedy — send the 64 lower-case hex
+    /// characters and nothing else — and admitting a second spelling would
+    /// split one mailbox in two.
     UnusableDevice,
     /// No such challenge, or it has already been answered. Challenges are
     /// single-use; a second answer to one is a replay whether or not it meant
@@ -214,15 +217,35 @@ fn verify(device: &DeviceId, preimage: &[u8], signature: &[u8; 64]) -> Result<()
     }
 }
 
+/// The ed25519 key a device id names, and the one gate that decides a device id
+/// is addressable here at all.
+///
+/// **A non-canonical spelling is refused rather than normalised**, and that is
+/// the whole point of this function. `DeviceId` is a newtype over `String` whose
+/// `Deserialize` is derived, so an id arriving on the wire has been through no
+/// parser: `DeviceId::from_key_string` says in its own doc that it validates
+/// nothing. Meanwhile a key decoded permissively accepts either case and yields
+/// the same 32 bytes. Put those together and `AABB…` and `aabb…` verify against
+/// one key while remaining two different `BTreeMap` keys, two different
+/// `box_dir` hashes, and unequal in `take_challenge` — so a deposit addressed in
+/// upper case lands in a mailbox no lower-case fetch will ever see, and nothing
+/// anywhere reports a problem.
+///
+/// Normalising here would close that. Refusing closes it *and* leaves exactly one
+/// spelling on the wire, which is the discipline the rest of the tree already
+/// keeps: `SignedCoordinates::decode_canonical` and `correspondence::Hello::decode`
+/// both reject a non-canonical encoding rather than repairing it. It also keeps
+/// every downstream use of the id *as a string* — store key, directory hash,
+/// challenge comparison, signature preimage — safe without any of them having to
+/// know why.
 fn device_key(device: &DeviceId) -> Result<[u8; 32], Refusal> {
-    let text = device.as_str();
-    if text.len() != 64 {
+    // `parse` lower-cases and trims, so comparing its output against the input
+    // is what turns a normaliser into a canonicality check.
+    let parsed = DeviceId::parse(device.as_str()).ok_or(Refusal::UnusableDevice)?;
+    if parsed.as_str() != device.as_str() {
         return Err(Refusal::UnusableDevice);
     }
-    let decoded = data_encoding::HEXLOWER_PERMISSIVE
-        .decode(text.as_bytes())
-        .map_err(|_| Refusal::UnusableDevice)?;
-    <[u8; 32]>::try_from(decoded.as_slice()).map_err(|_| Refusal::UnusableDevice)
+    parsed.key_bytes().ok_or(Refusal::UnusableDevice)
 }
 
 /// The carrier.
@@ -279,12 +302,16 @@ impl<S: Store> Post<S> {
             &request.signature,
         )?;
         self.store
-            .put(&request.sender, &request.envelope)
+            .put(&request.sender, &request.envelope, now)
             .map_err(|_| Refusal::Unavailable)
     }
 
     /// Return what is waiting, to a device that proves it is that device.
     pub fn fetch(&mut self, request: &SignedFetch, now: u64) -> Result<Vec<Deposited>, Refusal> {
+        // Before the challenge is spent: a malformed or non-canonical id is a
+        // malformed request, not the wrong-device probe `take_challenge` burns a
+        // nonce to discourage, and it deserves the refusal that names it.
+        device_key(&request.device)?;
         let challenge = self.take_challenge(&request.nonce, &request.device, now)?;
         verify(
             &request.device,
@@ -298,6 +325,7 @@ impl<S: Store> Post<S> {
 
     /// Drop what the recipient confirms.
     pub fn acknowledge(&mut self, request: &SignedAck, now: u64) -> Result<usize, Refusal> {
+        device_key(&request.device)?;
         let challenge = self.take_challenge(&request.nonce, &request.device, now)?;
         // The ack signs the deposit ids too, so a captured signature cannot be
         // replayed against a different set — even though the challenge already
@@ -439,6 +467,82 @@ mod tests {
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].envelope.sealed, b"sealed bytes");
         assert_eq!(waiting[0].sender, device_from_seed(&SENDER_SEED));
+    }
+
+    #[test]
+    fn a_device_spelled_in_upper_case_is_refused_rather_than_given_a_second_mailbox() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let shouted = DeviceId::from_key_string(recipient.as_str().to_ascii_uppercase());
+
+        // The premise, and the reason this was silent rather than merely wrong:
+        // both spellings name the *same* ed25519 key, so a signature made by
+        // that device verifies under either. Only the string differs — and the
+        // string is the store key, the mailbox directory hash, and the equality
+        // `take_challenge` tests.
+        assert_eq!(
+            shouted.key_bytes(),
+            recipient.key_bytes(),
+            "the two spellings must name one key, or this test is about nothing"
+        );
+        assert_ne!(shouted, recipient);
+
+        let mut post = Post::new(MemStore::default());
+
+        assert_eq!(
+            post.deposit(
+                &signed_deposit(&SENDER_SEED, envelope_to(&shouted, b"shouted")),
+                NOW
+            ),
+            Err(Refusal::UnusableDevice),
+            "an upper-case address must be refused, not filed where no canonical fetch will look"
+        );
+        assert_eq!(
+            post.challenge(&shouted, NOW),
+            Err(Refusal::UnusableDevice),
+            "and a challenge must not be issued for a spelling that cannot be fetched under"
+        );
+
+        // The device is addressable; it was the spelling that was refused.
+        post.deposit(
+            &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"canonical")),
+            NOW,
+        )
+        .expect("the canonical spelling is accepted");
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        let waiting = post
+            .fetch(&answer(&RECIPIENT_SEED, &challenge), NOW)
+            .expect("fetch");
+        assert_eq!(waiting.len(), 1, "one spelling, one mailbox, one letter");
+        assert_eq!(waiting[0].envelope.sealed, b"canonical");
+    }
+
+    #[test]
+    fn a_shouted_fetch_is_refused_without_spending_the_challenge() {
+        let recipient = device_from_seed(&RECIPIENT_SEED);
+        let mut post = Post::new(MemStore::default());
+        post.deposit(
+            &signed_deposit(&SENDER_SEED, envelope_to(&recipient, b"waiting")),
+            NOW,
+        )
+        .expect("deposit");
+
+        let challenge = post.challenge(&recipient, NOW).expect("challenge");
+        let mut shouted = answer(&RECIPIENT_SEED, &challenge);
+        shouted.device = DeviceId::from_key_string(recipient.as_str().to_ascii_uppercase());
+
+        assert_eq!(
+            post.fetch(&shouted, NOW),
+            Err(Refusal::UnusableDevice),
+            "a malformed id is named as one, not reported as an unknown challenge"
+        );
+
+        // The nonce is deliberately spent for a *wrong-device* answer, to stop a
+        // probe grinding through outstanding challenges. A malformed id is not
+        // that probe, so the real device can still answer the same challenge.
+        let waiting = post
+            .fetch(&answer(&RECIPIENT_SEED, &challenge), NOW)
+            .expect("the challenge survived a malformed answer");
+        assert_eq!(waiting.len(), 1);
     }
 
     #[test]

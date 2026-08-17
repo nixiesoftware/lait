@@ -30,7 +30,12 @@ pub struct Deposited {
 /// What a Post keeps its deposits in.
 pub trait Store {
     /// Accept one envelope and return its id.
-    fn put(&mut self, sender: &DeviceId, envelope: &Envelope) -> anyhow::Result<String>;
+    ///
+    /// `now` is passed in rather than read here because a store that reads the
+    /// clock cannot be tested against one, and because `deposited_at` is the
+    /// carrier's own observation — the one fact on [`Deposited`] that does not
+    /// come from the envelope.
+    fn put(&mut self, sender: &DeviceId, envelope: &Envelope, now: u64) -> anyhow::Result<String>;
     /// Everything waiting for this device that has not expired.
     fn list(&self, device: &DeviceId, now: u64) -> anyhow::Result<Vec<Deposited>>;
     /// Drop the named deposits belonging to this device. Returns how many went.
@@ -46,12 +51,24 @@ pub trait Store {
 /// sure landed should not double a recipient's mailbox, and the retry is the
 /// common case for a carrier whose whole purpose is reaching someone who is not
 /// there.
+///
+/// The fields are hashed in the order [`Envelope::preimage`] frames them, and
+/// they cover every field the signature covers — including `envelope_version`.
+/// Leaving the version out made two envelopes that differ only in their sealing
+/// construction collapse to one id, so the second `put` silently overwrote the
+/// first: signed as distinct, stored as the same thing. Nothing ships a second
+/// construction yet, which is exactly why this is cheap to fix now.
+///
+/// Unframed concatenation is safe here only because every field ahead of
+/// `sealed` is fixed width — two 64-char ids and two integers. Anything
+/// variable-length added above `sealed` needs framing first.
 fn deposit_id(sender: &DeviceId, envelope: &Envelope) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"lait/post/1/deposit-id");
     hasher.update(sender.as_str().as_bytes());
     hasher.update(envelope.recipient.as_str().as_bytes());
     hasher.update(&envelope.expires_at.to_be_bytes());
+    hasher.update(&envelope.envelope_version.to_be_bytes());
     hasher.update(&envelope.sealed);
     data_encoding::HEXLOWER.encode(&hasher.finalize().as_bytes()[..16])
 }
@@ -65,7 +82,7 @@ pub struct MemStore {
 }
 
 impl Store for MemStore {
-    fn put(&mut self, sender: &DeviceId, envelope: &Envelope) -> anyhow::Result<String> {
+    fn put(&mut self, sender: &DeviceId, envelope: &Envelope, now: u64) -> anyhow::Result<String> {
         let id = deposit_id(sender, envelope);
         self.held
             .entry(envelope.recipient.clone())
@@ -76,7 +93,7 @@ impl Store for MemStore {
                     id: id.clone(),
                     sender: sender.clone(),
                     envelope: envelope.clone(),
-                    deposited_at: envelope.expires_at,
+                    deposited_at: now,
                 },
             );
         Ok(id)
@@ -150,7 +167,7 @@ impl FsStore {
 }
 
 impl Store for FsStore {
-    fn put(&mut self, sender: &DeviceId, envelope: &Envelope) -> anyhow::Result<String> {
+    fn put(&mut self, sender: &DeviceId, envelope: &Envelope, now: u64) -> anyhow::Result<String> {
         let id = deposit_id(sender, envelope);
         let dir = self.box_dir(&envelope.recipient);
         std::fs::create_dir_all(&dir)?;
@@ -158,7 +175,7 @@ impl Store for FsStore {
             id: id.clone(),
             sender: sender.clone(),
             envelope: envelope.clone(),
-            deposited_at: envelope.expires_at,
+            deposited_at: now,
         };
         // Written beside and renamed, so a reader never sees half a deposit.
         let staged = dir.join(format!("{id}.staged"));
@@ -261,13 +278,13 @@ mod tests {
         let bob = device_from_seed(&[3u8; 32]);
 
         let first = store
-            .put(&sender, &envelope(&alice, b"one", NOW + 100))
+            .put(&sender, &envelope(&alice, b"one", NOW + 100), NOW)
             .expect("put");
         store
-            .put(&sender, &envelope(&alice, b"two", NOW + 100))
+            .put(&sender, &envelope(&alice, b"two", NOW + 100), NOW)
             .expect("put");
         store
-            .put(&sender, &envelope(&bob, b"bob's", NOW + 100))
+            .put(&sender, &envelope(&bob, b"bob's", NOW + 100), NOW)
             .expect("put");
 
         assert_eq!(store.list(&alice, NOW).expect("list").len(), 2);
@@ -275,7 +292,7 @@ mod tests {
 
         // The same envelope again is the same deposit, not a second one.
         let again = store
-            .put(&sender, &envelope(&alice, b"one", NOW + 100))
+            .put(&sender, &envelope(&alice, b"one", NOW + 100), NOW + 5)
             .expect("put");
         assert_eq!(again, first, "a retry is not a duplicate");
         assert_eq!(store.list(&alice, NOW).expect("list").len(), 2);
@@ -293,7 +310,7 @@ mod tests {
         assert_eq!(store.list(&bob, NOW).expect("list").len(), 1);
 
         store
-            .put(&sender, &envelope(&alice, b"brief", NOW + 10))
+            .put(&sender, &envelope(&alice, b"brief", NOW + 10), NOW)
             .expect("put");
         assert_eq!(store.list(&alice, NOW + 50).expect("list").len(), 1);
         assert_eq!(store.sweep(NOW + 50).expect("sweep"), 1);
@@ -311,6 +328,71 @@ mod tests {
     }
 
     #[test]
+    fn a_deposit_records_when_it_arrived_and_not_when_it_expires() {
+        // These two were the same field for as long as `put` had no clock to
+        // read, so `deposited_at` reported the expiry it was assigned. Keep the
+        // two numbers far apart, or the assertion cannot tell them apart.
+        let expires_at = NOW + 100;
+
+        fn check(store: &mut dyn Store, expires_at: u64) {
+            let alice = device_from_seed(&[2u8; 32]);
+            store
+                .put(
+                    &device_from_seed(&[1u8; 32]),
+                    &envelope(&alice, b"x", expires_at),
+                    NOW,
+                )
+                .expect("put");
+
+            let held = store.list(&alice, NOW).expect("list");
+            assert_eq!(held.len(), 1);
+            assert_eq!(
+                held[0].deposited_at, NOW,
+                "arrival is the carrier's own fact"
+            );
+            assert_eq!(held[0].envelope.expires_at, expires_at);
+            assert_ne!(
+                held[0].deposited_at, held[0].envelope.expires_at,
+                "recording the expiry as the arrival time is the defect this pins"
+            );
+        }
+
+        check(&mut MemStore::default(), expires_at);
+        // The directory has to outlive the store, so it is bound here rather
+        // than persisted — a test that leaks a temp dir per run is its own bug.
+        let dir = tempfile::tempdir().expect("a root");
+        check(&mut FsStore::open(dir.path()).expect("open"), expires_at);
+    }
+
+    #[test]
+    fn two_sealing_constructions_are_two_deposits() {
+        // The version rides the record, is covered by the deposit signature, and
+        // was missing from the id — so a v2 envelope collided with its v1 twin
+        // and the second `put` overwrote the first.
+        let mut store = MemStore::default();
+        let sender = device_from_seed(&[1u8; 32]);
+        let alice = device_from_seed(&[2u8; 32]);
+
+        let mut v1 = envelope(&alice, b"same bytes", NOW + 100);
+        v1.envelope_version = 1;
+        let mut v2 = v1.clone();
+        v2.envelope_version = 2;
+
+        let first = store.put(&sender, &v1, NOW).expect("put");
+        let second = store.put(&sender, &v2, NOW).expect("put");
+
+        assert_ne!(
+            first, second,
+            "envelopes signed as distinct must not be stored as one"
+        );
+        assert_eq!(
+            store.list(&alice, NOW).expect("list").len(),
+            2,
+            "neither construction may silently overwrite the other"
+        );
+    }
+
+    #[test]
     fn a_mailbox_directory_does_not_name_its_owner() {
         let dir = tempfile::tempdir().expect("a root");
         let mut store = FsStore::open(dir.path()).expect("open");
@@ -319,6 +401,7 @@ mod tests {
             .put(
                 &device_from_seed(&[1u8; 32]),
                 &envelope(&alice, b"x", NOW + 10),
+                NOW,
             )
             .expect("put");
 
@@ -343,6 +426,7 @@ mod tests {
             .put(
                 &device_from_seed(&[1u8; 32]),
                 &envelope(&alice, b"x", NOW + 10),
+                NOW,
             )
             .expect("put");
 

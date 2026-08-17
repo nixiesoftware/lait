@@ -68,6 +68,11 @@ async fn challenge(
     State(shared): State<Shared>,
     Query(query): Query<DeviceQuery>,
 ) -> Result<Json<Challenge>, (StatusCode, Json<Refusal>)> {
+    // Verbatim on purpose. `from_key_string` validates nothing, and that is what
+    // is wanted here: the query string reaches `Post::challenge`'s canonicality
+    // check exactly as it was spelled. Parsing here would *normalise* it — which
+    // would silently accept a second spelling of one device and hand back a
+    // challenge answerable under an id the store never saw.
     let device = DeviceId::from_key_string(query.device);
     held(&shared)
         .challenge(&device, now())
