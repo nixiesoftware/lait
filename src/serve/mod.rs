@@ -223,13 +223,18 @@ pub async fn run_until(
     // Created before anything that has to watch it. Every long-lived response
     // and every background task selects on this one channel.
     let (stop, _) = tokio::sync::watch::channel(false);
-    // The head serves the compiled-in floor unless a staged World bundle
-    // matches this build's runtime version. Resolved once at start: a bundle
-    // that arrives later becomes live at the next head, which is the same
+    // The head serves the compiled-in floor unless a payload is staged for
+    // the World this build presents. Resolved once at start: a payload that
+    // arrives later becomes live at the next head, which is the same
     // "applied at a boundary" rule the client tree follows.
     let head = selection
         .identity_dir()
-        .map(|identity| head::activate(&head::bundles_root(&identity)))
+        .map(|identity| {
+            head::activate(
+                &head::worlds_root(&identity),
+                crate::composition::PRODUCT_WORLD,
+            )
+        })
         .unwrap_or_default();
     let app = Arc::new(App {
         head,

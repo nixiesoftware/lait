@@ -40,20 +40,11 @@ impl Source {
     /// Serve from `bundle` when it holds the asked-for path, else from the
     /// embedded floor.
     ///
-    /// `runtime` is the bundle's declared runtime version and `expected` is
-    /// this build's. They must be equal or the bundle is not activated at
-    /// all: the mismatch is named here, once, and the floor keeps serving —
-    /// never a partial activation, and never a silent one.
-    pub fn activated(bundle: PathBuf, runtime: &str, expected: &str) -> Self {
-        if runtime != expected {
-            tracing::warn!(
-                bundle = %bundle.display(),
-                %runtime,
-                %expected,
-                "a World bundle targets another runtime version; serving the embedded head"
-            );
-            return Self::embedded();
-        }
+    /// Whether this build may run the bundle at all was settled when it was
+    /// staged — a payload whose declared requirements are unmet never reaches
+    /// this directory. Deciding it again here would be a second answer to one
+    /// question, and the two would drift.
+    pub fn activated(bundle: PathBuf) -> Self {
         Self {
             bundle: Some(bundle),
         }
@@ -102,30 +93,26 @@ fn read_under(root: &Path, relative: &str) -> Option<Vec<u8>> {
     std::fs::read(root.join(candidate)).ok()
 }
 
-/// The directory a staged World bundle is unpacked under, per World and
-/// runtime version: `<identity>/heads/<runtime>/`.
+/// Where staged World payloads live: `<identity>/worlds/<world>/current/`.
 ///
-/// Keyed by runtime version rather than by bundle version so a build only
-/// ever finds bundles it can serve — the same "withheld by construction"
-/// property the feed manifest gets from keying artifacts the same way, held
-/// on this side too rather than trusted from the other.
-pub fn bundles_root(identity: &Path) -> PathBuf {
-    identity.join("heads")
+/// One directory per World, because two Worlds sharing one is a collision
+/// that appears only after more than one is published — which is to say after
+/// it would have been expensive to find.
+pub fn worlds_root(identity: &Path) -> PathBuf {
+    identity.join("worlds")
 }
 
-/// Activate the staged bundle for this build's runtime version, when one is
-/// staged.
+/// Serve a World's staged payload, when one is staged for it.
 ///
-/// Nothing here reads a manifest or verifies bytes: staging is what proves a
-/// bundle, and a directory that is present under this runtime's name is one
-/// that was proven when it landed. What this settles is only *which* source
-/// a head serves from.
-pub fn activate(bundles: &Path) -> Source {
-    let runtime = crate::update::runtime::runtime_version();
-    let candidate = bundles.join(&runtime);
+/// Nothing here reads a declaration or verifies bytes: staging is what proves
+/// a bundle *and* what decides whether this build can run it, so a directory
+/// present under a World's name is one that was proven and admitted when it
+/// landed. What this settles is only *which* source a head serves from.
+pub fn activate(worlds: &Path, world: &str) -> Source {
+    let candidate = crate::update::world::live_dir(worlds, world);
     if candidate.is_dir() {
-        tracing::info!(bundle = %candidate.display(), %runtime, "serving a staged World head");
-        return Source::activated(candidate, &runtime, &runtime);
+        tracing::info!(bundle = %candidate.display(), %world, "serving a staged World payload");
+        return Source::activated(candidate);
     }
     Source::embedded()
 }
@@ -149,7 +136,7 @@ mod tests {
     #[test]
     fn an_activated_bundle_answers_and_an_absent_path_falls_through() {
         let dir = bundle_with(&[("index.html", b"<html>from the bundle</html>")]);
-        let source = Source::activated(dir.path().to_path_buf(), "rt-a", "rt-a");
+        let source = Source::activated(dir.path().to_path_buf());
         assert_eq!(
             source.read("/index.html").as_deref(),
             Some(&b"<html>from the bundle</html>"[..])
@@ -160,18 +147,14 @@ mod tests {
         );
     }
 
-    /// The mismatch is settled at activation, not at every read: a bundle for
-    /// another runtime never becomes the source at all, so no request can be
-    /// served half from it.
+    /// Whether a payload may run here is settled when it is staged, not when
+    /// it is read. This layer's job is only which directory answers.
     #[test]
-    fn a_bundle_for_another_runtime_is_never_activated() {
-        let dir = bundle_with(&[("index.html", b"the wrong runtime")]);
-        let source = Source::activated(dir.path().to_path_buf(), "rt-other", "rt-mine");
-        assert!(
-            source.bundle().is_none(),
-            "a mismatched bundle was activated"
-        );
-        assert!(source.read("/index.html").is_none());
+    fn a_source_answers_from_the_bundle_it_was_given() {
+        let dir = bundle_with(&[("index.html", b"from the bundle")]);
+        let source = Source::activated(dir.path().to_path_buf());
+        assert_eq!(source.bundle(), Some(dir.path()));
+        assert!(source.read("/index.html").is_some());
     }
 
     /// `include_dir` made this impossible for free and the module it replaced
@@ -181,7 +164,7 @@ mod tests {
         let dir = bundle_with(&[("index.html", b"inside")]);
         let outside = dir.path().parent().expect("a parent").join("outside.txt");
         std::fs::write(&outside, b"not the bundle's to serve").expect("a file beside the bundle");
-        let source = Source::activated(dir.path().to_path_buf(), "rt-a", "rt-a");
+        let source = Source::activated(dir.path().to_path_buf());
 
         for escape in [
             "../outside.txt",
@@ -203,26 +186,29 @@ mod tests {
         let _ = std::fs::remove_file(&outside);
     }
 
+    /// One directory per World. The first cut keyed staging by runtime alone,
+    /// so a second World overwrote the first — a collision that appears only
+    /// once more than one World is published.
     #[test]
-    fn a_root_with_no_bundle_for_this_runtime_serves_the_floor() {
+    fn each_world_activates_its_own_payload_and_never_anothers() {
         let identity = tempfile::tempdir().expect("an identity dir");
-        let bundles = bundles_root(identity.path());
+        let worlds = worlds_root(identity.path());
         assert!(
-            activate(&bundles).bundle().is_none(),
-            "an absent bundles directory activated something"
+            activate(&worlds, "world.a").bundle().is_none(),
+            "an absent worlds directory activated something"
         );
-        std::fs::create_dir_all(bundles.join("rt-some-other-runtime"))
-            .expect("a bundle for another runtime");
-        assert!(
-            activate(&bundles).bundle().is_none(),
-            "a bundle keyed to another runtime was activated"
-        );
-        let mine = bundles.join(crate::update::runtime::runtime_version());
-        std::fs::create_dir_all(&mine).expect("a bundle for this runtime");
+
+        let a = crate::update::world::live_dir(&worlds, "world.a");
+        std::fs::create_dir_all(&a).expect("a payload for world.a");
+        std::fs::write(a.join("index.html"), b"a").expect("its entry");
         assert_eq!(
-            activate(&bundles).bundle(),
-            Some(mine.as_path()),
-            "the bundle for this runtime was not activated"
+            activate(&worlds, "world.a").bundle(),
+            Some(a.as_path()),
+            "the World's own payload was not activated"
+        );
+        assert!(
+            activate(&worlds, "world.b").bundle().is_none(),
+            "one World's payload was served for another"
         );
     }
 
@@ -243,7 +229,7 @@ mod tests {
     fn a_bundle_that_vanishes_underneath_falls_back_rather_than_failing() {
         let dir = bundle_with(&[("index.html", b"from the bundle")]);
         let root = dir.path().to_path_buf();
-        let source = Source::activated(root.clone(), "rt-a", "rt-a");
+        let source = Source::activated(root.clone());
         assert!(source.read("/index.html").is_some());
         drop(dir);
         assert!(

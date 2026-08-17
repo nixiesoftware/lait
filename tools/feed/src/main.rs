@@ -412,13 +412,14 @@ fn verify(args: &[String]) -> Result<()> {
 // release holds here — pointer last, immutable releases, promotion is pointer
 // motion — without a second contract to keep in step.
 //
-// **The runtime version occupies the target slot.** A web bundle has no
-// platform, and what it does have is the pair it can run against. Keying
-// `artifacts[<world>][<runtime>]` means a client asks for exactly the bundle
-// its own runtime can take, and a bundle built for another runtime is simply
-// not there — withheld by construction rather than delivered and refused,
-// which is the shape VS Code's marketplace uses for `engines.vscode` and the
-// reason "a bundle newer than its host" cannot be represented.
+// **Compatibility is declared inside the bundle, not encoded in where it is
+// filed.** An earlier cut keyed `artifacts[<world>][<runtime>]` by a
+// fingerprint of the host, so an incompatible bundle was not found. That
+// invalidated every published bundle whenever any unrelated host fact moved.
+// A World now states named requirements in its own `world.json` — which rides
+// inside the payload, under the artifact digest, under the feed signature —
+// and the client decides after proving the bytes. One artifact per release,
+// filed under `any`.
 
 /// Publish a World's web head in one act, or promote one that is already
 /// published.
@@ -465,13 +466,35 @@ fn world(args: &[String]) -> Result<()> {
     let pointer_path = out.join("pointer");
 
     if arg(args, "--promote").is_none() {
-        let runtime = required(args, "--runtime")?;
-        if runtime.is_empty() {
-            bail!("--runtime is the token a client matches on; it cannot be empty");
-        }
         let bundle = PathBuf::from(required(args, "--bundle")?);
         if !bundle.is_dir() {
             bail!("--bundle {} is not a directory", bundle.display());
+        }
+        // The declaration is what makes a directory of files a World, and it
+        // is checked here rather than discovered by a machine that already
+        // downloaded it. A publisher learns at publish time.
+        let declared = fs::read(bundle.join("world.json")).with_context(|| {
+            format!(
+                "--bundle {} carries no world.json at its root — a World must declare what it is \
+                 and how to reach it",
+                bundle.display()
+            )
+        })?;
+        let declaration = world_interface::manifest::WorldManifest::parse(&declared)
+            .map_err(|error| anyhow!("{error}"))?;
+        if declaration.id != world {
+            bail!(
+                "publishing {world} but the bundle declares itself {} — a World may not answer \
+                 for another",
+                declaration.id
+            );
+        }
+        if declaration.version != version {
+            bail!(
+                "publishing {version} but the bundle declares {} — the declaration is what a \
+                 client believes",
+                declaration.version
+            );
         }
         let name = format!("world-{world}-{version}.tar.gz");
         let archive = out.join(&name);
@@ -480,7 +503,7 @@ fn world(args: &[String]) -> Result<()> {
 
         let mut targets = BTreeMap::new();
         targets.insert(
-            runtime.clone(),
+            "any".to_string(),
             Artifact {
                 url: format!("{base}/{release_prefix}/{name}"),
                 blake3: digest,
@@ -500,8 +523,18 @@ fn world(args: &[String]) -> Result<()> {
         };
         fs::write(&manifest_path, seal(&manifest, &seed)?)
             .with_context(|| format!("write {}", manifest_path.display()))?;
+        let requires = if declaration.requires.is_empty() {
+            "no host requirements".to_string()
+        } else {
+            declaration
+                .requires
+                .iter()
+                .map(|r| format!("{} {}", r.name, r.range))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         println!(
-            "packed {} ({size} bytes) and sealed its manifest for runtime {runtime}",
+            "packed {} ({size} bytes) and sealed its manifest — {requires}",
             archive.display()
         );
     } else if !manifest_path.is_file() {
@@ -630,10 +663,24 @@ mod tests {
     }
 
     fn bundle(dir: &Path) -> String {
+        bundle_declaring(dir, "com.lait.issues", "0.1.0")
+    }
+
+    fn bundle_declaring(dir: &Path, id: &str, version: &str) -> String {
         let bundle = dir.join("bundle");
         fs::create_dir_all(bundle.join("assets")).expect("a bundle tree");
         fs::write(bundle.join("index.html"), b"<html>head</html>").expect("an entry document");
         fs::write(bundle.join("assets/app.css"), b"body{}").expect("an asset");
+        let declaration = serde_json::json!({
+            "format": 1,
+            "id": id,
+            "mount": "issues",
+            "version": version,
+            "requires": [{ "name": "lait.control", "range": ">=13, <14" }],
+            "launch": [{ "id": "app", "present": "primary",
+                         "target": { "type": "web", "path": "/" } }],
+        });
+        fs::write(bundle.join("world.json"), declaration.to_string()).expect("a declaration");
         bundle.display().to_string()
     }
 
@@ -663,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn a_world_publish_seals_a_manifest_a_client_can_address_by_runtime() {
+    fn a_world_publish_seals_a_manifest_naming_one_artifact_for_the_release() {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let seed = seeded(dir.path());
         let source = bundle(dir.path());
@@ -696,14 +743,14 @@ mod tests {
         let payload = open(&sealed, &pubkey).expect("the manifest opens under its own key");
         let manifest: serde_json::Value = serde_json::from_slice(&payload).expect("it parses");
         assert_eq!(manifest["bundles"]["com.lait.issues"], "0.1.0");
-        // The runtime version occupies the target slot: a client asks for the
-        // bundle its own runtime can take, and one built for another runtime
-        // is simply absent rather than delivered and refused.
+        // One artifact per release. What a bundle runs against is stated in
+        // its own declaration, inside the payload and under the digest —
+        // never encoded in where the artifact is filed.
         assert!(
-            manifest["artifacts"]["com.lait.issues"]["rt-abc"]["size"]
+            manifest["artifacts"]["com.lait.issues"]["any"]["size"]
                 .as_u64()
                 .is_some_and(|size| size > 0),
-            "the manifest does not address the artifact by runtime version: {manifest}"
+            "the manifest does not name one artifact for the release: {manifest}"
         );
     }
 
@@ -711,7 +758,7 @@ mod tests {
     fn a_stable_channel_never_takes_a_prerelease() {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let seed = seeded(dir.path());
-        let source = bundle(dir.path());
+        let source = bundle_declaring(dir.path(), "com.lait.issues", "0.2.0-test.1");
         let error = publish(
             dir.path(),
             &[
@@ -762,6 +809,69 @@ mod tests {
         .expect_err("a malformed World id must refuse")
         .to_string();
         assert!(error.contains("reverse-domain id"), "{error}");
+    }
+
+    /// A directory of files is not a World until it says what it is. Caught
+    /// at publish time, where a publisher can fix it, rather than by a machine
+    /// that already downloaded it.
+    #[test]
+    fn a_bundle_with_no_declaration_is_refused_at_publish_time() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let bare = dir.path().join("bare");
+        fs::create_dir_all(&bare).expect("a bundle tree");
+        fs::write(bare.join("index.html"), b"<html/>").expect("an entry document");
+        let error = publish(
+            dir.path(),
+            &[
+                "--world",
+                "com.lait.issues",
+                "--version",
+                "0.1.0",
+                "--bundle",
+                &bare.display().to_string(),
+                "--channel",
+                "test",
+                "--base-url",
+                "https://feed.example",
+                "--seed",
+                &seed,
+                "--out",
+                &dir.path().join("out").display().to_string(),
+            ],
+        )
+        .expect_err("an undeclared bundle must refuse")
+        .to_string();
+        assert!(error.contains("world.json"), "{error}");
+    }
+
+    #[test]
+    fn a_bundle_that_declares_another_world_or_version_is_refused() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let source = bundle_declaring(dir.path(), "com.someone.else", "0.1.0");
+        let error = publish(
+            dir.path(),
+            &[
+                "--world",
+                "com.lait.issues",
+                "--version",
+                "0.1.0",
+                "--bundle",
+                &source,
+                "--channel",
+                "test",
+                "--base-url",
+                "https://feed.example",
+                "--seed",
+                &seed,
+                "--out",
+                &dir.path().join("out").display().to_string(),
+            ],
+        )
+        .expect_err("a mismatched declaration must refuse")
+        .to_string();
+        assert!(error.contains("may not answer for another"), "{error}");
     }
 
     /// Promotion may only ever name a release this key sealed. Without the

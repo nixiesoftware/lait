@@ -220,16 +220,15 @@ where
 /// prompted — a staged head becomes live at the next head that starts, which
 /// is the same "applied at a boundary" rule the client tree follows.
 fn check_worlds(identity: &Path, channel: feed::Channel) {
-    let runtime = super::runtime::runtime_version();
-    let heads = crate::serve::head::bundles_root(identity);
+    let worlds = crate::serve::head::worlds_root(identity);
     for (world, _, _) in crate::composition::bundled_world_surfaces() {
-        match super::world::check(&world, &runtime, &heads, channel) {
-            Ok(outcome) => tracing::debug!(%world, ?outcome, "world head checked"),
+        match super::world::check(&world, &worlds, channel) {
+            Ok(outcome) => tracing::debug!(%world, ?outcome, "world bundle checked"),
             // Named, never folded into the client's standing: "this World's
             // channel could not be asked" is a different fact from anything
             // the product's channel said, and collapsing them would report a
             // World's outage as the product's.
-            Err(error) => tracing::warn!(%world, %error, "a world head could not be staged"),
+            Err(error) => tracing::warn!(%world, %error, "a world bundle could not be staged"),
         }
     }
 }

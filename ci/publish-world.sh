@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# publish-world.sh — ship a World's web head in one act (SUB-23).
+# publish-world.sh — ship a World in one act (SUB-23).
 #
 # The goal Spec says shipping is one act. This is that act: a developer runs
 # one command and a World's bundle is live on its test channel; promoting it
@@ -17,11 +17,15 @@
 #
 # Usage:
 #   ci/publish-world.sh --world com.lait.issues --version 0.1.0 \
-#     --runtime <runtime-token> --bundle viewer/dist --channel test \
-#     --seed ~/.lait-feed-signing.seed
+#     --bundle viewer/dist --channel test --seed ~/.lait-feed-signing.seed
 #
 #   ci/publish-world.sh --world com.lait.issues --version 0.1.0 \
 #     --channel stable --promote --seed ~/.lait-feed-signing.seed
+#
+# The bundle must carry `world.json` at its root: what the World is, how to
+# reach it, and the host facts it runs against. `lait-feed world` refuses
+# without one, so a publisher learns at publish time rather than a machine
+# learning after it has already downloaded.
 #
 # Requires: gcloud (authenticated with write access to the bucket), curl, and
 # a built `lait-feed` (cargo build -p lait-feed).
@@ -33,12 +37,11 @@ set -euo pipefail
 BUCKET="gs://the-foundation-dist"
 BASE_URL="https://storage.googleapis.com/the-foundation-dist"
 
-WORLD="" VERSION="" RUNTIME="" BUNDLE="" CHANNEL="" SEED="" PROMOTE=""
+WORLD="" VERSION="" BUNDLE="" CHANNEL="" SEED="" PROMOTE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --world) WORLD="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
-    --runtime) RUNTIME="$2"; shift 2 ;;
     --bundle) BUNDLE="$2"; shift 2 ;;
     --channel) CHANNEL="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
@@ -71,12 +74,12 @@ if [ -n "$PROMOTE" ]; then
   $FEED_TOOL world --world "$WORLD" --version "$VERSION" --channel "$CHANNEL" \
     --promote yes --base-url "$BASE_URL" --seed "$SEED" --out "$WORK"
 else
-  if [ -z "$RUNTIME" ] || [ -z "$BUNDLE" ]; then
-    echo "publish-world: --runtime and --bundle are required unless --promote" >&2
+  if [ -z "$BUNDLE" ]; then
+    echo "publish-world: --bundle is required unless --promote" >&2
     exit 1
   fi
   # shellcheck disable=SC2086
-  $FEED_TOOL world --world "$WORLD" --version "$VERSION" --runtime "$RUNTIME" \
+  $FEED_TOOL world --world "$WORLD" --version "$VERSION" \
     --bundle "$BUNDLE" --channel "$CHANNEL" --base-url "$BASE_URL" \
     --seed "$SEED" --out "$WORK"
 

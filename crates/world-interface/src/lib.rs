@@ -32,6 +32,7 @@
 
 pub mod destination;
 pub mod display;
+pub mod manifest;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
