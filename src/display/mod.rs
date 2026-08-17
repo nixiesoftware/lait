@@ -9,6 +9,11 @@ mod compiler;
 mod coordinator;
 mod hls;
 mod http;
+
+/// The two the daemon needs to tell "the port is taken" from "our service
+/// broke". Re-exported rather than opening the module: everything else in there
+/// is the HTTPS surface itself, which has one caller.
+pub(crate) use http::{bind_display, is_port_taken};
 mod live;
 mod pairing;
 mod runtime;

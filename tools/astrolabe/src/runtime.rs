@@ -910,11 +910,12 @@ impl Worker {
                 Ok(Outcome::Said(said))
             }
             Action::StartHead => {
-                // No mount: this is "bring a head up", not "open that World".
-                // A build hosting one World gets it; one hosting several
-                // refuses rather than choosing, which is the honest answer to
-                // an ask that named nothing.
-                let head = client.head(None).await?;
+                // "Bring a head up", not "open that World" — so the mount is
+                // resolved here rather than left unspecified. This is the layer
+                // that knows which build this is, and the supervisor's key
+                // cannot be built without an answer: an `Option` here is how one
+                // World ended up with two heads.
+                let head = client.head(lait::composition::PRODUCT_WORLD_MOUNT).await?;
                 Ok(Outcome::Said(format!("a head is serving at {}", head.base)))
             }
             Action::StopHead(id) => {

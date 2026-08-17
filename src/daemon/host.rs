@@ -1009,6 +1009,35 @@ impl Daemon {
             Self::join_world_upgrades(world_upgrades).await;
             return served;
         }
+        // Take the port before committing to it, so "another daemon already holds
+        // it" is separable from "our service broke". The port is fixed and bound
+        // on `0.0.0.0`, which makes the coordinator a machine-wide singleton — so
+        // on any machine that already runs a daemon, this is the *ordinary* case
+        // rather than an exceptional one.
+        //
+        // It used to be fatal to the whole daemon, which meant a second identity
+        // could not come up at all and a supervisor could not start a head for
+        // it. The concern underneath that was right — never advertise an origin
+        // receivers cannot reach — but the remedy was one size too large: the
+        // answer to "cannot host displays" is to not host them and say so, not to
+        // refuse to be a daemon.
+        match crate::display::bind_display(&self.display.tls).await {
+            Ok(listener) => drop(listener),
+            Err(error) if crate::display::is_port_taken(&error) => {
+                tracing::warn!(
+                    %error,
+                    "another daemon on this machine holds the display port; \
+                     serving without display coordination"
+                );
+                let served = self.endpoint.clone().serve(home).await;
+                Self::join_staging(staging).await;
+                return served;
+            }
+            Err(error) => {
+                Self::join_staging(staging).await;
+                return Err(error).context("serve daemon display HTTPS");
+            }
+        }
         let display = self.display.clone();
         let display_stop = self.endpoint.subscribe_stop();
         let endpoint = self.endpoint.clone();

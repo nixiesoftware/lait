@@ -537,6 +537,29 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         );
     };
 
+    // This test drives a real receiver through pairing, so it needs the display
+    // coordinator — and the coordinator binds a fixed `0.0.0.0:7443`, which makes
+    // it a machine-wide singleton. A daemon that loses that race now degrades to
+    // serving without display coordination rather than refusing to start, which
+    // is right for the product and leaves this test with nothing to pair against.
+    //
+    // Said here, before ten seconds of polling. Without it the failure is
+    // "reference receiver did not open a pairing within ten seconds" — a symptom
+    // that names neither the port nor the process holding it, which is the class
+    // of message this suite exists to stop shipping.
+    if let Err(error) = std::net::TcpListener::bind((
+        std::net::Ipv4Addr::UNSPECIFIED,
+        lait::display::DEFAULT_DISPLAY_PORT,
+    )) {
+        panic!(
+            "this test needs the display coordinator, which binds 0.0.0.0:{port}, and \
+             something else on this machine holds it ({error}). A running `lait` daemon is \
+             the usual holder — stop it, or run this test where none is running. Setting \
+             LAIT_DISPLAY=off does not help: it removes the coordinator this test drives.",
+            port = lait::display::DEFAULT_DISPLAY_PORT,
+        );
+    }
+
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
 
@@ -924,7 +947,7 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     };
 
     let head = client
-        .head(Some("issues"))
+        .head("issues")
         .await
         .expect("a head for this identity");
     assert!(
@@ -959,25 +982,59 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     // Asking twice finds the head that is already up. The alternative is a port
     // and a run credential per click.
-    let again = client.head(Some("issues")).await.expect("the same head");
+    let again = client.head("issues").await.expect("the same head");
     assert_eq!(again, head, "a second Open started a second head");
 
     // A different World is a different head, which is the whole point: one
     // process per World is what makes stopping one a statement about that
     // World rather than about whatever else shared it.
     let signage = client
-        .head(Some("signage"))
+        .head("signage")
         .await
         .expect("a head for the other World");
     assert_ne!(
         signage.base, head.base,
         "two Worlds were served by one head"
     );
+
+    // Two Worlds, two heads — and *exactly* two. The assertion this replaces
+    // said `len() == 1`, "one identity acquired more than one head", written when
+    // one head served everything. It was left standing directly under the block
+    // above that starts a second head, so it could not pass; the display-pairing
+    // wait earlier in this test failed first and hid it. Per-World heads reached
+    // CI unproven against a real binary because of it.
+    //
+    // The count is what matters, not just that the bases differ: the defect this
+    // is guarding is a *third* head, which is what `Option<&str>` produced when
+    // one caller named a World and another did not.
+    let heads = client.heads();
     assert_eq!(
-        client.heads().len(),
-        1,
-        "one identity acquired more than one head"
+        heads.len(),
+        2,
+        "two Worlds is two heads, and no more: {:?}",
+        heads.iter().map(|h| (&h.world, &h.url)).collect::<Vec<_>>()
     );
+    let mut served: Vec<Option<String>> = heads.iter().map(|h| h.world.clone()).collect();
+    served.sort();
+    assert_eq!(
+        served,
+        vec![Some("issues".to_owned()), Some("signage".to_owned())],
+        "each head names the World it actually announced"
+    );
+
+    // Asking again for either World finds the head that is already up, rather
+    // than spending a third port. This is the property the key exists for, and
+    // it is checked *after* both are running because that is when a key
+    // collision would show.
+    assert_eq!(
+        client.head("issues").await.expect("the issues head").base,
+        head.base
+    );
+    assert_eq!(
+        client.head("signage").await.expect("the signage head").base,
+        signage.base
+    );
+    assert_eq!(client.heads().len(), 2, "asking again started nothing new");
 
     let minted = client.mint(&head).await.expect("a launch credential");
     assert!(!minted.secret.is_empty());

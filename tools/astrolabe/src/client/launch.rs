@@ -38,10 +38,14 @@ impl Client {
     /// finds the head that is already running. That matters because the
     /// alternative is a port and a run credential per click.
     /// `world` is the mount this head will serve, and it is what makes two
-    /// Worlds two heads. `None` asks for the build's own default, which is
-    /// unambiguous only while a build hosts one World — the head refuses rather
-    /// than picks when it is not.
-    pub async fn head(&self, world: Option<&str>) -> ClientResult<Head> {
+    /// Worlds two heads.
+    ///
+    /// Mandatory, and it was an `Option` once. "Unspecified" is a question, and a
+    /// question cannot be a map key: one caller passing `None` and another
+    /// passing the same World by name produced two keys, so one World got two
+    /// heads and stopping either left the row saying Running. Whoever knows which
+    /// build this is resolves it; by the time it reaches here it is an answer.
+    pub async fn head(&self, world: &str) -> ClientResult<Head> {
         let facts = self
             .supervisor()
             .start_identity_head(self.identity(), world)
@@ -75,7 +79,7 @@ impl Client {
         // This World's head, not whichever one happened to be up. That is the
         // difference between opening Issues and opening "the head", and it is
         // what lets stopping one say something true about one World.
-        let head = self.head(Some(world)).await?;
+        let head = self.head(world).await?;
         let ticket = self.mint(&head).await?;
         Self::launch_url(&head.base, entry_path, &ticket.secret, ticket.expires_at_ms)
     }

@@ -1357,15 +1357,15 @@ impl Supervisor {
     pub async fn start_head(
         &self,
         device_id: &str,
-        world: Option<&str>,
+        world: &str,
     ) -> Result<HeadFacts, SupervisorError> {
         let device = self.device(device_id).await?;
         let home = device.home.clone();
         self.spawn_head(
-            format!("{device_id}-browser:{}", world.unwrap_or("default")),
+            format!("{device_id}-browser:{world}"),
             Some(device_id.to_owned()),
             Some(home),
-            world,
+            Some(world),
         )
         .await
     }
@@ -1385,7 +1385,7 @@ impl Supervisor {
     pub async fn start_identity_head(
         &self,
         home: Option<&Path>,
-        world: Option<&str>,
+        world: &str,
     ) -> Result<HeadFacts, SupervisorError> {
         let id = identity_head_id(home, world);
         // A head that is already up for this identity *is* the answer. Starting
@@ -1398,7 +1398,7 @@ impl Supervisor {
         if let Some(existing) = running {
             return Ok(existing);
         }
-        self.spawn_head(id, None, home.map(Path::to_path_buf), world)
+        self.spawn_head(id, None, home.map(Path::to_path_buf), Some(world))
             .await
     }
 
@@ -1876,8 +1876,16 @@ fn path_text(path: &Path) -> String {
 /// processes, so a key that named only the identity would find the first and
 /// hand it back for the second — which is the shared-head behaviour the pin
 /// exists to end, reintroduced one layer up.
-fn identity_head_id(home: Option<&Path>, world: Option<&str>) -> String {
-    let world = world.unwrap_or("default");
+///
+/// **The mount is not optional, and that is the whole guarantee.** It used to be
+/// `Option<&str>` spelled into the key as `world.unwrap_or("default")`, while the
+/// facts recorded what the head *announced*. So one caller asking for `None` and
+/// another asking for `Some("issues")` built two different keys for one World:
+/// two heads, two ports, two run credentials, both listed, both matching the
+/// row — and `stop` reached one of them while the row went on saying Running.
+/// Resolving "which World did they mean" belongs to whoever knows the build, and
+/// a key cannot be built here without an answer.
+fn identity_head_id(home: Option<&Path>, world: &str) -> String {
     match home {
         Some(home) => format!("identity:{}:{world}", path_text(home)),
         None => format!("identity:default:{world}"),

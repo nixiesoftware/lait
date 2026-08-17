@@ -153,14 +153,45 @@ fn display_routes() -> Router<DisplayHttpState> {
 }
 
 /// Serve the closed receiver router over the coordinator's pinned certificate.
+/// Take the display port, or say which kind of failure it was.
+///
+/// Split out of [`serve_display_https`] because the two failures need different
+/// answers from the daemon above. **Could not take the port** is a
+/// machine-arrangement fact — another daemon on this machine already holds it,
+/// since the port is fixed and `0.0.0.0`-bound — and it is knowable before
+/// anything is serving. **Stopped after serving** is this daemon's own service
+/// breaking, which is the case worth failing on.
+///
+/// Folding them was why a second identity's daemon could not start at all on a
+/// machine that already had one: the loser of the port race refused to exist
+/// rather than coming up without a coordinator. That is the same shape as reading
+/// an unreachable carrier as an empty mailbox — a fact that could not be
+/// established, rendered as a verdict.
+pub async fn bind_display(identity: &DisplayTlsIdentity) -> Result<TcpListener> {
+    TcpListener::bind(identity.bind())
+        .await
+        .with_context(|| format!("bind display HTTPS on {}", identity.bind()))
+}
+
+/// Whether this failure is "somebody else already holds the port".
+///
+/// Matched on the io kind rather than the message, so it does not depend on
+/// wording. `AddrInUse` is the one that means *another daemon*; a permission or
+/// address error is this machine being configured in a way nobody should paper
+/// over, and it keeps its fatality.
+pub fn is_port_taken(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+}
+
 pub async fn serve_display_https(
     state: DisplayHttpState,
     identity: Arc<DisplayTlsIdentity>,
     mut stop: watch::Receiver<bool>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(identity.bind())
-        .await
-        .with_context(|| format!("bind display HTTPS on {}", identity.bind()))?;
+    let listener = bind_display(&identity).await?;
     let acceptor = TlsAcceptor::from(identity.server_config());
     let app = display_http_router(state);
     let mut connections = JoinSet::new();
