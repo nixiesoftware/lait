@@ -29,7 +29,7 @@ use crate::control::ControlRoute;
 use crate::orbits::Router;
 
 use super::{
-    AssignmentRecord, CompiledProgram, CoordinatorState, CoordinatorStore, PlaybackAlignment,
+    AssignmentRecord, CompiledProgram, CoordinatorPolicy, CoordinatorStore, PlaybackAlignment,
     ProgramCompiler,
 };
 use super::{LiveMediaHub, LiveTransport};
@@ -96,7 +96,7 @@ impl DisplayCoordinator {
         registry: WorldClientRegistry,
         local_root: PathBuf,
     ) -> Result<Self> {
-        let identifier_key = store.snapshot()?.identifier_key;
+        let identifier_key = store.identifier_key()?;
         let (assignment_changes, _) = broadcast::channel(64);
         Ok(Self {
             store,
@@ -576,7 +576,7 @@ fn random_token() -> Result<String> {
 }
 
 fn playback_alignment(
-    state: &CoordinatorState,
+    state: &CoordinatorPolicy,
     assignment: &AssignmentRecord,
     sampled_at_unix_ms: u64,
 ) -> Result<Option<PlaybackAlignment>> {
