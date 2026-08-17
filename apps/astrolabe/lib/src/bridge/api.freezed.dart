@@ -52,6 +52,7 @@ extension ActionRequestPatterns on ActionRequest {
   TResult maybeMap<TResult extends Object?>({
     TResult Function(ActionRequest_Refresh value)? refresh,
     TResult Function(ActionRequest_Open value)? open,
+    TResult Function(ActionRequest_UpdateWorld value)? updateWorld,
     TResult Function(ActionRequest_StartDevice value)? startDevice,
     TResult Function(ActionRequest_StopDevice value)? stopDevice,
     TResult Function(ActionRequest_RestartDevice value)? restartDevice,
@@ -92,6 +93,8 @@ extension ActionRequestPatterns on ActionRequest {
         return refresh(_that);
       case ActionRequest_Open() when open != null:
         return open(_that);
+      case ActionRequest_UpdateWorld() when updateWorld != null:
+        return updateWorld(_that);
       case ActionRequest_StartDevice() when startDevice != null:
         return startDevice(_that);
       case ActionRequest_StopDevice() when stopDevice != null:
@@ -172,6 +175,7 @@ extension ActionRequestPatterns on ActionRequest {
   TResult map<TResult extends Object?>({
     required TResult Function(ActionRequest_Refresh value) refresh,
     required TResult Function(ActionRequest_Open value) open,
+    required TResult Function(ActionRequest_UpdateWorld value) updateWorld,
     required TResult Function(ActionRequest_StartDevice value) startDevice,
     required TResult Function(ActionRequest_StopDevice value) stopDevice,
     required TResult Function(ActionRequest_RestartDevice value) restartDevice,
@@ -213,6 +217,8 @@ extension ActionRequestPatterns on ActionRequest {
         return refresh(_that);
       case ActionRequest_Open():
         return open(_that);
+      case ActionRequest_UpdateWorld():
+        return updateWorld(_that);
       case ActionRequest_StartDevice():
         return startDevice(_that);
       case ActionRequest_StopDevice():
@@ -286,6 +292,7 @@ extension ActionRequestPatterns on ActionRequest {
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(ActionRequest_Refresh value)? refresh,
     TResult? Function(ActionRequest_Open value)? open,
+    TResult? Function(ActionRequest_UpdateWorld value)? updateWorld,
     TResult? Function(ActionRequest_StartDevice value)? startDevice,
     TResult? Function(ActionRequest_StopDevice value)? stopDevice,
     TResult? Function(ActionRequest_RestartDevice value)? restartDevice,
@@ -325,6 +332,8 @@ extension ActionRequestPatterns on ActionRequest {
         return refresh(_that);
       case ActionRequest_Open() when open != null:
         return open(_that);
+      case ActionRequest_UpdateWorld() when updateWorld != null:
+        return updateWorld(_that);
       case ActionRequest_StartDevice() when startDevice != null:
         return startDevice(_that);
       case ActionRequest_StopDevice() when stopDevice != null:
@@ -404,6 +413,7 @@ extension ActionRequestPatterns on ActionRequest {
   TResult maybeWhen<TResult extends Object?>({
     TResult Function()? refresh,
     TResult Function(String entryPath)? open,
+    TResult Function(String world)? updateWorld,
     TResult Function(String id)? startDevice,
     TResult Function(String id)? stopDevice,
     TResult Function(String id)? restartDevice,
@@ -454,6 +464,8 @@ extension ActionRequestPatterns on ActionRequest {
         return refresh();
       case ActionRequest_Open() when open != null:
         return open(_that.entryPath);
+      case ActionRequest_UpdateWorld() when updateWorld != null:
+        return updateWorld(_that.world);
       case ActionRequest_StartDevice() when startDevice != null:
         return startDevice(_that.id);
       case ActionRequest_StopDevice() when stopDevice != null:
@@ -547,6 +559,7 @@ extension ActionRequestPatterns on ActionRequest {
   TResult when<TResult extends Object?>({
     required TResult Function() refresh,
     required TResult Function(String entryPath) open,
+    required TResult Function(String world) updateWorld,
     required TResult Function(String id) startDevice,
     required TResult Function(String id) stopDevice,
     required TResult Function(String id) restartDevice,
@@ -604,6 +617,8 @@ extension ActionRequestPatterns on ActionRequest {
         return refresh();
       case ActionRequest_Open():
         return open(_that.entryPath);
+      case ActionRequest_UpdateWorld():
+        return updateWorld(_that.world);
       case ActionRequest_StartDevice():
         return startDevice(_that.id);
       case ActionRequest_StopDevice():
@@ -690,6 +705,7 @@ extension ActionRequestPatterns on ActionRequest {
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function()? refresh,
     TResult? Function(String entryPath)? open,
+    TResult? Function(String world)? updateWorld,
     TResult? Function(String id)? startDevice,
     TResult? Function(String id)? stopDevice,
     TResult? Function(String id)? restartDevice,
@@ -739,6 +755,8 @@ extension ActionRequestPatterns on ActionRequest {
         return refresh();
       case ActionRequest_Open() when open != null:
         return open(_that.entryPath);
+      case ActionRequest_UpdateWorld() when updateWorld != null:
+        return updateWorld(_that.world);
       case ActionRequest_StartDevice() when startDevice != null:
         return startDevice(_that.id);
       case ActionRequest_StopDevice() when stopDevice != null:
@@ -896,6 +914,71 @@ class _$ActionRequest_OpenCopyWithImpl<$Res>
       entryPath: null == entryPath
           ? _self.entryPath
           : entryPath // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_UpdateWorld extends ActionRequest {
+  const ActionRequest_UpdateWorld({required this.world}) : super._();
+
+  final String world;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_UpdateWorldCopyWith<ActionRequest_UpdateWorld> get copyWith =>
+      _$ActionRequest_UpdateWorldCopyWithImpl<ActionRequest_UpdateWorld>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_UpdateWorld &&
+            (identical(other.world, world) || other.world == world));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, world);
+
+  @override
+  String toString() {
+    return 'ActionRequest.updateWorld(world: $world)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_UpdateWorldCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_UpdateWorldCopyWith(ActionRequest_UpdateWorld value,
+          $Res Function(ActionRequest_UpdateWorld) _then) =
+      _$ActionRequest_UpdateWorldCopyWithImpl;
+  @useResult
+  $Res call({String world});
+}
+
+/// @nodoc
+class _$ActionRequest_UpdateWorldCopyWithImpl<$Res>
+    implements $ActionRequest_UpdateWorldCopyWith<$Res> {
+  _$ActionRequest_UpdateWorldCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_UpdateWorld _self;
+  final $Res Function(ActionRequest_UpdateWorld) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? world = null,
+  }) {
+    return _then(ActionRequest_UpdateWorld(
+      world: null == world
+          ? _self.world
+          : world // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

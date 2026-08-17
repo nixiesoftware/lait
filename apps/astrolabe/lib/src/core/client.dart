@@ -73,7 +73,8 @@ export '../bridge/api.dart'
         CardRow,
         PresenceView,
         WorldArtwork,
-        WorldPersonRow;
+        WorldPersonRow,
+        WorldUpdateRow;
 
 /// The core library, resolved for the process that is about to load it.
 ///
@@ -258,6 +259,7 @@ class ClientScope extends InheritedNotifier<ValueListenable<api.ClientView>> {
 abstract final class ActionKeys {
   static const String refresh = 'refresh';
   static String open(String entryPath) => 'open:$entryPath';
+  static String updateWorld(String world) => 'world.update:$world';
   static String startDevice(String id) => 'device.start:$id';
   static String stopDevice(String id) => 'device.stop:$id';
   static String restartDevice(String id) => 'device.restart:$id';

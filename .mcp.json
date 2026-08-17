@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lait": {
+      "args": [
+        "mcp"
+      ],
+      "command": "lait",
+      "env": {
+        "LAIT_AGENT": "claude",
+        "LAIT_WORLD": "issues"
+      }
+    }
+  }
+}

@@ -43,8 +43,12 @@ fi
 # dependency, the Dart dependency, and the generator that wrote both halves.
 # A generator a minor version ahead emits code the runtime does not implement,
 # and the failure lands at run time in a program with no console.
-pinned=$(grep -oP '^flutter_rust_bridge = "=\K[0-9.]+' tools/astrolabe/Cargo.toml)
-actual=$(flutter_rust_bridge_codegen --version | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+# `sed` and `grep -oE` rather than `grep -oP`: PCRE mode is a GNU extension
+# that BSD grep does not carry, so the -P form exited 2 on macOS before it
+# checked anything. This script's whole job is to be run by hand until a
+# workflow calls it (CLIENT-61), and the hand it is run by is usually on a Mac.
+pinned=$(sed -n 's/^flutter_rust_bridge = "=\([0-9.]*\)".*/\1/p' tools/astrolabe/Cargo.toml)
+actual=$(flutter_rust_bridge_codegen --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 if [ "$pinned" != "$actual" ]; then
   echo "bridge-drift: the generator is $actual and the pin is $pinned." >&2
   echo "bridge-drift: cargo install flutter_rust_bridge_codegen --version $pinned --locked" >&2

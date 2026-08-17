@@ -248,25 +248,29 @@ impl SseDecode for crate::api::ActionRequest {
                 };
             }
             2 => {
-                let mut var_id = <String>::sse_decode(deserializer);
-                return crate::api::ActionRequest::StartDevice { id: var_id };
+                let mut var_world = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::UpdateWorld { world: var_world };
             }
             3 => {
                 let mut var_id = <String>::sse_decode(deserializer);
-                return crate::api::ActionRequest::StopDevice { id: var_id };
+                return crate::api::ActionRequest::StartDevice { id: var_id };
             }
             4 => {
                 let mut var_id = <String>::sse_decode(deserializer);
-                return crate::api::ActionRequest::RestartDevice { id: var_id };
+                return crate::api::ActionRequest::StopDevice { id: var_id };
             }
             5 => {
                 let mut var_id = <String>::sse_decode(deserializer);
-                return crate::api::ActionRequest::ForceStopDevice { id: var_id };
+                return crate::api::ActionRequest::RestartDevice { id: var_id };
             }
             6 => {
-                return crate::api::ActionRequest::StopAllOwned;
+                let mut var_id = <String>::sse_decode(deserializer);
+                return crate::api::ActionRequest::ForceStopDevice { id: var_id };
             }
             7 => {
+                return crate::api::ActionRequest::StopAllOwned;
+            }
+            8 => {
                 let mut var_id = <String>::sse_decode(deserializer);
                 let mut var_deleteData = <bool>::sse_decode(deserializer);
                 return crate::api::ActionRequest::RemoveDevice {
@@ -274,22 +278,22 @@ impl SseDecode for crate::api::ActionRequest {
                     delete_data: var_deleteData,
                 };
             }
-            8 => {
+            9 => {
                 let mut var_orbit = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::ReadSpace { orbit: var_orbit };
             }
-            9 => {
+            10 => {
                 return crate::api::ActionRequest::StartHead;
             }
-            10 => {
+            11 => {
                 let mut var_id = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::StopHead { id: var_id };
             }
-            11 => {
+            12 => {
                 let mut var_space = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::ForgetOrbit { space: var_space };
             }
-            12 => {
+            13 => {
                 let mut var_card = <Option<String>>::sse_decode(deserializer);
                 let mut var_name = <String>::sse_decode(deserializer);
                 let mut var_note = <Option<String>>::sse_decode(deserializer);
@@ -299,11 +303,11 @@ impl SseDecode for crate::api::ActionRequest {
                     note: var_note,
                 };
             }
-            13 => {
+            14 => {
                 let mut var_card = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookDelete { card: var_card };
             }
-            14 => {
+            15 => {
                 let mut var_card = <String>::sse_decode(deserializer);
                 let mut var_path = <Option<String>>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookSetPicture {
@@ -311,7 +315,7 @@ impl SseDecode for crate::api::ActionRequest {
                     path: var_path,
                 };
             }
-            15 => {
+            16 => {
                 let mut var_from = <String>::sse_decode(deserializer);
                 let mut var_into = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookMerge {
@@ -319,11 +323,11 @@ impl SseDecode for crate::api::ActionRequest {
                     into: var_into,
                 };
             }
-            16 => {
+            17 => {
                 let mut var_card = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookClaimSelf { card: var_card };
             }
-            17 => {
+            18 => {
                 let mut var_card = <String>::sse_decode(deserializer);
                 let mut var_handle = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookLink {
@@ -331,7 +335,7 @@ impl SseDecode for crate::api::ActionRequest {
                     handle: var_handle,
                 };
             }
-            18 => {
+            19 => {
                 let mut var_card = <String>::sse_decode(deserializer);
                 let mut var_handle = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookUnlink {
@@ -339,7 +343,7 @@ impl SseDecode for crate::api::ActionRequest {
                     handle: var_handle,
                 };
             }
-            19 => {
+            20 => {
                 let mut var_path = <String>::sse_decode(deserializer);
                 let mut var_cards = <Option<Vec<String>>>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookExport {
@@ -347,23 +351,23 @@ impl SseDecode for crate::api::ActionRequest {
                     cards: var_cards,
                 };
             }
-            20 => {
+            21 => {
                 let mut var_path = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookImport { path: var_path };
             }
-            21 => {
+            22 => {
                 let mut var_suggestion = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookAccept {
                     suggestion: var_suggestion,
                 };
             }
-            22 => {
+            23 => {
                 let mut var_suggestion = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::BookDismiss {
                     suggestion: var_suggestion,
                 };
             }
-            23 => {
+            24 => {
                 let mut var_client = <String>::sse_decode(deserializer);
                 let mut var_scope = <Option<String>>::sse_decode(deserializer);
                 let mut var_name = <String>::sse_decode(deserializer);
@@ -383,7 +387,7 @@ impl SseDecode for crate::api::ActionRequest {
                     preview: var_preview,
                 };
             }
-            24 => {
+            25 => {
                 let mut var_pairing = <String>::sse_decode(deserializer);
                 let mut var_label = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::DisplayPairingApprove {
@@ -391,13 +395,13 @@ impl SseDecode for crate::api::ActionRequest {
                     label: var_label,
                 };
             }
-            25 => {
+            26 => {
                 let mut var_pairing = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::DisplayPairingReject {
                     pairing: var_pairing,
                 };
             }
-            26 => {
+            27 => {
                 let mut var_device = <String>::sse_decode(deserializer);
                 let mut var_orbit = <String>::sse_decode(deserializer);
                 let mut var_world = <String>::sse_decode(deserializer);
@@ -425,13 +429,13 @@ impl SseDecode for crate::api::ActionRequest {
                     expires_at_unix_ms: var_expiresAtUnixMs,
                 };
             }
-            27 => {
+            28 => {
                 let mut var_assignment = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::DisplayAssignmentRevoke {
                     assignment: var_assignment,
                 };
             }
-            28 => {
+            29 => {
                 let mut var_device = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::DisplayDeviceRevoke { device: var_device };
             }
@@ -864,6 +868,7 @@ impl SseDecode for crate::api::LibraryRow {
         let mut var_tagline = <Option<String>>::sse_decode(deserializer);
         let mut var_accent = <Option<u32>>::sse_decode(deserializer);
         let mut var_people = <Option<Vec<crate::api::WorldPersonRow>>>::sse_decode(deserializer);
+        let mut var_update = <Option<crate::api::WorldUpdateRow>>::sse_decode(deserializer);
         return crate::api::LibraryRow {
             key: var_key,
             world_mount: var_worldMount,
@@ -873,6 +878,7 @@ impl SseDecode for crate::api::LibraryRow {
             tagline: var_tagline,
             accent: var_accent,
             people: var_people,
+            update: var_update,
         };
     }
 }
@@ -1309,6 +1315,17 @@ impl SseDecode for Option<u64> {
     }
 }
 
+impl SseDecode for Option<crate::api::WorldUpdateRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::WorldUpdateRow>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<Vec<String>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1520,6 +1537,22 @@ impl SseDecode for crate::api::WorldPersonRow {
     }
 }
 
+impl SseDecode for crate::api::WorldUpdateRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_serving = <Option<String>>::sse_decode(deserializer);
+        let mut var_available = <Option<String>>::sse_decode(deserializer);
+        let mut var_behind = <bool>::sse_decode(deserializer);
+        let mut var_unmet = <Option<Vec<String>>>::sse_decode(deserializer);
+        return crate::api::WorldUpdateRow {
+            serving: var_serving,
+            available: var_available,
+            behind: var_behind,
+            unmet: var_unmet,
+        };
+    }
+}
+
 fn pde_ffi_dispatcher_primary_impl(
     func_id: i32,
     port: flutter_rust_bridge::for_generated::MessagePort,
@@ -1560,86 +1593,89 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             crate::api::ActionRequest::Open { entry_path } => {
                 [1.into_dart(), entry_path.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::ActionRequest::StartDevice { id } => {
-                [2.into_dart(), id.into_into_dart().into_dart()].into_dart()
+            crate::api::ActionRequest::UpdateWorld { world } => {
+                [2.into_dart(), world.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::ActionRequest::StopDevice { id } => {
+            crate::api::ActionRequest::StartDevice { id } => {
                 [3.into_dart(), id.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::ActionRequest::RestartDevice { id } => {
+            crate::api::ActionRequest::StopDevice { id } => {
                 [4.into_dart(), id.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::ActionRequest::ForceStopDevice { id } => {
+            crate::api::ActionRequest::RestartDevice { id } => {
                 [5.into_dart(), id.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::ActionRequest::StopAllOwned => [6.into_dart()].into_dart(),
+            crate::api::ActionRequest::ForceStopDevice { id } => {
+                [6.into_dart(), id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ActionRequest::StopAllOwned => [7.into_dart()].into_dart(),
             crate::api::ActionRequest::RemoveDevice { id, delete_data } => [
-                7.into_dart(),
+                8.into_dart(),
                 id.into_into_dart().into_dart(),
                 delete_data.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::ActionRequest::ReadSpace { orbit } => {
-                [8.into_dart(), orbit.into_into_dart().into_dart()].into_dart()
+                [9.into_dart(), orbit.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::ActionRequest::StartHead => [9.into_dart()].into_dart(),
+            crate::api::ActionRequest::StartHead => [10.into_dart()].into_dart(),
             crate::api::ActionRequest::StopHead { id } => {
-                [10.into_dart(), id.into_into_dart().into_dart()].into_dart()
+                [11.into_dart(), id.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::ForgetOrbit { space } => {
-                [11.into_dart(), space.into_into_dart().into_dart()].into_dart()
+                [12.into_dart(), space.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::BookPut { card, name, note } => [
-                12.into_dart(),
+                13.into_dart(),
                 card.into_into_dart().into_dart(),
                 name.into_into_dart().into_dart(),
                 note.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::ActionRequest::BookDelete { card } => {
-                [13.into_dart(), card.into_into_dart().into_dart()].into_dart()
+                [14.into_dart(), card.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::BookSetPicture { card, path } => [
-                14.into_dart(),
+                15.into_dart(),
                 card.into_into_dart().into_dart(),
                 path.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::ActionRequest::BookMerge { from, into } => [
-                15.into_dart(),
+                16.into_dart(),
                 from.into_into_dart().into_dart(),
                 into.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::ActionRequest::BookClaimSelf { card } => {
-                [16.into_dart(), card.into_into_dart().into_dart()].into_dart()
+                [17.into_dart(), card.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::BookLink { card, handle } => [
-                17.into_dart(),
-                card.into_into_dart().into_dart(),
-                handle.into_into_dart().into_dart(),
-            ]
-            .into_dart(),
-            crate::api::ActionRequest::BookUnlink { card, handle } => [
                 18.into_dart(),
                 card.into_into_dart().into_dart(),
                 handle.into_into_dart().into_dart(),
             ]
             .into_dart(),
-            crate::api::ActionRequest::BookExport { path, cards } => [
+            crate::api::ActionRequest::BookUnlink { card, handle } => [
                 19.into_dart(),
+                card.into_into_dart().into_dart(),
+                handle.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::ActionRequest::BookExport { path, cards } => [
+                20.into_dart(),
                 path.into_into_dart().into_dart(),
                 cards.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::ActionRequest::BookImport { path } => {
-                [20.into_dart(), path.into_into_dart().into_dart()].into_dart()
+                [21.into_dart(), path.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::BookAccept { suggestion } => {
-                [21.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
+                [22.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::BookDismiss { suggestion } => {
-                [22.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
+                [23.into_dart(), suggestion.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::InstallMcp {
                 client,
@@ -1651,7 +1687,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
                 world,
                 preview,
             } => [
-                23.into_dart(),
+                24.into_dart(),
                 client.into_into_dart().into_dart(),
                 scope.into_into_dart().into_dart(),
                 name.into_into_dart().into_dart(),
@@ -1663,13 +1699,13 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             ]
             .into_dart(),
             crate::api::ActionRequest::DisplayPairingApprove { pairing, label } => [
-                24.into_dart(),
+                25.into_dart(),
                 pairing.into_into_dart().into_dart(),
                 label.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::ActionRequest::DisplayPairingReject { pairing } => {
-                [25.into_dart(), pairing.into_into_dart().into_dart()].into_dart()
+                [26.into_dart(), pairing.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::DisplayAssignmentPut {
                 device,
@@ -1685,7 +1721,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
                 static_delay_ms,
                 expires_at_unix_ms,
             } => [
-                26.into_dart(),
+                27.into_dart(),
                 device.into_into_dart().into_dart(),
                 orbit.into_into_dart().into_dart(),
                 world.into_into_dart().into_dart(),
@@ -1701,10 +1737,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
             ]
             .into_dart(),
             crate::api::ActionRequest::DisplayAssignmentRevoke { assignment } => {
-                [27.into_dart(), assignment.into_into_dart().into_dart()].into_dart()
+                [28.into_dart(), assignment.into_into_dart().into_dart()].into_dart()
             }
             crate::api::ActionRequest::DisplayDeviceRevoke { device } => {
-                [28.into_dart(), device.into_into_dart().into_dart()].into_dart()
+                [29.into_dart(), device.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -2143,6 +2179,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::LibraryRow {
             self.tagline.into_into_dart().into_dart(),
             self.accent.into_into_dart().into_dart(),
             self.people.into_into_dart().into_dart(),
+            self.update.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2372,6 +2409,24 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::WorldPersonRow> for crate::ap
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::WorldUpdateRow {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.serving.into_into_dart().into_dart(),
+            self.available.into_into_dart().into_dart(),
+            self.behind.into_into_dart().into_dart(),
+            self.unmet.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::WorldUpdateRow {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::WorldUpdateRow> for crate::api::WorldUpdateRow {
+    fn into_into_dart(self) -> crate::api::WorldUpdateRow {
+        self
+    }
+}
 
 impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2407,94 +2462,98 @@ impl SseEncode for crate::api::ActionRequest {
                 <i32>::sse_encode(1, serializer);
                 <String>::sse_encode(entry_path, serializer);
             }
-            crate::api::ActionRequest::StartDevice { id } => {
+            crate::api::ActionRequest::UpdateWorld { world } => {
                 <i32>::sse_encode(2, serializer);
-                <String>::sse_encode(id, serializer);
+                <String>::sse_encode(world, serializer);
             }
-            crate::api::ActionRequest::StopDevice { id } => {
+            crate::api::ActionRequest::StartDevice { id } => {
                 <i32>::sse_encode(3, serializer);
                 <String>::sse_encode(id, serializer);
             }
-            crate::api::ActionRequest::RestartDevice { id } => {
+            crate::api::ActionRequest::StopDevice { id } => {
                 <i32>::sse_encode(4, serializer);
                 <String>::sse_encode(id, serializer);
             }
-            crate::api::ActionRequest::ForceStopDevice { id } => {
+            crate::api::ActionRequest::RestartDevice { id } => {
                 <i32>::sse_encode(5, serializer);
                 <String>::sse_encode(id, serializer);
             }
-            crate::api::ActionRequest::StopAllOwned => {
+            crate::api::ActionRequest::ForceStopDevice { id } => {
                 <i32>::sse_encode(6, serializer);
+                <String>::sse_encode(id, serializer);
+            }
+            crate::api::ActionRequest::StopAllOwned => {
+                <i32>::sse_encode(7, serializer);
             }
             crate::api::ActionRequest::RemoveDevice { id, delete_data } => {
-                <i32>::sse_encode(7, serializer);
+                <i32>::sse_encode(8, serializer);
                 <String>::sse_encode(id, serializer);
                 <bool>::sse_encode(delete_data, serializer);
             }
             crate::api::ActionRequest::ReadSpace { orbit } => {
-                <i32>::sse_encode(8, serializer);
+                <i32>::sse_encode(9, serializer);
                 <String>::sse_encode(orbit, serializer);
             }
             crate::api::ActionRequest::StartHead => {
-                <i32>::sse_encode(9, serializer);
+                <i32>::sse_encode(10, serializer);
             }
             crate::api::ActionRequest::StopHead { id } => {
-                <i32>::sse_encode(10, serializer);
+                <i32>::sse_encode(11, serializer);
                 <String>::sse_encode(id, serializer);
             }
             crate::api::ActionRequest::ForgetOrbit { space } => {
-                <i32>::sse_encode(11, serializer);
+                <i32>::sse_encode(12, serializer);
                 <String>::sse_encode(space, serializer);
             }
             crate::api::ActionRequest::BookPut { card, name, note } => {
-                <i32>::sse_encode(12, serializer);
+                <i32>::sse_encode(13, serializer);
                 <Option<String>>::sse_encode(card, serializer);
                 <String>::sse_encode(name, serializer);
                 <Option<String>>::sse_encode(note, serializer);
             }
             crate::api::ActionRequest::BookDelete { card } => {
-                <i32>::sse_encode(13, serializer);
+                <i32>::sse_encode(14, serializer);
                 <String>::sse_encode(card, serializer);
             }
             crate::api::ActionRequest::BookSetPicture { card, path } => {
-                <i32>::sse_encode(14, serializer);
+                <i32>::sse_encode(15, serializer);
                 <String>::sse_encode(card, serializer);
                 <Option<String>>::sse_encode(path, serializer);
             }
             crate::api::ActionRequest::BookMerge { from, into } => {
-                <i32>::sse_encode(15, serializer);
+                <i32>::sse_encode(16, serializer);
                 <String>::sse_encode(from, serializer);
                 <String>::sse_encode(into, serializer);
             }
             crate::api::ActionRequest::BookClaimSelf { card } => {
-                <i32>::sse_encode(16, serializer);
+                <i32>::sse_encode(17, serializer);
                 <String>::sse_encode(card, serializer);
             }
             crate::api::ActionRequest::BookLink { card, handle } => {
-                <i32>::sse_encode(17, serializer);
-                <String>::sse_encode(card, serializer);
-                <String>::sse_encode(handle, serializer);
-            }
-            crate::api::ActionRequest::BookUnlink { card, handle } => {
                 <i32>::sse_encode(18, serializer);
                 <String>::sse_encode(card, serializer);
                 <String>::sse_encode(handle, serializer);
             }
-            crate::api::ActionRequest::BookExport { path, cards } => {
+            crate::api::ActionRequest::BookUnlink { card, handle } => {
                 <i32>::sse_encode(19, serializer);
+                <String>::sse_encode(card, serializer);
+                <String>::sse_encode(handle, serializer);
+            }
+            crate::api::ActionRequest::BookExport { path, cards } => {
+                <i32>::sse_encode(20, serializer);
                 <String>::sse_encode(path, serializer);
                 <Option<Vec<String>>>::sse_encode(cards, serializer);
             }
             crate::api::ActionRequest::BookImport { path } => {
-                <i32>::sse_encode(20, serializer);
+                <i32>::sse_encode(21, serializer);
                 <String>::sse_encode(path, serializer);
             }
             crate::api::ActionRequest::BookAccept { suggestion } => {
-                <i32>::sse_encode(21, serializer);
+                <i32>::sse_encode(22, serializer);
                 <String>::sse_encode(suggestion, serializer);
             }
             crate::api::ActionRequest::BookDismiss { suggestion } => {
-                <i32>::sse_encode(22, serializer);
+                <i32>::sse_encode(23, serializer);
                 <String>::sse_encode(suggestion, serializer);
             }
             crate::api::ActionRequest::InstallMcp {
@@ -2507,7 +2566,7 @@ impl SseEncode for crate::api::ActionRequest {
                 world,
                 preview,
             } => {
-                <i32>::sse_encode(23, serializer);
+                <i32>::sse_encode(24, serializer);
                 <String>::sse_encode(client, serializer);
                 <Option<String>>::sse_encode(scope, serializer);
                 <String>::sse_encode(name, serializer);
@@ -2518,12 +2577,12 @@ impl SseEncode for crate::api::ActionRequest {
                 <bool>::sse_encode(preview, serializer);
             }
             crate::api::ActionRequest::DisplayPairingApprove { pairing, label } => {
-                <i32>::sse_encode(24, serializer);
+                <i32>::sse_encode(25, serializer);
                 <String>::sse_encode(pairing, serializer);
                 <String>::sse_encode(label, serializer);
             }
             crate::api::ActionRequest::DisplayPairingReject { pairing } => {
-                <i32>::sse_encode(25, serializer);
+                <i32>::sse_encode(26, serializer);
                 <String>::sse_encode(pairing, serializer);
             }
             crate::api::ActionRequest::DisplayAssignmentPut {
@@ -2540,7 +2599,7 @@ impl SseEncode for crate::api::ActionRequest {
                 static_delay_ms,
                 expires_at_unix_ms,
             } => {
-                <i32>::sse_encode(26, serializer);
+                <i32>::sse_encode(27, serializer);
                 <String>::sse_encode(device, serializer);
                 <String>::sse_encode(orbit, serializer);
                 <String>::sse_encode(world, serializer);
@@ -2555,11 +2614,11 @@ impl SseEncode for crate::api::ActionRequest {
                 <Option<u64>>::sse_encode(expires_at_unix_ms, serializer);
             }
             crate::api::ActionRequest::DisplayAssignmentRevoke { assignment } => {
-                <i32>::sse_encode(27, serializer);
+                <i32>::sse_encode(28, serializer);
                 <String>::sse_encode(assignment, serializer);
             }
             crate::api::ActionRequest::DisplayDeviceRevoke { device } => {
-                <i32>::sse_encode(28, serializer);
+                <i32>::sse_encode(29, serializer);
                 <String>::sse_encode(device, serializer);
             }
             _ => {
@@ -2864,6 +2923,7 @@ impl SseEncode for crate::api::LibraryRow {
         <Option<String>>::sse_encode(self.tagline, serializer);
         <Option<u32>>::sse_encode(self.accent, serializer);
         <Option<Vec<crate::api::WorldPersonRow>>>::sse_encode(self.people, serializer);
+        <Option<crate::api::WorldUpdateRow>>::sse_encode(self.update, serializer);
     }
 }
 
@@ -3234,6 +3294,16 @@ impl SseEncode for Option<u64> {
     }
 }
 
+impl SseEncode for Option<crate::api::WorldUpdateRow> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::WorldUpdateRow>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<Vec<String>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3402,6 +3472,16 @@ impl SseEncode for crate::api::WorldPersonRow {
         <Option<crate::api::PresenceView>>::sse_encode(self.presence, serializer);
         <bool>::sse_encode(self.agent, serializer);
         <bool>::sse_encode(self.here, serializer);
+    }
+}
+
+impl SseEncode for crate::api::WorldUpdateRow {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<String>>::sse_encode(self.serving, serializer);
+        <Option<String>>::sse_encode(self.available, serializer);
+        <bool>::sse_encode(self.behind, serializer);
+        <Option<Vec<String>>>::sse_encode(self.unmet, serializer);
     }
 }
 
