@@ -321,10 +321,15 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         match issue_req(
             &client,
             &founder_home,
-            issues_app::IssuesRequest::Inbox { watermark: 0 },
+            issues_app::IssuesRequest::Inbox {
+                watermark: 0,
+                page: issues::contract::PageRequest::default(),
+                publication: None,
+            },
         ) {
-            IssueResponse::Inbox { entries, .. }
-                if entries
+            IssueResponse::Inbox { page, .. }
+                if page
+                    .items
                     .iter()
                     .any(|e| e.kind == "comment" && e.detail == "joined over the socket") =>
             {

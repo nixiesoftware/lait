@@ -188,13 +188,17 @@ impl World for KvWorld {
     }
     fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
         let key = String::from_utf8(query.payload).map_err(|_| Rejection::InvalidRequest)?;
-        let value = ctx.read_body(&self.body(&key)).unwrap_or_default();
+        let value = ctx
+            .read_body(&self.body(&key))?
+            .map(|bytes| bytes.as_ref().to_vec())
+            .unwrap_or_default();
         Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             bytes: value,
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -263,6 +267,7 @@ fn a_consumer_drives_the_whole_lifecycle_through_the_public_api() {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: key.as_bytes().to_vec(),
+            publication: None,
         })
         .unwrap()
         .bytes

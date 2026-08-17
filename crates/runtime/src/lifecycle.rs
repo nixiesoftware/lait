@@ -98,12 +98,25 @@ pub enum Failure {
     Persistence(Persistence),
     StationDormant,
     PrincipalDenied,
+    NoActiveImplementation(WorldId),
+    ImplementationUnavailable {
+        world: WorldId,
+        implementation: [u8; 32],
+    },
+    AuthorityUnavailable(String),
     /// The activation's Find policy failed validation. Carries the refusal:
     /// `Policy` has one field today, but `find::Invalid` names fifteen ways a
     /// contract can be refused, and a discard here is how a diagnosable
     /// refusal becomes one word the moment the policy grows a second field —
     /// the exact defect the error-context ratchet exists to stop.
     InvalidFindPolicy(crate::find::Invalid),
+    /// A hosted World's extractor declaration could not be reduced to the
+    /// canonical digest that binds publications and cursors.
+    InvalidExtractorSchema(crate::find::Invalid),
+    WorldPublicationUnavailable(WorldId),
+    /// The composition-wide read-memory governor refused another Station or
+    /// publication build before allocating beyond its physical envelope.
+    ReadCapacity,
     UnknownWorld(WorldId),
 }
 
@@ -333,6 +346,7 @@ pub struct Runtime {
     /// protected material. Supplied by the composition root; absent keys fail
     /// closed (local writes refuse, remote material stays opaque).
     keys: Arc<dyn BodyKeySource>,
+    read_memory: Arc<crate::session::ReadMemoryGovernor>,
 }
 
 impl Runtime {
@@ -350,6 +364,7 @@ impl Runtime {
             root: None,
             authority: Arc::new(DenyAllAuthority),
             keys: Arc::new(NoBodyKeys),
+            read_memory: crate::session::ReadMemoryGovernor::process_default(),
         }
     }
 
@@ -368,6 +383,7 @@ impl Runtime {
             root: Some(root.into()),
             authority,
             keys,
+            read_memory: crate::session::ReadMemoryGovernor::process_default(),
         }
     }
 
@@ -406,6 +422,7 @@ impl Runtime {
             self.registry.clone(),
             self.authority.clone(),
             self.keys.clone(),
+            self.read_memory.clone(),
             epoch,
             lock,
         ))
@@ -440,6 +457,7 @@ impl Runtime {
             self.registry.clone(),
             self.authority.clone(),
             self.keys.clone(),
+            self.read_memory.clone(),
             epoch,
             lock,
         ))
@@ -459,6 +477,7 @@ impl Runtime {
             self.registry.clone(),
             self.authority.clone(),
             self.keys.clone(),
+            self.read_memory.clone(),
             epoch,
             lock,
         ))
@@ -495,6 +514,7 @@ pub struct Orbit {
     registry: Catalog,
     authority: Arc<dyn AuthorityView>,
     keys: Arc<dyn BodyKeySource>,
+    read_memory: Arc<crate::session::ReadMemoryGovernor>,
     epoch: Epoch,
     lock: StoreLock,
 }
@@ -514,6 +534,7 @@ impl Orbit {
         registry: Catalog,
         authority: Arc<dyn AuthorityView>,
         keys: Arc<dyn BodyKeySource>,
+        read_memory: Arc<crate::session::ReadMemoryGovernor>,
         epoch: Epoch,
         lock: StoreLock,
     ) -> Self {
@@ -522,6 +543,7 @@ impl Orbit {
             registry,
             authority,
             keys,
+            read_memory,
             epoch,
             lock,
         }
@@ -569,10 +591,13 @@ impl Orbit {
         // material as interpretable versus opaque.
         let mut supported = replica::body::SupportedSchemas::new();
         for id in self.registry.ids() {
-            if let Some(reg) = self.registry.descriptor(id) {
+            for reg in self.registry.descriptors(id) {
                 for schema in &reg.schemas {
                     let model = match schema.mutation {
                         replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
+                        replica::body::MutationModel::ImmutableAtomic => {
+                            replica::body::MUTATION_IMMUTABLE_ATOMIC
+                        }
                         replica::body::MutationModel::Collaborative(_) => {
                             replica::body::MUTATION_COLLABORATIVE
                         }
@@ -589,12 +614,21 @@ impl Orbit {
                 // schemas are interpretable even though package composition
                 // forbids the World from declaring or writing them itself.
                 for schema in crate::exec::body_schemas() {
+                    let model = match schema.mutation {
+                        replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
+                        replica::body::MutationModel::ImmutableAtomic => {
+                            replica::body::MUTATION_IMMUTABLE_ATOMIC
+                        }
+                        replica::body::MutationModel::Collaborative(_) => {
+                            replica::body::MUTATION_COLLABORATIVE
+                        }
+                    };
                     supported.declare(
                         id.clone(),
                         schema.id,
                         schema.version,
                         schema.encoding,
-                        replica::body::MUTATION_COLLABORATIVE,
+                        model,
                     );
                 }
             }
@@ -609,7 +643,22 @@ impl Orbit {
         } else {
             options.observation_capacity
         };
-        let core = Arc::new(crate::session::StationCore::new(epoch, capacity, replica));
+        // Corpus images are local acceleration, never Replica authority. A
+        // missing/unwrappable cache key or corrupt cache directory disables
+        // warm reopen for this activation but cannot block durable truth.
+        let corpus_images = crate::corpus_store::CorpusImageStore::open(self.store.dir())
+            .ok()
+            .map(Arc::new);
+        let core = Arc::new(
+            crate::session::StationCore::new(
+                epoch,
+                capacity,
+                replica,
+                self.read_memory.clone(),
+                corpus_images,
+            )
+            .map_err(|_| Failure::ReadCapacity)?,
+        );
 
         // The resident cache lives beside the store rather than inside it: the
         // journal's promise is that everything a root names is present, and a
@@ -657,6 +706,7 @@ impl Orbit {
             registry: self.registry,
             authority: self.authority,
             keys: self.keys,
+            read_memory: self.read_memory,
             epoch,
             lock: Some(self.lock),
             alive: Arc::new(AtomicBool::new(true)),
@@ -875,6 +925,7 @@ pub struct Station {
     registry: Catalog,
     authority: Arc<dyn AuthorityView>,
     keys: Arc<dyn BodyKeySource>,
+    read_memory: Arc<crate::session::ReadMemoryGovernor>,
     epoch: Epoch,
     /// The exclusive store lock. `Some` while live; taken out (and either moved
     /// into the returned Orbit or dropped) exactly once at dormancy/exit, so it
@@ -943,6 +994,27 @@ impl Station {
     /// business.
     pub fn descriptor(&self, world: &WorldId) -> Option<&crate::world::Descriptor> {
         self.registry.descriptor(world)
+    }
+
+    /// Resolve the exact World implementation authority selects for this
+    /// principal at its current frontier. Application routing uses this before
+    /// choosing among multiple installed exact package hosts.
+    pub fn active_implementation(
+        &self,
+        world: &WorldId,
+        identity: &LocalIdentity,
+    ) -> Result<[u8; 32], Failure> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err(Failure::StationDormant);
+        }
+        let resolution = self
+            .authority
+            .resolve(identity.device())
+            .ok_or(Failure::PrincipalDenied)?;
+        self.authority
+            .active_implementation(world, &resolution.authority_frontier)
+            .map_err(Failure::AuthorityUnavailable)?
+            .ok_or_else(|| Failure::NoActiveImplementation(world.clone()))
     }
 
     /// What this Station currently believes about who is doing what.
@@ -1146,14 +1218,39 @@ impl Station {
             space: self.space_id().clone(),
             authority_frontier: resolution.authority_frontier,
         };
+        let active_implementation = self
+            .authority
+            .active_implementation(world_id, &principal.authority_frontier)
+            .map_err(Failure::AuthorityUnavailable)?
+            .ok_or_else(|| Failure::NoActiveImplementation(world_id.clone()))?;
         let world = self
             .registry
-            .world(world_id)
-            .ok_or_else(|| Failure::UnknownWorld(world_id.clone()))?;
+            .world_for(world_id, active_implementation)
+            .or_else(|| self.registry.unreviewed_world(world_id))
+            .ok_or_else(|| Failure::ImplementationUnavailable {
+                world: world_id.clone(),
+                implementation: active_implementation,
+            })?;
         let registration = self
             .registry
-            .descriptor(world_id)
+            .descriptor_for(world_id, active_implementation)
+            .or_else(|| self.registry.unreviewed_descriptor(world_id))
             .ok_or_else(|| Failure::UnknownWorld(world_id.clone()))?;
+        let extractor_schema_digest = crate::publication::ExtractorSchemaDigest::derive(
+            &registration.find_schemas,
+            &registration.find_extractors,
+        )
+        .map_err(Failure::InvalidExtractorSchema)?;
+        self.core
+            .ensure_world_publication(
+                &world,
+                world_id,
+                active_implementation,
+                extractor_schema_digest,
+                &registration.find_schemas,
+                &registration.find_extractors,
+            )
+            .map_err(|_| Failure::WorldPublicationUnavailable(world_id.clone()))?;
         Ok(Session::new(
             self.store.space().clone(),
             world_id.clone(),
@@ -1163,10 +1260,13 @@ impl Station {
             self.epoch,
             registration.limits,
             registration.schemas.clone(),
+            active_implementation,
+            extractor_schema_digest,
             self.find_policy,
             self.alive.clone(),
             self.core.clone(),
             self.authority.clone(),
+            self.registry.clone(),
         ))
     }
 
@@ -1356,6 +1456,7 @@ impl Station {
             self.registry,
             self.authority,
             self.keys,
+            self.read_memory,
             self.epoch,
             lock,
         ))
@@ -1388,6 +1489,7 @@ impl Station {
                 self.registry,
                 self.authority,
                 self.keys,
+                self.read_memory,
                 self.epoch,
                 lock,
             ),

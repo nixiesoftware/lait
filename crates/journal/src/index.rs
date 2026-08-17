@@ -485,8 +485,24 @@ pub fn lookup(
     root: Option<ChildRef>,
     key: &IndexKey,
 ) -> Result<Option<Vec<u8>>, Failure> {
+    lookup_validated(source, root, key, &|_| true)
+}
+
+/// Look one key up while validating every value in the reached leaf.
+///
+/// This is the lazy integrity boundary used by large deferred indexes. Open
+/// authenticates their root coordinate only; a lookup authenticates and
+/// structurally validates each node on its one bounded path, then validates
+/// the complete reached leaf's value domain before returning anything from it.
+pub fn lookup_validated(
+    source: &dyn NodeSource,
+    root: Option<ChildRef>,
+    key: &IndexKey,
+    valid_value: &dyn Fn(&[u8]) -> bool,
+) -> Result<Option<Vec<u8>>, Failure> {
     let mut current = root;
     let mut depth = 0usize;
+    let mut prefix = Vec::new();
     while let Some(child) = current {
         if depth > MAX_DEPTH {
             return Err(Failure::Bounds);
@@ -494,20 +510,248 @@ pub fn lookup(
         let bytes = source
             .node(&child.hash)
             .ok_or(Failure::MissingNode(child.hash))?;
+        if node_hash(&bytes) != child.hash {
+            return Err(Failure::NonCanonical);
+        }
         match IndexNode::decode_canonical(&bytes)? {
             IndexNode::Leaf(entries) => {
-                return Ok(entries.into_iter().find(|e| &e.key == key).map(|e| e.value))
+                if entries.is_empty() {
+                    return Err(Failure::NotCanonicalShape);
+                }
+                for window in entries.windows(2) {
+                    if matches!(window, [left, right] if left.key >= right.key) {
+                        return Err(Failure::Order);
+                    }
+                }
+                for entry in &entries {
+                    if entry.value.len() > MAX_VALUE_BYTES || !valid_value(&entry.value) {
+                        return Err(Failure::Bounds);
+                    }
+                    for (level, expected) in prefix.iter().enumerate() {
+                        if nibble(&entry.key, level)? != *expected {
+                            return Err(Failure::Order);
+                        }
+                    }
+                }
+                if !fits_leaf(&entries, depth)? {
+                    return Err(Failure::NotCanonicalShape);
+                }
+                if child.count != count(entries.len())? {
+                    return Err(Failure::CountMismatch);
+                }
+                return Ok(entries.into_iter().find(|e| &e.key == key).map(|e| e.value));
             }
             IndexNode::Branch(children) => {
-                current = children
-                    .get(nibble(key, depth)?)
-                    .copied()
-                    .ok_or(Failure::Bounds)?;
+                if children.iter().flatten().next().is_none() {
+                    return Err(Failure::NotCanonicalShape);
+                }
+                let total = children
+                    .iter()
+                    .flatten()
+                    .try_fold(0u64, |total, reference| {
+                        if reference.count == 0 {
+                            return Err(Failure::CountMismatch);
+                        }
+                        total.checked_add(reference.count).ok_or(Failure::Bounds)
+                    })?;
+                if total != child.count {
+                    return Err(Failure::CountMismatch);
+                }
+                let slot = nibble(key, depth)?;
+                current = children.get(slot).copied().ok_or(Failure::Bounds)?;
+                prefix.push(slot);
                 depth = next_depth(depth)?;
             }
         }
     }
     Ok(None)
+}
+
+/// Read at most `limit` entries strictly after `after`, in canonical key
+/// order. Only the seek path and subtrees containing returned material are
+/// opened, so a resumable migration page is O(depth + returned material)
+/// rather than O(the complete index).
+pub fn page_after(
+    source: &dyn NodeSource,
+    root: Option<ChildRef>,
+    after: Option<&IndexKey>,
+    limit: usize,
+) -> Result<Vec<IndexEntry>, Failure> {
+    if limit == 0 || limit > 4097 {
+        return Err(Failure::Bounds);
+    }
+
+    fn walk(
+        source: &dyn NodeSource,
+        child: ChildRef,
+        depth: usize,
+        after: Option<&IndexKey>,
+        tight: bool,
+        limit: usize,
+        out: &mut Vec<IndexEntry>,
+        prefix: &mut Vec<usize>,
+    ) -> Result<(), Failure> {
+        if out.len() >= limit {
+            return Ok(());
+        }
+        if depth > MAX_DEPTH || child.count == 0 {
+            return Err(Failure::Bounds);
+        }
+        let bytes = source
+            .node(&child.hash)
+            .ok_or(Failure::MissingNode(child.hash))?;
+        if node_hash(&bytes) != child.hash {
+            return Err(Failure::NonCanonical);
+        }
+        match IndexNode::decode_canonical(&bytes)? {
+            IndexNode::Leaf(entries) => {
+                if entries.is_empty() || !fits_leaf(&entries, depth)? {
+                    return Err(Failure::NotCanonicalShape);
+                }
+                if child.count != count(entries.len())?
+                    || entries.windows(2).any(|pair| pair[0].key >= pair[1].key)
+                    || entries
+                        .iter()
+                        .any(|entry| entry.value.len() > MAX_VALUE_BYTES)
+                {
+                    return Err(Failure::CountMismatch);
+                }
+                for entry in &entries {
+                    for (level, expected) in prefix.iter().enumerate() {
+                        if nibble(&entry.key, level)? != *expected {
+                            return Err(Failure::Order);
+                        }
+                    }
+                }
+                for entry in entries {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    if !tight || after.map_or(true, |cursor| entry.key > *cursor) {
+                        out.push(entry);
+                    }
+                }
+            }
+            IndexNode::Branch(children) => {
+                let total = children.iter().flatten().try_fold(0u64, |sum, child| {
+                    if child.count == 0 {
+                        return Err(Failure::CountMismatch);
+                    }
+                    sum.checked_add(child.count).ok_or(Failure::Bounds)
+                })?;
+                if total != child.count {
+                    return Err(Failure::CountMismatch);
+                }
+                let start = if tight {
+                    match after {
+                        Some(cursor) => nibble(cursor, depth)?,
+                        None => 0,
+                    }
+                } else {
+                    0
+                };
+                for slot in start..FANOUT {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    let Some(next) = children.get(slot).copied().flatten() else {
+                        continue;
+                    };
+                    prefix.push(slot);
+                    walk(
+                        source,
+                        next,
+                        next_depth(depth)?,
+                        after,
+                        tight && slot == start,
+                        limit,
+                        out,
+                        prefix,
+                    )?;
+                    prefix.pop();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::with_capacity(limit);
+    if let Some(root) = root {
+        walk(
+            source,
+            root,
+            0,
+            after,
+            after.is_some(),
+            limit,
+            &mut out,
+            &mut Vec::new(),
+        )?;
+    }
+    Ok(out)
+}
+
+/// Authenticate and locally validate one root node without descending.
+///
+/// This deliberately does not claim that an unopened subtree is intact. It
+/// proves that the manifest's root coordinate names a canonical root node with
+/// a self-consistent entry count. Exact lookup validates its path and detached
+/// [`validate`] / GC scrub validates the complete tree.
+pub fn validate_root(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<(), Failure> {
+    let Some(child) = root else {
+        return Ok(());
+    };
+    if child.count == 0 {
+        return Err(Failure::CountMismatch);
+    }
+    let bytes = source
+        .node(&child.hash)
+        .ok_or(Failure::MissingNode(child.hash))?;
+    if node_hash(&bytes) != child.hash {
+        return Err(Failure::NonCanonical);
+    }
+    match IndexNode::decode_canonical(&bytes)? {
+        IndexNode::Leaf(entries) => {
+            if entries.is_empty() {
+                return Err(Failure::NotCanonicalShape);
+            }
+            for window in entries.windows(2) {
+                if matches!(window, [left, right] if left.key >= right.key) {
+                    return Err(Failure::Order);
+                }
+            }
+            if entries
+                .iter()
+                .any(|entry| entry.value.len() > MAX_VALUE_BYTES)
+            {
+                return Err(Failure::Bounds);
+            }
+            if !fits_leaf(&entries, 0)? {
+                return Err(Failure::NotCanonicalShape);
+            }
+            if child.count != count(entries.len())? {
+                return Err(Failure::CountMismatch);
+            }
+        }
+        IndexNode::Branch(children) => {
+            if children.iter().flatten().next().is_none() {
+                return Err(Failure::NotCanonicalShape);
+            }
+            let total = children
+                .iter()
+                .flatten()
+                .try_fold(0u64, |total, reference| {
+                    if reference.count == 0 {
+                        return Err(Failure::CountMismatch);
+                    }
+                    total.checked_add(reference.count).ok_or(Failure::Bounds)
+                })?;
+            if total != child.count {
+                return Err(Failure::CountMismatch);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Walk the whole index in key order, calling `visit` per entry. Streaming:
@@ -900,4 +1144,61 @@ fn lookup_from(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MemoryNodes {
+        nodes: BTreeMap<[u8; 32], Vec<u8>>,
+        reads: AtomicUsize,
+    }
+
+    impl NodeSource for MemoryNodes {
+        fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.nodes.get(hash).cloned()
+        }
+    }
+
+    #[test]
+    fn bounded_pages_seek_without_rescanning_the_returned_prefix() {
+        let expected = (0u32..10_000)
+            .map(|n| {
+                let mut key = [0u8; 32];
+                key[28..].copy_from_slice(&n.to_be_bytes());
+                IndexEntry {
+                    key,
+                    value: n.to_be_bytes().to_vec(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut sink = NodeSink::default();
+        let root = build_index(expected.clone(), &mut sink).unwrap();
+        let nodes = MemoryNodes {
+            nodes: sink
+                .written
+                .into_iter()
+                .map(|bytes| (node_hash(&bytes), bytes))
+                .collect(),
+            reads: AtomicUsize::new(0),
+        };
+        let mut actual = Vec::new();
+        let mut after = None;
+        while actual.len() < expected.len() {
+            nodes.reads.store(0, Ordering::Relaxed);
+            let page = page_after(&nodes, root, after.as_ref(), 73).unwrap();
+            assert!(!page.is_empty());
+            assert!(nodes.reads.load(Ordering::Relaxed) < 128);
+            after = page.last().map(|entry| entry.key);
+            actual.extend(page);
+        }
+        assert_eq!(actual, expected);
+        assert!(page_after(&nodes, root, after.as_ref(), 73)
+            .unwrap()
+            .is_empty());
+    }
 }

@@ -1109,7 +1109,7 @@ impl StationHost {
             }
             RequestOwner::Station => self.dispatch_station(req),
             RequestOwner::Work => self.dispatch_work(req, act_as),
-            RequestOwner::Observation => self.dispatch_observation(req),
+            RequestOwner::Observation => self.dispatch_observation(req, act_as),
             RequestOwner::Lifecycle => self.dispatch_lifecycle(req),
         }
     }
@@ -1278,7 +1278,7 @@ impl StationHost {
                 let Some(world_id) = WorldId::parse(&world) else {
                     return Response::err("invalid World id");
                 };
-                let Some(host) = self.worlds.host(&world_id) else {
+                let Some(host) = self.worlds.preferred_host(&world_id) else {
                     return Response::not_found(format!("World '{world}' is not hosted"));
                 };
                 let ours = *host.reviewed_implementation();
@@ -1475,21 +1475,25 @@ impl StationHost {
                 continue;
             }
             let body = crate::world::contract::issue_body_id(&caret.issue).as_bytes();
-            let Some(anchor) = self
+            let anchor = match self
                 .station
                 .live()
                 .anchor(&world, body, &caret.field, caret.anchor)
-            else {
-                continue;
+            {
+                Ok(Some(anchor)) => anchor,
+                Ok(None) => continue,
+                Err(failure) => return live_anchor_failure(failure),
             };
             let payload = match caret.focus.filter(|focus| *focus != caret.anchor) {
                 Some(focus) => {
-                    let Some(focus) = self
+                    let focus = match self
                         .station
                         .live()
                         .anchor(&world, body, &caret.field, focus)
-                    else {
-                        continue;
+                    {
+                        Ok(Some(focus)) => focus,
+                        Ok(None) => continue,
+                        Err(failure) => return live_anchor_failure(failure),
                     };
                     TransientPayload::Selection { anchor, focus }
                 }
@@ -1636,6 +1640,18 @@ impl StationHost {
             Err(runtime::exec::WorkRefusal::Invalid(error)) => {
                 Response::invalid(format!("invalid Runtime Work request: {error}"))
             }
+            Err(runtime::exec::WorkRefusal::BodyRead(failure)) => match failure {
+                runtime::world::BodyReadFailure::Corrupt(_) => Response::err(
+                    "an authenticated Runtime Body in this exact publication is corrupt — operator attention is required",
+                ),
+                runtime::world::BodyReadFailure::NotCollaborative(_)
+                | runtime::world::BodyReadFailure::SchemaAhead(_) => Response::err(
+                    "the exact Runtime Body cannot be interpreted by this build — install the matching implementation",
+                ),
+                _ => Response::err(
+                    "this exact publication's Runtime Body is temporarily unavailable — sync or retry shortly",
+                ),
+            },
             Err(runtime::exec::WorkRefusal::Unsupported(message)) => Response::invalid(message),
             Err(runtime::exec::WorkRefusal::Session(
                 runtime::world::Failure::Rejected(runtime::world::Rejection::Denied(_)),
@@ -2036,9 +2052,10 @@ impl StationHost {
     }
 
     /// Generic status and subscription projection surfaces.
-    fn dispatch_observation(&self, req: Request) -> Response {
+    fn dispatch_observation(&self, req: Request, act_as: Option<&str>) -> Response {
         match req {
             Request::Status => self.status(),
+            Request::Find { world, query } => self.dispatch_find(&world, query, act_as),
             // What this Orbit's store holds. Read from the Replica this
             // activation already opened and from the bytes already sitting in
             // the store directory, so answering costs nothing beyond what
@@ -2065,6 +2082,85 @@ impl StationHost {
             other => Response::err(format!(
                 "request is not an observation operation: {other:?}"
             )),
+        }
+    }
+
+    fn dispatch_find(
+        &self,
+        world: &str,
+        query: runtime::find::Query,
+        act_as: Option<&str>,
+    ) -> Response {
+        let Some(world) = WorldId::parse(world) else {
+            return Response::invalid("invalid World id");
+        };
+        if !self.worlds.contains(&world) {
+            return Response::not_found(format!("World '{world}' is not hosted"));
+        }
+        let seed = match self.acting_seed(act_as) {
+            Ok(seed) => seed,
+            Err(response) => return response,
+        };
+        let result = if act_as.is_none() {
+            if !self.ensure_world_session(&world) {
+                return Response::denied(
+                    "not admitted to this space yet — complete admission before using Find",
+                );
+            }
+            self.worlds
+                .with_primary(&world, |session| session.find(query))
+                .unwrap_or(Err(runtime::find::Failure::Interrupted))
+        } else {
+            let identity = Runtime::identity_from_seed(&seed);
+            match self
+                .worlds
+                .with_agent(&self.station, &world, &identity, |session| {
+                    session.find(query)
+                }) {
+                Ok(result) => result,
+                Err(_) => {
+                    return Response::denied(
+                        "this agent identity holds no standing in the space yet — a human member \
+                         must sponsor it before it can use Find",
+                    );
+                }
+            }
+        };
+        match result {
+            Ok(answer) => Response::Find { answer },
+            Err(runtime::find::Failure::Invalid(error)) => {
+                Response::invalid(format!("invalid Find query: {error}"))
+            }
+            Err(runtime::find::Failure::PrincipalDenied) => {
+                Response::denied("the acting identity has no standing for this Find")
+            }
+            Err(runtime::find::Failure::AuthorityUnavailable(detail)) => {
+                Response::err(format!("Find authority is unavailable: {detail}"))
+            }
+            Err(runtime::find::Failure::PolicyExceeded) => {
+                Response::invalid("Find exceeds the declared or Station resource bound")
+            }
+            Err(runtime::find::Failure::PublicationUnavailable) => {
+                Response::not_found("the requested Find publication is unavailable")
+            }
+            Err(runtime::find::Failure::PublicationExpired) => Response::not_found(
+                "the Find cursor's retained publication expired; restart the query",
+            ),
+            Err(runtime::find::Failure::PaginationUnsupported) => {
+                Response::invalid("this Find query shape does not support cursor pagination")
+            }
+            Err(runtime::find::Failure::CursorCapacityExceeded) => Response::err(
+                "the Station cannot retain another Find cursor publication; retry later",
+            ),
+            Err(runtime::find::Failure::NoActiveImplementation) => {
+                Response::invalid("the World has no active implementation")
+            }
+            Err(runtime::find::Failure::ImplementationUnavailable) => {
+                Response::invalid("the exact World implementation required by Find is unavailable")
+            }
+            Err(runtime::find::Failure::Interrupted | runtime::find::Failure::Unavailable) => {
+                Response::err("Find is temporarily unavailable")
+            }
         }
     }
 
@@ -3286,6 +3382,8 @@ impl StationHost {
             seq: record.sequence,
             reset: record.reset,
             invalidations,
+            publications: record.publications.clone(),
+            change: record.change.clone(),
             authority_advanced: record.authority,
             // Authority alone advances no feed: it is membership news, and
             // `Activity` projects the World's own history. One record can
@@ -3420,6 +3518,24 @@ impl StationHost {
         // latched value for late receivers as well.
         self.stop_tx.send_replace(true);
         self.shutdown.notify_one();
+    }
+}
+
+fn live_anchor_failure(failure: runtime::world::BodyReadFailure) -> Response {
+    match failure {
+        runtime::world::BodyReadFailure::Corrupt(_) => Response::err(
+            "the exact collaborative Body is corrupt — operator attention is required",
+        ),
+        runtime::world::BodyReadFailure::NotCollaborative(_)
+        | runtime::world::BodyReadFailure::SchemaAhead(_) => Response::err(
+            "the exact collaborative Body cannot be interpreted by this build — install the matching implementation",
+        ),
+        runtime::world::BodyReadFailure::PublicationExpired(_) => {
+            Response::err("the viewed publication expired — refresh before publishing the caret")
+        }
+        _ => Response::err(
+            "the exact collaborative Body is temporarily unavailable — refresh or retry before publishing the caret",
+        ),
     }
 }
 

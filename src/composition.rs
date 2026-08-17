@@ -119,6 +119,7 @@ impl ObservationProjector for SignageProjector {
                 schema: signage::contract::program_schema(),
                 schema_version: signage::contract::PROGRAM_SCHEMA_VERSION,
                 payload: serde_json::to_vec(&signage::SignageQuery::Programs).ok()?,
+                publication: None,
             })
             .ok()?;
         let signage::SignageProjection::Programs { programs } =

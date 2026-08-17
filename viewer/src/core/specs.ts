@@ -112,7 +112,7 @@ export function specKindLabel(kind: SpecKind): string {
  * nobody has written yet, and drawing ten headings over one document is the
  * exact opposite of what this surface is for.
  */
-export function groupByKind(specs: readonly SpecView[]): { kind: SpecKind; specs: SpecView[] }[] {
+export function groupByKind<T extends { kind: SpecKind }>(specs: readonly T[]): { kind: SpecKind; specs: T[] }[] {
   return SPEC_KINDS.map((kind) => ({
     kind,
     specs: specs.filter((spec) => spec.kind === kind),

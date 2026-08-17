@@ -188,6 +188,7 @@ impl Driver {
                     me: None,
                 }
                 .to_json(),
+                publication: None,
             })
             .unwrap()
             .bytes;
@@ -238,6 +239,21 @@ impl Driver {
     ) -> Result<String, runtime::world::Failure> {
         let id = issues::ids::mint_comment_id(&SystemUlidSource);
         let ts = self.ts();
+        let source = self
+            .session
+            .query(Query {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: IssueQuery::View {
+                    doc: doc.to_string(),
+                    me: None,
+                }
+                .to_json(),
+                publication: None,
+            })
+            .expect("source publication")
+            .publication
+            .expect("stamped source publication");
         self.submit(&IssueIntent::CommentAt {
             doc: doc.to_string(),
             body: body.into(),
@@ -246,6 +262,7 @@ impl Driver {
             end,
             id: id.clone(),
             parent: None,
+            source,
             actor: my_actor().as_str().to_string(),
             device: my_device().as_str().to_string(),
             ts,

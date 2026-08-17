@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LabelDto, MemberDto, ProjectDto, WorkflowState } from "../types";
+import { ProjectViewerStore, ProjectViewerStoreProvider } from "../projectStore";
 import { NewIssue } from "./NewIssue";
 
 const rpcMock = vi.hoisted(() => vi.fn());
@@ -47,7 +48,25 @@ describe("the composer names the project it files into", () => {
 
   beforeEach(() => {
     rpcMock.mockReset();
-    rpcMock.mockResolvedValue({ kind: "ref", reff: "WEB-1" });
+    rpcMock.mockImplementation(async (_space: string, request: { cmd?: string }) => {
+      if (request.cmd !== "change_set") throw new Error("unexpected request");
+      return {
+        kind: "change_set",
+        results: [{ operation: 0, kind: "issue", id: "iss_created" }],
+        receipt: {
+          operation: "11".repeat(16),
+          phase: "accepted",
+          publication: {
+            publication: {
+              manifest_root: Array(32).fill(1),
+              implementation_digest: Array(32).fill(2),
+              extractor_schema_digest: Array(32).fill(3),
+            },
+            materialization: 1,
+          },
+        },
+      };
+    });
     localStorage.clear();
   });
 
@@ -62,20 +81,23 @@ describe("the composer names the project it files into", () => {
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
+    const store = new ProjectViewerStore(rpcMock, undefined, undefined, () => "11".repeat(16));
     await act(async () => {
       root?.render(
-        <NewIssue
-          spaceId="orb_test"
-          canonicalSpaceId="ws_test"
-          projectKey={projectKey}
-          projects={PROJECTS}
-          states={STATES}
-          labels={LABELS}
-          members={MEMBERS}
-          onClose={vi.fn()}
-          onError={vi.fn()}
-          onCreated={vi.fn()}
-        />,
+        <ProjectViewerStoreProvider store={store}>
+          <NewIssue
+            spaceId="orb_test"
+            canonicalSpaceId="ws_test"
+            projectKey={projectKey}
+            projects={PROJECTS}
+            states={STATES}
+            labels={LABELS}
+            members={MEMBERS}
+            onClose={vi.fn()}
+            onError={vi.fn()}
+            onCreated={vi.fn()}
+          />
+        </ProjectViewerStoreProvider>,
       );
     });
 
@@ -105,7 +127,7 @@ describe("the composer names the project it files into", () => {
     });
 
     return rpcMock.mock.calls.find(
-      (call) => (call[1] as { cmd?: string })?.cmd === "issue_new",
+      (call) => (call[1] as { cmd?: string })?.cmd === "change_set",
     )?.[1] as Record<string, unknown> | undefined;
   }
 
@@ -116,14 +138,22 @@ describe("the composer names the project it files into", () => {
   it("sends the project even when it is the one already open", async () => {
     const sent = await fileAnIssue("WEB");
     expect(sent).toBeTruthy();
-    expect(sent).toMatchObject({ cmd: "issue_new", title: "A new issue", project: "WEB" });
+    expect(sent).toMatchObject({
+      cmd: "change_set",
+      operations: [{
+        op: "issue_create",
+        title: "A new issue",
+        project: { source: "existing", project: "WEB" },
+      }],
+    });
   });
 
   /** And it is never merely present-but-empty: the engine reads `null` as "work
    *  it out yourself", which is the same failure spelled differently. */
   it("never leaves the project null or absent", async () => {
     const sent = await fileAnIssue("ENG");
-    expect(Object.hasOwn(sent ?? {}, "project")).toBe(true);
-    expect(sent?.project).toBe("ENG");
+    const operations = sent?.operations as Array<Record<string, unknown>> | undefined;
+    const project = operations?.[0]?.project as Record<string, unknown> | undefined;
+    expect(project).toEqual({ source: "existing", project: "ENG" });
   });
 });

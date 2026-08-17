@@ -5,8 +5,8 @@
 //! resolving refs from the Snapshot query) and drives every issue-family
 //! behavior through `IssuesWorld` Sessions on isolated orbital stores: create/
 //! edit/board/assign/label/comment/link/parent/work-state/delete/restore,
-//! legacy-shape projections (Rows, Board columns, IssueView, GraphView,
-//! History), `KEY-n` aliases, idempotent no-ops, restart durability, and
+//! bounded exact-publication projections, `KEY-n` aliases, idempotent no-ops,
+//! restart durability, and
 //! two-Station product convergence over the real Contact plane. Legacy
 //! production paths are untouched (the C5 cutover switches them atomically).
 
@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row, StatusCategory};
+use issues::dto::{
+    BoardPage, IssueRelationDto, IssueView, LabelDto, ProjectDto, Row, StatusCategory,
+};
 use issues::ids::{
     ActorId, BaselineId, DeviceId, DocId, LabelId, ObservationId, ProjectId, SpecId,
     SystemUlidSource,
@@ -46,6 +48,10 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn first_page() -> contract::PageRequest {
+    contract::PageRequest::default()
 }
 
 fn coordinates() -> runtime::coordinates::SignedCoordinates {
@@ -187,6 +193,7 @@ impl Driver {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: query.to_json(),
+                publication: None,
             })
             .unwrap()
             .bytes
@@ -196,28 +203,43 @@ impl Driver {
         serde_json::from_slice(&self.query_raw(query)).unwrap()
     }
 
-    fn snapshot(&self) -> serde_json::Value {
-        self.query(&IssueQuery::Snapshot)
+    fn query_at<T: serde::de::DeserializeOwned>(
+        &self,
+        query: &IssueQuery,
+        publication: runtime::publication::WorldPublicationId,
+    ) -> T {
+        let projection = self
+            .session
+            .query(Query {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: query.to_json(),
+                publication: Some(publication.publication),
+            })
+            .unwrap();
+        serde_json::from_slice(&projection.bytes).unwrap()
     }
 
-    /// Resolve a `KEY-n` alias or canonical prefix to a DocId string, the way
-    /// the daemon will (from the Snapshot's derived aliases).
+    /// Resolve a human alias or canonical id through the exact publication's
+    /// shared Corpus selector, the same primitive used by the app and MCP.
     fn resolve(&self, reff: &str) -> Option<String> {
-        let snapshot = self.snapshot();
-        let aliases = &snapshot["aliases"];
-        if let Some(doc) = aliases["by_alias"][reff.to_ascii_lowercase()].as_str() {
-            return Some(doc.to_string());
-        }
-        // canonical / doc-id prefix match
-        let lower = reff.to_ascii_lowercase();
-        let seqs = snapshot["catalog"]["seqs"].as_object().unwrap();
-        let mut hits: Vec<String> = seqs
-            .keys()
-            .filter(|doc| doc.to_ascii_lowercase().starts_with(&lower))
-            .cloned()
-            .collect();
-        hits.dedup();
-        (hits.len() == 1).then(|| hits.remove(0))
+        let projection = self
+            .session
+            .query(Query {
+                schema: contract::issue_schema(),
+                schema_version: contract::ISSUE_SCHEMA_VERSION,
+                payload: IssueQuery::Resolve {
+                    entity: contract::ResolveEntity::Issue,
+                    selector: reff.to_owned(),
+                    project: None,
+                }
+                .to_json(),
+                publication: None,
+            })
+            .ok()?;
+        serde_json::from_slice::<contract::ResolvedEntity>(&projection.bytes)
+            .ok()
+            .map(|resolved| resolved.id)
     }
 }
 
@@ -227,7 +249,7 @@ fn setup(root: &std::path::Path) -> (Runtime, Station) {
     (rt, station)
 }
 
-fn seed_space(driver: &mut Driver) -> (String, String, String) {
+fn seed_project(driver: &mut Driver) -> String {
     let ts = driver.ts();
     let project = ProjectId::mint(&SystemUlidSource).as_str().to_string();
     driver
@@ -240,6 +262,11 @@ fn seed_space(driver: &mut Driver) -> (String, String, String) {
             my_device().as_str(),
         ))
         .unwrap();
+    project
+}
+
+fn seed_space(driver: &mut Driver) -> (String, String, String) {
+    let project = seed_project(driver);
     let doc = DocId::mint(&SystemUlidSource).as_str().to_string();
     let ts = driver.ts();
     driver
@@ -260,6 +287,138 @@ fn seed_space(driver: &mut Driver) -> (String, String, String) {
         })
         .unwrap();
     (project, doc, "ENG-1".to_string())
+}
+
+fn create_board_issue(driver: &mut Driver, project: &str, title: String) -> String {
+    let doc = DocId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::IssueNew {
+            duedate: None,
+            estimate: None,
+            doc: doc.clone(),
+            project: project.into(),
+            title,
+            priority: "none".into(),
+            assignees: vec![],
+            labels: vec![],
+            new_labels: vec![],
+            body: None,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    doc
+}
+
+#[test]
+fn board_continuation_is_exact_across_a_leaf_split() {
+    let root = temp_root("board-block-page");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let project = seed_project(&mut driver);
+    let mut expected = Vec::new();
+
+    // Fill the deterministic seed leaf exactly. The captured continuation is
+    // pinned to this pre-split publication and must remain usable after a
+    // later action changes the block topology.
+    for ordinal in 0..issues::v4::BOARD_BLOCK_CAPACITY {
+        expected.push(create_board_issue(
+            &mut driver,
+            &project,
+            format!("Board issue {ordinal}"),
+        ));
+    }
+    let first_request = contract::PageRequest {
+        limit: 64,
+        cursor: None,
+    };
+    let old_first: BoardPage = driver.query(&IssueQuery::Board {
+        project: project.clone(),
+        me: None,
+        page: first_request,
+    });
+    assert_eq!(old_first.rows.items.len(), 64);
+    let old_cursor = old_first.rows.next_cursor.clone().expect("second page");
+    let old_publication = contract::page_publication(&contract::PageRequest {
+        limit: 64,
+        cursor: Some(old_cursor.clone()),
+    })
+    .expect("exact continuation publication");
+
+    // The next insertion encounters a full leaf. It must split the leaf and
+    // commit bounded exact-transition overlays plus the user move rather than
+    // refusing because flat labels are dense.
+    let newest = create_board_issue(&mut driver, &project, "Split insertion".into());
+    expected.push(newest.clone());
+
+    let old_second: BoardPage = driver.query_at(
+        &IssueQuery::Board {
+            project: project.clone(),
+            me: None,
+            page: contract::PageRequest {
+                limit: 64,
+                cursor: Some(old_cursor),
+            },
+        },
+        old_publication,
+    );
+    assert_eq!(old_second.rows.items.len(), 64);
+    assert!(old_second.rows.next_cursor.is_none());
+    let old_docs = old_first
+        .rows
+        .items
+        .iter()
+        .chain(&old_second.rows.items)
+        .map(|row| row.doc_id.as_str().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(old_docs.len(), issues::v4::BOARD_BLOCK_CAPACITY);
+    assert!(!old_docs.contains(&newest));
+
+    // The current publication walks block order and then local member order.
+    // A 64-row page ends at the split seam; resuming must neither interleave
+    // equal local labels across blocks nor omit/duplicate a card.
+    let mut request = contract::PageRequest {
+        limit: 64,
+        cursor: None,
+    };
+    let mut current_docs = Vec::new();
+    let mut page_sizes = Vec::new();
+    let mut current_publication = None;
+    loop {
+        let board: BoardPage = driver.query(&IssueQuery::Board {
+            project: project.clone(),
+            me: None,
+            page: request.clone(),
+        });
+        current_publication.get_or_insert_with(|| board.rows.publication.clone());
+        assert_eq!(current_publication.as_ref(), Some(&board.rows.publication));
+        page_sizes.push(board.rows.items.len());
+        current_docs.extend(
+            board
+                .rows
+                .items
+                .iter()
+                .map(|row| row.doc_id.as_str().to_owned()),
+        );
+        let Some(cursor) = board.rows.next_cursor else {
+            break;
+        };
+        request.cursor = Some(cursor);
+    }
+    assert_eq!(page_sizes, vec![64, 64, 1]);
+    let unique = current_docs
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(current_docs.len(), expected.len());
+    assert_eq!(unique.len(), expected.len());
+    assert!(unique.contains(&newest));
+    assert!(expected.iter().all(|doc| unique.contains(doc)));
+
+    let _ = station.vacate();
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -543,11 +702,14 @@ fn an_observation_never_governs_and_never_becomes_a_link() {
         })
         .unwrap();
 
-    let notes: Vec<issues::spec::Observation> =
-        driver.query(&IssueQuery::SpecObservations { project: None });
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].observation, observation);
-    assert_eq!(notes[0].observer, my_actor().as_str());
+    let notes: contract::Page<issues::spec::Observation> =
+        driver.query(&IssueQuery::SpecObservations {
+            project: None,
+            page: first_page(),
+        });
+    assert_eq!(notes.items.len(), 1);
+    assert_eq!(notes.items[0].observation, observation);
+    assert_eq!(notes.items[0].observer, my_actor().as_str());
 
     // Filed, readable — and governing nothing.
     let packet: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc });
@@ -556,15 +718,20 @@ fn an_observation_never_governs_and_never_becomes_a_link() {
     assert!(packet.conflicts.is_empty());
 
     // And invisible to the link graph, which is what coverage is read from.
-    let references: Vec<issues::spec::SpecReference> =
-        driver.query(&IssueQuery::SpecReferences { project: None });
-    assert!(references.is_empty());
+    let references: contract::Page<issues::spec::SpecReference> =
+        driver.query(&IssueQuery::SpecReferences {
+            project: None,
+            page: first_page(),
+        });
+    assert!(references.items.is_empty());
     let view: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
     assert!(view.body.links.is_empty());
 
     // Retracting takes it back without touching the revision trail.
-    let before: Vec<issues::spec::Revision> =
-        driver.query(&IssueQuery::SpecHistory { spec: spec.clone() });
+    let before: contract::Page<issues::spec::Revision> = driver.query(&IssueQuery::SpecHistory {
+        spec: spec.clone(),
+        page: first_page(),
+    });
     let ts = driver.ts();
     driver
         .submit(&IssueIntent::SpecRetract {
@@ -575,11 +742,17 @@ fn an_observation_never_governs_and_never_becomes_a_link() {
             ts,
         })
         .unwrap();
-    let after: Vec<issues::spec::Observation> =
-        driver.query(&IssueQuery::SpecObservations { project: None });
-    assert!(after.is_empty());
-    let trail: Vec<issues::spec::Revision> = driver.query(&IssueQuery::SpecHistory { spec });
-    assert_eq!(trail.len(), before.len());
+    let after: contract::Page<issues::spec::Observation> =
+        driver.query(&IssueQuery::SpecObservations {
+            project: None,
+            page: first_page(),
+        });
+    assert!(after.items.is_empty());
+    let trail: contract::Page<issues::spec::Revision> = driver.query(&IssueQuery::SpecHistory {
+        spec,
+        page: first_page(),
+    });
+    assert_eq!(trail.items.len(), before.items.len());
 }
 
 #[test]
@@ -629,7 +802,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     assert_eq!(driver.resolve("ENG-2").as_deref(), Some(doc2.as_str()));
 
     // List: priority desc (high first), then DocId asc.
-    let rows: Vec<Row> = driver.query(&IssueQuery::List {
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
         project: Some(project.clone()),
         label: None,
         status: None,
@@ -637,23 +810,24 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: Some(my_actor().as_str().to_string()),
+        page: first_page(),
     });
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].title, "First issue");
-    assert_eq!(rows[0].assignee_summary, "you");
-    assert_eq!(rows[1].title, "Second issue");
+    assert_eq!(rows.items.len(), 2);
+    assert_eq!(rows.items[0].title, "First issue");
+    assert_eq!(rows.items[0].assignee_summary, "you");
+    assert_eq!(rows.items[1].title, "Second issue");
 
     // Board: backlog column holds both, newest insert on top.
-    let board: BoardView = driver.query(&IssueQuery::Board {
+    let board: BoardPage = driver.query(&IssueQuery::Board {
         project: project.clone(),
         me: None,
+        page: first_page(),
     });
     assert_eq!(board.schema_version, 5);
-    assert_eq!(board.columns.len(), 4);
-    let backlog = &board.columns[0];
-    assert_eq!(backlog.state.id, "backlog");
-    assert_eq!(backlog.rows.len(), 2);
-    assert_eq!(backlog.rows[0].title, "Second issue");
+    assert_eq!(board.workflow.len(), 4);
+    assert_eq!(board.workflow[0].id, "backlog");
+    assert_eq!(board.rows.items.len(), 2);
+    assert_eq!(board.rows.items[0].title, "Second issue");
 
     // Move ENG-2 after ENG-1 (the legacy Before/After math).
     let ts = driver.ts();
@@ -666,12 +840,13 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             ts,
         })
         .unwrap();
-    let board: BoardView = driver.query(&IssueQuery::Board {
+    let board: BoardPage = driver.query(&IssueQuery::Board {
         project: project.clone(),
         me: None,
+        page: first_page(),
     });
-    assert_eq!(board.columns[0].rows[0].title, "First issue");
-    assert_eq!(board.columns[0].rows[1].title, "Second issue");
+    assert_eq!(board.rows.items[0].title, "First issue");
+    assert_eq!(board.rows.items[1].title, "Second issue");
 
     // Labels create-on-first-use; label filter applies.
     let label_id = LabelId::mint(&SystemUlidSource).as_str().to_string();
@@ -690,10 +865,10 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             ts,
         })
         .unwrap();
-    let labels: Vec<LabelDto> = driver.query(&IssueQuery::Labels);
-    assert_eq!(labels.len(), 1);
-    assert_eq!(labels[0].name, "bug");
-    let rows: Vec<Row> = driver.query(&IssueQuery::List {
+    let labels: contract::Page<LabelDto> = driver.query(&IssueQuery::Labels { page: first_page() });
+    assert_eq!(labels.items.len(), 1);
+    assert_eq!(labels.items[0].name, "bug");
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
         project: None,
         label: Some(label_id.clone()),
         status: None,
@@ -701,9 +876,10 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: None,
+        page: first_page(),
     });
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].title, "First issue");
+    assert_eq!(rows.items.len(), 1);
+    assert_eq!(rows.items[0].title, "First issue");
 
     // Comment lands append-only with author attribution.
     let ts = driver.ts();
@@ -738,14 +914,15 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             ts,
         })
         .unwrap();
-    let graph: GraphView = driver.query(&IssueQuery::Graph {
+    let graph: contract::Page<IssueRelationDto> = driver.query(&IssueQuery::Relations {
         doc: doc.clone(),
-        me: None,
+        direction: issues::dto::RelationDirection::In,
+        page: first_page(),
     });
-    assert_eq!(graph.links.len(), 1);
-    assert_eq!(graph.links[0].direction, "in");
-    assert_eq!(graph.blocked_by.len(), 1);
-    assert_eq!(graph.blocked_by[0].title, "Second issue");
+    assert_eq!(graph.items.len(), 1);
+    assert_eq!(graph.items[0].direction, issues::dto::RelationDirection::In);
+    assert_eq!(graph.items[0].kind, "blocks");
+    assert_eq!(graph.items[0].row.title, "Second issue");
 
     // Self-link and unknown-kind links are refused.
     let ts = driver.ts();
@@ -794,12 +971,20 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             ts,
         })
         .unwrap();
-    let board: BoardView = driver.query(&IssueQuery::Board {
+    let board: BoardPage = driver.query(&IssueQuery::Board {
         project: project.clone(),
         me: None,
+        page: first_page(),
     });
-    let done = board.columns.iter().find(|c| c.state.id == "done").unwrap();
-    assert_eq!(done.rows.len(), 1);
+    assert_eq!(
+        board
+            .rows
+            .items
+            .iter()
+            .filter(|row| row.status == "done")
+            .count(),
+        1
+    );
     let ts = driver.ts();
     let repeat = driver
         .submit(&IssueIntent::WorkState {
@@ -822,7 +1007,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             ts,
         })
         .unwrap();
-    let rows: Vec<Row> = driver.query(&IssueQuery::List {
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
         project: None,
         label: None,
         status: None,
@@ -830,9 +1015,10 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: false,
         me: None,
+        page: first_page(),
     });
-    assert!(rows.iter().all(|r| r.title != "Second issue"));
-    let all_rows: Vec<Row> = driver.query(&IssueQuery::List {
+    assert!(rows.items.iter().all(|r| r.title != "Second issue"));
+    let all_rows: contract::Page<Row> = driver.query(&IssueQuery::List {
         project: None,
         label: None,
         status: None,
@@ -840,8 +1026,10 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         mine: None,
         all: true,
         me: None,
+        page: first_page(),
     });
     assert!(all_rows
+        .items
         .iter()
         .any(|r| r.title == "Second issue" && r.tombstone));
     let ts = driver.ts();
@@ -855,16 +1043,20 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         .unwrap();
 
     // History: the durable per-issue event log, oldest first, attributed.
-    let history: serde_json::Value = driver.query(&IssueQuery::History { doc: doc.clone() });
-    let events = history["events"].as_array().unwrap();
+    let history: contract::Page<issues::dto::ActivityEvent> = driver.query(&IssueQuery::History {
+        doc: doc.clone(),
+        page: first_page(),
+    });
+    let events = history.items;
     assert!(events.len() >= 3);
-    assert_eq!(events[0]["kind"], "created");
-    assert_eq!(events[0]["seq"], 1);
+    assert_eq!(events[0].kind, "created");
+    assert_eq!(events[0].seq, 1);
 
     // Projects list.
-    let projects: Vec<ProjectDto> = driver.query(&IssueQuery::Projects);
-    assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].key, "ENG");
+    let projects: contract::Page<ProjectDto> =
+        driver.query(&IssueQuery::Projects { page: first_page() });
+    assert_eq!(projects.items.len(), 1);
+    assert_eq!(projects.items[0].key, "ENG");
 
     // Restart durability: everything above survives a cold reactivation.
     let space = station.space_id().clone();
@@ -932,11 +1124,11 @@ fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
             ts,
         })
         .unwrap();
-    let labels: Vec<LabelDto> = driver.query(&IssueQuery::Labels);
-    assert_eq!(labels.len(), 1, "one name is one label: {labels:?}");
-    assert_eq!(labels[0].name, "bug");
+    let labels: contract::Page<LabelDto> = driver.query(&IssueQuery::Labels { page: first_page() });
+    assert_eq!(labels.items.len(), 1, "one name is one label: {labels:?}");
+    assert_eq!(labels.items[0].name, "bug");
     assert_eq!(
-        labels[0].id.as_str(),
+        labels.items[0].id.as_str(),
         first,
         "the first proposal wins deterministically"
     );
@@ -960,16 +1152,16 @@ fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
             ts,
         })
         .unwrap();
-    let labels: Vec<LabelDto> = driver.query(&IssueQuery::Labels);
+    let labels: contract::Page<LabelDto> = driver.query(&IssueQuery::Labels { page: first_page() });
     assert_eq!(
-        labels.len(),
+        labels.items.len(),
         1,
         "a stale proposal must not mint a rival for a label the Space has: {labels:?}"
     );
-    assert_eq!(labels[0].id.as_str(), first);
+    assert_eq!(labels.items[0].id.as_str(), first);
 
     // And the issue carries the adopted id, not the rival that was proposed.
-    let rows: Vec<Row> = driver.query(&IssueQuery::List {
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
         project: None,
         label: Some(first.clone()),
         status: None,
@@ -977,9 +1169,14 @@ fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
         mine: None,
         all: false,
         me: None,
+        page: first_page(),
     });
-    assert_eq!(rows.len(), 1, "the issue is labelled with the adopted id");
-    let rows: Vec<Row> = driver.query(&IssueQuery::List {
+    assert_eq!(
+        rows.items.len(),
+        1,
+        "the issue is labelled with the adopted id"
+    );
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
         project: None,
         label: Some(rival),
         status: None,
@@ -987,8 +1184,9 @@ fn proposed_labels_resolve_against_the_catalog_the_write_lands_on() {
         mine: None,
         all: false,
         me: None,
+        page: first_page(),
     });
-    assert!(rows.is_empty(), "the rival id was never applied");
+    assert!(rows.items.is_empty(), "the rival id was never applied");
 
     drop(driver);
     let _ = station.vacate();
@@ -1204,11 +1402,12 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     }
 
     // The board converged too.
-    let board: BoardView = driver_a.query(&IssueQuery::Board {
+    let board: BoardPage = driver_a.query(&IssueQuery::Board {
         project: project.clone(),
         me: None,
+        page: first_page(),
     });
-    assert_eq!(board.columns[0].rows.len(), 1);
+    assert_eq!(board.rows.items.len(), 1);
 
     let _ = station_a.vacate();
     let _ = station_b.vacate();
@@ -1246,7 +1445,7 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
     });
     assert_eq!(view.due_date, Some(1_800_000_000));
     assert_eq!(view.estimate, Some(5));
-    let rows: Vec<Row> = driver.query(&IssueQuery::List {
+    let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
         project: None,
         label: None,
         status: None,
@@ -1254,8 +1453,13 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         mine: None,
         all: true,
         me: None,
+        page: first_page(),
     });
-    let row = rows.iter().find(|r| r.doc_id.as_str() == doc).unwrap();
+    let row = rows
+        .items
+        .iter()
+        .find(|r| r.doc_id.as_str() == doc)
+        .unwrap();
     assert_eq!(row.due_date, Some(1_800_000_000));
     assert_eq!(row.estimate, Some(5));
 

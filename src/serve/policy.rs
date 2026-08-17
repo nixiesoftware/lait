@@ -42,6 +42,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::Live { .. }
         | Request::LiveSubscribe { .. }
         | Request::AssignmentList { .. }
+        | Request::Find { .. }
         // Host-plane reads: node-local settings and orientation. They sign
         // nothing and change nothing, so they carry the same weight through a
         // browser as through a terminal. A settings read still names a store
@@ -282,6 +283,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
         | Request::Work { .. }
+        | Request::Find { .. }
         | Request::Subscribe { .. }
         | Request::Status
         // Orbit-routed, not host-routed, for the same reason `WorldsActive` is:

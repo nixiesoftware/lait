@@ -155,6 +155,21 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
 
     // A range-attached comment routes too: the adapter mints the comment id the
     // World demands for it, and the projection resolves the span on the read.
+    let source = match router
+        .route(
+            Request::IssueDetail {
+                reff: "ENG-1".into(),
+                publication: None,
+            },
+            &facts(),
+        )
+        .0
+    {
+        Response::IssueDetail(detail) => {
+            issues_app::WorldPublicationCoordinate::from_id(&detail.publication)
+        }
+        other => panic!("expected IssueDetail, got {other:?}"),
+    };
     let (resp, changed) = router.route(
         Request::CommentAt {
             reff: "ENG-1".into(),
@@ -163,6 +178,7 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
             start: 0,
             end: Some(4),
             reply_to: None,
+            source,
         },
         &facts(),
     );
@@ -194,6 +210,21 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
 
     // A field the algebra cannot move a position inside is a typed refusal, not
     // a comment stored with an anchor nothing can resolve.
+    let source = match router
+        .route(
+            Request::IssueDetail {
+                reff: "ENG-1".into(),
+                publication: None,
+            },
+            &facts(),
+        )
+        .0
+    {
+        Response::IssueDetail(detail) => {
+            issues_app::WorldPublicationCoordinate::from_id(&detail.publication)
+        }
+        other => panic!("expected IssueDetail, got {other:?}"),
+    };
     let (resp, changed) = router.route(
         Request::CommentAt {
             reff: "ENG-1".into(),
@@ -202,6 +233,7 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
             start: 0,
             end: Some(3),
             reply_to: None,
+            source,
         },
         &facts(),
     );
@@ -249,11 +281,12 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
         Request::List {
             project: None,
             filter: Filter::default(),
+            page: issues::contract::PageRequest::default(),
         },
         &facts(),
     );
     let rows = match resp {
-        Response::List { rows } => rows,
+        Response::List { page } => page.items,
         other => panic!("expected List, got {other:?}"),
     };
     assert!(rows.iter().any(|r| r.title == "Renamed"));
@@ -307,5 +340,6 @@ fn the_router_accepts_its_product_protocol() {
     assert!(IssueRouter::handles(&Request::Board {
         project: None,
         project_hint: None,
+        page: issues::contract::PageRequest::default(),
     }));
 }

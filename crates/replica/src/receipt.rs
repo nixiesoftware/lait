@@ -6,8 +6,8 @@
 //! committed result **without reapplying** the operations; reusing the same
 //! request id with a different payload is a typed conflict. The receipt carries
 //! everything an identical replay must return: the application effect bytes,
-//! the Observation Bodies, and the committed Replica frontier the transaction
-//! advanced to.
+//! the Observation Bodies, the committed Replica frontier, and the exact
+//! semantic World publication the original caller interpreted.
 //!
 //! C0 freezes the canonical bytes, bounds, and lookup semantics. The durable
 //! content-addressed representation — the receipt as a store object referenced
@@ -26,7 +26,25 @@ use crate::ids::{BodyKey, WorldId};
 /// applied.
 pub const MAX_EFFECT_BYTES: usize = 1024 * 1024;
 
-/// The canonical committed-request receipt. `version` is exactly 1.
+/// Executable interpretation supplied by Runtime before preparing an action.
+/// Replica computes the resulting Manifest root; it merely persists the two
+/// opaque semantic digests alongside it for exact idempotent replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interpretation {
+    pub implementation_digest: [u8; 32],
+    pub extractor_schema_digest: [u8; 32],
+}
+
+impl Interpretation {
+    /// Low-level callers that do not expose World projections. Runtime-hosted
+    /// actions always pass reviewed nonzero coordinates.
+    pub const UNSPECIFIED: Self = Self {
+        implementation_digest: [0u8; 32],
+        extractor_schema_digest: [0u8; 32],
+    };
+}
+
+/// The canonical committed-request receipt. `version` is exactly 2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestReceipt {
     pub version: u8,
@@ -45,6 +63,12 @@ pub struct RequestReceipt {
     pub bodies: Vec<BodyKey>,
     /// The committed Replica frontier the transaction advanced to.
     pub frontier: ReplicaFrontier,
+    /// Portable semantic publication returned by an identical replay. These
+    /// coordinates are fixed at prepared-candidate time and never derived from
+    /// the package or Manifest that happens to be active during the retry.
+    pub manifest_root: [u8; 32],
+    pub implementation_digest: [u8; 32],
+    pub extractor_schema_digest: [u8; 32],
     /// The committed transaction's id (the full signed-envelope digest);
     /// all-zero for an idempotent no-op that committed no transaction.
     pub transaction: [u8; 32],
@@ -55,7 +79,7 @@ pub struct RequestReceipt {
 pub enum Invalid {
     /// The bytes did not decode, left trailing bytes, or were non-canonical.
     NonCanonical,
-    /// `version` was not 1.
+    /// `version` was not 2.
     UnsupportedVersion(u8),
     /// The effect exceeded [`MAX_EFFECT_BYTES`].
     EffectTooLarge,
@@ -86,7 +110,7 @@ impl RequestReceipt {
         if re != bytes {
             return Err(Invalid::NonCanonical);
         }
-        if receipt.version != 1 {
+        if receipt.version != 2 {
             return Err(Invalid::UnsupportedVersion(receipt.version));
         }
         if receipt.effect.len() > MAX_EFFECT_BYTES {
@@ -123,7 +147,7 @@ mod tests {
 
     fn receipt() -> RequestReceipt {
         RequestReceipt {
-            version: 1,
+            version: 2,
             space: SpaceId::from_digest([2u8; 16]),
             world: WorldId::parse("com.example.notes").unwrap(),
             device: mechanics::actor::device_from_seed(&[5u8; 32]),
@@ -135,6 +159,9 @@ mod tests {
                 BodyId::from_bytes([1u8; 16]),
             )],
             frontier: ReplicaFrontier::new([3u8; 32], 4),
+            manifest_root: [4u8; 32],
+            implementation_digest: [5u8; 32],
+            extractor_schema_digest: [6u8; 32],
             transaction: [8u8; 32],
         }
     }
@@ -159,10 +186,10 @@ mod tests {
     #[test]
     fn unknown_version_is_rejected_not_negotiated() {
         let mut r = receipt();
-        r.version = 2;
+        r.version = 3;
         assert_eq!(
             RequestReceipt::decode_canonical(&r.encode()),
-            Err(Invalid::UnsupportedVersion(2))
+            Err(Invalid::UnsupportedVersion(3))
         );
     }
 
@@ -203,7 +230,7 @@ mod tests {
         // scope, so the anchor asserts the exact leading bytes.
         let r = receipt();
         let bytes = r.encode();
-        assert_eq!(bytes[0], 1, "version leads");
+        assert_eq!(bytes[0], 2, "version leads");
         let scope = scope_key(&r.space, &r.world, &r.device, &r.request);
         assert_eq!(
             &bytes[1..1 + scope.len()],

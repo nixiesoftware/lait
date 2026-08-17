@@ -509,8 +509,17 @@ fn issues_reference_performance_gate() {
                     ticket: founder_device.clone(),
                 },
             );
-            match issue_req(&rt, &home, issues_app::IssuesRequest::ProjectList) {
-                IssueResponse::Projects { projects } if projects.len() >= projects_expected => {
+            match issue_req(
+                &rt,
+                &home,
+                issues_app::IssuesRequest::ProjectList {
+                    page: issues::contract::PageRequest {
+                        limit: issues::contract::MAX_PAGE_SIZE,
+                        cursor: None,
+                    },
+                },
+            ) {
+                IssueResponse::Projects { page } if page.items.len() >= projects_expected => {
                     Some(())
                 }
                 _ => None,
@@ -618,9 +627,17 @@ fn issues_reference_performance_gate() {
                     all: true,
                     ..Default::default()
                 },
+                page: issues::contract::PageRequest {
+                    limit: issues::contract::MAX_PAGE_SIZE,
+                    cursor: None,
+                },
             },
         ) {
-            IssueResponse::List { rows } => rows.len(),
+            IssueResponse::List { page } => usize::try_from(
+                page.exact_total
+                    .unwrap_or_else(|| u64::try_from(page.items.len()).unwrap_or(u64::MAX)),
+            )
+            .unwrap_or(usize::MAX),
             _ => 0,
         }
     };
@@ -677,9 +694,13 @@ fn issues_reference_performance_gate() {
                 all: true,
                 ..Default::default()
             },
+            page: issues::contract::PageRequest {
+                limit: issues::contract::MAX_PAGE_SIZE,
+                cursor: None,
+            },
         },
     ) {
-        IssueResponse::List { rows } => rows.iter().map(|r| r.reff.clone()).collect(),
+        IssueResponse::List { page } => page.items.iter().map(|r| r.reff.clone()).collect(),
         other => panic!("expected List, got {other:?}"),
     };
     for (n, f) in fleet.iter().filter(|f| f.writer).enumerate() {
@@ -722,7 +743,15 @@ fn issues_reference_performance_gate() {
     let refs = founder_refs;
     let home = founder_home.clone();
     let focus = |rt: &tokio::runtime::Runtime| {
-        issue_ok(rt, &home, issues_app::IssuesRequest::Inbox { watermark: 0 });
+        issue_ok(
+            rt,
+            &home,
+            issues_app::IssuesRequest::Inbox {
+                watermark: 0,
+                page: issues::contract::PageRequest::default(),
+                publication: None,
+            },
+        );
         issue_ok(
             rt,
             &home,
@@ -732,6 +761,7 @@ fn issues_reference_performance_gate() {
                     mine: true,
                     ..Default::default()
                 },
+                page: issues::contract::PageRequest::default(),
             },
         );
     };
@@ -760,7 +790,13 @@ fn issues_reference_performance_gate() {
         (
             "project_list",
             Box::new(|rt, _| {
-                issue_ok(rt, &home, issues_app::IssuesRequest::ProjectList);
+                issue_ok(
+                    rt,
+                    &home,
+                    issues_app::IssuesRequest::ProjectList {
+                        page: issues::contract::PageRequest::default(),
+                    },
+                );
             }),
         ),
         (
@@ -772,20 +808,29 @@ fn issues_reference_performance_gate() {
                     issues_app::IssuesRequest::Board {
                         project: Some(project_keys[i % project_keys.len()].clone()),
                         project_hint: None,
+                        page: issues::contract::PageRequest::default(),
                     },
                 );
             }),
         ),
         (
-            "graph",
+            "relations",
             Box::new(|rt, i| {
-                issue_ok(
-                    rt,
-                    &home,
-                    issues_app::IssuesRequest::IssueGraph {
-                        reff: refs[i % refs.len()].clone(),
-                    },
-                );
+                for direction in [
+                    issues::dto::RelationDirection::Out,
+                    issues::dto::RelationDirection::In,
+                ] {
+                    issue_ok(
+                        rt,
+                        &home,
+                        issues_app::IssuesRequest::IssueRelations {
+                            reff: refs[i % refs.len()].clone(),
+                            direction,
+                            publication: None,
+                            page: issues::contract::PageRequest::default(),
+                        },
+                    );
+                }
             }),
         ),
         (
@@ -796,6 +841,11 @@ fn issues_reference_performance_gate() {
                     &home,
                     issues_app::IssuesRequest::History {
                         reff: refs[i % refs.len()].clone(),
+                        publication: None,
+                        page: issues::contract::PageRequest {
+                            limit: 100,
+                            cursor: None,
+                        },
                     },
                 );
             }),
@@ -861,6 +911,7 @@ fn issues_reference_performance_gate() {
                         issues_app::IssuesRequest::List {
                             project: Some(project_keys[p % project_keys.len()].clone()),
                             filter: issues_app::Filter::default(),
+                            page: issues::contract::PageRequest::default(),
                         },
                     );
                 }

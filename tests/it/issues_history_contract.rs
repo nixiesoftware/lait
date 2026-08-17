@@ -137,10 +137,16 @@ fn history_is_attributed_to_an_actor_and_not_to_the_device_it_was_committed_on()
         &facts(),
     );
 
-    let (activity, _) = router.route(Request::Activity { since: None }, &facts());
-    let Response::Activity { events: rows, .. } = activity else {
+    let (activity, _) = router.route(
+        Request::Activity {
+            page: issues::contract::PageRequest::default(),
+        },
+        &facts(),
+    );
+    let Response::Activity { page } = activity else {
         panic!("expected activity, got {activity:?}");
     };
+    let rows = page.items;
     assert!(!rows.is_empty(), "creating and commenting is history");
 
     for row in &rows {
@@ -203,6 +209,25 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
         },
         &facts(),
     );
+    let project_id = match router
+        .route(
+            Request::ProjectList {
+                page: issues::contract::PageRequest::default(),
+            },
+            &facts(),
+        )
+        .0
+    {
+        Response::Projects { page } => page
+            .items
+            .into_iter()
+            .find(|project| project.key == "CLIENT")
+            .expect("client project")
+            .id
+            .as_str()
+            .to_owned(),
+        response => panic!("expected project list, got {response:?}"),
+    };
     let create = |title: &str| {
         let (reply, _) = router.route(
             Request::IssueNew {
@@ -225,9 +250,25 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
     };
     let foundation = create("Connect to a served World");
     let workspace = create("Operate the local workspace");
-    let before_link = session
-        .snapshot_id()
-        .expect("generation before topology edit");
+    let before_link: issues::contract::Page<issues::dto::ProjectDto> = serde_json::from_slice(
+        &session
+            .query(runtime::world::Query {
+                schema: issues::contract::issue_schema(),
+                schema_version: issues::contract::ISSUE_SCHEMA_VERSION,
+                payload: issues::contract::IssueQuery::Projects {
+                    page: issues::contract::PageRequest {
+                        limit: 1,
+                        cursor: None,
+                    },
+                }
+                .to_json(),
+                publication: None,
+            })
+            .expect("publication before topology edit")
+            .bytes,
+    )
+    .expect("project page before topology edit");
+    let before_link = before_link.publication;
 
     let (linked, _) = router.route(
         Request::IssueLink {
@@ -242,35 +283,66 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
         "link reply: {linked:?}"
     );
 
-    let (current, _) = router.route(
-        Request::Geometry {
-            project: "CLIENT".into(),
+    let geometry_query = |publication| runtime::world::Query {
+        schema: issues::contract::issue_schema(),
+        schema_version: issues::contract::ISSUE_SCHEMA_VERSION,
+        payload: issues::contract::IssueQuery::Geometry {
+            project: project_id.clone(),
             roots: vec![],
-            generation: None,
-        },
-        &facts(),
-    );
-    let Response::Geometry(current) = current else {
-        panic!("expected current geometry, got {current:?}");
+            page: Some(issues::geometry::GeometryPageRequest::first(
+                issues::geometry::GeometrySection::Edges,
+                16,
+            )),
+        }
+        .to_json(),
+        publication,
     };
-    assert_eq!(current.nodes.len(), 2);
-    assert_eq!(current.components.len(), 1);
-    assert_eq!(current.edges.len(), 1);
-    assert_eq!(current.edges[0].relation, "blocks");
+    // Resolve the human project key once through the router's product
+    // snapshot, then use the canonical id selected by deterministic fixtures.
+    // Geometry itself is now a bounded artifact response: summary and one
+    // explicit page, never a whole graph serialized by accident.
+    let current: issues::contract::GeometryProjection = serde_json::from_slice(
+        &session
+            .query(geometry_query(None))
+            .expect("current geometry")
+            .bytes,
+    )
+    .expect("current geometry response");
+    let current_summary = current.summary.as_ref().expect("ready summary");
+    assert_eq!(current_summary.nodes, 2);
+    assert_eq!(current_summary.components, 1);
+    assert_eq!(current_summary.edges, 1);
+    let Some(issues::geometry::GeometryPage {
+        rows: issues::geometry::GeometryRows::Edges(edges),
+        ..
+    }) = current.page.as_ref()
+    else {
+        panic!("expected current edge page, got {:?}", current.page);
+    };
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].relation, issues::geometry::RelationKind::Blocks);
 
-    let (historical, _) = router.route(
-        Request::Geometry {
-            project: "CLIENT".into(),
-            roots: vec![],
-            generation: Some(before_link.to_hex()),
-        },
-        &facts(),
-    );
-    let Response::Geometry(historical) = historical else {
-        panic!("expected historical geometry, got {historical:?}");
+    let historical: issues::contract::GeometryProjection = serde_json::from_slice(
+        &session
+            .query(geometry_query(Some(before_link.publication.clone())))
+            .expect("historical geometry")
+            .bytes,
+    )
+    .expect("historical geometry response");
+    let historical_summary = historical.summary.as_ref().expect("ready summary");
+    assert_eq!(historical_summary.nodes, 2);
+    assert_eq!(historical_summary.components, 2);
+    assert_eq!(historical_summary.edges, 0);
+    let Some(issues::geometry::GeometryPage {
+        rows: issues::geometry::GeometryRows::Edges(edges),
+        ..
+    }) = historical.page.as_ref()
+    else {
+        panic!("expected historical edge page, got {:?}", historical.page);
     };
-    assert_eq!(historical.nodes.len(), 2);
-    assert_eq!(historical.components.len(), 2);
-    assert!(historical.edges.is_empty());
-    assert_eq!(historical.generation, before_link.to_hex());
+    assert!(edges.is_empty());
+    assert_eq!(
+        data_encoding::HEXLOWER.encode(&historical.source.publication.manifest_root),
+        data_encoding::HEXLOWER.encode(&before_link.publication.manifest_root)
+    );
 }

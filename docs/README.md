@@ -56,6 +56,7 @@ not carry authority.
 | [`PROTOCOL.md`](./PROTOCOL.md) | Coordinates, Beacon/presence, Contact, convergence, and local-control compatibility. |
 | [`THREAT-MODEL.md`](./THREAT-MODEL.md) | Assets, adversaries, security claims, and explicit non-goals. |
 | [`COMPATIBILITY.md`](./COMPATIBILITY.md) | Every versioned surface, how each one is enforced, and what a bump costs. |
+| [`RESEARCH.md`](./RESEARCH.md) | Academic and systems references that constrain architecture decisions and their acceptance gates. |
 
 These documents describe the current branch. Historical phase plans and
 superseded alternatives are not normative. Exact Rust APIs live in rustdoc and

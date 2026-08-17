@@ -123,9 +123,10 @@ fn list_titles(rt: &tokio::runtime::Runtime, home: &Path) -> Vec<String> {
                 all: true,
                 ..Default::default()
             },
+            page: issues::contract::PageRequest::default(),
         },
     ) {
-        IssueResponse::List { rows } => rows.iter().map(|r| r.title.clone()).collect(),
+        IssueResponse::List { page } => page.items.iter().map(|r| r.title.clone()).collect(),
         _ => vec![],
     }
 }

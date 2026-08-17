@@ -130,9 +130,10 @@ fn list_titles(rt: &tokio::runtime::Runtime, home: &Path) -> Vec<String> {
         issues_app::IssuesRequest::List {
             project: None,
             filter: issues_app::protocol::Filter::default(),
+            page: issues::contract::PageRequest::default(),
         },
     ) {
-        IssueResponse::List { rows } => rows.into_iter().map(|r| r.title).collect(),
+        IssueResponse::List { page } => page.items.into_iter().map(|r| r.title).collect(),
         _ => Vec::new(),
     }
 }

@@ -70,6 +70,8 @@ pub enum AccessRequest {
 pub enum IssuesHostRequest {
     Inbox {
         clear: bool,
+        page: issues::contract::PageRequest,
+        publication: Option<crate::PublicationCoordinate>,
     },
     WorldUpgrade,
     Access(AccessRequest),
@@ -93,14 +95,14 @@ impl IssuesHostRequest {
     /// command access or be mistaken for a read-only World query.
     pub fn access(&self) -> ClientAccess {
         match self {
-            Self::Inbox { clear: false } | Self::Access(AccessRequest::List { .. }) => {
+            Self::Inbox { clear: false, .. } | Self::Access(AccessRequest::List { .. }) => {
                 ClientAccess::Query
             }
             Self::Work(IssuesWorkRequest {
                 action: IssuesWorkAction::Inspect | IssuesWorkAction::Watch { .. },
                 ..
             }) => ClientAccess::Query,
-            Self::Inbox { clear: true }
+            Self::Inbox { clear: true, .. }
             | Self::WorldUpgrade
             | Self::Access(AccessRequest::Grant { .. } | AccessRequest::Revoke { .. })
             | Self::Attach { .. }
@@ -156,6 +158,20 @@ pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Failur
     match operation {
         LOCAL_INBOX => Ok(IssuesHostRequest::Inbox {
             clear: input.get("clear").and_then(Value::as_bool).unwrap_or(false),
+            page: input
+                .get("page")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| Failure::new(format!("decode inbox page: {error}")))?
+                .unwrap_or_default(),
+            publication: input
+                .get("publication")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| Failure::new(format!("decode inbox publication: {error}")))?,
         }),
         LOCAL_WORLD_UPGRADE => Ok(IssuesHostRequest::WorldUpgrade),
         LOCAL_ACCESS => {
@@ -281,7 +297,14 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
                     return Err(Failure::new("inbox 'clear' must be a boolean"));
                 }
             };
-            invocation(LOCAL_INBOX, json!({ "clear": clear }))
+            invocation(
+                LOCAL_INBOX,
+                json!({
+                    "clear": clear,
+                    "page": input.get("page").cloned().unwrap_or_else(|| json!({})),
+                    "publication": input.get("publication").cloned(),
+                }),
+            )
         }
         "access_list" => invocation(
             LOCAL_ACCESS,
@@ -329,7 +352,11 @@ pub fn execute<'a>(
     Box::pin(async move {
         let request = decode(&local.operation, local.input)?;
         match request {
-            IssuesHostRequest::Inbox { clear } => run_inbox(host, clear).await,
+            IssuesHostRequest::Inbox {
+                clear,
+                page,
+                publication,
+            } => run_inbox(host, clear, page, publication).await,
             IssuesHostRequest::WorldUpgrade => {
                 host.call_control(HostControlRequest::WorldActivate {
                     world: issues::contract::world_id(),
@@ -497,11 +524,18 @@ fn issues_output(response: &crate::IssuesResponse) -> Value {
     serde_json::to_value(response).unwrap_or(Value::Null)
 }
 
-async fn run_inbox(host: &dyn ClientHost, clear: bool) -> Result<Value, Failure> {
+async fn run_inbox(
+    host: &dyn ClientHost,
+    clear: bool,
+    page: issues::contract::PageRequest,
+    publication: Option<crate::PublicationCoordinate>,
+) -> Result<Value, Failure> {
     let response = call_issues(
         host,
         IssuesRequest::Inbox {
             watermark: read_inbox_watermark(host.local_root()),
+            page,
+            publication,
         },
     )
     .await?;
@@ -732,30 +766,23 @@ pub fn plan_access_grant(
             ));
         }
         ("project", Some(selector)) => {
-            let Some(snapshot) =
-                crate::projections::query_json(session, issues::contract::IssueQuery::Snapshot)
-            else {
-                return Err(AccessRefusal::Invalid(
-                    "the Issues catalog is unavailable".into(),
-                ));
-            };
-            let projects = snapshot["catalog"]["projects"].as_object().cloned();
-            let resolved = projects.and_then(|projects| {
-                let upper = selector.to_ascii_uppercase();
-                if projects.contains_key(selector) {
-                    return Some(selector.to_string());
-                }
-                projects
-                    .iter()
-                    .find(|(_, metadata)| metadata["key"].as_str() == Some(upper.as_str()))
-                    .map(|(id, _)| id.clone())
-            });
-            let Some(id) = resolved else {
+            let Some(value) = crate::projections::query_json(
+                session,
+                issues::contract::IssueQuery::Resolve {
+                    entity: issues::contract::ResolveEntity::Project,
+                    selector: selector.to_string(),
+                    project: None,
+                },
+            ) else {
                 return Err(AccessRefusal::NotFound(format!(
                     "no project matches '{selector}'"
                 )));
             };
-            mechanics::authorization::Resource::segments(world, [&id])
+            let resolved: issues::contract::ResolvedEntity = serde_json::from_value(value)
+                .map_err(|_| {
+                    AccessRefusal::Invalid("the Issues selector reply is invalid".into())
+                })?;
+            mechanics::authorization::Resource::segments(world, [&resolved.id])
                 .map_err(|error| AccessRefusal::Invalid(error.to_string()))?
         }
         ("project", None) => {
@@ -769,20 +796,21 @@ pub fn plan_access_grant(
             ));
         }
     };
-    let assignments: Vec<crate::AccessAssignment> = body["capabilities"]
-        .as_array()
-        .map(|capabilities| {
-            capabilities
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|capability| crate::AccessAssignment {
-                    world: world.to_string(),
-                    capability: capability.to_string(),
-                    resource: resource.segments.clone(),
-                })
-                .collect()
+    let capabilities = body["capabilities"].as_array().cloned().unwrap_or_default();
+    if capabilities.is_empty() || capabilities.len() > issues::roles::MAX_CAPABILITIES {
+        return Err(AccessRefusal::Invalid(format!(
+            "role `{role}` exceeds the bounded capability registry"
+        )));
+    }
+    let assignments: Vec<crate::AccessAssignment> = capabilities
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|capability| crate::AccessAssignment {
+            world: world.to_string(),
+            capability: capability.to_string(),
+            resource: resource.segments.clone(),
         })
-        .unwrap_or_default();
+        .collect();
     if assignments.is_empty() {
         return Err(AccessRefusal::Invalid(format!(
             "role `{role}` expands to no capabilities"

@@ -635,7 +635,9 @@ async fn contact_attempt(
 
     // Stage → validate (authority first, durable) → incorporate under the
     // Station writer. TransferAck already went out — it acknowledged the
-    // transcript, not convergence.
+    // transcript, not convergence. Each Body byte string is now the bounded
+    // delivery pack for the protected artifacts named by its signed
+    // transaction descriptor; Contact remains blind to Body keys and content.
     let staged = StagedContactMaterial {
         authority_records: received.authority_records,
         manifest_root_bytes: received.manifest_root_bytes,
@@ -646,47 +648,44 @@ async fn contact_attempt(
             .map(|((tx, key), bytes)| (tx, key, bytes))
             .collect(),
     };
-    let signer = crate::world::LocalIdentity::from_seed(&ctx.options.station_seed);
+    let station_seed = ctx.options.station_seed;
     let frontier = (ctx.options.authority.frontier)();
-    let attempted = {
-        let mut incorporator = ctx.options.authority.incorporator.lock_recovering();
-        ctx.core
-            .with_replica(|replica| {
-                let commit_ctx = replica::transaction::CommitContext {
-                    space: &ctx.space,
-                    signer: &signer,
-                    authority_frontier: frontier.clone(),
-                };
-                let bundle = replica.validate_contact(
-                    &staged,
-                    ctx.options.authority.source.as_ref(),
-                    &mut *incorporator,
-                )?;
-                replica.incorporate_bundle(
-                    &commit_ctx,
-                    bundle,
-                    ctx.options.authority.source.as_ref(),
-                )
-            })
-            .map_err(|failure| {
-                // The one place the cause exists. Logged as well as returned:
-                // the caller sees it inline, and an operator reading the daemon
-                // afterwards does not have to have been holding the connection.
-                tracing::warn!(?failure, peer = %station, "contact material was refused");
-                // Keep the discriminant alive across the stringification. Root
-                // completeness is the one refusal this Station can repair by
-                // itself, and it can only do that if it can still tell that is
-                // what happened.
-                let incomplete = matches!(
-                    failure,
-                    replica::transaction::commit::Failure::Illegitimate(
-                        replica::transaction::commit::Invalid::IncompleteMaterial
-                    )
-                );
-                (Failure::Convergence(format!("{failure:?}")), incomplete)
-            })
-    };
-    // ---- One Contact, one published change. -------------------------------
+    let core = ctx.core.clone();
+    let space = ctx.space.clone();
+    let source = ctx.options.authority.source.clone();
+    let incorporator = ctx.options.authority.incorporator.clone();
+    let commit_frontier = frontier.clone();
+    // Protected-pack validation, journal durability, snapshot projection and
+    // corpus recovery are all blocking work. The Contact driver is a
+    // current-thread reactor that also owns heartbeat, admission and every
+    // other in-flight exchange; running this stage inline would freeze all of
+    // them behind one large remote publication. MAX_CONTACTS_IN_FLIGHT bounds
+    // the blocking jobs admitted by this Station.
+    let attempted = tokio::task::spawn_blocking(move || {
+        let signer = crate::world::LocalIdentity::from_seed(&station_seed);
+        let mut incorporator = incorporator.lock_recovering();
+        core.with_replica_convergence(|replica| {
+            let commit_ctx = replica::transaction::CommitContext {
+                space: &space,
+                signer: &signer,
+                authority_frontier: commit_frontier.clone(),
+            };
+            let bundle = replica.validate_contact(&staged, source.as_ref(), &mut *incorporator)?;
+            replica.incorporate_bundle(&commit_ctx, bundle, source.as_ref())
+        })
+    })
+    .await
+    .map_err(|_| (Failure::Interrupted, false))?
+    .map_err(|failure| {
+        // The one place the cause exists. Logged as well as returned: the
+        // caller sees it inline, and an operator reading the daemon afterwards
+        // does not have to have been holding the connection.
+        tracing::warn!(?failure, peer = %station, "contact material was refused");
+        // Keep the discriminant alive across the stringification. Root
+        // completeness is the one refusal this Station can repair by itself.
+        contact_commit_failure(failure)
+    });
+    // ---- One Contact, ordered per-transaction published changes. ----------
     //
     // Authority is durably incorporated INSIDE validation — before the manifest
     // and the Bodies are checked — so a legitimate admission riding a malformed
@@ -694,10 +693,13 @@ async fn contact_attempt(
     // frontier around the WHOLE attempt, rather than reading it off a successful
     // outcome, is what catches that: the error path has real news to announce.
     //
-    // Publication then happens once, before the result is returned, whichever
-    // way it went. The unit is the semantic change, not the durability phase
-    // that produced it — a consumer should never have to reassemble one Contact
-    // from an authority record plus a Body record.
+    // Publication happens before the result is returned, whichever way it
+    // went. A bundle may carry several signed actors, so each contributing
+    // transaction publishes its own attributed dirty record in canonical
+    // transaction order. Every record is stamped with the same final frontier
+    // and exact post-incorporation publications. Authority advancement rides
+    // the first record (or a standalone record when no Body transaction
+    // changed); it is never duplicated across the bundle.
     let authority_advanced = (ctx.options.authority.frontier)() != frontier;
     let (bodies, body_frontier) = match &attempted {
         // A retained opaque Body becoming locally interpretable changes what
@@ -707,10 +709,41 @@ async fn contact_attempt(
         Ok(convergence) => (convergence.bodies.clone(), convergence.current),
         Err(_) => (Vec::new(), ctx.core.frontier()),
     };
-    if authority_advanced || !bodies.is_empty() {
+    let mut authority_unpublished = authority_advanced;
+    let mut attributed_bodies = std::collections::BTreeSet::new();
+    if let Ok(convergence) = &attempted {
+        for change in &convergence.changes {
+            attributed_bodies.extend(change.bodies.iter().cloned());
+            let publications = ctx.core.affected_world_publications(&change.bodies);
+            let mut durable = crate::change::DurableChange::dirty(change.bodies.clone());
+            durable.attribution = Some(crate::change::Attribution {
+                operation: change.operation,
+                actor: change.actor.clone(),
+                device: change.device.clone(),
+            });
+            ctx.core.broadcaster.publish_change(
+                durable,
+                body_frontier,
+                authority_unpublished,
+                publications,
+            );
+            authority_unpublished = false;
+        }
+    }
+    // Opaque material that became readable because this Contact delivered a
+    // key is a real dirty scope but may have no newly incorporated transaction.
+    // Keep that residual explicit and unattributed rather than attaching it to
+    // an unrelated actor in the same bundle.
+    let residual: Vec<_> = bodies
+        .iter()
+        .filter(|body| !attributed_bodies.contains(*body))
+        .cloned()
+        .collect();
+    if authority_unpublished || !residual.is_empty() {
+        let publications = ctx.core.affected_world_publications(&residual);
         ctx.core
             .broadcaster
-            .publish(bodies, body_frontier, authority_advanced);
+            .publish(residual, body_frontier, authority_unpublished, publications);
     }
     if authority_advanced {
         // Rung here as well as on a local write, and this is the half that
@@ -728,6 +761,25 @@ async fn contact_attempt(
         bytes_moved,
         convergence,
     })
+}
+
+fn contact_commit_failure(failure: replica::transaction::commit::Failure) -> (Failure, bool) {
+    let incomplete = matches!(
+        &failure,
+        replica::transaction::commit::Failure::Illegitimate(
+            replica::transaction::commit::Invalid::IncompleteMaterial
+        )
+    );
+    if matches!(
+        failure,
+        replica::transaction::commit::Failure::OutcomeUnknown
+    ) {
+        (Failure::OutcomeUnknown, false)
+    } else if matches!(failure, replica::transaction::commit::Failure::MutationBusy) {
+        (Failure::Capacity, false)
+    } else {
+        (Failure::Convergence(format!("{failure:?}")), incomplete)
+    }
 }
 
 /// A step under both the whole-contact deadline and the progress deadline.
@@ -812,7 +864,7 @@ async fn initiate(
     // trap primed for exactly the descent this file keeps promising.
     let (published, held) = ctx
         .core
-        .with_replica(|replica| {
+        .with_replica_read(|replica| {
             Ok((
                 replica.published_root(),
                 if declare {
@@ -1142,7 +1194,7 @@ async fn serve_contact(
     if ctx.options.gossip.is_some() {
         let ours = ctx
             .core
-            .with_replica(|replica| {
+            .with_replica_read(|replica| {
                 Ok(replica
                     .published_root()
                     .map(|root| root.0)
@@ -1177,7 +1229,7 @@ async fn serve_contact(
         .signer_authorized(&ctx.station_key, &frontier);
     let (material, manifest) = if advertise {
         ctx.core
-            .with_replica(|replica| {
+            .with_replica_read(|replica| {
                 let commit_ctx = replica::transaction::CommitContext {
                     space: &ctx.space,
                     signer: &signer,
@@ -1193,10 +1245,10 @@ async fn serve_contact(
     };
     let mut authority_records = (ctx.options.authority.export)();
     let mut bodies = Vec::new();
-    for (tx, payloads) in &material {
+    for (tx, closures) in &material {
         authority_records.push(tx.encode());
-        for (key, envelope) in payloads {
-            bodies.push((tx.id(), key.clone(), envelope.clone()));
+        for (key, artifact_pack) in closures {
+            bodies.push((tx.id(), key.clone(), artifact_pack.clone()));
         }
     }
     let transfer = OutboundTransfer {
@@ -1284,4 +1336,25 @@ async fn serve_presence(
     )
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indeterminate_contact_durability_is_not_rendered_as_retryable_convergence() {
+        assert_eq!(
+            contact_commit_failure(replica::transaction::commit::Failure::OutcomeUnknown),
+            (Failure::OutcomeUnknown, false),
+        );
+    }
+
+    #[test]
+    fn occupied_mutation_lane_is_a_prompt_contact_capacity_refusal() {
+        assert_eq!(
+            contact_commit_failure(replica::transaction::commit::Failure::MutationBusy),
+            (Failure::Capacity, false),
+        );
+    }
 }

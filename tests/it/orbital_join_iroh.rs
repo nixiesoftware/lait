@@ -135,6 +135,7 @@ fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: q.to_json(),
+            publication: None,
         })
         .unwrap()
         .bytes;
@@ -289,22 +290,28 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
         .as_str()
         .to_string();
     // The founder created the default project via SpaceInit; the joiner reads it.
-    let snapshot: serde_json::Value = {
+    let projects: contract::Page<issues::dto::ProjectDto> = {
         let bytes = session_j
             .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
-                payload: IssueQuery::Snapshot.to_json(),
+                payload: IssueQuery::Projects {
+                    page: contract::PageRequest {
+                        limit: 1,
+                        cursor: None,
+                    },
+                }
+                .to_json(),
+                publication: None,
             })
             .unwrap()
             .bytes;
         serde_json::from_slice(&bytes).unwrap()
     };
-    let project_id = snapshot
-        .get("catalog")
-        .and_then(|c| c.get("projects"))
-        .and_then(|p| p.as_object())
-        .and_then(|m| m.keys().next().cloned())
+    let project_id = projects
+        .items
+        .first()
+        .map(|project| project.id.as_str().to_owned())
         .expect("the joiner sees the founder's project");
     submit(
         &session_j,

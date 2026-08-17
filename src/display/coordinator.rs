@@ -25,7 +25,7 @@ use world_interface::{
     HostControlRequest, PresentationHandle, PresentationResolution, WorldClientRegistry,
 };
 
-use crate::control::ControlRoute;
+use crate::control::{ControlRoute, Request};
 use crate::orbits::Router;
 
 use super::{
@@ -192,10 +192,13 @@ impl DisplayCoordinator {
             .validate_invocation(&invocation)
             .map_err(adapter_failure)?;
         if invocation.access() != ClientAccess::Query
-            || !matches!(invocation.kind(), ClientInvocationKind::World(_))
+            || !matches!(
+                invocation.kind(),
+                ClientInvocationKind::World(_) | ClientInvocationKind::Find { .. }
+            )
         {
             return Err(anyhow!(
-                "display surface did not prepare a read-only World invocation"
+                "display surface did not prepare a read-only World or Find invocation"
             ));
         }
 
@@ -713,6 +716,45 @@ impl ClientHost for QueryOnlyHost<'_> {
                 .call_world_requiring(self.route.clone(), &call, REQUIRED_WORLD_ACCESS)
                 .await
                 .map_err(|error| Failure::new(format!("{error:#}")))
+        })
+    }
+
+    fn call_find<'a>(
+        &'a self,
+        world: WorldId,
+        query: runtime::find::Query,
+    ) -> ClientFuture<'a, Value> {
+        Box::pin(async move {
+            if &world != self.world {
+                return Err(Failure::new(
+                    "display projection attempted to query another World",
+                ));
+            }
+            let ControlRoute::World { address, .. } = &self.route else {
+                return Err(Failure::new("display projection has no World route"));
+            };
+            let response = self
+                .router
+                .request_routed(
+                    ControlRoute::Orbit {
+                        address: address.clone(),
+                    },
+                    &Request::Find {
+                        world: world.as_str().to_owned(),
+                        query,
+                    },
+                    None,
+                )
+                .await
+                .map_err(|error| Failure::new(format!("{error:#}")))?;
+            match response {
+                crate::control::Response::Find { answer } => serde_json::to_value(answer)
+                    .map_err(|error| Failure::new(format!("encode Runtime Find answer: {error}"))),
+                crate::control::Response::Error { message, .. } => Err(Failure::new(message)),
+                other => Err(Failure::new(format!(
+                    "Runtime Find request returned an unexpected response: {other:?}"
+                ))),
+            }
         })
     }
 

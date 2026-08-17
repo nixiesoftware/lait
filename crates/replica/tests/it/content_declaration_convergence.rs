@@ -132,7 +132,7 @@ fn commit_blob(r: &mut Replica, seq: u8, key: &BodyKey, bytes: &[u8]) {
     r.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: demand(),
             intent_digest: [7u8; 32],

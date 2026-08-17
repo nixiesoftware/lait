@@ -29,7 +29,18 @@ use serde::{Deserialize, Serialize};
 pub const MAX_HEADS: usize = 256;
 
 /// The encoded generation of the causal artifact formats.
-pub const CAUSAL_FORMAT_VERSION: u8 = 1;
+pub const CAUSAL_FORMAT_VERSION: u8 = 2;
+
+/// Protected Body-key epoch coordinate carried by every artifact reference.
+/// The epoch is part of the signed closure, allowing a publication reader to
+/// pin the exact opening capability without reading/decrypting every object at
+/// snapshot construction time.
+pub const ARTIFACT_EPOCH_ID_LEN: usize = 16;
+
+/// A canonical Body image cannot exceed the protected artifact envelope.
+/// `Material::plaintext_size` is an authenticated admission hint and is still
+/// checked against the decoded image before callers allocate from it.
+pub const MAX_MATERIAL_PLAINTEXT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One operation's identity: who wrote it and where in their sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -187,8 +198,10 @@ pub enum Artifact {
         result: Version,
         bytes: Vec<u8>,
     },
-    /// Current state with history trimmed at a retention frontier. What
-    /// reconstructs a Body without replaying it.
+    /// A state checkpoint. An empty `retention_frontier` is an ordinary full
+    /// snapshot: it reconstructs the Body without discarding the history
+    /// needed to admit concurrent work. A non-empty frontier is an explicit
+    /// compaction checkpoint whose history before that frontier was trimmed.
     Checkpoint {
         format_version: u8,
         retention_frontier: Version,
@@ -358,31 +371,56 @@ pub(crate) fn relation(doc: &LoroDoc, a: &Version, b: &Version) -> CausalRelatio
 /// would trim at different frontiers and refuse different work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointPolicy {
-    /// Deltas in the tail before a checkpoint replaces them.
+    /// Deltas in the tail at which ordinary checkpoint replacement is due.
+    pub target_tail_deltas: usize,
+    /// Encoded tail bytes at which ordinary checkpoint replacement is due.
+    pub target_tail_bytes: usize,
+    /// Protocol emergency ceiling. This is deliberately much larger than the
+    /// target so a stalled maintenance worker cannot turn an edit into a
+    /// synchronous full-Body serialization. Reaching it is fast typed
+    /// backpressure; it is never permission to checkpoint on the action path.
     pub max_tail_deltas: usize,
-    /// Encoded tail bytes before a checkpoint replaces them.
+    /// Protocol emergency ceiling for referenced tail bytes.
     pub max_tail_bytes: usize,
 }
 
 impl Default for CheckpointPolicy {
     fn default() -> Self {
-        // F0 measured an ordinary edit's delta at 105 bytes, so 256 of them
-        // encode to about 33 KB — two orders under the byte threshold. The
-        // count is therefore what bounds an ordinary Body, and the byte
-        // threshold exists for the Body that pastes megabytes at a time. Both
-        // are operator-lowerable; neither may be raised past a protocol
-        // maximum, because a peer has to be able to receive the result.
+        // F0 measured an ordinary edit's delta at 105 bytes, so the 256-delta
+        // target encodes to about 33 KB. The 4096/128 MiB ceilings leave the
+        // fixed two-worker service 16 target intervals to recover from a
+        // deliberate stall while keeping the signed descriptor far below the
+        // 1 MiB transaction limit (~164 KiB of ArtifactRefs). They are receive
+        // protocol bounds, not checkpoint triggers.
         Self {
-            max_tail_deltas: 256,
-            max_tail_bytes: 8 * 1024 * 1024,
+            target_tail_deltas: 256,
+            target_tail_bytes: 8 * 1024 * 1024,
+            max_tail_deltas: 4096,
+            max_tail_bytes: 128 * 1024 * 1024,
         }
     }
 }
 
 impl CheckpointPolicy {
+    /// Whether checkpoint construction should begin off the publication path.
+    /// The 3/4 watermark leaves 64 ordinary edits (or 2 MiB of encoded tail)
+    /// for the worker to finish before the hard replacement threshold.
+    pub fn should_prepare(&self, tail_deltas: usize, tail_bytes: usize) -> bool {
+        let soft_deltas = self.target_tail_deltas.saturating_mul(3) / 4;
+        let soft_bytes = self.target_tail_bytes.saturating_mul(3) / 4;
+        tail_deltas >= soft_deltas || tail_bytes >= soft_bytes
+    }
+
     /// Whether a tail of this shape should be replaced by a checkpoint.
     pub fn should_checkpoint(&self, tail_deltas: usize, tail_bytes: usize) -> bool {
-        tail_deltas >= self.max_tail_deltas || tail_bytes >= self.max_tail_bytes
+        tail_deltas >= self.target_tail_deltas || tail_bytes >= self.target_tail_bytes
+    }
+
+    /// Whether one more edit would exceed the protocol's explicit cold-read
+    /// and transfer envelope. Callers apply fast maintenance backpressure at
+    /// this boundary; they never serialize a Body to escape it.
+    pub fn admits(&self, tail_deltas: usize, tail_bytes: usize) -> bool {
+        tail_deltas <= self.max_tail_deltas && tail_bytes <= self.max_tail_bytes
     }
 }
 
@@ -391,16 +429,17 @@ impl CheckpointPolicy {
 pub struct ArtifactRef {
     pub hash: [u8; 32],
     pub len: u64,
+    pub epoch: [u8; ARTIFACT_EPOCH_ID_LEN],
 }
 
 /// What a collaborative Body's head commits: enough to reconstruct current
 /// state, plus a bounded commitment to the history behind it.
 ///
-/// The split is the point. A snapshot conflates *active state size* with
-/// *retained history*, so an ordinary edit paid for both. Here the checkpoint
-/// reconstructs state, the tail carries what came after it, and archives are
-/// reachable through an index root rather than listed — so the descriptor stays
-/// the same size however long the Body lives.
+/// The split is the point. An ordinary edit adds one delta to the bounded tail;
+/// it does not rewrite the checkpoint. Ordinary checkpoints are full snapshots
+/// so replacing a tail never changes which concurrent work can still merge.
+/// History trimming is a separate, explicit compaction operation accompanied
+/// by an archive reachable through `history_root`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Material {
     pub format_version: u8,
@@ -414,6 +453,12 @@ pub struct Material {
     pub history_root: Option<[u8; 32]>,
     pub history_count: u64,
     pub version: Version,
+    /// Signed upper/accounting coordinate for the canonical Body image.
+    /// Atomic/immutable Bodies publish their exact canonical byte length;
+    /// collaborative material may publish a conservative closure-derived
+    /// bound. Resolvers never trust this as an allocation instruction and
+    /// verify the decoded image before returning it.
+    pub plaintext_size: u64,
 }
 
 impl Material {
@@ -438,7 +483,14 @@ impl Material {
         if self.format_version != CAUSAL_FORMAT_VERSION {
             return Err(Invalid::NonCanonical);
         }
-        if self.delta_tail.len() > CheckpointPolicy::default().max_tail_deltas {
+        if self.plaintext_size > MAX_MATERIAL_PLAINTEXT_BYTES {
+            return Err(Invalid::Bounds);
+        }
+        let policy = CheckpointPolicy::default();
+        if !policy.admits(
+            self.delta_tail.len(),
+            usize::try_from(self.tail_bytes()).unwrap_or(usize::MAX),
+        ) {
             return Err(Invalid::Bounds);
         }
         self.version.validate()

@@ -10,7 +10,7 @@
 //! Replica incorporation directly.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use mechanics::authorization::AuthorizedBodyKey;
@@ -44,6 +44,7 @@ const RECOVERY_SEED: [u8; 32] = [20u8; 32];
 const STATION_A_SEED: [u8; 32] = [31u8; 32];
 const STATION_B_SEED: [u8; 32] = [32u8; 32];
 const WRITER_SEED: [u8; 32] = [33u8; 32];
+const WRITER_2_SEED: [u8; 32] = [34u8; 32];
 const SALT: [u8; 16] = [9u8; 16];
 const EPOCH: [u8; 16] = [13u8; 16];
 const EPOCH_KEY: [u8; 32] = [14u8; 32];
@@ -90,10 +91,69 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
 struct KvWorld {
     id: WorldId,
     schemas: Vec<Schema>,
+    find_schemas: Vec<runtime::find::Schema>,
+    find_extractors: Vec<runtime::find::Extractor>,
+    extraction_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
+    extraction_started: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl KvWorld {
     fn new() -> Self {
+        let indexed = runtime::find::SchemaRef {
+            name: SchemaId::parse("entry-index").unwrap(),
+            version: 1,
+        };
+        let field = runtime::find::FieldRef {
+            schema: indexed.clone(),
+            name: SchemaId::parse("value").unwrap(),
+        };
+        let find_schema = runtime::find::Schema {
+            reference: indexed.clone(),
+            sources: vec![runtime::find::SourceRef {
+                name: SchemaId::parse("entry").unwrap(),
+                version: 1,
+            }],
+            fields: vec![runtime::find::Field {
+                reference: field,
+                kind: runtime::find::FieldKind::Text,
+                analyzer: None,
+            }],
+            edges: Vec::new(),
+            gates: Vec::new(),
+            analyzers: Vec::new(),
+            features: Vec::new(),
+            ops: runtime::find::OpSet::SEEK,
+            modes: runtime::find::ModeSet::EXACT,
+            bound: runtime::find::Bound {
+                decoded_bodies: 1024,
+                postings_read: 1024,
+                edges_visited: 1024,
+                nodes_visited: 1024,
+                paths_retained: 1024,
+                candidates_per_branch: 1024,
+                score_evaluations: 1,
+                projected_bytes: 1024 * 1024,
+                packed_tokens: 1024,
+                wall_millis: 1_000,
+            },
+        };
+        let find_extractor = runtime::find::Extractor {
+            schema: indexed,
+            source: runtime::find::SourceRef {
+                name: SchemaId::parse("entry").unwrap(),
+                version: 1,
+            },
+            abi_version: runtime::find::EXTRACTOR_ABI_VERSION,
+            semantic_digest: [0x6b; 32],
+            shape: runtime::find::ExtractionShape::new(
+                1,
+                1_024,
+                1_024,
+                1024 * 1024,
+                1024 * 1024,
+                4 * 1024,
+            ),
+        };
         Self {
             id: WorldId::parse("dev.example.kv").unwrap(),
             schemas: vec![Schema {
@@ -103,7 +163,21 @@ impl KvWorld {
                 mutation: MutationModel::Atomic,
                 readable_predecessors: vec![],
             }],
+            find_schemas: vec![find_schema],
+            find_extractors: vec![find_extractor],
+            extraction_gate: None,
+            extraction_started: None,
         }
+    }
+
+    fn with_extraction_gate(
+        mut self,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        started: std::sync::mpsc::Sender<()>,
+    ) -> Self {
+        self.extraction_gate = Some(gate);
+        self.extraction_started = Some(started);
+        self
     }
     fn body(&self, key: &str) -> BodyKey {
         let mut raw = [0u8; 16];
@@ -119,6 +193,57 @@ impl World for KvWorld {
     }
     fn schemas(&self) -> &[Schema] {
         &self.schemas
+    }
+    fn find_schemas(&self) -> &[runtime::find::Schema] {
+        &self.find_schemas
+    }
+    fn find_extractors(&self) -> &[runtime::find::Extractor] {
+        &self.find_extractors
+    }
+    fn extract(
+        &self,
+        ctx: &runtime::world::ExtractionContext<'_>,
+        extractor: &runtime::find::Extractor,
+        body: &BodyKey,
+    ) -> Result<runtime::find::BodyExtraction, Rejection> {
+        if extractor != &self.find_extractors[0] {
+            return Err(Rejection::ContractViolation);
+        }
+        if let Some(started) = &self.extraction_started {
+            let _ = started.send(());
+        }
+        if let Some(gate) = &self.extraction_gate {
+            let (released, wake) = &**gate;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+        }
+        let value = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
+        Ok(runtime::find::BodyExtraction {
+            body: body.clone(),
+            stamp: ctx.body_stamp(body).unwrap_or_default(),
+            nodes: vec![runtime::find::ExtractedNode {
+                key: runtime::find::NodeKey {
+                    schema: self.find_schemas[0].reference.clone(),
+                    node: runtime::find::NodeId::new(body.body.as_bytes().to_vec())
+                        .map_err(|_| Rejection::ContractViolation)?,
+                },
+                gate: None,
+                fields: vec![runtime::find::ExtractedField {
+                    reference: self.find_schemas[0].fields[0].reference.clone(),
+                    value: runtime::find::Value::text(
+                        std::str::from_utf8(&value)
+                            .map_err(|_| Rejection::StateCorrupt)?
+                            .to_owned(),
+                    ),
+                    gate: None,
+                    terms: Vec::new(),
+                }],
+                edges: Vec::new(),
+                features: Vec::new(),
+            }],
+        })
     }
     fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let text = String::from_utf8(intent.payload).map_err(|_| Rejection::InvalidRequest)?;
@@ -145,8 +270,12 @@ impl World for KvWorld {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
-            bytes: ctx.read_body(&self.body(&key)).unwrap_or_default(),
+            bytes: ctx
+                .read_body(&self.body(&key))?
+                .map(|bytes| bytes.as_ref().to_vec())
+                .unwrap_or_default(),
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -154,9 +283,14 @@ impl World for KvWorld {
 /// Authorizes everyone this test names (writer + both stations).
 struct TestAuthority;
 impl runtime::world::AuthorityView for TestAuthority {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+    fn resolve(&self, device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        let actor_hash = if device == &mechanics::actor::device_from_seed(&WRITER_2_SEED) {
+            "d".repeat(64)
+        } else {
+            "c".repeat(64)
+        };
         Some(runtime::world::PrincipalResolution {
-            actor: ActorId::from_incept_hash(&"c".repeat(64)),
+            actor: ActorId::from_incept_hash(&actor_hash),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![3]),
         })
     }
@@ -165,7 +299,7 @@ impl runtime::world::AuthorityView for TestAuthority {
 struct AnyKnownSigner;
 impl replica::transaction::AuthoritySource for AnyKnownSigner {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
-        [WRITER_SEED, STATION_A_SEED, STATION_B_SEED]
+        [WRITER_SEED, WRITER_2_SEED, STATION_A_SEED, STATION_B_SEED]
             .iter()
             .any(|seed| mechanics::actor::device_from_seed(seed).key_bytes() == Some(*signer))
     }
@@ -195,6 +329,21 @@ fn test_keys() -> Arc<dyn replica::body::BodyKeySource> {
 
 fn runtime_at(root: &std::path::Path) -> Runtime {
     let world = KvWorld::new();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
+    Runtime::open(
+        root.to_path_buf(),
+        registry,
+        Arc::new(TestAuthority),
+        test_keys(),
+    )
+}
+
+fn runtime_at_with_extraction_gate(
+    root: &std::path::Path,
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    started: std::sync::mpsc::Sender<()>,
+) -> Runtime {
+    let world = KvWorld::new().with_extraction_gate(gate, started);
     let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
@@ -245,14 +394,15 @@ fn activate_with(
         .unwrap()
 }
 
-fn submit_kv(station: &Station, entry: &str) {
+fn submit_kv(station: &Station, seed: &[u8; 32], entry: &str) -> RequestId {
     let world_id = WorldId::parse("dev.example.kv").unwrap();
-    let writer = Runtime::identity_from_seed(&WRITER_SEED);
+    let writer = Runtime::identity_from_seed(seed);
     let session = station.dock(&world_id, &writer).unwrap();
+    let request = RequestId::mint();
     let action = writer
         .sign_action(
             &session,
-            RequestId::mint(),
+            request,
             Intent {
                 schema: SchemaId::parse("entry").unwrap(),
                 schema_version: 1,
@@ -261,6 +411,7 @@ fn submit_kv(station: &Station, entry: &str) {
         )
         .unwrap();
     session.submit(action).unwrap();
+    request
 }
 
 fn read_kv(station: &Station, key: &str) -> Vec<u8> {
@@ -272,6 +423,7 @@ fn read_kv(station: &Station, key: &str) -> Vec<u8> {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: key.as_bytes().to_vec(),
+            publication: None,
         })
         .unwrap()
         .bytes
@@ -296,12 +448,12 @@ fn two_stations_converge_through_the_public_contact_api() {
     let rt_b = runtime_at(&root_b);
 
     let station_a = activate_with(&rt_a, &coords, ta, STATION_A_SEED, None);
-    submit_kv(&station_a, "greeting=hello");
-    submit_kv(&station_a, "farewell=bye");
+    let greeting_operation = submit_kv(&station_a, &WRITER_SEED, "greeting=hello");
+    let farewell_operation = submit_kv(&station_a, &WRITER_2_SEED, "farewell=bye");
 
     let station_b = activate_with(&rt_b, &coords, tb, STATION_B_SEED, None);
-    // Subscribe BEFORE the contact: remote convergence must publish exactly
-    // one live-epoch Observation after durable incorporation.
+    // Subscribe BEFORE the contact: remote convergence publishes one
+    // live-epoch Observation per contributing signed transaction.
     let world_id = WorldId::parse("dev.example.kv").unwrap();
     let writer = Runtime::identity_from_seed(&WRITER_SEED);
     let obs_session = station_b.dock(&world_id, &writer).unwrap();
@@ -311,25 +463,77 @@ fn two_stations_converge_through_the_public_contact_api() {
     let outcome = station_b.contact(&station_id(&STATION_A_SEED)).unwrap();
     assert!(outcome.bytes_moved > 0, "bytes accounted separately");
     assert!(outcome.convergence.accepted >= 1);
-    let remote_record = obs
+    assert_eq!(outcome.convergence.changes.len(), 2);
+    let first_remote = obs
         .next_timeout(Duration::from_secs(5))
         .unwrap()
         .expect("remote convergence publishes");
-    assert!(!remote_record.reset);
-    assert!(
-        !remote_record.bodies.is_empty(),
-        "the Bodies that converged must be named: {remote_record:?}"
+    let second_remote = obs
+        .next_timeout(Duration::from_secs(5))
+        .unwrap()
+        .expect("each signed transaction publishes separately");
+    let remote_records = [first_remote, second_remote];
+    for remote_record in &remote_records {
+        assert!(!remote_record.reset);
+        assert_eq!(remote_record.bodies.len(), 1);
+        assert_eq!(remote_record.publications.len(), 1);
+        assert_eq!(remote_record.publications[0].world, world_id);
+        assert!(remote_record.change.attribution.is_some());
+        assert!(remote_record
+            .change
+            .bodies
+            .iter()
+            .all(|change| matches!(change.detail, runtime::change::Detail::Dirty)));
+    }
+    let mut operations: Vec<_> = remote_records
+        .iter()
+        .map(|record| record.change.attribution.as_ref().unwrap().operation)
+        .collect();
+    operations.sort();
+    let mut expected = vec![greeting_operation.as_bytes(), farewell_operation.as_bytes()];
+    expected.sort();
+    assert_eq!(operations, expected);
+    let mut authors: Vec<_> = remote_records
+        .iter()
+        .map(|record| {
+            let attribution = record.change.attribution.as_ref().unwrap();
+            (attribution.actor.clone(), attribution.device.clone())
+        })
+        .collect();
+    authors.sort();
+    let mut expected_authors = vec![
+        (
+            ActorId::from_incept_hash(&"c".repeat(64)),
+            mechanics::actor::device_from_seed(&WRITER_SEED),
+        ),
+        (
+            ActorId::from_incept_hash(&"d".repeat(64)),
+            mechanics::actor::device_from_seed(&WRITER_2_SEED),
+        ),
+    ];
+    expected_authors.sort();
+    assert_eq!(authors, expected_authors);
+    let installed = obs_session
+        .query(Query {
+            schema: SchemaId::parse("entry").unwrap(),
+            schema_version: 1,
+            payload: b"greeting".to_vec(),
+            publication: None,
+        })
+        .unwrap()
+        .publication
+        .expect("Runtime stamps every World projection");
+    assert_eq!(
+        remote_records[0].publications[0].publication, installed,
+        "every remote notification must stamp the adopted publication"
     );
-    // ONE record for one Contact. Authority and Bodies are separate durability
-    // phases but a single piece of news, and a consumer must never have to
-    // reassemble one Contact from a scopeless record plus a scoped one. These
-    // two stations already share authority, so nothing rides along here — the
-    // point being pinned is the count, not the flag.
+    assert_eq!(remote_records[1].publications[0].publication, installed);
+    // The bundle had exactly two contributing signed transactions. No union
+    // record or transport-only duplicate follows them.
     assert!(
         obs.try_next().unwrap().is_none(),
-        "a single Contact published more than one Observation"
+        "the Contact published a record outside its contributing transactions"
     );
-    obs_session.close();
     assert_eq!(read_kv(&station_b, "greeting"), b"hello");
     assert_eq!(read_kv(&station_b, "farewell"), b"bye");
 
@@ -341,11 +545,16 @@ fn two_stations_converge_through_the_public_contact_api() {
     assert_eq!(again.convergence.accepted, 0);
     assert!(!again.convergence.advanced());
     assert!(
+        obs.try_next().unwrap().is_none(),
+        "exact replay must not publish a duplicate attributed change"
+    );
+    assert!(
         again.bytes_moved < outcome.bytes_moved,
         "idle delta pull ({}) must move fewer bytes than the first sync ({})",
         again.bytes_moved,
         outcome.bytes_moved
     );
+    obs_session.close();
 
     // Restart B: incorporated material is durable, and a further Contact is
     // still unchanged.
@@ -381,6 +590,151 @@ fn two_stations_converge_through_the_public_contact_api() {
 }
 
 #[test]
+fn remote_extraction_does_not_block_prior_reads_and_local_retry_orders_after_contact() {
+    let (_space, coords) = coordinates();
+    let net = comms::mem::MemNet::new();
+    let ta: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
+    let tb: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
+
+    let root_a = temp_root("ordered-a");
+    let root_b = temp_root("ordered-b");
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let rt_a = runtime_at(&root_a);
+    let rt_b = runtime_at_with_extraction_gate(&root_b, gate.clone(), entered_tx);
+    let station_a = Arc::new(activate_with(&rt_a, &coords, ta, STATION_A_SEED, None));
+    let station_b = Arc::new(activate_with(&rt_b, &coords, tb, STATION_B_SEED, None));
+
+    submit_kv(&station_b, &WRITER_SEED, "local=before");
+    while entered_rx.try_recv().is_ok() {}
+    submit_kv(&station_a, &WRITER_2_SEED, "remote=arrived");
+
+    let world_id = WorldId::parse("dev.example.kv").unwrap();
+    let identity = Runtime::identity_from_seed(&WRITER_SEED);
+    let session_b = Arc::new(station_b.dock(&world_id, &identity).unwrap());
+    let prior = session_b
+        .query(Query {
+            schema: SchemaId::parse("entry").unwrap(),
+            schema_version: 1,
+            payload: b"local".to_vec(),
+            publication: None,
+        })
+        .unwrap();
+    let prior_publication = prior
+        .publication
+        .expect("prior exact publication")
+        .publication;
+    assert_eq!(prior.bytes, b"before");
+
+    let (released, wake) = &*gate;
+    *released.lock().unwrap() = false;
+    let contact_station = station_b.clone();
+    let contact = std::thread::spawn(move || contact_station.contact(&station_id(&STATION_A_SEED)));
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("remote publication extractor entered");
+
+    // Corpus recovery is blocking work, but it must not occupy Contact's
+    // current-thread reactor. The scheduler remains live and promptly applies
+    // its bounded in-flight admission rule while the first exact publication
+    // is deliberately stalled.
+    let duplicate_station = station_b.clone();
+    let (duplicate_tx, duplicate_rx) = std::sync::mpsc::channel();
+    let duplicate = std::thread::spawn(move || {
+        let result = duplicate_station.contact(&station_id(&STATION_A_SEED));
+        let _ = duplicate_tx.send(result);
+    });
+    // A Contact authority record may also invalidate this already-docked
+    // Session before mutation admission. Either result is terminal and
+    // immediate: stale session or occupied mutation lane, never a hidden wait.
+    assert!(matches!(
+        duplicate_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("Contact admission reactor must remain live during extraction"),
+        Err(runtime::plane::contact::Failure::Capacity)
+    ));
+    duplicate.join().unwrap();
+
+    // The installed frontier is part of the immutable prior read image. It
+    // remains immediately observable while Contact compiles the candidate
+    // corpus off the Station state mutex.
+    let (frontier_tx, frontier_rx) = std::sync::mpsc::channel();
+    let frontier_station = station_b.clone();
+    let frontier_read = std::thread::spawn(move || {
+        let _ = frontier_tx.send(frontier_station.frontier());
+    });
+    frontier_rx
+        .recv_timeout(Duration::from_millis(250))
+        .expect("published frontier must not wait behind remote extraction");
+    frontier_read.join().unwrap();
+
+    // An exact old publication remains readable. An ambient write cannot
+    // overtake the durable remote root while its interpretation is Building;
+    // it is refused promptly and can be retried against the ready head.
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    let prior_session = session_b.clone();
+    let prior_read = std::thread::spawn(move || {
+        let result = prior_session.query(Query {
+            schema: SchemaId::parse("entry").unwrap(),
+            schema_version: 1,
+            payload: b"local".to_vec(),
+            publication: Some(prior_publication),
+        });
+        let _ = read_tx.send(result);
+    });
+    let old = read_rx
+        .recv_timeout(Duration::from_millis(250))
+        .expect("exact prior query must not wait behind remote extraction")
+        .unwrap();
+    assert_eq!(old.bytes, b"before");
+    prior_read.join().unwrap();
+
+    let request = RequestId::mint();
+    let action = identity
+        .sign_action(
+            &session_b,
+            request,
+            Intent {
+                schema: SchemaId::parse("entry").unwrap(),
+                schema_version: 1,
+                payload: b"local=during".to_vec(),
+            },
+        )
+        .unwrap();
+    let (write_tx, write_rx) = std::sync::mpsc::channel();
+    let blocked_head_session = session_b.clone();
+    let write = std::thread::spawn(move || {
+        let _ = write_tx.send(blocked_head_session.submit(action));
+    });
+    assert!(matches!(
+        write_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("local submit must be refused, not deadlock behind Contact"),
+        Err(runtime::world::Failure::Busy | runtime::world::Failure::Interrupted)
+    ));
+    write.join().unwrap();
+
+    *released.lock().unwrap() = true;
+    wake.notify_all();
+    let outcome = contact.join().unwrap().unwrap();
+    let adopted_count = outcome.convergence.current.transaction_count;
+    submit_kv(&station_b, &WRITER_SEED, "local=after");
+    assert_eq!(read_kv(&station_b, "remote"), b"arrived");
+    assert_eq!(read_kv(&station_b, "local"), b"after");
+    assert!(
+        station_b.frontier().transaction_count > adopted_count,
+        "the retried local commit must publish after the Contact frontier"
+    );
+
+    drop(station_a);
+    drop(station_b);
+    let _ = std::fs::remove_dir_all(root_a);
+    let _ = std::fs::remove_dir_all(root_b);
+}
+
+#[test]
 fn a_beacon_drives_fully_automatic_convergence() {
     let (_space, coords) = coordinates();
     let net = comms::mem::MemNet::new();
@@ -409,7 +763,7 @@ fn a_beacon_drives_fully_automatic_convergence() {
         })
     };
     let station_a = activate_with(&rt_a, &coords, ta, STATION_A_SEED, gossip(true));
-    submit_kv(&station_a, "auto=converged");
+    submit_kv(&station_a, &WRITER_SEED, "auto=converged");
     let station_b = activate_with(&rt_b, &coords, tb, STATION_B_SEED, gossip(true));
 
     // No manual contact: A's periodic Beacon reaches B over gossip, the

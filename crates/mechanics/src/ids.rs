@@ -73,7 +73,8 @@ pub fn valid_ulid(s: &str) -> bool {
 }
 
 /// Render a 128-bit value as a 26-char Crockford base32 ULID string.
-pub(crate) fn encode_ulid(value: u128) -> String {
+#[doc(hidden)]
+pub fn encode_ulid(value: u128) -> String {
     // 128 bits → 26 base32 chars (the top char encodes only 2 bits).
     let mut out = [0u8; 26];
     let mut v = value;
@@ -127,6 +128,13 @@ macro_rules! prefixed_id {
                 Self(format!("{}{}", $prefix, $crate::ids::mint_ulid(src)))
             }
 
+            /// Deterministically derive an id from a domain-separated 128-bit
+            /// digest. Product batch planners use this for request+ordinal
+            /// identities whose retry must name the same entity.
+            pub fn from_digest(digest: [u8; 16]) -> Self {
+                Self(format!("{}{}", $prefix, $crate::ids::encode_ulid(u128::from_be_bytes(digest))))
+            }
+
             /// Wrap an existing string, validating the prefix + ULID shape.
             pub fn parse(s: &str) -> Option<Self> {
                 let rest = s.strip_prefix($prefix)?;
@@ -175,20 +183,6 @@ prefixed_id!(
     /// Space id — minted at `space init` and committed by genesis.
     SpaceId, "ws_"
 );
-
-impl SpaceId {
-    /// Derive a **self-certifying** space id from a 16-byte digest that
-    /// commits to the founding device + salt (`lait/space/1`): `ws_<crockford128>`.
-    /// The id is bound to its trust root rather than random, so a joiner can
-    /// verify a ticket's founder anchor against the id (see [`crate::space`]).
-    pub fn from_digest(digest: [u8; 16]) -> Self {
-        Self(format!(
-            "{}{}",
-            Self::PREFIX,
-            encode_ulid(u128::from_be_bytes(digest))
-        ))
-    }
-}
 
 /// A **device** id — an ed25519 public key, hex-encoded (64 lowercase hex
 /// chars), the same bytes as the iroh `EndpointId`. Kept as a validated string

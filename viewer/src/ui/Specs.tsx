@@ -22,7 +22,6 @@ import {
   standingLabel,
   targetLabel,
   transitions,
-  verificationGap,
   type LinkDelta,
   type SpecStanding,
   type SpecTransition,
@@ -46,9 +45,11 @@ import {
   useSpecReferences,
   useSpec,
   useSpecHistory,
+  type PagedResourceSnapshot,
 } from "../projectStore";
 import type {
   AssignmentDto,
+  BaselineSummary,
   BaselineView,
   MemberDto,
   PlanData,
@@ -57,10 +58,13 @@ import type {
   SpecKind,
   SpecLink,
   SpecObservation,
+  SpecObservationRecord,
   SpecRef,
   SpecReference,
+  SpecReferenceFact,
   SpecRel,
   SpecRevision,
+  SpecSummary,
   SpecState,
   SpecTarget,
   SpecView,
@@ -78,6 +82,26 @@ import { Combobox, type Option } from "./Picker";
 import { fromRowControl } from "./fields";
 import { cn, interactiveRow } from "./primitives";
 import { short, when } from "./time";
+
+function MoreRows<T>({
+  resource,
+  label,
+}: {
+  resource: PagedResourceSnapshot<T>;
+  label: string;
+}) {
+  if (resource.nextCursor === null) return null;
+  return (
+    <div className="flex justify-center py-3">
+      <Button
+        onClick={() => void resource.loadMore()}
+        label={label}
+        variant="ghost"
+        size="sm"
+      />
+    </div>
+  );
+}
 
 /**
  * The register's rhythm, borrowed wholesale from the issue list rather than
@@ -100,6 +124,64 @@ const SPEC_ROW_LAYOUT = cn("group/row flex items-center gap-2 py-2", SPEC_LIST_I
 /** The 16px column the checkbox lives in, shared with the group header above it
  *  so the index and title keep the same geometry whether or not it is showing. */
 const SPEC_LEADING_SLOT = "flex size-icon-md shrink-0 items-center justify-center";
+
+const renderedSpecs = (summaries: readonly SpecSummary[]): SpecView[] =>
+  summaries.flatMap((summary) => summary.view ? [summary.view] : []);
+
+const renderedBaselines = (summaries: readonly BaselineSummary[]): BaselineView[] =>
+  summaries.flatMap((summary) => summary.view ? [summary.view] : []);
+
+/** Standing is joined from the same exact page rather than copied into every
+ * immutable relation fact. Missing summaries leave a fact historical/inert. */
+const renderReferences = (
+  facts: readonly SpecReferenceFact[],
+  summaries: readonly SpecSummary[],
+): SpecReference[] => {
+  const bySpec = new Map(summaries.map((summary) => [summary.spec, summary]));
+  return facts.map((fact) => {
+    const summary = bySpec.get(fact.spec);
+    return {
+      ...fact,
+      head: summary?.heads.includes(fact.revision) ?? false,
+      issued: summary?.issued.includes(fact.revision) ?? false,
+    };
+  });
+};
+
+const verificationGapSummary = (
+  summary: SpecSummary,
+  facts: readonly SpecReferenceFact[],
+  summaries: readonly SpecSummary[],
+): boolean => {
+  if ((summary.kind !== "requirement" && summary.kind !== "design") || summary.issued.length !== 1) {
+    return false;
+  }
+  const bySpec = new Map(summaries.map((candidate) => [candidate.spec, candidate]));
+  return !facts.some((fact) => {
+    const source = bySpec.get(fact.spec);
+    return fact.spec !== summary.spec
+      && (source?.heads.includes(fact.revision) || source?.issued.includes(fact.revision))
+      && (fact.link.rel === "verifies" || fact.link.rel === "validates")
+      && fact.link.target.kind === "spec"
+      && fact.link.target.spec === summary.spec;
+  });
+};
+
+/** Fold only the bounded observation page. Retractions remain visible on the
+ * wire; the legacy note panel shows assertions that survive within this page. */
+const renderObservations = (records: readonly SpecObservationRecord[]): SpecObservation[] => {
+  const ordered = [...records].sort((left, right) => {
+    const leftTs = left.kind === "assert" ? left.observation.ts : left.timestamp;
+    const rightTs = right.kind === "assert" ? right.observation.ts : right.timestamp;
+    return leftTs - rightTs;
+  });
+  const live = new Map<string, SpecObservation>();
+  for (const record of ordered) {
+    if (record.kind === "assert") live.set(record.observation.observation, record.observation);
+    else live.delete(record.observation);
+  }
+  return [...live.values()];
+};
 
 /**
  * The project's Specs — an Issue says what work is happening, a Spec says what
@@ -243,7 +325,8 @@ function Register({
   onCompose: (next: SpecKind | "any") => void;
 }) {
   const specs = useProjectSpecs(spaceId, project);
-  const references = useSpecReferences(spaceId, project).data ?? [];
+  const referencePage = useSpecReferences(spaceId, project);
+  const references = referencePage.data ?? [];
   /**
    * The checked set, by spec id.
    *
@@ -301,7 +384,8 @@ function Register({
     return <ApplicationState kind="loading" title="Loading specs" />;
   }
 
-  const groups = groupByKind(specs.data);
+  const summaries = specs.data;
+  const groups = groupByKind(summaries);
   if (groups.length === 0) {
     return (
       <ApplicationState
@@ -354,7 +438,7 @@ function Register({
                 key={row.spec}
                 spec={row}
                 index={index}
-                gap={verificationGap(row, references)}
+                gap={verificationGapSummary(row, references, summaries)}
                 readOnly={readOnly}
                 checked={checked.has(row.spec)}
                 anyChecked={checked.size > 0}
@@ -365,6 +449,8 @@ function Register({
           </ul>
         </section>
       ))}
+      <MoreRows resource={specs} label="Load more specs" />
+      <MoreRows resource={referencePage} label="Load more reference facts" />
     </div>
   );
 }
@@ -379,7 +465,7 @@ function SpecRow({
   onToggleCheck,
   onOpen,
 }: {
-  spec: SpecView;
+  spec: SpecSummary;
   /** Position within this kind's section, zero-based. */
   index: number;
   /** In force, and nothing verifies it — the gap a coverage matrix looks for. */
@@ -392,7 +478,12 @@ function SpecRow({
   onToggleCheck: (spec: string, extend: boolean) => void;
   onOpen: (spec: string) => void;
 }) {
-  const label = standingLabel(standing(spec));
+  const label = spec.conflicted
+    ? { text: "conflicted", tone: "warn" as const }
+    : spec.view
+      ? standingLabel(standing(spec.view))
+      : null;
+  const title = spec.view?.title ?? spec.spec;
   return (
     <li
       className={cn(
@@ -419,7 +510,7 @@ function SpecRow({
       <span data-row-control="" className={SPEC_LEADING_SLOT}>
         {!readOnly && (
           <CheckboxInput
-            label={`Select ${spec.title}`}
+            label={`Select ${title}`}
             isLabelHidden
             size="sm"
             value={checked}
@@ -457,7 +548,7 @@ function SpecRow({
           kind that had it, and the one row shape that did not match its
           neighbours. `PlanIdentity` still earns its place on a relation row,
           where there is no header to say what you are looking at. */}
-      <span className="min-w-0 flex-1 truncate font-medium">{spec.title}</span>
+      <span className="min-w-0 flex-1 truncate font-medium">{title}</span>
       {/* Not styled as a warning: nothing is broken, and a wall of amber over
           a project that has not written its proofs yet would be. It is a gap,
           said once, on the rows where it is actually a gap. */}
@@ -483,7 +574,7 @@ function SpecRow({
           of these did I touch last. Right-aligned and quiet — it is how you find
           a row, not something you read. */}
       <span className="text-mute w-14 shrink-0 text-right text-2xs tabular-nums">
-        {when(spec.body.ts)}
+        {spec.view ? when(spec.view.body.ts) : ""}
       </span>
     </li>
   );
@@ -513,8 +604,10 @@ function BaselineReader({
 }) {
   const store = useProjectViewerStore();
   const resource = useBaseline(spaceId, baseline);
-  const history = useBaselineHistory(spaceId, baseline).data ?? [];
-  const everySpec = useProjectSpecs(spaceId, null).data ?? [];
+  const historyPage = useBaselineHistory(spaceId, baseline);
+  const history = historyPage.data ?? [];
+  const specPage = useProjectSpecs(spaceId, null);
+  const everySpec = renderedSpecs(specPage.data ?? []);
   const grants = useGrants(spaceId).data ?? [];
   const admin = members.some((member) => member.me && member.role === "admin");
   const [adding, setAdding] = useState(false);
@@ -731,6 +824,8 @@ function BaselineReader({
             </div>
           )}
         </section>
+        <MoreRows resource={historyPage} label="Load more baseline revisions" />
+        <MoreRows resource={specPage} label="Load more specs" />
       </article>
     </div>
   );
@@ -1842,14 +1937,20 @@ function SpecReader({
 }) {
   const store = useProjectViewerStore();
   const resource = useSpec(spaceId, spec);
-  const history = useSpecHistory(spaceId, spec).data ?? [];
+  const historyPage = useSpecHistory(spaceId, spec);
+  const history = historyPage.data ?? [];
   // The whole space, not this project: a relation crosses projects freely, and
   // an incoming edge the reader hid because its author sat elsewhere would be
   // the one case where "what relies on this" quietly lied.
-  const everySpec = useProjectSpecs(spaceId, null).data ?? [];
-  const references = useSpecReferences(spaceId, null).data ?? [];
-  const observations = useSpecObservations(spaceId, null).data ?? [];
-  const baselines = useProjectBaselines(spaceId, null).data ?? [];
+  const specPage = useProjectSpecs(spaceId, null);
+  const specSummaries = specPage.data ?? [];
+  const everySpec = renderedSpecs(specSummaries);
+  const referencePage = useSpecReferences(spaceId, null);
+  const references = renderReferences(referencePage.data ?? [], specSummaries);
+  const observationPage = useSpecObservations(spaceId, null);
+  const observations = renderObservations(observationPage.data ?? []);
+  const baselinePage = useProjectBaselines(spaceId, null);
+  const baselines = renderedBaselines(baselinePage.data ?? []);
   const { board } = useProjectBoard(spaceId, project);
   const rows = board?.columns.flatMap((column) => column.rows) ?? [];
   const grants = useGrants(spaceId).data ?? [];
@@ -1872,7 +1973,7 @@ function SpecReader({
     spaceId,
     view?.kind === "plan" ? view.project : null,
     geometryBody?.plan?.roots ?? [],
-    selectedRevision?.body.generation || null,
+    geometryBody?.publication ?? null,
   );
 
   // The authoritative title wins whenever it changes underneath — a doorbell
@@ -2096,8 +2197,8 @@ function SpecReader({
                   && ` · ${progress.cyclic + progress.stalled} structurally unresolved`}
                 {/* The counts are the only derived reading left on the page, so
                     they have to say which World they were taken from. A pinned
-                    revision reports its own generation; the head reports now. */}
-                {past && shown.generation && " · as of this revision"}
+                    revision reports its own publication; the head reports now. */}
+                {past && shown.publication && " · as of this revision"}
               </p>
             ) : null;
           })()}
@@ -2210,11 +2311,6 @@ function SpecReader({
             )}
             {view.kind === "plan" && shown.plan && (
               <>
-                {past && !shown.generation && (
-                  <p className="text-mute mt-4 text-xs">
-                    This revision predates generation coordinates; its closure counts are live.
-                  </p>
-                )}
                 <PlanSurface
                   plan={shown.plan}
                   rows={rows}
@@ -2314,6 +2410,11 @@ function SpecReader({
             }}
           />
         )}
+        <MoreRows resource={historyPage} label="Load more revisions" />
+        <MoreRows resource={referencePage} label="Load more references" />
+        <MoreRows resource={observationPage} label="Load more observations" />
+        <MoreRows resource={specPage} label="Load more related specs" />
+        <MoreRows resource={baselinePage} label="Load more baselines" />
       </article>
     </div>
   );

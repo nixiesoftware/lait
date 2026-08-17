@@ -40,10 +40,12 @@ pub fn build_prior(
     let frontier = meta.frontier.clone();
     let space = meta.genesis.space_id.clone();
     let effects = u64::try_from(meta.effects.len()).unwrap_or(u64::MAX);
-    let mut added = Vec::with_capacity(source.objects().len());
-    for object in source.objects() {
-        added.push(source.read_object(object)?);
-    }
+    let mut added =
+        Vec::with_capacity(usize::try_from(source.object_count()).unwrap_or(usize::MAX));
+    source.for_each_object(|object| {
+        added.push(source.read_object(&object)?);
+        Ok(())
+    })?;
 
     let target_path = target.as_ref().to_path_buf();
     let mut store = journal::Store::open(&target_path)?;

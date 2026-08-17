@@ -7,9 +7,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    body_index_key, object_ref, receipt_index_key, BodyKey, BodyRecord, CommitContext, Defect,
-    Failure, IndexedBody, IndexedReceipt, ManifestRoot, Object, QuotaConfig, Replica,
-    ReplicaFrontier, StoreMeta, STORE_META_FORMAT_VERSION,
+    body_index_key, object_ref, ownership_index_key, receipt_index_key, BodyKey, BodyRecord,
+    CommitContext, Defect, Failure, IndexedBody, IndexedOwnership, IndexedReceipt, ManifestRoot,
+    Object, OwnedObjectClass, PriorIndexedStoreMeta, QuotaConfig, Replica, ReplicaFrontier,
+    StoreMeta, STORE_META_FORMAT_VERSION,
 };
 use crate::protected::BodyKeySource;
 use crate::receipt::RequestReceipt;
@@ -17,15 +18,723 @@ use crate::receipt::RequestReceipt;
 const PRIOR_META_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorBodyHead {
+    tx: [u8; 32],
+    descriptor_hash: [u8; 32],
+    tx_commitment: [u8; 32],
+    protected: Option<Object>,
+    transaction: Option<Object>,
+    protected_len: u64,
+    tx_len: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorBodyRecord {
+    binding: super::BodyBinding,
+    chain: ReplicaFrontier,
+    heads: Vec<PriorBodyHead>,
+    interpreted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PriorMeta {
     version: u8,
     space: Option<mechanics::ids::SpaceId>,
     frontier: ReplicaFrontier,
     quota: QuotaConfig,
-    bodies: Vec<(BodyKey, BodyRecord)>,
+    bodies: Vec<(BodyKey, PriorBodyRecord)>,
     receipts: Vec<(Vec<u8>, Object)>,
     manifest_root: Option<Object>,
     manifest_pages: Vec<Object>,
+}
+
+/// One canonical whole-Body value opened from a prior signed head. These bytes
+/// are migration input only; they are never installed as a current BodyHead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorOpenedMaterial {
+    pub epoch: [u8; 16],
+    pub payload: fabric::BodyExport,
+    pub base_frontier: ReplicaFrontier,
+    pub resulting_frontier: ReplicaFrontier,
+}
+
+/// Signed transaction coordinates retained as evidence while composition
+/// authors the replacement current transaction under update consent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorTransactionEvidence {
+    pub id: [u8; 32],
+    pub bytes: Arc<[u8]>,
+    pub parent_manifest_root: [u8; 32],
+    pub replica_frontier: ReplicaFrontier,
+    pub authority_frontier: crate::frontier::AuthorityFrontier,
+    pub actor: String,
+    pub signer: [u8; 32],
+    pub intent_digest: [u8; 32],
+    pub operations_digest: [u8; 32],
+    pub demand: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorHeadEvidence {
+    pub descriptor_hash: [u8; 32],
+    pub transaction_commitment: [u8; 32],
+    pub transaction: PriorTransactionEvidence,
+    pub material: Option<PriorOpenedMaterial>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorBodyEvidence {
+    pub key: BodyKey,
+    pub binding: super::BodyBinding,
+    pub chain: ReplicaFrontier,
+    pub interpreted: bool,
+    pub heads: Vec<PriorHeadEvidence>,
+    pub content_refs: Vec<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorBodyPage {
+    pub bodies: Vec<PriorBodyEvidence>,
+    /// Exclusive prior-index cursor. `None` means this was the final page.
+    pub next: Option<[u8; 32]>,
+}
+
+/// A canonical prior request receipt. Publication digests did not exist in
+/// this generation; the composition migrator supplies them from the reviewed
+/// target publication rather than inventing historical values here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorReceiptEvidence {
+    pub version: u8,
+    pub space: mechanics::ids::SpaceId,
+    pub world: crate::body::WorldId,
+    pub device: mechanics::ids::DeviceId,
+    pub request: [u8; 16],
+    pub payload_hash: [u8; 32],
+    pub effect: Vec<u8>,
+    pub bodies: Vec<BodyKey>,
+    pub frontier: ReplicaFrontier,
+    pub transaction: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorReceiptPage {
+    pub receipts: Vec<(Vec<u8>, Arc<[u8]>, PriorReceiptEvidence)>,
+    /// Exclusive prior-index cursor. `None` means this was the final page.
+    pub next: Option<[u8; 32]>,
+}
+
+/// The exact signed prior catalog coordinate. Composition verifies the
+/// signer's standing at `authority_frontier` before replaying any page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorManifestEvidence {
+    pub bytes: Arc<[u8]>,
+    pub space: mechanics::ids::SpaceId,
+    pub frontier: ReplicaFrontier,
+    pub body_index_root: Option<([u8; 32], u64)>,
+    pub content_index_root: Option<([u8; 32], u64)>,
+    pub signer: [u8; 32],
+    pub authority_frontier: crate::frontier::AuthorityFrontier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorContentPage {
+    pub descriptors: Vec<crate::content::ContentDescriptor>,
+    pub next: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyDescriptor {
+    world: crate::body::WorldId,
+    body: crate::body::BodyId,
+    schema: crate::body::SchemaId,
+    schema_version: u32,
+    encoding: crate::body::EncodingId,
+    content_commitment: [u8; 32],
+}
+
+impl LegacyDescriptor {
+    fn key(&self) -> BodyKey {
+        BodyKey::new(self.world.clone(), self.body.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyCore {
+    version: u8,
+    space: [u8; 29],
+    parent_manifest_root: [u8; 32],
+    replica_frontier: ReplicaFrontier,
+    authority_frontier: crate::frontier::AuthorityFrontier,
+    actor: String,
+    signer: [u8; 32],
+    intent_digest: [u8; 32],
+    operations_digest: [u8; 32],
+    demand: Vec<u8>,
+    descriptors: Vec<LegacyDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyTransaction {
+    core: LegacyCore,
+    authorization_receipt: Vec<u8>,
+    signature_algorithm: u8,
+    #[serde(with = "serde_byte_array")]
+    signature: [u8; 64],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyMaterial {
+    version: u8,
+    mutation_model: u8,
+    payload: fabric::BodyExport,
+    base_frontier: ReplicaFrontier,
+    resulting_frontier: ReplicaFrontier,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyIndexedBody {
+    key: BodyKey,
+    record: PriorBodyRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyIndexedReceipt {
+    scope: Vec<u8>,
+    object: Object,
+}
+
+const LEGACY_TRANSACTION_DOMAIN: &[u8] = b"lait/body-transaction/2";
+const LEGACY_CORE_DIGEST_CONTEXT: &str = "lait.body-transaction-core.v1";
+const LEGACY_TRANSACTION_ID_CONTEXT: &str = "lait.body-transaction-id.v1";
+const LEGACY_MAX_TRANSACTION: usize = 1024 * 1024;
+const LEGACY_MAX_DESCRIPTORS: usize = 4096;
+const LEGACY_MAX_MATERIAL: usize = 64 * 1024 * 1024;
+
+fn legacy_length_framed(domain: &[u8], body: &[u8]) -> Option<Vec<u8>> {
+    let domain_len = u16::try_from(domain.len()).ok()?;
+    let body_len = u32::try_from(body.len()).ok()?;
+    let mut out = Vec::with_capacity(
+        2usize
+            .checked_add(domain.len())?
+            .checked_add(4)?
+            .checked_add(body.len())?,
+    );
+    out.extend_from_slice(&domain_len.to_be_bytes());
+    out.extend_from_slice(domain);
+    out.extend_from_slice(&body_len.to_be_bytes());
+    out.extend_from_slice(body);
+    Some(out)
+}
+
+fn legacy_core_digest(core: &LegacyCore) -> Result<[u8; 32], Failure> {
+    let bytes = postcard::to_stdvec(core).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    Ok(blake3::derive_key(LEGACY_CORE_DIGEST_CONTEXT, &bytes))
+}
+
+fn legacy_transaction_id(bytes: &[u8]) -> [u8; 32] {
+    blake3::derive_key(LEGACY_TRANSACTION_ID_CONTEXT, bytes)
+}
+
+fn decode_legacy_transaction(bytes: &[u8]) -> Result<LegacyTransaction, Failure> {
+    if bytes.len() > LEGACY_MAX_TRANSACTION {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    let tx: LegacyTransaction =
+        postcard::from_bytes(bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    if postcard::to_stdvec(&tx).ok().as_deref() != Some(bytes)
+        || tx.core.version != 1
+        || tx.signature_algorithm != 1
+        || tx.core.descriptors.is_empty()
+        || tx.core.descriptors.len() > LEGACY_MAX_DESCRIPTORS
+    {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    let space = std::str::from_utf8(&tx.core.space)
+        .ok()
+        .and_then(mechanics::ids::SpaceId::parse)
+        .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
+    if mechanics::ids::ActorId::parse(&tx.core.actor).is_none() {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    if tx
+        .core
+        .descriptors
+        .windows(2)
+        .any(|pair| pair[0].key() >= pair[1].key())
+    {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    let demand = mechanics::authorization::AuthorizationDemand::decode_canonical(&tx.core.demand)
+        .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
+    let receipt = mechanics::authorization::AuthorizationReceipt::decode(&tx.authorization_receipt)
+        .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
+    if receipt.space != space.as_str()
+        || receipt.actor != tx.core.actor
+        || receipt.device != tx.core.signer
+        || receipt.authority_frontier != tx.core.authority_frontier.as_bytes()
+        || receipt.parent_manifest_root != tx.core.parent_manifest_root
+        || receipt.intent_digest != tx.core.intent_digest
+        || receipt.effect_operations_digest != tx.core.operations_digest
+        || receipt.demand_digest
+            != demand
+                .digest()
+                .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?
+        || receipt.body_transaction_core_digest != legacy_core_digest(&tx.core)?
+    {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    let preimage_body = postcard::to_stdvec(&(&tx.core, &tx.authorization_receipt))
+        .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    let preimage = legacy_length_framed(LEGACY_TRANSACTION_DOMAIN, &preimage_body)
+        .ok_or(Failure::Integrity(Defect::Encoding))?;
+    if !mechanics::actor::verify_detached(&tx.core.signer, &preimage, &tx.signature) {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    Ok(tx)
+}
+
+fn open_legacy_material(
+    opening: &mechanics::authorization::AuthorizedBodyKey,
+    envelope: &[u8],
+    record: &PriorBodyRecord,
+) -> Result<PriorOpenedMaterial, Failure> {
+    if envelope.len() > LEGACY_MAX_MATERIAL {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    let epoch = mechanics::authorization::body_epoch_id(envelope)
+        .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
+    if opening.epoch_id() != &epoch {
+        return Err(Failure::BodyKeyUnavailable);
+    }
+    let bytes = mechanics::authorization::body_open(opening, envelope)
+        .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
+    let material: LegacyMaterial =
+        postcard::from_bytes(&bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    if postcard::to_stdvec(&material).ok().as_deref() != Some(bytes.as_slice())
+        || material.version != 1
+        || material.mutation_model != record.binding.mutation_model
+        || match (&material.payload, material.mutation_model) {
+            (fabric::BodyExport::Atomic(_), super::MUTATION_ATOMIC) => false,
+            (fabric::BodyExport::Collaborative(_), super::MUTATION_COLLABORATIVE) => false,
+            _ => true,
+        }
+        || material.resulting_frontier.transaction_count
+            != material.base_frontier.transaction_count.saturating_add(1)
+    {
+        return Err(Failure::Integrity(Defect::CorruptMaterial));
+    }
+    Ok(PriorOpenedMaterial {
+        epoch,
+        payload: material.payload,
+        base_frontier: material.base_frontier,
+        resulting_frontier: material.resulting_frontier,
+    })
+}
+
+fn validate_prior_advertisement(
+    key: &BodyKey,
+    record: &PriorBodyRecord,
+    advertised: &crate::manifest::ManifestEntry,
+) -> Result<(), Failure> {
+    let expected_heads = record
+        .heads
+        .iter()
+        .map(|head| crate::manifest::ManifestHead {
+            descriptor_hash: head.descriptor_hash,
+            transaction_commitment: head.tx_commitment,
+        })
+        .collect::<Vec<_>>();
+    if advertised.key != *key || advertised.heads != expected_heads {
+        return Err(Failure::Integrity(Defect::Index));
+    }
+    Ok(())
+}
+
+/// Validated, read-only streaming access to an actual indexed Journal-v2
+/// Replica. The source directory remains untouched. A caller may build a fresh
+/// target, verify it, and activate it atomically, but cannot reinterpret these
+/// old signatures as current causal descriptors.
+pub struct PriorReplicaSource {
+    source: journal::GenerationSource,
+    meta: PriorIndexedStoreMeta,
+    manifest: PriorManifestEvidence,
+    keys: Arc<dyn BodyKeySource>,
+}
+
+impl PriorReplicaSource {
+    pub fn open(path: impl AsRef<Path>, keys: Arc<dyn BodyKeySource>) -> Result<Self, Failure> {
+        let source = journal::GenerationSource::open(path.as_ref()).map_err(map_journal)?;
+        let meta: PriorIndexedStoreMeta = postcard::from_bytes(source.meta())
+            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        if meta.format_version != 2
+            || postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?
+                != source.meta()
+        {
+            return Err(Failure::Integrity(Defect::Encoding));
+        }
+        let committed: BTreeSet<([u8; 32], u64)> =
+            source.caller_index_roots().into_iter().collect();
+        for root in [
+            meta.body_index_root,
+            meta.manifest_body_root,
+            meta.content_index_root,
+            meta.receipt_index_root,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !committed.contains(&(root.hash, root.count)) {
+                return Err(Failure::Integrity(Defect::Index));
+            }
+        }
+        let root_ref = meta
+            .manifest_root
+            .ok_or(Failure::Integrity(Defect::Encoding))?;
+        let root_bytes = source.read_object(&root_ref).map_err(map_journal)?;
+        let root = crate::manifest::ManifestRoot::decode_canonical(&root_bytes)
+            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        root.verify()
+            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        let space = std::str::from_utf8(&root.space)
+            .ok()
+            .and_then(mechanics::ids::SpaceId::parse)
+            .ok_or(Failure::Integrity(Defect::Encoding))?;
+        if meta.space.as_ref() != Some(&space)
+            || root.replica_frontier != meta.frontier
+            || root.body_index_root != meta.manifest_body_root
+            || root.content_index_root != meta.content_index_root
+            || root.body_count != meta.body_index_root.map_or(0, |child| child.count)
+        {
+            return Err(Failure::Integrity(Defect::Encoding));
+        }
+        let manifest = PriorManifestEvidence {
+            bytes: Arc::from(root_bytes),
+            space,
+            frontier: root.replica_frontier,
+            body_index_root: root.body_index_root.map(|child| (child.hash, child.count)),
+            content_index_root: root
+                .content_index_root
+                .map(|child| (child.hash, child.count)),
+            signer: root.signer,
+            authority_frontier: root.authority_frontier,
+        };
+        Ok(Self {
+            source,
+            meta,
+            manifest,
+            keys,
+        })
+    }
+
+    pub fn space(&self) -> Option<&mechanics::ids::SpaceId> {
+        self.meta.space.as_ref()
+    }
+
+    pub fn frontier(&self) -> ReplicaFrontier {
+        self.meta.frontier
+    }
+
+    pub fn quota(&self) -> QuotaConfig {
+        self.meta.quota
+    }
+
+    pub fn manifest(&self) -> &PriorManifestEvidence {
+        &self.manifest
+    }
+
+    pub fn body_count(&self) -> u64 {
+        self.meta.body_index_root.map_or(0, |root| root.count)
+    }
+
+    pub fn receipt_count(&self) -> u64 {
+        self.meta.receipt_index_root.map_or(0, |root| root.count)
+    }
+
+    pub fn content_count(&self) -> u64 {
+        self.meta.content_index_root.map_or(0, |root| root.count)
+    }
+
+    pub fn for_each_body(
+        &self,
+        mut visit: impl FnMut(PriorBodyEvidence) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        let mut after = None;
+        loop {
+            let page = self.body_page(after, 4096)?;
+            for body in page.bodies {
+                visit(body)?;
+            }
+            let Some(next) = page.next else { return Ok(()) };
+            after = Some(next);
+        }
+    }
+
+    pub fn body_page(&self, after: Option<[u8; 32]>, limit: u16) -> Result<PriorBodyPage, Failure> {
+        let Some(root) = self.meta.body_index_root else {
+            return Ok(PriorBodyPage {
+                bodies: Vec::new(),
+                next: None,
+            });
+        };
+        let page = self
+            .source
+            .caller_index_page((root.hash, root.count), after, limit)
+            .map_err(map_journal)?;
+        let mut bodies = Vec::with_capacity(page.entries.len());
+        for entry in page.entries {
+            let indexed: LegacyIndexedBody = postcard::from_bytes(&entry.value)
+                .map_err(|_| Failure::Integrity(Defect::Index))?;
+            if postcard::to_stdvec(&indexed).ok().as_deref() != Some(entry.value.as_slice())
+                || body_index_key(&indexed.key) != entry.key
+                || indexed.record.heads.is_empty()
+            {
+                return Err(Failure::Integrity(Defect::Index));
+            }
+            bodies.push(self.open_body(indexed)?);
+        }
+        Ok(PriorBodyPage {
+            bodies,
+            next: page.next,
+        })
+    }
+
+    pub fn for_each_receipt(
+        &self,
+        mut visit: impl FnMut(Vec<u8>, Arc<[u8]>, PriorReceiptEvidence) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        let mut after = None;
+        loop {
+            let page = self.receipt_page(after, 4096)?;
+            for (scope, bytes, receipt) in page.receipts {
+                visit(scope, bytes, receipt)?;
+            }
+            let Some(next) = page.next else { return Ok(()) };
+            after = Some(next);
+        }
+    }
+
+    pub fn receipt_page(
+        &self,
+        after: Option<[u8; 32]>,
+        limit: u16,
+    ) -> Result<PriorReceiptPage, Failure> {
+        let Some(root) = self.meta.receipt_index_root else {
+            return Ok(PriorReceiptPage {
+                receipts: Vec::new(),
+                next: None,
+            });
+        };
+        let page = self
+            .source
+            .caller_index_page((root.hash, root.count), after, limit)
+            .map_err(map_journal)?;
+        let mut receipts = Vec::with_capacity(page.entries.len());
+        for entry in page.entries {
+            let indexed: LegacyIndexedReceipt = postcard::from_bytes(&entry.value)
+                .map_err(|_| Failure::Integrity(Defect::Index))?;
+            if postcard::to_stdvec(&indexed).ok().as_deref() != Some(entry.value.as_slice())
+                || receipt_index_key(&indexed.scope) != entry.key
+            {
+                return Err(Failure::Integrity(Defect::Index));
+            }
+            let bytes = self
+                .source
+                .read_object(&indexed.object)
+                .map_err(map_journal)?;
+            let receipt: PriorReceiptEvidence =
+                postcard::from_bytes(&bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+            if postcard::to_stdvec(&receipt).ok().as_deref() != Some(bytes.as_slice())
+                || receipt.version != 1
+                || receipt.effect.len() > crate::receipt::MAX_EFFECT_BYTES
+                || crate::receipt::scope_key(
+                    &receipt.space,
+                    &receipt.world,
+                    &receipt.device,
+                    &receipt.request,
+                ) != indexed.scope
+            {
+                return Err(Failure::Integrity(Defect::Encoding));
+            }
+            receipts.push((indexed.scope, Arc::from(bytes), receipt));
+        }
+        Ok(PriorReceiptPage {
+            receipts,
+            next: page.next,
+        })
+    }
+
+    pub fn content_page(
+        &self,
+        after: Option<[u8; 32]>,
+        limit: u16,
+    ) -> Result<PriorContentPage, Failure> {
+        let Some(root) = self.meta.content_index_root else {
+            return Ok(PriorContentPage {
+                descriptors: Vec::new(),
+                next: None,
+            });
+        };
+        let page = self
+            .source
+            .caller_index_page((root.hash, root.count), after, limit)
+            .map_err(map_journal)?;
+        let mut descriptors = Vec::with_capacity(page.entries.len());
+        for entry in page.entries {
+            let descriptor = crate::content::ContentDescriptor::decode_canonical(&entry.value)
+                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+            if descriptor.space != self.manifest.space.as_str()
+                || crate::manifest::content_index_key(descriptor.content_ref().as_bytes())
+                    != entry.key
+            {
+                return Err(Failure::Integrity(Defect::Index));
+            }
+            descriptors.push(descriptor);
+        }
+        Ok(PriorContentPage {
+            descriptors,
+            next: page.next,
+        })
+    }
+
+    fn open_body(&self, indexed: LegacyIndexedBody) -> Result<PriorBodyEvidence, Failure> {
+        let LegacyIndexedBody { key, record } = indexed;
+        let manifest_root = self
+            .meta
+            .manifest_body_root
+            .ok_or(Failure::Integrity(Defect::Index))?;
+        let manifest_bytes = self
+            .source
+            .caller_index_lookup(
+                (manifest_root.hash, manifest_root.count),
+                &body_index_key(&key),
+            )
+            .map_err(map_journal)?
+            .ok_or(Failure::Integrity(Defect::Index))?;
+        let advertised = crate::manifest::ManifestEntry::decode_canonical(&manifest_bytes)
+            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        validate_prior_advertisement(&key, &record, &advertised)?;
+        for content in &advertised.content_refs {
+            let root = self
+                .meta
+                .content_index_root
+                .ok_or(Failure::Integrity(Defect::Index))?;
+            let bytes = self
+                .source
+                .caller_index_lookup(
+                    (root.hash, root.count),
+                    &crate::manifest::content_index_key(content),
+                )
+                .map_err(map_journal)?
+                .ok_or(Failure::Integrity(Defect::Index))?;
+            let descriptor = crate::content::ContentDescriptor::decode_canonical(&bytes)
+                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+            if descriptor.space != self.manifest.space.as_str()
+                || descriptor.content_ref().as_bytes() != content
+            {
+                return Err(Failure::Integrity(Defect::Index));
+            }
+        }
+        let mut heads = Vec::with_capacity(record.heads.len());
+        for head in &record.heads {
+            let protected = head
+                .protected
+                .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+            let transaction_ref = head
+                .transaction
+                .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+            if protected.len != head.protected_len || transaction_ref.len != head.tx_len {
+                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            }
+            let transaction_bytes = self
+                .source
+                .read_object(&transaction_ref)
+                .map_err(map_journal)?;
+            let transaction = decode_legacy_transaction(&transaction_bytes)?;
+            if legacy_transaction_id(&transaction_bytes) != head.tx
+                || *blake3::hash(&transaction_bytes).as_bytes() != head.tx_commitment
+            {
+                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            }
+            let descriptor = transaction
+                .core
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.key() == key)
+                .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+            let descriptor_bytes = postcard::to_stdvec(descriptor)
+                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+            if *blake3::hash(&descriptor_bytes).as_bytes() != head.descriptor_hash
+                || descriptor.schema != record.binding.schema
+                || descriptor.schema_version != record.binding.schema_version
+                || descriptor.encoding != record.binding.encoding
+            {
+                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            }
+            let envelope = self.source.read_object(&protected).map_err(map_journal)?;
+            if crate::body::ContentCommitment::over_protected_payload(&envelope).as_bytes()
+                != descriptor.content_commitment
+            {
+                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            }
+            let epoch = mechanics::authorization::body_epoch_id(&envelope)
+                .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
+            let material = match self.keys.opening_key(&epoch) {
+                Some(opening) => Some(open_legacy_material(&opening, &envelope, &record)?),
+                None if record.interpreted => return Err(Failure::BodyKeyUnavailable),
+                None => None,
+            };
+            heads.push(PriorHeadEvidence {
+                descriptor_hash: head.descriptor_hash,
+                transaction_commitment: head.tx_commitment,
+                transaction: PriorTransactionEvidence {
+                    id: head.tx,
+                    bytes: Arc::from(transaction_bytes),
+                    parent_manifest_root: transaction.core.parent_manifest_root,
+                    replica_frontier: transaction.core.replica_frontier,
+                    authority_frontier: transaction.core.authority_frontier.clone(),
+                    actor: transaction.core.actor.clone(),
+                    signer: transaction.core.signer,
+                    intent_digest: transaction.core.intent_digest,
+                    operations_digest: transaction.core.operations_digest,
+                    demand: transaction.core.demand.clone(),
+                },
+                material,
+            });
+        }
+        if record.interpreted {
+            let mut derived = None;
+            for head in &heads {
+                let material = head
+                    .material
+                    .as_ref()
+                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                derived = Some(match (&material.payload, derived) {
+                    (_, None) => material.resulting_frontier,
+                    (fabric::BodyExport::Atomic(_), Some(current)) => {
+                        if super::chain_order(&material.resulting_frontier, &current).is_gt() {
+                            material.resulting_frontier
+                        } else {
+                            current
+                        }
+                    }
+                    (fabric::BodyExport::Collaborative(_), Some(current)) => {
+                        super::combine_chains(&current, &material.resulting_frontier)
+                    }
+                });
+            }
+            if derived != Some(record.chain) {
+                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            }
+        }
+        Ok(PriorBodyEvidence {
+            key,
+            binding: record.binding,
+            chain: record.chain,
+            interpreted: record.interpreted,
+            heads,
+            content_refs: advertised.content_refs,
+        })
+    }
 }
 
 /// Evidence that the rebuilt catalogs encode the same committed logical view.
@@ -58,7 +767,15 @@ pub fn build_prior(
     context: &CommitContext<'_>,
     keys: Arc<dyn BodyKeySource>,
 ) -> Result<Verification, Failure> {
-    let source = journal::GenerationSource::open(source.as_ref()).map_err(map_journal)?;
+    let source_path = source.as_ref();
+    if let Ok(indexed) = PriorReplicaSource::open(source_path, keys.clone()) {
+        if indexed.body_count() != 0 {
+            return Err(Failure::NeedsSemanticMigration {
+                bodies: indexed.body_count(),
+            });
+        }
+    }
+    let source = journal::GenerationSource::open(source_path).map_err(map_journal)?;
     let target_path = target.as_ref().to_path_buf();
     let prior: PriorMeta =
         postcard::from_bytes(source.meta()).map_err(|_| Failure::Integrity(Defect::Encoding))?;
@@ -70,19 +787,17 @@ pub fn build_prior(
         return Err(Failure::Integrity(Defect::Encoding));
     }
 
-    let mut bodies = BTreeMap::new();
+    // A whole-Body signed head cannot be rewritten into an ArtifactRef closure
+    // without its author. Pre-v1 migrations replay non-empty Bodies through a
+    // current Replica instead of manufacturing a signature here.
+    if !prior.bodies.is_empty() {
+        return Err(Failure::NeedsSemanticMigration {
+            bodies: u64::try_from(prior.bodies.len()).unwrap_or(u64::MAX),
+        });
+    }
+    let bodies: BTreeMap<BodyKey, BodyRecord> = BTreeMap::new();
     let mut added = Vec::new();
     let mut required = BTreeSet::new();
-    for (key, record) in prior.bodies {
-        if record.heads.is_empty() || bodies.insert(key.clone(), record.clone()).is_some() {
-            return Err(Failure::Integrity(Defect::Encoding));
-        }
-        for reference in record_references(&record)? {
-            if required.insert(reference.hash) {
-                added.push(source.read_object(&reference).map_err(map_journal)?);
-            }
-        }
-    }
 
     let mut receipts = BTreeMap::new();
     for (scope, reference) in prior.receipts {
@@ -155,6 +870,37 @@ pub fn build_prior(
     let receipt_index_root = crate::index::build_index(receipt_entries, &mut sink)
         .map_err(|_| Failure::Integrity(Defect::Index))?;
 
+    let mut receipt_owners = BTreeMap::<[u8; 32], (Object, u64)>::new();
+    for (object, _) in receipts.values() {
+        match receipt_owners.get_mut(&object.hash) {
+            Some((held, owners)) if held == object => {
+                *owners = owners
+                    .checked_add(1)
+                    .ok_or(Failure::Integrity(Defect::Index))?;
+            }
+            Some(_) => return Err(Failure::Integrity(Defect::CorruptMaterial)),
+            None => {
+                receipt_owners.insert(object.hash, (*object, 1));
+            }
+        }
+    }
+    let ownership_entries = receipt_owners
+        .iter()
+        .map(|(hash, (object, owners))| {
+            Ok(crate::index::IndexEntry {
+                key: ownership_index_key(hash),
+                value: postcard::to_stdvec(&IndexedOwnership {
+                    object: *object,
+                    class: OwnedObjectClass::DeferredReceipt,
+                    owners: *owners,
+                })
+                .map_err(|_| Failure::Integrity(Defect::Encoding))?,
+            })
+        })
+        .collect::<Result<Vec<_>, Failure>>()?;
+    let ownership_index_root = crate::index::build_index(ownership_entries, &mut sink)
+        .map_err(|_| Failure::Integrity(Defect::Index))?;
+
     let root = ManifestRoot::sign_with(
         context.space,
         prior.frontier,
@@ -179,7 +925,12 @@ pub fn build_prior(
         manifest_body_root,
         content_index_root: None,
         receipt_index_root,
+        receipt_count: u64::try_from(receipts.len()).unwrap_or(u64::MAX),
+        receipt_material_bytes: receipts.values().fold(0u64, |total, (_, bytes)| {
+            total.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+        }),
         generation_index_root: None,
+        ownership_index_root,
         manifest_root: Some(root_object),
     };
     let meta = postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
@@ -189,16 +940,34 @@ pub fn build_prior(
         .chain(receipt_index_root)
         .map(|root| (root.hash, root.count))
         .collect();
+    let lazy_roots: Vec<([u8; 32], u64)> = ownership_index_root
+        .into_iter()
+        .map(|root| (root.hash, root.count))
+        .collect();
     let caller_index = journal::Index {
         roots: &roots,
+        lazy_roots: &lazy_roots,
         nodes: &sink.written,
     };
     let mut target_store = journal::Store::open(&target_path).map_err(map_journal)?;
     if target_store.manifest().is_some() {
         return Err(Failure::Integrity(Defect::Encoding));
     }
+    let receipt_hashes: BTreeSet<[u8; 32]> = receipt_owners.keys().copied().collect();
+    let (deferred_added, eager_added): (Vec<Vec<u8>>, Vec<Vec<u8>>) = added
+        .into_iter()
+        .partition(|bytes| receipt_hashes.contains(&object_ref(bytes).hash));
     target_store
-        .commit(&added, &[], caller_index, meta)
+        .commit_classified(
+            &eager_added,
+            &[],
+            journal::Deferred {
+                added: &deferred_added,
+                removed: &[],
+            },
+            caller_index,
+            meta,
+        )
         .map_err(map_journal)?;
     verify_target(&target_store, evidence, &bodies, &receipts)?;
     drop(target_store);
@@ -303,21 +1072,6 @@ fn verify_target(
     Ok(())
 }
 
-fn record_references(record: &BodyRecord) -> Result<Vec<Object>, Failure> {
-    let mut references = Vec::with_capacity(record.heads.len().saturating_mul(2));
-    for head in &record.heads {
-        let protected = head
-            .protected
-            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-        let transaction = head
-            .transaction
-            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-        references.push(protected);
-        references.push(transaction);
-    }
-    Ok(references)
-}
-
 fn semantic_evidence(
     space: Option<&mechanics::ids::SpaceId>,
     frontier: ReplicaFrontier,
@@ -345,7 +1099,7 @@ fn map_journal(failure: journal::Failure) -> Failure {
 mod tests {
     use super::*;
     use crate::frontier::AuthorityFrontier;
-    use crate::transaction::SeedSigner;
+    use crate::transaction::{SeedSigner, Signer};
     use mechanics::authorization::AuthorizedBodyKey;
     use mechanics::ids::SpaceId;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -382,6 +1136,279 @@ mod tests {
         fn opening_key(&self, _epoch: &[u8; 16]) -> Option<AuthorizedBodyKey> {
             None
         }
+    }
+
+    const PRIOR_EPOCH: [u8; 16] = [0x31; 16];
+    const PRIOR_KEY: [u8; 32] = [0x42; 32];
+
+    struct PriorKeys;
+
+    impl BodyKeySource for PriorKeys {
+        fn sealing_key(&self) -> Option<AuthorizedBodyKey> {
+            Some(AuthorizedBodyKey::for_authorized_epoch(
+                PRIOR_EPOCH,
+                PRIOR_KEY,
+            ))
+        }
+
+        fn opening_key(&self, epoch: &[u8; 16]) -> Option<AuthorizedBodyKey> {
+            (epoch == &PRIOR_EPOCH)
+                .then(|| AuthorizedBodyKey::for_authorized_epoch(PRIOR_EPOCH, PRIOR_KEY))
+        }
+    }
+
+    #[derive(Serialize)]
+    struct PriorIndexedManifest {
+        format_version: u8,
+        sequence: u64,
+        required_object_index_root: Option<([u8; 32], u64)>,
+        caller_meta: Option<Object>,
+        caller_index_roots: Vec<([u8; 32], u64)>,
+    }
+
+    fn write_object(root: &Path, bytes: &[u8]) -> Object {
+        let object = object_ref(bytes);
+        let name = object
+            .hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        std::fs::write(root.join("objects").join(name), bytes).unwrap();
+        object
+    }
+
+    fn write_index(root: &Path, entries: Vec<crate::index::IndexEntry>) -> crate::index::ChildRef {
+        let mut sink = crate::index::NodeSink::default();
+        let child = crate::index::build_index(entries, &mut sink)
+            .unwrap()
+            .expect("non-empty fixture index");
+        for bytes in sink.written {
+            write_object(root, &bytes);
+        }
+        child
+    }
+
+    fn legacy_transaction(
+        space: &SpaceId,
+        descriptor: LegacyDescriptor,
+        seed: &[u8; 32],
+    ) -> LegacyTransaction {
+        use mechanics::authorization::{
+            policy_evidence_digest, AuthorizationDemand, AuthorizationReceipt, PolicyCapability,
+            Resource,
+        };
+        let signer = SeedSigner(seed);
+        let demand = AuthorizationDemand::require(
+            PolicyCapability::new("com.example.prior", "write"),
+            Resource::root("com.example.prior"),
+        );
+        let demand_bytes = demand.encode_canonical().unwrap();
+        let mut space_bytes = [0u8; 29];
+        space_bytes.copy_from_slice(space.as_str().as_bytes());
+        let core = LegacyCore {
+            version: 1,
+            space: space_bytes,
+            parent_manifest_root: [0u8; 32],
+            replica_frontier: ReplicaFrontier::new([0x61; 32], 1),
+            authority_frontier: AuthorityFrontier::from_canonical_bytes(Vec::new()),
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            signer: signer.signer_key(),
+            intent_digest: [0x62; 32],
+            operations_digest: [0x63; 32],
+            demand: demand_bytes,
+            descriptors: vec![descriptor],
+        };
+        let receipt = AuthorizationReceipt {
+            space: space.as_str().to_string(),
+            world: "com.example.prior".to_string(),
+            actor: core.actor.clone(),
+            device: core.signer,
+            authority_frontier: core.authority_frontier.as_bytes().to_vec(),
+            authority_checkpoint_commitment: [0u8; 32],
+            policy_evidence_digest: policy_evidence_digest(&[]),
+            parent_manifest_root: core.parent_manifest_root,
+            implementation_id: [0u8; 32],
+            intent_digest: core.intent_digest,
+            demand_digest: demand.digest().unwrap(),
+            effect_operations_digest: core.operations_digest,
+            body_transaction_core_digest: legacy_core_digest(&core).unwrap(),
+            decision: 1,
+        }
+        .encode();
+        let preimage_body = postcard::to_stdvec(&(&core, &receipt)).unwrap();
+        let preimage = legacy_length_framed(LEGACY_TRANSACTION_DOMAIN, &preimage_body).unwrap();
+        LegacyTransaction {
+            core,
+            authorization_receipt: receipt,
+            signature_algorithm: 1,
+            signature: signer.sign_preimage(&preimage),
+        }
+    }
+
+    fn indexed_prior_fixture(name: &str) -> (std::path::PathBuf, BodyKey, Vec<u8>) {
+        let root = directory(name);
+        let space = SpaceId::from_digest([0x51; 16]);
+        let world = crate::body::WorldId::parse("com.example.prior").unwrap();
+        let key = BodyKey::new(world, crate::body::BodyId::from_bytes([0x52; 16]));
+        let binding = super::super::BodyBinding {
+            schema: crate::body::SchemaId::parse("fact").unwrap(),
+            schema_version: 1,
+            encoding: crate::body::EncodingId::parse("bytes").unwrap(),
+            mutation_model: super::super::MUTATION_ATOMIC,
+        };
+        let chain = ReplicaFrontier::new([0x53; 32], 1);
+        let value = b"prior signed fact".to_vec();
+        let material = LegacyMaterial {
+            version: 1,
+            mutation_model: super::super::MUTATION_ATOMIC,
+            payload: fabric::BodyExport::Atomic(value.clone()),
+            base_frontier: ReplicaFrontier::EMPTY,
+            resulting_frontier: chain,
+        };
+        let opening = AuthorizedBodyKey::for_authorized_epoch(PRIOR_EPOCH, PRIOR_KEY);
+        let envelope =
+            mechanics::authorization::body_seal(&opening, &postcard::to_stdvec(&material).unwrap())
+                .unwrap();
+        let protected = write_object(&root, &envelope);
+        let descriptor = LegacyDescriptor {
+            world: key.world.clone(),
+            body: key.body.clone(),
+            schema: binding.schema.clone(),
+            schema_version: binding.schema_version,
+            encoding: binding.encoding.clone(),
+            content_commitment: crate::body::ContentCommitment::over_protected_payload(&envelope)
+                .as_bytes(),
+        };
+        let tx = legacy_transaction(&space, descriptor.clone(), &[0x54; 32]);
+        let tx_bytes = postcard::to_stdvec(&tx).unwrap();
+        let transaction = write_object(&root, &tx_bytes);
+        let head = PriorBodyHead {
+            tx: legacy_transaction_id(&tx_bytes),
+            descriptor_hash: *blake3::hash(&postcard::to_stdvec(&descriptor).unwrap()).as_bytes(),
+            tx_commitment: *blake3::hash(&tx_bytes).as_bytes(),
+            protected: Some(protected),
+            transaction: Some(transaction),
+            protected_len: protected.len,
+            tx_len: transaction.len,
+        };
+        let record = PriorBodyRecord {
+            binding,
+            chain,
+            heads: vec![head.clone()],
+            interpreted: true,
+        };
+        let body_value = postcard::to_stdvec(&LegacyIndexedBody {
+            key: key.clone(),
+            record,
+        })
+        .unwrap();
+        let body_root = write_index(
+            &root,
+            vec![crate::index::IndexEntry {
+                key: body_index_key(&key),
+                value: body_value,
+            }],
+        );
+        // Empty content still has one canonical leaf. Keeping a zero-leaf
+        // descriptor here used to make this prior-store fixture bypass the
+        // current content geometry instead of exercising the migration
+        // verifier against evidence a real v2 writer could have produced.
+        let empty_leaf = crate::content::ChunkLeaf {
+            chunk_index: 0,
+            ciphertext_len: 0,
+            ciphertext_hash: *blake3::hash(&[]).as_bytes(),
+        };
+        let content_descriptor = crate::content::ContentDescriptor {
+            format_version: crate::content::CONTENT_FORMAT_VERSION,
+            space: space.as_str().to_string(),
+            content_nonce: [0x56; 16],
+            plaintext_len: 0,
+            chunk_plaintext_len: crate::content::CHUNK_PLAINTEXT_LEN,
+            chunk_count: 1,
+            ciphertext_merkle_root: crate::content::merkle_root(&[empty_leaf]),
+            epoch: PRIOR_EPOCH,
+        };
+        content_descriptor.validate().unwrap();
+        let content_id = *content_descriptor.content_ref().as_bytes();
+        let content_root = write_index(
+            &root,
+            vec![crate::index::IndexEntry {
+                key: crate::manifest::content_index_key(&content_id),
+                value: content_descriptor.encode(),
+            }],
+        );
+        let advertised = crate::manifest::ManifestEntry::declaring(
+            key.clone(),
+            vec![crate::manifest::ManifestHead {
+                descriptor_hash: head.descriptor_hash,
+                transaction_commitment: head.tx_commitment,
+            }],
+            vec![content_id],
+        )
+        .unwrap();
+        let advertised_root = write_index(
+            &root,
+            vec![crate::index::IndexEntry {
+                key: body_index_key(&key),
+                value: advertised.encode(),
+            }],
+        );
+        let signer = SeedSigner(&[0x55; 32]);
+        let signed_root = crate::manifest::ManifestRoot::sign_with(
+            &space,
+            tx.core.replica_frontier,
+            Some(advertised_root),
+            Some(content_root),
+            AuthorityFrontier::from_canonical_bytes(Vec::new()),
+            &signer,
+        )
+        .unwrap();
+        let signed_root_object = write_object(&root, &signed_root.encode());
+        let meta = PriorIndexedStoreMeta {
+            format_version: 2,
+            space: Some(space),
+            frontier: tx.core.replica_frontier,
+            quota: QuotaConfig::default(),
+            body_index_root: Some(body_root),
+            manifest_body_root: Some(advertised_root),
+            content_index_root: Some(content_root),
+            receipt_index_root: None,
+            manifest_root: Some(signed_root_object),
+        };
+        let meta_bytes = postcard::to_stdvec(&meta).unwrap();
+        let meta_object = write_object(&root, &meta_bytes);
+
+        let mut required = vec![protected, transaction, signed_root_object, meta_object];
+        required.sort_by_key(|object| object.hash);
+        required.dedup_by_key(|object| object.hash);
+        let required_root = write_index(
+            &root,
+            required
+                .into_iter()
+                .map(|object| crate::index::IndexEntry {
+                    key: object.hash,
+                    value: object.len.to_be_bytes().to_vec(),
+                })
+                .collect(),
+        );
+        let manifest = PriorIndexedManifest {
+            format_version: 2,
+            sequence: 7,
+            required_object_index_root: Some((required_root.hash, required_root.count)),
+            caller_meta: Some(meta_object),
+            caller_index_roots: vec![
+                (body_root.hash, body_root.count),
+                (advertised_root.hash, advertised_root.count),
+                (content_root.hash, content_root.count),
+            ],
+        };
+        std::fs::write(
+            root.join("current-manifest"),
+            postcard::to_stdvec(&manifest).unwrap(),
+        )
+        .unwrap();
+        (root, key, value)
     }
 
     #[test]
@@ -429,5 +1456,195 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(source);
         let _ = std::fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn indexed_prior_source_pages_verified_signed_evidence_without_rewriting_it() {
+        let (source, key, value) = indexed_prior_fixture("indexed-source");
+        let prior = PriorReplicaSource::open(&source, Arc::new(PriorKeys)).unwrap();
+        assert_eq!(prior.body_count(), 1);
+        assert_eq!(prior.manifest().body_index_root.unwrap().1, 1);
+        let page = prior.body_page(None, 1).unwrap();
+        assert!(page.next.is_none());
+        assert_eq!(page.bodies.len(), 1);
+        assert_eq!(page.bodies[0].key, key);
+        assert_eq!(page.bodies[0].heads.len(), 1);
+        assert_eq!(
+            page.bodies[0].heads[0].material.as_ref().unwrap().payload,
+            fabric::BodyExport::Atomic(value)
+        );
+        assert_eq!(page.bodies[0].content_refs.len(), 1);
+        let content = prior.content_page(None, 1).unwrap();
+        assert!(content.next.is_none());
+        assert_eq!(content.descriptors.len(), 1);
+        assert_eq!(
+            content.descriptors[0].content_ref().as_bytes(),
+            &page.bodies[0].content_refs[0]
+        );
+
+        let space = prior.space().unwrap().clone();
+        let seed = [0x77; 32];
+        let signer = SeedSigner(&seed);
+        let context = CommitContext {
+            space: &space,
+            signer: &signer,
+            authority_frontier: AuthorityFrontier::from_canonical_bytes(Vec::new()),
+        };
+        let target = directory("semantic-target");
+        assert_eq!(
+            build_prior(&source, &target, &context, Arc::new(PriorKeys)).unwrap_err(),
+            Failure::NeedsSemanticMigration { bodies: 1 }
+        );
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn prior_transaction_and_material_tampering_are_typed_integrity_failures() {
+        let space = SpaceId::from_digest([0x71; 16]);
+        let key = BodyKey::new(
+            crate::body::WorldId::parse("com.example.prior").unwrap(),
+            crate::body::BodyId::from_bytes([0x72; 16]),
+        );
+        let descriptor = LegacyDescriptor {
+            world: key.world,
+            body: key.body,
+            schema: crate::body::SchemaId::parse("fact").unwrap(),
+            schema_version: 1,
+            encoding: crate::body::EncodingId::parse("bytes").unwrap(),
+            content_commitment: [0x73; 32],
+        };
+        let mut tx = legacy_transaction(&space, descriptor.clone(), &[0x74; 32]);
+        assert!(decode_legacy_transaction(&postcard::to_stdvec(&tx).unwrap()).is_ok());
+        tx.signature[0] ^= 0x80;
+        assert!(matches!(
+            decode_legacy_transaction(&postcard::to_stdvec(&tx).unwrap()),
+            Err(Failure::Integrity(_))
+        ));
+
+        let mut tx = legacy_transaction(&space, descriptor.clone(), &[0x74; 32]);
+        tx.authorization_receipt[0] ^= 0x80;
+        assert!(matches!(
+            decode_legacy_transaction(&postcard::to_stdvec(&tx).unwrap()),
+            Err(Failure::Integrity(_))
+        ));
+
+        let mut tx = legacy_transaction(&space, descriptor.clone(), &[0x74; 32]);
+        tx.core.descriptors.push(descriptor);
+        assert!(matches!(
+            decode_legacy_transaction(&postcard::to_stdvec(&tx).unwrap()),
+            Err(Failure::Integrity(_))
+        ));
+
+        let mut tx = legacy_transaction(&space, tx.core.descriptors[0].clone(), &[0x74; 32]);
+        let mut lower = tx.core.descriptors[0].clone();
+        lower.body = crate::body::BodyId::from_bytes([0x01; 16]);
+        tx.core.descriptors.push(lower);
+        assert!(matches!(
+            decode_legacy_transaction(&postcard::to_stdvec(&tx).unwrap()),
+            Err(Failure::Integrity(_))
+        ));
+
+        let record = PriorBodyRecord {
+            binding: super::super::BodyBinding {
+                schema: crate::body::SchemaId::parse("fact").unwrap(),
+                schema_version: 1,
+                encoding: crate::body::EncodingId::parse("bytes").unwrap(),
+                mutation_model: super::super::MUTATION_ATOMIC,
+            },
+            chain: ReplicaFrontier::new([0x75; 32], 1),
+            heads: Vec::new(),
+            interpreted: true,
+        };
+        let material = LegacyMaterial {
+            version: 1,
+            mutation_model: super::super::MUTATION_ATOMIC,
+            payload: fabric::BodyExport::Atomic(b"fact".to_vec()),
+            base_frontier: ReplicaFrontier::EMPTY,
+            resulting_frontier: record.chain,
+        };
+        let key = AuthorizedBodyKey::for_authorized_epoch(PRIOR_EPOCH, PRIOR_KEY);
+        let mut envelope =
+            mechanics::authorization::body_seal(&key, &postcard::to_stdvec(&material).unwrap())
+                .unwrap();
+        assert!(open_legacy_material(&key, &envelope, &record).is_ok());
+        let last = envelope.len() - 1;
+        envelope[last] ^= 0x80;
+        assert!(matches!(
+            open_legacy_material(&key, &envelope, &record),
+            Err(Failure::Integrity(_))
+        ));
+        let wrong = AuthorizedBodyKey::for_authorized_epoch([0x76; 16], PRIOR_KEY);
+        assert_eq!(
+            open_legacy_material(&wrong, &envelope, &record).unwrap_err(),
+            Failure::BodyKeyUnavailable
+        );
+    }
+
+    #[test]
+    fn prior_advertised_heads_refuse_duplicate_or_noncanonical_record_order() {
+        let key = BodyKey::new(
+            crate::body::WorldId::parse("com.example.prior").unwrap(),
+            crate::body::BodyId::from_bytes([0x78; 16]),
+        );
+        let binding = super::super::BodyBinding {
+            schema: crate::body::SchemaId::parse("fact").unwrap(),
+            schema_version: 1,
+            encoding: crate::body::EncodingId::parse("bytes").unwrap(),
+            mutation_model: super::super::MUTATION_ATOMIC,
+        };
+        let head = |byte| PriorBodyHead {
+            tx: [byte; 32],
+            descriptor_hash: [byte; 32],
+            tx_commitment: [byte; 32],
+            protected: None,
+            transaction: None,
+            protected_len: 0,
+            tx_len: 0,
+        };
+        let advertised = crate::manifest::ManifestEntry::declaring(
+            key.clone(),
+            vec![
+                crate::manifest::ManifestHead {
+                    descriptor_hash: [1; 32],
+                    transaction_commitment: [1; 32],
+                },
+                crate::manifest::ManifestHead {
+                    descriptor_hash: [2; 32],
+                    transaction_commitment: [2; 32],
+                },
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let record = |heads| PriorBodyRecord {
+            binding: binding.clone(),
+            chain: ReplicaFrontier::new([1; 32], 1),
+            heads,
+            interpreted: false,
+        };
+        assert!(
+            validate_prior_advertisement(&key, &record(vec![head(1), head(2)]), &advertised)
+                .is_ok()
+        );
+        assert!(
+            validate_prior_advertisement(&key, &record(vec![head(2), head(1)]), &advertised)
+                .is_err()
+        );
+        assert!(
+            validate_prior_advertisement(&key, &record(vec![head(1), head(1)]), &advertised)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn interpreted_prior_body_never_collapses_a_missing_epoch_into_opaque() {
+        let (source, _, _) = indexed_prior_fixture("missing-key");
+        let prior = PriorReplicaSource::open(&source, Arc::new(NoKeys)).unwrap();
+        assert_eq!(
+            prior.body_page(None, 1).unwrap_err(),
+            Failure::BodyKeyUnavailable
+        );
+        let _ = std::fs::remove_dir_all(source);
     }
 }

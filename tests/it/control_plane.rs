@@ -225,7 +225,10 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         Err(error) if error.code == runtime::world::call::Code::UnsupportedOperation
     ));
 
-    let issues_call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
+    let issues_call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList {
+        page: issues::contract::PageRequest::default(),
+    })
+    .unwrap();
     let wrong_level = rt
         .block_on(lait::control::call_world(
             &home,
@@ -415,11 +418,12 @@ fn doorbell_names_the_dirty_project_and_doc() {
         issues_app::IssuesRequest::List {
             project: None,
             filter: Default::default(),
+            page: issues::contract::PageRequest::default(),
         },
     ) {
         // The only row there is — `reff` may be the `ENG-1` alias rather than the
         // canonical handle the row carries, so match on the seeding, not the text.
-        IssueResponse::List { rows } => match rows.as_slice() {
+        IssueResponse::List { page } => match page.items.as_slice() {
             [row] => row.doc_id.as_str().to_string(),
             other => panic!("expected exactly the seeded issue, got {other:?}"),
         },

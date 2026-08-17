@@ -331,7 +331,7 @@ impl Sim {
         let outcome = self.peers[p].commit_action(
             &ctx,
             &CommitAuthorization {
-                actor: "actor",
+                actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
                 parent_manifest_root: NO_PARENT_ROOT,
                 demand,
                 intent_digest: [1u8; 32],

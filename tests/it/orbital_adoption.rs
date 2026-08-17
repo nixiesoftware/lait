@@ -86,11 +86,12 @@ impl TallyWorld {
     fn body(&self) -> BodyKey {
         BodyKey::new(self.id.clone(), self.body_id.clone())
     }
-    fn current(&self, ctx: &Context<'_>) -> u64 {
-        ctx.read_body(&self.body())
-            .and_then(|b| String::from_utf8(b).ok())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
+    fn current(&self, ctx: &Context<'_>) -> Result<u64, Rejection> {
+        let Some(bytes) = ctx.read_body(&self.body())? else {
+            return Ok(0);
+        };
+        let value = std::str::from_utf8(&bytes).map_err(|_| Rejection::StateCorrupt)?;
+        value.parse().map_err(|_| Rejection::StateCorrupt)
     }
 }
 
@@ -102,7 +103,7 @@ impl World for TallyWorld {
         &self.schemas
     }
     fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
-        let next = self.current(ctx) + intent.payload.len() as u64;
+        let next = self.current(ctx)? + intent.payload.len() as u64;
         let key = self.body();
         Ok(Effect {
             content_refs: Vec::new(),
@@ -124,8 +125,9 @@ impl World for TallyWorld {
             demand: any_demand(),
             schema: SchemaId::parse("tally").unwrap(),
             schema_version: 1,
-            bytes: self.current(ctx).to_string().into_bytes(),
+            bytes: self.current(ctx)?.to_string().into_bytes(),
             frontier: ReplicaFrontier::EMPTY, // overwritten by Runtime
+            publication: None,
         })
     }
 }
@@ -200,6 +202,7 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
             schema: SchemaId::parse("tally").unwrap(),
             schema_version: 1,
             payload: vec![],
+            publication: None,
         })
         .unwrap();
     assert_eq!(proj.bytes, b"8");
@@ -254,6 +257,7 @@ fn one_station_hosts_and_routes_two_worlds_independently() {
         schema: SchemaId::parse("tally").unwrap(),
         schema_version: 1,
         payload: vec![],
+        publication: None,
     };
     assert_eq!(
         worlds

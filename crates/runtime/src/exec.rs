@@ -47,7 +47,7 @@ use mechanics::{
 use replica::{
     body::{
         BodyId, CollaborativeSchema, EncodingId, MutationModel, Schema as BodySchema, SchemaId,
-        WorldId, MAX_BODY_BYTES, MUTATION_COLLABORATIVE,
+        WorldId, MAX_BODY_BYTES, MUTATION_ATOMIC, MUTATION_COLLABORATIVE,
     },
     content::{ContentRef, MAX_CONTENT_LEN},
     frontier::AuthorityFrontier,
@@ -102,6 +102,7 @@ pub const RUN_COMMAND_PATH: &str = "command";
 const RUN_EVENT_VERSION: u8 = 1;
 const RUN_EVENT_ID_CONTEXT: &str = "lait.exec.run-event.v1";
 const RUN_ID_DOMAIN: &[u8] = b"lait/exec/run-id/1\0";
+const ACTIVE_RUN_BODY_DOMAIN: &[u8] = b"lait/exec/active-body/1\0";
 const ATTEMPT_ID_DOMAIN: &[u8] = b"lait/exec/attempt-id/1\0";
 const INPUT_DIGEST_CONTEXT: &str = "lait.exec.input.v1";
 const QUERY_GRANTS_DIGEST_DOMAIN: &[u8] = b"lait/exec/query-grants/1\0";
@@ -121,13 +122,24 @@ pub const RUN_BODY_SCHEMA: &str = "lait.exec.run";
 pub const BUILD_BODY_SCHEMA: &str = "lait.exec.build";
 /// Runtime-owned Service Body Schema id.
 pub const SERVICE_BODY_SCHEMA: &str = "lait.exec.service";
-pub const RESERVED_SCHEMAS: [&str; 3] = [RUN_BODY_SCHEMA, BUILD_BODY_SCHEMA, SERVICE_BODY_SCHEMA];
+/// Runtime-owned sparse directory of Runs that still require control work.
+/// A deterministic marker Body exists only while its Run is unresolved;
+/// terminal history stays in the Run Body without occupying this posting.
+pub const ACTIVE_RUN_BODY_SCHEMA: &str = "lait.exec.active";
+pub const RESERVED_SCHEMAS: [&str; 4] = [
+    RUN_BODY_SCHEMA,
+    BUILD_BODY_SCHEMA,
+    SERVICE_BODY_SCHEMA,
+    ACTIVE_RUN_BODY_SCHEMA,
+];
 /// Version of the Runtime-owned Run Body schema.
 pub const RUN_BODY_SCHEMA_VERSION: u32 = 1;
 /// Version of the Runtime-owned Build Body schema.
 pub const BUILD_BODY_SCHEMA_VERSION: u32 = 1;
 /// Version of the Runtime-owned Service Body schema.
 pub const SERVICE_BODY_SCHEMA_VERSION: u32 = 1;
+/// Version of the sparse active-Run marker schema.
+pub const ACTIVE_RUN_BODY_SCHEMA_VERSION: u32 = 1;
 /// Encoding contract shared by the generation-1 Runtime event Bodies.
 pub const BODY_ENCODING: &str = "lait.exec.body.v1";
 
@@ -138,7 +150,7 @@ pub fn is_reserved_schema(schema: &SchemaId) -> bool {
 
 /// Exact Runtime-owned Body schemas installed under every hosted World.
 ///
-/// The three literals are tests and compatibility fixtures. Localized
+/// The literals are tests and compatibility fixtures. Localized
 /// `expect` is intentional: an invalid checked-in literal is a broken build,
 /// not a runtime input that can be recovered by silently dropping a protected
 /// schema.
@@ -146,7 +158,7 @@ pub fn is_reserved_schema(schema: &SchemaId) -> bool {
     clippy::expect_used,
     reason = "checked-in reserved schema and encoding literals are compatibility fixtures"
 )]
-pub fn body_schemas() -> [BodySchema; 3] {
+pub fn body_schemas() -> [BodySchema; 4] {
     let encoding = EncodingId::parse(BODY_ENCODING).expect("reserved Exec Body encoding");
     let schema = |name: &str, version| BodySchema {
         id: SchemaId::parse(name).expect("reserved Exec Body schema"),
@@ -155,10 +167,18 @@ pub fn body_schemas() -> [BodySchema; 3] {
         mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
         readable_predecessors: Vec::new(),
     };
+    let active = BodySchema {
+        id: SchemaId::parse(ACTIVE_RUN_BODY_SCHEMA).expect("reserved active Run Body schema"),
+        version: ACTIVE_RUN_BODY_SCHEMA_VERSION,
+        encoding: encoding.clone(),
+        mutation: MutationModel::Atomic,
+        readable_predecessors: Vec::new(),
+    };
     [
         schema(RUN_BODY_SCHEMA, RUN_BODY_SCHEMA_VERSION),
         schema(BUILD_BODY_SCHEMA, BUILD_BODY_SCHEMA_VERSION),
         schema(SERVICE_BODY_SCHEMA, SERVICE_BODY_SCHEMA_VERSION),
+        active,
     ]
 }
 
@@ -1673,6 +1693,111 @@ impl InProcess {
     }
 }
 
+/// Runtime-private exact Body capability for protected Exec state.
+///
+/// Implementations must be pinned to one immutable read publication and must
+/// enter the same Body-image cache, singleflight, and memory governor as World
+/// reads. Exec deliberately does not accept a raw `ReadSnapshot`: protected
+/// Run state can be cold and encrypted, and bypassing this capability would
+/// both defeat admission and collapse key/capacity failures into corruption.
+pub(crate) trait ReservedBodyReader {
+    fn binding(&self, key: &replica::body::BodyKey) -> Option<replica::body::BodyBinding>;
+
+    fn body_keys_page_with_schema(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        after: Option<&replica::body::BodyKey>,
+        limit: usize,
+    ) -> Vec<replica::body::BodyKey>;
+
+    fn read_atomic(
+        &self,
+        key: &replica::body::BodyKey,
+    ) -> Result<Option<crate::world::BodyBytes>, crate::world::BodyReadFailure>;
+
+    fn read_collaborative(
+        &self,
+        key: &replica::body::BodyKey,
+    ) -> Result<Option<crate::world::CollaborativeBody>, crate::world::BodyReadFailure>;
+}
+
+// Unit tests build small in-memory generations directly. Production has no
+// raw-snapshot implementation: Session supplies the governed exact reader.
+#[cfg(test)]
+impl ReservedBodyReader for replica::ReadSnapshot {
+    fn binding(&self, key: &replica::body::BodyKey) -> Option<replica::body::BodyBinding> {
+        replica::ReadSnapshot::binding(self, key).cloned()
+    }
+
+    fn body_keys_page_with_schema(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        after: Option<&replica::body::BodyKey>,
+        limit: usize,
+    ) -> Vec<replica::body::BodyKey> {
+        replica::ReadSnapshot::body_keys_page_with_schema(self, world, schema, after, limit)
+    }
+
+    fn read_atomic(
+        &self,
+        key: &replica::body::BodyKey,
+    ) -> Result<Option<crate::world::BodyBytes>, crate::world::BodyReadFailure> {
+        Ok(replica::ReadSnapshot::read(self, key).map(crate::world::BodyBytes::owned))
+    }
+
+    fn read_collaborative(
+        &self,
+        key: &replica::body::BodyKey,
+    ) -> Result<Option<crate::world::CollaborativeBody>, crate::world::BodyReadFailure> {
+        let Some(binding) = replica::ReadSnapshot::binding(self, key) else {
+            return Ok(None);
+        };
+        if binding.mutation_model != replica::body::MUTATION_COLLABORATIVE {
+            return Err(crate::world::BodyReadFailure::NotCollaborative(
+                crate::world::BodyReadCoordinate::new(key.clone(), None),
+            ));
+        }
+        replica::ReadSnapshot::read_collaborative(self, key)
+            .map(crate::world::CollaborativeBody::owned)
+            .map(Some)
+            .map_err(|failure| match failure {
+                fabric::projection::Failure::NotCollaborative => {
+                    crate::world::BodyReadFailure::NotCollaborative(
+                        crate::world::BodyReadCoordinate::new(key.clone(), None),
+                    )
+                }
+                fabric::projection::Failure::SchemaAhead => {
+                    crate::world::BodyReadFailure::SchemaAhead(
+                        crate::world::BodyReadCoordinate::new(key.clone(), None),
+                    )
+                }
+                fabric::projection::Failure::Malformed => crate::world::BodyReadFailure::Corrupt(
+                    crate::world::BodyReadCoordinate::new(key.clone(), None),
+                ),
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadFailure {
+    Invalid(Invalid),
+    Body(crate::world::BodyReadFailure),
+}
+
+impl From<Invalid> for ReadFailure {
+    fn from(value: Invalid) -> Self {
+        Self::Invalid(value)
+    }
+}
+
+impl From<crate::world::BodyReadFailure> for ReadFailure {
+    fn from(value: crate::world::BodyReadFailure) -> Self {
+        Self::Body(value)
+    }
+}
+
 /// Local dispatch that derives every invocation from one immutable committed
 /// Replica generation.
 ///
@@ -1680,27 +1805,27 @@ impl InProcess {
 /// provide semantic ids, never an in-memory Run to trust, so incomplete staged
 /// material has no route to a backend.
 #[derive(Debug, Clone, Copy)]
-pub struct Dispatcher<'a> {
+pub(crate) struct Dispatcher<'a> {
     package: &'a Package,
     backend: InProcess,
 }
 
 impl<'a> Dispatcher<'a> {
-    pub const fn new(package: &'a Package, backend: InProcess) -> Self {
+    pub(crate) const fn new(package: &'a Package, backend: InProcess) -> Self {
         Self { package, backend }
     }
 
-    pub fn observe(
+    pub(crate) fn observe(
         &self,
-        snapshot: &replica::ReadSnapshot,
+        snapshot: &impl ReservedBodyReader,
         world: &WorldId,
     ) -> Result<Vec<Unresolved>, DispatchFailure> {
-        scan_unresolved(snapshot, world).map_err(DispatchFailure::Invalid)
+        scan_unresolved(snapshot, world).map_err(DispatchFailure::from)
     }
 
-    pub fn invoke(
+    pub(crate) fn invoke(
         &self,
-        snapshot: &replica::ReadSnapshot,
+        snapshot: &impl ReservedBodyReader,
         world: &WorldId,
         run: RunId,
         attempt: AttemptId,
@@ -1800,6 +1925,7 @@ fn selected_links(selection: &Selection<'_>) -> Vec<LinkSpec> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchFailure {
     Invalid(Invalid),
+    BodyRead(crate::world::BodyReadFailure),
     Run(RunId),
     Attempt(AttemptId),
     NotBegan(AttemptId),
@@ -1815,6 +1941,15 @@ impl std::fmt::Display for DispatchFailure {
 }
 
 impl std::error::Error for DispatchFailure {}
+
+impl From<ReadFailure> for DispatchFailure {
+    fn from(value: ReadFailure) -> Self {
+        match value {
+            ReadFailure::Invalid(invalid) => Self::Invalid(invalid),
+            ReadFailure::Body(failure) => Self::BodyRead(failure),
+        }
+    }
+}
 
 /// Maximum canonical size of one command, checked before postcard allocates.
 pub const MAX_CMD_BYTES: usize = 4 * 1024 * 1024;
@@ -1846,6 +1981,22 @@ opaque_id!(
     AttemptId,
     "The stable identity of one physical Attempt under a Run."
 );
+
+/// Deterministic sparse marker key for one unresolved Run. The marker value
+/// carries the canonical RunId; the derived BodyId prevents it from colliding
+/// with the Run's immutable identity Body in the same World namespace.
+pub(crate) fn active_run_body_key(world: &WorldId, run: RunId) -> replica::body::BodyKey {
+    let digest = blake3::keyed_hash(
+        &blake3::derive_key("lait.exec.active-body.key.v1", ACTIVE_RUN_BODY_DOMAIN),
+        &run.as_bytes(),
+    );
+    let mut body = [0u8; 16];
+    body.copy_from_slice(&digest.as_bytes()[..16]);
+    replica::body::BodyKey {
+        world: world.clone(),
+        body: BodyId::from_bytes(body),
+    }
+}
 opaque_id!(
     ServiceId,
     "The stable identity of one reusable live Service."
@@ -2725,6 +2876,9 @@ pub enum WorkReply {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkRefusal {
     Invalid(Invalid),
+    /// The exact protected Run/active image could not be obtained under the
+    /// Station's key, integrity, or memory policy. This is never `NotFound`.
+    BodyRead(crate::world::BodyReadFailure),
     Session(crate::world::Failure),
     NotFound(RunId),
     Unsupported(&'static str),
@@ -2741,6 +2895,15 @@ impl std::error::Error for WorkRefusal {}
 impl From<Invalid> for WorkRefusal {
     fn from(value: Invalid) -> Self {
         Self::Invalid(value)
+    }
+}
+
+impl From<ReadFailure> for WorkRefusal {
+    fn from(value: ReadFailure) -> Self {
+        match value {
+            ReadFailure::Invalid(invalid) => Self::Invalid(invalid),
+            ReadFailure::Body(failure) => Self::BodyRead(failure),
+        }
     }
 }
 
@@ -2996,39 +3159,64 @@ impl Run {
     }
 }
 
-/// Scan one committed read generation for complete unresolved Runs.
+/// Read the sparse active directory in one committed generation and project
+/// its complete unresolved Runs.
 ///
 /// The scan is deliberately inert. It reads an immutable Replica snapshot and
 /// returns projections; it has no executor, callback, or message-sending seam.
 /// This lets a local controller resume work after a crash while remote
 /// incorporation remains data-only.
 ///
-/// Every matching protected Body is validated in full. A malformed Run Body,
-/// an incomplete command map, or a mismatch between Body identity, Started
-/// coordinates, and canonical Start material fails the scan rather than being
-/// skipped and potentially dispatched from partial truth.
-pub fn scan_unresolved(
-    snapshot: &replica::ReadSnapshot,
+/// Terminal history is not visited: Start atomically creates one deterministic
+/// `exec-active` marker and Run-level terminal acceptance/rejection atomically
+/// tombstones it. Every returned marker and referenced protected Run Body is
+/// validated in full. Malformed or stale active truth fails closed rather than
+/// being skipped and potentially dispatched from partial state.
+pub(crate) fn scan_unresolved(
+    snapshot: &impl ReservedBodyReader,
     world: &WorldId,
-) -> Result<Vec<Unresolved>, Invalid> {
+) -> Result<Vec<Unresolved>, ReadFailure> {
     let mut unresolved = Vec::new();
-    for key in snapshot
-        .body_keys()
-        .into_iter()
-        .filter(|key| &key.world == world)
-    {
-        let binding = snapshot
-            .binding(&key)
-            .ok_or(Invalid::InvalidEvent("run binding"))?;
-        if binding.schema.as_str() != RUN_BODY_SCHEMA {
-            continue;
-        }
-        let id = RunId::from_bytes(key.body.as_bytes());
-        let Some((run, start, _)) = read_committed_run(snapshot, world, id)? else {
-            return Err(Invalid::InvalidEvent("run binding"));
-        };
-        if run.is_unresolved() {
+    let active_schema = SchemaId::parse(ACTIVE_RUN_BODY_SCHEMA)
+        .ok_or(Invalid::InvalidEvent("active run schema"))?;
+    let mut after = None;
+    const ACTIVE_PAGE: usize = 4_096;
+    loop {
+        let page =
+            snapshot.body_keys_page_with_schema(world, &active_schema, after.as_ref(), ACTIVE_PAGE);
+        for key in &page {
+            let binding = snapshot
+                .binding(key)
+                .ok_or(Invalid::InvalidEvent("active run binding"))?;
+            if binding.schema != active_schema
+                || binding.schema_version != ACTIVE_RUN_BODY_SCHEMA_VERSION
+                || binding.encoding.as_str() != BODY_ENCODING
+                || binding.mutation_model != MUTATION_ATOMIC
+            {
+                return Err(Invalid::InvalidEvent("active run binding").into());
+            }
+            let value = snapshot
+                .read_atomic(key)?
+                .ok_or(Invalid::InvalidEvent("active run body"))?;
+            let raw: [u8; 16] = value
+                .as_ref()
+                .try_into()
+                .map_err(|_| Invalid::InvalidEvent("active run body"))?;
+            let id = RunId::from_bytes(raw);
+            if active_run_body_key(world, id) != *key {
+                return Err(Invalid::InvalidEvent("active run identity").into());
+            }
+            let Some((run, start, _)) = read_committed_run(snapshot, world, id)? else {
+                return Err(Invalid::InvalidEvent("active run target").into());
+            };
+            if !run.is_unresolved() {
+                return Err(Invalid::InvalidEvent("terminal active run").into());
+            }
             unresolved.push(Unresolved { run, start });
+        }
+        after = page.last().cloned();
+        if page.len() < ACTIVE_PAGE {
+            break;
         }
     }
     unresolved.sort_by_key(|candidate| candidate.run.id);
@@ -3041,10 +3229,10 @@ pub fn scan_unresolved(
 /// event at this same pinned generation. Absence is distinct from malformed
 /// protected truth; malformed material always fails closed.
 pub(crate) fn read_committed_run(
-    snapshot: &replica::ReadSnapshot,
+    snapshot: &impl ReservedBodyReader,
     world: &WorldId,
     id: RunId,
-) -> Result<Option<(Run, Start, u64)>, Invalid> {
+) -> Result<Option<(Run, Start, u64)>, ReadFailure> {
     let key = replica::body::BodyKey {
         world: world.clone(),
         body: BodyId::from_bytes(id.as_bytes()),
@@ -3057,11 +3245,11 @@ pub(crate) fn read_committed_run(
         || binding.encoding.as_str() != BODY_ENCODING
         || binding.mutation_model != MUTATION_COLLABORATIVE
     {
-        return Err(Invalid::InvalidEvent("run binding"));
+        return Err(Invalid::InvalidEvent("run binding").into());
     }
     let view = snapshot
-        .read_collaborative(&key)
-        .map_err(|_| Invalid::InvalidEvent("run body"))?;
+        .read_collaborative(&key)?
+        .ok_or(Invalid::InvalidEvent("run body"))?;
     let values = view
         .lists
         .get(RUN_EVENTS_PATH)
@@ -3073,28 +3261,28 @@ pub(crate) fn read_committed_run(
         .collect::<Result<Vec<_>, _>>()?;
     let run = Run::project(&events)?;
     if run.id != id || run.started.world != *world || key.body.as_bytes() != run.id.as_bytes() {
-        return Err(Invalid::InvalidEvent("run body identity"));
+        return Err(Invalid::InvalidEvent("run body identity").into());
     }
     let start = start_from_body(&view, &run.started)?;
     Ok(Some((run, start, event_count)))
 }
 
 pub(crate) fn work_state(
-    snapshot: &replica::ReadSnapshot,
+    snapshot: &impl ReservedBodyReader,
     world: &WorldId,
     run: RunId,
-) -> Result<Option<WorkState>, Invalid> {
+) -> Result<Option<WorkState>, ReadFailure> {
     Ok(read_committed_run(snapshot, world, run)?
         .map(|(run, _, event_count)| WorkState::from_run(&run, event_count)))
 }
 
 /// Derive the narrow World-facing Outcome facade from one committed snapshot.
 pub(crate) fn outcome_facts(
-    snapshot: &replica::ReadSnapshot,
+    snapshot: &impl ReservedBodyReader,
     world: &WorldId,
     run: RunId,
     attempt: AttemptId,
-) -> Result<Option<crate::world::OutcomeFacts>, Invalid> {
+) -> Result<Option<crate::world::OutcomeFacts>, ReadFailure> {
     let Some((projection, _, _)) = read_committed_run(snapshot, world, run)? else {
         return Ok(None);
     };
@@ -4085,6 +4273,13 @@ mod tests {
             EncodingId::parse(BODY_ENCODING).unwrap(),
             MUTATION_COLLABORATIVE,
         );
+        supported.declare(
+            WorldId::parse("com.example.product").unwrap(),
+            SchemaId::parse(ACTIVE_RUN_BODY_SCHEMA).unwrap(),
+            ACTIVE_RUN_BODY_SCHEMA_VERSION,
+            EncodingId::parse(BODY_ENCODING).unwrap(),
+            MUTATION_ATOMIC,
+        );
         let keys = std::sync::Arc::new(StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch([1; 16], [2; 32]),
         ));
@@ -4104,6 +4299,7 @@ mod tests {
         intent.service = None;
         let command = Cmd::Start(intent).encode().unwrap();
         let key = BodyKey::new(world.clone(), BodyId::from_bytes(run.as_bytes()));
+        let active = active_run_body_key(&world, run);
         let mut operations = vec![
             (key.clone(), Op::Create),
             (
@@ -4112,6 +4308,12 @@ mod tests {
                     path: RUN_EVENTS_PATH.to_owned(),
                     index: 0,
                     value: event,
+                },
+            ),
+            (
+                active.clone(),
+                Op::ReplaceAtomic {
+                    value: run.as_bytes().to_vec(),
                 },
             ),
         ];
@@ -4139,7 +4341,7 @@ mod tests {
             .commit_action(
                 &context,
                 &CommitAuthorization {
-                    actor: "actor",
+                    actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
                     parent_manifest_root: NO_PARENT_ROOT,
                     demand: demand("run.start"),
                     intent_digest: [3; 32],
@@ -4150,18 +4352,29 @@ mod tests {
                 &[4; 16],
                 &[5; 32],
                 Vec::new(),
-                vec![key.clone()],
+                vec![key.clone(), active.clone()],
                 "start",
                 &operations,
-                &[(
-                    (key),
-                    BodyBinding {
-                        schema: SchemaId::parse(RUN_BODY_SCHEMA).unwrap(),
-                        schema_version: RUN_BODY_SCHEMA_VERSION,
-                        encoding: EncodingId::parse(BODY_ENCODING).unwrap(),
-                        mutation_model: MUTATION_COLLABORATIVE,
-                    },
-                )],
+                &[
+                    (
+                        key,
+                        BodyBinding {
+                            schema: SchemaId::parse(RUN_BODY_SCHEMA).unwrap(),
+                            schema_version: RUN_BODY_SCHEMA_VERSION,
+                            encoding: EncodingId::parse(BODY_ENCODING).unwrap(),
+                            mutation_model: MUTATION_COLLABORATIVE,
+                        },
+                    ),
+                    (
+                        active,
+                        BodyBinding {
+                            schema: SchemaId::parse(ACTIVE_RUN_BODY_SCHEMA).unwrap(),
+                            schema_version: ACTIVE_RUN_BODY_SCHEMA_VERSION,
+                            encoding: EncodingId::parse(BODY_ENCODING).unwrap(),
+                            mutation_model: MUTATION_ATOMIC,
+                        },
+                    ),
+                ],
                 &[],
             )
             .unwrap();
@@ -4209,7 +4422,16 @@ mod tests {
         intent.service = None;
         let command = Cmd::Start(intent).encode().unwrap();
         let key = BodyKey::new(world.clone(), BodyId::from_bytes(run.as_bytes()));
-        let mut operations = vec![(key.clone(), Op::Create)];
+        let active = active_run_body_key(&world, run);
+        let mut operations = vec![
+            (key.clone(), Op::Create),
+            (
+                active.clone(),
+                Op::ReplaceAtomic {
+                    value: run.as_bytes().to_vec(),
+                },
+            ),
+        ];
         for (index, event) in events.into_iter().enumerate() {
             operations.push((
                 key.clone(),
@@ -4244,7 +4466,7 @@ mod tests {
             .commit_action(
                 &context,
                 &CommitAuthorization {
-                    actor: "actor",
+                    actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
                     parent_manifest_root: NO_PARENT_ROOT,
                     demand: demand("run.start"),
                     intent_digest: [3; 32],
@@ -4255,18 +4477,29 @@ mod tests {
                 &[4; 16],
                 &[5; 32],
                 Vec::new(),
-                vec![key.clone()],
+                vec![key.clone(), active.clone()],
                 "start",
                 &operations,
-                &[(
-                    (key),
-                    BodyBinding {
-                        schema: SchemaId::parse(RUN_BODY_SCHEMA).unwrap(),
-                        schema_version: RUN_BODY_SCHEMA_VERSION,
-                        encoding: EncodingId::parse(BODY_ENCODING).unwrap(),
-                        mutation_model: MUTATION_COLLABORATIVE,
-                    },
-                )],
+                &[
+                    (
+                        key,
+                        BodyBinding {
+                            schema: SchemaId::parse(RUN_BODY_SCHEMA).unwrap(),
+                            schema_version: RUN_BODY_SCHEMA_VERSION,
+                            encoding: EncodingId::parse(BODY_ENCODING).unwrap(),
+                            mutation_model: MUTATION_COLLABORATIVE,
+                        },
+                    ),
+                    (
+                        active,
+                        BodyBinding {
+                            schema: SchemaId::parse(ACTIVE_RUN_BODY_SCHEMA).unwrap(),
+                            schema_version: ACTIVE_RUN_BODY_SCHEMA_VERSION,
+                            encoding: EncodingId::parse(BODY_ENCODING).unwrap(),
+                            mutation_model: MUTATION_ATOMIC,
+                        },
+                    ),
+                ],
                 &[],
             )
             .unwrap();
@@ -5192,6 +5425,69 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_scan_preserves_typed_body_image_capacity_failure() {
+        struct RefusingReader {
+            world: WorldId,
+            run: RunId,
+        }
+
+        impl ReservedBodyReader for RefusingReader {
+            fn binding(&self, key: &BodyKey) -> Option<BodyBinding> {
+                (key == &active_run_body_key(&self.world, self.run)).then(|| BodyBinding {
+                    schema: SchemaId::parse(ACTIVE_RUN_BODY_SCHEMA).unwrap(),
+                    schema_version: ACTIVE_RUN_BODY_SCHEMA_VERSION,
+                    encoding: replica::body::EncodingId::parse(BODY_ENCODING).unwrap(),
+                    mutation_model: MUTATION_ATOMIC,
+                })
+            }
+
+            fn body_keys_page_with_schema(
+                &self,
+                _world: &WorldId,
+                _schema: &SchemaId,
+                after: Option<&BodyKey>,
+                _limit: usize,
+            ) -> Vec<BodyKey> {
+                after
+                    .is_none()
+                    .then(|| active_run_body_key(&self.world, self.run))
+                    .into_iter()
+                    .collect()
+            }
+
+            fn read_atomic(
+                &self,
+                key: &BodyKey,
+            ) -> Result<Option<crate::world::BodyBytes>, crate::world::BodyReadFailure>
+            {
+                Err(crate::world::BodyReadFailure::Capacity(
+                    crate::world::BodyReadCoordinate::new(key.clone(), Some([0x81; 32])),
+                ))
+            }
+
+            fn read_collaborative(
+                &self,
+                _key: &BodyKey,
+            ) -> Result<Option<crate::world::CollaborativeBody>, crate::world::BodyReadFailure>
+            {
+                panic!("active marker refusal must happen before Run hydration")
+            }
+        }
+
+        let world = WorldId::parse("com.example.product").unwrap();
+        let reader = RefusingReader {
+            world: world.clone(),
+            run: run(0x82),
+        };
+        assert!(matches!(
+            scan_unresolved(&reader, &world),
+            Err(ReadFailure::Body(crate::world::BodyReadFailure::Capacity(
+                _
+            )))
+        ));
+    }
+
+    #[test]
     fn run_projection_refuses_ambiguous_or_unbound_attempt_facts() {
         let root = RunEvent::started(started()).unwrap();
         let run = root.run();
@@ -5268,14 +5564,19 @@ mod tests {
                 RUN_BODY_SCHEMA_VERSION,
                 BUILD_BODY_SCHEMA_VERSION,
                 SERVICE_BODY_SCHEMA_VERSION,
+                ACTIVE_RUN_BODY_SCHEMA_VERSION,
             ]
         );
-        for schema in &schemas {
+        for schema in &schemas[..3] {
             assert_eq!(schema.encoding.as_str(), BODY_ENCODING);
             assert!(matches!(schema.mutation, MutationModel::Collaborative(_)));
             assert!(schema.readable_predecessors.is_empty());
             assert!(is_reserved_schema(&schema.id));
         }
+        assert_eq!(schemas[3].encoding.as_str(), BODY_ENCODING);
+        assert_eq!(schemas[3].mutation, MutationModel::Atomic);
+        assert!(schemas[3].readable_predecessors.is_empty());
+        assert!(is_reserved_schema(&schemas[3].id));
         assert!(!is_reserved_schema(
             &SchemaId::parse("product.run").unwrap()
         ));

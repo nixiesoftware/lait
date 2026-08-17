@@ -181,12 +181,22 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     assert!(online, "daemon online");
 
     // ---- built-ins are listed, immutable, and shown with revisions --------
-    let roles = text_of(issue_req(&rt, &home, issues_app::IssuesRequest::RoleList));
+    let roles = text_of(issue_req(
+        &rt,
+        &home,
+        issues_app::IssuesRequest::RoleList {
+            page: issues::contract::PageRequest {
+                limit: 100,
+                cursor: None,
+            },
+        },
+    ));
     let ids: Vec<&str> = roles
-        .as_array()
+        .get("items")
+        .and_then(serde_json::Value::as_array)
         .unwrap()
         .iter()
-        .map(|r| r["role_id"].as_str().unwrap())
+        .map(|r| r["summary"]["role_id"].as_str().unwrap())
         .collect();
     for built_in in ["lait.administrator", "lait.contributor", "lait.viewer"] {
         assert!(ids.contains(&built_in), "{built_in} listed");
@@ -198,7 +208,7 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
             role: "lait.viewer".into(),
         },
     ));
-    assert_eq!(viewer["built_in"], true);
+    assert_eq!(viewer["summary"]["built_in"], true);
     let resp = issue_req(
         &rt,
         &home,
@@ -219,8 +229,14 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     );
 
     // ---- custom role lifecycle: create → edit (exact head) → assign -------
-    let project_key = match issue_req(&rt, &home, issues_app::IssuesRequest::ProjectList) {
-        IssueResponse::Projects { projects } => projects.first().unwrap().key.clone(),
+    let project_key = match issue_req(
+        &rt,
+        &home,
+        issues_app::IssuesRequest::ProjectList {
+            page: issues::contract::PageRequest::default(),
+        },
+    ) {
+        IssueResponse::Projects { page } => page.items.first().unwrap().key.clone(),
         other => panic!("{other:?}"),
     };
     let created = issue_req(

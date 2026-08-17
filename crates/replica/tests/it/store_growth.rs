@@ -95,7 +95,7 @@ fn edit(r: &mut Replica, n: u16, key: &BodyKey) {
     r.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],
@@ -145,13 +145,13 @@ fn editing_one_body_grows_only_by_the_history_it_retains() {
     }
     let after_eighty = r.required_object_count().expect("durable");
 
-    // One required object per commit is the signed Body transaction, and one
-    // is the changed-Body generation delta that makes an exact historical read
-    // survive restart and sweep. Both are retained history. The index spine is
+    // Three required objects are retained history: the request receipt, the
+    // protected causal artifact, and the changed-Body generation delta that
+    // names its Material descriptor. The index spine is
     // not history and must not add another three to four objects per commit.
     let per_commit = (after_eighty as f64 - after_twenty as f64) / 60.0;
     assert!(
-        per_commit < 2.5,
+        per_commit < 3.5,
         "the required set grows {per_commit:.2} per commit \
          ({after_twenty} after 20, {after_eighty} after 80)"
     );
@@ -186,12 +186,13 @@ fn collecting_returns_the_store_to_live_state() {
     r.collect_unreachable_objects().expect("collect");
     let after_eighty = object_count(&dir);
 
-    // Some growth is legitimate: the Body's own collaborative history
-    // accumulates until a checkpoint reclaims it. What must not survive is the
-    // index spine, at three to four nodes per commit.
+    // The immutable generation delta and its independently addressable causal
+    // artifact are retained history; a checkpoint bounds the current
+    // descriptor, not past generations. What must not survive is the index
+    // spine, at three to four nodes per commit.
     let per_commit = (after_eighty as f64 - after_twenty as f64) / 60.0;
     assert!(
-        per_commit < 2.5,
+        per_commit < 3.5,
         "storage grows {per_commit:.2} objects per commit          ({after_twenty} after 20, {after_eighty} after 80)"
     );
 
@@ -203,6 +204,36 @@ fn collecting_returns_the_store_to_live_state() {
         "an in-session collect leaves nothing for the restart to find"
     );
     drop(reopened);
+}
+
+#[test]
+fn an_old_generation_reconstructs_from_its_protected_causal_closure_after_restart() {
+    let dir = temp_store("causal-generation");
+    let key = body(1);
+    let mut r = Replica::open(&dir, keys()).unwrap();
+    r.set_supported(supported());
+    edit(&mut r, 1, &key);
+    let first = r
+        .read_generations()
+        .expect("generation catalog")
+        .into_iter()
+        .find(|generation| generation.frontier.transaction_count == 1)
+        .expect("first generation")
+        .root;
+    edit(&mut r, 2, &key);
+    edit(&mut r, 3, &key);
+    drop(r);
+
+    let reopened = Replica::open(&dir, keys()).expect("reopen");
+    let snapshot = reopened
+        .read_generation(&first)
+        .expect("historical read")
+        .expect("retained generation");
+    let view = snapshot
+        .read_collaborative(&key)
+        .expect("collaborative body");
+    assert_eq!(view.texts.get("body").map(String::as_str), Some("x"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- What the store can say about itself ----

@@ -24,17 +24,21 @@ struct StubReader {
 }
 
 impl runtime::world::BodyReader for StubReader {
-    fn read_body(&self, _key: &replica::body::BodyKey) -> Option<Vec<u8>> {
-        None
+    fn read_body(
+        &self,
+        _key: &replica::body::BodyKey,
+    ) -> Result<Option<runtime::world::BodyBytes>, runtime::world::BodyReadFailure> {
+        Ok(None)
     }
     fn read_collaborative_body(
         &self,
         key: &replica::body::BodyKey,
-    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
-        self.views
+    ) -> Result<Option<runtime::world::CollaborativeBody>, runtime::world::BodyReadFailure> {
+        Ok(self
+            .views
             .get(key)
             .cloned()
-            .ok_or(fabric::projection::Failure::NotCollaborative)
+            .map(runtime::world::CollaborativeBody::owned))
     }
     fn body_version(&self, _key: &replica::body::BodyKey) -> Option<fabric::Version> {
         None
@@ -44,15 +48,15 @@ impl runtime::world::BodyReader for StubReader {
         _key: &replica::body::BodyKey,
         _path: &str,
         _position: u64,
-    ) -> Option<fabric::Anchor> {
-        None
+    ) -> Result<Option<fabric::Anchor>, runtime::world::BodyReadFailure> {
+        Ok(None)
     }
     fn resolve_anchor(
         &self,
         _key: &replica::body::BodyKey,
         _anchor: &fabric::Anchor,
-    ) -> fabric::AnchorResolution {
-        fabric::AnchorResolution::Drifted
+    ) -> Result<fabric::AnchorResolution, runtime::world::BodyReadFailure> {
+        Ok(fabric::AnchorResolution::Drifted)
     }
     fn content_status(
         &self,
@@ -142,14 +146,16 @@ fn list_titles(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Vec<Strin
                     mine: None,
                     all: true,
                     me: None,
+                    page: contract::PageRequest::default(),
                 }
                 .to_json(),
+                publication: None,
             },
         )
         .expect("list");
-    let rows: serde_json::Value = serde_json::from_slice(&projection.bytes).unwrap();
-    rows.as_array()
-        .unwrap()
+    let rows: contract::Page<serde_json::Value> =
+        serde_json::from_slice(&projection.bytes).unwrap();
+    rows.items
         .iter()
         .map(|r| r["title"].as_str().unwrap_or_default().to_string())
         .collect()

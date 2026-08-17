@@ -106,7 +106,7 @@ fn a_delta_from_an_unknown_base_is_refused_by_name() {
 
     // A base naming operations this replica has never seen.
     let stranger = Version {
-        format_version: 1,
+        format_version: fabric::CAUSAL_FORMAT_VERSION,
         heads: vec![fabric::OpHead {
             writer: 99,
             sequence: 7,
@@ -150,8 +150,18 @@ fn artifacts_converge_out_of_order_and_duplicates_are_free() {
 }
 
 #[test]
-fn a_checkpoint_reconstructs_state_without_the_history_behind_it() {
+fn an_ordinary_checkpoint_reconstructs_state_and_keeps_mergeable_history() {
     let mut author = Engine::new();
+    commit(&mut author, "shared", vec![splice(&key(), 0, "shared ")]);
+    let shared = author
+        .export_delta(&key(), &Version::empty())
+        .expect("shared history");
+    let mut stale = Engine::new();
+    stale.import_artifact(&key(), &shared).expect("fork");
+    commit(&mut stale, "offline", vec![splice(&key(), 0, "offline ")]);
+    let offline = stale
+        .export_delta(&key(), &Version::empty())
+        .expect("offline work");
     for i in 0..500 {
         commit(
             &mut author,
@@ -162,17 +172,17 @@ fn a_checkpoint_reconstructs_state_without_the_history_behind_it() {
     let checkpoint = author
         .export_checkpoint(&key(), &Version::empty())
         .expect("checkpoint");
-    let archive = author.export_history(&key()).expect("archive");
-    assert!(
-        checkpoint.payload_len() < archive.payload_len(),
-        "a checkpoint must be cheaper than the history it replaces"
-    );
 
     let mut receiver = Engine::new();
     receiver
         .import_artifact(&key(), &checkpoint)
         .expect("import checkpoint");
     assert_eq!(text(&receiver, &key()), text(&author, &key()));
+    let merged = receiver
+        .import_artifact(&key(), &offline)
+        .expect("a full checkpoint still admits concurrent work");
+    assert!(merged.applied && !merged.pending);
+    assert!(text(&receiver, &key()).contains("offline"));
 }
 
 #[test]
@@ -204,8 +214,9 @@ fn work_older_than_the_retention_frontier_is_refused_and_recovers() {
     let archive = origin
         .export_history(&key())
         .expect("archive before the trim");
+    let retention_frontier = origin.version(&key()).expect("current frontier");
     let checkpoint = origin
-        .export_checkpoint(&key(), &Version::empty())
+        .export_checkpoint(&key(), &retention_frontier)
         .expect("checkpoint");
 
     // A replica rebuilt from the checkpoint alone cannot admit the old work.
@@ -280,7 +291,7 @@ fn relation_says_undetermined_rather_than_guessing() {
     );
 
     let unseen = Version {
-        format_version: 1,
+        format_version: fabric::CAUSAL_FORMAT_VERSION,
         heads: vec![fabric::OpHead {
             writer: 4242,
             sequence: 1,
@@ -311,6 +322,41 @@ fn an_anchor_follows_its_text_across_a_concurrent_edit() {
         ),
         AnchorResolution::Drifted => panic!("a live position must not drift"),
     }
+}
+
+#[test]
+fn immutable_image_anchor_failures_remain_typed() {
+    let mut fabric = Engine::new();
+    commit(&mut fabric, "seed", vec![splice(&key(), 0, "hello")]);
+    let image = fabric
+        .body_snapshot(&key())
+        .unwrap()
+        .expect("collaborative image");
+    let anchor = image.try_anchor(&key(), "body", 2).unwrap();
+    assert_eq!(
+        image.try_resolve(&key(), &anchor).unwrap(),
+        AnchorResolution::Resolved(2)
+    );
+
+    let atomic = fabric::BodySnapshot::from_export(
+        &other_key(),
+        fabric::BodyExport::Atomic(b"value".to_vec()),
+    )
+    .unwrap();
+    assert_eq!(
+        atomic.try_anchor(&other_key(), "body", 0),
+        Err(fabric::projection::Failure::NotCollaborative)
+    );
+
+    let malformed = fabric::BodySnapshot::from_export(
+        &other_key(),
+        fabric::BodyExport::Collaborative(b"not a loro export".to_vec()),
+    )
+    .unwrap();
+    assert_eq!(
+        malformed.try_anchor(&other_key(), "body", 0),
+        Err(fabric::projection::Failure::Malformed)
+    );
 }
 
 #[test]
@@ -511,13 +557,18 @@ fn a_failed_batch_cannot_replace_a_collaborative_body_with_a_value() {
 #[test]
 fn the_checkpoint_policy_is_decided_by_size_not_by_time() {
     let policy = CheckpointPolicy::default();
+    assert!(!policy.should_prepare(191, 1_000));
+    assert!(policy.should_prepare(192, 1_000));
+    assert!(policy.should_prepare(1, 6 * 1024 * 1024));
     assert!(!policy.should_checkpoint(255, 1_000));
     assert!(policy.should_checkpoint(256, 1_000));
     assert!(policy.should_checkpoint(1, 8 * 1024 * 1024));
+    assert!(policy.admits(4096, 128 * 1024 * 1024));
+    assert!(!policy.admits(4097, 1_000));
     // The count binds first for an ordinary Body: F0 measured 256 ordinary
     // deltas at ~33 KB, so a Body only reaches the byte threshold by pasting.
     assert!(
-        policy.max_tail_deltas * 200 < policy.max_tail_bytes,
+        policy.target_tail_deltas * 200 < policy.target_tail_bytes,
         "the byte threshold must sit well above what ordinary editing reaches"
     );
 }
@@ -526,20 +577,23 @@ fn the_checkpoint_policy_is_decided_by_size_not_by_time() {
 fn body_material_is_the_same_size_however_long_the_body_lives() {
     use fabric::{ArtifactRef, Material};
     let material = |tail: usize, history: u64| Material {
-        format_version: 1,
+        format_version: fabric::CAUSAL_FORMAT_VERSION,
         checkpoint: ArtifactRef {
             hash: [1u8; 32],
             len: 4096,
+            epoch: [7u8; 16],
         },
         delta_tail: (0..tail)
             .map(|i| ArtifactRef {
                 hash: [i as u8; 32],
                 len: 105,
+                epoch: [7u8; 16],
             })
             .collect(),
         history_root: Some([9u8; 32]),
         history_count: history,
         version: Version::empty(),
+        plaintext_size: 4096,
     };
     // History is behind a root, so a Body with a thousand archives commits the
     // same bytes as one with none.
@@ -575,7 +629,7 @@ fn causal_encodings_are_canonical() {
 
     // An unsorted head set is not a canonical version, whatever it decodes to.
     let unsorted = Version {
-        format_version: 1,
+        format_version: fabric::CAUSAL_FORMAT_VERSION,
         heads: vec![
             fabric::OpHead {
                 writer: 9,
@@ -670,10 +724,137 @@ fn a_replacement_artifact_cannot_flatten_a_collaborative_body() {
     let outcome = fabric.import_artifact(
         &key(),
         &Artifact::Replace {
-            format_version: 1,
+            format_version: fabric::CAUSAL_FORMAT_VERSION,
             bytes: b"a flat value".to_vec(),
         },
     );
     assert!(outcome.is_err(), "a model mismatch is a conflict");
     assert_eq!(text(&fabric, &key()), "history worth keeping");
+}
+
+#[cfg(windows)]
+fn resident_bytes() -> usize {
+    #[repr(C)]
+    struct Counters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn K32GetProcessMemoryInfo(
+            process: *mut core::ffi::c_void,
+            counters: *mut Counters,
+            size: u32,
+        ) -> i32;
+    }
+    let mut counters = Counters {
+        cb: u32::try_from(std::mem::size_of::<Counters>()).expect("counter size"),
+        page_fault_count: 0,
+        peak_working_set_size: 0,
+        working_set_size: 0,
+        quota_peak_paged_pool_usage: 0,
+        quota_paged_pool_usage: 0,
+        quota_peak_non_paged_pool_usage: 0,
+        quota_non_paged_pool_usage: 0,
+        pagefile_usage: 0,
+        peak_pagefile_usage: 0,
+    };
+    // SAFETY: this is the Windows PROCESS_MEMORY_COUNTERS layout and the
+    // pseudo-handle is valid for the duration of the call.
+    let ok =
+        unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, counters.cb) };
+    if ok == 0 {
+        0
+    } else {
+        counters.working_set_size
+    }
+}
+
+#[cfg(not(windows))]
+fn resident_bytes() -> usize {
+    0
+}
+
+fn frozen_record_scale(total: u32) {
+    const MAX_RSS_BYTES_PER_BODY: usize = 2 * 1024;
+    const MAX_STARTUP: std::time::Duration = std::time::Duration::from_secs(120);
+
+    let template_key = Key::from_bytes(b"record-template".to_vec());
+    let mut template_engine = Engine::new();
+    commit(
+        &mut template_engine,
+        "record-template",
+        vec![
+            Op::CreateBody {
+                key: template_key.clone(),
+            },
+            Op::RegisterSet {
+                key: template_key.clone(),
+                path: "kind".to_owned(),
+                value: b"relation".to_vec(),
+            },
+        ],
+    );
+    let template = template_engine
+        .export_body(&template_key)
+        .expect("collaborative export");
+    let export_bytes = match &template {
+        fabric::BodyExport::Collaborative(bytes) => bytes.len(),
+        fabric::BodyExport::Atomic(_) => panic!("template must be collaborative"),
+    };
+    drop(template_engine);
+
+    let before = resident_bytes();
+    let started = std::time::Instant::now();
+    let mut recovered = Engine::new();
+    for number in 0..total {
+        let key = Key::from_bytes(number.to_be_bytes().to_vec());
+        let snapshot =
+            fabric::BodySnapshot::from_export(&key, template.clone()).expect("valid body image");
+        // Recovery's proof Engine has already interpreted and verified this
+        // image. Filling the cell here models that proof; the long-lived Engine
+        // then installs the same Arc without a second decode.
+        snapshot.version().expect("verified version");
+        recovered
+            .import_verified_snapshot(&key, &snapshot)
+            .expect("cold install");
+    }
+    let elapsed = started.elapsed();
+    let after = resident_bytes();
+    let rss = after.saturating_sub(before);
+    let rss_per_body = rss / usize::try_from(total).expect("body count");
+
+    assert_eq!(recovered.body_count(), u64::from(total));
+    assert!(elapsed <= MAX_STARTUP);
+    if rss != 0 {
+        assert!(
+            rss_per_body <= MAX_RSS_BYTES_PER_BODY,
+            "frozen Engine RSS/Body regressed: {rss_per_body} > {MAX_RSS_BYTES_PER_BODY}"
+        );
+    }
+    eprintln!(
+        "fabric-frozen-record-scale bodies={total} export_bytes={export_bytes} startup_ms={} rss_mib={:.1} rss_bytes_per_body={rss_per_body}",
+        elapsed.as_millis(),
+        rss as f64 / (1024.0 * 1024.0),
+    );
+}
+
+#[test]
+#[ignore = "release-scale one-record-per-Body frozen Engine residency fixture"]
+fn frozen_100k_record_bodies() {
+    frozen_record_scale(100_000);
+}
+
+#[test]
+#[ignore = "release-scale one-record-per-Body frozen Engine residency fixture"]
+fn frozen_1m_record_bodies() {
+    frozen_record_scale(1_000_000);
 }

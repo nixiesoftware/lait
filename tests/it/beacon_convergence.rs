@@ -376,9 +376,12 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
             issues_app::IssuesRequest::List {
                 project: None,
                 filter: Default::default(),
+                page: issues::contract::PageRequest::default(),
             },
         ) {
-            IssueResponse::List { rows } => rows.first().map(|r| r.doc_id.as_str().to_string()),
+            IssueResponse::List { page } => {
+                page.items.first().map(|r| r.doc_id.as_str().to_string())
+            }
             _ => None,
         }
     })

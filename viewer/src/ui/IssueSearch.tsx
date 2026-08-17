@@ -44,7 +44,11 @@ export function IssueSearch({
     let alive = true;
     void Promise.allSettled(
       projects.map((project) =>
-        rpc(rpcSpaceId, { cmd: "board", project: project.key }),
+        rpc(rpcSpaceId, {
+          cmd: "board",
+          project: project.key,
+          page: { limit: 100, cursor: null },
+        }),
       ),
     ).then((replies) => {
       if (!alive) return;
@@ -56,10 +60,8 @@ export function IssueSearch({
           if (project) failed.push(project.name);
           return;
         }
-        for (const column of result.value.columns) {
-          for (const row of column.rows) {
-            if (!row.tombstone) merged.set(row.reff, row);
-          }
+        for (const row of result.value.rows.items) {
+          if (!row.tombstone) merged.set(row.reff, row);
         }
       });
       setUnreached(failed);

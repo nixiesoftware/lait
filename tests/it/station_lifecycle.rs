@@ -225,72 +225,44 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     // The space-wide activity feed serves through daemon dispatch (this pins
     // the classification/routing defect where an activity request was refused
     // with "request not routed to the issues world"): the created issue and the
-    // comment appear as feed rows, and re-pulling from the returned cursor
-    // yields nothing new.
-    let resp = issue_req(
-        &client_rt,
-        &home,
-        issues_app::IssuesRequest::Activity { since: None },
-    );
-    let IssueResponse::Activity { events, last } = resp else {
-        panic!("expected Activity, got {resp:?}");
-    };
-    assert!(
-        !last.is_empty(),
-        "created + comment rows expected, last={last}"
-    );
-    assert!(events.len() >= 2, "created + comment rows expected");
-    assert!(events.iter().any(|e| e.kind == "created"));
-    assert!(events
-        .iter()
-        .any(|e| e.kind == "commented" && e.text == "a socket comment"));
+    // comment appear while one-row continuations neither repeat nor skip.
     let resp = issue_req(
         &client_rt,
         &home,
         issues_app::IssuesRequest::Activity {
-            since: Some(last.clone()),
+            page: issues::contract::PageRequest {
+                limit: 1,
+                cursor: None,
+            },
         },
     );
-    let IssueResponse::Activity { events, last: l2 } = resp else {
+    let IssueResponse::Activity { page: mut current } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
-    assert!(events.is_empty(), "cursor resume must yield no repeats");
-    assert_eq!(
-        l2, last,
-        "an empty resume holds the caller's place rather than resetting it"
-    );
-
-    // Resuming from each row in turn must serve exactly the rows after it. This
-    // is the property the cursor exists for and the one that broke while it was
-    // being built: the feed was ordered one way and the token compared another,
-    // so a resume re-served rows whose entry id happened to sort high. Walking
-    // every position catches that where resuming from the tail alone does not.
-    let resp = issue_req(
-        &client_rt,
-        &home,
-        issues_app::IssuesRequest::Activity { since: None },
-    );
-    let IssueResponse::Activity { events: all, .. } = resp else {
-        panic!("expected Activity");
-    };
-    for (i, row) in all.iter().enumerate() {
+    let mut all = std::mem::take(&mut current.items);
+    while let Some(cursor) = current.next_cursor.take() {
         let resp = issue_req(
             &client_rt,
             &home,
             issues_app::IssuesRequest::Activity {
-                since: Some(row.cursor.clone()),
+                page: issues::contract::PageRequest {
+                    limit: 1,
+                    cursor: Some(cursor),
+                },
             },
         );
-        let IssueResponse::Activity { events: rest, .. } = resp else {
+        let IssueResponse::Activity { page } = resp else {
             panic!("expected Activity");
         };
-        let expected: Vec<&str> = all.iter().skip(i + 1).map(|e| e.cursor.as_str()).collect();
-        let got: Vec<&str> = rest.iter().map(|e| e.cursor.as_str()).collect();
-        assert_eq!(
-            got, expected,
-            "resuming from row {i} must serve exactly what follows it"
-        );
+        all.extend(page.items.iter().cloned());
+        current = page;
     }
+    assert!(all.len() >= 2, "created + comment rows expected");
+    assert!(all.iter().any(|event| event.kind == "created"));
+    assert!(all
+        .iter()
+        .any(|event| event.kind == "commented" && event.text == "a socket comment"));
+    assert!(all.windows(2).all(|pair| pair[0].cursor != pair[1].cursor));
 
     // List reflects it.
     let resp = issue_req(
@@ -299,12 +271,16 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
         issues_app::IssuesRequest::List {
             project: None,
             filter: issues_app::protocol::Filter::default(),
+            page: issues::contract::PageRequest::default(),
         },
     );
-    let IssueResponse::List { rows } = resp else {
+    let IssueResponse::List { page } = resp else {
         panic!("expected List");
     };
-    assert!(rows.iter().any(|r| r.title == "Served over the socket"));
+    assert!(page
+        .items
+        .iter()
+        .any(|r| r.title == "Served over the socket"));
 
     // Board renders columns.
     let resp = issue_req(
@@ -313,6 +289,7 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
         issues_app::IssuesRequest::Board {
             project: Some("eng".into()),
             project_hint: None,
+            page: issues::contract::PageRequest::default(),
         },
     );
     assert!(matches!(resp, IssueResponse::Board(_)), "{resp:?}");

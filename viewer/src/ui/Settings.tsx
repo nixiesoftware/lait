@@ -16,7 +16,15 @@ import {
 } from "lucide-react";
 
 import { rpc, spaceRpc } from "../api";
-import type { AssignmentDto, LabelDto, MemberDto, ProjectDto, TeamDto } from "../types";
+import { useProjectViewerStore } from "../projectStore";
+import type {
+  AssignmentDto,
+  LabelDto,
+  MemberDto,
+  ProjectDto,
+  RoleProjection,
+  TeamDto,
+} from "../types";
 import { memberName } from "./Avatar";
 import { catalogColor } from "./colors";
 import { ColorPicker } from "./ColorPicker";
@@ -630,6 +638,7 @@ function LabelsPanel({
   readOnly: boolean;
   onError: (message: string) => void;
 }) {
+  const projectStore = useProjectViewerStore();
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState("blue");
@@ -653,7 +662,7 @@ function LabelsPanel({
     if (!name) return;
     setNewName("");
     setCreating(false);
-    void send(() => rpc(spaceId, { cmd: "label_new", name, color: newColor }));
+    void send(() => projectStore.createLabel(spaceId, name, newColor));
   };
 
   return (
@@ -727,7 +736,7 @@ function LabelsPanel({
               onCancel={() => setEditing(null)}
               onSave={(name, color) => {
                 setEditing(null);
-                void send(() => rpc(spaceId, { cmd: "label_edit", label: l.id, name, color }));
+                void send(() => projectStore.editLabel(spaceId, l.id, name, color));
               }}
             />
           ) : (
@@ -754,7 +763,7 @@ function LabelsPanel({
                           danger: true,
                         })
                         .then((ok) => {
-                          if (ok) void send(() => rpc(spaceId, { cmd: "label_delete", label: l.id }));
+                          if (ok) void send(() => projectStore.deleteLabel(spaceId, l.id));
                         })
                     }
                     variant="ghost"
@@ -1033,6 +1042,10 @@ interface RoleWire {
   conflict_heads: string[];
 }
 
+function roleFromProjection({ summary, revision }: RoleProjection): RoleWire {
+  return { ...summary, revision: revision ?? null };
+}
+
 /** The name a role grant carries, falling back to its id. */
 function roleName(r: RoleWire): string {
   return r.revision?.body.name ?? r.role_id;
@@ -1066,6 +1079,7 @@ function AccessPanel({
   onError: (message: string) => void;
 }) {
   const [roles, setRoles] = useState<RoleWire[] | null>(null);
+  const [roleCursor, setRoleCursor] = useState<string | null>(null);
   const [members, setMembers] = useState<MemberDto[] | null>(null);
   const [rows, setRows] = useState<AssignmentDto[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1076,17 +1090,44 @@ function AccessPanel({
   const load = useCallback(async () => {
     try {
       const [r, m, a] = await Promise.all([
-        rpc(spaceId, { cmd: "role_list" }),
+        rpc(spaceId, { cmd: "role_list", page: { limit: 100, cursor: null } }),
         spaceRpc(spaceId, { cmd: "members" }),
         rpc(spaceId, { cmd: "access_list" }),
       ]);
-      if (r.kind === "text") setRoles(JSON.parse(r.text) as RoleWire[]);
+      if (r.kind === "roles") {
+        setRoles(r.page.items.map(roleFromProjection));
+        setRoleCursor(r.page.next_cursor ?? null);
+      }
       if (m.kind === "members") setMembers(m.members);
       if (a.kind === "assignments") setRows(a.rows);
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     }
   }, [spaceId, onError]);
+
+  const loadMoreRoles = async () => {
+    if (!roleCursor || busy) return;
+    setBusy(true);
+    try {
+      const response = await rpc(spaceId, {
+        cmd: "role_list",
+        page: { limit: 100, cursor: roleCursor },
+      });
+      if (response.kind === "roles") {
+        setRoles((current) => [
+          ...(current ?? []),
+          ...response.page.items.map(roleFromProjection).filter(
+            (candidate) => !(current ?? []).some((role) => role.role_id === candidate.role_id),
+          ),
+        ]);
+        setRoleCursor(response.page.next_cursor ?? null);
+      }
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
     void load();
@@ -1199,6 +1240,16 @@ function AccessPanel({
             </li>
           ))}
         </ul>
+        {roleCursor && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            isDisabled={busy}
+            label={busy ? "Loading…" : "Load more roles"}
+            onClick={() => void loadMoreRoles()}
+          />
+        )}
       </SettingsSection>
 
       <SettingsSection

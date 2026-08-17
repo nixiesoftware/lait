@@ -253,7 +253,7 @@ impl ContentHost {
         }
         let ingested = ingest.finish()?;
 
-        let committed = self.core.with_replica(|replica| {
+        let committed = self.core.with_replica_metadata(|replica| {
             replica.commit_content(ctx, std::slice::from_ref(&ingested.descriptor))
         });
         if committed.is_err() {
@@ -281,7 +281,7 @@ impl ContentHost {
         // Body names it — which is a person choosing an issue, not a machine
         // finishing a write. The hold is what buys that window, and it lapses
         // on its own so an upload nobody ever attaches is still collectable.
-        let _ = self.core.with_replica(|replica| {
+        let _ = self.core.with_replica_control(|replica| {
             // `into_std` at the crate boundary: Replica has no tokio dependency
             // and should not grow one for a deadline type. The conversion is
             // free and, importantly, does not lose the simulation — the VALUE
@@ -660,7 +660,7 @@ impl ContentHost {
 
     fn descriptor(&self, content: &ContentRef) -> Result<ContentDescriptor, Failure> {
         self.core
-            .with_replica(|replica| Ok(replica.content_descriptor(content)))
+            .with_replica_read(|replica| Ok(replica.content_descriptor(content)))
             .map_err(|_| Failure::Storage(Storage::Replica))?
             .ok_or(Failure::Unknown)
     }
