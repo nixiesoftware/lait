@@ -348,6 +348,15 @@ async fn write_signage_program(
     program: signage::SignageProgram,
 ) {
     let space = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    // The Orbit id is derived from the store path *as spelled* — `normalize`
+    // settles separators, trailing slashes and Windows case, and deliberately
+    // resolves nothing — so an address built from a raw tempdir path names a
+    // different Orbit than the one the daemon registered from its canonical
+    // form, and the host answers `InvalidCall`. Linux tempdirs are already
+    // canonical, which is why this only ever bit macOS (/var -> /private/var)
+    // and Windows (8.3 short names): the exact platform split that made this
+    // seam worth running on all three.
+    let store = &store.canonicalize().expect("canonical Signage store");
     let call = signage_app::encode_call(&signage_app::SignageRequest::ProgramPut {
         program: program.clone(),
     })
