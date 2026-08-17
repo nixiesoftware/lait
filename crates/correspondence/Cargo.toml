@@ -23,6 +23,17 @@ serde = { version = "1", features = ["derive"] }
 blake3 = "1"
 data-encoding = "2.6"
 postcard = { version = "1", features = ["use-std"] }
+serde_json = "1"
+
+# The wire format and its client half. This crate is the only one that may name a
+# delivery protocol, so the dependency belongs here and nowhere above it.
+lait-post = { path = "../post" }
+
+# `ureq` + rustls, matching the one other outbound client in the tree
+# (`src/update/feed.rs`): pure Rust, no reqwest, no native-tls, no OpenSSL.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 
 [dev-dependencies]
-serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+axum = "0.8"
+tempfile = "3"

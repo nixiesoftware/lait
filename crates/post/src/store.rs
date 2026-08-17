@@ -284,6 +284,13 @@ impl Store for FsStore {
                     gone += 1;
                 }
             }
+            // An emptied mailbox directory goes too. Files were collected and the
+            // directory was not, so every device ever deposited to left one behind
+            // permanently — and a directory that outlives its contents is a record
+            // that somebody had a mailbox here, which is the one thing the hashed
+            // name exists to avoid. `remove_dir` refuses a non-empty directory, so
+            // this cannot take a mailbox that still holds something.
+            let _ = std::fs::remove_dir(mailbox.path());
         }
         Ok(gone)
     }
@@ -423,6 +430,48 @@ mod tests {
             2,
             "neither construction may silently overwrite the other"
         );
+    }
+
+    #[test]
+    fn a_swept_mailbox_leaves_no_directory_behind() {
+        let dir = tempfile::tempdir().expect("a root");
+        let mut store = FsStore::open(dir.path()).expect("open");
+        let alice = device_from_seed(&[2u8; 32]);
+        store
+            .put(
+                &device_from_seed(&[1u8; 32]),
+                &envelope(&alice, b"x", NOW + 10),
+                NOW,
+            )
+            .expect("put");
+        assert_eq!(count_dirs(dir.path()), 1, "a deposit creates a mailbox");
+
+        assert_eq!(store.sweep(NOW + 50).expect("sweep"), 1);
+        assert_eq!(
+            count_dirs(dir.path()),
+            0,
+            "an emptied mailbox directory is a standing record that somebody had one \
+             here, which is what the hashed name exists to avoid"
+        );
+
+        // And a mailbox that still holds something is untouched.
+        store
+            .put(
+                &device_from_seed(&[1u8; 32]),
+                &envelope(&alice, b"keep", NOW + 10_000),
+                NOW,
+            )
+            .expect("put");
+        assert_eq!(store.sweep(NOW + 50).expect("sweep"), 0);
+        assert_eq!(count_dirs(dir.path()), 1, "a live mailbox survives a sweep");
+    }
+
+    fn count_dirs(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root)
+            .expect("read root")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .count()
     }
 
     #[test]

@@ -627,13 +627,18 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
         (
             "correspondence",
             // The seam itself is the crate root — `Carrier`, `Sealed`, `Missed`.
-            // Only the contractor behind it gets a module, and there is exactly
-            // one so far: the in-process carrier that lets the send and receive
-            // paths be tested with no network and no protocol. A second entry
-            // here should be another contractor and nothing else; a *concept*
-            // appearing in this list would mean the seam had grown an opinion
-            // about delivery, which is the thing it exists not to have.
-            &["mem"],
+            // Only the contractors behind it get modules, and both entries here
+            // are contractors: the in-process carrier that lets the send and
+            // receive paths be tested with no network and no protocol, and the
+            // hosted one that speaks to a `lait-post` over HTTP.
+            //
+            // A third entry should be another contractor and nothing else. A
+            // *concept* appearing in this list would mean the seam had grown an
+            // opinion about delivery, which is the thing it exists not to have —
+            // and it is what `comms` keeps out by the same rule, where `iroh` and
+            // `mem` are two contractors and `policy` is the one exception that
+            // says so in its own doc.
+            &["mem", "post"],
         ),
         ("fabric", &[]),
         ("journal", &[]),

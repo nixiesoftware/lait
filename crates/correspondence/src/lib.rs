@@ -81,8 +81,10 @@ use mechanics::ids::DeviceId;
 use serde::{Deserialize, Serialize};
 
 pub mod mem;
+pub mod post;
 
 pub use mem::MemCarrier;
+pub use post::PostCarrier;
 
 /// The largest sealed envelope this plane will carry.
 ///

@@ -256,6 +256,71 @@ impl SignedAck {
     }
 }
 
+/// The client half of this protocol: build the three signed requests.
+///
+/// Here rather than in whatever crate happens to dial a Post, and the reason is
+/// the one `sigdag::payload_to_sign` gives for existing at all. A caller that
+/// composed its own preimage would be reimplementing a format whose only other
+/// implementation is the verifier ten lines up — and the failure mode is a
+/// signature that verifies nowhere, reported as "bad signature", with the actual
+/// disagreement invisible. Keeping both halves in one file is what makes a domain
+/// or a field order impossible to get wrong in one place only.
+///
+/// **Signing takes a seed, and that does not make the Post hold keys.** The
+/// service — `Post`, `Store`, `http::router` — never sees one. These are
+/// functions a *client* calls in its own process, which is the same crate only
+/// because the wire format is.
+pub mod sign {
+    use super::{
+        Challenge, DeviceId, Envelope, SignedAck, SignedDeposit, SignedFetch, ACK_DOMAIN,
+        FETCH_DOMAIN,
+    };
+
+    /// Sign a deposit as `seed`'s device.
+    pub fn deposit(seed: &[u8; 32], envelope: Envelope) -> SignedDeposit {
+        let sender = mechanics::actor::device_from_seed(seed);
+        let signature = mechanics::actor::sign_detached(seed, &envelope.preimage(&sender));
+        SignedDeposit {
+            sender,
+            envelope,
+            signature,
+        }
+    }
+
+    /// Answer a challenge to read what is waiting.
+    ///
+    /// The challenge is answered rather than re-derived: its nonce came from the
+    /// service and is remembered there exactly once, so a client that invented one
+    /// would be signing something nobody will accept.
+    pub fn fetch(seed: &[u8; 32], challenge: &Challenge) -> SignedFetch {
+        SignedFetch {
+            device: challenge.device.clone(),
+            nonce: challenge.nonce,
+            signature: mechanics::actor::sign_detached(seed, &challenge.preimage(FETCH_DOMAIN)),
+        }
+    }
+
+    /// Confirm exactly these deposits.
+    ///
+    /// The ids are inside the signature, so a captured acknowledgement cannot be
+    /// replayed against a different set — the challenge already makes it
+    /// single-use, and this makes it single-*meaning*.
+    pub fn acknowledge(seed: &[u8; 32], challenge: &Challenge, deposits: Vec<String>) -> SignedAck {
+        let mut ack = SignedAck {
+            device: challenge.device.clone(),
+            nonce: challenge.nonce,
+            deposits,
+            signature: [0u8; 64],
+        };
+        // The preimage covers the deposit list, so it is built from the finished
+        // value rather than from the arguments — otherwise adding a field would
+        // silently leave it uncovered.
+        ack.signature = mechanics::actor::sign_detached(seed, &ack.preimage());
+        let _ = ACK_DOMAIN;
+        ack
+    }
+}
+
 /// Length-framed, so two different field splits can never produce one preimage.
 fn framed(out: &mut Vec<u8>, part: &[u8]) {
     out.extend_from_slice(&(part.len() as u32).to_be_bytes());
