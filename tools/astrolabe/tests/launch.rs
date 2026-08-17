@@ -923,7 +923,10 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         (client, signals)
     };
 
-    let head = client.head().await.expect("a head for this identity");
+    let head = client
+        .head(Some("issues"))
+        .await
+        .expect("a head for this identity");
     assert!(
         head.base.starts_with("http://127.0.0.1:"),
         "a head came up somewhere other than loopback: {}",
@@ -956,8 +959,20 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     // Asking twice finds the head that is already up. The alternative is a port
     // and a run credential per click.
-    let again = client.head().await.expect("the same head");
+    let again = client.head(Some("issues")).await.expect("the same head");
     assert_eq!(again, head, "a second Open started a second head");
+
+    // A different World is a different head, which is the whole point: one
+    // process per World is what makes stopping one a statement about that
+    // World rather than about whatever else shared it.
+    let signage = client
+        .head(Some("signage"))
+        .await
+        .expect("a head for the other World");
+    assert_ne!(
+        signage.base, head.base,
+        "two Worlds were served by one head"
+    );
     assert_eq!(
         client.heads().len(),
         1,

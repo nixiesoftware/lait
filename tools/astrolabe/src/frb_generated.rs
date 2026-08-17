@@ -242,8 +242,10 @@ impl SseDecode for crate::api::ActionRequest {
                 return crate::api::ActionRequest::Refresh;
             }
             1 => {
+                let mut var_world = <String>::sse_decode(deserializer);
                 let mut var_entryPath = <String>::sse_decode(deserializer);
                 return crate::api::ActionRequest::Open {
+                    world: var_world,
                     entry_path: var_entryPath,
                 };
             }
@@ -869,12 +871,14 @@ impl SseDecode for crate::api::HeadRow {
         let mut var_id = <String>::sse_decode(deserializer);
         let mut var_kind = <String>::sse_decode(deserializer);
         let mut var_orbit = <Option<String>>::sse_decode(deserializer);
+        let mut var_world = <Option<String>>::sse_decode(deserializer);
         let mut var_origin = <Option<String>>::sse_decode(deserializer);
         let mut var_owned = <bool>::sse_decode(deserializer);
         return crate::api::HeadRow {
             id: var_id,
             kind: var_kind,
             orbit: var_orbit,
+            world: var_world,
             origin: var_origin,
             owned: var_owned,
         };
@@ -1801,9 +1805,12 @@ impl flutter_rust_bridge::IntoDart for crate::api::ActionRequest {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
             crate::api::ActionRequest::Refresh => [0.into_dart()].into_dart(),
-            crate::api::ActionRequest::Open { entry_path } => {
-                [1.into_dart(), entry_path.into_into_dart().into_dart()].into_dart()
-            }
+            crate::api::ActionRequest::Open { world, entry_path } => [
+                1.into_dart(),
+                world.into_into_dart().into_dart(),
+                entry_path.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             crate::api::ActionRequest::UpdateWorld { world } => {
                 [2.into_dart(), world.into_into_dart().into_dart()].into_dart()
             }
@@ -2392,6 +2399,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::HeadRow {
             self.id.into_into_dart().into_dart(),
             self.kind.into_into_dart().into_dart(),
             self.orbit.into_into_dart().into_dart(),
+            self.world.into_into_dart().into_dart(),
             self.origin.into_into_dart().into_dart(),
             self.owned.into_into_dart().into_dart(),
         ]
@@ -2834,8 +2842,9 @@ impl SseEncode for crate::api::ActionRequest {
             crate::api::ActionRequest::Refresh => {
                 <i32>::sse_encode(0, serializer);
             }
-            crate::api::ActionRequest::Open { entry_path } => {
+            crate::api::ActionRequest::Open { world, entry_path } => {
                 <i32>::sse_encode(1, serializer);
+                <String>::sse_encode(world, serializer);
                 <String>::sse_encode(entry_path, serializer);
             }
             crate::api::ActionRequest::UpdateWorld { world } => {
@@ -3306,6 +3315,7 @@ impl SseEncode for crate::api::HeadRow {
         <String>::sse_encode(self.id, serializer);
         <String>::sse_encode(self.kind, serializer);
         <Option<String>>::sse_encode(self.orbit, serializer);
+        <Option<String>>::sse_encode(self.world, serializer);
         <Option<String>>::sse_encode(self.origin, serializer);
         <bool>::sse_encode(self.owned, serializer);
     }

@@ -75,6 +75,13 @@ fn cookie_name(port: u16) -> String {
 
 struct App {
     guard: Guard,
+    /// The one World mount this head answers for.
+    ///
+    /// A request naming any other mount is refused rather than served. Without
+    /// it a head answers for every mounted World, which makes "is this World
+    /// running" a question about a shared process — and every control built on
+    /// the answer, including stopping, a statement about the wrong thing.
+    world: String,
     /// Where this head's web bundle is read from: an activated World bundle
     /// when one is staged and matches this build's runtime version, and the
     /// compiled-in floor otherwise.
@@ -131,8 +138,9 @@ pub async fn run(
     open: bool,
     json: bool,
     selection: crate::config::Selection,
+    world: Option<String>,
 ) -> Result<()> {
-    run_announced(port, open, selection, move |ready| {
+    run_announced(port, open, selection, world, move |ready| {
         if json {
             // One line, then keep serving — the same shape `watch` has: a
             // long-running command whose first output is the fact you were
@@ -140,7 +148,12 @@ pub async fn run(
             // flushes it to a piped parent without an explicit flush.
             println!(
                 "{}",
-                serde_json::json!({ "url": ready.url, "token": ready.token, "port": ready.port })
+                serde_json::json!({
+                    "url": ready.url,
+                    "token": ready.token,
+                    "port": ready.port,
+                    "world": ready.world,
+                })
             );
         } else {
             println!("lait — your spaces at:\n  {}", ready.url);
@@ -164,6 +177,13 @@ pub struct Ready {
     pub url: String,
     pub token: String,
     pub port: u16,
+    /// The one World this head serves.
+    ///
+    /// Announced rather than inferred, so a supervisor learns it from the head
+    /// itself instead of from the arguments it hoped the head took. That is the
+    /// difference between a stop that is a statement about a World and one that
+    /// is a guess about a process.
+    pub world: String,
 }
 
 /// [`run`], with the readiness line replaced by a callback.
@@ -175,9 +195,10 @@ pub async fn run_announced(
     port: u16,
     open: bool,
     selection: crate::config::Selection,
+    world: Option<String>,
     announce: impl FnOnce(&Ready) + Send,
 ) -> Result<()> {
-    run_until(port, open, selection, announce, shutdown_signal()).await
+    run_until(port, open, selection, world, announce, shutdown_signal()).await
 }
 
 /// [`run_announced`], with the second process-shaped assumption handed over
@@ -195,9 +216,21 @@ pub async fn run_until(
     port: u16,
     open: bool,
     selection: crate::config::Selection,
+    world: Option<String>,
     announce: impl FnOnce(&Ready) + Send,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    // Resolved before the listener binds. A build that cannot say which World
+    // this head is refuses to be one, rather than coming up, announcing an
+    // address, and answering for whatever mount a request happens to name.
+    //
+    // The same `pin` `lait mcp` uses, so the ladder is identical: an explicit
+    // pin, then $LAIT_WORLD, then the sole World a build hosts — and a refusal
+    // that names the mounts when there is more than one and no pin.
+    let pinned = crate::world::client_packages()
+        .pin(world.as_deref())
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let pinned_mount = pinned.mount().to_owned();
     // Identity scoping, resolved once at startup from the invocation's own
     // selection rather than from a process-wide environment.
     let identity = selection.identity_dir()?;
@@ -227,17 +260,16 @@ pub async fn run_until(
     // the World this build presents. Resolved once at start: a payload that
     // arrives later becomes live at the next head, which is the same
     // "applied at a boundary" rule the client tree follows.
+    // This head's own World, not the build's first one. A Signage head serving
+    // the Issues bundle would be the staging equivalent of the bug the pin
+    // exists to close.
     let head = selection
         .identity_dir()
-        .map(|identity| {
-            head::activate(
-                &head::worlds_root(&identity),
-                crate::composition::PRODUCT_WORLD,
-            )
-        })
+        .map(|identity| head::activate(&head::worlds_root(&identity), pinned.world().as_str()))
         .unwrap_or_default();
     let app = Arc::new(App {
         head,
+        world: pinned_mount.clone(),
         guard: Guard::new(token.clone(), bound.port()),
         directory: Catalog::new(identity, agents_base, self_contained),
         daemon: daemon.clone(),
@@ -269,6 +301,7 @@ pub async fn run_until(
         url: url.clone(),
         token: token.clone(),
         port: bound.port(),
+        world: pinned_mount.clone(),
     });
     if open {
         // A launch ticket rather than the run token, and for the reason the
@@ -908,6 +941,23 @@ async fn world_rpc(
     let package = registry.package_for_mount(&world).or_else(|| {
         replica::body::WorldId::parse(&world).and_then(|world| registry.package_for_world(&world))
     });
+    // Mounted is not the same as *served here*. This head answers for one World
+    // and refuses the rest by name, so a tab that wandered to another mount
+    // learns it is at the wrong address instead of being quietly obliged — and
+    // so stopping this head is a statement about one World.
+    if package.is_some_and(|found| found.mount() != app.world) {
+        return (
+            StatusCode::NOT_FOUND,
+            err_json(
+                &format!(
+                    "this head serves '{}' and not '{world}'; open that World's own head",
+                    app.world
+                ),
+                ErrorKind::NotFound,
+            ),
+        )
+            .into_response();
+    }
     let Some(package) = package.cloned() else {
         return (
             StatusCode::NOT_FOUND,
@@ -1317,6 +1367,9 @@ mod tests {
     fn app(token: &str) -> Router {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
+            // Tests pin the build's own product World; the pin under test
+            // is the refusal, not the choice.
+            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
             head: head::Source::embedded(),
             guard: Guard::new(token.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
@@ -1336,6 +1389,9 @@ mod tests {
     fn app_with_tickets(token: &str) -> (Router, Arc<App>) {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         let state = Arc::new(App {
+            // Tests pin the build's own product World; the pin under test
+            // is the refusal, not the choice.
+            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
             head: head::Source::embedded(),
             guard: Guard::new(token.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
@@ -1605,6 +1661,9 @@ mod tests {
 
         let orbit = resolved.address.orbit.as_str().to_string();
         let router = router(Arc::new(App {
+            // Tests pin the build's own product World; the pin under test
+            // is the refusal, not the choice.
+            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
             head: head::Source::embedded(),
             guard: Guard::new(HOSTED_TOKEN.into(), 7717),
             directory,
@@ -1802,6 +1861,9 @@ mod gate_coverage {
     fn app() -> Router {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
+            // Tests pin the build's own product World; the pin under test
+            // is the refusal, not the choice.
+            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
             head: head::Source::embedded(),
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
@@ -1967,6 +2029,9 @@ mod gate_coverage {
         // it would pass whether or not the stop signal works.
         let doorbells = tokio::sync::broadcast::channel(4).0;
         let app = Arc::new(App {
+            // Tests pin the build's own product World; the pin under test
+            // is the refusal, not the choice.
+            world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),
             head: head::Source::embedded(),
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),

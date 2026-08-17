@@ -198,7 +198,8 @@ class _Rail extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final running = rows
-        .where((row) => _opening(view, row) || _serving(view).isNotEmpty)
+        .where((row) =>
+            _opening(view, row) || _servingWorld(view, row.worldMount).isNotEmpty)
         .toList();
     final ready = rows
         .where((row) => !running.contains(row) && row.opensAt != null)
@@ -517,9 +518,9 @@ class _ActionPanel extends StatelessWidget {
     final updating =
         view.inFlight.contains(ActionKeys.updateWorld(showing.worldMount));
     final lifecycle = _lifecycleCopy(view, showing);
-    // The head is per-identity and serves every installed World, so "running"
-    // is the head's own liveness: an owned browser head reporting an address.
-    final heads = _serving(view);
+    // This World's own head. One process per World, so running is a fact about
+    // this row rather than about whichever head happened to come up first.
+    final heads = _servingWorld(view, showing.worldMount);
     final running = !opening && heads.isNotEmpty;
     final activeOrigin = heads.isEmpty ? null : heads.first.origin;
     // Stopping is offered against an *owned* head and nothing else. A head
@@ -527,7 +528,7 @@ class _ActionPanel extends StatelessWidget {
     // the boundary the supervisor enforces — a control that pretended
     // otherwise would be a button whose refusal is the only way to learn it
     // was never ours.
-    final stoppable = _stoppable(view);
+    final stoppable = _stoppable(view, showing.worldMount);
     final stopping =
         stoppable != null && view.inFlight.contains(ActionKeys.stopHead(stoppable.id));
 
@@ -556,7 +557,10 @@ class _ActionPanel extends StatelessWidget {
                 onOpen: entryPath == null || opening
                     ? null
                     : () => client.dispatch(
-                          ActionRequest.open(entryPath: entryPath),
+                          ActionRequest.open(
+                            world: showing.worldMount,
+                            entryPath: entryPath,
+                          ),
                         ),
                 onStop: stoppable == null || stopping
                     ? null
@@ -1260,8 +1264,19 @@ class _InfoPanel extends StatelessWidget {
 /// Orbit, because one identity head serves every installed World. What they
 /// answer is the head's own liveness, which is what "running" means on a
 /// World row: the destination is up and `Open` is a handoff, not a start.
-List<HeadRow> _serving(ClientView view) =>
-    view.heads.where((head) => head.orbit == null).toList();
+/// The heads serving one World.
+///
+/// Keyed by mount, because a head serves one World. It used to answer "every
+/// browser head", which made "is this World running" a question about a shared
+/// process — so opening Issues put Signage into RUNNING, and STOP on either row
+/// stopped the one head both were reading.
+///
+/// A head that announced no World predates the pin and answers for everything;
+/// it is deliberately matched by nothing here rather than by everything, since
+/// a definite statement cannot be made about it.
+List<HeadRow> _servingWorld(ClientView view, String mount) => view.heads
+    .where((head) => head.orbit == null && head.world == mount)
+    .toList();
 
 /// The serving head this client may stop, or `None` when there is none it
 /// owns.
@@ -1271,8 +1286,8 @@ List<HeadRow> _serving(ClientView view) =>
 /// the head itself rather than a bool is what lets the caller name the one it
 /// is stopping — `head.stop:<id>` is per-head, so a second head's stop does
 /// not disable this one's control.
-HeadRow? _stoppable(ClientView view) {
-  for (final head in _serving(view)) {
+HeadRow? _stoppable(ClientView view, String mount) {
+  for (final head in _servingWorld(view, mount)) {
     if (head.owned) return head;
   }
   return null;
@@ -1321,13 +1336,16 @@ _Lifecycle _lifecycle(ClientView view, LibraryRow row) {
   // honest state is still Running.
   if (_opening(view, row)) return _Lifecycle.opening;
   if (row.opensAt == null) return _Lifecycle.unavailable;
-  if (_serving(view).isNotEmpty) return _Lifecycle.running;
+  if (_servingWorld(view, row.worldMount).isNotEmpty) {
+    return _Lifecycle.running;
+  }
   return _Lifecycle.ready;
 }
 
 bool _opening(ClientView view, LibraryRow row) {
-  final path = row.opensAt;
-  return path != null && view.inFlight.contains(ActionKeys.open(path));
+  // Keyed by World, so one row's open never disables another's control.
+  return row.opensAt != null &&
+      view.inFlight.contains(ActionKeys.open(row.worldMount));
 }
 
 String _openTooltip(LibraryRow row, {required bool running}) {

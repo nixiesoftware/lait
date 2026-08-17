@@ -416,6 +416,13 @@ pub struct HeadRow {
     /// The Orbit it is bound to. `None` is a browser head serving every Orbit
     /// its identity has.
     pub orbit: Option<String>,
+    /// The one World this head serves.
+    ///
+    /// `None` is a head from before the pin, which answers for every mounted
+    /// World. It matches no row deliberately: a surface cannot say a definite
+    /// thing about it, and saying an indefinite thing is the defect this field
+    /// closes.
+    pub world: Option<String>,
     /// The address, *without* the run credential its URL carries. A front page
     /// has no use for a credential — `Open` mints a single-use ticket of its
     /// own, which is what that ceremony is for.
@@ -624,7 +631,11 @@ pub enum ActionRequest {
     /// Read this machine again.
     Refresh,
     /// Hand a World to the person's browser.
+    ///
+    /// Names the mount as well as the path: a head serves one World, so opening
+    /// says which rather than reaching for whichever head is up.
     Open {
+        world: String,
         entry_path: String,
     },
     /// Fetch this World's newest bundle now rather than at the next period.
@@ -799,7 +810,7 @@ impl ActionRequest {
         Ok(match self {
             Self::Refresh => Action::Refresh,
             Self::UpdateWorld { world } => Action::UpdateWorld { world },
-            Self::Open { entry_path } => Action::OpenWorld { entry_path },
+            Self::Open { world, entry_path } => Action::OpenWorld { world, entry_path },
             Self::StartDevice { id } => Action::StartDevice(id),
             Self::StopDevice { id } => Action::StopDevice(id),
             Self::RestartDevice { id } => Action::RestartDevice(id),
@@ -1453,6 +1464,7 @@ fn project(app: &App) -> ClientView {
                 id: head.id.clone(),
                 kind: format!("{:?}", head.kind).to_lowercase(),
                 orbit: head.orbit.clone(),
+                world: head.world.clone(),
                 origin: head
                     .url
                     .as_deref()

@@ -53,6 +53,14 @@ pub struct HeadFacts {
     /// every Orbit the identity has; an MCP head is authored against one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orbit: Option<String>,
+    /// The one World this head serves.
+    ///
+    /// `None` is a head that predates the pin and answers for every mounted
+    /// World. That is a fact about the head, not a default to paper over: a
+    /// supervisor cannot make a definite statement about such a head, and
+    /// pretending otherwise is the whole defect this field exists to end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world: Option<String>,
     pub identity: String,
     pub ownership: Ownership,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +101,17 @@ struct Ready {
     token: String,
     #[allow(dead_code, reason = "as above")]
     port: u16,
+    /// Which World this head came up serving.
+    ///
+    /// Read from the head rather than remembered from the arguments it was
+    /// given: the head resolves the pin, so the head is the one that knows. A
+    /// supervisor that recorded its own intent instead would be right until the
+    /// day the resolution disagreed with it — which is the day it matters.
+    ///
+    /// Defaulted so a head from a build before the pin still parses; such a head
+    /// answers for every World, which is what an empty string says here.
+    #[serde(default)]
+    world: String,
 }
 
 /// A browser head this process started and holds.
@@ -137,8 +156,16 @@ pub(crate) fn start_browser(
     id: String,
     device: Option<String>,
     home: Option<&Path>,
+    world: Option<&str>,
 ) -> Result<OwnedHead> {
     let mut command = Command::new(executable);
+    if let Some(world) = world {
+        // One head, one World. Passed rather than left to `$LAIT_WORLD`,
+        // because a supervisor starting several must be able to say which is
+        // which without a process-wide variable that only one of them could
+        // win.
+        command.arg("--world").arg(world);
+    }
     command
         .arg("--json")
         // An ephemeral port, always. A fixed one turns "start a second head"
@@ -169,6 +196,11 @@ pub(crate) fn start_browser(
                 kind: HeadKind::Browser,
                 device,
                 orbit: None,
+                // What the head said, not what it was asked for. An empty
+                // announcement is a head that predates the pin, and stays
+                // `None` rather than being credited with a World it never
+                // claimed.
+                world: Some(ready.world.clone()).filter(|world| !world.is_empty()),
                 identity: home.map_or_else(
                     || "the ordinary identity".to_owned(),
                     |home| home.to_string_lossy().into_owned(),
@@ -252,6 +284,10 @@ pub fn mcp_head(
         kind: HeadKind::Mcp,
         device,
         orbit,
+        // An MCP head is pinned by its binding rather than by a flag this
+        // supervisor passed, and this process never spawns one — so what World
+        // it speaks is the binding's fact to state, not ours to claim.
+        world: None,
         identity: identity.to_string_lossy().into_owned(),
         // Always. Not "unless we happen to have spawned it" — there is no path
         // on which this process is the parent, and a field that could say
@@ -304,6 +340,7 @@ mod tests {
             "head-1".into(),
             Some("alice".into()),
             Some(directory.path()),
+            None,
         );
         assert!(
             started.is_err(),

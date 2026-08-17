@@ -466,7 +466,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
     TResult Function()? refresh,
-    TResult Function(String entryPath)? open,
+    TResult Function(String world, String entryPath)? open,
     TResult Function(String world)? updateWorld,
     TResult Function(String id)? startDevice,
     TResult Function(String id)? stopDevice,
@@ -524,7 +524,7 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_Refresh() when refresh != null:
         return refresh();
       case ActionRequest_Open() when open != null:
-        return open(_that.entryPath);
+        return open(_that.world, _that.entryPath);
       case ActionRequest_UpdateWorld() when updateWorld != null:
         return updateWorld(_that.world);
       case ActionRequest_StartDevice() when startDevice != null:
@@ -631,7 +631,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult when<TResult extends Object?>({
     required TResult Function() refresh,
-    required TResult Function(String entryPath) open,
+    required TResult Function(String world, String entryPath) open,
     required TResult Function(String world) updateWorld,
     required TResult Function(String id) startDevice,
     required TResult Function(String id) stopDevice,
@@ -697,7 +697,7 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_Refresh():
         return refresh();
       case ActionRequest_Open():
-        return open(_that.entryPath);
+        return open(_that.world, _that.entryPath);
       case ActionRequest_UpdateWorld():
         return updateWorld(_that.world);
       case ActionRequest_StartDevice():
@@ -796,7 +796,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function()? refresh,
-    TResult? Function(String entryPath)? open,
+    TResult? Function(String world, String entryPath)? open,
     TResult? Function(String world)? updateWorld,
     TResult? Function(String id)? startDevice,
     TResult? Function(String id)? stopDevice,
@@ -853,7 +853,7 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_Refresh() when refresh != null:
         return refresh();
       case ActionRequest_Open() when open != null:
-        return open(_that.entryPath);
+        return open(_that.world, _that.entryPath);
       case ActionRequest_UpdateWorld() when updateWorld != null:
         return updateWorld(_that.world);
       case ActionRequest_StartDevice() when startDevice != null:
@@ -968,8 +968,10 @@ class ActionRequest_Refresh extends ActionRequest {
 /// @nodoc
 
 class ActionRequest_Open extends ActionRequest {
-  const ActionRequest_Open({required this.entryPath}) : super._();
+  const ActionRequest_Open({required this.world, required this.entryPath})
+      : super._();
 
+  final String world;
   final String entryPath;
 
   /// Create a copy of ActionRequest
@@ -984,16 +986,17 @@ class ActionRequest_Open extends ActionRequest {
     return identical(this, other) ||
         (other.runtimeType == runtimeType &&
             other is ActionRequest_Open &&
+            (identical(other.world, world) || other.world == world) &&
             (identical(other.entryPath, entryPath) ||
                 other.entryPath == entryPath));
   }
 
   @override
-  int get hashCode => Object.hash(runtimeType, entryPath);
+  int get hashCode => Object.hash(runtimeType, world, entryPath);
 
   @override
   String toString() {
-    return 'ActionRequest.open(entryPath: $entryPath)';
+    return 'ActionRequest.open(world: $world, entryPath: $entryPath)';
   }
 }
 
@@ -1004,7 +1007,7 @@ abstract mixin class $ActionRequest_OpenCopyWith<$Res>
           ActionRequest_Open value, $Res Function(ActionRequest_Open) _then) =
       _$ActionRequest_OpenCopyWithImpl;
   @useResult
-  $Res call({String entryPath});
+  $Res call({String world, String entryPath});
 }
 
 /// @nodoc
@@ -1019,9 +1022,14 @@ class _$ActionRequest_OpenCopyWithImpl<$Res>
   /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   $Res call({
+    Object? world = null,
     Object? entryPath = null,
   }) {
     return _then(ActionRequest_Open(
+      world: null == world
+          ? _self.world
+          : world // ignore: cast_nullable_to_non_nullable
+              as String,
       entryPath: null == entryPath
           ? _self.entryPath
           : entryPath // ignore: cast_nullable_to_non_nullable
