@@ -668,51 +668,15 @@ impl Worker {
             // The re-read itself is the effect, and `rereads` is what
             // carries it out. Nothing to say beyond that it happened.
             Action::Refresh => Ok(Outcome::Silent),
-            // The check both resolves the channel and stages what it finds,
-            // so this is the whole act. Blocking, and off the signal loop for
-            // the same reason every other network read here is: a World host
-            // that is slow must not hold a frame.
+            // Consent is one bounded durable daemon write. Fetch, staging and
+            // per-Space migration happen later on the daemon's admitted lane;
+            // the UI gets its operation coordinate before any of that work.
             Action::UpdateWorld { world } => {
-                let Some(identity) = client.identity_dir() else {
-                    return Err(ClientError::invalid(
-                        "no identity is bound, so there is no World to update".to_string(),
-                    ));
-                };
-                let world = world.clone();
-                let outcome = tokio::task::spawn_blocking(move || {
-                    let worlds = lait::serve::head::worlds_root(&identity);
-                    let channel = lait::update::feed::Channel::current();
-                    let found = lait::update::world::check(&world, &worlds, channel);
-                    if let Ok(found) = &found {
-                        // Record it the same way the daemon's own period does,
-                        // so the row this refreshes into agrees with the row a
-                        // later period would draw.
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |since| since.as_secs());
-                        lait::update::world::note(&worlds, &world, found, now);
-                    }
-                    found
-                })
-                .await
-                .map_err(|error| {
-                    ClientError::internal(format!("the world check panicked: {error}"))
-                })?
-                .map_err(|error| ClientError::internal(format!("{error:#}")))?;
-                Ok(Outcome::Said(match outcome {
-                    lait::update::world::Outcome::Staged { version } => {
-                        format!("updated to {version}")
-                    }
-                    lait::update::world::Outcome::Current { version } => {
-                        format!("already on {version}")
-                    }
-                    lait::update::world::Outcome::Unmet { version, why } => {
-                        format!("{version} needs {}", why.join(", "))
-                    }
-                    lait::update::world::Outcome::NothingPublished { version } => {
-                        format!("{version} carries nothing for this World")
-                    }
-                }))
+                let job = client.world_update(world).await?;
+                Ok(Outcome::Said(format!(
+                    "update accepted ({})",
+                    job.operation_hex()
+                )))
             }
             Action::OpenWorld { entry_path } => {
                 let launch = client.open_world(entry_path).await?;

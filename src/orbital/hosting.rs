@@ -53,7 +53,9 @@ use crate::control::{
     RequestOwner, Response, StatusInfo, UploadReader,
 };
 use crate::orbital::{
-    orbital_store_root, unsupported_store_at, SpaceAuthority, WorldPackages, WorldRouter,
+    orbital_store_root, unsupported_store_at, ReviewedImplementation, SpaceAuthority,
+    WorldPackages, WorldRouter, WorldUpgradeAssessment, WorldUpgradeContext, WorldUpgradeProgress,
+    WorldUpgradeStep,
 };
 use comms::{Transport, TransportFactory};
 use runtime::world::call::{Access, Call, Code, Context, Reply};
@@ -123,6 +125,63 @@ const PRESENCE_FRESH_SECS: u64 = 90;
 /// it drops it says it dropped — a silent cap on a convergence verb would be
 /// the same class of lie this function was just fixed for.
 const SYNC_MAX_PEERS: usize = 8;
+
+/// Product-owned lifecycle state is deliberately tiny. It is a cursor and
+/// verification record, never a materialized migration catalog.
+const WORLD_UPGRADE_RECORD_MAX: usize = 64 * 1024;
+const WORLD_UPGRADE_ENVELOPE_MAX: usize = WORLD_UPGRADE_RECORD_MAX + 4 * 1024;
+
+static WORLD_UPGRADE_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn contains_io_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
+}
+
+/// Refuse an initial historical migration until this host can preserve the
+/// exact active reader for the whole bounded upgrade.
+///
+/// Activating the migrator first would immediately route ordinary queries to
+/// its incrementally materialized publication. Merely having the predecessor
+/// package installed is not sufficient: the host does not yet own an exact
+/// read-continuity selector/lease. Preferred re-verification and an already
+/// active migrator are safe existing states; every other transition remains on
+/// its current authority coordinate and fails closed.
+fn lifecycle_read_continuity_refusal(
+    active: ReviewedImplementation,
+    migrator: ReviewedImplementation,
+    preferred: ReviewedImplementation,
+    active_installed: bool,
+) -> Option<String> {
+    if active.id == migrator.id || active.id == preferred.id {
+        return None;
+    }
+    Some(if active_installed {
+        "this build cannot yet preserve the exact active World read publication throughout migration; keeping the prior implementation active"
+            .into()
+    } else {
+        format!(
+            "the exact active World implementation v{} ({}) is not installed; keeping it active",
+            active.version,
+            data_encoding::HEXLOWER.encode(&active.id[..8])
+        )
+    })
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorldUpgradeRecord {
+    format: u8,
+    operation: [u8; 16],
+    source: WorldUpgradeSourceRecord,
+    product: Vec<u8>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorldUpgradeSourceRecord {
+    publication: runtime::publication::PublicationId,
+    frontier: replica::frontier::ReplicaFrontier,
+}
 
 /// Where this build stands against the Space, for one World.
 ///
@@ -305,6 +364,68 @@ pub(crate) struct StationRunner {
     _lock: DaemonLock,
 }
 
+struct PreparedStationOpen {
+    space: SpaceId,
+    mechanics: SpaceAuthority,
+    rt: Runtime,
+    worlds: WorldRouter,
+    network: comms::policy::Network,
+}
+
+fn prepare_station_open(
+    home: &Path,
+    device_seed: [u8; 32],
+    packages: WorldPackages,
+) -> Result<PreparedStationOpen> {
+    if let Some(error) = unsupported_store_at(home) {
+        return Err(anyhow!("{error}"));
+    }
+    let space = discover_space(home)?;
+    let mechanics = SpaceAuthority::open(&orbital_store_root(home), &space, &device_seed)?;
+    let (registry, worlds) = packages
+        .build()
+        .map_err(|error| anyhow!("world registry: {error:?}"))?;
+    let rt = Runtime::open(
+        orbital_store_root(home),
+        registry,
+        Arc::new(mechanics.clone()),
+        Arc::new(mechanics.clone()),
+    );
+    let network = comms::policy::Network::from_env()?;
+    Ok(PreparedStationOpen {
+        space,
+        mechanics,
+        rt,
+        worlds,
+        network,
+    })
+}
+
+async fn run_station_activation<T, F>(
+    blocking: Option<Arc<tokio::sync::Semaphore>>,
+    open: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    if let Some(blocking) = blocking {
+        let permit = blocking
+            .try_acquire_owned()
+            .map_err(|_| anyhow!("the bounded host blocking lane is saturated"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            open()
+        })
+        .await
+        .map_err(|error| anyhow!("Station activation worker failed: {error}"))?
+    } else {
+        tokio::task::spawn_blocking(open)
+            .await
+            .map_err(|error| anyhow!("Station activation worker failed: {error}"))?
+    }
+}
+
 /// A non-owning signal for an in-process StationHost runner.
 ///
 /// Weak by design: retaining a stop handle must not keep the host alive while
@@ -330,8 +451,40 @@ impl StationRunner {
         factory: &dyn TransportFactory,
         packages: WorldPackages,
     ) -> Result<Self> {
-        let lock = acquire_daemon_lock(&home)?;
-        let host = Arc::new(StationHost::open(&home, device_seed, factory, packages).await?);
+        Self::start_inner(home, device_seed, factory, packages, None).await
+    }
+
+    /// Start through the composition-owned bounded blocking lane. Only the
+    /// synchronous store/authority/Runtime-open prelude consumes the permit;
+    /// transport construction remains asynchronous.
+    pub(crate) async fn start_admitted(
+        home: PathBuf,
+        device_seed: [u8; 32],
+        factory: &dyn TransportFactory,
+        packages: WorldPackages,
+        blocking: Arc<tokio::sync::Semaphore>,
+    ) -> Result<Self> {
+        Self::start_inner(home, device_seed, factory, packages, Some(blocking)).await
+    }
+
+    async fn start_inner(
+        home: PathBuf,
+        device_seed: [u8; 32],
+        factory: &dyn TransportFactory,
+        packages: WorldPackages,
+        blocking: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> Result<Self> {
+        // Lock-file open/replace is fixed-size, but still performs filesystem
+        // I/O. The admitted launcher path must not do even that work on a
+        // Tokio reactor before it reaches the bounded lane.
+        let home_for_lock = home.clone();
+        let lock = run_station_activation(blocking.clone(), move || {
+            acquire_daemon_lock(&home_for_lock)
+        })
+        .await?;
+        let host = Arc::new(
+            StationHost::open_inner(&home, device_seed, factory, packages, blocking).await?,
+        );
         Ok(Self {
             home,
             host,
@@ -412,23 +565,41 @@ impl StationHost {
         factory: &dyn TransportFactory,
         packages: WorldPackages,
     ) -> Result<Self> {
-        if let Some(err) = unsupported_store_at(home) {
-            return Err(anyhow!("{err}"));
-        }
-        let space = discover_space(home)?;
-        let mechanics = SpaceAuthority::open(&orbital_store_root(home), &space, &device_seed)?;
+        Self::open_inner(home, device_seed, factory, packages, None).await
+    }
 
-        let (registry, worlds) = packages
-            .build()
-            .map_err(|e| anyhow!("world registry: {e:?}"))?;
-        let rt = Runtime::open(
-            orbital_store_root(home),
-            registry,
-            Arc::new(mechanics.clone()),
-            Arc::new(mechanics.clone()),
-        );
-
-        let network = comms::policy::Network::from_env()?;
+    async fn open_inner(
+        home: &Path,
+        device_seed: [u8; 32],
+        factory: &dyn TransportFactory,
+        packages: WorldPackages,
+        blocking: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> Result<Self> {
+        let home_for_open = home.to_path_buf();
+        let prepare = move || prepare_station_open(&home_for_open, device_seed, packages);
+        let prepared = if let Some(blocking) = blocking.as_ref() {
+            let permit = blocking
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| anyhow!("the bounded host blocking lane is saturated"))?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                prepare()
+            })
+            .await
+            .map_err(|error| anyhow!("Station open worker failed: {error}"))??
+        } else {
+            tokio::task::spawn_blocking(prepare)
+                .await
+                .map_err(|error| anyhow!("Station open worker failed: {error}"))??
+        };
+        let PreparedStationOpen {
+            space,
+            mechanics,
+            rt,
+            worlds,
+            network,
+        } = prepared;
         let transport = factory
             .build_scoped(
                 &device_seed,
@@ -530,28 +701,31 @@ impl StationHost {
         advertise.sort();
         advertise.dedup();
         advertise.truncate(runtime::beacon::MAX_ROUTE_HINTS);
-        let station = rt
-            .acquire(&space)
-            .map_err(|e| anyhow!("acquire orbit: {e:?}"))?
-            .open(Activation {
-                content: Default::default(),
-                find: Default::default(),
-                // Both planes on, which is what `lait/freight/1` being
-                // advertised has always implied and, until now, has not meant:
-                // the ALPN was registered and no driver owned it, so a peer
-                // that dialled completed a handshake and was turned away.
-                planes: Default::default(),
-                drain_deadline: Duration::from_secs(5),
-                comms: Some(comms_options(
-                    transport,
-                    device_seed,
-                    &mechanics,
-                    bootstrap,
-                    advertise,
-                )),
-                observation_capacity: 0,
-            })
-            .map_err(|e| anyhow!("activate: {e:?}"))?;
+        let activation = Activation {
+            content: Default::default(),
+            find: Default::default(),
+            // Both planes on, which is what `lait/freight/1` being advertised
+            // has always implied. The potentially size-proportional Station
+            // open below is admitted on the host blocking lane.
+            planes: Default::default(),
+            drain_deadline: Duration::from_secs(5),
+            comms: Some(comms_options(
+                transport,
+                device_seed,
+                &mechanics,
+                bootstrap,
+                advertise,
+            )),
+            observation_capacity: 0,
+        };
+        let open_station = move || {
+            rt.acquire(&space)
+                .map_err(|error| anyhow!("acquire orbit: {error:?}"))?
+                .open(activation)
+                .map_err(|error| anyhow!("activate: {error:?}"))
+                .map(|station| (space, station))
+        };
+        let (space, station) = run_station_activation(blocking, open_station).await?;
         let identity = Runtime::identity_from_seed(&device_seed);
         // Dock now if we already hold standing (founder / re-opened member);
         // otherwise defer until admission lands (an un-admitted joiner cannot
@@ -1283,6 +1457,27 @@ impl StationHost {
                 };
                 let ours = *host.reviewed_implementation();
                 let version = host.reviewed_version();
+                let active = self.active_reviewed_implementation(&world_id);
+                match self.worlds.upgrade_assessment(&world_id, active) {
+                    Ok(WorldUpgradeAssessment::Current)
+                    | Ok(WorldUpgradeAssessment::Direct) => {}
+                    Ok(WorldUpgradeAssessment::ConsentRequired { .. })
+                    | Ok(WorldUpgradeAssessment::InProgress { .. }) => {
+                        return Response::denied(
+                            "this World has a pending lifecycle migration; use the native World update control so consent, progress, and verification are durable",
+                        )
+                    }
+                    Ok(WorldUpgradeAssessment::Unsupported { reason }) => {
+                        return Response::invalid(format!(
+                            "this World cannot activate the preferred implementation: {reason}"
+                        ))
+                    }
+                    Err(error) => {
+                        return Response::err(format!(
+                            "could not assess the World lifecycle before activation: {error}"
+                        ))
+                    }
+                }
                 match self
                     .mechanics
                     .activate_implementation(world_id.as_str(), ours, version)
@@ -2707,6 +2902,340 @@ impl StationHost {
             .collect()
     }
 
+    fn active_reviewed_implementation(&self, world: &WorldId) -> Option<ReviewedImplementation> {
+        self.mechanics
+            .active_implementation_state(world.as_str())
+            .map(|active| ReviewedImplementation {
+                id: active.id,
+                version: active.version,
+            })
+    }
+
+    fn world_upgrade_record_path(&self, world: &WorldId, operation: [u8; 16]) -> PathBuf {
+        let digest = blake3::hash(world.as_str().as_bytes());
+        orbital_store_root(&self.home)
+            .join(self.station.space_id().as_str())
+            .join("lifecycle")
+            .join(format!(
+                "{}-{}.record",
+                data_encoding::HEXLOWER.encode(digest.as_bytes()),
+                data_encoding::HEXLOWER.encode(&operation)
+            ))
+    }
+
+    fn read_world_upgrade_record(
+        &self,
+        world: &WorldId,
+        operation: [u8; 16],
+    ) -> Result<Option<WorldUpgradeRecord>> {
+        let path = self.world_upgrade_record_path(world, operation);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read lifecycle record {}", path.display()))
+            }
+        };
+        if bytes.len() > WORLD_UPGRADE_ENVELOPE_MAX {
+            anyhow::bail!("the lifecycle record exceeds its host bound");
+        }
+        let record: WorldUpgradeRecord = postcard::from_bytes(&bytes)
+            .with_context(|| format!("decode lifecycle record {}", path.display()))?;
+        if record.format != 1 {
+            anyhow::bail!("unsupported lifecycle record format {}", record.format);
+        }
+        if record.operation != operation {
+            anyhow::bail!(
+                "another consented World upgrade operation already owns this Space record"
+            );
+        }
+        if record.product.len() > WORLD_UPGRADE_RECORD_MAX {
+            anyhow::bail!("the product lifecycle record exceeds its host bound");
+        }
+        Ok(Some(record))
+    }
+
+    fn persist_world_upgrade_record(
+        &self,
+        world: &WorldId,
+        operation: [u8; 16],
+        source: &runtime::world::LifecycleSourceCoordinate,
+        product: Vec<u8>,
+    ) -> Result<()> {
+        if product.len() > WORLD_UPGRADE_RECORD_MAX {
+            anyhow::bail!(
+                "the product lifecycle record is {} bytes; the host bound is {}",
+                product.len(),
+                WORLD_UPGRADE_RECORD_MAX
+            );
+        }
+        let path = self.world_upgrade_record_path(world, operation);
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("lifecycle record has no parent directory"))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create lifecycle directory {}", parent.display()))?;
+        // The opaque product checkpoint may use its full 64 KiB allowance.
+        // Postcard keeps those bytes binary; JSON would expand a Vec<u8> into
+        // decimal arrays and violate the host envelope for valid records.
+        let bytes = postcard::to_stdvec(&WorldUpgradeRecord {
+            format: 1,
+            operation,
+            source: WorldUpgradeSourceRecord {
+                publication: source.publication.publication,
+                frontier: source.frontier.clone(),
+            },
+            product,
+        })
+        .context("encode lifecycle record")?;
+        if bytes.len() > WORLD_UPGRADE_ENVELOPE_MAX {
+            anyhow::bail!("the encoded lifecycle record exceeds its host bound");
+        }
+        let nonce = WORLD_UPGRADE_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = path.with_extension(format!("tmp.{}.{}", std::process::id(), nonce));
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&temporary)
+                .with_context(|| format!("create {}", temporary.display()))?;
+            file.write_all(&bytes)
+                .with_context(|| format!("write {}", temporary.display()))?;
+            file.sync_all()
+                .with_context(|| format!("sync {}", temporary.display()))?;
+        }
+        crate::update::consent::commit_replace(&temporary, &path, parent)
+            .with_context(|| format!("commit lifecycle record {}", path.display()))?;
+        Ok(())
+    }
+
+    fn persist_world_upgrade_checkpoint(
+        &self,
+        world: &WorldId,
+        operation: [u8; 16],
+        source: &runtime::world::LifecycleSourceCoordinate,
+        product: Vec<u8>,
+    ) -> Result<Option<WorldUpgradeStep>> {
+        match self.persist_world_upgrade_record(world, operation, source, product) {
+            Ok(()) => Ok(None),
+            Err(error) if contains_io_failure(&error) => Err(error),
+            Err(error) => {
+                tracing::error!(world = %world, %error, "invalid World lifecycle checkpoint");
+                Ok(Some(WorldUpgradeStep::Unsupported {
+                    reason: "the World lifecycle produced an invalid durable checkpoint".into(),
+                }))
+            }
+        }
+    }
+
+    fn activate_upgrade_implementation(
+        &self,
+        world: &WorldId,
+        implementation: ReviewedImplementation,
+    ) -> Result<Option<WorldUpgradeStep>> {
+        match self.mechanics.activate_implementation(
+            world.as_str(),
+            implementation.id,
+            implementation.version,
+        ) {
+            Ok(()) => Ok(None),
+            Err(error) if contains_io_failure(&error) => Err(error),
+            Err(error) => {
+                tracing::error!(world = %world, %error, "World lifecycle activation refused by authority");
+                Ok(Some(WorldUpgradeStep::Unsupported {
+                    reason: "Space authority refused the lifecycle implementation activation"
+                        .into(),
+                }))
+            }
+        }
+    }
+
+    /// Advance one consented World upgrade turn.
+    ///
+    /// The daemon invokes this on its bounded blocking lane. No Station or
+    /// Runtime lock is held while product code executes, and the active
+    /// publication remains readable until the short preferred activation at
+    /// the end of a verified turn.
+    pub(crate) fn advance_world_upgrade(
+        &self,
+        world: &WorldId,
+        operation: [u8; 16],
+    ) -> Result<WorldUpgradeStep> {
+        let Some(active) = self.active_reviewed_implementation(world) else {
+            return Ok(WorldUpgradeStep::Unbound);
+        };
+        let assessment = self.worlds.upgrade_assessment(world, Some(active))?;
+        let preferred = self
+            .worlds
+            .preferred_host(world)
+            .ok_or_else(|| anyhow!("World '{world}' has no preferred package"))?
+            .reviewed_state();
+
+        let migrator = match assessment {
+            WorldUpgradeAssessment::Current => {
+                let Some(migrator) = self.worlds.verification_migrator(world) else {
+                    return Ok(WorldUpgradeStep::Current);
+                };
+                migrator
+            }
+            WorldUpgradeAssessment::Direct => {
+                if let Some(refusal) = self.activate_upgrade_implementation(world, preferred)? {
+                    return Ok(refusal);
+                }
+                self.worlds
+                    .ensure_primary(&self.station, world, &self.identity)?;
+                return Ok(WorldUpgradeStep::Verified);
+            }
+            WorldUpgradeAssessment::Unsupported { reason } => {
+                return Ok(WorldUpgradeStep::Unsupported { reason })
+            }
+            WorldUpgradeAssessment::ConsentRequired { migrator }
+            | WorldUpgradeAssessment::InProgress { migrator } => migrator,
+        };
+        if !self.worlds.has_reviewed_implementation(world, migrator) {
+            return Ok(WorldUpgradeStep::Unsupported {
+                reason: format!(
+                    "the exact reviewed migrator v{} ({}) is not installed",
+                    migrator.version,
+                    data_encoding::HEXLOWER.encode(&migrator.id[..8])
+                ),
+            });
+        }
+
+        if let Some(reason) = lifecycle_read_continuity_refusal(
+            active,
+            migrator,
+            preferred,
+            self.worlds.has_reviewed_implementation(world, active),
+        ) {
+            return Ok(WorldUpgradeStep::Unsupported { reason });
+        }
+
+        if active.id != migrator.id {
+            if let Some(refusal) = self.activate_upgrade_implementation(world, migrator)? {
+                return Ok(refusal);
+            }
+        }
+        self.worlds
+            .ensure_primary(&self.station, world, &self.identity)?;
+        let record = match self.read_world_upgrade_record(world, operation) {
+            Ok(record) => record,
+            Err(error) if contains_io_failure(&error) => return Err(error),
+            Err(error) => {
+                tracing::error!(world = %world, %error, "World lifecycle checkpoint failed integrity validation");
+                return Ok(WorldUpgradeStep::Unsupported {
+                    reason: "the stored World lifecycle checkpoint failed integrity validation"
+                        .into(),
+                });
+            }
+        };
+        let lifecycle = self
+            .worlds
+            .preferred_host(world)
+            .and_then(|host| host.lifecycle())
+            .ok_or_else(|| anyhow!("World '{world}' has no upgrade lifecycle"))?;
+        let device = mechanics::actor::device_from_seed(&self.device_seed).to_string();
+        let source = self
+            .worlds
+            .with_primary_for(world, migrator.id, |session| {
+                session.lifecycle_source_status(
+                    record.as_ref().map(|record| record.source.publication),
+                )
+            })
+            .ok_or_else(|| anyhow!("the exact migrator Session is unavailable"))??;
+        let source = match source {
+            runtime::LifecycleSourceStatus::Ready(source) => source,
+            runtime::LifecycleSourceStatus::Building => return Ok(WorldUpgradeStep::Building),
+            runtime::LifecycleSourceStatus::Capacity => return Ok(WorldUpgradeStep::Capacity),
+            runtime::LifecycleSourceStatus::ImplementationUnavailable => {
+                return Ok(WorldUpgradeStep::Unsupported {
+                    reason: "the frozen migration implementation is unavailable".into(),
+                })
+            }
+            runtime::LifecycleSourceStatus::GenerationUnavailable => {
+                return Ok(WorldUpgradeStep::Unsupported {
+                    reason: "the frozen migration generation is unavailable".into(),
+                })
+            }
+            runtime::LifecycleSourceStatus::Unavailable => {
+                return Ok(WorldUpgradeStep::Unsupported {
+                    reason: "the frozen migration publication is unavailable".into(),
+                })
+            }
+        };
+        if let Some(record) = &record {
+            if record.source.publication != source.publication.publication
+                || record.source.frontier != source.frontier
+            {
+                return Ok(WorldUpgradeStep::Unsupported {
+                    reason: "the frozen migration source no longer matches its durable record"
+                        .into(),
+                });
+            }
+        } else {
+            // Persist the frozen causal cut before product planning performs
+            // any size-proportional read. A crash restarts from this same
+            // semantic publication and frontier under a fresh materialization.
+            if let Some(refusal) =
+                self.persist_world_upgrade_checkpoint(world, operation, &source, Vec::new())?
+            {
+                return Ok(refusal);
+            }
+        }
+        let progress = self
+            .worlds
+            .with_primary_for(world, migrator.id, |session| {
+                lifecycle.upgrade_step(WorldUpgradeContext {
+                    space: self.station.space_id(),
+                    session,
+                    identity: &self.identity,
+                    device: &device,
+                    active: migrator,
+                    migrator,
+                    preferred,
+                    source: &source,
+                    record: record.as_ref().and_then(|record| {
+                        (!record.product.is_empty()).then_some(record.product.as_slice())
+                    }),
+                })
+            })
+            .ok_or_else(|| anyhow!("the exact migrator Session is unavailable"))??;
+
+        match progress {
+            WorldUpgradeProgress::Pending {
+                completed,
+                remaining,
+                record,
+            } => {
+                if let Some(refusal) =
+                    self.persist_world_upgrade_checkpoint(world, operation, &source, record)?
+                {
+                    return Ok(refusal);
+                }
+                Ok(WorldUpgradeStep::Pending {
+                    completed,
+                    remaining,
+                })
+            }
+            WorldUpgradeProgress::Verified { record } => {
+                // The verified product record is durable before the authority
+                // flip. A later explicit update always re-enters the migrator
+                // from a fresh frozen source, so causally valid legacy Contact
+                // delivered after activation remains durable and recoverable.
+                if let Some(refusal) =
+                    self.persist_world_upgrade_checkpoint(world, operation, &source, record)?
+                {
+                    return Ok(refusal);
+                }
+                if let Some(refusal) = self.activate_upgrade_implementation(world, preferred)? {
+                    return Ok(refusal);
+                }
+                self.worlds
+                    .ensure_primary(&self.station, world, &self.identity)?;
+                Ok(WorldUpgradeStep::Verified)
+            }
+        }
+    }
+
     /// Bring the Space's active World implementations up to this build's, where
     /// this build is strictly newer and this node may say so.
     ///
@@ -2743,7 +3272,17 @@ impl StationHost {
                     short(&active.id),
                 ),
                 Some(active) if ours.version > active.version => {
-                    match mechanics.activate_implementation(world.as_str(), ours.id, ours.version) {
+                    let assessment = worlds.upgrade_assessment(
+                        &world,
+                        Some(ReviewedImplementation {
+                            id: active.id,
+                            version: active.version,
+                        }),
+                    );
+                    match assessment {
+                        Ok(WorldUpgradeAssessment::Direct) => match mechanics
+                            .activate_implementation(world.as_str(), ours.id, ours.version)
+                        {
                         Ok(()) => tracing::info!(
                             "took the Space's {world} implementation forward: v{} ({}) -> v{} ({})",
                             active.version,
@@ -2756,6 +3295,25 @@ impl StationHost {
                              (v{}, {}): {error}",
                             ours.version,
                             short(&ours.id),
+                        ),
+                        },
+                        Ok(WorldUpgradeAssessment::Current) => {}
+                        Ok(WorldUpgradeAssessment::ConsentRequired { .. })
+                        | Ok(WorldUpgradeAssessment::InProgress { .. }) => tracing::info!(
+                            "{world} has a newer reviewed implementation, but its lifecycle \
+                             requires explicit update consent; keeping v{} ({}) active",
+                            active.version,
+                            short(&active.id),
+                        ),
+                        Ok(WorldUpgradeAssessment::Unsupported { reason }) => tracing::warn!(
+                            "{world} cannot be upgraded by this build: {reason}; keeping v{} ({}) active",
+                            active.version,
+                            short(&active.id),
+                        ),
+                        Err(error) => tracing::warn!(
+                            "could not assess {world} lifecycle upgrade: {error}; keeping v{} ({}) active",
+                            active.version,
+                            short(&active.id),
                         ),
                     }
                 }
@@ -3997,12 +4555,63 @@ pub async fn run_station_process_with_packages(
 
 #[cfg(test)]
 mod tests {
+    use super::{lifecycle_read_continuity_refusal, run_station_activation};
+    use crate::orbital::ReviewedImplementation;
     use runtime::plane::live::LiveNarrow;
     use runtime::transient::Target;
     use runtime::world::{DirtyScope, RoutedInvalidation};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     const BODY: [u8; 16] = [7u8; 16];
     const OTHER: [u8; 16] = [8u8; 16];
+
+    #[test]
+    fn historical_upgrade_refuses_before_migrator_activation_without_continuity() {
+        let historical = ReviewedImplementation {
+            id: [1; 32],
+            version: 2,
+        };
+        let migrator = ReviewedImplementation {
+            id: [2; 32],
+            version: 3,
+        };
+        let preferred = ReviewedImplementation {
+            id: [3; 32],
+            version: 4,
+        };
+
+        let missing = lifecycle_read_continuity_refusal(historical, migrator, preferred, false)
+            .expect("an unavailable historical reader must fail closed");
+        assert!(missing.contains("not installed"));
+        assert!(
+            lifecycle_read_continuity_refusal(historical, migrator, preferred, true,).is_some()
+        );
+        assert!(lifecycle_read_continuity_refusal(migrator, migrator, preferred, true).is_none());
+        assert!(lifecycle_read_continuity_refusal(preferred, migrator, preferred, true).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn station_activation_work_does_not_block_the_reactor() {
+        let lane = Arc::new(tokio::sync::Semaphore::new(1));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let activation = tokio::spawn(run_station_activation(Some(lane), move || {
+            let _ = started_tx.send(());
+            release_rx.recv().expect("test releases Station open");
+            Ok(())
+        }));
+        started_rx.await.expect("activation entered blocking lane");
+
+        let mut ticks = 0;
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            ticks += 1;
+        }
+        assert_eq!(ticks, 8, "reactor heartbeat survives blocked Station::open");
+        release_tx.send(()).unwrap();
+        activation.await.unwrap().unwrap();
+    }
 
     #[test]
     fn narrowing_to_an_issue_keeps_every_scope_over_its_body() {

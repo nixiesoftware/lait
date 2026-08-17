@@ -460,7 +460,7 @@ use is a slot held open for nothing.
 |---|---|---|---|
 | Local DTOs | `runtime::dto::DTO_PROTOCOL_VERSION` | 1 | loopback control plane and viewer |
 
-| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 14 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 14, so the mixed-version window is currently empty |
+| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 15 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 15, so the mixed-version window is currently empty |
 
 DTOs are a local contract between the engine and its own clients. They are
 versioned because a stale viewer bundle is a real situation, not because they

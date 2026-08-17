@@ -1023,6 +1023,134 @@ pub struct DocumentSplice {
     pub insert: String,
 }
 
+/// One exact, content-bound source window selected outside mutation admission.
+/// The cursor is a compact product coordinate; source content never enters the
+/// signed command or the host's opaque lifecycle record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct V4MigrationWindow {
+    /// Stable phase vocabulary. The planner uses `catalog`, `issue`, the
+    /// Catalog-backed `coordinates` join, `spec`, `baseline`, then the
+    /// body-less `terminal` sentinel.
+    pub phase: String,
+    /// Exact frozen Body opened by the commit callback. Absent only for the
+    /// terminal sentinel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<BodyKey>,
+    /// Phase-local continuation within that Body. It is an ordinal or a
+    /// canonical map/set key, never source payload.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subitem: String,
+    /// Domain-separated digest of the selected Body/window coordinate and its
+    /// frozen source bytes. Commit recomputes it before staging any effect.
+    pub digest: [u8; 32],
+    /// Canonical durable cursor written with the migrated output.
+    pub cursor: String,
+}
+
+impl V4MigrationWindow {
+    pub const CURSOR_PREFIX: &str = "m1";
+    pub const TERMINAL_PHASE: &str = "terminal";
+
+    pub fn render_cursor(phase: &str, body: Option<&BodyKey>, subitem: &str) -> Option<String> {
+        if !matches!(
+            phase,
+            "catalog" | "issue" | "coordinates" | "spec" | "baseline" | Self::TERMINAL_PHASE
+        ) || subitem.len() > 256
+            || (phase == Self::TERMINAL_PHASE) != body.is_none()
+            || (phase == Self::TERMINAL_PHASE && !subitem.is_empty())
+        {
+            return None;
+        }
+        let body = body.map_or_else(|| "-".to_string(), |key| key.body.render());
+        let subitem = data_encoding::BASE64URL_NOPAD.encode(subitem.as_bytes());
+        Some(format!("{}:{phase}:{body}:{subitem}", Self::CURSOR_PREFIX))
+    }
+
+    pub fn valid(&self) -> bool {
+        self.digest != [0; 32]
+            && self
+                .body
+                .as_ref()
+                .is_none_or(|body| body.world == world_id())
+            && Self::render_cursor(&self.phase, self.body.as_ref(), &self.subitem)
+                .is_some_and(|cursor| cursor == self.cursor)
+            && self.cursor.len() <= 512
+    }
+
+    pub fn parse_cursor(cursor: &str) -> Option<(String, Option<BodyId>, String)> {
+        let mut parts = cursor.splitn(4, ':');
+        if parts.next()? != Self::CURSOR_PREFIX {
+            return None;
+        }
+        let phase = parts.next()?.to_string();
+        let body = match parts.next()? {
+            "-" => None,
+            rendered => Some(BodyId::parse(rendered)?),
+        };
+        let subitem = String::from_utf8(
+            data_encoding::BASE64URL_NOPAD
+                .decode(parts.next()?.as_bytes())
+                .ok()?,
+        )
+        .ok()?;
+        Self::render_cursor(
+            &phase,
+            body.as_ref()
+                .map(|body| BodyKey::new(world_id(), body.clone()))
+                .as_ref(),
+            &subitem,
+        )
+        .filter(|canonical| canonical == cursor)?;
+        Some((phase, body, subitem))
+    }
+
+    pub fn terminal(&self) -> bool {
+        self.phase == Self::TERMINAL_PHASE
+    }
+}
+
+/// Crash-stable coordinate for one bounded v3 -> v4 lifecycle batch.
+///
+/// The launcher persists the signed intent containing this value before it
+/// submits. A large legacy description therefore remains in its frozen Body;
+/// neither the opaque lifecycle record nor the signed command becomes a
+/// tracker-sized data transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct V4MigrationPlan {
+    pub version: u16,
+    pub source: runtime::publication::PublicationId,
+    pub source_frontier: replica::frontier::ReplicaFrontier,
+    /// Last durably committed batch/cursor at preparation time. Zero plus an
+    /// empty cursor names the first batch.
+    pub previous_batch: u64,
+    #[serde(default)]
+    pub previous_cursor: String,
+    /// Exact next frozen source window, prepared read-only before the action is
+    /// admitted to the single mutation lane.
+    pub window: V4MigrationWindow,
+    /// Product fact timestamp chosen once when this plan is signed. Durable
+    /// attribution still comes exclusively from authenticated Context.
+    pub timestamp: u64,
+}
+
+impl V4MigrationPlan {
+    pub const VERSION: u16 = 2;
+
+    pub fn valid(&self) -> bool {
+        self.version == Self::VERSION
+            && self.source.implementation_digest != [0; 32]
+            && self.source.extractor_schema_digest.digest() != [0; 32]
+            && self.source_frontier != replica::frontier::ReplicaFrontier::EMPTY
+            && self.previous_cursor.len() <= 512
+            && (self.previous_batch > 0 || self.previous_cursor.is_empty())
+            && self.window.valid()
+            && self.window.cursor != self.previous_cursor
+            && self.timestamp > 0
+    }
+}
+
 /// The product intents (schema `issue` v1). Every id/timestamp is supplied by
 /// the daemon; the World validates and stages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1066,9 +1194,11 @@ pub enum IssueIntent {
     /// idempotent no-op. Batching is required by the substrate's 4,096-op /
     /// 1-MiB transaction ceiling and is not exposed as product truth.
     V4Migrate {
-        actor: String,
-        device: String,
-        ts: u64,
+        /// Compact deterministic coordinate prepared against one exact frozen
+        /// source publication by the composition-owned lifecycle. Migrated
+        /// Bodies and text remain in the frozen source rather than inflating
+        /// the host's opaque lifecycle record.
+        plan: V4MigrationPlan,
     },
     IssueNew {
         doc: String,
@@ -1959,6 +2089,10 @@ pub struct WorkflowProjection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum IssueQuery {
+    /// Migrator-package-only, constant-footprint lifecycle proof. This reads
+    /// only the v4 migration marker and its retained audit tail; it never
+    /// projects Catalog, Issues, Specs, or Baselines.
+    V4MigrationStatus,
     /// Report which current Blueprint records still depend on compatibility
     /// readers instead of the structures this implementation writes natively.
     StructureStatus,
@@ -2209,7 +2343,49 @@ pub struct StructureReport {
     pub plans_without_roots: u64,
     pub issue_documents_pending: u64,
     pub baselines: u64,
+    /// Durable v3 -> v4 cursor and audit-tail verification. Present only in
+    /// the separately installed migrator implementation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationVerification>,
     pub complete: bool,
+}
+
+/// Bounded proof that the migrator's mutable cursor and immutable audit tail
+/// describe the same completed batch. The lifecycle host requires this proof
+/// before it may activate the preferred v4 implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationVerification {
+    pub batch: u64,
+    pub cursor: String,
+    pub marker_complete: bool,
+    pub audit_records: u64,
+    pub audit_tail_complete: bool,
+    pub audit_tail_matches: bool,
+    /// Every source admitted by the preferred extractor has a deterministic
+    /// migrator phase. End-of-enumerator alone is never completion.
+    pub source_coverage_complete: bool,
+    /// The cursor enumerated one immutable source publication rather than the
+    /// changing migration head. Until Runtime supplies that exact-source
+    /// lifecycle capability, completion must remain pending.
+    pub source_snapshot_pinned: bool,
+    /// Portable semantic publication and causal frontier retained by the
+    /// generic lifecycle host. A later Contact extension is compared against
+    /// this cut and re-enters the consented migrator instead of becoming
+    /// silently invisible under preferred v4.
+    pub source_publication: runtime::publication::PublicationId,
+    pub source_frontier: replica::frontier::ReplicaFrontier,
+}
+
+impl MigrationVerification {
+    pub fn verified(&self) -> bool {
+        self.marker_complete
+            && self.audit_records > 0
+            && self.audit_tail_complete
+            && self.audit_tail_matches
+            && self.source_coverage_complete
+            && self.source_snapshot_pinned
+    }
 }
 
 /// Publication-pinned, bounded geometry response. The compact artifact never
@@ -2509,6 +2685,38 @@ mod product_bound_tests {
         let last = tampered.last_mut().unwrap();
         *last = if *last == b'A' { b'B' } else { b'A' };
         assert!(decode_page_cursor(std::str::from_utf8(&tampered).unwrap()).is_none());
+    }
+
+    #[test]
+    fn migration_window_cursor_rejects_body_and_subitem_tampering() {
+        let body = BodyKey::new(world_id(), BodyId::from_bytes([0x41; 16]));
+        let cursor = V4MigrationWindow::render_cursor("issue", Some(&body), "21:comment:list:0")
+            .expect("canonical migration cursor");
+        let window = V4MigrationWindow {
+            phase: "issue".into(),
+            body: Some(body.clone()),
+            subitem: "21:comment:list:0".into(),
+            digest: [0x42; 32],
+            cursor: cursor.clone(),
+        };
+        assert!(window.valid());
+
+        let mut wrong_body = window.clone();
+        wrong_body.body = Some(BodyKey::new(world_id(), BodyId::from_bytes([0x43; 16])));
+        assert!(!wrong_body.valid());
+
+        let mut wrong_subitem = window.clone();
+        wrong_subitem.subitem = "21:comment:list:1".into();
+        assert!(!wrong_subitem.valid());
+
+        let mut wrong_digest = window;
+        wrong_digest.digest = [0; 32];
+        assert!(!wrong_digest.valid());
+
+        let parsed = V4MigrationWindow::parse_cursor(&cursor).expect("round trip cursor");
+        assert_eq!(parsed.0, "issue");
+        assert_eq!(parsed.1, Some(body.body));
+        assert_eq!(parsed.2, "21:comment:list:0");
     }
 }
 

@@ -143,7 +143,10 @@ impl Endpoint {
 /// available on the shared control path. This is a decisive pre-v1 cutoff:
 /// silently falling back to a World-wide legacy query would violate both the
 /// query semantics and the latency contract.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 14;
+///
+/// v15: native World update consent/progress is daemon-owned and durable;
+/// Busy/Capacity are typed so a client never guesses whether retry is safe.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 15;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
 ///
@@ -230,7 +233,7 @@ impl BuildFingerprint {
 /// than failing once. The minimum moves with the version rather than trailing
 /// it — a v10 daemon answers the book's verbs with "unknown variant" instead
 /// of a version complaint, which is a worse failure than being told to stop.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 14;
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 15;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -1039,6 +1042,15 @@ pub enum Request {
     /// executable (it renames rather than overwrites), so the swap lands and
     /// takes effect at the next restart.
     HostUpdate,
+    /// Durably enqueue a native World update before any bundle fetch or
+    /// lifecycle migration work begins.
+    HostWorldUpdate {
+        world: String,
+    },
+    /// Read the durable native World update operation and progress.
+    HostWorldUpdateStatus {
+        world: String,
+    },
     /// Stop this daemon once the reply is on the wire, so the next request
     /// starts a fresh one.
     ///
@@ -1575,6 +1587,8 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::HostOrbitRebuild { .. }
         | Request::HostInstallMcp { .. }
         | Request::HostUpdate
+        | Request::HostWorldUpdate { .. }
+        | Request::HostWorldUpdateStatus { .. }
         | Request::HostRestart
         | Request::HostContext => Lifecycle,
     }
@@ -1834,6 +1848,8 @@ pub fn representative_requests() -> Vec<Request> {
             world: None,
         },
         Request::HostUpdate,
+        Request::HostWorldUpdate { world: s() },
+        Request::HostWorldUpdateStatus { world: s() },
         Request::HostRestart,
         Request::HostContext,
     ]
@@ -2262,6 +2278,12 @@ pub enum HostReply {
         #[serde(default)]
         standing: Option<crate::update::watch::Standing>,
     },
+    /// Durable native World update consent/progress.
+    WorldUpdate {
+        world: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job: Option<crate::update::consent::Job>,
+    },
     /// The daemon accepted the reply's own last instruction and is stopping.
     Restarting {
         /// The process that is going away, so an operator can confirm it did.
@@ -2369,6 +2391,11 @@ pub enum ErrorKind {
     /// your sponsor to grant write access") instead of an opaque blob, and so it
     /// is never confused with a transient/internal error. Exit `1` like `Error`.
     Denied,
+    /// The bounded owner is already processing another operation. Nothing was
+    /// queued; a caller may poll the durable status or retry later.
+    Busy,
+    /// The bounded execution or memory lane cannot admit this operation now.
+    Capacity,
 }
 
 impl Response {
@@ -2400,6 +2427,18 @@ impl Response {
         Response::Error {
             message: msg.into(),
             error_kind: ErrorKind::Denied,
+        }
+    }
+    pub fn busy(msg: impl Into<String>) -> Self {
+        Response::Error {
+            message: msg.into(),
+            error_kind: ErrorKind::Busy,
+        }
+    }
+    pub fn capacity(msg: impl Into<String>) -> Self {
+        Response::Error {
+            message: msg.into(),
+            error_kind: ErrorKind::Capacity,
         }
     }
 }

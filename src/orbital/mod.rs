@@ -148,8 +148,9 @@ pub use hosting::{
 pub use mechanics::{AuthorityRecord, SpaceAuthority};
 pub use worlds::{
     BootstrapContext, FounderGrant, InitialScope, Invalidation, ObservationProjector,
-    RoutedInvalidation, StatusProjection, WorldHost, WorldLifecycle, WorldPackage, WorldPackages,
-    WorldRouter,
+    ReviewedImplementation, RoutedInvalidation, StatusProjection, WorldHost, WorldLifecycle,
+    WorldPackage, WorldPackages, WorldRouter, WorldUpgradeAssessment, WorldUpgradeContext,
+    WorldUpgradeProgress, WorldUpgradeStep,
 };
 
 pub use crate::world::lifecycle::{enter_space, form_space, found_space, seed_founder_policy};

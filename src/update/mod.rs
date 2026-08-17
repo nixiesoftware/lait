@@ -12,6 +12,7 @@
 //! a restart is what makes it take effect. Nothing downloaded ever executes
 //! before that restart: the updater stages bytes, it never launches them.
 
+pub mod consent;
 pub mod facts;
 pub mod feed;
 pub mod tree;

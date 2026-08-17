@@ -4013,6 +4013,47 @@ impl Corpus {
         }
     }
 
+    /// Conservative pre-reconstruction price for an exact durable generation.
+    ///
+    /// `footprint` is authenticated beside the requested generation root and
+    /// contains the source counts/bytes needed by the same extractor-growth
+    /// calculation as [`Self::estimate_build_bytes`]. No ambient/current
+    /// snapshot participates, so a larger historical generation cannot be
+    /// admitted using a smaller current publication's cost.
+    pub(crate) fn estimate_build_bytes_from_footprint(
+        footprint: &replica::GenerationFootprint,
+        world: &replica::body::WorldId,
+        extractors: &[crate::find::Extractor],
+    ) -> BuildMemory {
+        let mut by_source =
+            BTreeMap::<crate::find::SourceRef, Vec<crate::find::ExtractionShape>>::new();
+        for extractor in extractors {
+            by_source
+                .entry(extractor.source.clone())
+                .or_default()
+                .push(extractor.shape);
+        }
+
+        let mut retained = 0u64;
+        let mut max_body_transient = 0u64;
+        for (source, shapes) in by_source {
+            let aggregate = footprint.sources.iter().find(|aggregate| {
+                &aggregate.world == world
+                    && aggregate.schema == source.name
+                    && aggregate.version == source.version
+            });
+            let bodies = aggregate.map_or(0, |aggregate| aggregate.body_count);
+            let source_bytes = aggregate.map_or(0, |aggregate| aggregate.payload_bytes);
+            let (source_retained, body_transient, _) = growth_price(&shapes, bodies, source_bytes);
+            retained = retained.saturating_add(source_retained);
+            max_body_transient = max_body_transient.max(body_transient);
+        }
+        BuildMemory {
+            retained_bytes: retained,
+            transient_bytes: max_body_transient.saturating_add(8 * 1024 * 1024),
+        }
+    }
+
     /// Additional physical headroom for one structurally-shared delta build.
     ///
     /// The base Corpus remains resident while the candidate is assembled. Only
@@ -5790,6 +5831,29 @@ mod tests {
         let (expected, body_transient, _) = growth_price(&[extractor.shape], 2, 0);
         assert_eq!(full.retained_bytes, expected);
         assert_eq!(full.transient_bytes, body_transient + 8 * 1024 * 1024);
+        let historical = replica::GenerationFootprint {
+            body_count: 2,
+            snapshot_retained_bytes: snapshot.retained_bytes_estimate(),
+            reconstruction_depth: 1,
+            reconstruction_delta_bytes: 1,
+            reconstruction_transient_bytes: 1,
+            sources: vec![replica::GenerationSourceFootprint {
+                world: world.clone(),
+                schema: extractor.source.name.clone(),
+                version: extractor.source.version,
+                body_count: 2,
+                payload_bytes: 0,
+            }],
+        };
+        assert_eq!(
+            Corpus::estimate_build_bytes_from_footprint(
+                &historical,
+                &world,
+                std::slice::from_ref(&extractor),
+            ),
+            full,
+            "historical admission uses the same source-growth price without a snapshot"
+        );
 
         let (corpus, _) = Corpus::build(
             coordinate(1, 1),

@@ -38,8 +38,8 @@ use replica::frontier::ReplicaFrontier;
 use serde::{Deserialize, Serialize};
 
 use crate::world::{
-    AuthorityView, Context, DeniedCause, Effect, Intent, Limits, PrincipalFacts, Projection, Query,
-    Rejection, World,
+    AuthorityView, Context, DeniedCause, Effect, Intent, LifecycleSourceCoordinate, Limits,
+    PrincipalFacts, Projection, Query, Rejection, World,
 };
 
 /// A concurrency or idempotency conflict observed while a Session commits.
@@ -241,6 +241,18 @@ pub struct DurableOperationReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationPublication {
     Ready(crate::publication::WorldPublicationId),
+    Building,
+    Capacity,
+    ImplementationUnavailable,
+    GenerationUnavailable,
+    Unavailable,
+}
+
+/// Nonblocking readiness of a portable publication selected as the frozen
+/// source for a composition-owned lifecycle plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleSourceStatus {
+    Ready(LifecycleSourceCoordinate),
     Building,
     Capacity,
     ImplementationUnavailable,
@@ -1316,6 +1328,21 @@ impl CoreInner {
             snapshot.retained_bytes_estimate()
         };
         self.reserve_build_memory(snapshot_bytes, corpus)
+    }
+
+    fn reserve_historical_publication_build(
+        &mut self,
+        footprint: &replica::GenerationFootprint,
+        world: &WorldId,
+        extractors: &[crate::find::Extractor],
+    ) -> Result<BuildMemoryReservation, ()> {
+        let mut corpus = crate::corpus::Corpus::estimate_build_bytes_from_footprint(
+            footprint, world, extractors,
+        );
+        corpus.transient_bytes = corpus
+            .transient_bytes
+            .saturating_add(footprint.reconstruction_transient_bytes);
+        self.reserve_build_memory(footprint.snapshot_retained_bytes, corpus)
     }
 
     fn finish_publication_build(
@@ -2723,7 +2750,50 @@ impl StationCore {
         semantic: crate::publication::PublicationId,
         builder: WorldPublicationBuilder,
     ) -> OperationPublication {
-        let (id, key, flight, snapshot, build_memory, read_memory) = {
+        enum Source {
+            Resident(Arc<replica::ReadSnapshot>),
+            Cold {
+                reader: replica::GenerationReader,
+                footprint: replica::GenerationFootprint,
+                materialization: crate::publication::MaterializationId,
+            },
+        }
+
+        // Discover whether this is genuinely cold without taking the Replica
+        // writer under the publication mutex. A cold reader is then pinned in
+        // Replica -> Core lock order and all authenticated index I/O happens
+        // after both guards have been released.
+        let cold_current = {
+            let inner = self.lock();
+            if inner.closed {
+                return OperationPublication::Unavailable;
+            }
+            if let Some(publication) = inner.ready_semantic_publication(&world_id, semantic) {
+                return OperationPublication::Ready(publication.id);
+            }
+            let key = (world_id.clone(), semantic);
+            if inner.publication_flights.contains_key(&key) {
+                return OperationPublication::Building;
+            }
+            (semantic.manifest_root != inner.snapshot.root()
+                && !inner.generations.contains_key(&semantic.manifest_root))
+            .then(|| inner.snapshot.clone())
+        };
+        let cold = if let Some(current) = cold_current {
+            let reader = {
+                let replica = self.replica_lock();
+                replica.generation_reader(current)
+            };
+            let footprint = match reader.generation_footprint(&semantic.manifest_root) {
+                Ok(Some(footprint)) => footprint,
+                Ok(None) | Err(_) => return OperationPublication::GenerationUnavailable,
+            };
+            Some((reader, footprint))
+        } else {
+            None
+        };
+
+        let (id, key, flight, source, build_memory, read_memory) = {
             let mut inner = self.lock();
             if inner.closed {
                 return OperationPublication::Unavailable;
@@ -2735,15 +2805,29 @@ impl StationCore {
             if inner.publication_flights.contains_key(&key) {
                 return OperationPublication::Building;
             }
-            let (snapshot, materialization) = if semantic.manifest_root == inner.snapshot.root() {
-                (inner.snapshot.clone(), inner.snapshot_materialization)
+            let (source, materialization) = if semantic.manifest_root == inner.snapshot.root() {
+                (
+                    Source::Resident(inner.snapshot.clone()),
+                    inner.snapshot_materialization,
+                )
             } else if let Some(generation) = inner.generations.get(&semantic.manifest_root) {
-                (generation.snapshot.clone(), generation.materialization)
+                (
+                    Source::Resident(generation.snapshot.clone()),
+                    generation.materialization,
+                )
             } else {
-                // Cold historical reconstruction remains unavailable until
-                // Replica supplies an authenticated generation footprint; it
-                // must never be priced from the ambient current image.
-                return OperationPublication::GenerationUnavailable;
+                let Some((reader, footprint)) = cold else {
+                    return OperationPublication::GenerationUnavailable;
+                };
+                let materialization = inner.reserve_materialization();
+                (
+                    Source::Cold {
+                        reader,
+                        footprint,
+                        materialization,
+                    },
+                    materialization,
+                )
             };
             let id = crate::publication::WorldPublicationId::new(semantic, materialization);
             match inner.world_read_heads.get(&(world_id.clone(), id)).cloned() {
@@ -2756,12 +2840,20 @@ impl StationCore {
                 }
                 Some(WorldReadHead::Ready) | None => {}
             }
-            let build_memory = match inner.reserve_full_publication_build(
-                &snapshot,
-                &world_id,
-                &builder.extractors,
-                true,
-            ) {
+            let build_memory = match &source {
+                Source::Resident(snapshot) => inner.reserve_full_publication_build(
+                    snapshot,
+                    &world_id,
+                    &builder.extractors,
+                    true,
+                ),
+                Source::Cold { footprint, .. } => inner.reserve_historical_publication_build(
+                    footprint,
+                    &world_id,
+                    &builder.extractors,
+                ),
+            };
+            let build_memory = match build_memory {
                 Ok(memory) => memory,
                 Err(()) => return OperationPublication::Capacity,
             };
@@ -2776,7 +2868,7 @@ impl StationCore {
                 id,
                 key,
                 flight,
-                snapshot,
+                source,
                 build_memory,
                 inner.read_memory.clone(),
             )
@@ -2787,22 +2879,68 @@ impl StationCore {
         let worker_key = key.clone();
         let worker_world = world_id.clone();
         let job: PublicationJob = Box::new(move || {
-            let built = build_world_corpus(
-                &snapshot,
-                core.body_images.clone(),
-                &builder.world,
-                &worker_world,
-                id,
-                &builder.schemas,
-                &builder.extractors,
-            )
-            .map(|corpus| {
-                Arc::new(WorldPublication {
-                    id,
-                    snapshot,
-                    corpus: Arc::new(corpus),
-                })
-            });
+            let resolved = match source {
+                Source::Resident(snapshot) => Ok((snapshot, id)),
+                Source::Cold {
+                    reader,
+                    materialization,
+                    ..
+                } => match reader.read_generation(&semantic.manifest_root) {
+                    Ok(Some(snapshot)) => {
+                        let reconstructed = Arc::new(snapshot);
+                        let mut inner = core.lock();
+                        if inner.closed {
+                            Err(PublicationFailure::Interrupted)
+                        } else if let Some(cached) =
+                            inner.generations.get(&semantic.manifest_root).cloned()
+                        {
+                            let actual = crate::publication::WorldPublicationId::new(
+                                semantic,
+                                cached.materialization,
+                            );
+                            if actual != id {
+                                inner.world_read_heads.remove(&(worker_world.clone(), id));
+                                inner.world_read_heads.insert(
+                                    (worker_world.clone(), actual),
+                                    WorldReadHead::Building,
+                                );
+                            }
+                            Ok((cached.snapshot, actual))
+                        } else {
+                            inner.cache_generation_at(
+                                semantic.manifest_root,
+                                reconstructed.clone(),
+                                None,
+                                materialization,
+                            );
+                            Ok((reconstructed, id))
+                        }
+                    }
+                    Ok(None) | Err(_) => Err(PublicationFailure::Generation),
+                },
+            };
+            let (built, completed_id) = match resolved {
+                Ok((snapshot, actual_id)) => {
+                    let built = build_world_corpus(
+                        &snapshot,
+                        core.body_images.clone(),
+                        &builder.world,
+                        &worker_world,
+                        actual_id,
+                        &builder.schemas,
+                        &builder.extractors,
+                    )
+                    .map(|corpus| {
+                        Arc::new(WorldPublication {
+                            id: actual_id,
+                            snapshot,
+                            corpus: Arc::new(corpus),
+                        })
+                    });
+                    (built, actual_id)
+                }
+                Err(failure) => (Err(failure), id),
+            };
             let result = {
                 let mut inner = core.lock();
                 if inner
@@ -2816,7 +2954,7 @@ impl StationCore {
                     Err(failure) => {
                         record_world_read_failure(
                             &mut inner,
-                            (worker_world.clone(), id),
+                            (worker_world.clone(), completed_id),
                             failure.clone(),
                         );
                         Err(failure)
@@ -2824,7 +2962,7 @@ impl StationCore {
                     Ok(_publication) if inner.closed => {
                         record_world_read_failure(
                             &mut inner,
-                            (worker_world.clone(), id),
+                            (worker_world.clone(), completed_id),
                             PublicationFailure::Interrupted,
                         );
                         Err(PublicationFailure::Interrupted)
@@ -2836,16 +2974,16 @@ impl StationCore {
                         {
                             record_world_read_failure(
                                 &mut inner,
-                                (worker_world.clone(), id),
+                                (worker_world.clone(), completed_id),
                                 PublicationFailure::Capacity,
                             );
                             Err(PublicationFailure::Capacity)
                         } else {
                             inner
                                 .world_read_heads
-                                .insert((worker_world.clone(), id), WorldReadHead::Ready);
-                            if inner.snapshot.root() == id.publication.manifest_root
-                                && inner.snapshot_materialization == id.materialization
+                                .insert((worker_world.clone(), completed_id), WorldReadHead::Ready);
+                            if inner.snapshot.root() == completed_id.publication.manifest_root
+                                && inner.snapshot_materialization == completed_id.materialization
                             {
                                 inner.install_world_publication(
                                     worker_world.clone(),
@@ -5437,11 +5575,19 @@ impl Session {
         receipt: &replica::receipt::RequestReceipt,
     ) -> OperationPublication {
         let semantic = Self::receipt_semantic(receipt);
+        self.semantic_readiness(&receipt.world, semantic)
+    }
+
+    fn semantic_readiness(
+        &self,
+        world_id: &WorldId,
+        semantic: crate::publication::PublicationId,
+    ) -> OperationPublication {
         let builder = match (
             self.registry
-                .world_for(&receipt.world, semantic.implementation_digest),
+                .world_for(world_id, semantic.implementation_digest),
             self.registry
-                .descriptor_for(&receipt.world, semantic.implementation_digest),
+                .descriptor_for(world_id, semantic.implementation_digest),
         ) {
             (Some(world), Some(descriptor)) => {
                 let Ok(digest) = crate::publication::ExtractorSchemaDigest::derive(
@@ -5477,7 +5623,7 @@ impl Session {
             _ => return OperationPublication::ImplementationUnavailable,
         };
         self.core
-            .schedule_receipt_publication(receipt.world.clone(), semantic, builder)
+            .schedule_receipt_publication(world_id.clone(), semantic, builder)
     }
 
     fn operation_status_from_receipt(
@@ -5621,6 +5767,145 @@ impl Session {
         self.operation_status(operation.as_bytes(), intent.payload_hash())
     }
 
+    /// Resolve or start rebuilding one portable publication for a bounded
+    /// lifecycle planning step. This never waits for extraction: `Building`
+    /// is returned after installing/joining the existing bounded singleflight.
+    pub fn lifecycle_source_status(
+        &self,
+        source: Option<crate::publication::PublicationId>,
+    ) -> Result<LifecycleSourceStatus, Failure> {
+        self.ensure_live()?;
+        let semantic = if let Some(source) = source {
+            source
+        } else {
+            let inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            let publication = inner
+                .world_publications
+                .get(&self.world_id)
+                .ok_or(Rejection::ImplementationUnavailable)?;
+            publication.id.publication
+        };
+        let readiness = self.semantic_readiness(&self.world_id, semantic);
+        let status = match readiness {
+            OperationPublication::Ready(id) => {
+                let publication = self
+                    .core
+                    .lock()
+                    .exact_world_publication(&(self.world_id.clone(), id));
+                match publication {
+                    Some(publication) => LifecycleSourceStatus::Ready(LifecycleSourceCoordinate {
+                        publication: publication.id,
+                        frontier: publication.snapshot.frontier(),
+                    }),
+                    None => LifecycleSourceStatus::Building,
+                }
+            }
+            OperationPublication::Building => LifecycleSourceStatus::Building,
+            OperationPublication::Capacity => LifecycleSourceStatus::Capacity,
+            OperationPublication::ImplementationUnavailable => {
+                LifecycleSourceStatus::ImplementationUnavailable
+            }
+            OperationPublication::GenerationUnavailable => {
+                LifecycleSourceStatus::GenerationUnavailable
+            }
+            OperationPublication::Unavailable => LifecycleSourceStatus::Unavailable,
+        };
+        Ok(status)
+    }
+
+    /// Run one product-owned, read-only migration planner over an exact frozen
+    /// publication. The publication Arc is pinned for the callback and no
+    /// Station/Replica/mutation lock is held while product code runs.
+    ///
+    /// The callback's return type is unconstrained so product diagnostics stay
+    /// product-owned; Runtime only contains panics and exact-source expiry.
+    pub fn with_lifecycle_source<T>(
+        &self,
+        source: &LifecycleSourceCoordinate,
+        prepare: impl FnOnce(&Context<'_>) -> T,
+    ) -> Result<T, Failure> {
+        self.ensure_live()?;
+        let principal = self.fresh_principal()?;
+        let publication = {
+            let mut inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            inner
+                .exact_world_publication(&(self.world_id.clone(), source.publication))
+                .ok_or(Failure::PublicationExpired(source.publication))?
+        };
+        if publication.snapshot.frontier() != source.frontier {
+            return Err(Rejection::ContractViolation.into());
+        }
+        let descriptor = self
+            .registry
+            .descriptor_for(
+                &self.world_id,
+                publication.id.publication.implementation_digest,
+            )
+            .ok_or(Rejection::ImplementationUnavailable)?;
+        let gates = self.context_find_gates_for(&principal, &descriptor.find_schemas)?;
+        let reader = SnapshotReader::interactive(
+            publication.snapshot.clone(),
+            self.core.body_images.clone(),
+        );
+        let (read_memory, station_memory, publication_retention, admitted_retained_bytes) = {
+            let inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            (
+                inner.read_memory.clone(),
+                inner.station_memory.clone(),
+                inner.publication_retention.clone(),
+                inner
+                    .station_read_retained_bytes()
+                    .saturating_add(inner.publication_incremental_bytes(&publication)),
+            )
+        };
+        let issued_find_cursor = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let find = crate::world::FindHandle::new(Arc::new(ContextFindReader {
+            read_memory,
+            station_memory,
+            publication_retention,
+            admitted_retained_bytes,
+            publication: publication.clone(),
+            schemas: Arc::from(descriptor.find_schemas.clone()),
+            policy: self.find_policy,
+            gates,
+            epoch: self.epoch,
+            space: self.space.clone(),
+            world: self.world_id.clone(),
+            implementation: publication.id.publication.implementation_digest,
+            actor: principal.actor.clone(),
+            device: principal.device.clone(),
+            authority_frontier: principal.authority_frontier.clone(),
+            issued_cursor: issued_find_cursor.clone(),
+        }));
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let context = Context::with_lifecycle_reads(
+                &principal,
+                &reader,
+                source.clone(),
+                &self.world_id,
+                find,
+            );
+            prepare(&context)
+        }))
+        .map_err(|_| Failure::CallbackPanicked)?;
+        if issued_find_cursor.load(std::sync::atomic::Ordering::Acquire) {
+            self.core
+                .lock()
+                .lease_world_publication(self.world_id.clone(), publication)
+                .map_err(|_| Failure::ReadCapacity)?;
+        }
+        Ok(result)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_building_memory_bytes(&self) -> u64 {
         let inner = self.core.lock();
@@ -5649,6 +5934,38 @@ impl Session {
             .world_read_heads
             .retain(|(_, id), _| id.publication != semantic);
         let _ = inner.sync_read_memory();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evict_generation_for_test(&self, root: [u8; 32]) {
+        let mut inner = self.core.lock();
+        assert_ne!(
+            root,
+            inner.snapshot.root(),
+            "the current generation is authoritative"
+        );
+        inner.generations.remove(&root);
+        inner.parents.remove(&root);
+        inner
+            .generation_order
+            .retain(|candidate| candidate != &root);
+        inner
+            .retained_world_publications
+            .retain(|(_, id), _| id.publication.manifest_root != root);
+        inner
+            .world_publication_order
+            .retain(|(_, id)| id.publication.manifest_root != root);
+        inner
+            .world_read_heads
+            .retain(|(_, id), _| id.publication.manifest_root != root);
+        let _ = inner.sync_read_memory();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generation_index_root_for_test(&self) -> Option<[u8; 32]> {
+        let current = { self.core.lock().snapshot.clone() };
+        let reader = { self.core.replica_lock().generation_reader(current) };
+        reader.generation_index_root_for_test()
     }
 
     #[cfg(test)]
@@ -5750,6 +6067,26 @@ impl Session {
         &self,
         action: crate::action::SignedWorldAction,
     ) -> Result<CommittedEffect, Failure> {
+        self.submit_with_provenance(action, None)
+    }
+
+    /// Submit one deterministically prepared lifecycle action against current
+    /// durable truth while carrying its exact frozen planning source as
+    /// non-serializable provenance. A raw World call cannot manufacture that
+    /// source coordinate in signed intent bytes.
+    pub fn submit_lifecycle_from(
+        &self,
+        action: crate::action::SignedWorldAction,
+        source: LifecycleSourceCoordinate,
+    ) -> Result<CommittedEffect, Failure> {
+        self.submit_with_provenance(action, Some(source))
+    }
+
+    fn submit_with_provenance(
+        &self,
+        action: crate::action::SignedWorldAction,
+        lifecycle_source: Option<LifecycleSourceCoordinate>,
+    ) -> Result<CommittedEffect, Failure> {
         self.ensure_live()?;
         // Opaque verification first: version, algorithm, bounds, payload hash,
         // signer identity, self-signature.
@@ -5799,8 +6136,9 @@ impl Session {
             station_memory,
             publication_retention,
             admitted_retained_bytes,
+            lifecycle_source_publication,
         ) = {
-            let inner = self.core.lock();
+            let mut inner = self.core.lock();
             if inner.closed {
                 return Err(Failure::Interrupted);
             }
@@ -5833,6 +6171,17 @@ impl Session {
             let admitted_retained_bytes = inner
                 .station_read_retained_bytes()
                 .saturating_add(inner.publication_incremental_bytes(&publication));
+            let lifecycle_source_publication = if let Some(source) = &lifecycle_source {
+                let source_publication = inner
+                    .exact_world_publication(&(self.world_id.clone(), source.publication))
+                    .ok_or(Failure::PublicationExpired(source.publication))?;
+                if source_publication.snapshot.frontier() != source.frontier {
+                    return Err(Rejection::ContractViolation.into());
+                }
+                Some(source_publication)
+            } else {
+                None
+            };
             (
                 publication,
                 pinned,
@@ -5841,6 +6190,7 @@ impl Session {
                 inner.station_memory.clone(),
                 inner.publication_retention.clone(),
                 admitted_retained_bytes,
+                lifecycle_source_publication,
             )
         };
         // Admission precedes the potentially size-proportional World callback
@@ -5858,6 +6208,9 @@ impl Session {
         }
         let issued_find_cursor = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader = SnapshotReader::interactive(pinned.clone(), self.core.body_images.clone());
+        let lifecycle_reader = lifecycle_source_publication.as_ref().map(|publication| {
+            SnapshotReader::interactive(publication.snapshot.clone(), self.core.body_images.clone())
+        });
         let effect: Effect = {
             let principal = &principal;
             let find = crate::world::FindHandle::new(Arc::new(ContextFindReader {
@@ -5882,10 +6235,14 @@ impl Session {
                 let mut ctx = Context::with_world_submission(
                     principal,
                     &reader,
+                    lifecycle_reader
+                        .as_ref()
+                        .map(|reader| reader as &dyn crate::world::BodyReader),
                     publication.id,
                     &self.world_id,
                     action.header.request,
                     find,
+                    lifecycle_source.clone(),
                 );
                 world.submit(&mut ctx, intent)
             }))
@@ -6675,6 +7032,29 @@ impl Session {
         }
 
         let requested_publication = query.publication;
+        let cold_generation = if requested_world_publication.is_none() {
+            requested_publication.and_then(|publication| {
+                let inner = self.core.lock();
+                (publication.manifest_root != inner.snapshot.root()
+                    && !inner.generations.contains_key(&publication.manifest_root))
+                .then(|| (publication.manifest_root, inner.snapshot.clone()))
+            })
+        } else {
+            None
+        };
+        let cold_generation = if let Some((root, current)) = cold_generation {
+            let reader = {
+                let replica = self.core.replica_lock();
+                replica.generation_reader(current)
+            };
+            let footprint = reader
+                .generation_footprint(&root)
+                .map_err(|_| crate::find::Failure::PublicationUnavailable)?
+                .ok_or(crate::find::Failure::PublicationUnavailable)?;
+            Some((root, reader, footprint))
+        } else {
+            None
+        };
         let (plan, gates, ambient) = {
             let mut inner = self.core.lock();
             if inner.closed {
@@ -6846,7 +7226,17 @@ impl Session {
                                 (generation.snapshot.clone(), generation.materialization)
                             })
                         };
-                        let reader = None;
+                        let (reader, footprint) = if snapshot.is_some() {
+                            (None, None)
+                        } else {
+                            let Some((cold_root, reader, footprint)) = cold_generation else {
+                                return Err(crate::find::Failure::PublicationUnavailable);
+                            };
+                            if cold_root != root {
+                                return Err(crate::find::Failure::PublicationUnavailable);
+                            }
+                            (Some(reader), Some(footprint))
+                        };
                         let reserved_materialization = if let Some((_, materialization)) = snapshot
                         {
                             materialization
@@ -6863,22 +7253,23 @@ impl Session {
                         {
                             return Err(find_publication_failure(failure));
                         }
-                        // A cold durable generation must be priced from its
-                        // own authenticated footprint before Replica inflates
-                        // causal material. GenerationReader does not expose
-                        // that metadata yet; using the ambient/current image
-                        // can under-reserve when history is larger, so refuse
-                        // this cold path until the exact estimate is present.
-                        let Some((estimate_snapshot, _)) = snapshot.as_ref() else {
-                            return Err(crate::find::Failure::PublicationUnavailable);
-                        };
-                        let build_memory = inner
-                            .reserve_full_publication_build(
-                                estimate_snapshot,
-                                &self.world_id,
-                                &find_extractors,
-                                true,
-                            )
+                        let build_memory =
+                            if let Some((estimate_snapshot, _)) = snapshot.as_ref() {
+                                inner.reserve_full_publication_build(
+                                    estimate_snapshot,
+                                    &self.world_id,
+                                    &find_extractors,
+                                    true,
+                                )
+                            } else {
+                                inner.reserve_historical_publication_build(
+                                    footprint
+                                        .as_ref()
+                                        .ok_or(crate::find::Failure::PublicationUnavailable)?,
+                                    &self.world_id,
+                                    &find_extractors,
+                                )
+                            }
                             .map_err(|_| crate::find::Failure::CursorCapacityExceeded)?;
                         let flight = Arc::new(PublicationFlight::new());
                         inner
@@ -7153,6 +7544,12 @@ impl Session {
             .saturating_add(current_headroom)
             .saturating_add(16 * 1024 * 1024)
             .min(inner.read_memory.station_bytes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn constrain_read_cache_to_resident_only_for_test(&self) {
+        let mut inner = self.core.lock();
+        inner.retained_cache_bytes_limit = inner.station_read_retained_bytes();
     }
 
     /// Query one exact World publication through the same resolution path used

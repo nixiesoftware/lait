@@ -50,6 +50,7 @@ pub fn is_read(req: &Request) -> bool {
         // beside it — being a read is not a licence to name a directory.
         | Request::HostConfigList { .. }
         | Request::HostConfigGet { .. }
+        | Request::HostWorldUpdateStatus { .. }
         | Request::HostContext
         | Request::Hello { .. }
         | Request::BookList
@@ -134,6 +135,7 @@ pub fn is_read(req: &Request) -> bool {
         // binary, and stopping the daemon that swap has to outlive…
         | Request::HostInstallMcp { .. }
         | Request::HostUpdate
+        | Request::HostWorldUpdate { .. }
         | Request::HostRestart
         // …and node control.
         | Request::ConfigReload
@@ -224,6 +226,8 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::HostOrbitRebuild { .. }
         | Request::HostInstallMcp { .. }
         | Request::HostUpdate
+        | Request::HostWorldUpdate { .. }
+        | Request::HostWorldUpdateStatus { .. }
         // …and the restart that makes an update take effect. Admitting it here
         // and not `Stop` is the whole distinction: this one names the daemon
         // *under* the server, which survives to stand a fresh one up.

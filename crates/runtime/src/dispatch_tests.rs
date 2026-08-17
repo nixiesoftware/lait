@@ -336,6 +336,26 @@ fn temp_root() -> PathBuf {
     dir
 }
 
+fn find_journal_object(root: &std::path::Path, hash: &[u8; 32]) -> Option<PathBuf> {
+    let name = hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|value| value.to_str()) == Some(name.as_str()) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn station_with(reg: Descriptor, world: Arc<dyn World>) -> crate::lifecycle::Station {
     let registry = Builder::new()
         .register(Arc::new(DescribedWorld {
@@ -1300,6 +1320,253 @@ fn old_receipt_status_builds_one_exact_retained_publication_off_lock() {
         .unwrap();
     assert_eq!(projection.bytes, b"OLD RECEIPT");
     assert_eq!(session.test_building_memory_bytes(), 0);
+}
+
+#[test]
+fn cold_historical_status_reconstructs_the_authenticated_root_after_restart() {
+    let root = temp_root();
+    let (_, world) = note_registration();
+    let registry = Builder::new().register(world).build().unwrap();
+    let runtime = Runtime::open(root.clone(), registry, Arc::new(SeedAuthority), test_keys());
+    let station = runtime
+        .create()
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let space = station.space_id().clone();
+    let world = WorldId::parse("com.example.notes").unwrap();
+    let identity = writer();
+    let session = station.dock(&world, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xa1; 16]);
+    let action = identity
+        .sign_action(
+            &session,
+            request,
+            Intent {
+                schema: SchemaId::parse("note").unwrap(),
+                schema_version: 1,
+                payload: b"historical after restart".to_vec(),
+            },
+        )
+        .unwrap();
+    let payload_hash = action.header.payload_hash;
+    let historical = session.submit(action).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: b"advanced current".to_vec(),
+        },
+    )
+    .unwrap();
+    drop(session);
+    drop(station);
+
+    let station = runtime
+        .acquire(&space)
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let session = station.dock(&world, &identity).unwrap();
+    let current = session
+        .query(Query {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: Vec::new(),
+            publication: None,
+        })
+        .unwrap();
+    assert_eq!(current.bytes, b"ADVANCED CURRENT");
+    assert!(matches!(
+        session
+            .operation_status(request.as_bytes(), payload_hash)
+            .unwrap(),
+        crate::session::OperationStatus::Found {
+            publication: crate::session::OperationPublication::Building,
+            ..
+        }
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let ready = loop {
+        match session
+            .operation_status(request.as_bytes(), payload_hash)
+            .unwrap()
+        {
+            crate::session::OperationStatus::Found {
+                publication: crate::session::OperationPublication::Ready(publication),
+                ..
+            } => break publication,
+            crate::session::OperationStatus::Found {
+                publication: crate::session::OperationPublication::Building,
+                ..
+            } if std::time::Instant::now() < deadline => std::thread::yield_now(),
+            other => panic!("cold historical publication did not become Ready: {other:?}"),
+        }
+    };
+    assert_eq!(ready.publication, historical.publication.publication);
+    assert_eq!(
+        session
+            .query_at(
+                ready,
+                Query {
+                    schema: SchemaId::parse("note").unwrap(),
+                    schema_version: 1,
+                    payload: Vec::new(),
+                    publication: None,
+                },
+            )
+            .unwrap()
+            .bytes,
+        b"HISTORICAL AFTER RESTART"
+    );
+    assert_eq!(session.test_building_memory_bytes(), 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cold_historical_status_refuses_a_long_chain_before_delta_io() {
+    let root = temp_root();
+    let (_, world) = note_registration();
+    let registry = Builder::new().register(world).build().unwrap();
+    let runtime = Runtime::open(root.clone(), registry, Arc::new(SeedAuthority), test_keys());
+    let station = runtime
+        .create()
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let space = station.space_id().clone();
+    let world = WorldId::parse("com.example.notes").unwrap();
+    let identity = writer();
+    let session = station.dock(&world, &identity).unwrap();
+    for generation in 0u8..63 {
+        submit_as(
+            &session,
+            &identity,
+            Intent {
+                schema: SchemaId::parse("note").unwrap(),
+                schema_version: 1,
+                payload: vec![generation; 8],
+            },
+        )
+        .unwrap();
+    }
+    let request = crate::action::RequestId::from_bytes([0xa2; 16]);
+    let action = identity
+        .sign_action(
+            &session,
+            request,
+            Intent {
+                schema: SchemaId::parse("note").unwrap(),
+                schema_version: 1,
+                payload: b"small old image".to_vec(),
+            },
+        )
+        .unwrap();
+    let payload_hash = action.header.payload_hash;
+    session.submit(action).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: b"advanced after long chain".to_vec(),
+        },
+    )
+    .unwrap();
+    drop(session);
+    drop(station);
+
+    let station = runtime
+        .acquire(&space)
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let session = station.dock(&world, &identity).unwrap();
+    session.constrain_read_cache_to_resident_only_for_test();
+    assert!(matches!(
+        session
+            .operation_status(request.as_bytes(), payload_hash)
+            .unwrap(),
+        crate::session::OperationStatus::Found {
+            publication: crate::session::OperationPublication::Capacity,
+            ..
+        }
+    ));
+    assert_eq!(session.test_building_memory_bytes(), 0);
+    assert_eq!(session.read_cache_stats_for_test().0, 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cold_historical_status_maps_generation_index_tamper_without_reconstruction() {
+    let root = temp_root();
+    let (_, world) = note_registration();
+    let registry = Builder::new().register(world).build().unwrap();
+    let runtime = Runtime::open(root.clone(), registry, Arc::new(SeedAuthority), test_keys());
+    let station = runtime
+        .create()
+        .unwrap()
+        .open(Activation::default())
+        .unwrap();
+    let world = WorldId::parse("com.example.notes").unwrap();
+    let identity = writer();
+    let session = station.dock(&world, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xa3; 16]);
+    let action = identity
+        .sign_action(
+            &session,
+            request,
+            Intent {
+                schema: SchemaId::parse("note").unwrap(),
+                schema_version: 1,
+                payload: b"tampered historical".to_vec(),
+            },
+        )
+        .unwrap();
+    let payload_hash = action.header.payload_hash;
+    let historical = session.submit(action).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("note").unwrap(),
+            schema_version: 1,
+            payload: b"current survives".to_vec(),
+        },
+    )
+    .unwrap();
+    session.evict_generation_for_test(historical.publication.publication.manifest_root);
+    let index_root = session
+        .generation_index_root_for_test()
+        .expect("durable generation index root");
+    let object = find_journal_object(&root, &index_root).expect("generation index object");
+    std::fs::write(object, b"tampered").unwrap();
+    assert!(matches!(
+        session
+            .operation_status(request.as_bytes(), payload_hash)
+            .unwrap(),
+        crate::session::OperationStatus::Found {
+            publication: crate::session::OperationPublication::GenerationUnavailable,
+            ..
+        }
+    ));
+    assert_eq!(session.test_building_memory_bytes(), 0);
+    assert_eq!(
+        session
+            .query(Query {
+                schema: SchemaId::parse("note").unwrap(),
+                schema_version: 1,
+                payload: Vec::new(),
+                publication: None,
+            })
+            .unwrap()
+            .bytes,
+        b"CURRENT SURVIVES"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

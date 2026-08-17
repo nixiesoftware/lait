@@ -660,6 +660,59 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
             })
             .await
         }
+        Request::HostWorldUpdate { world } => {
+            let Some(world_id) = replica::body::WorldId::parse(&world) else {
+                return Some(Response::invalid("invalid World id"));
+            };
+            if router.reviewed_world_implementation(&world_id).is_none() {
+                return Some(Response::not_found(format!(
+                    "World '{world}' is not installed in this build"
+                )));
+            }
+            let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+            let world_for_job = world.clone();
+            match router
+                .run_blocking(move || {
+                    crate::update::consent::enqueue(
+                        &worlds,
+                        &world_for_job,
+                        mechanics::wallclock::now_secs(),
+                    )
+                })
+                .await
+            {
+                Ok(job) => Response::Host(HostReply::WorldUpdate {
+                    world,
+                    job: Some(job),
+                }),
+                Err(crate::orbits::BlockingFailure::Capacity) => Response::capacity(
+                    "the bounded host lane cannot admit World update consent right now",
+                ),
+                Err(error) => world_update_state_failure("persist consent", error),
+            }
+        }
+        Request::HostWorldUpdateStatus { world } => {
+            let Some(world_id) = replica::body::WorldId::parse(&world) else {
+                return Some(Response::invalid("invalid World id"));
+            };
+            if router.reviewed_world_implementation(&world_id).is_none() {
+                return Some(Response::not_found(format!(
+                    "World '{world}' is not installed in this build"
+                )));
+            }
+            let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+            let world_for_job = world.clone();
+            match router
+                .run_blocking(move || crate::update::consent::load(&worlds, &world_for_job))
+                .await
+            {
+                Ok(job) => Response::Host(HostReply::WorldUpdate { world, job }),
+                Err(crate::orbits::BlockingFailure::Capacity) => Response::capacity(
+                    "the bounded host lane cannot admit World update status right now",
+                ),
+                Err(error) => world_update_state_failure("read status", error),
+            }
+        }
         Request::HostContext => match config::list_identities() {
             Ok(identities) => Response::Host(HostReply::Context {
                 version: crate::VERSION.to_string(),
@@ -677,6 +730,33 @@ pub(crate) async fn dispatch(router: &Router, request: Request) -> Option<Respon
         },
         _ => return None,
     })
+}
+
+fn world_update_state_failure(
+    operation: &'static str,
+    failure: crate::orbits::BlockingFailure,
+) -> Response {
+    match failure {
+        crate::orbits::BlockingFailure::Capacity => Response::capacity(
+            "the bounded host lane cannot admit this World update operation right now",
+        ),
+        crate::orbits::BlockingFailure::Join(error) => {
+            tracing::warn!(operation, %error, "World update blocking worker failed");
+            Response::err("the World update worker is temporarily unavailable")
+        }
+        crate::orbits::BlockingFailure::Work(error) => {
+            let io = error
+                .chain()
+                .any(|cause| cause.downcast_ref::<std::io::Error>().is_some());
+            if io {
+                tracing::warn!(operation, %error, "World update state I/O failed");
+                Response::err("World update state is temporarily unavailable")
+            } else {
+                tracing::error!(operation, %error, "World update state failed integrity validation");
+                Response::invalid("stored World update state failed integrity validation")
+            }
+        }
+    }
 }
 
 /// Run one blocking host operation off the reactor and shape its answer.
@@ -1089,6 +1169,35 @@ mod tests {
                 error_kind: crate::control::ErrorKind::Error,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn world_update_state_hides_mechanical_detail_but_types_integrity() {
+        let integrity = world_update_state_failure(
+            "read status",
+            crate::orbits::BlockingFailure::Work(anyhow!("secret decoder detail")),
+        );
+        assert!(matches!(
+            integrity,
+            Response::Error {
+                error_kind: crate::control::ErrorKind::Invalid,
+                ref message,
+            } if message == "stored World update state failed integrity validation"
+        ));
+
+        let io = world_update_state_failure(
+            "read status",
+            crate::orbits::BlockingFailure::Work(
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "private path").into(),
+            ),
+        );
+        assert!(matches!(
+            io,
+            Response::Error {
+                error_kind: crate::control::ErrorKind::Error,
+                ref message,
+            } if message == "World update state is temporarily unavailable"
         ));
     }
 }

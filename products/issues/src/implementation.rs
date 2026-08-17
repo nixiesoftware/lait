@@ -33,15 +33,15 @@ use crate::ids::{ActorId, DocId, ProjectId};
 use crate::v4::CanonicalRecord as _;
 
 use super::contract::{
-    self, baseline_key, catalog_key, issue_key, spec_key, EventChange, IssueEffect, IssueEvent,
-    IssueIntent, IssueQuery, NewLabel, Pos, StoredComment, WorkAction, DEFAULT_STATUS,
-    DOCUMENT_SCHEMA_VERSION, LINK_KINDS, VIEW_SCHEMA_VERSION,
+    self, catalog_key, issue_key, EventChange, IssueEffect, IssueEvent, IssueIntent, IssueQuery,
+    NewLabel, Pos, StoredComment, WorkAction, DEFAULT_STATUS, DOCUMENT_SCHEMA_VERSION, LINK_KINDS,
+    VIEW_SCHEMA_VERSION,
 };
 use super::rank;
 use super::views::{
     board_view, canonical_for, issue_view, label_dto, project_dto, project_row, CatalogState,
-    DerivedAliases, IssueState, LabelMeta, Milestone, ProjectMeta, RelationState,
-    WorkflowResolutionError,
+    DerivedAliases, Initiative, IssueState, LabelMeta, Milestone, ProjectMeta, RelationState, Team,
+    TriageItem, WorkflowResolutionError,
 };
 
 /// The order milestones read in, and the only place that decides it.
@@ -359,6 +359,18 @@ impl Default for IssuesWorld {
 }
 
 impl IssuesWorld {
+    /// Product-owned read-only planner for one exact frozen migration window.
+    /// The lifecycle host invokes this through `Session::with_lifecycle_source`
+    /// before it signs or admits a mutation.
+    pub fn prepare_v4_migration_plan(
+        ctx: &Context<'_>,
+        previous_batch: u64,
+        previous_cursor: String,
+        timestamp: u64,
+    ) -> Result<contract::V4MigrationPlan, Rejection> {
+        prepare_v4_migration_plan(ctx, previous_batch, previous_cursor, timestamp)
+    }
+
     pub fn new() -> Self {
         Self::preferred_v4()
     }
@@ -436,7 +448,12 @@ fn legacy_and_v4_schemas() -> Vec<Schema> {
             version: contract::ISSUE_SCHEMA_VERSION,
             encoding: contract::issue_encoding(),
             mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
-            readable_predecessors: vec![1, 2],
+            // The preferred and migrator packages share this exact current
+            // content binding. Historical v1/v2 are declared independently
+            // below; claiming them as implicit predecessors here would make
+            // the same `(World,Schema,v3)` coordinate mean two different
+            // contracts across installed implementations.
+            readable_predecessors: vec![],
         },
         Schema {
             id: contract::issue_schema(),
@@ -489,6 +506,17 @@ fn legacy_and_v4_schemas() -> Vec<Schema> {
         },
     ];
     schemas.extend(crate::v4::schemas());
+    // The migrator intentionally combines the historical package with every
+    // physical v4 declaration. Keep that union explicit and canonical even if
+    // a current content schema is also represented in the physical catalog;
+    // Runtime admits one declaration per exact schema/version coordinate.
+    schemas.sort_by(|left, right| {
+        left.id
+            .as_str()
+            .cmp(right.id.as_str())
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    schemas.dedup_by(|left, right| left.id == right.id && left.version == right.version);
     schemas
 }
 
@@ -540,6 +568,104 @@ mod package_descriptor_tests {
             .schemas
             .iter()
             .any(|schema| schema.id == contract::spec_schema()));
+        assert!(crate::v4_store::migration_source_coverage_complete());
+    }
+}
+
+#[cfg(test)]
+mod migration_window_order_tests {
+    use super::*;
+
+    fn enumerate(phase: &str, view: &fabric::CollaborativeView) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut after = String::new();
+        while let Some(next) =
+            next_lifecycle_subitem(phase, view, &after).expect("bounded migration subitem")
+        {
+            assert!(next > after, "migration cursor must advance monotonically");
+            after = next.clone();
+            out.push(next);
+            assert!(out.len() < 64, "fixture must terminate");
+        }
+        out
+    }
+
+    #[test]
+    fn every_revision_record_precedes_its_final_head_projection() {
+        // The child ids sort before their parents. Record order is therefore
+        // deliberately non-causal; the separate final head subitem is what
+        // makes the resulting projection causal.
+        let mut catalog = fabric::CollaborativeView::default();
+        catalog
+            .maps
+            .entry("role_revisions".into())
+            .or_default()
+            .extend([
+                ("role.example/00".into(), Vec::new()),
+                ("role.example/ff".into(), Vec::new()),
+            ]);
+        catalog
+            .maps
+            .entry("workflow_revisions".into())
+            .or_default()
+            .extend([
+                ("prj_example/00".into(), Vec::new()),
+                ("prj_example/ff".into(), Vec::new()),
+            ]);
+        let catalog_items = enumerate("catalog", &catalog);
+        let governance_head = catalog_items
+            .iter()
+            .position(|item| item == "07:governance-heads:role.example")
+            .expect("governance head projection");
+        let workflow_head = catalog_items
+            .iter()
+            .position(|item| item == "11z:workflow-heads:prj_example")
+            .expect("workflow head projection");
+        assert!(catalog_items[..governance_head]
+            .iter()
+            .any(|item| item == "06:governance:role.example/ff"));
+        assert!(catalog_items[..workflow_head]
+            .iter()
+            .any(|item| item == "11:workflow:prj_example/ff"));
+
+        let mut document = fabric::CollaborativeView::default();
+        document
+            .maps
+            .entry("revisions".into())
+            .or_default()
+            .extend([("00".into(), Vec::new()), ("ff".into(), Vec::new())]);
+        let spec_items = enumerate("spec", &document);
+        let spec_head = spec_items
+            .iter()
+            .position(|item| item == "11c:heads")
+            .expect("Spec head projection");
+        assert!(spec_items[..spec_head]
+            .iter()
+            .any(|item| item == "11a:revision:ff"));
+        assert_eq!(spec_items.last().map(String::as_str), Some("11d:issued"));
+
+        let baseline_items = enumerate("baseline", &document);
+        let baseline_head = baseline_items
+            .iter()
+            .position(|item| item == "11e:heads")
+            .expect("Baseline head projection");
+        assert!(baseline_items[..baseline_head]
+            .iter()
+            .any(|item| item == "11d:revision:ff"));
+        assert_eq!(
+            baseline_items.last().map(String::as_str),
+            Some("11f:issued")
+        );
+    }
+
+    #[test]
+    fn every_phase_has_an_explicit_terminal_subitem_or_exhausts() {
+        let empty = fabric::CollaborativeView::default();
+        assert_eq!(enumerate("catalog", &empty), ["00:space"]);
+        assert_eq!(enumerate("issue", &empty), ["20:base"]);
+        assert!(enumerate("coordinates", &empty).is_empty());
+        assert_eq!(enumerate("spec", &empty), ["11c:heads", "11d:issued"]);
+        assert_eq!(enumerate("baseline", &empty), ["11e:heads", "11f:issued"]);
     }
 }
 
@@ -597,6 +723,7 @@ impl Staging {
                 && (matches!(op, Op::Create)
                     || matches!(op, Op::RegisterSet { path, .. } if path == crate::v4::roots::IDENTITY)))
         }));
+        self.declared.extend(batch.content_refs);
     }
 
     fn for_space(space: mechanics::ids::SpaceId, declare_catalog_on_use: bool) -> Self {
@@ -977,6 +1104,386 @@ fn checked_catalog_view(
 fn catalog_state(ctx: &Context<'_>) -> Result<CatalogState, Rejection> {
     let view = checked_catalog_view(ctx)?;
     Ok(CatalogState::from_view(view.as_deref()))
+}
+
+fn migration_cursor_body(cursor: &str) -> Option<(String, Option<BodyKey>, String)> {
+    if cursor.is_empty() {
+        return Some((String::new(), None, String::new()));
+    }
+    let (phase, body, subitem) = contract::V4MigrationWindow::parse_cursor(cursor)?;
+    Some((
+        phase,
+        body.map(|body| BodyKey::new(contract::world_id(), body)),
+        subitem,
+    ))
+}
+
+fn lifecycle_window_digest(
+    ctx: &Context<'_>,
+    phase: &str,
+    body: Option<&BodyKey>,
+    subitem: &str,
+) -> Result<[u8; 32], Rejection> {
+    let source = ctx.lifecycle_source().ok_or(Rejection::ContractViolation)?;
+    let mut hasher = blake3::Hasher::new_derive_key("lait.issues.v4-migration-window.v1");
+    hasher.update(
+        &postcard::to_stdvec(&source.publication.publication)
+            .map_err(|_| Rejection::StateCorrupt)?,
+    );
+    hasher.update(&postcard::to_stdvec(&source.frontier).map_err(|_| Rejection::StateCorrupt)?);
+    hasher.update(phase.as_bytes());
+    hasher.update(subitem.as_bytes());
+    if let Some(body) = body {
+        hasher.update(&body.body.as_bytes());
+        let view = ctx
+            .read_lifecycle_source_collaborative(body)
+            .map_err(Rejection::BodyRead)?
+            .ok_or(Rejection::StateCorrupt)?;
+        let encoded = postcard::to_stdvec(&*view).map_err(|_| Rejection::StateCorrupt)?;
+        if encoded.len() > contract::MAX_PAYLOAD_BYTES as usize {
+            return Err(Rejection::LimitExceeded);
+        }
+        hasher.update(&encoded);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn select_subitem(best: &mut Option<String>, after: &str, candidate: String) {
+    if candidate.as_str() > after
+        && best
+            .as_ref()
+            .is_none_or(|current| candidate.as_str() < current.as_str())
+    {
+        *best = Some(candidate);
+    }
+}
+
+fn next_lifecycle_subitem(
+    phase: &str,
+    view: &fabric::CollaborativeView,
+    after: &str,
+) -> Result<Option<String>, Rejection> {
+    let mut best = None;
+    match phase {
+        "catalog" => {
+            select_subitem(&mut best, after, "00:space".into());
+            for (path, prefix) in [
+                ("labels", "02:label"),
+                ("roles", "05:governance"),
+                ("role_revisions", "06:governance"),
+                ("projects", "10:project"),
+                ("workflow_revisions", "11:workflow"),
+                ("project_milestones", "12:milestone"),
+                ("cycles", "13:cycle"),
+                ("project_updates", "40:update"),
+                ("initiatives", "50:initiative"),
+                ("teams", "60:team"),
+                ("triage", "70:triage"),
+            ] {
+                if let Some(entries) = view.maps.get(path) {
+                    for key in entries.keys() {
+                        select_subitem(&mut best, after, format!("{prefix}:{key}"));
+                    }
+                }
+            }
+            if let Some(entries) = view.maps.get("initiatives") {
+                for (id, raw) in entries {
+                    let initiative: Initiative =
+                        serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+                    if initiative.id != *id {
+                        return Err(Rejection::StateCorrupt);
+                    }
+                    for project in &initiative.projects {
+                        select_subitem(
+                            &mut best,
+                            after,
+                            format!("51:initiative-project:{id}:{project}"),
+                        );
+                    }
+                }
+            }
+            if let Some(entries) = view.maps.get("teams") {
+                for (id, raw) in entries {
+                    let team: Team =
+                        serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+                    if team.id != *id {
+                        return Err(Rejection::StateCorrupt);
+                    }
+                    for member in &team.members {
+                        select_subitem(&mut best, after, format!("61:team-member:{id}:{member}"));
+                    }
+                }
+            }
+            let mut governance = BTreeSet::new();
+            if let Some(entries) = view.maps.get("roles") {
+                governance.extend(entries.keys().cloned());
+            }
+            if let Some(entries) = view.maps.get("role_revisions") {
+                for key in entries.keys() {
+                    let (role, _) = key.rsplit_once('/').ok_or(Rejection::StateCorrupt)?;
+                    governance.insert(role.into());
+                }
+            }
+            for role in governance {
+                select_subitem(&mut best, after, format!("07:governance-heads:{role}"));
+            }
+            if let Some(entries) = view.maps.get("workflow_revisions") {
+                let mut projects = BTreeSet::new();
+                for key in entries.keys() {
+                    let (project, _) = key.rsplit_once('/').ok_or(Rejection::StateCorrupt)?;
+                    projects.insert(project);
+                }
+                for project in projects {
+                    select_subitem(&mut best, after, format!("11z:workflow-heads:{project}"));
+                }
+            }
+        }
+        "coordinates" => {
+            for (path, prefix) in [("seqs", "14:identity"), ("tombstones", "15:tombstone")] {
+                if let Some(entries) = view.maps.get(path) {
+                    for key in entries.keys() {
+                        select_subitem(&mut best, after, format!("{prefix}:{key}"));
+                    }
+                }
+            }
+            for (path, entries) in &view.lists {
+                if path.starts_with("board/") {
+                    for (ordinal, _entry) in entries.iter().enumerate() {
+                        select_subitem(&mut best, after, format!("16:board:{path}:{ordinal:020}"));
+                    }
+                }
+            }
+            for (ordinal, _node) in view
+                .trees
+                .get(contract::HIERARCHY_PATH)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                select_subitem(&mut best, after, format!("30:tree:{ordinal:020}"));
+            }
+            if let Some(parents) = view.maps.get("parents") {
+                for child in parents.keys() {
+                    select_subitem(&mut best, after, format!("30:map:{child}"));
+                }
+            }
+            if let Some(edges) = view.maps.get("edges") {
+                for key in edges.keys() {
+                    select_subitem(&mut best, after, format!("31:link:{key}"));
+                }
+            }
+            if let Some(triage) = view.maps.get("triage") {
+                for (id, raw) in triage {
+                    let item: TriageItem =
+                        serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+                    if item.id != *id {
+                        return Err(Rejection::StateCorrupt);
+                    }
+                    if !item.outcome.is_empty() {
+                        select_subitem(&mut best, after, format!("71:triage-decision:{id}"));
+                    }
+                }
+            }
+        }
+        "issue" => {
+            select_subitem(&mut best, after, "20:base".into());
+            for (path, prefix) in [("attachments", "24:attachment"), ("checks", "25:check")] {
+                if let Some(entries) = view.maps.get(path) {
+                    for key in entries.keys() {
+                        select_subitem(&mut best, after, format!("{prefix}:{key}"));
+                    }
+                }
+            }
+            for (path, values) in &view.sets {
+                let prefix = if path == "assignees" {
+                    Some("23:relation:assignee".to_string())
+                } else if path == "followers" {
+                    Some("23:relation:follower".to_string())
+                } else if path == "labels" {
+                    Some("23:relation:label".to_string())
+                } else if path == contract::REACTIONS_PATH {
+                    Some("22:reaction:current".to_string())
+                } else {
+                    path.strip_prefix("reactions/").map(return_reaction_prefix)
+                };
+                if let Some(prefix) = prefix {
+                    for (ordinal, _value) in values.iter().enumerate() {
+                        select_subitem(&mut best, after, format!("{prefix}:{ordinal:020}"));
+                    }
+                }
+            }
+            for (kind, value) in [
+                ("milestone", view.registers.get("milestone")),
+                ("cycle", view.registers.get("cycle")),
+                ("baseline", view.registers.get("baseline")),
+            ] {
+                if value.is_some_and(|value| !value.is_empty()) {
+                    select_subitem(&mut best, after, format!("23:relation:{kind}:single"));
+                }
+            }
+            for (path, prefix) in [("comments", "21:comment"), ("events", "26:activity")] {
+                for (ordinal, _entry) in view.lists.get(path).into_iter().flatten().enumerate() {
+                    select_subitem(&mut best, after, format!("{prefix}:list:{ordinal:020}"));
+                }
+            }
+            for (ordinal, _node) in view.trees.get("comments").into_iter().flatten().enumerate() {
+                select_subitem(&mut best, after, format!("21:comment:tree:{ordinal:020}"));
+            }
+            for (ordinal, _entry) in view
+                .logs
+                .get(contract::EVENTS_PATH)
+                .into_iter()
+                .flat_map(|log| &log.entries)
+                .enumerate()
+            {
+                select_subitem(&mut best, after, format!("26:activity:log:{ordinal:020}"));
+            }
+        }
+        "spec" => {
+            if let Some(revisions) = view.maps.get("revisions") {
+                for key in revisions.keys() {
+                    select_subitem(&mut best, after, format!("11a:revision:{key}"));
+                }
+            }
+            for (ordinal, _value) in view
+                .sets
+                .get("observations")
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                select_subitem(&mut best, after, format!("11b:observation:{ordinal:020}"));
+            }
+            select_subitem(&mut best, after, "11c:heads".into());
+            select_subitem(&mut best, after, "11d:issued".into());
+        }
+        "baseline" => {
+            if let Some(revisions) = view.maps.get("revisions") {
+                for key in revisions.keys() {
+                    select_subitem(&mut best, after, format!("11d:revision:{key}"));
+                }
+            }
+            select_subitem(&mut best, after, "11e:heads".into());
+            select_subitem(&mut best, after, "11f:issued".into());
+        }
+        _ => return Err(Rejection::InvalidRequest),
+    }
+    Ok(best)
+}
+
+fn return_reaction_prefix(comment: &str) -> String {
+    format!("22:reaction:{comment}")
+}
+
+fn first_lifecycle_body(
+    ctx: &Context<'_>,
+    schema: &replica::body::SchemaId,
+    after: Option<&BodyKey>,
+) -> Result<Option<BodyKey>, Rejection> {
+    let page = ctx
+        .lifecycle_source_body_keys_page_with_schema(&contract::world_id(), schema, after, 1)
+        .map_err(Rejection::BodyRead)?;
+    Ok(page.into_iter().next())
+}
+
+/// Select one compact exact-source migration window outside mutation-lane
+/// admission. Exactly one logical source fact is selected; a later callback
+/// reopens this one Body and recomputes the digest before staging it.
+pub fn prepare_v4_migration_plan(
+    ctx: &Context<'_>,
+    previous_batch: u64,
+    previous_cursor: String,
+    timestamp: u64,
+) -> Result<contract::V4MigrationPlan, Rejection> {
+    let source = ctx.lifecycle_source().ok_or(Rejection::ContractViolation)?;
+    if timestamp == 0 || previous_cursor.len() > 512 {
+        return Err(Rejection::InvalidRequest);
+    }
+    let (previous_phase, previous_body, previous_subitem) =
+        migration_cursor_body(&previous_cursor).ok_or(Rejection::InvalidRequest)?;
+    if previous_phase == contract::V4MigrationWindow::TERMINAL_PHASE {
+        return Err(Rejection::Conflict);
+    }
+    let phases = [
+        ("catalog", contract::catalog_schema()),
+        ("issue", contract::issue_schema()),
+        ("coordinates", contract::catalog_schema()),
+        ("spec", contract::spec_schema()),
+        ("baseline", contract::baseline_schema()),
+    ];
+    let start = phases
+        .iter()
+        .position(|(phase, _)| *phase == previous_phase)
+        .unwrap_or(0);
+    if !previous_phase.is_empty()
+        && phases
+            .get(start)
+            .is_none_or(|(phase, _)| *phase != previous_phase)
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    let mut selected = None;
+    for (index, (candidate_phase, schema)) in phases.iter().enumerate().skip(start) {
+        if previous_phase == *candidate_phase {
+            let body = previous_body.as_ref().ok_or(Rejection::InvalidRequest)?;
+            let view = ctx
+                .read_lifecycle_source_collaborative(body)
+                .map_err(Rejection::BodyRead)?
+                .ok_or(Rejection::StateCorrupt)?;
+            if let Some(subitem) =
+                next_lifecycle_subitem(candidate_phase, &view, &previous_subitem)?
+            {
+                selected = Some((*candidate_phase, Some(body.clone()), subitem));
+                break;
+            }
+        }
+        let after = (previous_phase == *candidate_phase)
+            .then_some(previous_body.as_ref())
+            .flatten();
+        if let Some(body) = first_lifecycle_body(ctx, schema, after)? {
+            if matches!(*candidate_phase, "catalog" | "coordinates") {
+                let expected = contract::catalog_key(&ctx.principal().space);
+                if body != expected || first_lifecycle_body(ctx, schema, Some(&body))?.is_some() {
+                    return Err(Rejection::StateCorrupt);
+                }
+            }
+            let view = ctx
+                .read_lifecycle_source_collaborative(&body)
+                .map_err(Rejection::BodyRead)?
+                .ok_or(Rejection::StateCorrupt)?;
+            let subitem = next_lifecycle_subitem(candidate_phase, &view, "")?
+                .unwrap_or_else(|| "$empty".into());
+            selected = Some((*candidate_phase, Some(body), subitem));
+            break;
+        }
+        if index == start && previous_phase == *candidate_phase && previous_body.is_none() {
+            return Err(Rejection::InvalidRequest);
+        }
+    }
+    let (phase, body, subitem) = selected.unwrap_or((
+        contract::V4MigrationWindow::TERMINAL_PHASE,
+        None,
+        String::new(),
+    ));
+    let cursor = contract::V4MigrationWindow::render_cursor(&phase, body.as_ref(), &subitem)
+        .ok_or(Rejection::StateCorrupt)?;
+    let digest = lifecycle_window_digest(ctx, phase, body.as_ref(), &subitem)?;
+    let plan = contract::V4MigrationPlan {
+        version: contract::V4MigrationPlan::VERSION,
+        source: source.publication.publication,
+        source_frontier: source.frontier,
+        previous_batch,
+        previous_cursor,
+        window: contract::V4MigrationWindow {
+            phase: phase.into(),
+            body,
+            subitem,
+            digest,
+            cursor,
+        },
+        timestamp,
+    };
+    plan.valid().then_some(plan).ok_or(Rejection::StateCorrupt)
 }
 
 /// The v4 catalog projection. Record Bodies are authoritative; the legacy
@@ -4117,119 +4624,462 @@ struct LegacySpecRevision {
     body: LegacySpecBody,
 }
 
-fn v4_spec_successors(
-    ctx: &Context<'_>,
-    catalog: &CatalogState,
-    publication: runtime::publication::PublicationId,
-) -> Result<Vec<(String, crate::v4_store::Batch)>, Rejection> {
-    let mut successors = Vec::new();
-    for body_key in ctx.bodies_with_schema(&contract::world_id(), &contract::spec_schema()) {
-        let view = ctx
-            .read_collaborative(&body_key)
-            .map_err(Rejection::BodyRead)?
-            .ok_or(Rejection::StateCorrupt)?;
-        let Some(records) = view.maps.get("revisions") else {
-            continue;
+fn ordered_spec_revisions(
+    revisions: BTreeMap<String, crate::spec::Revision>,
+) -> Result<Vec<crate::spec::Revision>, Rejection> {
+    let ids = revisions.keys().cloned().collect::<BTreeSet<_>>();
+    let mut pending = revisions;
+    let mut ordered = Vec::new();
+    while !pending.is_empty() {
+        let ready = pending.iter().find_map(|(id, revision)| {
+            revision
+                .predecessors
+                .iter()
+                .all(|predecessor| ids.contains(predecessor) && !pending.contains_key(predecessor))
+                .then(|| id.clone())
+        });
+        let Some(ready) = ready else {
+            return Err(Rejection::StateCorrupt);
         };
-        let mut legacy = BTreeMap::<String, LegacySpecRevision>::new();
-        for (stored_id, raw) in records {
-            // A canonical revision is never migration work, even if a future
-            // canonical Body happens to gain fields the v3 wire did not know.
-            if serde_json::from_slice::<crate::spec::Revision>(raw).is_ok() {
-                continue;
+        ordered.push(pending.remove(&ready).ok_or(Rejection::StateCorrupt)?);
+    }
+    Ok(ordered)
+}
+
+fn ordered_baseline_revisions(
+    revisions: BTreeMap<String, crate::spec::BaselineRevision>,
+) -> Result<Vec<crate::spec::BaselineRevision>, Rejection> {
+    let ids = revisions.keys().cloned().collect::<BTreeSet<_>>();
+    let mut pending = revisions;
+    let mut ordered = Vec::new();
+    while !pending.is_empty() {
+        let ready = pending.iter().find_map(|(id, revision)| {
+            revision
+                .predecessors
+                .iter()
+                .all(|predecessor| ids.contains(predecessor) && !pending.contains_key(predecessor))
+                .then(|| id.clone())
+        });
+        let Some(ready) = ready else {
+            return Err(Rejection::StateCorrupt);
+        };
+        ordered.push(pending.remove(&ready).ok_or(Rejection::StateCorrupt)?);
+    }
+    Ok(ordered)
+}
+
+fn spec_issued_ids(spec: &crate::spec::Spec) -> Vec<String> {
+    match spec.issued() {
+        crate::spec::Issued::None => Vec::new(),
+        crate::spec::Issued::One(revision) => vec![revision.revision.clone()],
+        crate::spec::Issued::Conflict(revisions) => revisions
+            .into_iter()
+            .map(|revision| revision.revision.clone())
+            .collect(),
+    }
+}
+
+fn baseline_issued_ids(baseline: &crate::spec::Baseline) -> Vec<String> {
+    match baseline.issued() {
+        crate::spec::BaselineIssued::None => Vec::new(),
+        crate::spec::BaselineIssued::One(revision) => vec![revision.revision.clone()],
+        crate::spec::BaselineIssued::Conflict(revisions) => revisions
+            .into_iter()
+            .map(|revision| revision.revision.clone())
+            .collect(),
+    }
+}
+
+fn migration_spec_revisions(
+    ctx: &Context<'_>,
+    body_key: &BodyKey,
+    view: &fabric::CollaborativeView,
+    publication: runtime::publication::PublicationId,
+) -> Result<(BTreeMap<String, crate::spec::Revision>, bool), Rejection> {
+    let records = view.maps.get("revisions").ok_or(Rejection::StateCorrupt)?;
+    let mut canonical = BTreeMap::<String, crate::spec::Revision>::new();
+    let mut legacy = BTreeMap::<String, LegacySpecRevision>::new();
+    for (stored_id, raw) in records {
+        if let Ok(revision) = serde_json::from_slice::<crate::spec::Revision>(raw) {
+            if stored_id != &revision.revision
+                || contract::spec_key(&revision.body.spec) != *body_key
+                || canonical.insert(stored_id.clone(), revision).is_some()
+            {
+                return Err(Rejection::StateCorrupt);
             }
+        } else {
             let revision: LegacySpecRevision =
                 serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
             if stored_id != &revision.revision
-                || contract::spec_key(&revision.body.spec) != body_key
-                || legacy.insert(revision.revision.clone(), revision).is_some()
+                || contract::spec_key(&revision.body.spec) != *body_key
+                || legacy.insert(stored_id.clone(), revision).is_some()
             {
                 return Err(Rejection::StateCorrupt);
             }
-        }
-        let legacy_ids: std::collections::BTreeSet<String> = legacy.keys().cloned().collect();
-        let mut mapped = BTreeMap::<String, String>::new();
-        while !legacy.is_empty() {
-            let ready = legacy.iter().find_map(|(old, revision)| {
-                revision
-                    .predecessors
-                    .iter()
-                    .all(|predecessor| {
-                        !legacy_ids.contains(predecessor) || mapped.contains_key(predecessor)
-                    })
-                    .then(|| old.clone())
-            });
-            let Some(old_revision) = ready else {
-                // Missing/cyclic predecessor history cannot be rewritten into
-                // an invented DAG.
-                return Err(Rejection::StateCorrupt);
-            };
-            let legacy_revision = legacy
-                .remove(&old_revision)
-                .ok_or(Rejection::StateCorrupt)?;
-            if !legacy_revision.body.generation.is_empty()
-                && (legacy_revision.body.generation.len() != 64
-                    || data_encoding::HEXLOWER
-                        .decode(legacy_revision.body.generation.as_bytes())
-                        .is_err())
-            {
-                return Err(Rejection::StateCorrupt);
-            }
-            let plan = if legacy_revision.body.kind == crate::spec::Kind::Plan {
-                Some(
-                    legacy_revision
-                        .body
-                        .plan
-                        .unwrap_or(crate::spec::PlanData { roots: Vec::new() }),
-                )
-            } else {
-                legacy_revision.body.plan
-            };
-            validate_plan(ctx, catalog, &legacy_revision.body.project, plan.as_ref())?;
-            let body = crate::spec::Body {
-                spec: legacy_revision.body.spec,
-                project: legacy_revision.body.project,
-                kind: legacy_revision.body.kind,
-                publication,
-                title: legacy_revision.body.title,
-                text: legacy_revision.body.text,
-                state: legacy_revision.body.state,
-                links: legacy_revision.body.links,
-                plan,
-                author: legacy_revision.body.author,
-                ts: legacy_revision.body.ts,
-            };
-            let predecessors = legacy_revision
-                .predecessors
-                .iter()
-                .map(|predecessor| {
-                    crate::spec::decode_revision(
-                        mapped
-                            .get(predecessor)
-                            .map_or(predecessor.as_str(), String::as_str),
-                    )
-                    .ok_or(Rejection::StateCorrupt)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let revision = crate::spec::build_revision(body, predecessors)
-                .map_err(|_| Rejection::StateCorrupt)?;
-            let alias = crate::v4::RevisionAliasRecord {
-                spec: revision.body.spec.clone(),
-                legacy_revision: old_revision.clone(),
-                canonical_revision: revision.revision.clone(),
-            };
-            let mut batch = crate::v4_store::Batch::default();
-            batch.absorb(crate::v4_store::write_spec_revision(ctx, &revision)?);
-            batch.absorb(crate::v4_store::write_revision_alias(ctx, &alias)?);
-            successors.push((
-                format!("11z:spec:{}:{}", revision.body.spec, old_revision),
-                batch,
-            ));
-            mapped.insert(old_revision, revision.revision);
         }
     }
-    successors.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(successors)
+    if !canonical.is_empty() && !legacy.is_empty() {
+        return Err(Rejection::StateCorrupt);
+    }
+    if !canonical.is_empty() {
+        let ordered = ordered_spec_revisions(canonical)?;
+        return Ok((
+            ordered
+                .into_iter()
+                .map(|revision| (revision.revision.clone(), revision))
+                .collect(),
+            false,
+        ));
+    }
+    let legacy_ids = legacy.keys().cloned().collect::<BTreeSet<_>>();
+    let mut mapped = BTreeMap::<String, crate::spec::Revision>::new();
+    while !legacy.is_empty() {
+        let ready = legacy.iter().find_map(|(id, revision)| {
+            revision
+                .predecessors
+                .iter()
+                .all(|predecessor| {
+                    !legacy_ids.contains(predecessor) || mapped.contains_key(predecessor)
+                })
+                .then(|| id.clone())
+        });
+        let old = ready.ok_or(Rejection::StateCorrupt)?;
+        let revision = legacy.remove(&old).ok_or(Rejection::StateCorrupt)?;
+        if !revision.body.generation.is_empty()
+            && (revision.body.generation.len() != 64
+                || data_encoding::HEXLOWER
+                    .decode(revision.body.generation.as_bytes())
+                    .is_err())
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+        let plan = if revision.body.kind == crate::spec::Kind::Plan {
+            Some(
+                revision
+                    .body
+                    .plan
+                    .unwrap_or(crate::spec::PlanData { roots: Vec::new() }),
+            )
+        } else {
+            revision.body.plan
+        };
+        validate_plan(
+            ctx,
+            &CatalogState::default(),
+            &revision.body.project,
+            plan.as_ref(),
+        )?;
+        let body = crate::spec::Body {
+            spec: revision.body.spec,
+            project: revision.body.project,
+            kind: revision.body.kind,
+            publication,
+            title: revision.body.title,
+            text: revision.body.text,
+            state: revision.body.state,
+            links: revision.body.links,
+            plan,
+            author: revision.body.author,
+            ts: revision.body.ts,
+        };
+        let predecessors = revision
+            .predecessors
+            .iter()
+            .map(|predecessor| {
+                let canonical = mapped
+                    .get(predecessor)
+                    .map_or(predecessor.as_str(), |revision| revision.revision.as_str());
+                crate::spec::decode_revision(canonical).ok_or(Rejection::StateCorrupt)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let migrated =
+            crate::spec::build_revision(body, predecessors).map_err(|_| Rejection::StateCorrupt)?;
+        mapped.insert(old, migrated);
+    }
+    Ok((mapped, true))
+}
+
+fn migration_spec_window(
+    ctx: &Context<'_>,
+    body_key: &BodyKey,
+    subitem: &str,
+    view: &fabric::CollaborativeView,
+    publication: runtime::publication::PublicationId,
+) -> Result<crate::v4_store::Batch, Rejection> {
+    let (revisions, legacy) = migration_spec_revisions(ctx, body_key, view, publication)?;
+    if subitem == "$empty" {
+        return Ok(crate::v4_store::Batch::default());
+    }
+    if let Some(stored_id) = subitem.strip_prefix("11a:revision:") {
+        let revision = revisions.get(stored_id).ok_or(Rejection::StateCorrupt)?;
+        let stored = crate::v4::SpecRevisionRecord {
+            revision: revision.clone(),
+        };
+        let present = crate::v4_store::migration_immutable_present(
+            ctx,
+            crate::v4::PhysicalSchema::SpecRevision,
+            crate::v4::RecordBodyIdentityRecord {
+                owner: revision.body.spec.clone(),
+                record: revision.revision.clone(),
+            },
+            stored
+                .encode_canonical()
+                .map_err(|_| Rejection::StateCorrupt)?,
+            crate::find::field::REVISION,
+            &revision.revision,
+            &[
+                (crate::find::field::SOURCE_ID, &revision.body.spec),
+                (crate::find::field::RELATION_KIND, "spec_revision"),
+            ],
+        )?;
+        let mut batch = if present {
+            crate::v4_store::Batch::default()
+        } else {
+            crate::v4_store::write_spec_revision_record(ctx, revision)?
+        };
+        if legacy {
+            let alias = crate::v4::RevisionAliasRecord {
+                spec: revision.body.spec.clone(),
+                legacy_revision: stored_id.into(),
+                canonical_revision: revision.revision.clone(),
+            };
+            if !crate::v4_store::migration_immutable_present(
+                ctx,
+                crate::v4::PhysicalSchema::RevisionAlias,
+                crate::v4::RecordBodyIdentityRecord {
+                    owner: alias.spec.clone(),
+                    record: alias.legacy_revision.clone(),
+                },
+                alias
+                    .encode_canonical()
+                    .map_err(|_| Rejection::StateCorrupt)?,
+                crate::find::field::SOURCE_ID,
+                &alias.legacy_revision,
+                &[
+                    (crate::find::field::KIND, "relation"),
+                    (crate::find::field::RELATION_KIND, "revision_alias"),
+                ],
+            )? {
+                batch.absorb(crate::v4_store::write_revision_alias(ctx, &alias)?);
+            }
+        }
+        return Ok(batch);
+    }
+    let first = revisions.values().next().ok_or(Rejection::StateCorrupt)?;
+    if let Some(raw) = subitem.strip_prefix("11b:observation:") {
+        let ordinal = raw.parse::<usize>().map_err(|_| Rejection::StateCorrupt)?;
+        let observation: crate::spec::Observation = serde_json::from_slice(
+            view.sets
+                .get("observations")
+                .and_then(|records| records.get(ordinal))
+                .ok_or(Rejection::StateCorrupt)?,
+        )
+        .map_err(|_| Rejection::StateCorrupt)?;
+        if observation.spec != first.body.spec {
+            return Err(Rejection::StateCorrupt);
+        }
+        let semantic_id = observation.observation.clone();
+        let record = crate::v4::SpecObservationRecord::Assert {
+            project: first.body.project.clone(),
+            observation,
+        };
+        let identity = record.identity();
+        if crate::v4_store::migration_immutable_present(
+            ctx,
+            crate::v4::PhysicalSchema::SpecObservation,
+            crate::v4::RecordBodyIdentityRecord {
+                owner: record.spec().into(),
+                record: identity,
+            },
+            record
+                .encode_canonical()
+                .map_err(|_| Rejection::StateCorrupt)?,
+            crate::find::field::ID,
+            &semantic_id,
+            &[
+                (crate::find::field::KIND, "spec_observation_fact"),
+                (crate::find::field::SOURCE_ID, record.spec()),
+                (crate::find::field::STATE, "assert"),
+            ],
+        )? {
+            return Ok(crate::v4_store::Batch::default());
+        }
+        return crate::v4_store::write_spec_observation(ctx, &record);
+    }
+    if subitem == "11c:heads" {
+        let ids = revisions
+            .values()
+            .map(|revision| revision.revision.clone())
+            .collect::<BTreeSet<_>>();
+        let predecessors = revisions
+            .values()
+            .flat_map(|revision| revision.predecessors.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if !predecessors.is_subset(&ids) {
+            return Err(Rejection::StateCorrupt);
+        }
+        let heads = ids.difference(&predecessors).cloned().collect();
+        let spec = crate::ids::SpecId::parse(&first.body.spec).ok_or(Rejection::StateCorrupt)?;
+        return crate::v4_store::migration_exact_set(
+            ctx,
+            crate::v4::PhysicalSchema::SpecHeads,
+            &crate::v4::spec_heads_key(&spec),
+            &first.body.spec,
+            &[
+                (crate::v4::roots::PROJECT, first.body.project.as_str()),
+                (crate::v4::roots::KIND, first.body.kind.as_str()),
+            ],
+            crate::v4::roots::HEADS,
+            &heads,
+            true,
+        );
+    }
+    if subitem == "11d:issued" {
+        let state = crate::spec::Spec {
+            revisions: revisions.values().cloned().collect(),
+            observations: Vec::new(),
+            explicit_heads: Vec::new(),
+            explicit_issued: Vec::new(),
+        };
+        let issued = spec_issued_ids(&state);
+        if issued.len() > crate::v4::MAX_CONCURRENT_HEADS {
+            return Err(Rejection::Conflict);
+        }
+        let issued = issued.into_iter().collect::<BTreeSet<_>>();
+        let spec = crate::ids::SpecId::parse(&first.body.spec).ok_or(Rejection::StateCorrupt)?;
+        return crate::v4_store::migration_exact_set(
+            ctx,
+            crate::v4::PhysicalSchema::SpecHeads,
+            &crate::v4::spec_heads_key(&spec),
+            &first.body.spec,
+            &[
+                (crate::v4::roots::PROJECT, first.body.project.as_str()),
+                (crate::v4::roots::KIND, first.body.kind.as_str()),
+            ],
+            crate::v4::roots::ISSUED_HEADS,
+            &issued,
+            false,
+        );
+    }
+    Err(Rejection::ContractViolation)
+}
+
+fn migration_baseline_window(
+    ctx: &Context<'_>,
+    body_key: &BodyKey,
+    subitem: &str,
+    view: &fabric::CollaborativeView,
+) -> Result<crate::v4_store::Batch, Rejection> {
+    let records = view.maps.get("revisions").ok_or(Rejection::StateCorrupt)?;
+    let mut revisions = BTreeMap::<String, crate::spec::BaselineRevision>::new();
+    for (stored_id, raw) in records {
+        let revision: crate::spec::BaselineRevision =
+            serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+        if stored_id != &revision.revision
+            || contract::baseline_key(&revision.body.baseline) != *body_key
+            || revisions.insert(stored_id.clone(), revision).is_some()
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+    }
+    let ordered = ordered_baseline_revisions(revisions)?;
+    if subitem == "$empty" {
+        return Ok(crate::v4_store::Batch::default());
+    }
+    if let Some(stored_id) = subitem.strip_prefix("11d:revision:") {
+        let revision = ordered
+            .iter()
+            .find(|revision| revision.revision == stored_id)
+            .ok_or(Rejection::StateCorrupt)?;
+        let stored = crate::v4::BaselineRevisionRecord {
+            revision: revision.clone(),
+        };
+        return if crate::v4_store::migration_immutable_present(
+            ctx,
+            crate::v4::PhysicalSchema::BaselineRevision,
+            crate::v4::RecordBodyIdentityRecord {
+                owner: revision.body.baseline.clone(),
+                record: revision.revision.clone(),
+            },
+            stored
+                .encode_canonical()
+                .map_err(|_| Rejection::StateCorrupt)?,
+            crate::find::field::REVISION,
+            &revision.revision,
+            &[
+                (crate::find::field::KIND, "baseline_revision"),
+                (crate::find::field::SOURCE_ID, &revision.body.baseline),
+                (crate::find::field::RELATION_KIND, "baseline_revision"),
+            ],
+        )? {
+            Ok(crate::v4_store::Batch::default())
+        } else {
+            crate::v4_store::write_baseline_revision_record(ctx, revision)
+        };
+    }
+    let baseline = ordered
+        .first()
+        .map(|revision| revision.body.baseline.clone())
+        .ok_or(Rejection::StateCorrupt)?;
+    if subitem == "11e:heads" {
+        let ids = ordered
+            .iter()
+            .map(|revision| revision.revision.clone())
+            .collect::<BTreeSet<_>>();
+        let predecessors = ordered
+            .iter()
+            .flat_map(|revision| revision.predecessors.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if !predecessors.is_subset(&ids) {
+            return Err(Rejection::StateCorrupt);
+        }
+        let heads = ids.difference(&predecessors).cloned().collect();
+        let first = ordered.first().ok_or(Rejection::StateCorrupt)?;
+        let baseline_id =
+            crate::ids::BaselineId::parse(&baseline).ok_or(Rejection::StateCorrupt)?;
+        return crate::v4_store::migration_exact_set(
+            ctx,
+            crate::v4::PhysicalSchema::BaselineHeads,
+            &crate::v4::baseline_heads_key(&baseline_id),
+            &baseline,
+            &[
+                (crate::v4::roots::PROJECT, first.body.project.as_str()),
+                (crate::v4::roots::KIND, "baseline"),
+            ],
+            crate::v4::roots::HEADS,
+            &heads,
+            true,
+        );
+    }
+    if subitem == "11f:issued" {
+        let state = crate::spec::Baseline {
+            revisions: ordered,
+            explicit_heads: Vec::new(),
+            explicit_issued: Vec::new(),
+        };
+        let issued = baseline_issued_ids(&state);
+        if issued.len() > crate::v4::MAX_CONCURRENT_HEADS {
+            return Err(Rejection::Conflict);
+        }
+        let issued = issued.into_iter().collect::<BTreeSet<_>>();
+        let first = state.revisions.first().ok_or(Rejection::StateCorrupt)?;
+        let baseline_id =
+            crate::ids::BaselineId::parse(&baseline).ok_or(Rejection::StateCorrupt)?;
+        return crate::v4_store::migration_exact_set(
+            ctx,
+            crate::v4::PhysicalSchema::BaselineHeads,
+            &crate::v4::baseline_heads_key(&baseline_id),
+            &baseline,
+            &[
+                (crate::v4::roots::PROJECT, first.body.project.as_str()),
+                (crate::v4::roots::KIND, "baseline"),
+            ],
+            crate::v4::roots::ISSUED_HEADS,
+            &issued,
+            false,
+        );
+    }
+    Err(Rejection::ContractViolation)
 }
 
 /// Audit the current representation without treating immutable history as work
@@ -4240,7 +5090,7 @@ fn structure_report(
     ctx: &Context<'_>,
     catalog: &CatalogState,
     read: &IssueReadSet,
-) -> contract::StructureReport {
+) -> Result<contract::StructureReport, Rejection> {
     let mut relation_bodies = 0u64;
     let mut relation_projects_pending = 0u64;
     let mut relation_edges_pending = 0u64;
@@ -4301,7 +5151,7 @@ fn structure_report(
         && spec_heads_pending == 0
         && issue_documents_pending == 0;
 
-    contract::StructureReport {
+    Ok(contract::StructureReport {
         generation: data_encoding::HEXLOWER.encode(&ctx.manifest_root()),
         projects: count(catalog.projects.len()),
         issues: count(read.issues.len()),
@@ -4317,8 +5167,9 @@ fn structure_report(
         plans_without_roots,
         issue_documents_pending,
         baselines: count(all_baselines(ctx).len()),
+        migration: crate::v4_store::migration_verification(ctx)?,
         complete,
-    }
+    })
 }
 
 fn spec_view(spec: &crate::spec::Spec) -> Option<crate::spec::SpecView> {
@@ -6443,14 +7294,6 @@ impl World for IssuesWorld {
             ctx.body_version(&catalog_key(&ctx.principal().space))
                 .is_none(),
         );
-        let mut catalog_storage: CatalogState;
-        let catalog: &mut CatalogState;
-        macro_rules! catalog {
-            () => {
-                catalog_storage = live_catalog(ctx)?;
-                catalog = &mut catalog_storage;
-            };
-        }
         match intent {
             IssueIntent::ChangeSet { operations, ts } => {
                 // A ChangeSet validates against an in-action overlay plus
@@ -7082,34 +7925,80 @@ impl World for IssuesWorld {
                 staging.require(contract::demand_admin());
                 Ok(staging.into_effect(None))
             }
-            IssueIntent::V4Migrate {
-                actor: _,
-                device: _,
-                ts,
-            } => {
-                catalog!();
-                let migration_read = issue_read_set(ctx, &mut *catalog, None)?;
-                let issues: BTreeMap<String, IssueState> = migration_read
-                    .issues
-                    .iter()
-                    .map(|(doc, issue)| (doc.clone(), (**issue).clone()))
-                    .collect();
-                let publication =
-                    crate::v4_store::migration_publication(ctx, self.portable_publication(ctx)?)?;
-                let spec_successors = v4_spec_successors(ctx, &catalog, publication)?;
-                let Some(batch) = crate::v4_store::migration_batch(
-                    ctx,
-                    &catalog,
-                    &issues,
-                    &spec_successors,
-                    publication,
-                    ctx.principal().actor.as_str(),
-                    ts,
-                )?
-                else {
-                    return Ok(unchanged_effect(None));
+            IssueIntent::V4Migrate { plan } => {
+                let Some(source) = ctx.lifecycle_source() else {
+                    return Err(Rejection::Denied(
+                        runtime::world::DeniedCause::DemandUnsatisfied,
+                    ));
                 };
-                staging.absorb_v4(batch);
+                if !plan.valid()
+                    || plan.source != source.publication.publication
+                    || plan.source_frontier != source.frontier
+                {
+                    return Err(Rejection::ContractViolation);
+                }
+                crate::v4_store::validate_migration_plan(ctx, &plan)?;
+                // The signed plan is only a compact coordinate. Recompute the
+                // canonical next window from the same frozen publication and
+                // reject any substituted Body/subitem/digest before staging.
+                let expected = prepare_v4_migration_plan(
+                    ctx,
+                    plan.previous_batch,
+                    plan.previous_cursor.clone(),
+                    plan.timestamp,
+                )?;
+                if expected != plan {
+                    return Err(Rejection::ContractViolation);
+                }
+                let item = if plan.window.terminal() {
+                    crate::v4_store::Batch::default()
+                } else {
+                    let body = plan
+                        .window
+                        .body
+                        .as_ref()
+                        .ok_or(Rejection::ContractViolation)?;
+                    let view = ctx
+                        .read_lifecycle_source_collaborative(body)
+                        .map_err(Rejection::BodyRead)?
+                        .ok_or(Rejection::StateCorrupt)?;
+                    match plan.window.phase.as_str() {
+                        "catalog" => crate::v4_store::migration_catalog_window(
+                            ctx,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                        )?,
+                        "issue" => crate::v4_store::migration_issue_window(
+                            ctx,
+                            body,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                        )?,
+                        "coordinates" => crate::v4_store::migration_coordinate_window(
+                            ctx,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                        )?,
+                        "spec" => migration_spec_window(
+                            ctx,
+                            body,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                            plan.source,
+                        )?,
+                        "baseline" => migration_baseline_window(
+                            ctx,
+                            body,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                        )?,
+                        "terminal" => return Err(Rejection::ContractViolation),
+                        _ => return Err(Rejection::ContractViolation),
+                    }
+                };
+                staging.absorb_v4(crate::v4_store::finalize_migration_window(
+                    ctx, &plan, item,
+                )?);
                 staging.require(contract::demand_admin());
                 Ok(staging.into_effect(None))
             }
@@ -9341,8 +10230,8 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
-                catalog_storage = CatalogState::default();
-                catalog = &mut catalog_storage;
+                let mut catalog_storage = CatalogState::default();
+                let catalog = &mut catalog_storage;
                 crate::v4_store::apply_initiative(ctx, catalog, &id)?;
                 staging.require(contract::demand_space_any("project.create"));
                 let description_changed = description.is_some();
@@ -9442,8 +10331,8 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
-                catalog_storage = CatalogState::default();
-                catalog = &mut catalog_storage;
+                let mut catalog_storage = CatalogState::default();
+                let catalog = &mut catalog_storage;
                 crate::v4_store::apply_team(ctx, catalog, &id)?;
                 staging.require(contract::demand_admin());
                 if id.is_empty() {
@@ -9787,7 +10676,10 @@ impl World for IssuesWorld {
     fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
         let query = IssueQuery::from_json(&query.payload).ok_or(Rejection::InvalidRequest)?;
         if self.package == IssuesPackage::PreferredV4
-            && matches!(&query, IssueQuery::StructureStatus)
+            && matches!(
+                &query,
+                IssueQuery::V4MigrationStatus | IssueQuery::StructureStatus
+            )
         {
             return Err(Rejection::InvalidRequest);
         }
@@ -9801,6 +10693,10 @@ impl World for IssuesWorld {
             demand: contract::demand_read(),
         };
         match query {
+            IssueQuery::V4MigrationStatus => Ok(projection(
+                serde_json::to_vec(&crate::v4_store::migration_verification(ctx)?)
+                    .expect("migration verification JSON"),
+            )),
             IssueQuery::Resolve {
                 entity,
                 selector,
@@ -9814,7 +10710,7 @@ impl World for IssuesWorld {
                 let catalog: &mut CatalogState = &mut catalog;
                 let read = issue_read_set(ctx, catalog, None)?;
                 Ok(projection(
-                    serde_json::to_vec(&structure_report(ctx, catalog, &read))
+                    serde_json::to_vec(&structure_report(ctx, catalog, &read)?)
                         .expect("structure report JSON"),
                 ))
             }

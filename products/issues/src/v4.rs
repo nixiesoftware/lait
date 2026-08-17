@@ -1065,6 +1065,10 @@ fn canonical_actor(value: &str) -> bool {
     ActorId::parse(value).is_some_and(|actor| actor.as_str() == value)
 }
 
+fn canonical_optional_actor(value: &str) -> bool {
+    value.is_empty() || canonical_actor(value)
+}
+
 fn token(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
@@ -1153,6 +1157,15 @@ pub struct MigrationMarkerRecord {
     /// The immutable interpretation used for every rewritten revision. A
     /// multi-batch migration crosses Manifest roots but must not change ids.
     pub publication: runtime::publication::PublicationId,
+    /// Exact causal cut enumerated by the lifecycle planner. An empty
+    /// frontier is accepted only for an in-progress legacy checkpoint; a
+    /// completed marker must name the frozen source frontier which the host
+    /// retains after preferred activation.
+    pub source_frontier: replica::frontier::ReplicaFrontier,
+    /// True only when every cursor step was prepared from the exact source
+    /// above through Runtime's lifecycle-only reader.
+    #[serde(default)]
+    pub source_snapshot_pinned: bool,
     pub batch: u64,
     #[serde(default)]
     pub cursor: String,
@@ -1170,6 +1183,9 @@ impl CanonicalRecord for MigrationMarkerRecord {
             || self.target_version != 4
             || self.publication.implementation_digest == [0; 32]
             || self.publication.extractor_schema_digest.digest() == [0; 32]
+            || (self.complete
+                && (!self.source_snapshot_pinned
+                    || self.source_frontier == replica::frontier::ReplicaFrontier::EMPTY))
             || self.batch == 0
             || !canonical_actor(&self.actor)
             || self.started_at == 0
@@ -2508,7 +2524,10 @@ impl CanonicalRecord for ActivityRecord {
         if DocId::parse(&self.issue).is_none()
             || self.event.k.is_empty()
             || self.event.k.len() > 64
-            || !canonical_actor(&self.event.a)
+            // Historical activity predates explicit actor attribution. An
+            // empty actor preserves that honest absence; current writers
+            // always stamp the authenticated Context actor.
+            || !canonical_optional_actor(&self.event.a)
             || self.event.t == 0
             || self.event.x.len() > crate::contract::MAX_TEXT_BYTES
             || self.event.c.len() > crate::contract::MAX_NAME_BYTES

@@ -1220,6 +1220,9 @@ impl<'a> ExtractionContext<'a> {
 pub struct Context<'a> {
     principal: &'a PrincipalFacts,
     reads: Option<&'a dyn BodyReader>,
+    /// Frozen lifecycle planning source, distinct from current commit-parent
+    /// reads. Only `submit_lifecycle_from` supplies it.
+    lifecycle_reads: Option<&'a dyn BodyReader>,
     outcome_world: Option<&'a WorldId>,
     request: Option<crate::action::RequestId>,
     /// The committed Manifest root this callback is pinned to (the parent of a
@@ -1227,6 +1230,25 @@ pub struct Context<'a> {
     manifest_root: [u8; 32],
     world_publication: Option<crate::publication::WorldPublicationId>,
     find: Option<FindHandle>,
+    /// Non-serializable host provenance. Only the composition-owned lifecycle
+    /// Session entrypoint sets it; signed intent bytes cannot assert it.
+    lifecycle_upgrade: bool,
+    /// Exact immutable source used to prepare a lifecycle action. The local
+    /// materialization is intentionally callback-only; durable lifecycle
+    /// records persist the portable publication plus its frontier.
+    lifecycle_source: Option<LifecycleSourceCoordinate>,
+}
+
+/// Exact, immutable source admitted for one composition-owned lifecycle step.
+///
+/// `publication.publication` is portable across Station activations; the full
+/// `publication` coordinate pins one local materialization for this callback.
+/// `frontier` lets the product bind its deterministic plan to the same causal
+/// cut instead of silently scanning a moving current snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleSourceCoordinate {
+    pub publication: crate::publication::WorldPublicationId,
+    pub frontier: replica::frontier::ReplicaFrontier,
 }
 
 impl<'a> Context<'a> {
@@ -1238,11 +1260,14 @@ impl<'a> Context<'a> {
         Self {
             principal,
             reads: None,
+            lifecycle_reads: None,
             outcome_world: None,
             request: None,
             manifest_root: [0u8; 32],
             world_publication: None,
             find: None,
+            lifecycle_upgrade: false,
+            lifecycle_source: None,
         }
     }
 
@@ -1256,11 +1281,14 @@ impl<'a> Context<'a> {
         Self {
             principal,
             reads: Some(reads),
+            lifecycle_reads: None,
             outcome_world: None,
             request: None,
             manifest_root,
             world_publication: None,
             find: None,
+            lifecycle_upgrade: false,
+            lifecycle_source: None,
         }
     }
 
@@ -1276,11 +1304,14 @@ impl<'a> Context<'a> {
         Self {
             principal,
             reads: Some(reads),
+            lifecycle_reads: None,
             outcome_world: Some(world),
             request: None,
             manifest_root: publication.publication.manifest_root,
             world_publication: Some(publication),
             find: Some(find),
+            lifecycle_upgrade: false,
+            lifecycle_source: None,
         }
     }
 
@@ -1294,11 +1325,14 @@ impl<'a> Context<'a> {
         Self {
             principal,
             reads: Some(reads),
+            lifecycle_reads: None,
             outcome_world: Some(world),
             request: None,
             manifest_root,
             world_publication: None,
             find: None,
+            lifecycle_upgrade: false,
+            lifecycle_source: None,
         }
     }
 
@@ -1311,20 +1345,123 @@ impl<'a> Context<'a> {
     pub(crate) fn with_world_submission(
         principal: &'a PrincipalFacts,
         reads: &'a dyn BodyReader,
+        lifecycle_reads: Option<&'a dyn BodyReader>,
         publication: crate::publication::WorldPublicationId,
         world: &'a WorldId,
         request: crate::action::RequestId,
         find: FindHandle,
+        lifecycle_source: Option<LifecycleSourceCoordinate>,
     ) -> Self {
         Self {
             principal,
             reads: Some(reads),
+            lifecycle_reads,
             outcome_world: Some(world),
             request: Some(request),
             manifest_root: publication.publication.manifest_root,
             world_publication: Some(publication),
             find: Some(find),
+            lifecycle_upgrade: lifecycle_source.is_some(),
+            lifecycle_source,
         }
+    }
+
+    /// Construct a read-only lifecycle planning context over an exact retained
+    /// publication. Planning runs before mutation-lane admission; it cannot
+    /// stage or commit an effect through this capability.
+    pub(crate) fn with_lifecycle_reads(
+        principal: &'a PrincipalFacts,
+        reads: &'a dyn BodyReader,
+        source: LifecycleSourceCoordinate,
+        world: &'a WorldId,
+        find: FindHandle,
+    ) -> Self {
+        Self {
+            principal,
+            reads: Some(reads),
+            lifecycle_reads: Some(reads),
+            outcome_world: Some(world),
+            request: None,
+            manifest_root: source.publication.publication.manifest_root,
+            world_publication: Some(source.publication),
+            find: Some(find),
+            lifecycle_upgrade: true,
+            lifecycle_source: Some(source),
+        }
+    }
+
+    /// Whether this callback was entered by the composition-owned, durably
+    /// consented World lifecycle path. This provenance is not serialized and
+    /// cannot be supplied by an ordinary signed World action.
+    pub fn is_lifecycle_upgrade(&self) -> bool {
+        self.lifecycle_upgrade
+    }
+
+    /// Frozen causal source whose deterministic bounded plan this lifecycle
+    /// callback is validating. Ordinary World calls always return `None`.
+    pub fn lifecycle_source(&self) -> Option<&LifecycleSourceCoordinate> {
+        self.lifecycle_source.as_ref()
+    }
+
+    /// Read one Body from the exact frozen lifecycle source rather than the
+    /// moving commit parent. `Ok(None)` means absent from that exact source;
+    /// ordinary submissions receive `CapabilityUnavailable`.
+    pub fn read_lifecycle_source_body(
+        &self,
+        key: &BodyKey,
+    ) -> Result<Option<BodyBytes>, BodyReadFailure> {
+        let world = self
+            .outcome_world
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?;
+        if key.world != *world {
+            return Err(BodyReadFailure::Opaque(BodyReadCoordinate::new(
+                key.clone(),
+                None,
+            )));
+        }
+        self.lifecycle_reads
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?
+            .read_body(key)
+    }
+
+    /// Read one collaborative Body from the same frozen lifecycle source.
+    pub fn read_lifecycle_source_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<Option<CollaborativeBody>, BodyReadFailure> {
+        let world = self
+            .outcome_world
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?;
+        if key.world != *world {
+            return Err(BodyReadFailure::Opaque(BodyReadCoordinate::new(
+                key.clone(),
+                None,
+            )));
+        }
+        self.lifecycle_reads
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?
+            .read_collaborative_body(key)
+    }
+
+    /// One canonical page from the frozen lifecycle source. The same hard
+    /// per-callback page bound as ordinary Context paging applies.
+    pub fn lifecycle_source_body_keys_page_with_schema(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        after: Option<&BodyKey>,
+        limit: usize,
+    ) -> Result<Vec<BodyKey>, BodyReadFailure> {
+        let outcome_world = self
+            .outcome_world
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?;
+        if world != outcome_world || limit == 0 || limit > Self::MAX_BODY_KEY_PAGE {
+            return Err(BodyReadFailure::CapabilityUnavailable);
+        }
+        Ok(self
+            .lifecycle_reads
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?
+            .body_keys_page_with_schema(world, schema, after, limit))
     }
 
     /// The committed Manifest root this callback is pinned to.

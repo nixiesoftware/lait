@@ -17,8 +17,370 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use issues::ids::{ProjectId, SpaceId, SystemUlidSource};
 use runtime::{
-    world::Intent, world::LocalIdentity, world::RequestId, world::SignedWorldAction, Session,
+    world::Intent, world::LifecycleSourceCoordinate, world::LocalIdentity, world::Query,
+    world::RequestId, world::SignedWorldAction, Session,
 };
+
+const UPGRADE_RECORD_VERSION: u16 = 1;
+/// Host-side lifecycle storage enforces its own outer bound. This tighter
+/// product bound prevents an opaque record from becoming a hidden payload
+/// transport; one prepared V4Migrate action is only a few hundred bytes.
+pub const MAX_UPGRADE_RECORD_BYTES: usize = 64 * 1_024;
+
+/// Exact implementation coordinate understood by the product lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImplementationCoordinate {
+    pub id: [u8; 32],
+    pub version: u32,
+}
+
+/// Pure upgrade classification. `Direct` is reserved for a tracker with no
+/// active implementation (new formation); an older active implementation must
+/// pass through explicit launcher consent and the distinct migrator package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpgradeAssessment {
+    Current,
+    Direct,
+    ConsentRequired { migrator: ImplementationCoordinate },
+    InProgress { migrator: ImplementationCoordinate },
+    Unsupported { reason: String },
+}
+
+/// Resources supplied by the generic lifecycle host for one bounded step.
+/// Opaque record placement and atomic persistence remain host-owned.
+pub struct UpgradeContext<'a> {
+    pub space: &'a SpaceId,
+    pub session: &'a Session,
+    pub identity: &'a LocalIdentity,
+    pub device: &'a str,
+    pub active: ImplementationCoordinate,
+    pub migrator: ImplementationCoordinate,
+    pub preferred: ImplementationCoordinate,
+    pub source: &'a LifecycleSourceCoordinate,
+    pub record: Option<&'a [u8]>,
+}
+
+/// One bounded step. The host persists `record` before scheduling another
+/// call or activating preferred v4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpgradeProgress {
+    Pending {
+        completed: u64,
+        remaining: Option<u64>,
+        record: Vec<u8>,
+    },
+    Verified {
+        record: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum UpgradePhase {
+    Prepared,
+    Verified,
+}
+
+/// Product-authored, host-persisted migration checkpoint. `Prepared` is
+/// intentionally a separate call from submission: a crash can only lose both
+/// the record and the work, or replay the exact signed action idempotently.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpgradeRecord {
+    version: u16,
+    space: String,
+    migrator: ImplementationCoordinate,
+    preferred: ImplementationCoordinate,
+    source: runtime::publication::PublicationId,
+    source_frontier: replica::frontier::ReplicaFrontier,
+    completed: u64,
+    #[serde(default)]
+    cursor: String,
+    phase: UpgradePhase,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    signed_action: Vec<u8>,
+}
+
+pub fn preferred_implementation() -> ImplementationCoordinate {
+    implementation_coordinate(issues::IssuesWorld::implementation_descriptor())
+}
+
+pub fn migrator_implementation() -> ImplementationCoordinate {
+    implementation_coordinate(issues::IssuesWorld::migrator_implementation_descriptor())
+}
+
+fn implementation_coordinate(
+    implementation: runtime::world::Implementation,
+) -> ImplementationCoordinate {
+    ImplementationCoordinate {
+        id: implementation
+            .id()
+            .expect("canonical Issues implementation descriptor"),
+        version: implementation.implementation_version,
+    }
+}
+
+/// Decide whether this active tracker can move directly to preferred v4.
+pub fn assess_upgrade(
+    active: Option<ImplementationCoordinate>,
+    preferred: ImplementationCoordinate,
+) -> UpgradeAssessment {
+    let compiled_preferred = preferred_implementation();
+    let migrator = migrator_implementation();
+    if preferred != compiled_preferred {
+        return UpgradeAssessment::Unsupported {
+            reason: "the lifecycle preferred coordinate is not this Issues build".into(),
+        };
+    }
+    match active {
+        None => UpgradeAssessment::Direct,
+        Some(active) if active == compiled_preferred => UpgradeAssessment::Current,
+        Some(active) if active == migrator => UpgradeAssessment::InProgress { migrator },
+        Some(active) if active.version < compiled_preferred.version => {
+            UpgradeAssessment::ConsentRequired { migrator }
+        }
+        Some(active) => UpgradeAssessment::Unsupported {
+            reason: format!(
+                "active Issues implementation v{} ({}) is not an upgrade source for v{} ({})",
+                active.version,
+                data_encoding::HEXLOWER.encode(&active.id[..8]),
+                compiled_preferred.version,
+                data_encoding::HEXLOWER.encode(&compiled_preferred.id[..8]),
+            ),
+        },
+    }
+}
+
+/// Advance exactly one crash-idempotent migration step.
+pub fn upgrade_step(context: UpgradeContext<'_>) -> Result<UpgradeProgress> {
+    validate_upgrade_context(&context)?;
+    let record = match context.record {
+        Some(bytes) => decode_upgrade_record(bytes, &context)?,
+        None => {
+            let verification = migration_verification(context.session)?;
+            if let Some(verification) = verification.as_ref().filter(|verification| {
+                verification.source_publication == context.source.publication.publication
+                    && verification.source_frontier == context.source.frontier
+            }) {
+                if verification.verified() {
+                    let verified = verified_record(&context, verification);
+                    return Ok(UpgradeProgress::Verified {
+                        record: encode_upgrade_record(&verified)?,
+                    });
+                }
+                if verification.marker_complete {
+                    return Err(anyhow!(
+                        "Issues migration cursor is complete but its bounded audit proof is not"
+                    ));
+                }
+            }
+            let (completed, cursor) =
+                verification
+                    .as_ref()
+                    .map_or((0, String::new()), |verification| {
+                        if verification.source_publication == context.source.publication.publication
+                            && verification.source_frontier == context.source.frontier
+                        {
+                            (verification.batch, verification.cursor.clone())
+                        } else {
+                            // A fresh causal cut re-enumerates from its beginning,
+                            // but audit batch ids remain globally monotonic.
+                            (verification.batch, String::new())
+                        }
+                    });
+            let record = prepare_upgrade_record(&context, completed, cursor)?;
+            return pending(record);
+        }
+    };
+    if record.phase == UpgradePhase::Verified {
+        return Ok(UpgradeProgress::Verified {
+            record: encode_upgrade_record(&record)?,
+        });
+    }
+
+    let action = validate_prepared_action(&record, &context)?;
+    context
+        .session
+        .submit_lifecycle_from(action, context.source.clone())
+        .map_err(|error| anyhow!("submit Issues v4 migration batch: {error:?}"))?;
+    let verification = migration_verification(context.session)?;
+    let verification = verification
+        .as_ref()
+        .ok_or_else(|| anyhow!("Issues migrator committed no durable migration marker"))?;
+    if verification.verified() {
+        let verified = verified_record(&context, verification);
+        return Ok(UpgradeProgress::Verified {
+            record: encode_upgrade_record(&verified)?,
+        });
+    }
+    if verification.marker_complete {
+        return Err(anyhow!(
+            "Issues migration cursor is complete but the structural audit is not"
+        ));
+    }
+    let next = prepare_upgrade_record(&context, verification.batch, verification.cursor.clone())?;
+    pending(next)
+}
+
+fn verified_record(
+    context: &UpgradeContext<'_>,
+    verification: &issues::contract::MigrationVerification,
+) -> UpgradeRecord {
+    UpgradeRecord {
+        version: UPGRADE_RECORD_VERSION,
+        space: context.space.as_str().into(),
+        migrator: context.migrator,
+        preferred: context.preferred,
+        source: context.source.publication.publication,
+        source_frontier: context.source.frontier,
+        completed: verification.batch,
+        cursor: verification.cursor.clone(),
+        phase: UpgradePhase::Verified,
+        signed_action: Vec::new(),
+    }
+}
+
+fn pending(record: UpgradeRecord) -> Result<UpgradeProgress> {
+    let completed = record.completed;
+    Ok(UpgradeProgress::Pending {
+        completed,
+        remaining: None,
+        record: encode_upgrade_record(&record)?,
+    })
+}
+
+fn validate_upgrade_context(context: &UpgradeContext<'_>) -> Result<()> {
+    let expected_migrator = migrator_implementation();
+    let expected_preferred = preferred_implementation();
+    if context.migrator != expected_migrator
+        || context.active != expected_migrator
+        || context.preferred != expected_preferred
+        || context.session.space_id() != context.space
+        || context.session.world_id() != &issues::contract::world_id()
+        || context.identity.device().as_str() != context.device
+        || context.source.publication.publication.implementation_digest != context.migrator.id
+    {
+        return Err(anyhow!(
+            "Issues migration step was not bound to its exact migrator session"
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_upgrade_record(
+    context: &UpgradeContext<'_>,
+    completed: u64,
+    cursor: String,
+) -> Result<UpgradeRecord> {
+    let ts = mechanics::wallclock::now_secs().max(1);
+    let plan = context
+        .session
+        .with_lifecycle_source(context.source, |ctx| {
+            issues::IssuesWorld::prepare_v4_migration_plan(ctx, completed, cursor.clone(), ts)
+        })
+        .map_err(|error| anyhow!("open exact Issues migration source: {error:?}"))?
+        .map_err(|error| anyhow!("prepare bounded Issues migration window: {error:?}"))?;
+    let intent = issues::contract::IssueIntent::V4Migrate { plan };
+    let action = context
+        .identity
+        .sign_action(
+            context.session,
+            RequestId::mint(),
+            Intent {
+                schema: issues::contract::issue_schema(),
+                schema_version: issues::contract::ISSUE_SCHEMA_VERSION,
+                payload: intent.to_json(),
+            },
+        )
+        .map_err(|error| anyhow!("sign Issues v4 migration batch: {error:?}"))?;
+    Ok(UpgradeRecord {
+        version: UPGRADE_RECORD_VERSION,
+        space: context.space.as_str().into(),
+        migrator: context.migrator,
+        preferred: context.preferred,
+        source: context.source.publication.publication,
+        source_frontier: context.source.frontier,
+        completed,
+        cursor,
+        phase: UpgradePhase::Prepared,
+        signed_action: action.encode(),
+    })
+}
+
+fn validate_prepared_action(
+    record: &UpgradeRecord,
+    context: &UpgradeContext<'_>,
+) -> Result<SignedWorldAction> {
+    let action = SignedWorldAction::decode_canonical(&record.signed_action)
+        .map_err(|error| anyhow!("Issues migration action is not canonical: {error}"))?;
+    action
+        .verify_self()
+        .map_err(|error| anyhow!("Issues migration action signature is invalid: {error}"))?;
+    if action.header.space != *context.space
+        || action.header.world != issues::contract::world_id()
+        || action.header.intent_schema != issues::contract::issue_schema()
+        || action.header.intent_version != issues::contract::ISSUE_SCHEMA_VERSION
+        || action.header.device.as_str() != context.device
+        || !matches!(
+            issues::contract::IssueIntent::from_json(&action.payload),
+            Some(issues::contract::IssueIntent::V4Migrate { .. })
+        )
+    {
+        return Err(anyhow!(
+            "Issues migration record contains an action for a different coordinate"
+        ));
+    }
+    Ok(action)
+}
+
+fn migration_verification(
+    session: &Session,
+) -> Result<Option<issues::contract::MigrationVerification>> {
+    let projection = session
+        .query(Query {
+            schema: issues::contract::issue_schema(),
+            schema_version: issues::contract::ISSUE_SCHEMA_VERSION,
+            payload: issues::contract::IssueQuery::V4MigrationStatus.to_json(),
+            publication: None,
+        })
+        .map_err(|error| anyhow!("query Issues migration status: {error:?}"))?;
+    serde_json::from_slice(&projection.bytes)
+        .map_err(|error| anyhow!("decode Issues migration status: {error}"))
+}
+
+fn encode_upgrade_record(record: &UpgradeRecord) -> Result<Vec<u8>> {
+    let bytes = postcard::to_stdvec(record)?;
+    if bytes.len() > MAX_UPGRADE_RECORD_BYTES {
+        return Err(anyhow!("Issues migration record exceeds its product bound"));
+    }
+    Ok(bytes)
+}
+
+fn decode_upgrade_record(bytes: &[u8], context: &UpgradeContext<'_>) -> Result<UpgradeRecord> {
+    if bytes.len() > MAX_UPGRADE_RECORD_BYTES {
+        return Err(anyhow!("Issues migration record exceeds its product bound"));
+    }
+    let record: UpgradeRecord = postcard::from_bytes(bytes)
+        .map_err(|error| anyhow!("decode Issues migration record: {error}"))?;
+    if postcard::to_stdvec(&record)? != bytes
+        || record.version != UPGRADE_RECORD_VERSION
+        || record.space != context.space.as_str()
+        || record.migrator != context.migrator
+        || record.preferred != context.preferred
+        || record.source != context.source.publication.publication
+        || record.source_frontier != context.source.frontier
+        || record.cursor.len() > 512
+        || (record.phase == UpgradePhase::Prepared && record.signed_action.is_empty())
+        || (record.phase == UpgradePhase::Verified
+            && (!record.signed_action.is_empty()
+                || record.completed == 0
+                || record.cursor.is_empty()))
+    {
+        return Err(anyhow!(
+            "Issues migration record is inconsistent with this lifecycle"
+        ));
+    }
+    Ok(record)
+}
 
 /// One deterministic founder grant supplied to the generic authority host.
 pub struct FounderGrant {
@@ -314,5 +676,34 @@ mod tests {
         assert_eq!(derive_project_key("Engineering"), "ENGI");
         assert_eq!(derive_project_key("Customer Success"), "CS");
         assert_eq!(derive_project_key("123"), "PRJ");
+    }
+
+    #[test]
+    fn new_tracker_forms_directly_on_preferred_v4() {
+        let preferred = preferred_implementation();
+        assert_eq!(assess_upgrade(None, preferred), UpgradeAssessment::Direct);
+        assert_eq!(implementation_id(), preferred.id);
+        assert_ne!(preferred, migrator_implementation());
+    }
+
+    #[test]
+    fn historical_tracker_requires_the_distinct_migrator() {
+        let preferred = preferred_implementation();
+        let historical = ImplementationCoordinate {
+            id: [0x51; 32],
+            version: preferred.version.saturating_sub(1),
+        };
+        assert_eq!(
+            assess_upgrade(Some(historical), preferred),
+            UpgradeAssessment::ConsentRequired {
+                migrator: migrator_implementation(),
+            }
+        );
+        assert_eq!(
+            assess_upgrade(Some(migrator_implementation()), preferred),
+            UpgradeAssessment::InProgress {
+                migrator: migrator_implementation(),
+            }
+        );
     }
 }

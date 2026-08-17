@@ -1123,6 +1123,14 @@ struct IndexedGeneration {
 pub struct GenerationFootprint {
     pub body_count: u64,
     pub snapshot_retained_bytes: u64,
+    /// Number of immutable generation deltas from this root to its baseline.
+    pub reconstruction_depth: u32,
+    /// Sum of the authenticated canonical delta-object lengths in that chain.
+    pub reconstruction_delta_bytes: u64,
+    /// Conservative peak bytes needed while `read_generation` retains the
+    /// decoded chain and its selected-Body directory before installing the
+    /// final immutable snapshot.
+    pub reconstruction_transient_bytes: u64,
     pub sources: Vec<GenerationSourceFootprint>,
 }
 
@@ -1138,6 +1146,10 @@ pub struct GenerationSourceFootprint {
 }
 
 const MAX_GENERATION_SOURCES: usize = 4_096;
+const MAX_GENERATION_RECONSTRUCTION_DEPTH: u32 = 1_048_576;
+const GENERATION_DELTA_DECODE_MULTIPLIER: u64 = 4;
+const GENERATION_DELTA_FIXED_TRANSIENT_BYTES: u64 = 1_024;
+const GENERATION_CHANGED_BODY_TRANSIENT_BYTES: u64 = 1_024;
 
 impl GenerationFootprint {
     fn validate(&self) -> Result<(), Failure> {
@@ -1151,10 +1163,54 @@ impl GenerationFootprint {
             || self.sources.iter().any(|source| source.body_count == 0)
             || readable_bodies > self.body_count
             || (self.body_count == 0) != (self.snapshot_retained_bytes == 0)
+            || self.reconstruction_depth > MAX_GENERATION_RECONSTRUCTION_DEPTH
+            || (self.reconstruction_depth == 0)
+                != (self.reconstruction_delta_bytes == 0
+                    && self.reconstruction_transient_bytes == 0)
+            || self.reconstruction_transient_bytes < self.reconstruction_delta_bytes
         {
             return Err(Failure::Integrity(Defect::Encoding));
         }
         Ok(())
+    }
+
+    fn record_generation_delta(
+        &mut self,
+        parent: Option<&Self>,
+        delta: &GenerationDelta,
+        encoded_len: u64,
+    ) -> Result<(), Failure> {
+        let parent_depth = parent.map_or(0, |parent| parent.reconstruction_depth);
+        let parent_delta_bytes = parent.map_or(0, |parent| parent.reconstruction_delta_bytes);
+        let parent_transient = parent.map_or(0, |parent| parent.reconstruction_transient_bytes);
+        self.reconstruction_depth = parent_depth
+            .checked_add(1)
+            .filter(|depth| *depth <= MAX_GENERATION_RECONSTRUCTION_DEPTH)
+            .ok_or(Failure::QuotaExceeded)?;
+        self.reconstruction_delta_bytes = parent_delta_bytes
+            .checked_add(encoded_len)
+            .ok_or(Failure::QuotaExceeded)?;
+
+        // `read_generation` keeps every decoded delta until it has selected
+        // the visible Body rows. Canonical bytes account for all variable
+        // strings/material vectors; the multiplier covers decoded capacities,
+        // while the per-delta and per-Body terms cover Vec/BTreeMap nodes,
+        // references, and allocator headers. The final ReadSnapshot is priced
+        // separately by `snapshot_retained_bytes`.
+        let changed = u64::try_from(delta.changed.len()).unwrap_or(u64::MAX);
+        let delta_transient = encoded_len
+            .checked_mul(GENERATION_DELTA_DECODE_MULTIPLIER)
+            .and_then(|bytes| bytes.checked_add(GENERATION_DELTA_FIXED_TRANSIENT_BYTES))
+            .and_then(|bytes| {
+                changed
+                    .checked_mul(GENERATION_CHANGED_BODY_TRANSIENT_BYTES)
+                    .and_then(|changed| bytes.checked_add(changed))
+            })
+            .ok_or(Failure::QuotaExceeded)?;
+        self.reconstruction_transient_bytes = parent_transient
+            .checked_add(delta_transient)
+            .ok_or(Failure::QuotaExceeded)?;
+        self.validate()
     }
 }
 
@@ -3152,6 +3208,7 @@ impl GenerationReader {
         })?;
         if &indexed.root != root
             || indexed.object.len == 0
+            || indexed.footprint.reconstruction_depth == 0
             || postcard::to_stdvec(&indexed).ok().as_deref() != Some(value.as_slice())
         {
             return Err(Failure::Integrity(Defect::Encoding));
@@ -3173,6 +3230,23 @@ impl GenerationReader {
         Ok(self
             .indexed_generation(root)?
             .map(|indexed| indexed.footprint))
+    }
+
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    #[doc(hidden)]
+    pub fn generation_delta_object_for_test(
+        &self,
+        root: &[u8; 32],
+    ) -> Result<Option<([u8; 32], u64)>, Failure> {
+        Ok(self
+            .indexed_generation(root)?
+            .map(|indexed| (indexed.object.hash, indexed.object.len)))
+    }
+
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    #[doc(hidden)]
+    pub fn generation_index_root_for_test(&self) -> Option<[u8; 32]> {
+        self.generation_index_root.map(|root| root.hash)
     }
 
     fn generation_delta(&self, root: &[u8; 32]) -> Result<Option<GenerationDelta>, Failure> {
@@ -3259,10 +3333,21 @@ impl GenerationReader {
         if self.current.root == *root {
             return Ok(Some((*self.current).clone()));
         }
+        let expected_depth = match self.indexed_generation(root)? {
+            Some(indexed) => indexed.footprint.reconstruction_depth,
+            None => return Ok(None),
+        };
         let mut cursor = *root;
         let mut seen = BTreeSet::new();
         let mut deltas = Vec::new();
         loop {
+            if deltas.len()
+                >= usize::try_from(expected_depth)
+                    .unwrap_or(usize::MAX)
+                    .min(usize::try_from(MAX_GENERATION_RECONSTRUCTION_DEPTH).unwrap_or(usize::MAX))
+            {
+                return Err(Failure::Integrity(Defect::Encoding));
+            }
             if !seen.insert(cursor) {
                 return Err(Failure::Integrity(Defect::Encoding));
             }
@@ -3275,6 +3360,9 @@ impl GenerationReader {
                 break;
             };
             cursor = parent;
+        }
+        if deltas.len() != usize::try_from(expected_depth).unwrap_or(usize::MAX) {
+            return Err(Failure::Integrity(Defect::Encoding));
         }
         let frontier = deltas
             .first()
@@ -4402,8 +4490,7 @@ impl Replica {
             }
             replica.bodies.insert(key, record);
         }
-        let recovered_footprint = GenerationFootprint::from_records(&replica.bodies)?;
-        replica.generation_footprint = recovered_footprint.clone();
+        let mut recovered_footprint = GenerationFootprint::from_records(&replica.bodies)?;
         // Declarations live in the published catalog, so reopening recovers
         // them from the same place a peer would read them.
         let mut declared_failure = false;
@@ -4446,6 +4533,7 @@ impl Replica {
             indexed.footprint.validate()?;
             if indexed.root != manifest.hash
                 || indexed.object.len == 0
+                || indexed.footprint.reconstruction_depth == 0
                 || postcard::to_stdvec(&indexed).ok().as_deref() != Some(value.as_slice())
                 || indexed.footprint.body_count != recovered_footprint.body_count
                 || indexed.footprint.snapshot_retained_bytes
@@ -4458,7 +4546,13 @@ impl Replica {
             // strict subset; `recovered_footprint` is therefore the correct
             // base for its next commit, while exact historical readers retain
             // the authenticated published aggregate in this index entry.
+            recovered_footprint.reconstruction_depth = indexed.footprint.reconstruction_depth;
+            recovered_footprint.reconstruction_delta_bytes =
+                indexed.footprint.reconstruction_delta_bytes;
+            recovered_footprint.reconstruction_transient_bytes =
+                indexed.footprint.reconstruction_transient_bytes;
         }
+        replica.generation_footprint = recovered_footprint;
 
         replica.durable = Some(store);
         // This stamp covers eager control/index/transaction verification and
@@ -4523,7 +4617,12 @@ impl Replica {
             integrity_cause(Defect::Encoding, "encode generation baseline", error)
         })?;
         let delta_ref = object_ref(&delta_bytes);
-        let generation_footprint = GenerationFootprint::from_records(&records)?;
+        let mut generation_footprint = GenerationFootprint::from_records(&records)?;
+        generation_footprint.record_generation_delta(
+            None,
+            &delta,
+            u64::try_from(delta_bytes.len()).unwrap_or(u64::MAX),
+        )?;
         let indexed = IndexedGeneration {
             root,
             object: delta_ref,
@@ -5253,7 +5352,7 @@ impl Replica {
                 new_objects.extend(artifacts);
             }
         }
-        let next_generation_footprint = ctx
+        let mut next_generation_footprint = ctx
             .is_some()
             .then(|| {
                 self.generation_footprint
@@ -5465,6 +5564,7 @@ impl Replica {
                 let bytes = postcard::to_stdvec(&delta).map_err(|error| {
                     integrity_cause(Defect::Encoding, "encode committed generation delta", error)
                 })?;
+                let delta_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 let reference = object_ref(&bytes);
                 new_objects.push(bytes);
                 let mut generation_objects = BTreeMap::new();
@@ -5484,12 +5584,19 @@ impl Replica {
                     }
                 }
                 Self::adjust_ownership(&mut ownership_changes, generation_objects, 1)?;
+                let mut footprint = next_generation_footprint
+                    .clone()
+                    .ok_or(Failure::Integrity(Defect::Index))?;
+                footprint.record_generation_delta(
+                    parent_generation.map(|_| &self.generation_footprint),
+                    &delta,
+                    delta_len,
+                )?;
+                next_generation_footprint = Some(footprint.clone());
                 let indexed = IndexedGeneration {
                     root: root_object.hash,
                     object: reference,
-                    footprint: next_generation_footprint
-                        .clone()
-                        .ok_or(Failure::Integrity(Defect::Index))?,
+                    footprint,
                 };
                 let value = postcard::to_stdvec(&indexed).map_err(|error| {
                     integrity_cause(Defect::Encoding, "encode committed generation index", error)
@@ -6027,10 +6134,16 @@ impl Replica {
             }
         }
         Self::adjust_ownership(&mut ownership_changes, generation_owned, 1)?;
+        let mut generation_footprint = self.generation_footprint.clone();
+        generation_footprint.record_generation_delta(
+            parent_generation.map(|_| &self.generation_footprint),
+            &delta,
+            u64::try_from(delta_bytes.len()).unwrap_or(u64::MAX),
+        )?;
         let indexed = IndexedGeneration {
             root: root_ref.hash,
             object: delta_ref,
-            footprint: self.generation_footprint.clone(),
+            footprint: generation_footprint.clone(),
         };
         let indexed_bytes = postcard::to_stdvec(&indexed).map_err(|error| {
             integrity_cause(
@@ -6129,6 +6242,7 @@ impl Replica {
         self.ownership_index_root = ownership_index_root;
         self.manifest_root_object = Some(root_ref);
         self.frontier = frontier;
+        self.generation_footprint = generation_footprint;
 
         // Residency last, and releasing is all this does — the cache's own
         // sweep decides when the bytes actually go, under its own quota. A
@@ -6706,6 +6820,11 @@ impl Replica {
         let mut seen = BTreeSet::new();
         let mut deltas = Vec::new();
         loop {
+            if deltas.len()
+                >= usize::try_from(MAX_GENERATION_RECONSTRUCTION_DEPTH).unwrap_or(usize::MAX)
+            {
+                return Err(Failure::Integrity(Defect::Encoding));
+            }
             if !seen.insert(cursor) {
                 return Err(Failure::Integrity(Defect::Encoding));
             }

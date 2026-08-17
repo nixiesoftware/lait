@@ -194,6 +194,13 @@ fn preferred_sources() -> Vec<SourceRef> {
     sources
 }
 
+pub(crate) fn preferred_source_coordinates() -> BTreeSet<(String, u32)> {
+    preferred_sources()
+        .into_iter()
+        .map(|source| (source.name.as_str().to_string(), source.version))
+        .collect()
+}
+
 pub fn schemas() -> Vec<Schema> {
     schemas_with_sources(migration_sources())
 }

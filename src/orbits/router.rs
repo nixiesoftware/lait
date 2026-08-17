@@ -18,11 +18,12 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
 
 use crate::control::{self, ControlRoute, Doorbell, Request, Response};
 use crate::orbital::hosting::{StationRunner, StationStop};
 use crate::orbital::WorldPackages;
+use crate::orbital::WorldUpgradeStep;
 use comms::{DefaultFactory, TransportFactory};
 use runtime::world::call::{Call, Code, Reply};
 
@@ -80,6 +81,35 @@ const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// shutdown should take. This bounds that wait; exceeding it is reported, not
 /// obeyed.
 const LIFECYCLE_DEADLINE: Duration = Duration::from_secs(5);
+const HOST_BLOCKING_CAPACITY: usize = 4;
+
+#[derive(Debug)]
+pub(crate) enum BlockingFailure {
+    Capacity,
+    Join(String),
+    Work(anyhow::Error),
+}
+
+impl std::fmt::Display for BlockingFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capacity => formatter.write_str("the bounded host blocking lane is at capacity"),
+            Self::Join(error) => {
+                write!(formatter, "the blocking host task did not finish: {error}")
+            }
+            Self::Work(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for BlockingFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Work(error) => Some(error.as_ref()),
+            Self::Capacity | Self::Join(_) => None,
+        }
+    }
+}
 
 /// Clears the placement's reachability flag however the pump ends — return,
 /// panic, or abort.
@@ -181,6 +211,7 @@ impl Placement {
         doorbells: broadcast::Sender<OrbitDoorbell>,
         factory: Arc<dyn TransportFactory>,
         packages: WorldPackages,
+        blocking: Arc<Semaphore>,
     ) -> Result<Self> {
         let mode = match control::probe(&resolved.home).await {
             control::Probe::Healthy => PlacementMode::Attached,
@@ -193,7 +224,7 @@ impl Placement {
                 .into())
             }
             control::Probe::Absent => {
-                match Self::start_owned(resolved, factory.as_ref(), packages).await {
+                match Self::start_owned(resolved, factory.as_ref(), packages, blocking).await {
                     Ok(mode) => mode,
                     Err(start_error) => {
                         // A cwd-bound CLI can win the daemon lock after our
@@ -233,6 +264,7 @@ impl Placement {
         resolved: &ResolvedOrbit,
         factory: &dyn TransportFactory,
         packages: WorldPackages,
+        blocking: Arc<Semaphore>,
     ) -> Result<PlacementMode> {
         if !crate::orbital::space_store_present(&resolved.home) {
             return Err(anyhow!(
@@ -241,7 +273,9 @@ impl Placement {
             ));
         }
         let seed = crate::config::load_or_create_identity(&resolved.identity_dir)?;
-        let runner = StationRunner::start(resolved.home.clone(), seed, factory, packages).await?;
+        let runner =
+            StationRunner::start_admitted(resolved.home.clone(), seed, factory, packages, blocking)
+                .await?;
         let host = runner.host();
         let stop = runner.stop_handle();
         let mut completion = tokio::spawn(runner.run());
@@ -571,6 +605,10 @@ pub struct Router {
     doorbells: broadcast::Sender<OrbitDoorbell>,
     factory: Arc<dyn TransportFactory>,
     packages: WorldPackages,
+    /// One process-owned admission lane for blocking host/lifecycle work.
+    /// Acquiring is a try operation: a control request gets bounded feedback
+    /// instead of waiting on Tokio while all workers are occupied.
+    blocking: Arc<Semaphore>,
     lifecycle: RwLock<()>,
     shutting_down: AtomicBool,
     book: Result<Arc<crate::daemon::address_book::AddressBookService>, String>,
@@ -601,6 +639,7 @@ impl Router {
             doorbells,
             factory: Arc::new(TransportHubFactory::new(factory)),
             packages,
+            blocking: Arc::new(Semaphore::new(HOST_BLOCKING_CAPACITY)),
             lifecycle: RwLock::new(()),
             shutting_down: AtomicBool::new(false),
             book,
@@ -652,6 +691,78 @@ impl Router {
         self.packages.reviewed_implementation(world)
     }
 
+    pub(crate) fn lifecycle_world_ids(&self) -> impl Iterator<Item = &WorldId> {
+        self.packages.lifecycle_world_ids()
+    }
+
+    fn visible_orbit_ids(&self) -> Vec<String> {
+        let mut orbits: Vec<_> = self
+            .catalog
+            .bindings()
+            .into_iter()
+            .map(|binding| {
+                LocalOrbitId::for_store(std::path::Path::new(&binding.entry.path)).to_string()
+            })
+            .collect();
+        orbits.sort();
+        orbits.dedup();
+        orbits
+    }
+
+    pub(crate) async fn visible_orbit_ids_blocking(
+        self: &Arc<Self>,
+    ) -> Result<Vec<String>, BlockingFailure> {
+        let lane = self.clone();
+        let source = self.clone();
+        lane.run_blocking(move || Ok(source.visible_orbit_ids()))
+            .await
+    }
+
+    /// Run one admitted blocking operation without occupying a Tokio worker.
+    /// Capacity refusal is immediate and retryable.
+    pub(crate) async fn run_blocking<T, F>(&self, work: F) -> Result<T, BlockingFailure>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        let permit = self
+            .blocking
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| BlockingFailure::Capacity)?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        })
+        .await
+        .map_err(|error| BlockingFailure::Join(error.to_string()))?
+        .map_err(BlockingFailure::Work)
+    }
+
+    /// Advance one consented lifecycle turn in an exact local Orbit.
+    pub(crate) async fn advance_world_upgrade(
+        &self,
+        orbit: &str,
+        world: WorldId,
+        operation: [u8; 16],
+    ) -> Result<WorldUpgradeStep> {
+        let resolved = self.resolve(orbit)?;
+        let (_resolved, placement) = self.place_resolved(resolved).await?;
+        let host = match &placement.mode {
+            PlacementMode::Owned { host, .. } => host
+                .upgrade()
+                .ok_or_else(|| anyhow!("owned StationHost is draining"))?,
+            PlacementMode::Attached => {
+                return Err(anyhow!(
+                    "the Orbit is hosted by a compatibility process; stop it before resuming the native World upgrade"
+                ))
+            }
+        };
+        self.run_blocking(move || host.advance_world_upgrade(&world, operation))
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<OrbitDoorbell> {
         self.doorbells.subscribe()
     }
@@ -679,10 +790,11 @@ impl Router {
         let doorbells = self.doorbells.clone();
         let factory = self.factory.clone();
         let packages = self.packages.clone();
+        let blocking = self.blocking.clone();
         let placement = self
             .occupancy
             .get_or_try_place(orbit, Placement::is_live, || {
-                Placement::establish(&resolved, doorbells, factory, packages)
+                Placement::establish(&resolved, doorbells, factory, packages, blocking)
             })
             .await?;
         Ok((resolved, placement))
@@ -1284,7 +1396,10 @@ mod tests {
             crate::world::contract::world_id(),
             issues_app::IssuesCallHandler::OPERATION,
             issues_app::IssuesCallHandler::VERSION + 1,
-            serde_json::to_vec(&issues_app::IssuesRequest::ProjectList).unwrap(),
+            serde_json::to_vec(&issues_app::IssuesRequest::ProjectList {
+                page: issues::contract::PageRequest::default(),
+            })
+            .unwrap(),
         )
         .unwrap();
         let reply = router
@@ -1354,6 +1469,47 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saturated_open_lane_refuses_without_stalling_the_reactor() {
+        let seed = [198; 32];
+        let (home, directory, id) = formed_directory("open-capacity", &seed);
+        let router = Arc::new(Router::with_factory(
+            directory,
+            Arc::new(MemFactory(MemNet::new())),
+            crate::world::packages(),
+        ));
+        let capacity = u32::try_from(HOST_BLOCKING_CAPACITY).expect("small blocking capacity");
+        let permits = router
+            .blocking
+            .clone()
+            .acquire_many_owned(capacity)
+            .await
+            .unwrap();
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticks_for_heartbeat = ticks.clone();
+        let heartbeat = tokio::spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                ticks_for_heartbeat.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        let refused = tokio::time::timeout(Duration::from_secs(2), router.place(&id))
+            .await
+            .expect("bounded open admission returns promptly")
+            .unwrap_err();
+        heartbeat.await.unwrap();
+        assert!(
+            format!("{refused:#}").contains("blocking lane is saturated"),
+            "unexpected refusal: {refused:#}"
+        );
+        assert_eq!(ticks.load(Ordering::Relaxed), 8);
+
+        drop(permits);
+        router.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn vacant_orbit_is_owned_in_process_and_shutdown_returns_it_to_vacancy() {
         let seed = [201; 32];
         let (home, directory, id) = formed_directory("owned", &seed);
@@ -1368,7 +1524,10 @@ mod tests {
             Response::Status(_)
         ));
         let resolved = router.resolve(&id).unwrap();
-        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
+        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList {
+            page: issues::contract::PageRequest::default(),
+        })
+        .unwrap();
         let reply = router
             .call_world(
                 ControlRoute::World {
@@ -1430,7 +1589,10 @@ mod tests {
             router.request(&id, &Request::Status).await.unwrap(),
             Response::Status(_)
         ));
-        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
+        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList {
+            page: issues::contract::PageRequest::default(),
+        })
+        .unwrap();
         let reply = router
             .call_world(
                 ControlRoute::World {

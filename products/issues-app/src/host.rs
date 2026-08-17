@@ -29,7 +29,6 @@ pub const LOCAL_INBOX: &str = "issues.inbox";
 pub const LOCAL_ATTACH: &str = "issues.attach";
 pub const LOCAL_ATTACHMENT_GET: &str = "issues.attachment_get";
 pub const LOCAL_ACCESS: &str = "issues.access";
-pub const LOCAL_WORLD_UPGRADE: &str = "issues.world_upgrade";
 pub const LOCAL_WORK: &str = "issues.work";
 
 #[derive(Debug, Clone)]
@@ -73,7 +72,6 @@ pub enum IssuesHostRequest {
         page: issues::contract::PageRequest,
         publication: Option<crate::PublicationCoordinate>,
     },
-    WorldUpgrade,
     Access(AccessRequest),
     Attach {
         reff: String,
@@ -103,7 +101,6 @@ impl IssuesHostRequest {
                 ..
             }) => ClientAccess::Query,
             Self::Inbox { clear: true, .. }
-            | Self::WorldUpgrade
             | Self::Access(AccessRequest::Grant { .. } | AccessRequest::Revoke { .. })
             | Self::Attach { .. }
             | Self::AttachmentGet { .. }
@@ -173,7 +170,6 @@ pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Failur
                 .transpose()
                 .map_err(|error| Failure::new(format!("decode inbox publication: {error}")))?,
         }),
-        LOCAL_WORLD_UPGRADE => Ok(IssuesHostRequest::WorldUpgrade),
         LOCAL_ACCESS => {
             let action = input.get("action").and_then(Value::as_str).unwrap_or("ls");
             let request = match action {
@@ -329,12 +325,6 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
                 "grant_id": required(&input, "grant_id")?,
             }),
         ),
-        // Admin-only and rare, but it must exist somewhere: a Space whose ledger
-        // pins an older implementation makes every write attest an
-        // implementation this build is not, and `hosting::open` warns about
-        // exactly that at every open. A warning naming a remedy no surface
-        // offers is worse than no warning.
-        "world_upgrade" => invocation(LOCAL_WORLD_UPGRADE, json!({})),
         "work" => invocation(LOCAL_WORK, input),
         _ => {
             let request: IssuesRequest = serde_json::from_value(input)
@@ -357,12 +347,6 @@ pub fn execute<'a>(
                 page,
                 publication,
             } => run_inbox(host, clear, page, publication).await,
-            IssuesHostRequest::WorldUpgrade => {
-                host.call_control(HostControlRequest::WorldActivate {
-                    world: issues::contract::world_id(),
-                })
-                .await
-            }
             IssuesHostRequest::Access(access) => run_access(host, access).await,
             IssuesHostRequest::Attach {
                 reff,
@@ -976,12 +960,10 @@ mod tests {
         assert_eq!(write.access(), ClientAccess::Command);
     }
 
-    /// The startup warning about an inactive implementation names an operation;
-    /// the operation has to be reachable from a head that is still shipped.
     #[test]
-    fn world_upgrade_is_reachable_from_the_web_surface() {
-        let upgrade = parse_web(json!({"cmd": "world_upgrade"})).unwrap();
-        assert_eq!(upgrade.access(), ClientAccess::Command);
+    fn migration_is_not_a_public_tracker_command() {
+        let error = parse_web(json!({"cmd": "world_upgrade"})).unwrap_err();
+        assert_eq!(error.kind(), world_interface::FailureKind::Invalid);
     }
 
     #[test]

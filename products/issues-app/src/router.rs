@@ -619,8 +619,8 @@ impl<'a> IssueRouter<'a> {
             // grant was told they lacked write standing.
             SessionFailure::Rejected(Rejection::NoActiveImplementation) => Response::denied(
                 "no World implementation is active at this space's frontier, so no \
-                 write can be authorized for anyone — an admin runs `world_upgrade` \
-                 to activate this build's; nothing was changed",
+                 write can be authorized for anyone — reopen this Space and approve \
+                 the reviewed World update in the launcher; nothing was changed",
             ),
             SessionFailure::Rejected(Rejection::ImplementationUnavailable) => Response::err(
                 "the exact World implementation active for this space is not installed on this node",

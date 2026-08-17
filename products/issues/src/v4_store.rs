@@ -23,11 +23,12 @@ use crate::{
 
 /// Operations and declarations for one collection of v4 facts. `absorb` in
 /// the World preserves their transaction boundary with any Issue operations.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Batch {
     pub operations: Vec<(BodyKey, Op)>,
     pub bodies: Vec<BodyKey>,
     pub declarations: Vec<BodyDeclaration>,
+    pub content_refs: BTreeMap<BodyKey, Vec<replica::content::ContentRef>>,
 }
 
 impl Batch {
@@ -63,6 +64,7 @@ impl Batch {
                 self.operations.push((body, operation));
             }
         }
+        self.content_refs.extend(other.content_refs);
     }
 
     fn estimated_bytes(&self) -> usize {
@@ -190,23 +192,23 @@ fn schema_bodies(ctx: &Context<'_>, schema: PhysicalSchema) -> Vec<BodyKey> {
 /// Resolve one semantic record coordinate through the shared, publication-
 /// pinned Corpus. Immutable Body addresses are content-derived, so semantic
 /// ids are indexed facts rather than alternate physical addresses.
-fn exact_record_source(
+fn exact_record_source_matching(
     ctx: &Context<'_>,
     field: &str,
     value: &str,
-    kind: &str,
+    predicates: &[(&str, &str)],
 ) -> Result<Option<BodyKey>, Rejection> {
     use runtime::find as find_api;
     let bound = find_api::Bound {
         decoded_bodies: 2,
-        postings_read: 8,
+        postings_read: 32,
         edges_visited: 1,
         nodes_visited: 8,
         paths_retained: 2,
         candidates_per_branch: 2,
         score_evaluations: 2,
         projected_bytes: 4 * 1_024,
-        packed_tokens: 8,
+        packed_tokens: 32,
         wall_millis: 500,
     };
     let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
@@ -231,11 +233,14 @@ fn exact_record_source(
                     id: keep,
                     input: vec![seek],
                     op: find_api::Op::Keep(find_api::Keep {
-                        predicates: vec![find_api::Predicate {
-                            field: crate::find::field_ref(crate::find::field::KIND),
-                            test: find_api::Test::Equal,
-                            value: find_api::Atom::Text(kind.into()),
-                        }],
+                        predicates: predicates
+                            .iter()
+                            .map(|(field, value)| find_api::Predicate {
+                                field: crate::find::field_ref(field),
+                                test: find_api::Test::Equal,
+                                value: find_api::Atom::Text((*value).into()),
+                            })
+                            .collect(),
                     }),
                     bound,
                 },
@@ -252,6 +257,15 @@ fn exact_record_source(
         return Err(Rejection::Conflict);
     }
     Ok(answer.rows().first().map(|row| row.source.clone()))
+}
+
+fn exact_record_source(
+    ctx: &Context<'_>,
+    field: &str,
+    value: &str,
+    kind: &str,
+) -> Result<Option<BodyKey>, Rejection> {
+    exact_record_source_matching(ctx, field, value, &[(crate::find::field::KIND, kind)])
 }
 
 fn register(view: &fabric::CollaborativeView, path: &str) -> String {
@@ -1439,10 +1453,21 @@ pub(crate) fn write_activity(
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
     let payload = serde_json::to_vec(event).map_err(|_| Rejection::StateCorrupt)?;
     let record = request_record_id(ctx, "lait.issues.activity-request.v1", &issue, &payload)?;
+    write_activity_record(ctx, doc, &record, event, recipients)
+}
+
+fn write_activity_record(
+    ctx: &Context<'_>,
+    doc: &str,
+    record: &str,
+    event: &contract::IssueEvent,
+    recipients: &[String],
+) -> Result<Batch, Rejection> {
+    let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
     let descriptor = v4::SegmentDescriptor {
         issue: doc.into(),
         kind: v4::SegmentKind::Activity,
-        record: record.clone(),
+        record: record.into(),
     };
     let key = v4::issue_activity_key(&issue, &record);
     let mut batch = Batch::default();
@@ -2351,6 +2376,18 @@ pub(crate) fn write_attachment(
         &key,
         canonical(record)?,
     )?;
+    let references = if record.tombstone {
+        Vec::new()
+    } else {
+        let decoded = data_encoding::HEXLOWER
+            .decode(record.content.as_bytes())
+            .map_err(|_| Rejection::InvalidRequest)?;
+        vec![replica::content::ContentRef {
+            content_id: <[u8; 32]>::try_from(decoded.as_slice())
+                .map_err(|_| Rejection::InvalidRequest)?,
+        }]
+    };
+    batch.content_refs.insert(key, references);
     Ok(batch)
 }
 
@@ -2581,22 +2618,11 @@ pub(crate) fn write_governance_revision(
     ctx: &Context<'_>,
     revision: &crate::views::StoredRoleRevision,
 ) -> Result<Batch, Rejection> {
-    let mut batch = Batch::default();
+    let mut batch = write_governance_revision_record(ctx, revision)?;
     let record = v4::GovernanceRevisionRecord {
         role: revision.body.role_id.clone(),
         revision: revision.clone(),
     };
-    let key = v4::governance_revision_key(&record.role, &record.revision.revision_id);
-    batch.immutable_record(
-        ctx,
-        PhysicalSchema::GovernanceRevision,
-        &key,
-        v4::RecordBodyIdentityRecord {
-            owner: record.role.clone(),
-            record: record.revision.revision_id.clone(),
-        },
-        canonical(&record)?,
-    )?;
     let heads = v4::governance_heads_key(&record.role);
     batch.ensure_body(
         ctx,
@@ -2623,28 +2649,36 @@ pub(crate) fn write_governance_revision(
     Ok(batch)
 }
 
+pub(crate) fn write_governance_revision_record(
+    ctx: &Context<'_>,
+    revision: &crate::views::StoredRoleRevision,
+) -> Result<Batch, Rejection> {
+    let mut batch = Batch::default();
+    let record = v4::GovernanceRevisionRecord {
+        role: revision.body.role_id.clone(),
+        revision: revision.clone(),
+    };
+    let key = v4::governance_revision_key(&record.role, &record.revision.revision_id);
+    batch.immutable_record(
+        ctx,
+        PhysicalSchema::GovernanceRevision,
+        &key,
+        v4::RecordBodyIdentityRecord {
+            owner: record.role.clone(),
+            record: record.revision.revision_id.clone(),
+        },
+        canonical(&record)?,
+    )?;
+    Ok(batch)
+}
+
 pub(crate) fn write_workflow_revision(
     ctx: &Context<'_>,
     project: &str,
     revision: &crate::workflow::WorkflowRevision,
 ) -> Result<Batch, Rejection> {
+    let mut batch = write_workflow_revision_record(ctx, project, revision)?;
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let mut batch = Batch::default();
-    let key = v4::workflow_revision_key(&project_id, &revision.revision_id);
-    let record = v4::ProjectWorkflowRevisionRecord {
-        project: project.into(),
-        revision: revision.clone(),
-    };
-    batch.immutable_record(
-        ctx,
-        PhysicalSchema::WorkflowRevision,
-        &key,
-        v4::RecordBodyIdentityRecord {
-            owner: project.into(),
-            record: revision.revision_id.clone(),
-        },
-        canonical(&record)?,
-    )?;
     let heads = v4::workflow_heads_key(&project_id);
     batch.ensure_body(
         ctx,
@@ -2678,26 +2712,37 @@ pub(crate) fn write_workflow_revision(
     Ok(batch)
 }
 
+pub(crate) fn write_workflow_revision_record(
+    ctx: &Context<'_>,
+    project: &str,
+    revision: &crate::workflow::WorkflowRevision,
+) -> Result<Batch, Rejection> {
+    let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
+    let mut batch = Batch::default();
+    let key = v4::workflow_revision_key(&project_id, &revision.revision_id);
+    let record = v4::ProjectWorkflowRevisionRecord {
+        project: project.into(),
+        revision: revision.clone(),
+    };
+    batch.immutable_record(
+        ctx,
+        PhysicalSchema::WorkflowRevision,
+        &key,
+        v4::RecordBodyIdentityRecord {
+            owner: project.into(),
+            record: revision.revision_id.clone(),
+        },
+        canonical(&record)?,
+    )?;
+    Ok(batch)
+}
+
 pub(crate) fn write_spec_revision(
     ctx: &Context<'_>,
     revision: &crate::spec::Revision,
 ) -> Result<Batch, Rejection> {
+    let mut batch = write_spec_revision_record(ctx, revision)?;
     let spec = crate::ids::SpecId::parse(&revision.body.spec).ok_or(Rejection::InvalidRequest)?;
-    let record = v4::SpecRevisionRecord {
-        revision: revision.clone(),
-    };
-    let coordinate = v4::spec_revision_key(&spec, &revision.revision);
-    let mut batch = Batch::default();
-    batch.immutable_record(
-        ctx,
-        PhysicalSchema::SpecRevision,
-        &coordinate,
-        v4::RecordBodyIdentityRecord {
-            owner: revision.body.spec.clone(),
-            record: revision.revision.clone(),
-        },
-        canonical(&record)?,
-    )?;
     let heads = v4::spec_heads_key(&spec);
     batch.ensure_body(
         ctx,
@@ -2733,6 +2778,29 @@ pub(crate) fn write_spec_revision(
             value: revision.revision.as_bytes().to_vec(),
         },
     );
+    Ok(batch)
+}
+
+pub(crate) fn write_spec_revision_record(
+    ctx: &Context<'_>,
+    revision: &crate::spec::Revision,
+) -> Result<Batch, Rejection> {
+    let spec = crate::ids::SpecId::parse(&revision.body.spec).ok_or(Rejection::InvalidRequest)?;
+    let record = v4::SpecRevisionRecord {
+        revision: revision.clone(),
+    };
+    let coordinate = v4::spec_revision_key(&spec, &revision.revision);
+    let mut batch = Batch::default();
+    batch.immutable_record(
+        ctx,
+        PhysicalSchema::SpecRevision,
+        &coordinate,
+        v4::RecordBodyIdentityRecord {
+            owner: revision.body.spec.clone(),
+            record: revision.revision.clone(),
+        },
+        canonical(&record)?,
+    )?;
     Ok(batch)
 }
 
@@ -3255,9 +3323,11 @@ pub(crate) fn write_spec_issued_heads(
 ) -> Result<Batch, Rejection> {
     let spec = crate::ids::SpecId::parse(spec).ok_or(Rejection::InvalidRequest)?;
     let key = v4::spec_heads_key(&spec);
-    if ctx.body_version(&key).is_none() {
-        return Err(Rejection::StateCorrupt);
-    }
+    // A migration may stage this projection in the same transaction that
+    // creates the heads Body. Ordinary callers have already resolved the
+    // exact heads source; the substrate still rejects an operation with no
+    // matching declaration/body.
+    let _ = ctx;
     let mut batch = Batch::default();
     for revision in remove {
         batch.operation(
@@ -3284,23 +3354,9 @@ pub(crate) fn write_baseline_revision(
     ctx: &Context<'_>,
     revision: &crate::spec::BaselineRevision,
 ) -> Result<Batch, Rejection> {
+    let mut batch = write_baseline_revision_record(ctx, revision)?;
     let baseline =
         crate::ids::BaselineId::parse(&revision.body.baseline).ok_or(Rejection::InvalidRequest)?;
-    let record = v4::BaselineRevisionRecord {
-        revision: revision.clone(),
-    };
-    let coordinate = v4::baseline_revision_key(&baseline, &revision.revision);
-    let mut batch = Batch::default();
-    batch.immutable_record(
-        ctx,
-        PhysicalSchema::BaselineRevision,
-        &coordinate,
-        v4::RecordBodyIdentityRecord {
-            owner: revision.body.baseline.clone(),
-            record: revision.revision.clone(),
-        },
-        canonical(&record)?,
-    )?;
     let heads = v4::baseline_heads_key(&baseline);
     batch.ensure_body(
         ctx,
@@ -3334,6 +3390,30 @@ pub(crate) fn write_baseline_revision(
     Ok(batch)
 }
 
+pub(crate) fn write_baseline_revision_record(
+    ctx: &Context<'_>,
+    revision: &crate::spec::BaselineRevision,
+) -> Result<Batch, Rejection> {
+    let baseline =
+        crate::ids::BaselineId::parse(&revision.body.baseline).ok_or(Rejection::InvalidRequest)?;
+    let record = v4::BaselineRevisionRecord {
+        revision: revision.clone(),
+    };
+    let coordinate = v4::baseline_revision_key(&baseline, &revision.revision);
+    let mut batch = Batch::default();
+    batch.immutable_record(
+        ctx,
+        PhysicalSchema::BaselineRevision,
+        &coordinate,
+        v4::RecordBodyIdentityRecord {
+            owner: revision.body.baseline.clone(),
+            record: revision.revision.clone(),
+        },
+        canonical(&record)?,
+    )?;
+    Ok(batch)
+}
+
 pub(crate) fn write_baseline_issued_heads(
     ctx: &Context<'_>,
     baseline: &str,
@@ -3342,9 +3422,7 @@ pub(crate) fn write_baseline_issued_heads(
 ) -> Result<Batch, Rejection> {
     let baseline = crate::ids::BaselineId::parse(baseline).ok_or(Rejection::InvalidRequest)?;
     let key = v4::baseline_heads_key(&baseline);
-    if ctx.body_version(&key).is_none() {
-        return Err(Rejection::StateCorrupt);
-    }
+    let _ = ctx;
     let mut batch = Batch::default();
     for revision in remove {
         batch.operation(
@@ -3758,9 +3836,66 @@ pub(crate) fn write_team(ctx: &Context<'_>, team: &Team) -> Result<Batch, Reject
     Ok(batch)
 }
 
-const MIGRATION_MAX_ITEMS: u32 = 256;
 const MIGRATION_MAX_OPERATIONS: usize = 3_500;
 const MIGRATION_MAX_ESTIMATED_BYTES: usize = 700 * 1_024;
+
+/// Preferred-v4 physical sources whose historical representation is copied
+/// by a migration phase or constructed as a required projection of a copied
+/// record. A newly added preferred source fails this exact comparison until
+/// its migrator phase is deliberately added here as well.
+const MIGRATION_BACKFILLED_SCHEMAS: &[PhysicalSchema] = &[
+    PhysicalSchema::SpaceDirectory,
+    PhysicalSchema::SpaceContent,
+    PhysicalSchema::ProjectMeta,
+    PhysicalSchema::ProjectContent,
+    PhysicalSchema::ProjectSchedule,
+    PhysicalSchema::ProjectHierarchy,
+    PhysicalSchema::ProjectUpdates,
+    PhysicalSchema::SpaceTriage,
+    PhysicalSchema::IssueComment,
+    PhysicalSchema::IssueReaction,
+    PhysicalSchema::IssueActivity,
+    PhysicalSchema::IssueRelation,
+    PhysicalSchema::IssueIdentity,
+    PhysicalSchema::IssueMeta,
+    PhysicalSchema::IssueTransition,
+    PhysicalSchema::BoardBlock,
+    PhysicalSchema::BoardLane,
+    PhysicalSchema::IssueAttachment,
+    PhysicalSchema::IssueCheck,
+    PhysicalSchema::Initiative,
+    PhysicalSchema::InitiativeContent,
+    PhysicalSchema::Team,
+    PhysicalSchema::Label,
+    PhysicalSchema::EntityRelation,
+    PhysicalSchema::RevisionAlias,
+    PhysicalSchema::GovernanceRevision,
+    PhysicalSchema::GovernanceHeads,
+    PhysicalSchema::WorkflowRevision,
+    PhysicalSchema::WorkflowHeads,
+    PhysicalSchema::SpecRevision,
+    PhysicalSchema::SpecHeads,
+    PhysicalSchema::SpecObservation,
+    PhysicalSchema::BaselineRevision,
+    PhysicalSchema::BaselineHeads,
+];
+
+pub(crate) fn migration_source_coverage_complete() -> bool {
+    let preferred = crate::find::preferred_source_coordinates();
+    let mut covered = MIGRATION_BACKFILLED_SCHEMAS
+        .iter()
+        .copied()
+        .map(|schema| (schema.name().to_string(), v4::SCHEMA_VERSION))
+        .collect::<BTreeSet<_>>();
+    // The anchored description stays in the current Issue Body. Its migrator
+    // phase advances the document schema marker and clears scalar title truth
+    // after copying that title to IssueMeta.
+    covered.insert((
+        contract::ISSUE_SCHEMA.to_string(),
+        contract::ISSUE_SCHEMA_VERSION,
+    ));
+    preferred == covered
+}
 
 fn migration_marker(ctx: &Context<'_>) -> Result<Option<v4::MigrationMarkerRecord>, Rejection> {
     let key = v4::space_directory_key(&ctx.principal().space);
@@ -3768,6 +3903,12 @@ fn migration_marker(ctx: &Context<'_>) -> Result<Option<v4::MigrationMarkerRecor
         return Ok(None);
     }
     let view = read_view(ctx, &key)?;
+    migration_marker_from_view(&view)
+}
+
+fn migration_marker_from_view(
+    view: &fabric::CollaborativeView,
+) -> Result<Option<v4::MigrationMarkerRecord>, Rejection> {
     view.registers
         .get(v4::roots::MIGRATION)
         .map(|raw| {
@@ -3776,335 +3917,483 @@ fn migration_marker(ctx: &Context<'_>) -> Result<Option<v4::MigrationMarkerRecor
         .transpose()
 }
 
-pub(crate) fn migration_publication(
+/// Bind a compact signed lifecycle plan to the exact durable checkpoint it
+/// was prepared after. A new frozen source resets only its source cursor; the
+/// global audit batch remains monotonic across source epochs.
+pub(crate) fn validate_migration_plan(
     ctx: &Context<'_>,
-    current: runtime::publication::PublicationId,
-) -> Result<runtime::publication::PublicationId, Rejection> {
-    Ok(migration_marker(ctx)?
-        .map(|marker| marker.publication)
-        .unwrap_or(current))
-}
-
-fn migration_positions(
-    catalog: &CatalogState,
-    issues: &BTreeMap<String, IssueState>,
-) -> BTreeMap<String, String> {
-    let mut positions = BTreeMap::new();
-    let mut last_by_project = BTreeMap::<String, String>::new();
-    for (project, entries) in &catalog.boards {
-        let mut last = String::new();
-        for (_, doc) in entries {
-            last = crate::rank::between(&last, None);
-            positions.insert(doc.clone(), last.clone());
-        }
-        last_by_project.insert(project.clone(), last);
-    }
-    for (doc, issue) in issues {
-        if positions.contains_key(doc) {
-            continue;
-        }
-        let last = last_by_project.entry(issue.project.clone()).or_default();
-        *last = crate::rank::between(last, None);
-        positions.insert(doc.clone(), last.clone());
-    }
-    positions
-}
-
-fn offer_migration_item(
-    out: &mut Batch,
-    cursor: &str,
-    key: String,
-    item: Batch,
-    first: &mut Option<String>,
-    last: &mut String,
-    items: &mut u32,
-) -> bool {
-    if key.as_str() <= cursor {
-        return true;
-    }
-    let mut candidate = out.clone();
-    candidate.absorb(item);
-    if *items == MIGRATION_MAX_ITEMS
-        || candidate.operations.len() > MIGRATION_MAX_OPERATIONS
-        || candidate.estimated_bytes() > MIGRATION_MAX_ESTIMATED_BYTES
-    {
-        return false;
-    }
-    out.absorb(candidate_delta(out, candidate));
-    first.get_or_insert_with(|| key.clone());
-    *last = key;
-    *items = items.saturating_add(1);
-    true
-}
-
-/// Return only the additions in `candidate` relative to `base`. This keeps the
-/// offer path simple without making Batch's fields a second transaction API.
-fn candidate_delta(base: &Batch, candidate: Batch) -> Batch {
-    Batch {
-        operations: candidate.operations[base.operations.len()..].to_vec(),
-        bodies: candidate
-            .bodies
-            .into_iter()
-            .filter(|body| !base.bodies.contains(body))
-            .collect(),
-        declarations: candidate
-            .declarations
-            .into_iter()
-            .filter(|declaration| {
-                !base
-                    .declarations
-                    .iter()
-                    .any(|existing| existing.key == declaration.key)
-            })
-            .collect(),
-    }
-}
-
-/// Stage one bounded, crash-resumable v3 -> v4 migration transaction. The
-/// caller repeats the same administrative intent until this returns `None`.
-/// Cursor and audit advance in the transaction containing the copied facts.
-pub(crate) fn migration_batch(
-    ctx: &Context<'_>,
-    catalog: &CatalogState,
-    issues: &BTreeMap<String, IssueState>,
-    spec_successors: &[(String, Batch)],
-    publication: runtime::publication::PublicationId,
-    actor: &str,
-    timestamp: u64,
-) -> Result<Option<Batch>, Rejection> {
+    plan: &contract::V4MigrationPlan,
+) -> Result<(), Rejection> {
     let previous = migration_marker(ctx)?;
-    if previous.as_ref().is_some_and(|marker| marker.complete) {
+    let durable_batch = previous.as_ref().map_or(0, |marker| marker.batch);
+    if plan.previous_batch != durable_batch {
+        return Err(Rejection::Conflict);
+    }
+    if let Some(marker) = previous {
+        let same_source =
+            marker.publication == plan.source && marker.source_frontier == plan.source_frontier;
+        if (same_source && marker.cursor != plan.previous_cursor)
+            || (!same_source && !plan.previous_cursor.is_empty())
+        {
+            return Err(Rejection::Conflict);
+        }
+    } else if !plan.previous_cursor.is_empty() {
+        return Err(Rejection::Conflict);
+    }
+    Ok(())
+}
+
+pub(crate) fn migration_verification(
+    ctx: &Context<'_>,
+) -> Result<Option<contract::MigrationVerification>, Rejection> {
+    let key = v4::space_directory_key(&ctx.principal().space);
+    if ctx.body_version(&key).is_none() {
         return Ok(None);
     }
-    if previous
-        .as_ref()
-        .is_some_and(|marker| marker.publication != publication)
-    {
+    let view = read_view(ctx, &key)?;
+    let Some(marker) = migration_marker_from_view(&view)? else {
+        return Ok(None);
+    };
+    let (audit_records, entries) = view
+        .logs
+        .get(v4::roots::MIGRATION_AUDIT)
+        .map_or((0, &[][..]), |log| (log.appended, log.entries.as_slice()));
+    if entries.len() > usize::try_from(v4::MIGRATION_AUDIT_RECORDS).unwrap_or(usize::MAX) {
         return Err(Rejection::StateCorrupt);
     }
-    if crate::ids::ActorId::parse(actor).is_none() || timestamp == 0 {
-        return Err(Rejection::InvalidRequest);
-    }
-    let cursor = previous
-        .as_ref()
-        .map(|marker| marker.cursor.as_str())
-        .unwrap_or("");
-    let mut out = Batch::default();
-    let mut first = None;
-    let mut last = String::new();
-    let mut items = 0u32;
-    let space_item = write_space(ctx, catalog, &catalog.name, Some(&catalog.description))?;
-    let mut stopped = !offer_migration_item(
-        &mut out,
-        cursor,
-        "00:space".into(),
-        space_item,
-        &mut first,
-        &mut last,
-        &mut items,
-    );
-
-    if !stopped {
-        for (id, label) in &catalog.labels {
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("02:label:{id}"),
-                write_label(ctx, catalog, id, label, false)?,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (id, revision) in &catalog.roles {
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("05:governance:{id}:{}", revision.revision_id),
-                write_governance_revision(ctx, revision)?,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (id, revisions) in &catalog.role_revisions {
-            for revision in revisions {
-                if !offer_migration_item(
-                    &mut out,
-                    cursor,
-                    format!("06:governance:{id}:{}", revision.revision_id),
-                    write_governance_revision(ctx, revision)?,
-                    &mut first,
-                    &mut last,
-                    &mut items,
-                ) {
-                    stopped = true;
-                    break;
-                }
-            }
-            if stopped {
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (id, meta) in &catalog.projects {
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("10:project:{id}"),
-                write_project(ctx, catalog, id, meta, false, Some(&meta.description))?,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (project, revisions) in &catalog.workflow_revisions {
-            for revision in revisions {
-                if !offer_migration_item(
-                    &mut out,
-                    cursor,
-                    format!("11:workflow:{project}:{}", revision.revision_id),
-                    write_workflow_revision(ctx, project, revision)?,
-                    &mut first,
-                    &mut last,
-                    &mut items,
-                ) {
-                    stopped = true;
-                    break;
-                }
-            }
-            if stopped {
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (migration_key, successor) in spec_successors {
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                migration_key.clone(),
-                successor.clone(),
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (project, records) in &catalog.milestones {
-            for record in records.values() {
-                if !offer_migration_item(
-                    &mut out,
-                    cursor,
-                    format!("12:milestone:{project}:{}", record.id),
-                    write_milestone(ctx, record)?,
-                    &mut first,
-                    &mut last,
-                    &mut items,
-                ) {
-                    stopped = true;
-                    break;
-                }
-            }
-            if stopped {
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (project, records) in &catalog.cycles {
-            for record in records.values() {
-                if !offer_migration_item(
-                    &mut out,
-                    cursor,
-                    format!("13:cycle:{project}:{}", record.id),
-                    write_cycle(ctx, record)?,
-                    &mut first,
-                    &mut last,
-                    &mut items,
-                ) {
-                    stopped = true;
-                    break;
-                }
-            }
-            if stopped {
-                break;
-            }
-        }
-    }
-    let positions = migration_positions(catalog, issues);
-    let existing_coordinates = issue_coordinates(ctx)?;
-    if !stopped {
-        for (doc, issue) in issues {
-            if !contract::valid_title(&issue.title) || !contract::valid_text(&issue.description) {
+    let mut tail = None;
+    for entry in entries {
+        let audit = v4::MigrationAuditRecord::decode_canonical(&entry.value)
+            .map_err(|_| Rejection::StateCorrupt)?;
+        if audit.batch == marker.batch {
+            if tail.replace(audit).is_some() {
                 return Err(Rejection::StateCorrupt);
             }
-            let ordinal = catalog
-                .seqs
-                .get(doc)
-                .copied()
-                .map(u64::from)
-                .or_else(|| {
-                    existing_coordinates
-                        .get(doc)
-                        .map(|coordinate| coordinate.identity.alias.ordinal)
+        }
+    }
+    Ok(Some(contract::MigrationVerification {
+        batch: marker.batch,
+        cursor: marker.cursor.clone(),
+        marker_complete: marker.complete,
+        audit_records,
+        audit_tail_complete: tail.as_ref().is_some_and(|audit| audit.complete),
+        audit_tail_matches: tail.as_ref().is_some_and(|audit| {
+            audit.migration == marker.migration
+                && audit.batch == marker.batch
+                && audit.actor == marker.actor
+                && audit.last == marker.cursor
+                && audit.complete == marker.complete
+        }),
+        source_coverage_complete: migration_source_coverage_complete(),
+        source_snapshot_pinned: marker.source_snapshot_pinned,
+        source_publication: marker.publication,
+        source_frontier: marker.source_frontier,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyAttachmentRecord {
+    id: String,
+    name: String,
+    #[serde(default)]
+    mime: String,
+    size: u64,
+    by: String,
+    #[serde(rename = "ts")]
+    timestamp: u64,
+    #[serde(default)]
+    comment: String,
+    /// V3 content-addressed attachments already name a protected descriptor.
+    /// Older inline `data_b64` records deliberately fail this decode: a World
+    /// migration cannot invent a content-plane descriptor for plaintext bytes.
+    content: String,
+}
+
+fn migration_digest(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
+    let mut material = Vec::new();
+    for part in parts {
+        material.extend_from_slice(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        material.extend_from_slice(part);
+    }
+    blake3::derive_key(domain, &material)
+}
+
+fn migration_comment_at(
+    doc: &str,
+    coordinate: &str,
+    raw: &[u8],
+) -> Result<contract::StoredComment, Rejection> {
+    let mut comment: contract::StoredComment =
+        serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+    if comment.id.is_none() {
+        let encoded = serde_json::to_vec(&comment).map_err(|_| Rejection::StateCorrupt)?;
+        let digest = migration_digest(
+            "lait.issues.migration-comment.v2",
+            &[doc.as_bytes(), coordinate.as_bytes(), &encoded],
+        );
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&digest[..16]);
+        comment.id = Some(format!("cmt_{}", crockford_128(u128::from_be_bytes(id))));
+    }
+    comment.node = None;
+    comment.parent_node = None;
+    Ok(comment)
+}
+
+fn migration_issue_id(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<String, Rejection> {
+    let doc = view
+        .registers
+        .get(v4::roots::ISSUE_ID)
+        .map(|raw| String::from_utf8_lossy(raw).into_owned())
+        .ok_or(Rejection::StateCorrupt)?;
+    if contract::issue_key(&doc) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(doc)
+}
+
+fn migration_index(raw: &str) -> Result<usize, Rejection> {
+    raw.parse::<usize>().map_err(|_| Rejection::StateCorrupt)
+}
+
+fn migration_maximal_heads<'a>(
+    revisions: impl IntoIterator<Item = (&'a str, &'a [String])>,
+) -> Result<BTreeSet<String>, Rejection> {
+    let mut ids = BTreeSet::new();
+    let mut predecessors = BTreeSet::new();
+    for (revision, parents) in revisions {
+        if !ids.insert(revision.to_string()) {
+            return Err(Rejection::StateCorrupt);
+        }
+        predecessors.extend(parents.iter().cloned());
+    }
+    if !predecessors.is_subset(&ids) {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(ids.difference(&predecessors).cloned().collect())
+}
+
+fn migration_governance_heads(
+    view: &fabric::CollaborativeView,
+    role: &str,
+) -> Result<BTreeSet<String>, Rejection> {
+    let mut revisions = BTreeMap::<String, crate::views::StoredRoleRevision>::new();
+    for (path, direct) in [("roles", true), ("role_revisions", false)] {
+        for (key, raw) in view.maps.get(path).into_iter().flatten() {
+            let revision: crate::views::StoredRoleRevision =
+                serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+            let selected = if direct {
+                key == role
+            } else {
+                key.rsplit_once('/').is_some_and(|(owner, revision_id)| {
+                    owner == role && revision_id == revision.revision_id
                 })
-                .ok_or(Rejection::StateCorrupt)?;
-            let mut item = Batch::default();
-            item.operation(
-                &contract::issue_key(doc),
+            };
+            if selected {
+                if revision.body.role_id != role {
+                    return Err(Rejection::StateCorrupt);
+                }
+                match revisions.get(&revision.revision_id) {
+                    Some(existing) if existing == &revision => {}
+                    Some(_) => return Err(Rejection::Conflict),
+                    None => {
+                        revisions.insert(revision.revision_id.clone(), revision);
+                    }
+                }
+            }
+        }
+    }
+    migration_maximal_heads(
+        revisions
+            .iter()
+            .map(|(id, revision)| (id.as_str(), revision.predecessor_ids.as_slice())),
+    )
+}
+
+fn migration_workflow_heads(
+    view: &fabric::CollaborativeView,
+    project: &str,
+) -> Result<BTreeSet<String>, Rejection> {
+    let mut revisions = BTreeMap::<String, crate::workflow::WorkflowRevision>::new();
+    for (key, raw) in view.maps.get("workflow_revisions").into_iter().flatten() {
+        let (owner, revision_id) = key.rsplit_once('/').ok_or(Rejection::StateCorrupt)?;
+        if owner != project {
+            continue;
+        }
+        let revision: crate::workflow::WorkflowRevision =
+            serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+        if revision.revision_id != revision_id
+            || revisions
+                .insert(revision.revision_id.clone(), revision)
+                .is_some()
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+    }
+    migration_maximal_heads(
+        revisions
+            .iter()
+            .map(|(id, revision)| (id.as_str(), revision.predecessor_ids.as_slice())),
+    )
+}
+
+/// Migration never participates in ordinary LWW replacement. A destination
+/// tuple is created when absent, skipped when byte-identical, and otherwise
+/// left untouched behind an explicit conflict.
+fn migration_atomic_absent(
+    ctx: &Context<'_>,
+    key: &BodyKey,
+    expected: &[u8],
+) -> Result<bool, Rejection> {
+    let Some(current) = ctx.read_body(key)? else {
+        return if ctx.body_version(key).is_none() {
+            Ok(true)
+        } else {
+            Err(Rejection::StateCorrupt)
+        };
+    };
+    if current.as_ref() == expected {
+        Ok(false)
+    } else {
+        Err(Rejection::Conflict)
+    }
+}
+
+pub(crate) fn migration_immutable_present(
+    ctx: &Context<'_>,
+    schema: PhysicalSchema,
+    identity: v4::RecordBodyIdentityRecord,
+    record: Vec<u8>,
+    semantic_field: &str,
+    semantic_value: &str,
+    semantic_predicates: &[(&str, &str)],
+) -> Result<bool, Rejection> {
+    let bytes = canonical(&v4::ImmutableRecordEnvelope { identity, record })?;
+    let expected_key = v4::immutable_record_key(schema, &bytes);
+    let Some(source) =
+        exact_record_source_matching(ctx, semantic_field, semantic_value, semantic_predicates)?
+    else {
+        // A physically present immutable record without its required Corpus
+        // fact means the pinned publication is internally inconsistent. It
+        // must not be treated as an absent semantic coordinate.
+        return if ctx.body_version(&expected_key).is_none()
+            && ctx.read_body(&expected_key)?.is_none()
+        {
+            Ok(false)
+        } else {
+            Err(Rejection::StateCorrupt)
+        };
+    };
+    let current = ctx.read_body(&source)?.ok_or(Rejection::StateCorrupt)?;
+    classify_migration_immutable(
+        &expected_key,
+        &bytes,
+        Some((&source, current.as_ref())),
+        false,
+    )
+}
+
+fn classify_migration_immutable(
+    expected_key: &BodyKey,
+    expected_bytes: &[u8],
+    semantic_source: Option<(&BodyKey, &[u8])>,
+    expected_physical_present_without_fact: bool,
+) -> Result<bool, Rejection> {
+    match semantic_source {
+        Some((source, current)) if source == expected_key && current == expected_bytes => Ok(true),
+        Some(_) => {
+            // The semantic coordinate already exists, but its immutable
+            // payload differs. Content addressing gives it another BodyKey;
+            // silently writing our expected key would create two truths for
+            // one id.
+            Err(Rejection::Conflict)
+        }
+        None if expected_physical_present_without_fact => Err(Rejection::StateCorrupt),
+        None => Ok(false),
+    }
+}
+
+/// Migrator Find intentionally excludes unbounded legacy aggregate Bodies.
+/// Hosting currently activates that package for the duration of migration,
+/// so ambient reads could otherwise swap from the complete legacy view to a
+/// partial v4 projection. Completion stays closed until the host retains the
+/// prior view as ambient throughout the bounded backfill.
+pub(crate) const fn migration_ambient_view_safe() -> bool {
+    false
+}
+
+fn migration_window_within_bounds(batch: &Batch) -> bool {
+    batch.operations.len() <= MIGRATION_MAX_OPERATIONS
+        && batch.estimated_bytes() <= MIGRATION_MAX_ESTIMATED_BYTES
+}
+
+/// Install one causally-derived head/issued set only when that set has no
+/// destination truth yet. An exact replay is empty; any other existing set is
+/// a semantic conflict and is never reconciled by migration-side LWW.
+pub(crate) fn migration_exact_set(
+    ctx: &Context<'_>,
+    schema: PhysicalSchema,
+    key: &BodyKey,
+    identity: &str,
+    registers: &[(&str, &str)],
+    root: &str,
+    expected: &BTreeSet<String>,
+    allow_create: bool,
+) -> Result<Batch, Rejection> {
+    if expected.len() > v4::MAX_CONCURRENT_HEADS {
+        return Err(Rejection::Conflict);
+    }
+    let exists = ctx.body_version(key).is_some();
+    if exists {
+        let view = read_view(ctx, key)?;
+        if view.registers.get(v4::roots::IDENTITY).map(Vec::as_slice) != Some(identity.as_bytes())
+            || registers.iter().any(|(path, value)| {
+                view.registers.get(*path).map(Vec::as_slice) != Some(value.as_bytes())
+            })
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+        if let Some(values) = view.sets.get(root) {
+            let current = values
+                .iter()
+                .map(|value| String::from_utf8(value.clone()).map_err(|_| Rejection::StateCorrupt))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            return if &current == expected {
+                Ok(Batch::default())
+            } else {
+                Err(Rejection::Conflict)
+            };
+        }
+    } else if !allow_create {
+        return Err(Rejection::StateCorrupt);
+    }
+
+    let mut batch = Batch::default();
+    if !exists {
+        batch.ensure_body(ctx, schema, key, identity.as_bytes().to_vec());
+        for (path, value) in registers {
+            set_register(&mut batch, key, path, value.as_bytes().to_vec());
+        }
+    }
+    for value in expected {
+        batch.operation(
+            key,
+            Op::SetAdd {
+                path: root.into(),
+                value: value.as_bytes().to_vec(),
+            },
+        );
+    }
+    Ok(batch)
+}
+
+fn equivalent_migration_base_transition(
+    body: &BodyKey,
+    issue: &IssueState,
+    head: &v4::IssueTransitionRecord,
+) -> bool {
+    head.predecessors.is_empty()
+        && head.placement
+            == (v4::BoardPlacement {
+                project: issue.project.clone(),
+                workflow_state: issue.status.clone(),
+                block: v4::board_seed_block_id(&issue.project, &issue.status),
+                position: format!("{}V", body.body.render()),
+            })
+        && head.evidence == "migration"
+        && head.timestamp == issue.created_at.max(1)
+}
+
+/// Stage exactly one logical fact from one frozen legacy Issue Body.
+pub(crate) fn migration_issue_window(
+    ctx: &Context<'_>,
+    body: &BodyKey,
+    subitem: &str,
+    view: &fabric::CollaborativeView,
+) -> Result<Batch, Rejection> {
+    let doc = migration_issue_id(body, view)?;
+    let issue = IssueState::from_view(view);
+    if issue.project.is_empty() || !contract::valid_text(&issue.description) {
+        return Err(Rejection::StateCorrupt);
+    }
+    if subitem == "$empty" {
+        return Ok(Batch::default());
+    }
+    if subitem == "20:base" {
+        let document_current = register(view, "document_schema")
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|version| version >= contract::DOCUMENT_SCHEMA_VERSION);
+        let existing_meta = issue_meta_for(ctx, &doc)?;
+        if !document_current && !contract::valid_title(&issue.title) {
+            return Err(Rejection::StateCorrupt);
+        }
+        if let Some(meta) = &existing_meta {
+            if !document_current
+                && (meta.title != issue.title
+                    || meta.priority != issue.priority.as_str()
+                    || meta.created_by.as_deref()
+                        != issue
+                            .created_by
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .as_deref()
+                    || meta.created_at != issue.created_at
+                    || meta.due_at != issue.duedate
+                    || meta.estimate != issue.estimate)
+            {
+                return Err(Rejection::Conflict);
+            }
+        }
+        let mut batch = Batch::default();
+        if !document_current {
+            batch.operation(
+                body,
                 Op::RegisterSet {
                     path: v4::roots::ISSUE_ID.into(),
                     value: doc.as_bytes().to_vec(),
                 },
             );
-            item.operation(
-                &contract::issue_key(doc),
+            batch.operation(
+                body,
                 Op::RegisterClear {
                     path: "title".into(),
                 },
             );
-            let position = positions.get(doc).cloned().ok_or(Rejection::StateCorrupt)?;
-            write_issue_coordinate(
-                ctx,
-                &mut item,
-                doc,
-                &issue.project,
-                &issue.status,
-                position.clone(),
-                ordinal,
-                catalog.tombstones.contains(doc),
-            )?;
-            item.absorb(write_issue_meta(
-                ctx,
-                doc,
-                issue,
-                catalog.tombstones.contains(doc),
-            )?);
-            item.absorb(
+            batch.operation(
+                body,
+                Op::RegisterSet {
+                    path: "document_schema".into(),
+                    value: contract::DOCUMENT_SCHEMA_VERSION.to_string().into_bytes(),
+                },
+            );
+        }
+        if existing_meta.is_none() {
+            let mut meta = write_issue_meta(ctx, &doc, &issue, false)?;
+            // Tombstone truth belongs to the later Catalog coordinate. An
+            // absent root projects false and lets that first coordinate create
+            // true; an explicit false written by a later preferred restore is
+            // therefore distinguishable and conflicts on re-consent.
+            meta.operations.retain(|(_, operation)| {
+                !matches!(operation, Op::RegisterSet { path, .. } if path == v4::roots::TOMBSTONE)
+            });
+            batch.absorb(meta);
+        }
+        // The Issue Body is the sole frozen owner of project/workflow state.
+        // Create one provisional authenticated head here; the later Catalog
+        // coordinate writes only an exact-head-fenced rank overlay, never a
+        // second transition.
+        let heads = issue_transition_heads(ctx, &doc)?;
+        if heads.is_empty() {
+            let mut position = body.body.render();
+            position.push('V');
+            batch.absorb(
                 write_issue_transition(
                     ctx,
-                    doc,
+                    &doc,
                     &[],
                     &v4::BoardPlacement {
                         project: issue.project.clone(),
@@ -4113,221 +4402,902 @@ pub(crate) fn migration_batch(
                         position,
                     },
                     "migration",
-                    timestamp,
+                    issue.created_at.max(1),
                 )?
                 .0,
             );
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("20:issue:{doc}"),
-                item,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
+        } else if let [(.., head)] = heads.as_slice() {
+            if equivalent_migration_base_transition(body, &issue, head) {
+                // Equivalent replay from a fresh frozen source epoch.
+            } else {
+                return Err(Rejection::Conflict);
             }
-        }
-    }
-    if !stopped {
-        for (child, parent) in &catalog.parents {
-            let project = issues
-                .get(child)
-                .ok_or(Rejection::StateCorrupt)?
-                .project
-                .as_str();
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("30:parent:{child}"),
-                write_parent(ctx, project, child, Some(parent.clone()))?,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (from, kind, to) in &catalog.edges {
-            let project = issues
-                .get(from)
-                .ok_or(Rejection::StateCorrupt)?
-                .project
-                .as_str();
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("31:link:{from}:{kind}:{to}"),
-                write_link(ctx, project, from, kind, to, true)?,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (project, updates) in &catalog.project_updates {
-            for update in updates {
-                if !offer_migration_item(
-                    &mut out,
-                    cursor,
-                    format!("40:update:{project}:{}", update.id),
-                    write_project_update(ctx, update)?,
-                    &mut first,
-                    &mut last,
-                    &mut items,
-                ) {
-                    stopped = true;
-                    break;
-                }
-            }
-            if stopped {
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (id, initiative) in &catalog.initiatives {
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("50:initiative:{id}"),
-                write_initiative(ctx, initiative, Some(&initiative.description))?,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (id, initiative) in &catalog.initiatives {
-            for project in &initiative.projects {
-                if !offer_migration_item(
-                    &mut out,
-                    cursor,
-                    format!("51:initiative-project:{id}:{project}"),
-                    write_entity_relation(ctx, id, "initiative_project", project, true)?,
-                    &mut first,
-                    &mut last,
-                    &mut items,
-                ) {
-                    stopped = true;
-                    break;
-                }
-            }
-            if stopped {
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (id, team) in &catalog.teams {
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("60:team:{id}"),
-                write_team(ctx, team)?,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (id, team) in &catalog.teams {
-            for member in &team.members {
-                if !offer_migration_item(
-                    &mut out,
-                    cursor,
-                    format!("61:team-member:{id}:{member}"),
-                    write_entity_relation(ctx, id, "team_member", member, true)?,
-                    &mut first,
-                    &mut last,
-                    &mut items,
-                ) {
-                    stopped = true;
-                    break;
-                }
-            }
-            if stopped {
-                break;
-            }
-        }
-    }
-    if !stopped {
-        for (id, triage) in &catalog.triage {
-            let mut item = write_triage_submission(ctx, triage)?;
-            if !triage.outcome.is_empty() {
-                let accepted_project = (triage.outcome == "accepted")
-                    .then(|| issues.get(&triage.doc).map(|issue| issue.project.as_str()))
-                    .flatten();
-                item.absorb(write_triage_decision(ctx, triage, accepted_project)?);
-            }
-            if !offer_migration_item(
-                &mut out,
-                cursor,
-                format!("70:triage:{id}"),
-                item,
-                &mut first,
-                &mut last,
-                &mut items,
-            ) {
-                stopped = true;
-                break;
-            }
-        }
-    }
-
-    let Some(first) = first else {
-        return if stopped {
-            Err(Rejection::LimitExceeded)
-        } else if previous.is_some() {
-            Ok(None)
         } else {
-            Err(Rejection::StateCorrupt)
+            return Err(Rejection::Conflict);
+        }
+        return Ok(batch);
+    }
+    if let Some(rest) = subitem.strip_prefix("21:comment:") {
+        let mut parts = rest.split(':');
+        let kind = parts.next().ok_or(Rejection::StateCorrupt)?;
+        let ordinal = migration_index(parts.next().ok_or(Rejection::StateCorrupt)?)?;
+        let raw = match kind {
+            "list" => {
+                &view
+                    .lists
+                    .get("comments")
+                    .and_then(|rows| rows.get(ordinal))
+                    .ok_or(Rejection::StateCorrupt)?
+                    .value
+            }
+            "tree" => {
+                &view
+                    .trees
+                    .get("comments")
+                    .and_then(|rows| rows.get(ordinal))
+                    .ok_or(Rejection::StateCorrupt)?
+                    .value
+            }
+            _ => return Err(Rejection::StateCorrupt),
         };
+        let mut comment = migration_comment_at(&doc, subitem, raw)?;
+        let id = comment.id.clone().ok_or(Rejection::StateCorrupt)?;
+        // Match write_comment's canonical record projection before probing the
+        // semantic id. Legacy engine-local node handles never enter v4.
+        comment.node = None;
+        comment.parent_node = None;
+        if migration_immutable_present(
+            ctx,
+            PhysicalSchema::IssueComment,
+            v4::RecordBodyIdentityRecord {
+                owner: doc.clone(),
+                record: id.clone(),
+            },
+            canonical(&v4::DiscussionRecord::Comment(comment.clone()))?,
+            crate::find::field::ID,
+            &id,
+            &[
+                (crate::find::field::KIND, "comment"),
+                (crate::find::field::SOURCE_ID, &doc),
+            ],
+        )? {
+            return Ok(Batch::default());
+        }
+        return write_comment(ctx, &doc, comment).map(|(batch, _)| batch);
+    }
+    if let Some(rest) = subitem.strip_prefix("22:reaction:") {
+        let (path, ordinal) = rest.rsplit_once(':').ok_or(Rejection::StateCorrupt)?;
+        let ordinal = migration_index(ordinal)?;
+        let (comment, emoji, actor) = if path == "current" {
+            contract::parse_reaction_value(
+                view.sets
+                    .get(contract::REACTIONS_PATH)
+                    .and_then(|values| values.get(ordinal))
+                    .ok_or(Rejection::StateCorrupt)?,
+            )
+            .ok_or(Rejection::StateCorrupt)?
+        } else {
+            let (emoji, actor) = contract::parse_legacy_reaction_value(
+                view.sets
+                    .get(&format!("reactions/{path}"))
+                    .and_then(|values| values.get(ordinal))
+                    .ok_or(Rejection::StateCorrupt)?,
+            )
+            .ok_or(Rejection::StateCorrupt)?;
+            (path.to_string(), emoji, actor)
+        };
+        let issue_id = DocId::parse(&doc).ok_or(Rejection::StateCorrupt)?;
+        let reaction = v4::ReactionRecord {
+            issue: doc.clone(),
+            comment: comment.clone(),
+            emoji: emoji.clone(),
+            actor: actor.clone(),
+            on: true,
+        };
+        let key = v4::issue_reaction_key(&issue_id, &reaction.identity());
+        let expected = canonical(&v4::DiscussionRecord::Reaction(reaction))?;
+        return if migration_atomic_absent(ctx, &key, &expected)? {
+            write_reaction(ctx, &doc, &comment, &emoji, &actor, true)
+        } else {
+            Ok(Batch::default())
+        };
+    }
+    if let Some(rest) = subitem.strip_prefix("23:relation:") {
+        let (kind, ordinal) = rest.rsplit_once(':').ok_or(Rejection::StateCorrupt)?;
+        let target = if ordinal == "single" {
+            let raw = view.registers.get(kind).ok_or(Rejection::StateCorrupt)?;
+            String::from_utf8(raw.clone()).map_err(|_| Rejection::StateCorrupt)?
+        } else {
+            let ordinal = migration_index(ordinal)?;
+            let path = match kind {
+                "assignee" => "assignees",
+                "follower" => "followers",
+                "label" => "labels",
+                _ => return Err(Rejection::StateCorrupt),
+            };
+            String::from_utf8(
+                view.sets
+                    .get(path)
+                    .and_then(|values| values.get(ordinal))
+                    .ok_or(Rejection::StateCorrupt)?
+                    .clone(),
+            )
+            .map_err(|_| Rejection::StateCorrupt)?
+        };
+        let issue_id = DocId::parse(&doc).ok_or(Rejection::StateCorrupt)?;
+        let record = v4::IssueRelationRecord {
+            issue: doc.clone(),
+            project: issue.project.clone(),
+            kind: kind.into(),
+            target: target.clone(),
+            present: true,
+        };
+        let key = v4::issue_relation_key(&issue_id, &record.identity());
+        let expected = canonical(&record)?;
+        return if migration_atomic_absent(ctx, &key, &expected)? {
+            write_issue_relation(ctx, &doc, &issue.project, kind, &target, true)
+        } else {
+            Ok(Batch::default())
+        };
+    }
+    if let Some(id) = subitem.strip_prefix("24:attachment:") {
+        let raw = view
+            .maps
+            .get("attachments")
+            .and_then(|records| records.get(id))
+            .ok_or(Rejection::StateCorrupt)?;
+        let legacy: LegacyAttachmentRecord =
+            serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+        if legacy.id != id {
+            return Err(Rejection::StateCorrupt);
+        }
+        let record = v4::IssueAttachmentRecord {
+            issue: doc,
+            id: legacy.id,
+            name: legacy.name,
+            mime: legacy.mime,
+            size: legacy.size,
+            by: legacy.by,
+            timestamp: legacy.timestamp,
+            comment: (!legacy.comment.is_empty()).then_some(legacy.comment),
+            content: legacy.content,
+            tombstone: false,
+        };
+        let issue = DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
+        let key = v4::issue_attachment_key(&issue, &record.id);
+        let expected = canonical(&record)?;
+        return if migration_atomic_absent(ctx, &key, &expected)? {
+            write_attachment(ctx, &record)
+        } else {
+            Ok(Batch::default())
+        };
+    }
+    if let Some(run) = subitem.strip_prefix("25:check:") {
+        let raw = view
+            .maps
+            .get("checks")
+            .and_then(|records| records.get(run))
+            .ok_or(Rejection::StateCorrupt)?;
+        let check = serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+        let record = v4::IssueCheckRecord {
+            issue: doc,
+            run: run.into(),
+            check,
+        };
+        let issue = DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
+        let key = v4::issue_check_key(&issue, &record.run);
+        let expected = canonical(&record)?;
+        return if migration_atomic_absent(ctx, &key, &expected)? {
+            write_check(ctx, &record)
+        } else {
+            Ok(Batch::default())
+        };
+    }
+    if let Some(rest) = subitem.strip_prefix("26:activity:") {
+        let mut parts = rest.split(':');
+        let kind = parts.next().ok_or(Rejection::StateCorrupt)?;
+        let ordinal = migration_index(parts.next().ok_or(Rejection::StateCorrupt)?)?;
+        let raw = match kind {
+            "list" => {
+                &view
+                    .lists
+                    .get("events")
+                    .and_then(|rows| rows.get(ordinal))
+                    .ok_or(Rejection::StateCorrupt)?
+                    .value
+            }
+            "log" => {
+                &view
+                    .logs
+                    .get(contract::EVENTS_PATH)
+                    .and_then(|log| log.entries.get(ordinal))
+                    .ok_or(Rejection::StateCorrupt)?
+                    .value
+            }
+            _ => return Err(Rejection::StateCorrupt),
+        };
+        let event: contract::IssueEvent =
+            serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+        let record = data_encoding::HEXLOWER.encode(&migration_digest(
+            "lait.issues.migration-activity.v2",
+            &[doc.as_bytes(), subitem.as_bytes(), raw],
+        ));
+        return write_activity_record(
+            ctx,
+            &doc,
+            &record,
+            &event,
+            &migration_activity_recipients(&issue, &event)?,
+        );
+    }
+    Err(Rejection::StateCorrupt)
+}
+
+/// Stage exactly one logical fact from the frozen legacy Catalog Body.
+///
+/// This first slice deliberately contains only the Space record. Additional
+/// Catalog coordinates are added as independent subitems; this function must
+/// never decode the whole Catalog into `CatalogState` merely to migrate one
+/// fact.
+pub(crate) fn migration_catalog_window(
+    ctx: &Context<'_>,
+    subitem: &str,
+    view: &fabric::CollaborativeView,
+) -> Result<Batch, Rejection> {
+    if subitem == "$empty" {
+        return Ok(Batch::default());
+    }
+    if subitem == "00:space" {
+        let name = register(view, "name");
+        let description = register(view, "description");
+        if !contract::valid_name(&name) || !contract::valid_text(&description) {
+            return Err(Rejection::StateCorrupt);
+        }
+        let catalog = CatalogState {
+            name: name.clone(),
+            description: description.clone(),
+            ..CatalogState::default()
+        };
+        let key = v4::space_directory_key(&ctx.principal().space);
+        if ctx.body_version(&key).is_some() {
+            let mut current = CatalogState::default();
+            apply_space(ctx, &mut current)?;
+            return if current.name == name && current.description == description {
+                Ok(Batch::default())
+            } else {
+                Err(Rejection::Conflict)
+            };
+        }
+        return write_space(ctx, &catalog, &name, Some(&description));
+    }
+    fn record<T: serde::de::DeserializeOwned>(
+        view: &fabric::CollaborativeView,
+        path: &str,
+        key: &str,
+    ) -> Result<T, Rejection> {
+        serde_json::from_slice(
+            view.maps
+                .get(path)
+                .and_then(|entries| entries.get(key))
+                .ok_or(Rejection::StateCorrupt)?,
+        )
+        .map_err(|_| Rejection::StateCorrupt)
+    }
+    if let Some(id) = subitem.strip_prefix("02:label:") {
+        let label: LabelMeta = record(view, "labels", id)?;
+        let key = v4::label_key(&crate::ids::LabelId::parse(id).ok_or(Rejection::StateCorrupt)?);
+        if ctx.body_version(&key).is_some() {
+            let mut current = CatalogState::default();
+            apply_label(ctx, &mut current, id)?;
+            return if current.labels.get(id) == Some(&label) {
+                Ok(Batch::default())
+            } else {
+                Err(Rejection::Conflict)
+            };
+        }
+        return write_label(ctx, &CatalogState::default(), id, &label, false);
+    }
+    if let Some(key) = subitem.strip_prefix("05:governance:") {
+        let revision: crate::views::StoredRoleRevision = record(view, "roles", key)?;
+        if revision.body.role_id != key {
+            return Err(Rejection::StateCorrupt);
+        }
+        let stored = v4::GovernanceRevisionRecord {
+            role: revision.body.role_id.clone(),
+            revision: revision.clone(),
+        };
+        if migration_immutable_present(
+            ctx,
+            PhysicalSchema::GovernanceRevision,
+            v4::RecordBodyIdentityRecord {
+                owner: stored.role.clone(),
+                record: stored.revision.revision_id.clone(),
+            },
+            canonical(&stored)?,
+            crate::find::field::REVISION,
+            &stored.revision.revision_id,
+            &[
+                (crate::find::field::KIND, "governance_revision"),
+                (crate::find::field::SOURCE_ID, &stored.role),
+            ],
+        )? {
+            return Ok(Batch::default());
+        }
+        return write_governance_revision_record(ctx, &revision);
+    }
+    if let Some(key) = subitem.strip_prefix("06:governance:") {
+        let revision: crate::views::StoredRoleRevision = record(view, "role_revisions", key)?;
+        let (role, revision_id) = key.rsplit_once('/').ok_or(Rejection::StateCorrupt)?;
+        if revision.body.role_id != role || revision.revision_id != revision_id {
+            return Err(Rejection::StateCorrupt);
+        }
+        let stored = v4::GovernanceRevisionRecord {
+            role: role.into(),
+            revision: revision.clone(),
+        };
+        if migration_immutable_present(
+            ctx,
+            PhysicalSchema::GovernanceRevision,
+            v4::RecordBodyIdentityRecord {
+                owner: role.into(),
+                record: revision_id.into(),
+            },
+            canonical(&stored)?,
+            crate::find::field::REVISION,
+            revision_id,
+            &[
+                (crate::find::field::KIND, "governance_revision"),
+                (crate::find::field::SOURCE_ID, role),
+            ],
+        )? {
+            return Ok(Batch::default());
+        }
+        return write_governance_revision_record(ctx, &revision);
+    }
+    if let Some(role) = subitem.strip_prefix("07:governance-heads:") {
+        let expected = migration_governance_heads(view, role)?;
+        return migration_exact_set(
+            ctx,
+            PhysicalSchema::GovernanceHeads,
+            &v4::governance_heads_key(role),
+            role,
+            &[],
+            v4::roots::HEADS,
+            &expected,
+            true,
+        );
+    }
+    if let Some(id) = subitem.strip_prefix("10:project:") {
+        let meta: ProjectMeta = record(view, "projects", id)?;
+        let key = v4::project_meta_key(&ProjectId::parse(id).ok_or(Rejection::StateCorrupt)?);
+        if ctx.body_version(&key).is_some() {
+            let mut current = CatalogState::default();
+            apply_project(ctx, &mut current, id)?;
+            return if current.projects.get(id) == Some(&meta) {
+                Ok(Batch::default())
+            } else {
+                Err(Rejection::Conflict)
+            };
+        }
+        let description = meta.description.clone();
+        return write_project(
+            ctx,
+            &CatalogState::default(),
+            id,
+            &meta,
+            false,
+            Some(&description),
+        );
+    }
+    if let Some(key) = subitem.strip_prefix("11:workflow:") {
+        let revision: crate::workflow::WorkflowRevision = record(view, "workflow_revisions", key)?;
+        let (project, revision_id) = key.rsplit_once('/').ok_or(Rejection::StateCorrupt)?;
+        if revision.revision_id != revision_id {
+            return Err(Rejection::StateCorrupt);
+        }
+        let stored = v4::ProjectWorkflowRevisionRecord {
+            project: project.into(),
+            revision: revision.clone(),
+        };
+        if migration_immutable_present(
+            ctx,
+            PhysicalSchema::WorkflowRevision,
+            v4::RecordBodyIdentityRecord {
+                owner: project.into(),
+                record: revision_id.into(),
+            },
+            canonical(&stored)?,
+            crate::find::field::REVISION,
+            revision_id,
+            &[
+                (crate::find::field::KIND, "workflow_revision"),
+                (crate::find::field::SOURCE_ID, project),
+            ],
+        )? {
+            return Ok(Batch::default());
+        }
+        return write_workflow_revision_record(ctx, project, &revision);
+    }
+    if let Some(project) = subitem.strip_prefix("11z:workflow-heads:") {
+        ProjectId::parse(project).ok_or(Rejection::StateCorrupt)?;
+        let expected = migration_workflow_heads(view, project)?;
+        return migration_exact_set(
+            ctx,
+            PhysicalSchema::WorkflowHeads,
+            &v4::workflow_heads_key(&ProjectId::parse(project).ok_or(Rejection::StateCorrupt)?),
+            project,
+            &[(v4::roots::PROJECT, project), (v4::roots::KIND, "workflow")],
+            v4::roots::HEADS,
+            &expected,
+            true,
+        );
+    }
+    if let Some(key) = subitem.strip_prefix("12:milestone:") {
+        let milestone: Milestone = record(view, "project_milestones", key)?;
+        let expected = format!("{}/{}", milestone.project_id, milestone.id);
+        if expected != key {
+            return Err(Rejection::StateCorrupt);
+        }
+        let body = v4::project_schedule_key(
+            &ProjectId::parse(&milestone.project_id).ok_or(Rejection::StateCorrupt)?,
+            &milestone.id,
+        );
+        if ctx.body_version(&body).is_some() {
+            let mut current = CatalogState::default();
+            apply_schedule_record(ctx, &mut current, &milestone.project_id, &milestone.id)?;
+            return if current
+                .milestones
+                .get(&milestone.project_id)
+                .and_then(|records| records.get(&milestone.id))
+                == Some(&milestone)
+            {
+                Ok(Batch::default())
+            } else {
+                Err(Rejection::Conflict)
+            };
+        }
+        return write_milestone(ctx, &milestone);
+    }
+    if let Some(key) = subitem.strip_prefix("13:cycle:") {
+        let cycle: Cycle = record(view, "cycles", key)?;
+        let expected = format!("{}/{}", cycle.project_id, cycle.id);
+        if expected != key {
+            return Err(Rejection::StateCorrupt);
+        }
+        let body = v4::project_schedule_key(
+            &ProjectId::parse(&cycle.project_id).ok_or(Rejection::StateCorrupt)?,
+            &cycle.id,
+        );
+        if ctx.body_version(&body).is_some() {
+            let mut current = CatalogState::default();
+            apply_schedule_record(ctx, &mut current, &cycle.project_id, &cycle.id)?;
+            return if current
+                .cycles
+                .get(&cycle.project_id)
+                .and_then(|records| records.get(&cycle.id))
+                == Some(&cycle)
+            {
+                Ok(Batch::default())
+            } else {
+                Err(Rejection::Conflict)
+            };
+        }
+        return write_cycle(ctx, &cycle);
+    }
+    if let Some(key) = subitem.strip_prefix("40:update:") {
+        let update: ProjectUpdate = record(view, "project_updates", key)?;
+        let expected = format!("{}/{}", update.project_id, update.id);
+        if expected != key {
+            return Err(Rejection::StateCorrupt);
+        }
+        let stored = v4::ProjectUpdateRecord {
+            update: update.id.clone(),
+            project: update.project_id.clone(),
+            author: update.author.clone(),
+            timestamp: update.ts,
+            body: update.body.clone(),
+            health: update.health.clone(),
+        };
+        if migration_immutable_present(
+            ctx,
+            PhysicalSchema::ProjectUpdates,
+            v4::RecordBodyIdentityRecord {
+                owner: stored.project.clone(),
+                record: stored.update.clone(),
+            },
+            canonical(&stored)?,
+            crate::find::field::ID,
+            &stored.update,
+            &[
+                (crate::find::field::KIND, "project_update"),
+                (crate::find::field::PROJECT, &stored.project),
+            ],
+        )? {
+            return Ok(Batch::default());
+        }
+        return write_project_update(ctx, &update);
+    }
+    if let Some(id) = subitem.strip_prefix("50:initiative:") {
+        let initiative: Initiative = record(view, "initiatives", id)?;
+        if initiative.id != id {
+            return Err(Rejection::StateCorrupt);
+        }
+        let key = v4::initiative_key(
+            &crate::ids::InitiativeId::parse(id).ok_or(Rejection::StateCorrupt)?,
+        );
+        if ctx.body_version(&key).is_some() {
+            let mut current = CatalogState::default();
+            apply_initiative(ctx, &mut current, id)?;
+            let mut expected = initiative.clone();
+            expected.projects.clear();
+            return if current.initiatives.get(id) == Some(&expected) {
+                Ok(Batch::default())
+            } else {
+                Err(Rejection::Conflict)
+            };
+        }
+        let description = initiative.description.clone();
+        return write_initiative(ctx, &initiative, Some(&description));
+    }
+    if let Some(pair) = subitem.strip_prefix("51:initiative-project:") {
+        let (id, project) = pair.split_once(':').ok_or(Rejection::StateCorrupt)?;
+        let initiative: Initiative = record(view, "initiatives", id)?;
+        if initiative.id != id || !initiative.projects.iter().any(|value| value == project) {
+            return Err(Rejection::StateCorrupt);
+        }
+        let record = v4::EntityRelationRecord {
+            owner: id.into(),
+            kind: "initiative_project".into(),
+            target: project.into(),
+            present: true,
+        };
+        let key = v4::entity_relation_key(id, &record.identity());
+        let expected = canonical(&record)?;
+        return if migration_atomic_absent(ctx, &key, &expected)? {
+            write_entity_relation(ctx, id, "initiative_project", project, true)
+        } else {
+            Ok(Batch::default())
+        };
+    }
+    if let Some(id) = subitem.strip_prefix("60:team:") {
+        let team: Team = record(view, "teams", id)?;
+        if team.id != id {
+            return Err(Rejection::StateCorrupt);
+        }
+        let key = v4::team_key(&crate::ids::TeamId::parse(id).ok_or(Rejection::StateCorrupt)?);
+        if ctx.body_version(&key).is_some() {
+            let mut current = CatalogState::default();
+            apply_team(ctx, &mut current, id)?;
+            let mut expected = team.clone();
+            expected.members.clear();
+            return if current.teams.get(id) == Some(&expected) {
+                Ok(Batch::default())
+            } else {
+                Err(Rejection::Conflict)
+            };
+        }
+        return write_team(ctx, &team);
+    }
+    if let Some(pair) = subitem.strip_prefix("61:team-member:") {
+        let (id, member) = pair.split_once(':').ok_or(Rejection::StateCorrupt)?;
+        let team: Team = record(view, "teams", id)?;
+        if team.id != id || !team.members.iter().any(|value| value == member) {
+            return Err(Rejection::StateCorrupt);
+        }
+        let record = v4::EntityRelationRecord {
+            owner: id.into(),
+            kind: "team_member".into(),
+            target: member.into(),
+            present: true,
+        };
+        let key = v4::entity_relation_key(id, &record.identity());
+        let expected = canonical(&record)?;
+        return if migration_atomic_absent(ctx, &key, &expected)? {
+            write_entity_relation(ctx, id, "team_member", member, true)
+        } else {
+            Ok(Batch::default())
+        };
+    }
+    if let Some(id) = subitem.strip_prefix("70:triage:") {
+        let triage: TriageItem = record(view, "triage", id)?;
+        if triage.id != id {
+            return Err(Rejection::StateCorrupt);
+        }
+        let stored = v4::TriageSubmissionRecord {
+            triage: triage.id.clone(),
+            title: triage.title.clone(),
+            body: triage.body.clone(),
+            source: triage.source.clone(),
+            submitted_by: triage.submitted_by.clone(),
+            timestamp: triage.ts,
+        };
+        if migration_immutable_present(
+            ctx,
+            PhysicalSchema::SpaceTriage,
+            v4::RecordBodyIdentityRecord {
+                owner: ctx.principal().space.as_str().into(),
+                record: stored.triage.clone(),
+            },
+            canonical(&v4::TriageRecord::Submission(stored))?,
+            crate::find::field::ID,
+            &triage.id,
+            &[
+                (crate::find::field::KIND, "triage_fact"),
+                (crate::find::field::STATE, "submission"),
+            ],
+        )? {
+            return Ok(Batch::default());
+        }
+        return write_triage_submission(ctx, &triage);
+    }
+    Err(Rejection::ContractViolation)
+}
+
+fn migration_identity(
+    ctx: &Context<'_>,
+    doc: &str,
+) -> Result<Option<v4::IssueIdentityRecord>, Rejection> {
+    let Some(key) = exact_record_source(ctx, crate::find::field::SOURCE_ID, doc, "issue_identity")?
+    else {
+        return Ok(None);
     };
-    let directory = ensure_directory(ctx, catalog, &mut out)?;
+    let envelope = read_immutable(ctx, &key)?;
+    if envelope.identity.owner != doc || envelope.identity.record != "identity" {
+        return Err(Rejection::StateCorrupt);
+    }
+    let identity = v4::IssueIdentityRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    (identity.issue == doc)
+        .then_some(identity)
+        .ok_or(Rejection::StateCorrupt)
+        .map(Some)
+}
+
+fn migration_heads(
+    ctx: &Context<'_>,
+    doc: &str,
+) -> Result<(String, v4::IssueTransitionRecord), Rejection> {
+    let heads = issue_transition_heads(ctx, doc)?;
+    match heads.as_slice() {
+        [(transition, record)] => Ok((transition.clone(), record.clone())),
+        [] => Err(Rejection::StateCorrupt),
+        _ => Err(Rejection::Conflict),
+    }
+}
+
+fn migration_rank(ordinal: usize) -> String {
+    // Fixed-width decimal preserves the legacy list order bytewise; the final
+    // non-zero base-62 digit keeps the rank canonical.
+    format!("{ordinal:020}V")
+}
+
+fn migration_project_from_path(
+    view: &fabric::CollaborativeView,
+    path: &str,
+) -> Result<String, Rejection> {
+    let folded = path.strip_prefix("board/").ok_or(Rejection::StateCorrupt)?;
+    let projects = view.maps.get("projects").ok_or(Rejection::StateCorrupt)?;
+    projects
+        .keys()
+        .find(|project| project.to_ascii_lowercase() == folded)
+        .cloned()
+        .ok_or(Rejection::StateCorrupt)
+}
+
+/// Stage one Catalog-owned coordinate after every frozen Issue base has been
+/// copied. The only placement mutation is an exact-transition-fenced rank
+/// overlay; workflow intent remains the authenticated Issue transition.
+pub(crate) fn migration_coordinate_window(
+    ctx: &Context<'_>,
+    subitem: &str,
+    view: &fabric::CollaborativeView,
+) -> Result<Batch, Rejection> {
+    if subitem == "$empty" {
+        return Ok(Batch::default());
+    }
+    if let Some(doc) = subitem.strip_prefix("14:identity:") {
+        let issue = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
+        let ordinal = view
+            .maps
+            .get("seqs")
+            .and_then(|entries| entries.get(doc))
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .ok_or(Rejection::StateCorrupt)?;
+        let expected = v4::IssueIdentityRecord {
+            issue: doc.into(),
+            alias: v4::IssueAliasCoordinate::for_issue(ordinal, &issue)
+                .map_err(|_| Rejection::StateCorrupt)?,
+        };
+        match migration_identity(ctx, doc)? {
+            Some(existing) if existing == expected => return Ok(Batch::default()),
+            Some(_) => return Err(Rejection::Conflict),
+            None => {}
+        }
+        let mut batch = Batch::default();
+        write_issue_identity(ctx, &mut batch, doc, ordinal)?;
+        return Ok(batch);
+    }
+    if let Some(doc) = subitem.strip_prefix("15:tombstone:") {
+        let raw = view
+            .maps
+            .get("tombstones")
+            .and_then(|entries| entries.get(doc))
+            .ok_or(Rejection::StateCorrupt)?;
+        if raw.as_slice() != b"1" {
+            return Err(Rejection::StateCorrupt);
+        }
+        let issue = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
+        let key = v4::issue_meta_key(&issue);
+        if ctx.body_version(&key).is_none() {
+            return Err(Rejection::StateCorrupt);
+        }
+        let meta = read_view(ctx, &key)?;
+        match meta.registers.get(v4::roots::TOMBSTONE) {
+            Some(raw) if raw.as_slice() == b"1" => return Ok(Batch::default()),
+            Some(_) => return Err(Rejection::Conflict),
+            None => {}
+        }
+        let mut batch = Batch::default();
+        set_register(&mut batch, &key, v4::roots::TOMBSTONE, b"1".to_vec());
+        return Ok(batch);
+    }
+    if let Some(rest) = subitem.strip_prefix("16:board:") {
+        let (path, ordinal) = rest.rsplit_once(':').ok_or(Rejection::StateCorrupt)?;
+        let ordinal = migration_index(ordinal)?;
+        let entry = view
+            .lists
+            .get(path)
+            .and_then(|entries| entries.get(ordinal))
+            .ok_or(Rejection::StateCorrupt)?;
+        let doc = std::str::from_utf8(&entry.value).map_err(|_| Rejection::StateCorrupt)?;
+        DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
+        let project = migration_project_from_path(view, path)?;
+        let (transition, head) = migration_heads(ctx, doc)?;
+        if head.placement.project != project {
+            return Err(Rejection::Conflict);
+        }
+        let overlay = v4::IssueRankOverlay {
+            issue: doc.into(),
+            transition,
+            project: head.placement.project.clone(),
+            workflow_state: head.placement.workflow_state.clone(),
+            block: head.placement.block.clone(),
+            position: migration_rank(ordinal),
+            maintenance: data_encoding::HEXLOWER.encode(&migration_digest(
+                "lait.issues.migration-rank-overlay.v1",
+                &[subitem.as_bytes()],
+            )),
+        };
+        match issue_rank_overlay(ctx, doc)? {
+            Some(existing) if existing == overlay => return Ok(Batch::default()),
+            Some(_) => return Err(Rejection::Conflict),
+            None => {}
+        }
+        return write_issue_rank_overlay(ctx, &overlay);
+    }
+    let (child, parent) = if let Some(child) = subitem.strip_prefix("30:map:") {
+        let parent = view
+            .maps
+            .get("parents")
+            .and_then(|entries| entries.get(child))
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .filter(|parent| !parent.is_empty())
+            .ok_or(Rejection::StateCorrupt)?;
+        (child.to_string(), Some(parent.to_string()))
+    } else if let Some(raw) = subitem.strip_prefix("30:tree:") {
+        let ordinal = migration_index(raw)?;
+        let nodes = view
+            .trees
+            .get(contract::HIERARCHY_PATH)
+            .ok_or(Rejection::StateCorrupt)?;
+        let node = nodes.get(ordinal).ok_or(Rejection::StateCorrupt)?;
+        let child = node.anchor.clone().ok_or(Rejection::StateCorrupt)?;
+        let parent = node.parent.as_deref().and_then(|parent_node| {
+            nodes
+                .iter()
+                .find(|candidate| candidate.node == parent_node)
+                .and_then(|candidate| candidate.anchor.clone())
+        });
+        (child, parent)
+    } else {
+        (String::new(), None)
+    };
+    if !child.is_empty() {
+        let (_, head) = migration_heads(ctx, &child)?;
+        return match read_parent(ctx, &head.placement.project, &child)? {
+            Some(existing) if existing.parent == parent => Ok(Batch::default()),
+            Some(_) => Err(Rejection::Conflict),
+            None => write_parent(ctx, &head.placement.project, &child, parent),
+        };
+    }
+    if let Some(edge) = subitem.strip_prefix("31:link:") {
+        if !view
+            .maps
+            .get("edges")
+            .is_some_and(|entries| entries.contains_key(edge))
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+        let mut parts = edge.splitn(3, '|');
+        let (Some(from), Some(kind), Some(to)) = (parts.next(), parts.next(), parts.next()) else {
+            return Err(Rejection::StateCorrupt);
+        };
+        let (_, head) = migration_heads(ctx, from)?;
+        return match read_link(ctx, &head.placement.project, from, kind, to)? {
+            Some(existing) if existing.present => Ok(Batch::default()),
+            Some(_) => Err(Rejection::Conflict),
+            None => write_link(ctx, &head.placement.project, from, kind, to, true),
+        };
+    }
+    if let Some(id) = subitem.strip_prefix("71:triage-decision:") {
+        let raw = view
+            .maps
+            .get("triage")
+            .and_then(|entries| entries.get(id))
+            .ok_or(Rejection::StateCorrupt)?;
+        let triage: TriageItem =
+            serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+        if triage.id != id || triage.outcome.is_empty() {
+            return Err(Rejection::StateCorrupt);
+        }
+        let accepted_project = if triage.outcome == "accepted" {
+            let (_, head) = migration_heads(ctx, &triage.doc)?;
+            Some(head.placement.project)
+        } else {
+            None
+        };
+        return write_triage_decision(ctx, &triage, accepted_project.as_deref());
+    }
+    Err(Rejection::ContractViolation)
+}
+
+/// Attach one migrated fact to its monotone cursor and audit coordinate.
+/// Output, cursor, and audit are committed atomically; terminal completion is
+/// intentionally impossible until every source family has a bounded handler
+/// and terminal lookahead tests prove exhaustion of the frozen source.
+pub(crate) fn finalize_migration_window(
+    ctx: &Context<'_>,
+    plan: &contract::V4MigrationPlan,
+    mut out: Batch,
+) -> Result<Batch, Rejection> {
+    let actor = ctx.principal().actor.as_str();
+    if crate::ids::ActorId::parse(actor).is_none() || plan.timestamp == 0 {
+        return Err(Rejection::InvalidRequest);
+    }
+    let complete = plan.window.terminal()
+        && migration_source_coverage_complete()
+        && migration_ambient_view_safe();
+    if plan.window.terminal() && !complete {
+        return Err(Rejection::Conflict);
+    }
+    if !migration_window_within_bounds(&out) {
+        return Err(Rejection::LimitExceeded);
+    }
+    let previous = migration_marker(ctx)?;
     let batch_number = previous
         .as_ref()
         .map_or(1, |marker| marker.batch.saturating_add(1));
+    if batch_number != plan.previous_batch.saturating_add(1) {
+        return Err(Rejection::Conflict);
+    }
     let started_at = previous
         .as_ref()
-        .map_or(timestamp, |marker| marker.started_at);
-    let marker_actor = previous
-        .as_ref()
-        .map_or_else(|| actor.to_string(), |marker| marker.actor.clone());
-    // Completion is intentionally withheld until the remaining physical DAG
-    // cutover (legacy comment/event records and Spec/Baseline revision Bodies)
-    // has run. Publishing `complete=true` here would activate an extractor
-    // that correctly ignores those coarse legacy roots and therefore lose
-    // visible facts. A later migration phase advances this same marker.
-    let complete = false;
+        .map_or(plan.timestamp, |marker| marker.started_at);
+    let directory = ensure_directory(ctx, &CatalogState::default(), &mut out)?;
     let marker = v4::MigrationMarkerRecord {
         migration: v4::MIGRATION_V3_TO_V4.into(),
         source_version: 3,
         target_version: 4,
-        publication,
+        publication: plan.source,
+        source_frontier: plan.source_frontier,
+        source_snapshot_pinned: complete,
         batch: batch_number,
-        cursor: last.clone(),
+        cursor: plan.window.cursor.clone(),
         complete,
-        actor: marker_actor,
+        actor: actor.into(),
         started_at,
-        updated_at: timestamp,
+        updated_at: plan.timestamp,
     };
     let operations = u32::try_from(out.operations.len().saturating_add(2))
         .map_err(|_| Rejection::LimitExceeded)?;
@@ -4335,10 +5305,10 @@ pub(crate) fn migration_batch(
         migration: v4::MIGRATION_V3_TO_V4.into(),
         batch: batch_number,
         actor: actor.into(),
-        timestamp,
-        first,
-        last,
-        items,
+        timestamp: plan.timestamp,
+        first: plan.window.cursor.clone(),
+        last: plan.window.cursor.clone(),
+        items: 1,
         operations,
         complete,
     };
@@ -4356,5 +5326,499 @@ pub(crate) fn migration_batch(
             retain: v4::MIGRATION_AUDIT_RECORDS,
         },
     );
-    Ok(Some(out))
+    if !migration_window_within_bounds(&out) {
+        return Err(Rejection::LimitExceeded);
+    }
+    Ok(out)
+}
+
+fn migration_activity_recipients(
+    issue: &IssueState,
+    event: &contract::IssueEvent,
+) -> Result<Vec<String>, Rejection> {
+    if event.inbox_kind().is_none() {
+        return Ok(Vec::new());
+    }
+    let mut recipients = issue
+        .assignees
+        .iter()
+        .chain(&issue.followers)
+        .map(|actor| actor.as_str().to_string())
+        .collect::<BTreeSet<_>>();
+    if event.k == "assigned" {
+        recipients.extend(
+            event
+                .c
+                .iter()
+                .filter(|change| change.f == "assignees")
+                .filter_map(|change| change.to.clone()),
+        );
+    }
+    if recipients.len() > contract::MAX_ISSUE_AUDIENCE {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(recipients.into_iter().collect())
+}
+
+/// Independently addressable facts formerly co-located with one Issue Body.
+/// Each returned item has its own stable cursor coordinate, so a large thread
+/// cannot force one migration transaction over the product byte/operation
+/// ceilings.
+#[cfg(test)]
+mod migration_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct MigrationStatusReader {
+        directory: BodyKey,
+        view: fabric::CollaborativeView,
+        reads: AtomicUsize,
+    }
+
+    impl runtime::world::BodyReader for MigrationStatusReader {
+        fn read_body(
+            &self,
+            _key: &BodyKey,
+        ) -> Result<Option<runtime::world::BodyBytes>, runtime::world::BodyReadFailure> {
+            panic!("migration status must not open atomic product state")
+        }
+
+        fn read_collaborative_body(
+            &self,
+            key: &BodyKey,
+        ) -> Result<Option<runtime::world::CollaborativeBody>, runtime::world::BodyReadFailure>
+        {
+            assert_eq!(key, &self.directory);
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(runtime::world::CollaborativeBody::owned(
+                self.view.clone(),
+            )))
+        }
+
+        fn bodies_with_schema(
+            &self,
+            _world: &replica::body::WorldId,
+            _schema: &replica::body::SchemaId,
+        ) -> Vec<BodyKey> {
+            panic!("migration status must not enumerate tracker Bodies")
+        }
+
+        fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
+            (key == &self.directory).then(fabric::Version::empty)
+        }
+
+        fn anchor_in_body(
+            &self,
+            _key: &BodyKey,
+            _path: &str,
+            _position: u64,
+        ) -> Result<Option<fabric::Anchor>, runtime::world::BodyReadFailure> {
+            panic!("migration status must not resolve anchors")
+        }
+
+        fn resolve_anchor(
+            &self,
+            _key: &BodyKey,
+            _anchor: &fabric::Anchor,
+        ) -> Result<fabric::AnchorResolution, runtime::world::BodyReadFailure> {
+            panic!("migration status must not resolve anchors")
+        }
+
+        fn content_status(
+            &self,
+            _content: &replica::content::ContentRef,
+        ) -> Option<runtime::world::ContentStatus> {
+            panic!("migration status must not inspect content")
+        }
+    }
+
+    fn principal(actor: &crate::ids::ActorId) -> runtime::world::PrincipalFacts {
+        let device = mechanics::actor::device_from_seed(&[7u8; 32]);
+        runtime::world::PrincipalFacts {
+            actor: actor.clone(),
+            station: mechanics::station::Key::from_device(&device).expect("test station"),
+            device,
+            space: mechanics::ids::SpaceId::from_digest([8u8; 16]),
+            authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
+        }
+    }
+
+    #[test]
+    fn migration_status_reads_only_the_bounded_marker_and_audit_body() {
+        let actor = crate::ids::ActorId::from_incept_hash(&"cd".repeat(32));
+        let facts = principal(&actor);
+        let cursor = contract::V4MigrationWindow::render_cursor(
+            contract::V4MigrationWindow::TERMINAL_PHASE,
+            None,
+            "",
+        )
+        .expect("terminal cursor");
+        let publication = runtime::publication::PublicationId::new(
+            [1; 32],
+            [2; 32],
+            runtime::publication::ExtractorSchemaDigest::from_digest([3; 32]),
+        );
+        let frontier = replica::frontier::ReplicaFrontier::new([4; 32], 7);
+        let marker = v4::MigrationMarkerRecord {
+            migration: v4::MIGRATION_V3_TO_V4.into(),
+            source_version: 3,
+            target_version: 4,
+            publication,
+            source_frontier: frontier,
+            source_snapshot_pinned: true,
+            batch: 9,
+            cursor: cursor.clone(),
+            complete: true,
+            actor: actor.as_str().into(),
+            started_at: 10,
+            updated_at: 11,
+        };
+        let audit = v4::MigrationAuditRecord {
+            migration: v4::MIGRATION_V3_TO_V4.into(),
+            batch: 9,
+            actor: actor.as_str().into(),
+            timestamp: 11,
+            first: cursor.clone(),
+            last: cursor.clone(),
+            items: 1,
+            operations: 2,
+            complete: true,
+        };
+        let mut view = fabric::CollaborativeView::default();
+        view.registers.insert(
+            v4::roots::MIGRATION.into(),
+            canonical(&marker).expect("marker"),
+        );
+        view.logs.insert(
+            v4::roots::MIGRATION_AUDIT.into(),
+            fabric::LogView {
+                entries: vec![fabric::ListElement {
+                    element: "tail".into(),
+                    value: canonical(&audit).expect("audit"),
+                }],
+                // This is the exact historical count, not work the status
+                // query visits. Only the retained tail above is decoded.
+                appended: 1_000_000,
+            },
+        );
+        let reader = MigrationStatusReader {
+            directory: v4::space_directory_key(&facts.space),
+            view,
+            reads: AtomicUsize::new(0),
+        };
+        let ctx = Context::with_reads(&facts, &reader, [0; 32]);
+        let verification = migration_verification(&ctx)
+            .expect("bounded status")
+            .expect("marker exists");
+        assert!(verification.verified());
+        assert_eq!(verification.audit_records, 1_000_000);
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn same_semantic_immutable_id_with_different_bytes_is_a_conflict() {
+        let doc = DocId::from_digest([0x31; 16]).as_str().to_string();
+        let id = "cmt_00000000000000000000000000".to_string();
+        let identity = v4::RecordBodyIdentityRecord {
+            owner: doc,
+            record: id.clone(),
+        };
+        let comment = |body: &str| contract::StoredComment {
+            a: crate::ids::ActorId::from_incept_hash(&"32".repeat(32))
+                .as_str()
+                .into(),
+            t: 7,
+            b: body.into(),
+            id: Some(id.clone()),
+            parent: None,
+            at: None,
+            node: None,
+            parent_node: None,
+        };
+        let expected = canonical(&v4::ImmutableRecordEnvelope {
+            identity: identity.clone(),
+            record: canonical(&v4::DiscussionRecord::Comment(comment("expected")))
+                .expect("expected comment"),
+        })
+        .expect("expected envelope");
+        let conflicting = canonical(&v4::ImmutableRecordEnvelope {
+            identity,
+            record: canonical(&v4::DiscussionRecord::Comment(comment("different")))
+                .expect("conflicting comment"),
+        })
+        .expect("conflicting envelope");
+        let expected_key = v4::immutable_record_key(PhysicalSchema::IssueComment, &expected);
+        let conflicting_key = v4::immutable_record_key(PhysicalSchema::IssueComment, &conflicting);
+
+        assert_ne!(
+            expected_key, conflicting_key,
+            "content addressing must differ"
+        );
+        assert_eq!(
+            classify_migration_immutable(
+                &expected_key,
+                &expected,
+                Some((&expected_key, &expected)),
+                false,
+            ),
+            Ok(true),
+            "an exact semantic replay is quiet"
+        );
+        assert!(matches!(
+            classify_migration_immutable(
+                &expected_key,
+                &expected,
+                Some((&conflicting_key, &conflicting)),
+                false,
+            ),
+            Err(Rejection::Conflict)
+        ));
+        assert_eq!(
+            classify_migration_immutable(&expected_key, &expected, None, false),
+            Ok(false),
+            "a genuinely absent semantic coordinate may be created"
+        );
+        assert!(matches!(
+            classify_migration_immutable(&expected_key, &expected, None, true),
+            Err(Rejection::StateCorrupt)
+        ));
+    }
+
+    #[test]
+    fn delayed_source_epoch_keeps_global_batch_and_resets_only_its_cursor() {
+        let actor = crate::ids::ActorId::from_incept_hash(&"61".repeat(32));
+        let facts = principal(&actor);
+        let old_source = runtime::publication::PublicationId::new(
+            [0x62; 32],
+            [0x63; 32],
+            runtime::publication::ExtractorSchemaDigest::from_digest([0x64; 32]),
+        );
+        let new_source = runtime::publication::PublicationId::new(
+            [0x65; 32],
+            [0x66; 32],
+            runtime::publication::ExtractorSchemaDigest::from_digest([0x67; 32]),
+        );
+        let frontier = replica::frontier::ReplicaFrontier::new([0x68; 32], 8);
+        let marker = v4::MigrationMarkerRecord {
+            migration: v4::MIGRATION_V3_TO_V4.into(),
+            source_version: 3,
+            target_version: 4,
+            publication: old_source,
+            source_frontier: frontier,
+            source_snapshot_pinned: false,
+            batch: 41,
+            cursor: "m1:issue:aaaaaaaaaaaaaaaaaaaaaaaaaa:MjA6YmFzZQ".into(),
+            complete: false,
+            actor: actor.as_str().into(),
+            started_at: 1,
+            updated_at: 2,
+        };
+        let mut view = fabric::CollaborativeView::default();
+        view.registers.insert(
+            v4::roots::MIGRATION.into(),
+            canonical(&marker).expect("marker"),
+        );
+        let reader = MigrationStatusReader {
+            directory: v4::space_directory_key(&facts.space),
+            view,
+            reads: AtomicUsize::new(0),
+        };
+        let ctx = Context::with_reads(&facts, &reader, [0x69; 32]);
+        let body = contract::issue_key(&DocId::from_digest([0x6a; 16]).as_str());
+        let cursor = contract::V4MigrationWindow::render_cursor("issue", Some(&body), "20:base")
+            .expect("cursor");
+        let plan = contract::V4MigrationPlan {
+            version: contract::V4MigrationPlan::VERSION,
+            source: new_source,
+            source_frontier: frontier,
+            previous_batch: 41,
+            previous_cursor: String::new(),
+            window: contract::V4MigrationWindow {
+                phase: "issue".into(),
+                body: Some(body),
+                subitem: "20:base".into(),
+                digest: [0x6b; 32],
+                cursor,
+            },
+            timestamp: 3,
+        };
+        assert!(validate_migration_plan(&ctx, &plan).is_ok());
+
+        let mut reset_batch = plan.clone();
+        reset_batch.previous_batch = 0;
+        assert!(matches!(
+            validate_migration_plan(&ctx, &reset_batch),
+            Err(Rejection::Conflict)
+        ));
+        let mut stale_cursor = plan;
+        stale_cursor.previous_cursor = marker.cursor;
+        assert!(matches!(
+            validate_migration_plan(&ctx, &stale_cursor),
+            Err(Rejection::Conflict)
+        ));
+    }
+
+    #[test]
+    fn delayed_equivalent_transition_is_quiet_but_a_preferred_move_conflicts() {
+        let doc = DocId::from_digest([0x71; 16]).as_str().to_string();
+        let project = ProjectId::from_digest([0x72; 16]).as_str().to_string();
+        let body = contract::issue_key(&doc);
+        let issue = IssueState {
+            project: project.clone(),
+            status: "backlog".into(),
+            created_at: 9,
+            ..IssueState::default()
+        };
+        let expected_placement = v4::BoardPlacement {
+            project: project.clone(),
+            workflow_state: "backlog".into(),
+            block: v4::board_seed_block_id(&project, "backlog"),
+            position: format!("{}V", body.body.render()),
+        };
+        let replay = v4::IssueTransitionRecord {
+            issue: doc.clone(),
+            predecessors: Vec::new(),
+            placement: expected_placement.clone(),
+            actor: crate::ids::ActorId::from_incept_hash(&"73".repeat(32))
+                .as_str()
+                .into(),
+            timestamp: 9,
+            evidence: "migration".into(),
+        };
+        assert!(equivalent_migration_base_transition(&body, &issue, &replay));
+
+        let mut preferred_move = replay.clone();
+        preferred_move.predecessors = vec!["74".repeat(32)];
+        preferred_move.placement.workflow_state = "done".into();
+        preferred_move.evidence = "user".into();
+        assert!(!equivalent_migration_base_transition(
+            &body,
+            &issue,
+            &preferred_move
+        ));
+
+        let mut differing_scalar = replay;
+        differing_scalar.placement = v4::BoardPlacement {
+            project,
+            workflow_state: "active".into(),
+            block: "75".repeat(32),
+            position: "U".into(),
+        };
+        assert!(!equivalent_migration_base_transition(
+            &body,
+            &issue,
+            &differing_scalar
+        ));
+    }
+
+    #[test]
+    fn terminal_activation_remains_closed_while_migrator_reads_are_partial() {
+        assert!(migration_source_coverage_complete());
+        assert!(!migration_ambient_view_safe());
+    }
+
+    #[test]
+    fn one_window_cannot_exceed_the_operation_or_byte_envelope() {
+        let key = BodyKey::new(
+            contract::world_id(),
+            replica::body::BodyId::from_bytes([0x52; 16]),
+        );
+        let mut operations = Batch::default();
+        for ordinal in 0..=MIGRATION_MAX_OPERATIONS {
+            operations.operation(
+                &key,
+                Op::RegisterSet {
+                    path: format!("bounded/{ordinal}"),
+                    value: vec![0],
+                },
+            );
+        }
+        assert!(!migration_window_within_bounds(&operations));
+
+        let mut bytes = Batch::default();
+        bytes.operation(
+            &key,
+            Op::ReplaceAtomic {
+                value: vec![0; MIGRATION_MAX_ESTIMATED_BYTES.saturating_add(1)],
+            },
+        );
+        assert!(!migration_window_within_bounds(&bytes));
+        assert!(migration_window_within_bounds(&Batch::default()));
+    }
+
+    #[test]
+    fn final_head_projection_is_causal_when_child_id_sorts_before_parent() {
+        let role = "role.example";
+        let parent = "ff";
+        let child = "00";
+        let role_body = crate::roles::RoleBody {
+            role_id: role.into(),
+            scope_kind: crate::roles::ScopeKind::Space,
+            name: "Example".into(),
+            description: String::new(),
+            capabilities: Vec::new(),
+            tombstone: false,
+        };
+        let mut catalog = fabric::CollaborativeView::default();
+        for revision in [
+            crate::views::StoredRoleRevision {
+                revision_id: parent.into(),
+                predecessor_ids: Vec::new(),
+                body: role_body.clone(),
+            },
+            crate::views::StoredRoleRevision {
+                revision_id: child.into(),
+                predecessor_ids: vec![parent.into()],
+                body: role_body,
+            },
+        ] {
+            catalog
+                .maps
+                .entry("role_revisions".into())
+                .or_default()
+                .insert(
+                    format!("{role}/{}", revision.revision_id),
+                    serde_json::to_vec(&revision).expect("role revision"),
+                );
+        }
+        assert_eq!(
+            migration_governance_heads(&catalog, role).expect("causal heads"),
+            BTreeSet::from([child.to_string()])
+        );
+
+        let project = ProjectId::from_digest([0x53; 16]).as_str().to_string();
+        let workflow_body = crate::workflow::WorkflowBody {
+            project_id: project.clone(),
+            name: "Workflow".into(),
+            states: Vec::new(),
+            transitions: Vec::new(),
+            tombstone: false,
+        };
+        for revision in [
+            crate::workflow::WorkflowRevision {
+                revision_id: parent.into(),
+                predecessor_ids: Vec::new(),
+                body: workflow_body.clone(),
+            },
+            crate::workflow::WorkflowRevision {
+                revision_id: child.into(),
+                predecessor_ids: vec![parent.into()],
+                body: workflow_body,
+            },
+        ] {
+            catalog
+                .maps
+                .entry("workflow_revisions".into())
+                .or_default()
+                .insert(
+                    format!("{project}/{}", revision.revision_id),
+                    serde_json::to_vec(&revision).expect("workflow revision"),
+                );
+        }
+        assert_eq!(
+            migration_workflow_heads(&catalog, &project).expect("causal workflow heads"),
+            BTreeSet::from([child.to_string()])
+        );
+    }
 }

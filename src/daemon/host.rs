@@ -994,6 +994,7 @@ impl Daemon {
         // never fails the daemon — the worst a check can do is leave the
         // standing unchanged.
         let staging = self.spawn_staging();
+        let world_upgrades = self.spawn_world_upgrades();
 
         // Display coordination is withheld from a daemon that does not own
         // the machine's posture: a guest in somebody's process (see
@@ -1004,6 +1005,7 @@ impl Daemon {
         if embedded() || !display_hosting() {
             let served = self.endpoint.clone().serve(home).await;
             Self::join_staging(staging).await;
+            Self::join_world_upgrades(world_upgrades).await;
             return served;
         }
         let display = self.display.clone();
@@ -1034,6 +1036,7 @@ impl Daemon {
             }
         };
         Self::join_staging(staging).await;
+        Self::join_world_upgrades(world_upgrades).await;
         outcome
     }
 
@@ -1053,6 +1056,16 @@ impl Daemon {
         )))
     }
 
+    /// Resume consented World updates independently of any client connection.
+    /// One turn performs at most one fetch or one bounded product migration
+    /// step, so progress never monopolizes the host reactor or a Station.
+    fn spawn_world_upgrades(&self) -> tokio::task::JoinHandle<()> {
+        let router = self.router.clone();
+        let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+        let stop = self.endpoint.subscribe_stop();
+        tokio::spawn(serve_world_upgrades(router, worlds, stop))
+    }
+
     /// Wait for the staging watcher to notice the stop signal, bounded so a
     /// check in flight can never hold a shutdown open.
     async fn join_staging(staging: Option<tokio::task::JoinHandle<()>>) {
@@ -1067,6 +1080,261 @@ impl Daemon {
             ),
         }
     }
+
+    async fn join_world_upgrades(upgrades: tokio::task::JoinHandle<()>) {
+        match tokio::time::timeout(Duration::from_secs(5), upgrades).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the World upgrade worker ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the World upgrade worker did not finish in time; leaving it to process exit"
+            ),
+        }
+    }
+}
+
+async fn serve_world_upgrades(
+    router: Arc<Router>,
+    worlds: PathBuf,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                if let Err(error) = advance_one_world_upgrade(router.clone(), worlds.clone()).await {
+                    tracing::warn!(%error, "could not advance a consented World update");
+                }
+            }
+        }
+    }
+}
+
+async fn advance_one_world_upgrade(router: Arc<Router>, worlds: PathBuf) -> Result<()> {
+    let world_ids: Vec<_> = router.lifecycle_world_ids().cloned().collect();
+    for world in world_ids {
+        let world_name = world.as_str().to_owned();
+        let worlds_for_read = worlds.clone();
+        let job = match router
+            .run_blocking(move || crate::update::consent::load(&worlds_for_read, &world_name))
+            .await
+        {
+            Ok(Some(job)) if !job.terminal() => job,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::warn!(world = %world, %error, "cannot read World update consent");
+                continue;
+            }
+        };
+        return advance_world_upgrade_job(router, worlds, world, job).await;
+    }
+    Ok(())
+}
+
+async fn advance_world_upgrade_job(
+    router: Arc<Router>,
+    worlds: PathBuf,
+    world: replica::body::WorldId,
+    mut job: crate::update::consent::Job,
+) -> Result<()> {
+    use crate::update::consent::Phase;
+
+    if job.staged_version.is_none() {
+        let worlds_for_fetch = worlds.clone();
+        let world_name = world.as_str().to_owned();
+        let operation = job.operation;
+        job = router
+            .run_blocking(move || {
+                let Some(mut current) =
+                    crate::update::consent::load(&worlds_for_fetch, &world_name)?
+                else {
+                    anyhow::bail!("World update consent disappeared")
+                };
+                if current.operation != operation || current.terminal() {
+                    return Ok(current);
+                }
+                current.phase = Phase::Fetching;
+                current.message = None;
+                current.updated_at = mechanics::wallclock::now_secs();
+                crate::update::consent::save(&worlds_for_fetch, &current)?;
+                let outcome = crate::update::world::check(
+                    &world_name,
+                    &worlds_for_fetch,
+                    crate::update::feed::Channel::current(),
+                );
+                match outcome {
+                    Ok(outcome) => {
+                        crate::update::world::note(
+                            &worlds_for_fetch,
+                            &world_name,
+                            &outcome,
+                            mechanics::wallclock::now_secs(),
+                        );
+                        match outcome {
+                            crate::update::world::Outcome::Staged { version }
+                            | crate::update::world::Outcome::Current { version } => {
+                                current.staged_version = Some(version);
+                                current.phase = Phase::Migrating;
+                            }
+                            crate::update::world::Outcome::Unmet { version, why } => {
+                                current.phase = Phase::Refused;
+                                current.message =
+                                    Some(format!("{version} requires {}", why.join(", ")));
+                            }
+                            crate::update::world::Outcome::NothingPublished { version } => {
+                                current.phase = Phase::Refused;
+                                current.message = Some(format!(
+                                    "release {version} carries no bundle for this World"
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            world = %world_name,
+                            %error,
+                            "World bundle verification will retry"
+                        );
+                        current.phase = Phase::Waiting;
+                        current.message = Some("Waiting to retry World bundle verification".into());
+                    }
+                }
+                current.updated_at = mechanics::wallclock::now_secs();
+                crate::update::consent::save(&worlds_for_fetch, &current)?;
+                Ok(current)
+            })
+            .await?;
+        return Ok(());
+    }
+
+    let bindings = router.visible_orbit_ids_blocking().await?;
+    job.total_spaces = u64::try_from(bindings.len()).unwrap_or(u64::MAX);
+    let had_stale_orbit = job
+        .current_orbit
+        .as_ref()
+        .is_some_and(|current| !bindings.contains(current));
+    let orbit = reconcile_upgrade_orbit(&mut job, &bindings);
+    if had_stale_orbit {
+        tracing::debug!(
+            world = %world,
+            "reconciling a lifecycle cursor whose Space is no longer bound"
+        );
+    }
+    let Some(orbit) = orbit else {
+        job.phase = Phase::Verified;
+        job.message = Some("bundle staged and every visible Space verified".into());
+        job.updated_at = mechanics::wallclock::now_secs();
+        let worlds_for_save = worlds.clone();
+        router
+            .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+            .await?;
+        return Ok(());
+    };
+    if job.current_orbit.is_none() {
+        job.current_orbit = Some(orbit.clone());
+        job.phase = Phase::Migrating;
+        job.message = None;
+        job.updated_at = mechanics::wallclock::now_secs();
+        let worlds_for_save = worlds.clone();
+        let staged = job.clone();
+        router
+            .run_blocking(move || crate::update::consent::save(&worlds_for_save, &staged))
+            .await?;
+    }
+
+    let step = match router
+        .advance_world_upgrade(&orbit, world.clone(), job.operation)
+        .await
+    {
+        Ok(step) => step,
+        Err(error) => {
+            tracing::warn!(
+                world = %world,
+                orbit = %orbit,
+                %error,
+                "Space lifecycle step will retry"
+            );
+            job.phase = Phase::Waiting;
+            job.message = Some("Waiting to retry the bounded Space lifecycle step".into());
+            job.updated_at = mechanics::wallclock::now_secs();
+            let worlds_for_save = worlds.clone();
+            router
+                .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+                .await?;
+            return Ok(());
+        }
+    };
+    match step {
+        crate::orbital::WorldUpgradeStep::Pending {
+            completed,
+            remaining,
+        } => {
+            job.phase = Phase::Migrating;
+            job.completed_records = completed;
+            job.remaining_records = remaining;
+            job.message = Some(format!("Space {orbit} migration is in progress"));
+        }
+        crate::orbital::WorldUpgradeStep::Building => {
+            job.phase = Phase::Waiting;
+            job.message = Some(format!(
+                "Space {orbit} frozen migration source is rebuilding"
+            ));
+        }
+        crate::orbital::WorldUpgradeStep::Capacity => {
+            job.phase = Phase::Waiting;
+            job.message = Some(format!(
+                "Space {orbit} frozen migration source awaits read capacity"
+            ));
+        }
+        crate::orbital::WorldUpgradeStep::Current
+        | crate::orbital::WorldUpgradeStep::Unbound
+        | crate::orbital::WorldUpgradeStep::Verified => {
+            job.after_orbit = Some(orbit);
+            job.current_orbit = None;
+            job.completed_spaces = job.completed_spaces.saturating_add(1);
+            job.completed_records = 0;
+            job.remaining_records = None;
+            job.phase = Phase::Migrating;
+            job.message = None;
+        }
+        crate::orbital::WorldUpgradeStep::Unsupported { reason } => {
+            job.phase = Phase::Refused;
+            job.message = Some(reason);
+        }
+    }
+    job.updated_at = mechanics::wallclock::now_secs();
+    let worlds_for_save = worlds;
+    router
+        .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+        .await?;
+    Ok(())
+}
+
+/// Reconcile a persisted cursor with the current exact set of World-bound
+/// Spaces. A removed/unbound Space is ordinary restart drift, not a semantic
+/// migration refusal; resume at the next canonical binding.
+fn reconcile_upgrade_orbit(
+    job: &mut crate::update::consent::Job,
+    bindings: &[String],
+) -> Option<String> {
+    if job
+        .current_orbit
+        .as_ref()
+        .is_some_and(|current| !bindings.contains(current))
+    {
+        job.current_orbit = None;
+    }
+    job.current_orbit.clone().or_else(|| {
+        bindings
+            .iter()
+            .find(|orbit| job.after_orbit.as_ref().is_none_or(|after| *orbit > after))
+            .cloned()
+    })
 }
 
 /// Joinable ownership of the process endpoint and its process-wide lock.
@@ -1528,6 +1796,31 @@ mod tests {
 
     static HOME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+    #[test]
+    fn restart_drift_skips_an_unbound_space_and_keeps_operation_progress() {
+        let root = tempfile::tempdir().expect("temp root");
+        let mut job = crate::update::consent::enqueue(
+            root.path(),
+            "lait.test.lifecycle",
+            mechanics::wallclock::now_secs(),
+        )
+        .expect("consent");
+        let operation = job.operation;
+        job.phase = crate::update::consent::Phase::Waiting;
+        job.after_orbit = Some("space-a".into());
+        job.current_orbit = Some("space-b".into());
+        job.completed_records = 256;
+
+        let next = reconcile_upgrade_orbit(
+            &mut job,
+            &["space-a".into(), "space-c".into(), "space-d".into()],
+        );
+        assert_eq!(next.as_deref(), Some("space-c"));
+        assert_eq!(job.current_orbit, None);
+        assert_eq!(job.operation, operation);
+        assert_eq!(job.completed_records, 256);
+    }
+
     struct MemFactory(MemNet);
 
     #[async_trait]
@@ -1645,7 +1938,10 @@ mod tests {
                 .unwrap(),
             Response::Worlds { .. }
         ));
-        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
+        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList {
+            page: issues::contract::PageRequest::default(),
+        })
+        .unwrap();
         let world_route = ControlRoute::World {
             address: resolved.address,
             world: call.world().as_str().to_string(),

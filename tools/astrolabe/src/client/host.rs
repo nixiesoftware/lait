@@ -6,7 +6,7 @@
 //! That is why this cannot live in a World: the page that would host it is
 //! unreachable until the thing it creates exists.
 
-use lait::control::{ControlRoute, HostReply, Request, Response, SponsorshipAsk};
+use lait::control::{ControlRoute, ErrorKind, HostReply, Request, Response, SponsorshipAsk};
 
 use super::{Client, ClientError, ClientResult};
 
@@ -168,6 +168,61 @@ impl Client {
             orbit: orbit.to_owned(),
         })
         .await
+    }
+
+    /// Durably consent to one native World update. The returned operation was
+    /// persisted before the daemon began any network or migration work.
+    pub async fn world_update(&self, world: &str) -> ClientResult<lait::update::consent::Job> {
+        let daemon = self.daemon()?;
+        let reply = daemon
+            .request(
+                ControlRoute::Daemon,
+                &Request::HostWorldUpdate {
+                    world: world.to_owned(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| ClientError::unreachable(format!("reach the daemon: {error:#}")))?;
+        match reply {
+            Response::Host(HostReply::WorldUpdate { job: Some(job), .. }) => Ok(job),
+            Response::Error {
+                message,
+                error_kind: ErrorKind::Busy | ErrorKind::Capacity,
+            } => Err(ClientError::unreachable(message)),
+            Response::Error { message, .. } => Err(ClientError::refused(message)),
+            other => Err(ClientError::internal(format!(
+                "unexpected World update reply: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn world_update_status(
+        &self,
+        world: &str,
+    ) -> ClientResult<Option<lait::update::consent::Job>> {
+        let daemon = self.daemon()?;
+        let reply = daemon
+            .request(
+                ControlRoute::Daemon,
+                &Request::HostWorldUpdateStatus {
+                    world: world.to_owned(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| ClientError::unreachable(format!("reach the daemon: {error:#}")))?;
+        match reply {
+            Response::Host(HostReply::WorldUpdate { job, .. }) => Ok(job),
+            Response::Error {
+                message,
+                error_kind: ErrorKind::Busy | ErrorKind::Capacity,
+            } => Err(ClientError::unreachable(message)),
+            Response::Error { message, .. } => Err(ClientError::refused(message)),
+            other => Err(ClientError::internal(format!(
+                "unexpected World update status reply: {other:?}"
+            ))),
+        }
     }
 
     async fn host_ok(&self, request: Request) -> ClientResult<()> {

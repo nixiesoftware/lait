@@ -368,6 +368,229 @@ fn journal_object_path(dir: &PathBuf, hash: &[u8; 32]) -> PathBuf {
     dir.join("objects").join(name)
 }
 
+#[test]
+fn generation_footprint_is_exact_historical_and_dominates_reconstruction() {
+    let dir = temp_store("generation-footprint");
+    let first_key = body(41);
+    let second_key = body(42);
+    let mut replica = open(&dir);
+    commit(
+        &mut replica,
+        [41; 16],
+        "first generation",
+        &[(
+            first_key.clone(),
+            Op::TextSplice {
+                path: "body".into(),
+                index: 0,
+                delete: 0,
+                insert: "first historical value".into(),
+            },
+        )],
+        &[(first_key.clone(), collab_binding())],
+    )
+    .unwrap();
+    let first_root = replica.read_snapshot().root();
+    commit(
+        &mut replica,
+        [42; 16],
+        "second generation",
+        &[(
+            second_key.clone(),
+            Op::ReplaceAtomic {
+                value: vec![0x2a; 257],
+            },
+        )],
+        &[(second_key.clone(), atomic_binding())],
+    )
+    .unwrap();
+    drop(replica);
+
+    let reopened = open(&dir);
+    let current = Arc::new(reopened.read_snapshot());
+    let current_root = current.root();
+    let reader = reopened.generation_reader(Arc::clone(&current));
+    let first_footprint = reader
+        .generation_footprint(&first_root)
+        .unwrap()
+        .expect("first generation footprint");
+    let current_footprint = reader
+        .generation_footprint(&current_root)
+        .unwrap()
+        .expect("current generation footprint");
+    assert_eq!(
+        reader.generation_footprint(&[0xee; 32]).unwrap(),
+        None,
+        "an unknown root is absence, never ambient-current pricing"
+    );
+
+    let historical = reader
+        .read_generation(&first_root)
+        .unwrap()
+        .expect("first generation reconstruction");
+    assert_eq!(first_footprint.body_count, historical.body_count());
+    assert_eq!(first_footprint.reconstruction_depth, 1);
+    assert_eq!(current_footprint.reconstruction_depth, 2);
+    assert!(first_footprint.reconstruction_delta_bytes > 0);
+    assert!(
+        first_footprint.reconstruction_transient_bytes
+            >= first_footprint.reconstruction_delta_bytes
+    );
+    assert!(
+        current_footprint.reconstruction_delta_bytes > first_footprint.reconstruction_delta_bytes,
+        "each indexed generation authenticates its complete ancestry cost"
+    );
+    assert!(
+        current_footprint.reconstruction_transient_bytes
+            > first_footprint.reconstruction_transient_bytes
+    );
+    assert!(
+        first_footprint.snapshot_retained_bytes >= historical.retained_bytes_estimate(),
+        "pre-inflation reservation must dominate the reconstructed snapshot"
+    );
+    assert_eq!(current_footprint.body_count, current.body_count());
+    assert!(
+        current_footprint.snapshot_retained_bytes >= current.retained_bytes_estimate(),
+        "current admission uses the same conservative physical estimate"
+    );
+    assert_eq!(first_footprint.sources.len(), 1);
+    let note = &first_footprint.sources[0];
+    assert_eq!(note.world, world());
+    assert_eq!(note.schema, collab_binding().schema);
+    assert_eq!(note.version, 1);
+    assert_eq!(note.body_count, 1);
+    let historical_body = historical.body_ix(&first_key).expect("historical BodyIx");
+    assert_eq!(
+        note.payload_bytes,
+        historical
+            .body_image_plaintext_bytes(historical_body)
+            .expect("historical plaintext bound")
+    );
+    assert_eq!(current_footprint.sources.len(), 2);
+    assert!(current_footprint
+        .sources
+        .windows(2)
+        .all(|pair| pair[0] < pair[1]));
+    for source in &current_footprint.sources {
+        assert_eq!(
+            source.body_count,
+            current.body_count_with_schema_version(&source.world, &source.schema, source.version,)
+        );
+        assert_eq!(
+            source.payload_bytes,
+            current.body_payload_bytes_with_schema_version(
+                &source.world,
+                &source.schema,
+                source.version,
+            )
+        );
+    }
+
+    // Footprint lookup is index-only. Removing both a target generation's
+    // delta and its protected Body artifacts cannot affect the already-pinned
+    // authenticated index lookup; reconstruction then fails typed at the first
+    // missing size-proportional object.
+    let delta = reader
+        .generation_delta_object_for_test(&first_root)
+        .unwrap()
+        .expect("generation delta object");
+    let artifacts = historical.body_image_artifacts_for_test(historical_body);
+    drop(historical);
+    std::fs::remove_file(journal_object_path(&dir, &delta.0)).unwrap();
+    for artifact in artifacts {
+        let path = journal_object_path(&dir, &artifact);
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    assert_eq!(
+        reader.generation_footprint(&first_root).unwrap(),
+        Some(first_footprint),
+        "metadata lookup must not touch delta, Body, or artifact objects"
+    );
+    assert!(
+        reader.read_generation(&first_root).is_err(),
+        "size-proportional reconstruction reports missing material"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generation_footprint_rejects_an_authenticated_index_tamper() {
+    let dir = temp_store("generation-footprint-tamper");
+    let key = body(43);
+    let mut replica = open(&dir);
+    commit(
+        &mut replica,
+        [43; 16],
+        "footprint tamper",
+        &[(
+            key.clone(),
+            Op::ReplaceAtomic {
+                value: b"tamper target".to_vec(),
+            },
+        )],
+        &[(key, atomic_binding())],
+    )
+    .unwrap();
+    let current = Arc::new(replica.read_snapshot());
+    let root = current.root();
+    let reader = replica.generation_reader(current);
+    assert!(reader.generation_footprint(&root).unwrap().is_some());
+    let index_root = reader
+        .generation_index_root_for_test()
+        .expect("generation index root");
+    std::fs::write(journal_object_path(&dir, &index_root), b"tampered").unwrap();
+    let failure = reader
+        .generation_footprint(&root)
+        .expect_err("tampered authenticated index must fail closed");
+    assert!(
+        format!("{failure:?}").contains("Integrity"),
+        "tamper is a typed integrity failure: {failure:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generation_footprint_prices_a_long_chain_before_reconstruction() {
+    let dir = temp_store("generation-footprint-long-chain");
+    let key = body(44);
+    let mut replica = open(&dir);
+    for generation in 0u8..64 {
+        commit(
+            &mut replica,
+            [generation; 16],
+            "long chain",
+            &[(
+                key.clone(),
+                Op::ReplaceAtomic {
+                    value: vec![generation; 8],
+                },
+            )],
+            &[(key.clone(), atomic_binding())],
+        )
+        .unwrap();
+    }
+    let current = Arc::new(replica.read_snapshot());
+    let footprint = replica
+        .generation_reader(Arc::clone(&current))
+        .generation_footprint(&current.root())
+        .unwrap()
+        .expect("current generation footprint");
+    assert_eq!(footprint.body_count, 1);
+    assert_eq!(footprint.reconstruction_depth, 64);
+    assert!(
+        footprint.reconstruction_transient_bytes > footprint.snapshot_retained_bytes,
+        "a small final snapshot must not hide its retained decoded ancestry"
+    );
+    assert!(
+        footprint.reconstruction_transient_bytes
+            >= footprint.reconstruction_delta_bytes.saturating_mul(4),
+        "the authenticated admission bound includes canonical bytes plus decode overhead"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn counter_ops(key: &BodyKey, delta: i64) -> Vec<(BodyKey, Op)> {
     vec![(
         key.clone(),
