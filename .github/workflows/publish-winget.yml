@@ -42,7 +42,7 @@ permissions:
 jobs:
   winget:
     name: submit to winget-pkgs
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, lait]
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
