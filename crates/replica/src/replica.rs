@@ -942,7 +942,10 @@ impl<K, V> Default for SnapshotDirectory<K, V> {
 impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
     fn from_entries(mut entries: Vec<(K, V)>) -> Self {
         entries.sort_by(|left, right| left.0.cmp(&right.0));
-        debug_assert!(entries.windows(2).all(|pair| pair[0].0 != pair[1].0));
+        debug_assert!(entries.windows(2).all(|pair| match pair {
+            [left, right] => left.0 != right.0,
+            _ => true,
+        }));
         let len = entries.len();
         let leaves = entries
             .chunks(SNAPSHOT_DIRECTORY_LEAF)
@@ -975,11 +978,15 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         let mut low = 0usize;
         let mut high = self.leaves.len();
         while low < high {
-            let mid = low + (high - low) / 2;
-            let leaf = self.leaves.get(mid).expect("snapshot directory midpoint");
-            let last = leaf.last().expect("snapshot directory leaf is non-empty");
+            let mid = low.saturating_add(high.saturating_sub(low).saturating_div(2));
+            let Some(leaf) = self.leaves.get(mid) else {
+                break;
+            };
+            let Some(last) = leaf.last() else {
+                break;
+            };
             if last.key.borrow() < key {
-                low = mid + 1;
+                low = mid.saturating_add(1);
             } else {
                 high = mid;
             }
@@ -999,7 +1006,7 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         let position = leaf
             .binary_search_by(|entry| entry.key.borrow().cmp(key))
             .ok()?;
-        let entry = &leaf[position];
+        let entry = leaf.get(position)?;
         Some((&entry.key, &entry.value))
     }
 
@@ -1019,10 +1026,16 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
             return None;
         }
         let leaf_index = self.leaf_for(&key);
-        let mut leaf = self.leaves[leaf_index].to_vec();
+        let Some(existing) = self.leaves.get(leaf_index) else {
+            return None;
+        };
+        let mut leaf = existing.to_vec();
         match leaf.binary_search_by(|entry| entry.key.cmp(&key)) {
             Ok(position) => {
-                let old = std::mem::replace(&mut leaf[position].value, value);
+                let Some(entry) = leaf.get_mut(position) else {
+                    return None;
+                };
+                let old = std::mem::replace(&mut entry.value, value);
                 self.leaves.set(leaf_index, Arc::from(leaf));
                 Some(old)
             }
@@ -1032,9 +1045,10 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
                 if leaf.len() <= SNAPSHOT_DIRECTORY_LEAF {
                     self.leaves.set(leaf_index, Arc::from(leaf));
                 } else {
-                    let right = leaf.split_off(leaf.len() / 2);
+                    let right = leaf.split_off(leaf.len().saturating_div(2));
                     self.leaves.set(leaf_index, Arc::from(leaf));
-                    self.leaves.insert(leaf_index + 1, Arc::from(right));
+                    self.leaves
+                        .insert(leaf_index.saturating_add(1), Arc::from(right));
                 }
                 None
             }
@@ -1050,7 +1064,10 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
             return None;
         }
         let leaf_index = self.leaf_for(key);
-        let mut leaf = self.leaves[leaf_index].to_vec();
+        let Some(existing) = self.leaves.get(leaf_index) else {
+            return None;
+        };
+        let mut leaf = existing.to_vec();
         let position = leaf
             .binary_search_by(|entry| entry.key.borrow().cmp(key))
             .ok()?;
@@ -1086,7 +1103,9 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         let mut first = true;
         let mut page = Vec::with_capacity(limit);
         while leaf_index < self.leaves.len() && page.len() < limit {
-            let leaf = &self.leaves[leaf_index];
+            let Some(leaf) = self.leaves.get(leaf_index) else {
+                break;
+            };
             let start = if first {
                 first = false;
                 after.map_or(0, |key| {
@@ -1096,8 +1115,9 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
                 0
             };
             page.extend(
-                leaf[start..]
-                    .iter()
+                leaf.get(start..)
+                    .into_iter()
+                    .flatten()
                     .take(limit.saturating_sub(page.len()))
                     .map(|entry| entry.key.clone()),
             );
@@ -1673,6 +1693,10 @@ fn operations_digest(ops: &[(BodyKey, Op)]) -> [u8; 32] {
 impl PreparedAction<'_> {
     /// The receipt that will become authoritative if this candidate is
     /// finalized.
+    #[allow(
+        clippy::expect_used,
+        reason = "PreparedAction keeps state until finalize or drop"
+    )]
     pub fn receipt(&self) -> &RequestReceipt {
         match self.state.as_ref().expect("prepared action retains state") {
             PreparedActionState::Noop { receipt } => receipt,
@@ -1681,6 +1705,10 @@ impl PreparedAction<'_> {
     }
 
     /// The exact read coordinate the durable finalize will publish.
+    #[allow(
+        clippy::expect_used,
+        reason = "PreparedAction keeps state until finalize or drop"
+    )]
     pub fn candidate_root(&self) -> [u8; 32] {
         match self.state.as_ref().expect("prepared action retains state") {
             PreparedActionState::Noop { .. } => {
@@ -1710,9 +1738,7 @@ impl PreparedAction<'_> {
         if prior.root != committed_root || prior.frontier != self.replica.frontier {
             return Err(Failure::ParentManifestUnavailable);
         }
-        let PreparedActionState::Mutation { data, .. } =
-            self.state.as_ref().expect("prepared action retains state")
-        else {
+        let Some(PreparedActionState::Mutation { data, .. }) = self.state.as_ref() else {
             return Ok(prior.clone());
         };
         let PreparedMutation {
@@ -1829,7 +1855,7 @@ impl PreparedAction<'_> {
     /// state. The caller may install the already-built read image only after
     /// this succeeds.
     pub fn finalize(mut self, ctx: &CommitContext<'_>) -> Result<RequestReceipt, Failure> {
-        let state = self.state.take().expect("prepared action retains state");
+        let state = self.state.take().ok_or(Failure::Poisoned)?;
         self.replica.finalize_prepared_action(ctx, state)
     }
 }
@@ -2651,7 +2677,11 @@ impl Replica {
         if let Some((checkpoint, checkpoint_envelope, covered_tail)) =
             self.take_ready_checkpoint(key, prior)
         {
-            let mut delta_tail = prior.delta_tail[covered_tail..].to_vec();
+            let mut delta_tail = prior
+                .delta_tail
+                .get(covered_tail..)
+                .ok_or(Failure::Integrity(Defect::CorruptMaterial))?
+                .to_vec();
             delta_tail.push(reference);
             let material = CausalMaterial {
                 format_version: CAUSAL_FORMAT_VERSION,
@@ -6512,7 +6542,7 @@ impl Replica {
     ) -> Result<RequestReceipt, Failure> {
         let PreparedActionState::Mutation { fabric, mut data } = state else {
             let PreparedActionState::Noop { receipt } = state else {
-                unreachable!();
+                return Err(Failure::Poisoned);
             };
             if self.durable.is_some() {
                 self.persist_receipt_only(&receipt)?;

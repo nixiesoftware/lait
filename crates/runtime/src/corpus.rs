@@ -1,3 +1,10 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "Find corpus indexes use bounded binary search and compact u32 ids"
+)]
 //! Immutable, structurally shared material for World-defined read indexes.
 //!
 //! A corpus is derived state. It is never replicated truth and it never grants

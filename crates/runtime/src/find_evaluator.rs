@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "Find evaluation steps over compact u32 node identities"
+)]
 //! Gate-first bounded evaluation over one immutable read corpus.
 //!
 //! This module owns no authority facts. Its caller supplies the exact granted

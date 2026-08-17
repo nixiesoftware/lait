@@ -4944,12 +4944,12 @@ impl Session {
                 let (snapshot, materialization) = if let Some(snapshot) = plan.snapshot {
                     snapshot
                 } else {
-                    let reconstructed = match plan
-                        .reader
-                        .as_ref()
-                        .expect("cold build owns a generation reader")
-                        .read_generation(&plan.root)
-                    {
+                    let Some(reader) = plan.reader.as_ref() else {
+                        let failure = crate::find::Failure::PublicationUnavailable;
+                        let _ = finish(Err(failure.clone()));
+                        return Err(failure);
+                    };
+                    let reconstructed = match reader.read_generation(&plan.root) {
                         Ok(Some(snapshot)) => Arc::new(snapshot),
                         Ok(None) | Err(_) => {
                             let failure = crate::find::Failure::PublicationUnavailable;
@@ -5241,12 +5241,12 @@ impl Session {
                 let (snapshot, materialization) = if let Some(snapshot) = plan.snapshot {
                     snapshot
                 } else {
-                    let reconstructed = match plan
-                        .reader
-                        .as_ref()
-                        .expect("cold query build owns generation reader")
-                        .read_generation(&plan.root)
-                    {
+                    let Some(reader) = plan.reader.as_ref() else {
+                        let failure = crate::find::Failure::PublicationUnavailable;
+                        let _ = finish(Err(failure));
+                        return Err(Failure::GenerationUnavailable);
+                    };
+                    let reconstructed = match reader.read_generation(&plan.root) {
                         Ok(Some(snapshot)) => Arc::new(snapshot),
                         Ok(None) | Err(_) => {
                             let failure = crate::find::Failure::PublicationUnavailable;
