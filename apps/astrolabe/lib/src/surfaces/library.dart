@@ -47,6 +47,13 @@ final Color kLaunchSlabInk = TokenEscape.rawColor(0xFFFFFFFF);
 final Color kStopSlabFill = TokenEscape.rawColor(0xFFFFFFFF);
 final Color kStopSlabInk = TokenEscape.rawColor(0xFF10151A);
 
+/// The update coat, under the same rule as the other two, and blue for the
+/// reason green is green: the colour that *starts* a World must never sit
+/// under the control that replaces one. A person reaching for LAUNCH out of
+/// habit should miss, not open something older than they asked for.
+final Color kUpdateSlabFill = TokenEscape.rawColor(0xFF3B82F6);
+final Color kUpdateSlabInk = TokenEscape.rawColor(0xFFFFFFFF);
+
 /// The corner every action slab is cut with — small enough to read as a
 /// square-ish button, large enough to not look like a rendering accident.
 const SizeStep kSlabCorner = Space.xs;
@@ -507,6 +514,8 @@ class _ActionPanel extends StatelessWidget {
     final view = ClientScope.watch(context);
     final entryPath = showing.opensAt;
     final opening = _opening(view, showing);
+    final updating =
+        view.inFlight.contains(ActionKeys.updateWorld(showing.worldMount));
     final lifecycle = _lifecycleCopy(view, showing);
     // The head is per-identity and serves every installed World, so "running"
     // is the head's own liveness: an owned browser head reporting an address.
@@ -554,6 +563,12 @@ class _ActionPanel extends StatelessWidget {
                     : () => client.dispatch(
                           ActionRequest.stopHead(id: stoppable.id),
                         ),
+                updating: updating,
+                onUpdate: updating
+                    ? null
+                    : () => client.dispatch(
+                          ActionRequest.updateWorld(world: showing.worldMount),
+                        ),
               ),
             ),
           ),
@@ -592,6 +607,8 @@ class _WorldAction extends StatelessWidget {
     required this.lifecycle,
     required this.onOpen,
     required this.onStop,
+    required this.onUpdate,
+    required this.updating,
   });
 
   final LibraryRow showing;
@@ -606,6 +623,8 @@ class _WorldAction extends StatelessWidget {
   }) lifecycle;
   final VoidCallback? onOpen;
   final VoidCallback? onStop;
+  final VoidCallback? onUpdate;
+  final bool updating;
 
   @override
   Widget build(BuildContext context) {
@@ -620,6 +639,23 @@ class _WorldAction extends StatelessWidget {
     }
 
     if (opening) return const _PendingSlab(label: 'LAUNCHING');
+
+    if (updating) return const _PendingSlab(label: 'UPDATING');
+
+    // The one state that replaces LAUNCH outright. Only when the channel is
+    // *known* to hold a bundle this build can run — `behind` answers false for
+    // every uncertainty, including a World nothing has ever checked, so a row
+    // with no standing draws exactly what it drew before any of this existed.
+    final update = showing.update;
+    if (update != null && update.behind && onUpdate != null) {
+      return _UpdateControl(
+        onUpdate: onUpdate!,
+        tooltip: update.available == null
+            ? 'Fetch the newest bundle for this World'
+            : 'Update to ${update.available} — this device is serving '
+                '${update.serving ?? 'the built-in version'}',
+      );
+    }
 
     if (onOpen != null) {
       return _LaunchControl(
@@ -699,6 +735,73 @@ class _LaunchControlState extends State<_LaunchControl> {
                 t.gap.x(Space.sm),
                 Text(
                   'LAUNCH',
+                  style: context.bodyStyle.copyWith(
+                    color: ink,
+                    fontSize: _worldActionGlyphSize,
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The update control — the launch slab's shape in its own coat.
+///
+/// Deliberately the same silhouette: this occupies the position LAUNCH would
+/// have, and a control that changed size would move the whole band when a
+/// World happened to be behind. What changes is the colour and the mark, which
+/// is what a person reads before they read a word.
+class _UpdateControl extends StatefulWidget {
+  const _UpdateControl({required this.onUpdate, required this.tooltip});
+
+  final VoidCallback onUpdate;
+  final String tooltip;
+
+  @override
+  State<_UpdateControl> createState() => _UpdateControlState();
+}
+
+class _UpdateControlState extends State<_UpdateControl> {
+  double _hover = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final fill = kUpdateSlabFill;
+    final ink = kUpdateSlabInk;
+    final scene = LightTheme.maybeOf(context) ?? kAstrolabeScene;
+    return Semantics(
+      button: true,
+      label: 'Update World',
+      child: Tooltip(
+        message: widget.tooltip,
+        child: Lit(
+          scene: scene,
+          baseColor: Color.lerp(fill, ink, _hover * 0.12)!,
+          curvature: 0.12,
+          elevation: 3,
+          borderRadius: t.radius.all(kSlabCorner),
+          onTap: widget.onUpdate,
+          onHoverChange: (value) => setState(() => _hover = value),
+          child: Container(
+            height: 40,
+            padding: t.padding.symmetric(h: Space.xl3),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  AppIcons.refresh,
+                  size: _worldActionGlyphSize,
+                  color: ink,
+                ),
+                t.gap.x(Space.sm),
+                Text(
+                  'UPDATE',
                   style: context.bodyStyle.copyWith(
                     color: ink,
                     fontSize: _worldActionGlyphSize,

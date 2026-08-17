@@ -61,6 +61,13 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# The staged-swap chain test seals its own feed and builds its own tree
+# artifacts; these carry the envelope, digest, and archive shapes and are
+# already in the lockfile via the root crate.
+blake3 = "1"
+data-encoding = "2.6"
+flate2 = "1"
+tar = "0.4"
 jiff = "0.2.35"
 replica = { path = "../../crates/replica" }
 schedule = { path = "../../crates/schedule" }

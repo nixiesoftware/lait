@@ -98,6 +98,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   BigInt dco_decode_box_autoadd_u_64(dynamic raw);
 
   @protected
+  WorldUpdateRow dco_decode_box_autoadd_world_update_row(dynamic raw);
+
+  @protected
   CardRow dco_decode_card_row(dynamic raw);
 
   @protected
@@ -288,6 +291,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
 
   @protected
+  WorldUpdateRow? dco_decode_opt_box_autoadd_world_update_row(dynamic raw);
+
+  @protected
   List<String>? dco_decode_opt_list_String(dynamic raw);
 
   @protected
@@ -352,6 +358,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   WorldPersonRow dco_decode_world_person_row(dynamic raw);
+
+  @protected
+  WorldUpdateRow dco_decode_world_update_row(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -440,6 +449,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
+
+  @protected
+  WorldUpdateRow sse_decode_box_autoadd_world_update_row(
+      SseDeserializer deserializer);
 
   @protected
   CardRow sse_decode_card_row(SseDeserializer deserializer);
@@ -654,6 +667,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
+  WorldUpdateRow? sse_decode_opt_box_autoadd_world_update_row(
+      SseDeserializer deserializer);
+
+  @protected
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
 
   @protected
@@ -721,6 +738,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   WorldPersonRow sse_decode_world_person_row(SseDeserializer deserializer);
+
+  @protected
+  WorldUpdateRow sse_decode_world_update_row(SseDeserializer deserializer);
 
   @protected
   void sse_encode_AnyhowException(
@@ -814,6 +834,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_world_update_row(
+      WorldUpdateRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_card_row(CardRow self, SseSerializer serializer);
@@ -1039,6 +1063,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_world_update_row(
+      WorldUpdateRow? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
 
   @protected
@@ -1111,6 +1139,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_world_person_row(
       WorldPersonRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_world_update_row(
+      WorldUpdateRow self, SseSerializer serializer);
 }
 
 // Section: wire_class

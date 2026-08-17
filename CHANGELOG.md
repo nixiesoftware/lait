@@ -1,5 +1,66 @@
 # Changelog
 
+## v0.9.0 — the client updates itself
+
+> **Upgrading:** install v0.9.0 by hand — this is the release that teaches the
+> client to update itself, so it is the last one that has to be fetched. It is
+> also the first release whose Windows installer exists at all: v0.8.0 through
+> v0.8.2 each shipped a macOS disk image and a Linux bundle and no `.exe`. No
+> protocol, wire, or stored-data format changes.
+
+Astrolabe becomes evergreen. The always-on daemon is this product's resident
+updater: on a jittered period it resolves its channel, and when the channel
+holds something newer it stages that release beside the live one. Nothing is
+prompted and nothing downloaded ever runs — applying is a separate act at a
+launch, behind a stub that swaps trees by rename and keeps the outgoing one as
+the rollback.
+
+### The staged swap
+
+- A stub launcher owns the installation directory and applies a verified staged
+  tree by rename before starting the client. A swap that cannot complete
+  restores the live tree and does not destroy the rollback.
+- The swap never moves the client's path, which is how macOS loses TCC grants.
+- macOS applies from the daemon rather than at a launch, because a `.app` has no
+  stub to run first. The bundle exchange is one syscall, licensed by measuring a
+  program actually running inside the bundle rather than by assuming.
+- Every release now carries the tree an updater consumes, alongside the
+  installer a person runs once. A release with the first and not the second can
+  be installed but never updated from.
+
+### The daemon stages continuously
+
+- Channel checks are jittered, so a fleet started together does not stay
+  together.
+- What the machine knows is a fact on disk, not a message: absence is absence, a
+  channel that could not be asked is never "up to date", and a staged release
+  remembers when it was staged.
+
+### Worlds ship on their own channel
+
+- A World declares what it is — name, artwork, accent, entry path — and names the
+  host facts it depends on as a version range rather than a fingerprint of the
+  whole build.
+- A World's head serves from a staged bundle over the embedded floor, so a World
+  updates without the engine updating.
+- Publishing a World is one act; promoting it is a pointer flip that rebuilds
+  nothing.
+
+### Fixes
+
+- The Windows installer is written where the caller asks for it. NSIS resolves a
+  relative `OutFile` against the script's directory, so the release job compiled
+  a complete installer into `packaging\windows\` while looking for it in `dist\`
+  and reported that success as "makensis produced no installer". Because the
+  attach step ran after the installer step, this also kept the Windows release
+  tree off every release.
+- CI builds the binaries its tests spawn before the unit tests rather than
+  between them, so the macOS bundle measurement runs instead of panicking for
+  want of its subject.
+- The coverage manifest is a Linux artifact and now says so. macOS lists eight
+  `cfg(target_os = "macos")` ids Linux does not, so regenerating there is
+  refused outright rather than rejected later as an unexplained diff.
+
 ## v0.8.2 — the Windows package follows Flutter's bundle
 
 > **Upgrading:** Windows users should install v0.8.2. The v0.8.1 Linux bundle

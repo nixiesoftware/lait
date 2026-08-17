@@ -267,3 +267,112 @@ pub fn bundled_client_packages() -> WorldClientRegistry {
 pub fn implementation_id() -> [u8; 32] {
     issues_app::lifecycle::implementation_id()
 }
+
+/// This build's own declaration for one of its Worlds, as a publisher would
+/// write it — plus the artwork files that go beside it in the bundle.
+///
+/// The same shape a fetched World ships in `world.json`, constructed from the
+/// consts a compiled-in World declares. One type, two sources: a World this
+/// build hosts and a World fetched from a feed must be the same thing to
+/// everything downstream, or the compiled-in one quietly becomes the only
+/// first-class kind.
+///
+/// `None` when this build does not host the World asked for.
+pub fn world_declaration(
+    world: &str,
+    version: &str,
+) -> Option<(
+    world_interface::manifest::WorldManifest,
+    Vec<(String, &'static [u8])>,
+)> {
+    let registry = bundled_client_packages();
+    let id = replica::body::WorldId::parse(world)?;
+    let package = registry.package_for_world(&id)?;
+    let display = package.display();
+
+    let mut art: Vec<(String, &'static [u8])> = Vec::new();
+    let mut named = |kind: &str, bytes: Option<&'static [u8]>| {
+        let bytes = bytes?;
+        let path = format!("art/{kind}.png");
+        art.push((path.clone(), bytes));
+        Some(path)
+    };
+    let mark = named("mark", display.mark());
+    let hero = named("hero", display.hero());
+
+    // What this World actually depends on, named: the control plane its head
+    // reaches the host through, and its own shapes. Not a fingerprint of the
+    // whole build — a range over the two facts that would break it.
+    let mut requires = vec![world_interface::manifest::Requirement {
+        name: crate::update::facts::CONTROL.to_string(),
+        range: format!(
+            ">={}, <{}",
+            crate::control::CONTROL_PROTOCOL_VERSION,
+            crate::control::CONTROL_PROTOCOL_VERSION + 1
+        ),
+    }];
+    if let Some((_, _, schema)) = bundled_world_surfaces()
+        .into_iter()
+        .find(|(named, _, _)| named == world)
+    {
+        requires.push(world_interface::manifest::Requirement {
+            name: format!("lait.world.{world}.schema"),
+            range: format!("={schema}"),
+        });
+    }
+
+    // A World that draws nothing in a browser declares no launch entry, which
+    // is the honest statement rather than an omission.
+    let launch = display
+        .entry_path()
+        .map(|path| world_interface::manifest::Launch {
+            id: "app".to_string(),
+            present: world_interface::manifest::Present::Primary,
+            when: None,
+            target: world_interface::manifest::Target::Web {
+                path: path.to_string(),
+            },
+        })
+        .into_iter()
+        .collect();
+
+    Some((
+        world_interface::manifest::WorldManifest {
+            format: world_interface::manifest::FORMAT,
+            id: world.to_string(),
+            version: version.to_string(),
+            name: Some(display.name().to_string()),
+            mark,
+            hero,
+            accent: display.accent(),
+            requires,
+            launch,
+        },
+        art,
+    ))
+}
+
+/// Every World this build hosts: its id, the reviewed implementation it runs,
+/// and the DTO schema version its web head decodes.
+///
+/// One more thing only a composition root can answer, and it exists so the
+/// runtime version (`update::runtime`) can fingerprint what a World's web head
+/// could break against *without any other file naming a product* — the
+/// invariant `tests/it/product_independence.rs` enforces, which is what caught
+/// the first version of this: `update::runtime` reached for
+/// `issues::dto::SCHEMA_VERSION` directly and made itself the second file in
+/// `src/**` that knows a product's name.
+pub fn bundled_world_surfaces() -> Vec<(String, [u8; 32], u32)> {
+    vec![
+        (
+            PRODUCT_WORLD.to_string(),
+            implementation_id(),
+            issues::dto::SCHEMA_VERSION,
+        ),
+        (
+            signage::contract::world_id().as_str().to_string(),
+            signage_app::implementation_id(),
+            signage::contract::PROGRAM_SCHEMA_VERSION,
+        ),
+    ]
+}

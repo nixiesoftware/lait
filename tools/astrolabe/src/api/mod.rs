@@ -143,6 +143,31 @@ pub struct LibraryRow {
     /// reachable in. `None` until the book has been read — which is not the
     /// same as a World nobody in the book is addressed near.
     pub people: Option<Vec<WorldPersonRow>>,
+    /// What this machine last learned about the World's own channel. `None`
+    /// when nothing has ever been checked — which is not "up to date", and
+    /// draws exactly what this row drew before any of it existed.
+    pub update: Option<WorldUpdateRow>,
+}
+
+/// A World's channel, as this machine last found it.
+///
+/// Separate from the row's compiled-in fields because the two are different
+/// kinds of fact: the list is the install list and cannot go stale, this is
+/// measured and can. Keeping them apart is what stops the Library becoming a
+/// surface that probes to draw itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldUpdateRow {
+    /// The bundle version serving now. `None` is the embedded floor.
+    pub serving: Option<String>,
+    /// The version the channel named when it was last asked.
+    pub available: Option<String>,
+    /// The channel holds a bundle this machine is not serving and this build
+    /// can run. The only state that turns `Open` into `Update`.
+    pub behind: bool,
+    /// A newer bundle exists that this build cannot run, each unmet
+    /// requirement named. Shown, never offered — pressing an update that
+    /// would be refused on arrival teaches a person to distrust the control.
+    pub unmet: Option<Vec<String>>,
 }
 
 /// The artwork one World ships, as PNG bytes compiled into this build.
@@ -597,6 +622,14 @@ pub enum ActionRequest {
     Open {
         entry_path: String,
     },
+    /// Fetch this World's newest bundle now rather than at the next period.
+    ///
+    /// The daemon stages on a period measured in hours; a World is published
+    /// in seconds. This is the control that closes that gap, and it is the
+    /// whole reason a Library row ever draws an update affordance.
+    UpdateWorld {
+        world: String,
+    },
     StartDevice {
         id: String,
     },
@@ -760,6 +793,7 @@ impl ActionRequest {
     fn into_action(self) -> Result<Action, String> {
         Ok(match self {
             Self::Refresh => Action::Refresh,
+            Self::UpdateWorld { world } => Action::UpdateWorld { world },
             Self::Open { entry_path } => Action::OpenWorld { entry_path },
             Self::StartDevice { id } => Action::StartDevice(id),
             Self::StopDevice { id } => Action::StopDevice(id),
@@ -1231,6 +1265,14 @@ fn project(app: &App) -> ClientView {
                     tagline: entry.tagline.clone(),
                     accent: entry.accent,
                     people: world_people(app.book(), app.presence(), &entry.world),
+                    update: app
+                        .world_standing(&entry.world)
+                        .map(|standing| WorldUpdateRow {
+                            serving: standing.serving.clone(),
+                            available: standing.available.clone(),
+                            behind: standing.behind,
+                            unmet: standing.unmet.clone(),
+                        }),
                 })
                 .collect()
         }),

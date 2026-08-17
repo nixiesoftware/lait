@@ -28,7 +28,7 @@ use lait_workbench::{
 use crate::client::book::BookSnapshot;
 use crate::client::heads::McpBindingOutcome;
 use crate::client::host::HostContext;
-use crate::client::library::{LaunchTicket, LibraryEntry};
+use crate::client::library::{LaunchTicket, LibraryEntry, WorldStanding};
 use crate::client::space::SpaceView;
 use crate::client::storage::{StorageFacts, TransferFacts};
 use crate::client::ClientError;
@@ -43,6 +43,10 @@ pub struct App {
     /// which is *loading*, and is not the same as a machine with nothing on it.
     snapshot: Option<WorkbenchSnapshot>,
     library: Option<Vec<LibraryEntry>>,
+    /// What the daemon has learned about each World's channel, keyed by World
+    /// id. A World absent from this map has never been checked — which is not
+    /// "up to date", and draws no update affordance at all.
+    world_standings: BTreeMap<String, WorldStanding>,
     /// What each Space is holding. Empty until an engine read supplies it —
     /// and empty is drawn as "no Spaces", not as "zero bytes", because those
     /// are different claims.
@@ -152,6 +156,7 @@ impl App {
         match update {
             Update::Snapshot(snapshot) => self.absorb(*snapshot),
             Update::Library(entries) => self.absorb_library(entries),
+            Update::WorldStandings(standings) => self.absorb_world_standings(standings),
             Update::Storage(facts) => self.absorb_storage(facts, Vec::new()),
             Update::Heads(heads) => self.heads = heads,
             Update::Context(context) => self.absorb_context(*context),
@@ -282,6 +287,18 @@ impl App {
 
     pub fn absorb_library(&mut self, library: Vec<LibraryEntry>) {
         self.library = Some(library);
+    }
+
+    /// Replace wholesale rather than merge: a World that has dropped out of
+    /// the map has stopped being known, and merging would keep drawing an
+    /// update offer from a reading nothing stands behind any more.
+    pub fn absorb_world_standings(&mut self, standings: BTreeMap<String, WorldStanding>) {
+        self.world_standings = standings;
+    }
+
+    /// What is known about one World's channel, if anything is.
+    pub fn world_standing(&self, world: &str) -> Option<&WorldStanding> {
+        self.world_standings.get(world)
     }
 
     pub fn absorb_storage(&mut self, storage: Vec<StorageFacts>, transfers: Vec<TransferFacts>) {

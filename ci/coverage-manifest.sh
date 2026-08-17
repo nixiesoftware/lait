@@ -30,17 +30,18 @@
 #             teeth: a deleted test is a deleted line, visible in review, and
 #             no count arithmetic can hide it.
 #
-# ## The manifest is a UNIX artifact
+# ## The manifest is a LINUX artifact
 #
 # Some tests do not exist on every platform — `#[cfg(unix)]` covers four of
 # them here, including the one that checks a Unix socket path fits in
-# sun_path. So "every test id in the workspace" is a different set on Windows
-# than on Linux, and a manifest regenerated on the wrong OS reports coverage
-# loss that is really just cfg.
+# sun_path, and `#[cfg(target_os = "macos")]` covers eight more in the bundle
+# exchange. So "every test id in the workspace" is a different set on each OS,
+# and a manifest regenerated on the wrong one reports a difference that is
+# really just cfg.
 #
-# Any unix host is canonical: the distinction is `cfg(unix)`, which macOS
-# satisfies, so Linux and Darwin list the same ids. Windows is refused rather
-# than silently wrong.
+# Linux is canonical because Linux is where the check runs. Windows and macOS
+# are both refused rather than silently wrong — Windows would drop the
+# cfg(unix) ids, macOS would add the cfg(target_os = "macos") ones.
 # When CI finds the manifest stale it uploads the corrected file as an
 # artifact, so a developer on another OS fixes it by downloading rather than by
 # finding a Linux box.
@@ -62,16 +63,26 @@ set -euo pipefail
 MANIFEST="ci/coverage-manifest.txt"
 MODE="${1:---check}"
 
-# The platforms that produce the canonical set. The distinction that matters is
-# `cfg(unix)`, not Linux specifically — macOS satisfies it, so it lists exactly
-# the same test ids. (The two `cfg(target_os = "linux")` blocks in the suite sit
-# inside `peak_rss_bytes()` helper bodies, not around `#[test]` items, so they
-# move no ids either.) Verified by generating on Darwin and diffing: the only
-# deltas were genuinely added tests. Windows is the platform that really does
-# drop `cfg(unix)` tests, and it stays refused.
+# Linux produces the canonical set, and it is the only platform that may.
+#
+# This used to say any unix host would do, on the reasoning that the
+# distinction was `cfg(unix)` and macOS satisfies it. That was true and stopped
+# being true: the staged-swap work added `cfg(target_os = "macos")` test
+# modules — the bundle exchange in `astrolabe-stub`, and the daemon's own
+# bundle check in `lait update::watch` — so Darwin now lists eight ids Linux
+# does not. Regenerating there writes a superset that the CI check, which runs
+# on Linux, rejects.
+#
+# Both refusals below are the same rule seen from two sides: generate where the
+# check runs. Windows drops `cfg(unix)` tests and would record their absence as
+# coverage loss; Darwin adds `cfg(target_os = "macos")` tests and would record
+# their presence as coverage the check cannot confirm.
+#
+# The cost is that those eight macOS-only tests are not in the manifest, so
+# deleting one is not caught here. The macOS platform job still runs them.
 case "$(uname -s)" in
-  Linux | Darwin) CANONICAL=1 ;;
-  *)              CANONICAL=0 ;;
+  Linux) CANONICAL=1 ;;
+  *)     CANONICAL=0 ;;
 esac
 
 # The named release gates. Each is a claim the docket makes about the
@@ -178,9 +189,11 @@ generate() {
 case "$MODE" in
   --update)
     if [ "$CANONICAL" -ne 1 ]; then
-      echo "::error::the coverage manifest is generated on a unix host — see the header." >&2
-      echo "  This machine is $(uname -s), where cfg(unix) tests do not exist, so" >&2
-      echo "  regenerating here would record their absence as coverage loss." >&2
+      echo "::error::the coverage manifest is generated on Linux — see the header." >&2
+      echo "  This machine is $(uname -s), which does not list the same test ids:" >&2
+      echo "  Windows drops the cfg(unix) tests, and macOS adds the" >&2
+      echo "  cfg(target_os = \"macos\") ones. Either way the file written here is" >&2
+      echo "  not the file the check compares against." >&2
       echo "  Push and let CI produce the corrected file: the 'coverage manifest'" >&2
       echo "  job uploads it as an artifact when it finds a mismatch." >&2
       exit 1
@@ -197,7 +210,9 @@ case "$MODE" in
     else
       if [ "$CANONICAL" -ne 1 ]; then
         echo "::notice::this is $(uname -s); the manifest is generated on Linux, so a" >&2
-        echo "  difference of only cfg(unix) tests is expected here and not a failure." >&2
+        echo "  difference of only platform-gated tests — cfg(unix) absent on Windows," >&2
+        echo "  cfg(target_os = \"macos\") extra on Darwin — is expected here and not a" >&2
+        echo "  failure." >&2
       fi
       # Leave the .actual file in place: the CI job uploads it so the fix is a
       # download rather than a hunt for a Linux machine.

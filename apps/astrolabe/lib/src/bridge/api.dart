@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -71,6 +71,15 @@ sealed class ActionRequest with _$ActionRequest {
   const factory ActionRequest.open({
     required String entryPath,
   }) = ActionRequest_Open;
+
+  /// Fetch this World's newest bundle now rather than at the next period.
+  ///
+  /// The daemon stages on a period measured in hours; a World is published
+  /// in seconds. This is the control that closes that gap, and it is the
+  /// whole reason a Library row ever draws an update affordance.
+  const factory ActionRequest.updateWorld({
+    required String world,
+  }) = ActionRequest_UpdateWorld;
   const factory ActionRequest.startDevice({
     required String id,
   }) = ActionRequest_StartDevice;
@@ -1101,6 +1110,11 @@ class LibraryRow {
   /// same as a World nobody in the book is addressed near.
   final List<WorldPersonRow>? people;
 
+  /// What this machine last learned about the World's own channel. `None`
+  /// when nothing has ever been checked — which is not "up to date", and
+  /// draws exactly what this row drew before any of it existed.
+  final WorldUpdateRow? update;
+
   const LibraryRow({
     required this.key,
     required this.worldMount,
@@ -1110,6 +1124,7 @@ class LibraryRow {
     this.tagline,
     this.accent,
     this.people,
+    this.update,
   });
 
   @override
@@ -1121,7 +1136,8 @@ class LibraryRow {
       version.hashCode ^
       tagline.hashCode ^
       accent.hashCode ^
-      people.hashCode;
+      people.hashCode ^
+      update.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1135,7 +1151,8 @@ class LibraryRow {
           version == other.version &&
           tagline == other.tagline &&
           accent == other.accent &&
-          people == other.people;
+          people == other.people &&
+          update == other.update;
 }
 
 /// What authoring an MCP binding produced. Bindings, not processes.
@@ -1673,4 +1690,48 @@ class WorldPersonRow {
           presence == other.presence &&
           agent == other.agent &&
           here == other.here;
+}
+
+/// A World's channel, as this machine last found it.
+///
+/// Separate from the row's compiled-in fields because the two are different
+/// kinds of fact: the list is the install list and cannot go stale, this is
+/// measured and can. Keeping them apart is what stops the Library becoming a
+/// surface that probes to draw itself.
+class WorldUpdateRow {
+  /// The bundle version serving now. `None` is the embedded floor.
+  final String? serving;
+
+  /// The version the channel named when it was last asked.
+  final String? available;
+
+  /// The channel holds a bundle this machine is not serving and this build
+  /// can run. The only state that turns `Open` into `Update`.
+  final bool behind;
+
+  /// A newer bundle exists that this build cannot run, each unmet
+  /// requirement named. Shown, never offered — pressing an update that
+  /// would be refused on arrival teaches a person to distrust the control.
+  final List<String>? unmet;
+
+  const WorldUpdateRow({
+    this.serving,
+    this.available,
+    required this.behind,
+    this.unmet,
+  });
+
+  @override
+  int get hashCode =>
+      serving.hashCode ^ available.hashCode ^ behind.hashCode ^ unmet.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WorldUpdateRow &&
+          runtimeType == other.runtimeType &&
+          serving == other.serving &&
+          available == other.available &&
+          behind == other.behind &&
+          unmet == other.unmet;
 }

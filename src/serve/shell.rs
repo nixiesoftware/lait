@@ -128,8 +128,19 @@ fn content_type(path: &str) -> &'static str {
 ///
 /// Documents go through [`compose`]; everything else is handed back as the exact
 /// bytes that were embedded.
-pub fn asset(path: &str, overlay: bool) -> Response {
+pub fn asset(path: &str, overlay: bool, head: &crate::serve::head::Source) -> Response {
     let path = path.trim_start_matches('/');
+    // An activated bundle answers first; the embedded tree is the floor
+    // beneath it, and a path neither holds is a route for the app to resolve.
+    if let Some(bytes) = head.read(path) {
+        let mime = content_type(path);
+        let body: Cow<'static, [u8]> = if mime == HTML && overlay {
+            Cow::Owned(compose(&bytes).into_owned())
+        } else {
+            Cow::Owned(bytes)
+        };
+        return ([(header::CONTENT_TYPE, mime)], body).into_response();
+    }
     if let Some(file) = ASSETS.get_file(path) {
         let mime = content_type(path);
         let body = if mime == HTML && overlay {
@@ -139,11 +150,19 @@ pub fn asset(path: &str, overlay: bool) -> Response {
         };
         return ([(header::CONTENT_TYPE, mime)], body).into_response();
     }
-    index(overlay)
+    index(overlay, head)
 }
 
-/// The SPA entry.
-pub fn index(overlay: bool) -> Response {
+/// The SPA entry, from the activated bundle when it carries one.
+pub fn index(overlay: bool, head: &crate::serve::head::Source) -> Response {
+    if let Some(bytes) = head.read("index.html") {
+        let body: Cow<'static, [u8]> = if overlay {
+            Cow::Owned(compose(&bytes).into_owned())
+        } else {
+            Cow::Owned(bytes)
+        };
+        return ([(header::CONTENT_TYPE, HTML)], body).into_response();
+    }
     match ASSETS.get_file("index.html") {
         Some(f) => {
             let body = if overlay {
@@ -588,7 +607,7 @@ mod composition {
         // browser refuses — both of them silent until something renders.
         for path in ["app.js", "index.css", "inter-latin-wght-normal.woff2"] {
             let embedded = ASSETS.get_file(path).expect(path).contents();
-            let served = body_of(asset(path, true)).await;
+            let served = body_of(asset(path, true, &crate::serve::head::Source::embedded())).await;
             assert_eq!(
                 served,
                 embedded,
@@ -606,8 +625,13 @@ mod composition {
     #[tokio::test]
     async fn a_head_nobody_launched_from_the_client_serves_no_overlay() {
         for served in [
-            body_of(index(false)).await,
-            body_of(asset("/index.html", false)).await,
+            body_of(index(false, &crate::serve::head::Source::embedded())).await,
+            body_of(asset(
+                "/index.html",
+                false,
+                &crate::serve::head::Source::embedded(),
+            ))
+            .await,
         ] {
             assert!(
                 !contains(&served, OVERLAY_MARKER.as_bytes()),
@@ -618,7 +642,10 @@ mod composition {
         // And what it serves is the embedded document, byte for byte — the
         // ungated path is not a second, subtly different composition.
         let embedded = ASSETS.get_file("index.html").expect("index").contents();
-        assert_eq!(body_of(index(false)).await, embedded);
+        assert_eq!(
+            body_of(index(false, &crate::serve::head::Source::embedded())).await,
+            embedded
+        );
     }
 
     #[tokio::test]
@@ -627,8 +654,13 @@ mod composition {
         // are separate functions, and a seam added to one of them is a seam a
         // person finds by opening the app the other way.
         for served in [
-            body_of(index(true)).await,
-            body_of(asset("/index.html", true)).await,
+            body_of(index(true, &crate::serve::head::Source::embedded())).await,
+            body_of(asset(
+                "/index.html",
+                true,
+                &crate::serve::head::Source::embedded(),
+            ))
+            .await,
         ] {
             assert!(
                 contains(&served, OVERLAY_MARKER.as_bytes()),

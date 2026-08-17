@@ -36,6 +36,8 @@ src/composition.rs	observation	D
 src/composition.rs	package	D
 src/composition.rs	program_schema	D
 src/composition.rs	ring_state	D
+src/composition.rs	signage	D
+src/composition.rs	signage_app	D
 src/composition.rs	status	D
 src/composition.rs	verify_spec	D
 src/composition.rs	world_id	D

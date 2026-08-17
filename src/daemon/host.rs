@@ -988,6 +988,14 @@ impl Daemon {
     }
 
     async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
+        // Staging runs beside whatever else this daemon serves, including in
+        // the reduced modes below: an embedded or display-less daemon is
+        // still the resident updater for its installation. It is spawned
+        // rather than selected on because it never completes on its own and
+        // never fails the daemon — the worst a check can do is leave the
+        // standing unchanged.
+        let staging = self.spawn_staging();
+
         // Display coordination is withheld from a daemon that does not own
         // the machine's posture: a guest in somebody's process (see
         // [`embed_in_host_process`]) and a daemon told `LAIT_DISPLAY=off`
@@ -995,14 +1003,16 @@ impl Daemon {
         // display control-plane requests still answer (status reads state,
         // not the listener); only the LAN-facing HTTPS service is absent.
         if embedded() || !display_hosting() {
-            return self.endpoint.clone().serve(home).await;
+            let served = self.endpoint.clone().serve(home).await;
+            Self::join_staging(staging).await;
+            return served;
         }
         let display = self.display.clone();
         let display_stop = self.endpoint.subscribe_stop();
         let endpoint = self.endpoint.clone();
         let mut display_service = Box::pin(async move { display.serve(display_stop).await });
         let mut control_service = Box::pin(async move { endpoint.serve(home).await });
-        tokio::select! {
+        let outcome = tokio::select! {
             endpoint_result = &mut control_service => {
                 self.endpoint.begin_stop();
                 if let Err(error) = display_service.await {
@@ -1023,6 +1033,39 @@ impl Daemon {
                     Err(error) => Err(error).context("serve daemon display HTTPS"),
                 }
             }
+        };
+        Self::join_staging(staging).await;
+        outcome
+    }
+
+    /// Start the continuous staging watcher, when this daemon runs inside a
+    /// stub-managed installation.
+    ///
+    /// `None` everywhere else — a developer's build tree and a standalone
+    /// `lait` have nowhere to stage to, and inventing a root would drop a
+    /// client tree beside somebody's `target/`. The watcher stops with the
+    /// endpoint, on the same signal every other service here uses.
+    fn spawn_staging(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let root = crate::update::watch::install_root()?;
+        let identity = self.router.catalog().identity().to_path_buf();
+        let stop = self.endpoint.subscribe_stop();
+        Some(tokio::spawn(crate::update::watch::serve(
+            identity, root, stop,
+        )))
+    }
+
+    /// Wait for the staging watcher to notice the stop signal, bounded so a
+    /// check in flight can never hold a shutdown open.
+    async fn join_staging(staging: Option<tokio::task::JoinHandle<()>>) {
+        let Some(staging) = staging else {
+            return;
+        };
+        match tokio::time::timeout(Duration::from_secs(5), staging).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the staging watcher ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the staging watcher did not finish in time; leaving it to the process exit"
+            ),
         }
     }
 }
