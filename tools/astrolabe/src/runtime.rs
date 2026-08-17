@@ -191,6 +191,8 @@ pub enum Action {
     DisplayAssignmentPut(Box<DisplayAssignmentInput>),
     DisplayAssignmentRevoke(String),
     DisplayDeviceRevoke(String),
+    /// Add a passphrase as a second unlock path for the identifier key.
+    DisplayIdentifierAdmitPassphrase(String),
     Exit(ExitRequest),
 }
 
@@ -257,6 +259,7 @@ impl Action {
                 format!("display.assignment.revoke:{assignment}")
             }
             Self::DisplayDeviceRevoke(device) => format!("display.device.revoke:{device}"),
+            Self::DisplayIdentifierAdmitPassphrase(_) => "display.identifier.admit".into(),
             Self::Exit(_) => "exit".into(),
         }
     }
@@ -326,6 +329,14 @@ impl Action {
                 format!("revoke display assignment {assignment}")
             }
             Self::DisplayDeviceRevoke(device) => format!("revoke display device {device}"),
+            // Deliberately says nothing about the passphrase itself: this
+            // string reaches a notice, a log line and a failure record.
+            Self::DisplayIdentifierAdmitPassphrase(_) => {
+                "add a passphrase to the identifier key".into()
+            }
+            Self::DisplayIdentifierAdmitPassphrase(_) => {
+                "add a passphrase to the identifier key".into()
+            }
             Self::Exit(ExitRequest::GoOffline) => "go offline and exit".into(),
             Self::Exit(ExitRequest::StayOnline) => "close and stay online".into(),
         }
@@ -931,6 +942,14 @@ impl Worker {
             Action::DisplayDeviceRevoke(device) => {
                 client.display_device_revoke(device.clone()).await?;
                 Ok(Outcome::Said(format!("revoked display device {device}")))
+            }
+            Action::DisplayIdentifierAdmitPassphrase(passphrase) => {
+                client
+                    .display_identifier_admit_passphrase(passphrase.clone())
+                    .await?;
+                Ok(Outcome::Said(
+                    "the identifier key now opens with a passphrase too".into(),
+                ))
             }
             Action::EnterPresentation => {
                 self.set_presenting(None);

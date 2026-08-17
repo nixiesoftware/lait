@@ -156,6 +156,24 @@ impl Client {
         }
     }
 
+    /// Add a passphrase as a second way into the coordinator's identifier key.
+    ///
+    /// The passphrase crosses to the daemon and is never held here: it wraps a
+    /// data-encryption key on the other side and is forgotten. Nothing in this
+    /// client keeps a copy to be helpful with later.
+    pub async fn display_identifier_admit_passphrase(
+        &self,
+        passphrase: String,
+    ) -> ClientResult<()> {
+        if passphrase.trim().is_empty() {
+            return Err(ClientError::invalid(
+                "a passphrase is required to add an unlock path",
+            ));
+        }
+        self.display_ok(Request::DisplayIdentifierAdmitPassphrase { passphrase })
+            .await
+    }
+
     pub async fn display_assignment_revoke(&self, assignment: String) -> ClientResult<()> {
         self.display_ok(Request::DisplayAssignmentRevoke { assignment })
             .await

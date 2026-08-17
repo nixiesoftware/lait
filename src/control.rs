@@ -562,6 +562,18 @@ pub enum Request {
     DisplayDeviceRevoke {
         device: String,
     },
+    /// Add a passphrase as a second way into this coordinator's identifier key.
+    ///
+    /// The first slot is sealed to the daemon's own device, which survives an
+    /// operating-system profile but not the loss of the identity itself. A
+    /// passphrase is the one unlock path that depends on neither, which is what
+    /// makes it the honest second slot rather than a third copy of the first.
+    ///
+    /// The passphrase is never stored — it wraps the data-encryption key and is
+    /// forgotten. Losing it costs this path and nothing else.
+    DisplayIdentifierAdmitPassphrase {
+        passphrase: String,
+    },
     /// Render one exact surface for a screen that is a **member of the Space**.
     ///
     /// Distinct from [`Request::DisplayAssignmentPut`] in what it does not do:
@@ -1630,6 +1642,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
         | Request::DisplayPresent { .. }
+        | Request::DisplayIdentifierAdmitPassphrase { .. }
         | Request::SeedAdd { .. }
         | Request::SeedList
         | Request::SeedRemove { .. }
@@ -1709,6 +1722,7 @@ pub fn representative_requests() -> Vec<Request> {
         },
         Request::DisplayAssignmentRevoke { assignment: s() },
         Request::DisplayDeviceRevoke { device: s() },
+        Request::DisplayIdentifierAdmitPassphrase { passphrase: s() },
         Request::DisplayPresent {
             orbit: s(),
             world: s(),

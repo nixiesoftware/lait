@@ -72,6 +72,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
+        | Request::DisplayIdentifierAdmitPassphrase { .. }
         | Request::AgentProvision { .. }
         | Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
@@ -262,6 +263,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
         | Request::DisplayPresent { .. }
+        | Request::DisplayIdentifierAdmitPassphrase { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
         | Request::Members

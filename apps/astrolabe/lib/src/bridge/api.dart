@@ -208,6 +208,16 @@ sealed class ActionRequest with _$ActionRequest {
     required String device,
   }) = ActionRequest_DisplayDeviceRevoke;
 
+  /// Add a passphrase as a second way into the coordinator's identifier key.
+  ///
+  /// The first slot is sealed to this daemon's device, which survives an
+  /// operating-system profile but not the loss of the identity. A passphrase
+  /// depends on neither, which is what makes it a second way in rather than a
+  /// second copy of the first.
+  const factory ActionRequest.displayIdentifierAdmitPassphrase({
+    required String passphrase,
+  }) = ActionRequest_DisplayIdentifierAdmitPassphrase;
+
   /// Make this machine a screen.
   ///
   /// Pressing the control is the whole of the consent — there is no dialog

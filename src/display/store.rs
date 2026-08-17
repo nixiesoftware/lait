@@ -1154,6 +1154,51 @@ mod tests {
     }
 
     #[test]
+    fn a_passphrase_opens_the_key_when_the_identity_is_gone_too() {
+        let root = temp();
+        let store = CoordinatorStore::open(&root, [7; 32], &custodian()).unwrap();
+        store
+            .admit_identifier_slot(&custodian().unlock, &fast_passphrase("remembered"))
+            .unwrap();
+
+        // The device slot survives an operating-system profile and not the loss
+        // of the identity itself. This is the path that depends on neither,
+        // which is what makes it a second way in rather than a second copy of
+        // the first.
+        let restored = CoordinatorStore::open(
+            &root,
+            [9; 32],
+            &Custodian {
+                device: mechanics::actor::device_from_seed(&[123; 32]),
+                unlock: custody::UnlockKey::Passphrase("remembered".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(restored.identifier_key().unwrap(), [7; 32]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn admitting_a_second_passphrase_is_refused_rather_than_stacked() {
+        let root = temp();
+        let store = CoordinatorStore::open(&root, [7; 32], &custodian()).unwrap();
+        store
+            .admit_identifier_slot(&custodian().unlock, &fast_passphrase("first"))
+            .unwrap();
+
+        // Two passphrase slots are two things to lose and one thing to
+        // remember. The slot list is a set of distinct answers to "who can open
+        // this", not a history of attempts.
+        let again = store.admit_identifier_slot(&custodian().unlock, &fast_passphrase("second"));
+        assert!(again.is_err(), "a second passphrase slot was stacked");
+        assert_eq!(
+            store.identifier_custody().unwrap().slots,
+            vec!["recovery-key".to_string(), "passphrase".to_string()]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn custody_status_counts_paths_without_yielding_one() {
         let root = temp();
         let store = CoordinatorStore::open(&root, [7; 32], &custodian()).unwrap();

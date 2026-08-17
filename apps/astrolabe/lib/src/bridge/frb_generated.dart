@@ -383,8 +383,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           device: dco_decode_String(raw[1]),
         );
       case 29:
-        return ActionRequest_EnterPresentation();
+        return ActionRequest_DisplayIdentifierAdmitPassphrase(
+          passphrase: dco_decode_String(raw[1]),
+        );
       case 30:
+        return ActionRequest_EnterPresentation();
+      case 31:
         return ActionRequest_PresentHere(
           orbit: dco_decode_String(raw[1]),
           world: dco_decode_String(raw[2]),
@@ -392,9 +396,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           input: dco_decode_String(raw[4]),
           title: dco_decode_String(raw[5]),
         );
-      case 31:
-        return ActionRequest_PresentRefresh();
       case 32:
+        return ActionRequest_PresentRefresh();
+      case 33:
         return ActionRequest_LeavePresentation();
       default:
         throw Exception("unreachable");
@@ -1533,8 +1537,12 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
         var var_device = sse_decode_String(deserializer);
         return ActionRequest_DisplayDeviceRevoke(device: var_device);
       case 29:
-        return ActionRequest_EnterPresentation();
+        var var_passphrase = sse_decode_String(deserializer);
+        return ActionRequest_DisplayIdentifierAdmitPassphrase(
+            passphrase: var_passphrase);
       case 30:
+        return ActionRequest_EnterPresentation();
+      case 31:
         var var_orbit = sse_decode_String(deserializer);
         var var_world = sse_decode_String(deserializer);
         var var_surface = sse_decode_String(deserializer);
@@ -1546,9 +1554,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
             surface: var_surface,
             input: var_input,
             title: var_title);
-      case 31:
-        return ActionRequest_PresentRefresh();
       case 32:
+        return ActionRequest_PresentRefresh();
+      case 33:
         return ActionRequest_LeavePresentation();
       default:
         throw UnimplementedError('');
@@ -3011,8 +3019,13 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
       case ActionRequest_DisplayDeviceRevoke(device: final device):
         sse_encode_i_32(28, serializer);
         sse_encode_String(device, serializer);
-      case ActionRequest_EnterPresentation():
+      case ActionRequest_DisplayIdentifierAdmitPassphrase(
+          passphrase: final passphrase
+        ):
         sse_encode_i_32(29, serializer);
+        sse_encode_String(passphrase, serializer);
+      case ActionRequest_EnterPresentation():
+        sse_encode_i_32(30, serializer);
       case ActionRequest_PresentHere(
           orbit: final orbit,
           world: final world,
@@ -3020,16 +3033,16 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
           input: final input,
           title: final title
         ):
-        sse_encode_i_32(30, serializer);
+        sse_encode_i_32(31, serializer);
         sse_encode_String(orbit, serializer);
         sse_encode_String(world, serializer);
         sse_encode_String(surface, serializer);
         sse_encode_String(input, serializer);
         sse_encode_String(title, serializer);
       case ActionRequest_PresentRefresh():
-        sse_encode_i_32(31, serializer);
-      case ActionRequest_LeavePresentation():
         sse_encode_i_32(32, serializer);
+      case ActionRequest_LeavePresentation():
+        sse_encode_i_32(33, serializer);
     }
   }
 

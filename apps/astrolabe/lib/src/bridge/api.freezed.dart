@@ -84,6 +84,8 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     TResult Function(ActionRequest_DisplayDeviceRevoke value)?
         displayDeviceRevoke,
+    TResult Function(ActionRequest_DisplayIdentifierAdmitPassphrase value)?
+        displayIdentifierAdmitPassphrase,
     TResult Function(ActionRequest_EnterPresentation value)? enterPresentation,
     TResult Function(ActionRequest_PresentHere value)? presentHere,
     TResult Function(ActionRequest_PresentRefresh value)? presentRefresh,
@@ -154,6 +156,9 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase()
+          when displayIdentifierAdmitPassphrase != null:
+        return displayIdentifierAdmitPassphrase(_that);
       case ActionRequest_EnterPresentation() when enterPresentation != null:
         return enterPresentation(_that);
       case ActionRequest_PresentHere() when presentHere != null:
@@ -218,6 +223,9 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     required TResult Function(ActionRequest_DisplayDeviceRevoke value)
         displayDeviceRevoke,
+    required TResult Function(
+            ActionRequest_DisplayIdentifierAdmitPassphrase value)
+        displayIdentifierAdmitPassphrase,
     required TResult Function(ActionRequest_EnterPresentation value)
         enterPresentation,
     required TResult Function(ActionRequest_PresentHere value) presentHere,
@@ -286,6 +294,8 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke():
         return displayDeviceRevoke(_that);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase():
+        return displayIdentifierAdmitPassphrase(_that);
       case ActionRequest_EnterPresentation():
         return enterPresentation(_that);
       case ActionRequest_PresentHere():
@@ -345,6 +355,8 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     TResult? Function(ActionRequest_DisplayDeviceRevoke value)?
         displayDeviceRevoke,
+    TResult? Function(ActionRequest_DisplayIdentifierAdmitPassphrase value)?
+        displayIdentifierAdmitPassphrase,
     TResult? Function(ActionRequest_EnterPresentation value)? enterPresentation,
     TResult? Function(ActionRequest_PresentHere value)? presentHere,
     TResult? Function(ActionRequest_PresentRefresh value)? presentRefresh,
@@ -414,6 +426,9 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase()
+          when displayIdentifierAdmitPassphrase != null:
+        return displayIdentifierAdmitPassphrase(_that);
       case ActionRequest_EnterPresentation() when enterPresentation != null:
         return enterPresentation(_that);
       case ActionRequest_PresentHere() when presentHere != null:
@@ -485,6 +500,7 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     TResult Function(String assignment)? displayAssignmentRevoke,
     TResult Function(String device)? displayDeviceRevoke,
+    TResult Function(String passphrase)? displayIdentifierAdmitPassphrase,
     TResult Function()? enterPresentation,
     TResult Function(String orbit, String world, String surface, String input,
             String title)?
@@ -570,6 +586,9 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase()
+          when displayIdentifierAdmitPassphrase != null:
+        return displayIdentifierAdmitPassphrase(_that.passphrase);
       case ActionRequest_EnterPresentation() when enterPresentation != null:
         return enterPresentation();
       case ActionRequest_PresentHere() when presentHere != null:
@@ -651,6 +670,8 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     required TResult Function(String assignment) displayAssignmentRevoke,
     required TResult Function(String device) displayDeviceRevoke,
+    required TResult Function(String passphrase)
+        displayIdentifierAdmitPassphrase,
     required TResult Function() enterPresentation,
     required TResult Function(String orbit, String world, String surface,
             String input, String title)
@@ -731,6 +752,8 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke():
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase():
+        return displayIdentifierAdmitPassphrase(_that.passphrase);
       case ActionRequest_EnterPresentation():
         return enterPresentation();
       case ActionRequest_PresentHere():
@@ -801,6 +824,7 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     TResult? Function(String assignment)? displayAssignmentRevoke,
     TResult? Function(String device)? displayDeviceRevoke,
+    TResult? Function(String passphrase)? displayIdentifierAdmitPassphrase,
     TResult? Function()? enterPresentation,
     TResult? Function(String orbit, String world, String surface, String input,
             String title)?
@@ -885,6 +909,9 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase()
+          when displayIdentifierAdmitPassphrase != null:
+        return displayIdentifierAdmitPassphrase(_that.passphrase);
       case ActionRequest_EnterPresentation() when enterPresentation != null:
         return enterPresentation();
       case ActionRequest_PresentHere() when presentHere != null:
@@ -2940,6 +2967,78 @@ class _$ActionRequest_DisplayDeviceRevokeCopyWithImpl<$Res>
       device: null == device
           ? _self.device
           : device // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_DisplayIdentifierAdmitPassphrase extends ActionRequest {
+  const ActionRequest_DisplayIdentifierAdmitPassphrase(
+      {required this.passphrase})
+      : super._();
+
+  final String passphrase;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_DisplayIdentifierAdmitPassphraseCopyWith<
+          ActionRequest_DisplayIdentifierAdmitPassphrase>
+      get copyWith =>
+          _$ActionRequest_DisplayIdentifierAdmitPassphraseCopyWithImpl<
+              ActionRequest_DisplayIdentifierAdmitPassphrase>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_DisplayIdentifierAdmitPassphrase &&
+            (identical(other.passphrase, passphrase) ||
+                other.passphrase == passphrase));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, passphrase);
+
+  @override
+  String toString() {
+    return 'ActionRequest.displayIdentifierAdmitPassphrase(passphrase: $passphrase)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_DisplayIdentifierAdmitPassphraseCopyWith<
+    $Res> implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_DisplayIdentifierAdmitPassphraseCopyWith(
+          ActionRequest_DisplayIdentifierAdmitPassphrase value,
+          $Res Function(ActionRequest_DisplayIdentifierAdmitPassphrase) _then) =
+      _$ActionRequest_DisplayIdentifierAdmitPassphraseCopyWithImpl;
+  @useResult
+  $Res call({String passphrase});
+}
+
+/// @nodoc
+class _$ActionRequest_DisplayIdentifierAdmitPassphraseCopyWithImpl<$Res>
+    implements $ActionRequest_DisplayIdentifierAdmitPassphraseCopyWith<$Res> {
+  _$ActionRequest_DisplayIdentifierAdmitPassphraseCopyWithImpl(
+      this._self, this._then);
+
+  final ActionRequest_DisplayIdentifierAdmitPassphrase _self;
+  final $Res Function(ActionRequest_DisplayIdentifierAdmitPassphrase) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? passphrase = null,
+  }) {
+    return _then(ActionRequest_DisplayIdentifierAdmitPassphrase(
+      passphrase: null == passphrase
+          ? _self.passphrase
+          : passphrase // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }
