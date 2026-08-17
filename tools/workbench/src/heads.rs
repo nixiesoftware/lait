@@ -421,6 +421,40 @@ fn read_ready(stdout: std::process::ChildStdout) -> Result<Ready> {
     }
 }
 
+/// An `OwnedHead` whose process has already exited, for tests that need to drive
+/// the map rather than the launcher.
+///
+/// Here rather than in the test module that uses it because `OwnedHead`'s fields
+/// are private to this module — and they should stay that way. A `pub(crate)`
+/// constructor gated to tests is narrower than opening the struct.
+#[cfg(test)]
+pub(crate) fn dead_head_for_test(id: String) -> OwnedHead {
+    let mut child = Command::new(if cfg!(windows) { "cmd" } else { "true" });
+    if cfg!(windows) {
+        child.args(["/C", "exit 0"]);
+    }
+    own_process_group(&mut child);
+    let mut child = child.spawn().expect("spawn a short-lived process");
+    // Waited here so the handle is genuinely dead before the test polls it.
+    let _ = child.wait();
+    OwnedHead {
+        facts: HeadFacts {
+            id,
+            kind: HeadKind::Browser,
+            device: None,
+            orbit: None,
+            world: Some("issues".to_owned()),
+            identity: "test".to_owned(),
+            ownership: Ownership::Owned,
+            pid: None,
+            // The stale URL the defect used to hand back.
+            url: Some("http://127.0.0.1:1/?token=stale".to_owned()),
+            state: HeadState::Running,
+        },
+        child,
+    }
+}
+
 /// Ask a head to stop, on the channel a web page cannot reach.
 ///
 /// `false` means no ask was possible on this platform, so the caller should go

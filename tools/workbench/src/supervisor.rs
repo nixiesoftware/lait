@@ -1388,14 +1388,51 @@ impl Supervisor {
         world: &str,
     ) -> Result<HeadFacts, SupervisorError> {
         let id = identity_head_id(home, world);
-        // A head that is already up for this identity *is* the answer. Starting
-        // a second would work and would still be wrong: two heads mean two run
+        // A head that is already up for this identity *is* the answer. Starting a
+        // second would work and would still be wrong: two heads mean two run
         // credentials and two ports for one identity, and the second is the one
         // nothing later can find.
-        let running = lock_recovering(&self.inner.heads)
-            .get(&id)
-            .map(|head| head.facts().clone());
-        if let Some(existing) = running {
+        //
+        // **"Already up" is polled, not assumed, and that is a fix rather than a
+        // refinement.** Exited heads now stay listed so a person can see that the
+        // thing they opened died — and this lookup returned the entry
+        // unconditionally, so the two composed into: a World whose head crashed
+        // could never be opened again, because every `Open` handed back the dead
+        // head's stale URL. Two correct changes, one broken composition, and a
+        // symptom that would have read as "the browser opens on nothing".
+        //
+        // Three answers, because there are three states:
+        let existing = {
+            let mut heads = lock_recovering(&self.inner.heads);
+            // Polled once, and the answer decides all three branches.
+            let polled = heads
+                .get_mut(&id)
+                .map(|head| (head.refresh(), head.facts().clone()));
+            match polled {
+                None => None,
+                // Alive. Reuse it, which is the whole point of the key.
+                Some((crate::HeadState::Running, facts)) => Some(facts),
+                // Gone. Take it out so the spawn below replaces it. Safe precisely
+                // because it is gone: dropping the handle cannot orphan a process
+                // `try_wait` has already reaped.
+                Some((crate::HeadState::Exited { .. }, _)) => {
+                    heads.remove(&id);
+                    None
+                }
+                // Unknown: neither reuse nor replace. Reusing hands out a URL this
+                // process cannot vouch for; replacing might start a second head
+                // while the first is still serving. Saying so is the only honest
+                // answer, and it is the arm that exists because the state has three
+                // values rather than two.
+                Some((crate::HeadState::Unknown { why }, _)) => {
+                    return Err(SupervisorError::Internal(anyhow::anyhow!(
+                        "head '{id}' could not be polled, so it is neither reused nor \
+                         replaced: {why}"
+                    )))
+                }
+            }
+        };
+        if let Some(existing) = existing {
             return Ok(existing);
         }
         self.spawn_head(id, None, home.map(Path::to_path_buf), Some(world))
@@ -2249,6 +2286,62 @@ mod tests {
             supervisor.stop_head("somebody-elses-head").await,
             Err(SupervisorError::NotFound(_))
         ));
+    }
+
+    /// A World whose head died can be opened again.
+    ///
+    /// The regression this exists for was a composition, not a mistake in either
+    /// half. Exited heads stay listed so a person can see that the thing they
+    /// opened died; `start_identity_head` reused whatever was under the key. Put
+    /// together: every `Open` on a crashed World handed back the dead head's stale
+    /// URL, forever, and the symptom would have read as "the browser opens on
+    /// nothing".
+    ///
+    /// Driven through the map directly rather than by spawning a real `lait`: the
+    /// property under test is what the lookup does with a dead entry, and a test
+    /// that needed the binary would be testing the launcher instead.
+    #[tokio::test]
+    async fn a_world_whose_head_died_is_opened_again_rather_than_handed_a_dead_url() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+
+        let id = identity_head_id(Some(directory.path()), "issues");
+        lock_recovering(&supervisor.inner.heads)
+            .insert(id.clone(), crate::heads::dead_head_for_test(id.clone()));
+
+        // It reports as exited rather than running, which is the first half.
+        let listed = supervisor.list_heads();
+        assert_eq!(listed.len(), 1, "a dead head stays listed");
+        assert!(
+            matches!(listed[0].state, crate::HeadState::Exited { .. }),
+            "a dead head reports exited, not running: {:?}",
+            listed[0].state
+        );
+
+        // And the second half: asking for that World does not hand the dead entry
+        // back. It has no `lait` to spawn here, so the *shape* of the answer is what
+        // matters — anything but `Ok(dead facts)` proves the entry was not reused.
+        let asked = supervisor
+            .start_identity_head(Some(directory.path()), "issues")
+            .await;
+        match asked {
+            Ok(facts) => panic!(
+                "a dead head was handed back as the answer: {:?} / {:?}",
+                facts.state, facts.url
+            ),
+            Err(error) => {
+                let said = format!("{error}");
+                assert!(
+                    !said.contains("could not be polled"),
+                    "a dead head must be replaced, not reported unpollable: {said}"
+                );
+            }
+        }
+        assert!(
+            !lock_recovering(&supervisor.inner.heads).contains_key(&id),
+            "the dead entry must be taken out of the map so a spawn can replace it"
+        );
     }
 
     /// An owned device is never routed through the unowned path: a handle is
