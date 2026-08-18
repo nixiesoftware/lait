@@ -6310,13 +6310,13 @@ fn stage_comment(
     record: StoredComment,
     device: &str,
     ts: u64,
-) -> Result<(), Rejection> {
+) -> Result<String, Rejection> {
     let mut ev = event("commented", device, ts);
     ev.x = record.b.clone();
-    let (batch, _) = crate::record_store::write_comment(ctx, doc, record)?;
+    let (batch, id) = crate::record_store::write_comment(ctx, doc, record)?;
     staging.absorb_records(batch);
     push_event(staging, ctx, doc, &ev)?;
-    Ok(())
+    Ok(id)
 }
 
 /// Mint the durable anchors for a range-attached comment, or refuse.
@@ -7510,18 +7510,26 @@ fn stage_issue_tombstone(
     ))
 }
 
+/// Stage one comment, minting its id when the caller did not name one.
+///
+/// A client is allowed to choose the id -- that is how a retry lands on the
+/// same comment rather than a second one -- but it is not required to, and
+/// `write_comment` derives one from the request when it is absent, which is
+/// equally stable under replay. Refusing an unnamed comment made the
+/// optional field in the protocol a lie: every value it could take other
+/// than `Some` was rejected.
 fn stage_issue_comment(
     staging: &mut Staging,
     ctx: &Context<'_>,
     issue: &str,
-    id: String,
+    id: Option<String>,
     body: String,
     parent: Option<String>,
     ts: u64,
 ) -> Result<(String, Vec<u8>), Rejection> {
     let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
-    let (held, parent_node) = check_comment(ctx, &doc, &body, Some(&id), parent.as_deref())?;
-    stage_comment(
+    let (held, parent_node) = check_comment(ctx, &doc, &body, id.as_deref(), parent.as_deref())?;
+    let id = stage_comment(
         staging,
         ctx,
         &doc,
@@ -7530,7 +7538,7 @@ fn stage_issue_comment(
             a: ctx.principal().actor.to_string(),
             t: ts,
             b: body,
-            id: Some(id.clone()),
+            id,
             parent,
             at: None,
             node: None,
@@ -8255,7 +8263,7 @@ impl World for IssuesWorld {
                                 &mut staging,
                                 ctx,
                                 &issue,
-                                id,
+                                Some(id),
                                 body,
                                 parent,
                                 ts,
@@ -9240,7 +9248,6 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let id = id.ok_or(Rejection::InvalidRequest)?;
                 let (_id, demand) =
                     stage_issue_comment(&mut staging, ctx, &doc, id, body, parent, ts)?;
                 let _ = device;
@@ -11670,7 +11677,12 @@ impl World for IssuesWorld {
                     ctx,
                     "activity",
                     &doc,
-                    true,
+                    // Oldest first. An Issue's history is a trail read from
+                    // where it starts -- the first row is the creation and
+                    // carries sequence one. The newest-first ordering belongs
+                    // to the cross-Issue activity feed, which is a different
+                    // question: "what just happened", not "what happened".
+                    false,
                     &page,
                     Vec::new(),
                     [

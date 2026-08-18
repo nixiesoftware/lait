@@ -967,13 +967,18 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             ts,
         })
         .unwrap();
-    let view: IssueView = driver.query(&IssueQuery::View {
+    // Discussion is its own page; `View` is the bounded summary.
+    let detail: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
         doc: doc.clone(),
         me: None,
+        pages: contract::IssueDetailPages::default(),
     });
-    assert_eq!(view.comments.len(), 1);
-    assert_eq!(view.comments[0].body, "a comment");
-    assert_eq!(view.comments[0].author, my_actor());
+    let view = detail.issue;
+    let comments = detail.comments.items;
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].body, "a comment");
+    assert_eq!(comments[0].author, my_actor());
+    let _ = &view;
 
     // Links + graph: blocks with transitive open blockers.
     let ts = driver.ts();
@@ -1123,7 +1128,10 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     let events = history.items;
     assert!(events.len() >= 3);
     assert_eq!(events[0].kind, "created");
-    assert_eq!(events[0].seq, 1);
+    // No sequence number: that was the retired per-Issue append log, and a
+    // per-Issue counter is the coordination this store does not take. The
+    // record id is the stable coordinate, and it is what resumes a page.
+    assert!(!events[0].cursor.is_empty());
 
     // Projects list.
     let projects: contract::Page<ProjectDto> =
@@ -1410,12 +1418,14 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
             .unwrap();
     let outcome = station_a.contact(&b_station_id).unwrap();
     assert!(outcome.convergence.accepted >= 1);
-    let view: IssueView = driver_a.query(&IssueQuery::View {
+    // Discussion is its own page; `View` is the bounded summary.
+    let detail: contract::IssueDetailProjection = driver_a.query(&IssueQuery::Detail {
         doc: doc.clone(),
         me: None,
+        pages: contract::IssueDetailPages::default(),
     });
-    assert_eq!(view.comments.len(), 1);
-    assert_eq!(view.comments[0].body, "from b");
+    assert_eq!(detail.comments.items.len(), 1);
+    assert_eq!(detail.comments.items[0].body, "from b");
 
     // A long thread, written from both sides while B is behind — the case the
     // hierarchy exists for. A carries the conversation on; B, which has synced
@@ -1469,11 +1479,18 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     expected.push("from b, while behind".into());
     expected.extend(a_bodies.iter().skip(7).cloned());
     for (station, driver) in [("a", &driver_a), ("b", &driver_b)] {
-        let view: IssueView = driver.query(&IssueQuery::View {
+        // Discussion is its own page; `View` is the bounded summary.
+        let detail: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
             doc: doc.clone(),
             me: None,
+            pages: contract::IssueDetailPages::default(),
         });
-        let bodies: Vec<String> = view.comments.iter().map(|c| c.body.clone()).collect();
+        let bodies: Vec<String> = detail
+            .comments
+            .items
+            .iter()
+            .map(|c| c.body.clone())
+            .collect();
         assert_eq!(
             bodies, expected,
             "station {station} read the thread in a different order than it was written"
