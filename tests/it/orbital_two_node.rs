@@ -170,10 +170,22 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
             body: Some("the sealed body".into()),
         },
     );
-    assert!(
-        matches!(&resp, IssueResponse::Ref { reff } if reff == "CORE-1"),
-        "{resp:?}"
+    let IssueResponse::Ref { reff: issue_ref } = resp else {
+        panic!("issue creation did not return its stable reference: {resp:?}");
+    };
+    assert!(issue_ref.starts_with("CORE-"), "{issue_ref}");
+
+    // Inbox recipients are immutable causal event facts. Establish the
+    // founder's assignment before the joiner authors its later comment; a
+    // subsequent assignment must not retroactively rewrite that event.
+    let resp = issue_req(
+        &client,
+        &founder_home,
+        issues_app::IssuesRequest::IssueStart {
+            reff: issue_ref.clone(),
+        },
     );
+    assert!(!matches!(resp, IssueResponse::Error { .. }), "{resp:?}");
 
     // The founder mints an auto-approving invite link (Coordinates v1).
     let resp = req(
@@ -255,7 +267,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         &client,
         &joiner_home,
         issues_app::IssuesRequest::IssueView {
-            reff: "CORE-1".into(),
+            reff: issue_ref.clone(),
         },
     );
     let IssueResponse::Issue(view) = resp else {
@@ -274,7 +286,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         &joiner_home,
         issues_app::IssuesRequest::Comment {
             reply_to: None,
-            reff: "CORE-1".into(),
+            reff: issue_ref.clone(),
             body: "joined over the socket".into(),
         },
     );
@@ -289,12 +301,15 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         match issue_req(
             &client,
             &founder_home,
-            issues_app::IssuesRequest::IssueView {
-                reff: "CORE-1".into(),
+            issues_app::IssuesRequest::IssueComments {
+                reff: issue_ref.clone(),
+                publication: None,
+                page: issues::contract::PageRequest::default(),
             },
         ) {
-            IssueResponse::Issue(v)
-                if v.comments
+            IssueResponse::Comments { page }
+                if page
+                    .items
                     .iter()
                     .any(|c| c.body == "joined over the socket") =>
             {
@@ -308,17 +323,9 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
         "the joiner's comment never converged back to the founder"
     );
 
-    // Inbox reconstruction (plan 04): the founder assigns itself by starting
-    // the issue, so the JOINER's converged comment is addressed to it — the
-    // inbox is a pure projection over the synced state, rebuilt from query.
-    let resp = issue_req(
-        &client,
-        &founder_home,
-        issues_app::IssuesRequest::IssueStart {
-            reff: "CORE-1".into(),
-        },
-    );
-    assert!(!matches!(resp, IssueResponse::Error { .. }), "{resp:?}");
+    // Inbox reconstruction (plan 04): the joiner's comment was authored after
+    // the founder's assignment above, so its immutable recipient set includes
+    // the founder and the inbox remains a pure query projection.
     let inboxed = poll_until(Duration::from_secs(10), || {
         match issue_req(
             &client,
