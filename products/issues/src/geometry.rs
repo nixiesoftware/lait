@@ -297,8 +297,22 @@ pub fn facts_from_find(
             let kind =
                 row_text(row, crate::find::field::KIND).ok_or(UnavailableReason::SourceCorrupt)?;
             match kind.as_str() {
-                "issue_placement" => {
-                    let issue = required_text(row, crate::find::field::SOURCE_ID)?;
+                // The issue row itself, because that is where a placement
+                // now lives: `extract_issue_meta` resolves the single
+                // transition head into project/state/block/position and posts
+                // them on the `issue` node. The `issue_placement` node this
+                // used to read is a migration source -- its schema answers
+                // `preferred() == false`, so its extractor is not even
+                // declared by the package this runs in and no such row has
+                // ever reached this match. That is why the graph compiled
+                // empty rather than wrong: every node fell through to `_`.
+                //
+                // An issue whose heads have not converged posts no project
+                // at all, so it does not reach this seek. Absent from one
+                // generation of the picture is the honest answer for an
+                // issue that has no single placement to draw.
+                "issue" => {
+                    let issue = required_text(row, crate::find::field::ID)?;
                     let state = required_text(row, crate::find::field::STATE)?;
                     meter.retain(
                         request,

@@ -26,6 +26,20 @@ fn tool_error_text(reply: &serde_json::Value) -> String {
         .join("\n")
 }
 
+/// The product result inside a durable operation envelope.
+///
+/// Every write answers as `{"kind":"operation","receipt":{..},"response":{..}}`
+/// -- the same envelope the viewer and the host plane get, because an agent is
+/// not owed a weaker acknowledgement than a browser. Reads are unwrapped
+/// already and pass through.
+fn accepted(reply: serde_json::Value) -> serde_json::Value {
+    if reply["kind"] != "operation" {
+        return reply;
+    }
+    assert_eq!(reply["receipt"]["phase"], "accepted", "{reply}");
+    reply["response"].clone()
+}
+
 fn publication() -> runtime::publication::WorldPublicationId {
     runtime::publication::WorldPublicationId::new(
         runtime::publication::PublicationId::new(
@@ -458,14 +472,14 @@ fn a_baseline_of_an_unissued_spec_names_the_lifecycle() {
         serde_json::json!({ "name": "Engineering", "key": "ENG" }),
     );
     assert!(project.get("error").is_none(), "{project}");
-    let spec = mcp.call(
+    let spec = accepted(mcp.call(
         "issues_spec_new",
         serde_json::json!({
             "project": "ENG",
             "kind": "plan",
             "title": "The tree as it stands",
         }),
-    );
+    ));
     let spec_id = spec["spec"]["spec"]
         .as_str()
         .or_else(|| spec["spec"].as_str())

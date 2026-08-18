@@ -1514,6 +1514,12 @@ fn issue_read_set(
     catalog: &mut CatalogState,
     project: Option<&str>,
 ) -> Result<IssueReadSet, Rejection> {
+    // Whether the read is scoped to a project or not, the row wanted is the
+    // issue node: it carries both the project and the id. The project-scoped
+    // branch used to look for `issue_placement`, which no extractor in this
+    // package emits, so scoping this read to a project answered with nothing.
+    // Only the unscoped caller exists today, which is the only reason that
+    // never showed.
     let rows = find_rows_equal(
         ctx,
         project.map_or(crate::find::field::KIND, |_| crate::find::field::PROJECT),
@@ -1521,25 +1527,8 @@ fn issue_read_set(
     )?;
     let docs = rows
         .into_iter()
-        .filter(|row| {
-            result_text(row, crate::find::field::KIND).as_deref()
-                == Some(if project.is_some() {
-                    "issue_placement"
-                } else {
-                    "issue"
-                })
-        })
-        .map(|row| {
-            result_text(
-                &row,
-                if project.is_some() {
-                    crate::find::field::SOURCE_ID
-                } else {
-                    crate::find::field::ID
-                },
-            )
-            .ok_or(Rejection::StateCorrupt)
-        })
+        .filter(|row| result_text(row, crate::find::field::KIND).as_deref() == Some("issue"))
+        .map(|row| result_text(&row, crate::find::field::ID).ok_or(Rejection::StateCorrupt))
         .collect::<Result<Vec<_>, _>>()?;
     issue_read_docs(ctx, catalog, docs)
 }
@@ -2260,6 +2249,104 @@ fn find_created_page(
                 input: Vec::new(),
                 op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
                     field: crate::find::field_ref(ordered_field),
+                    test: find_api::Test::GreaterOrEqual,
+                    value: find_api::Atom::Bytes(lower),
+                })),
+                bound,
+            },
+            find_api::Step {
+                id: keep,
+                input: vec![seek],
+                op: find_api::Op::Keep(find_api::Keep {
+                    predicates: additional,
+                }),
+                bound,
+            },
+            find_api::Step {
+                id: pack,
+                input: vec![keep],
+                op: find_api::Op::Pack(find_api::Pack { fields }),
+                bound,
+            },
+        ],
+        output: pack,
+        bound,
+        page_size: request.limit,
+        cursor,
+    })
+    .map_err(find_rejection)
+}
+
+/// Rank-ordered page of one project's hand-ordered entities.
+///
+/// `find_kind_page` seeks `(kind, project)` with `Test::Equal`, so every row
+/// in a project shares one key and the page comes back in whatever order the
+/// index breaks ties in -- which is not the order somebody arranged. A
+/// milestone list is an arrangement; drawing it in index order silently
+/// discards the arrangement, and the DTO carries no rank for a client to
+/// re-derive it from.
+///
+/// So seek the ordered `(kind, project, position, id)` posting as a range,
+/// the way `find_created_page` seeks the ordered time posting. Rank order is
+/// then the page order, and the cursor resumes inside it.
+///
+/// A row whose position is empty sorts first rather than last. That is the
+/// pre-backfill legacy shape only: every rank this product writes comes from
+/// `rank::between`.
+fn find_kind_position_page(
+    ctx: &Context<'_>,
+    kind: &str,
+    project: &str,
+    request: &contract::PageRequest,
+    mut additional: Vec<runtime::find::Predicate>,
+    mut fields: Vec<runtime::find::FieldRef>,
+) -> Result<runtime::find::Answer, Rejection> {
+    use runtime::find as find_api;
+    let cursor = page_cursor(request)?;
+    let candidates = u64::from(request.limit).saturating_mul(4).max(64);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: candidates.saturating_mul(8),
+        edges_visited: candidates,
+        nodes_visited: candidates,
+        paths_retained: candidates,
+        candidates_per_branch: candidates,
+        score_evaluations: candidates,
+        projected_bytes: u64::from(request.limit).saturating_mul(64 * 1_024),
+        packed_tokens: u64::from(request.limit).saturating_mul(4_096),
+        wall_millis: 5_000,
+    };
+    let lower = crate::find::composite_key([kind, project]);
+    let upper =
+        crate::find::composite_prefix_upper(lower.clone()).ok_or(Rejection::StateCorrupt)?;
+    additional.insert(
+        0,
+        find_api::Predicate {
+            field: crate::find::field_ref(crate::find::field::KIND_PROJECT_POSITION),
+            test: find_api::Test::Less,
+            value: find_api::Atom::Bytes(upper),
+        },
+    );
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    fields.extend([
+        crate::find::field_ref(crate::find::field::ID),
+        crate::find::field_ref(crate::find::field::KIND),
+        crate::find::field_ref(crate::find::field::PROJECT),
+    ]);
+    fields.sort();
+    fields.dedup();
+    ctx.find(find_api::Query {
+        schema: crate::find::entity_schema_ref(),
+        publication: ctx.world_publication_id().map(|id| id.publication),
+        mode: find_api::Mode::Exact,
+        steps: vec![
+            find_api::Step {
+                id: seek,
+                input: Vec::new(),
+                op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                    field: crate::find::field_ref(crate::find::field::KIND_PROJECT_POSITION),
                     test: find_api::Test::GreaterOrEqual,
                     value: find_api::Atom::Bytes(lower),
                 })),
@@ -4486,6 +4573,66 @@ fn issue_core_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
     Some(issue)
 }
 
+/// Put an Issue's relation-held facts back onto the state a view is drawn
+/// from.
+///
+/// `issue_core_state` clears these deliberately: what it decodes are the v3
+/// aggregate roots, which are migration input and not live truth. The live
+/// truth is one `issue_relation` Body per fact, and until something reads
+/// those back an `IssueView` reports an issue with no assignees, no labels,
+/// no milestone, no cycle and no baseline -- which reads as an issue that
+/// has none, rather than as one nobody asked about.
+///
+/// Set-valued kinds come from the bounded membership posting. The three
+/// singleton kinds are read as records instead, for two reasons: their
+/// physical identity ignores the target, so one probe finds the current one
+/// whatever it points at; and a baseline is stored as a `BaselineRef`, whose
+/// revision the relation node does not carry -- it indexes the baseline id
+/// alone.
+fn enrich_issue_relations(
+    ctx: &Context<'_>,
+    issue: &mut IssueState,
+    doc: &str,
+) -> Result<(), Rejection> {
+    let actors = |targets: std::collections::BTreeSet<String>| {
+        targets
+            .into_iter()
+            .map(|target| ActorId::parse(&target).ok_or(Rejection::StateCorrupt))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    issue.assignees = actors(issue_relation_targets(
+        ctx,
+        doc,
+        "assignee",
+        contract::MAX_ISSUE_ASSIGNEES,
+    )?)?;
+    issue.followers = actors(issue_relation_targets(
+        ctx,
+        doc,
+        "follower",
+        contract::MAX_ISSUE_FOLLOWERS,
+    )?)?;
+    issue.labels = issue_relation_targets(ctx, doc, "label", contract::MAX_ISSUE_LABELS)?
+        .into_iter()
+        .collect();
+    let singleton = |kind: &str| -> Result<Option<String>, Rejection> {
+        Ok(
+            crate::record_store::read_issue_relation(ctx, doc, kind, "")?
+                .filter(|record| record.present)
+                .map(|record| record.target),
+        )
+    };
+    issue.milestone = singleton("milestone")?;
+    issue.cycle = singleton("cycle")?;
+    issue.baseline = singleton("baseline")?
+        .map(|raw| {
+            serde_json::from_str::<crate::spec::BaselineRef>(&raw)
+                .map_err(|_| Rejection::StateCorrupt)
+        })
+        .transpose()?;
+    Ok(())
+}
+
 fn apply_project_workflow(
     ctx: &Context<'_>,
     catalog: &mut CatalogState,
@@ -5485,7 +5632,12 @@ fn validate_plan(
 }
 
 fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection> {
-    let issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
+    let mut issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
+    // A Packet is built around the issue's baseline binding, which is one of
+    // the relation-held facts the core state clears. `issue_state` would put
+    // it back, but by scanning every record that names this doc; this needs
+    // one bounded read of one singleton relation.
+    enrich_issue_relations(ctx, &mut issue, doc)?;
     let specs = all_specs(ctx);
     let mut exact: BTreeMap<
         (String, String),
@@ -10162,10 +10314,15 @@ impl World for IssuesWorld {
                 // issue — live or tombstoned — refuses. Every doc's alias keys
                 // off its project; deleting under one would orphan it
                 // silently. Reassign (`issue move`) or archive instead.
+                //
+                // This asked for `issue_placement`, a migration-only node no
+                // extractor in this package emits, so the guard answered
+                // "unreferenced" for every project and deleted one out from
+                // under its issues.
                 let referenced = find_exists_bytes(
                     ctx,
                     crate::find::field::KIND_PROJECT,
-                    crate::find::composite_key(["issue_placement", id.as_str()]),
+                    crate::find::composite_key(["issue", id.as_str()]),
                 )?;
                 if referenced {
                     return Err(Rejection::Conflict);
@@ -10931,7 +11088,8 @@ impl World for IssuesWorld {
                 ))
             }
             IssueQuery::View { doc, me } => {
-                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let mut issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                enrich_issue_relations(ctx, &mut issue, &doc)?;
                 let mut catalog = CatalogState::default();
                 crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
                 apply_project_workflow(ctx, &mut catalog, &issue.project)?;
@@ -10952,7 +11110,8 @@ impl World for IssuesWorld {
                 Ok(projection(serde_json::to_vec(&view).expect("view json")))
             }
             IssueQuery::Detail { doc, me, pages } => {
-                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let mut issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                enrich_issue_relations(ctx, &mut issue, &doc)?;
                 let mut catalog = CatalogState::default();
                 crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
                 apply_project_workflow(ctx, &mut catalog, &issue.project)?;
@@ -11694,10 +11853,10 @@ impl World for IssuesWorld {
                 ))
             }
             IssueQuery::Milestones { project, page } => {
-                let answer = find_kind_page(
+                let answer = find_kind_position_page(
                     ctx,
                     "milestone",
-                    Some(&project),
+                    &project,
                     &page,
                     vec![live_predicate()],
                     [
@@ -11769,11 +11928,21 @@ impl World for IssuesWorld {
                     .map(crate::find::field_ref)
                     .collect(),
                 )?;
-                let items = answer
-                    .rows()
-                    .iter()
-                    .map(cycle_page_row)
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut catalog = CatalogState::default();
+                let mut items = Vec::with_capacity(answer.rows().len());
+                for row in answer.rows() {
+                    let mut item = cycle_page_row(row)?;
+                    // Same as a milestone: the progress is the reason the row
+                    // is drawn, and `0 of 0` renders as a finished cycle.
+                    if let Some((total, done)) =
+                        membership_counts(ctx, &mut catalog, "cycle", &item.id)?
+                    {
+                        item.total = total;
+                        item.done = done;
+                        item.enrichment_complete = true;
+                    }
+                    items.push(item);
+                }
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items))
                         .expect("cycles page json"),
