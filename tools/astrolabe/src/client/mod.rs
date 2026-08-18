@@ -180,6 +180,12 @@ pub struct Config {
     /// to no carrier until a real one exists, and the actions refuse honestly.
     /// On, it drives and validates the chat UI with no daemon.
     pub correspondence_demo: bool,
+    /// The base URL of a hosted Post to carry **real** correspondence over, from
+    /// `LAIT_POST_URL`. `Some` connects the client to a live `lait-post` and
+    /// takes precedence over the demo fixture — real carriage beats a loopback
+    /// one. `None` (the default) leaves correspondence on the fixture, or
+    /// unconnected.
+    pub post_url: Option<String>,
 }
 
 impl Config {
@@ -192,6 +198,7 @@ impl Config {
             identity: None,
             skip_sidecar: false,
             correspondence_demo: false,
+            post_url: None,
         }
     }
 }

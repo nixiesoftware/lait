@@ -86,7 +86,10 @@ impl ReachPlane {
     /// Found this identity's profile from its device seeds and stand up the
     /// plane. At least two seeds are required — the genesis is a mutual link
     /// between the first two, and any further seed joins by another link.
-    pub fn found(seeds: Vec<[u8; 32]>, now: u64) -> Result<Self, ReachError> {
+    ///
+    /// `_now` is reserved: the genesis carries a fixed epoch today, and the
+    /// daemon-backed path will stamp it from the wall clock.
+    pub fn found(seeds: Vec<[u8; 32]>, _now: u64) -> Result<Self, ReachError> {
         if seeds.len() < 2 {
             return Err(ReachError::TooFewDevices);
         }
@@ -172,6 +175,22 @@ impl ReachPlane {
         self.registry.resolve(profile)
     }
 
+    /// This identity's own devices, as the resolver sees them.
+    #[must_use]
+    pub fn my_devices(&self) -> Vec<DeviceId> {
+        self.registry.resolve(&self.profile).unwrap_or_default()
+    }
+
+    /// The seed behind one of this identity's own devices, if it holds it. What a
+    /// per-device carrier signer needs to authorize a fetch on that device.
+    #[must_use]
+    pub fn seed_for(&self, device: &DeviceId) -> Option<[u8; 32]> {
+        self.seeds
+            .iter()
+            .find(|seed| &device_from_seed(seed) == device)
+            .copied()
+    }
+
     /// Seal a message to a resolved recipient and deposit it at the carrier.
     ///
     /// Resolution is the reach: without a device set for `recipient`, there is
@@ -187,6 +206,27 @@ impl ReachPlane {
     ) -> Result<String, ReachError> {
         let devices = self.resolve(recipient).ok_or(ReachError::NotReachable)?;
         let addressed = devices.first().ok_or(ReachError::NotReachable)?.clone();
+        self.send_addressed(carrier, recipient, &addressed, body, now)
+    }
+
+    /// Seal to a recipient, keyed at a chosen one of their devices.
+    ///
+    /// The carrier keys one recipient device today, so the caller picks which —
+    /// and a hosted carrier fences a deposit's signer to the *sender's* egress
+    /// device, so a self-message must be addressed at the sender's own device
+    /// for the signer, the egress, and the later fetch to agree.
+    pub fn send_addressed(
+        &self,
+        carrier: &mut impl Carrier,
+        recipient: &ProfileId,
+        addressed: &DeviceId,
+        body: &str,
+        now: u64,
+    ) -> Result<String, ReachError> {
+        let devices = self.resolve(recipient).ok_or(ReachError::NotReachable)?;
+        if !devices.contains(addressed) {
+            return Err(ReachError::NotReachable);
+        }
         let letter = Letter::compose(
             &self.seeds[0],
             Content::Message {
@@ -195,7 +235,7 @@ impl ReachPlane {
             now,
         );
         let sealed = letter
-            .seal_to_devices(&devices, &addressed, now + RETENTION)
+            .seal_to_devices(&devices, addressed, now + RETENTION)
             .map_err(ReachError::Seal)?;
         let plane = actor::replay(&self.egress_space, &self.egress_events);
         let witness = egress::authorize(
@@ -207,6 +247,22 @@ impl ReachPlane {
         carrier
             .deposit(&witness, &sealed, now)
             .map_err(ReachError::Carrier)
+    }
+
+    /// Collect on exactly one device, with the seed that opens for it — what a
+    /// hosted, per-device-signed carrier needs: one device, one signer.
+    pub fn collect_on(
+        &mut self,
+        carrier: &mut impl Carrier,
+        device: &DeviceId,
+        seed: &[u8; 32],
+        now: u64,
+    ) -> usize {
+        if let Missed::Held(waiting) = carrier.collect(device, now) {
+            self.mailbox.ingest(seed, device, &waiting)
+        } else {
+            0
+        }
     }
 
     /// Collect anything waiting on any of this identity's devices, open it, and
@@ -237,6 +293,107 @@ impl ReachPlane {
                 Content::Invitation { .. } => None,
             })
             .collect()
+    }
+
+    /// The opened text messages in the richest form a surface draws:
+    /// (proven sender device, body, when it was written, whether the carrier's
+    /// word matched the proof).
+    #[must_use]
+    pub fn inbox(&self) -> Vec<(DeviceId, String, u64, bool)> {
+        self.mailbox
+            .letters()
+            .into_iter()
+            .filter_map(|received| match &received.letter.content {
+                Content::Message { body } => Some((
+                    received.letter.from.clone(),
+                    body.clone(),
+                    received.letter.sent_at,
+                    received.provenance_agrees(),
+                )),
+                Content::Invitation { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// The default hosted Post — The Foundation's, unless `LAIT_POST_URL` overrides.
+pub const DEFAULT_POST_URL: &str = "https://post.foundation.pub";
+
+/// The client's live correspondence over a hosted Post.
+///
+/// Wraps a [`ReachPlane`] and a hosted carrier's base URL, and runs the real
+/// carriage over HTTP. v1 proves the whole pipe against real infrastructure the
+/// one way that needs no directory: a person reaches **themselves** — seals to
+/// their own profile's devices, deposits over the Post, and fetches it back.
+/// Reaching another person is the same `send`/`collect` once their profile is
+/// learned (announce/learn), which the directory (AUTH-12) will carry.
+///
+/// Client-direct: the person's own device seed signs the person's own mail on
+/// the person's own device. The `Carrier` seam is a `PostCarrier`, so nothing
+/// about the plane changed — only where the letter lands.
+pub struct PostReach {
+    plane: ReachPlane,
+    base: String,
+}
+
+impl PostReach {
+    /// Stand up the plane from this identity's device seeds, pointed at a Post.
+    pub fn found(seeds: Vec<[u8; 32]>, base: String, now: u64) -> Result<Self, ReachError> {
+        Ok(Self {
+            plane: ReachPlane::found(seeds, now)?,
+            base,
+        })
+    }
+
+    /// This identity's own profile — the address it is reached by.
+    #[must_use]
+    pub fn profile(&self) -> &ProfileId {
+        self.plane.profile()
+    }
+
+    /// This identity's primary device — the one it composes, signs and collects
+    /// on over the hosted Post.
+    #[must_use]
+    pub fn my_device(&self) -> DeviceId {
+        device_from_seed(&self.plane.seeds[0])
+    }
+
+    /// The opened text messages, richest form. See [`ReachPlane::inbox`].
+    #[must_use]
+    pub fn inbox(&self) -> Vec<(DeviceId, String, u64, bool)> {
+        self.plane.inbox()
+    }
+
+    /// Seal a message to *yourself* and deposit it over the hosted Post.
+    ///
+    /// Addressed at the primary device — the same device the egress authorizes
+    /// and the same one `collect` fetches on — so signer, sender, and reader all
+    /// agree under the hosted carrier's custody fence.
+    pub fn send_self(&self, body: &str, now: u64) -> Result<String, ReachError> {
+        use correspondence::post::{PostCarrier, Signer};
+        let seed = self.plane.seeds[0];
+        let primary = device_from_seed(&seed);
+        let mut carrier = PostCarrier::new(self.base.clone(), Signer::new(seed));
+        let profile = self.plane.profile().clone();
+        self.plane
+            .send_addressed(&mut carrier, &profile, &primary, body, now)
+    }
+
+    /// Fetch anything waiting for you over the hosted Post, open it, and file it.
+    /// Returns how many were newly filed. Asks the primary device — the one a
+    /// self-message is addressed and signed for.
+    pub fn collect(&mut self, now: u64) -> usize {
+        use correspondence::post::{PostCarrier, Signer};
+        let seed = self.plane.seeds[0];
+        let primary = device_from_seed(&seed);
+        let mut carrier = PostCarrier::new(self.base.clone(), Signer::new(seed));
+        self.plane.collect_on(&mut carrier, &primary, &seed, now)
+    }
+
+    /// The messages this identity has opened, as (proven sender device, body).
+    #[must_use]
+    pub fn messages(&self) -> Vec<(DeviceId, String)> {
+        self.plane.messages()
     }
 }
 
@@ -379,6 +536,39 @@ mod tests {
             alice.send(&mut carrier, &stranger.profile().clone(), "hi", NOW),
             Err(ReachError::NotReachable)
         ));
+    }
+
+    /// The live backend round-trips a message to yourself over the **deployed**
+    /// Post, when `POST_SMOKE_URL` points at one. This is the real client path:
+    /// seal, deposit over HTTP, fetch back, open.
+    #[test]
+    fn post_reach_self_round_trips_over_the_deployed_post() {
+        let Ok(base) = std::env::var("POST_SMOKE_URL") else {
+            return;
+        };
+        let base = base.trim_end_matches('/').to_owned();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        // Per-run seeds, so the persistent Post never crosses runs.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+            .to_le_bytes();
+        let mk = |tag: u8| {
+            let mut s = [0u8; 32];
+            s[..16].copy_from_slice(&stamp);
+            s[16] = tag;
+            s
+        };
+
+        let mut me = PostReach::found(vec![mk(1), mk(2)], base, now).expect("found");
+        me.send_self("a note to future me", now).expect("send self");
+        let filed = me.collect(now);
+        assert_eq!(filed, 1, "the note came back over the deployed Post");
+        assert_eq!(me.messages()[0].1, "a note to future me");
     }
 
     /// A single device cannot found a profile — a set is a mutual link.

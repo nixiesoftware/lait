@@ -1162,6 +1162,15 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
     // Opt in to the in-process correspondence fixture — off by default, so
     // correspondence refuses honestly until a real carrier exists.
     config.correspondence_demo = env_flag("LAIT_CORRESPONDENCE_DEMO");
+    // Carry real correspondence over a hosted Post when one is named. Takes
+    // precedence over the fixture: real carriage beats a loopback one. A bare
+    // `LAIT_POST_URL=1` is not a URL, so the truthy-but-not-a-URL spellings the
+    // fixture flag accepts are ignored here.
+    config.post_url = std::env::var("LAIT_POST_URL").ok().and_then(|value| {
+        let value = value.trim();
+        (value.starts_with("http://") || value.starts_with("https://"))
+            .then(|| value.trim_end_matches('/').to_owned())
+    });
     let runtime = Runtime::start(config, move || {
         // A failed send means the pump is gone, which happens only on the
         // way out. Nothing to report and nobody to report it to.

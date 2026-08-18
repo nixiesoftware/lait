@@ -368,9 +368,6 @@ impl Action {
             Self::DisplayIdentifierAdmitPassphrase(_) => {
                 "add a passphrase to the identifier key".into()
             }
-            Self::DisplayIdentifierAdmitPassphrase(_) => {
-                "add a passphrase to the identifier key".into()
-            }
             Self::Exit(ExitRequest::GoOffline) => "go offline and exit".into(),
             Self::Exit(ExitRequest::StayOnline) => "close and stay online".into(),
         }
@@ -552,12 +549,13 @@ struct Worker {
     /// Where the screen preference lives, so a machine that was a screen comes
     /// back as one.
     state_root: std::path::PathBuf,
-    /// The opt-in front-end validation fixture, present only under
-    /// `LAIT_CORRESPONDENCE_DEMO`. When absent, correspondence is not connected
-    /// to any carrier and every correspondence action refuses honestly. Behind a
-    /// `Mutex` because the `Worker` is shared across the tasks that answer
-    /// actions.
-    correspondence: Option<std::sync::Mutex<crate::client::correspondence::DemoCarrier>>,
+    /// This identity's correspondence backend — a real hosted-Post plane under
+    /// `LAIT_POST_URL`, else the opt-in front-end fixture under
+    /// `LAIT_CORRESPONDENCE_DEMO`. When neither is set, correspondence is not
+    /// connected to any carrier and every correspondence action refuses
+    /// honestly. Behind a `Mutex` because the `Worker` is shared across the
+    /// tasks that answer actions.
+    correspondence: Option<std::sync::Mutex<crate::client::correspondence::Correspondent>>,
 }
 
 /// Unix seconds, for the clocks the correspondence crate takes as arguments.
@@ -565,6 +563,44 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
+}
+
+/// Choose the correspondence backend: a real hosted-Post plane when one is
+/// named, else the fixture when opted in, else none (which refuses honestly).
+/// Post wins — real carriage beats a loopback one.
+fn build_correspondent(
+    post_url: Option<String>,
+    demo: bool,
+) -> Option<std::sync::Mutex<crate::client::correspondence::Correspondent>> {
+    use crate::client::correspondence::{Correspondent, DemoCarrier, PostBackend};
+    if let Some(base) = post_url {
+        return match PostBackend::found(launch_seeds(), base, now_secs()) {
+            Ok(backend) => Some(std::sync::Mutex::new(Correspondent::Post(backend))),
+            // Only too-few-seeds can fail founding, which cannot happen here;
+            // if it somehow does, leave correspondence unconnected rather than
+            // silently fall back to a fixture the person did not ask for.
+            Err(_) => None,
+        };
+    }
+    demo.then(|| std::sync::Mutex::new(Correspondent::Demo(DemoCarrier::new(now_secs()))))
+}
+
+/// Two per-launch device seeds for this identity's Post profile, derived from
+/// the wall clock so each launch founds a distinct self-profile — which keeps a
+/// persistent Post from crossing one run's mail into the next. The daemon
+/// supplies the identity's real, stable seeds in place of these.
+fn launch_seeds() -> Vec<[u8; 32]> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos())
+        .to_le_bytes();
+    let mk = |tag: u8| {
+        let mut seed = [0u8; 32];
+        seed[..16].copy_from_slice(&stamp);
+        seed[16] = tag;
+        seed
+    };
+    vec![mk(1), mk(2)]
 }
 
 async fn serve(
@@ -576,6 +612,7 @@ async fn serve(
     // Read before the supervisor starts, because the config is moved into it.
     let state_root = config.state_root.clone();
     let correspondence_demo = config.correspondence_demo;
+    let post_url = config.post_url.clone();
     let remembered = crate::screen::load(&state_root);
     let (client, signals) = match Client::start(config).await {
         Ok(started) => started,
@@ -621,9 +658,7 @@ async fn serve(
                 .map(Into::into),
         ),
         state_root,
-        correspondence: correspondence_demo.then(|| {
-            std::sync::Mutex::new(crate::client::correspondence::DemoCarrier::new(now_secs()))
-        }),
+        correspondence: build_correspondent(post_url, correspondence_demo),
     });
 
     // A machine that was a screen comes back as one, before the first read.
@@ -700,7 +735,7 @@ impl Worker {
     /// rather than pretending an action landed.
     fn correspond(
         &self,
-        act: impl FnOnce(&mut crate::client::correspondence::DemoCarrier) -> ClientResult<()>,
+        act: impl FnOnce(&mut crate::client::correspondence::Correspondent) -> ClientResult<()>,
     ) -> ClientResult<()> {
         let Some(fixture) = self.correspondence.as_ref() else {
             return Err(ClientError::refused("correspondence is not connected yet"));
