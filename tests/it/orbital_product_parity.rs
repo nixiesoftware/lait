@@ -89,6 +89,27 @@ impl runtime::world::AuthorityView for WriterAuthority {
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![8]),
         })
     }
+
+    /// The real reviewed identity rather than the trait's all-zero fixture
+    /// default. A Spec revision pins the World publication that authored it,
+    /// and a publication whose implementation digest is zero is refused as
+    /// unidentified — so the authority and the registration have to name the
+    /// same implementation, or nothing that writes a Spec can commit.
+    fn active_implementation(
+        &self,
+        _world: &replica::body::WorldId,
+        _authority_frontier: &AuthorityFrontier,
+    ) -> Result<Option<[u8; 32]>, String> {
+        Ok(Some(reviewed_implementation()))
+    }
+}
+
+/// The canonical Issues implementation id, as registered and as the authority
+/// reports it active.
+fn reviewed_implementation() -> [u8; 32] {
+    IssuesWorld::implementation_descriptor()
+        .id()
+        .expect("the Issues descriptor is canonical")
 }
 
 struct AnyKnownSigner;
@@ -124,8 +145,13 @@ fn my_device() -> DeviceId {
 }
 
 fn product_runtime(root: &std::path::Path) -> Runtime {
+    // Registered under the authority-reviewed identity, not bare. A Spec
+    // revision pins the World publication that authored it, and a publication
+    // whose implementation digest is all zeros is refused as unidentified —
+    // which is what a bare `register` produces. Every Spec write in this suite
+    // depends on the Station knowing which implementation it is running.
     let registry = Builder::new()
-        .register(Arc::new(IssuesWorld::new()))
+        .register_reviewed(Arc::new(IssuesWorld::new()), reviewed_implementation())
         .build()
         .unwrap();
     Runtime::open(
@@ -195,7 +221,7 @@ impl Driver {
                 payload: query.to_json(),
                 publication: None,
             })
-            .unwrap()
+            .unwrap_or_else(|failure| panic!("query {query:?} refused: {failure:?}"))
             .bytes
     }
 
