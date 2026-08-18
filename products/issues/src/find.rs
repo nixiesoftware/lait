@@ -491,18 +491,25 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
             3 * MIB,
         )
         .with_growth(ExtractionGrowth {
-            // A reply emits three nodes on the smallest possible body: the
-            // comment entity, its edge to the issue, and its edge to the
-            // comment it answers. The allowance is
-            // `base + source_kib * per_kib`, and a one-line reply rounds up to
-            // a single KiB, so a base of 1 earned only 2 and the extraction was
-            // refused for output shape — which fails the whole candidate
-            // publication, so the comment never became findable and the next
-            // reply to it was refused as if its parent did not exist.
+            // Every schema in this group emits a FIXED set of nodes — one
+            // entity plus its relation edges — decided by which record variant
+            // it is, never by how much text it carries. A triage decision is
+            // the widest at four (entity, triage, project, issue); a comment
+            // reply is three (entity, issue, the comment it answers); a project
+            // update is two; a Spec observation is one. So the node allowance
+            // is structural and the per-KiB term is zero: a longer comment does
+            // not earn another edge, and should not have to.
             //
-            // The base is what a body owes before it has any size to pay with.
-            base_nodes_per_body: 3,
-            nodes_per_source_kib: 1,
+            // Postings and bytes are the size-proportional half and keep their
+            // growth — those really do scale with the text.
+            //
+            // This was `base: 1, per_kib: 1`, which allowed two nodes on any
+            // body under a kilobyte. Every reply emits three, so every reply
+            // was refused for output shape, which fails the whole candidate
+            // publication — the comment never became findable, and the next
+            // reply to it was refused as though its parent did not exist.
+            base_nodes_per_body: 4,
+            nodes_per_source_kib: 0,
             base_postings_per_body: 20,
             postings_per_source_kib: 512,
             base_variable_bytes_per_body: 4 * KIB,
