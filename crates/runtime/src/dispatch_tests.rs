@@ -118,6 +118,35 @@ fn submit_as(
     session.submit(identity.sign_action(session, crate::action::RequestId::mint(), intent)?)
 }
 
+/// Submit, treating `Busy` as the transient it is documented to be.
+///
+/// Admission is a `try_lock`: a competing intent gets a prompt typed refusal
+/// rather than waiting invisibly behind whatever holds the lane. That makes
+/// `Busy` an ordinary answer for any writer that did not happen to win the
+/// lane — the product's own router retries on it for exactly this reason.
+///
+/// A test that wants to observe what a submission does once it is ADMITTED
+/// must therefore keep asking. Asking once conflates two different questions,
+/// and the answer to the one it did not mean to ask is scheduling: the caller
+/// below spawns this immediately after a dock, whose publication work can
+/// still hold the lane, so a single attempt was refused often enough to fail
+/// this test roughly one run in eight.
+fn submit_when_admitted(
+    session: &crate::session::Session,
+    identity: &LocalIdentity,
+    intent: Intent,
+) -> Result<crate::session::CommittedEffect, SessionFailure> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match submit_as(session, identity, intent.clone()) {
+            Err(SessionFailure::Busy) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
 /// A minimal note World: intents carry UTF-8 text; `submit` stages an atomic
 /// replacement and reports the touched scope; `query` echoes a deterministic
 /// projection derived only from its inputs.
@@ -2122,7 +2151,7 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
     let before_candidate = station.frontier();
     let submit_session = current_session.clone();
     let submit = std::thread::spawn(move || {
-        submit_as(
+        submit_when_admitted(
             &submit_session,
             &writer(),
             Intent {
@@ -2198,7 +2227,7 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
     let before_callback = station.frontier();
     let callback_session = current_session.clone();
     let callback_submit = std::thread::spawn(move || {
-        submit_as(
+        submit_when_admitted(
             &callback_session,
             &writer(),
             Intent {
