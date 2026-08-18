@@ -2348,6 +2348,9 @@ impl CanonicalRecord for IssueIdentityRecord {
 }
 
 impl IssueAliasCoordinate {
+    /// Ordinal space for a derived alias. See `deterministic_for_issue`.
+    pub const MAX_DERIVED_ORDINAL: u64 = 999_999;
+
     pub fn for_issue(ordinal: u64, issue: &DocId) -> Result<Self, Invalid> {
         if ordinal == 0 {
             return Err(Invalid::Field("alias"));
@@ -2362,9 +2365,24 @@ impl IssueAliasCoordinate {
         })
     }
 
-    /// Allocate without a shared counter.  The ordinal is a stable 63-bit
-    /// display hint derived from the Issue id; the independent 128-bit
-    /// disambiguator remains the collision-proof identity component.
+    /// Allocate without a shared counter.  The ordinal is a stable display
+    /// hint derived from the Issue id; the independent 128-bit disambiguator
+    /// remains the collision-proof identity component.
+    ///
+    /// A display hint has to be small enough to be one. Six digits is a
+    /// reference a person can read out loud, remember across a room, and type
+    /// without checking -- which is the entire job of a human alias, and the
+    /// reason a tracker has one at all.
+    ///
+    /// Small means ordinals repeat, and the arithmetic that matters is not
+    /// "will any two issues collide" but "how many issues are affected when
+    /// they do". Expected share is issues-per-project over the ordinal space:
+    /// roughly one in a thousand at a thousand issues, one in a hundred at ten
+    /// thousand. Those issues, and only those, are ever shown the long form.
+    ///
+    /// Collisions are never resolved by making the reference longer for
+    /// everybody. They are resolved where the ambiguity is actually observed,
+    /// which is at lookup -- see `resolve_entity`.
     pub fn deterministic_for_issue(issue: &DocId) -> Self {
         let digest = blake3::derive_key(
             "lait.issues.alias-coordinate.ordinal.v1",
@@ -2372,9 +2390,8 @@ impl IssueAliasCoordinate {
         );
         let mut ordinal_bytes = [0u8; 8];
         ordinal_bytes.copy_from_slice(&digest[..8]);
-        let ordinal =
-            u64::from_be_bytes(ordinal_bytes) & u64::try_from(i64::MAX).unwrap_or(u64::MAX);
-        Self::for_issue(ordinal.max(1), issue).expect("nonzero deterministic ordinal")
+        let ordinal = u64::from_be_bytes(ordinal_bytes) % Self::MAX_DERIVED_ORDINAL;
+        Self::for_issue(ordinal.saturating_add(1), issue).expect("nonzero deterministic ordinal")
     }
 
     pub fn suffix(self) -> String {
@@ -2384,15 +2401,38 @@ impl IssueAliasCoordinate {
     /// Render an alias that is stable without consulting any collision group.
     /// The fixed disambiguator is intentionally always present: conditionally
     /// adding one after an offline collision would rename an existing Issue.
+    /// The full, always-unambiguous reference. This is the canonical form: it
+    /// names the collision-proof component explicitly, so it resolves without
+    /// consulting anything else.
     pub fn render(self, project_key: &str) -> Result<String, Invalid> {
+        Self::check_project_key(project_key)?;
+        self.validate()?;
+        Ok(format!("{project_key}-{}-{}", self.ordinal, self.suffix()))
+    }
+
+    /// The reference a person is shown: the project key and the ordinal, and
+    /// nothing else.
+    ///
+    /// This is rendered unconditionally, without asking whether the ordinal is
+    /// unique. Checking would cost a lookup per row -- a hundred of them to
+    /// draw one page of a list -- to change what a handful of references look
+    /// like. The ambiguity is real but it belongs where it is observed: a
+    /// short reference that names more than one Issue is refused at lookup,
+    /// naming the full forms it could have meant.
+    pub fn render_short(self, project_key: &str) -> Result<String, Invalid> {
+        Self::check_project_key(project_key)?;
+        self.validate()?;
+        Ok(format!("{project_key}-{}", self.ordinal))
+    }
+
+    fn check_project_key(project_key: &str) -> Result<(), Invalid> {
         if project_key.is_empty()
             || project_key.len() > 8
             || !project_key.bytes().all(|byte| byte.is_ascii_uppercase())
         {
             return Err(Invalid::Field("project_key"));
         }
-        self.validate()?;
-        Ok(format!("{project_key}-{}-{}", self.ordinal, self.suffix()))
+        Ok(())
     }
 }
 

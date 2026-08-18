@@ -1089,7 +1089,7 @@ pub fn canonical_for(aliases: &DerivedAliases, doc: &str) -> String {
     })
 }
 
-fn assignee_summary(assignees: &[ActorId], me: Option<&ActorId>) -> String {
+pub(crate) fn assignee_summary(assignees: &[ActorId], me: Option<&ActorId>) -> String {
     let mine = me.is_some_and(|m| assignees.contains(m));
     match (assignees.len(), mine) {
         (0, _) => String::new(),

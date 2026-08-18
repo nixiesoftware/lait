@@ -291,6 +291,37 @@ fn seed_project(driver: &mut Driver) -> String {
     project
 }
 
+/// Put a Detail projection's separately paged reactions back on the comments
+/// they mark, so the assertions below read one assembled comment.
+fn rejoin(
+    mut comments: Vec<issues::dto::CommentDto>,
+    reactions: &[issues::records::ReactionRecord],
+) -> Vec<issues::dto::CommentDto> {
+    for comment in &mut comments {
+        comment.reactions.clear();
+        let Some(id) = comment.id.clone() else {
+            continue;
+        };
+        for record in reactions.iter().filter(|r| r.comment == id && r.on) {
+            let Some(actor) = issues::ids::ActorId::parse(&record.actor) else {
+                continue;
+            };
+            match comment
+                .reactions
+                .iter_mut()
+                .find(|existing| existing.emoji == record.emoji)
+            {
+                Some(existing) => existing.actors.push(actor),
+                None => comment.reactions.push(issues::dto::ReactionDto {
+                    emoji: record.emoji.clone(),
+                    actors: vec![actor],
+                }),
+            }
+        }
+    }
+    comments
+}
+
 fn seed_space(driver: &mut Driver) -> (String, String, String) {
     let project = seed_project(driver);
     let doc = DocId::mint(&SystemUlidSource).as_str().to_string();
@@ -312,7 +343,20 @@ fn seed_space(driver: &mut Driver) -> (String, String, String) {
             ts,
         })
         .unwrap();
-    (project, doc, "ENG-1".to_string())
+    // An alias ordinal is derived from the Issue id rather than counted, so
+    // the reference this Issue answers to is a property of `doc` -- not a
+    // literal a test can know in advance.
+    let alias = short_alias(&doc);
+    (project, doc, alias)
+}
+
+/// The reference a person is shown for `doc`, in project ENG.
+fn short_alias(doc: &str) -> String {
+    issues::records::IssueAliasCoordinate::deterministic_for_issue(
+        &DocId::parse(doc).expect("minted Issue id"),
+    )
+    .render_short("ENG")
+    .expect("rendered alias")
 }
 
 fn create_board_issue(driver: &mut Driver, project: &str, title: String) -> String {
@@ -803,7 +847,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     assert_eq!(view.status, "backlog");
     assert_eq!(view.priority, issues::dto::Priority::High);
     assert_eq!(view.assignees, vec![my_actor()]);
-    assert_eq!(view.key_alias.as_deref(), Some("ENG-1"));
+    assert_eq!(view.key_alias.as_deref(), Some(alias.as_str()));
 
     // A second issue gets ENG-2 and sits above on the board (insert-at-top).
     let doc2 = DocId::mint(&SystemUlidSource).as_str().to_string();
@@ -825,7 +869,10 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             ts,
         })
         .unwrap();
-    assert_eq!(driver.resolve("ENG-2").as_deref(), Some(doc2.as_str()));
+    assert_eq!(
+        driver.resolve(&short_alias(&doc2)).as_deref(),
+        Some(doc2.as_str())
+    );
 
     // List: priority desc (high first), then DocId asc.
     let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
@@ -1101,7 +1148,10 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     });
     assert_eq!(view.title, "First issue");
     assert_eq!(view.comments.len(), 1);
-    assert_eq!(driver.resolve("ENG-2").as_deref(), Some(doc2.as_str()));
+    assert_eq!(
+        driver.resolve(&short_alias(&doc2)).as_deref(),
+        Some(doc2.as_str())
+    );
     let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1332,7 +1382,10 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         me: None,
     });
     assert_eq!(view.title, "First issue");
-    assert_eq!(driver_b.resolve("ENG-1").as_deref(), Some(doc.as_str()));
+    assert_eq!(
+        driver_b.resolve(&short_alias(&doc)).as_deref(),
+        Some(doc.as_str())
+    );
 
     // B comments; A contacts back; the comment converges with stable
     // identity (no duplication on re-contact).
@@ -1599,10 +1652,15 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
             ts,
         })
         .unwrap();
-    let view: IssueView = driver.query(&IssueQuery::View {
+    // Discussion is its own page: `View` is the bounded Issue summary and says
+    // so in place, so the comments come from `Detail` and are rejoined here.
+    let detail: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
         doc: doc.clone(),
         me: None,
+        pages: contract::IssueDetailPages::default(),
     });
+    let mut view = detail.issue;
+    view.comments = rejoin(detail.comments.items, &detail.reactions.items);
     let root_comment = view
         .comments
         .iter()
@@ -1631,10 +1689,15 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
             ts,
         })
         .unwrap();
-    let view: IssueView = driver.query(&IssueQuery::View {
+    // Discussion is its own page: `View` is the bounded Issue summary and says
+    // so in place, so the comments come from `Detail` and are rejoined here.
+    let detail: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
         doc: doc.clone(),
         me: None,
+        pages: contract::IssueDetailPages::default(),
     });
+    let mut view = detail.issue;
+    view.comments = rejoin(detail.comments.items, &detail.reactions.items);
     let root_comment = view
         .comments
         .iter()

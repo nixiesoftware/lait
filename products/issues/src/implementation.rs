@@ -2468,6 +2468,10 @@ fn find_source_created_page(
     .map_err(find_rejection)
 }
 
+/// Members a roll-up will resolve. `issue_relation_targets` asks for one more
+/// than this to detect overflow, so it has to stay under the page ceiling.
+const MAX_ROLLUP_MEMBERS: usize = 256;
+
 /// How many member issues a collection row will be enriched over.
 ///
 /// Not a product guess: [`runtime::find::MAX_SEEK_IDS`] is the ceiling the
@@ -4245,6 +4249,107 @@ fn unique_find_row(
     Ok(rows.pop())
 }
 
+/// The one Issue in `project` whose alias ordinal is `ordinal`.
+///
+/// Ordinals are derived rather than counted, so two Issues in a project can
+/// share one. That is the trade the short reference buys, and this is where
+/// it is paid: a short reference naming more than one Issue is refused, and
+/// the refusal is the signal to use the full form, which always resolves.
+///
+/// The scan is the ordinal's own prefix of the alias coordinate. Every alias
+/// under it is `<ordinal>-<32 lowercase hex>`, and a longer ordinal sorts
+/// above the upper bound because a digit is greater than `-`, so the range
+/// holds exactly the Issues sharing this ordinal -- a handful at worst, and
+/// one almost always.
+fn unique_doc_for_ordinal(
+    ctx: &Context<'_>,
+    project: &str,
+    ordinal: &str,
+) -> Result<String, Rejection> {
+    let request = contract::PageRequest {
+        limit: ALIAS_ORDINAL_SCAN,
+        cursor: None,
+    };
+    let answer = find_field_test_page(
+        ctx,
+        crate::find::field::ALIAS_COORDINATE,
+        runtime::find::Test::GreaterOrEqual,
+        runtime::find::Atom::Text(format!("{ordinal}-")),
+        &request,
+        vec![runtime::find::Predicate {
+            field: crate::find::field_ref(crate::find::field::ALIAS_COORDINATE),
+            test: runtime::find::Test::Less,
+            // 'g' is the first character above lowercase hex.
+            value: runtime::find::Atom::Text(format!("{ordinal}-g")),
+        }],
+        vec![crate::find::field_ref(crate::find::field::SOURCE_ID)],
+    )?;
+    // More sharing one ordinal than the scan admits is not something to
+    // resolve by taking the first: say the reference is not usable.
+    if answer.next_cursor().is_some() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let mut found = None;
+    for row in answer.rows() {
+        if result_text(row, crate::find::field::KIND).as_deref() != Some("issue_identity") {
+            continue;
+        }
+        let doc = result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?;
+        let Some(coordinate) = crate::record_store::issue_coordinate_for(ctx, &doc)? else {
+            continue;
+        };
+        if coordinate.placement.project != project {
+            continue;
+        }
+        if found.replace(doc).is_some() {
+            // Ambiguous inside one project. The full form is what names it.
+            return Err(Rejection::InvalidRequest);
+        }
+    }
+    found.ok_or(Rejection::InvalidRequest)
+}
+
+/// The one node of `kind` whose id begins with `prefix`.
+fn unique_id_by_prefix(ctx: &Context<'_>, kind: &str, prefix: &str) -> Result<String, Rejection> {
+    let request = contract::PageRequest {
+        limit: ALIAS_ORDINAL_SCAN,
+        cursor: None,
+    };
+    let mut upper = prefix.to_string();
+    // Canonical ids are Crockford base32, so no character above 'z' occurs.
+    upper.push('{');
+    let answer = find_field_test_page(
+        ctx,
+        crate::find::field::ID,
+        runtime::find::Test::GreaterOrEqual,
+        runtime::find::Atom::Text(prefix.to_string()),
+        &request,
+        vec![runtime::find::Predicate {
+            field: crate::find::field_ref(crate::find::field::ID),
+            test: runtime::find::Test::Less,
+            value: runtime::find::Atom::Text(upper),
+        }],
+        Vec::new(),
+    )?;
+    if answer.next_cursor().is_some() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let mut found = None;
+    for row in answer.rows() {
+        if result_text(row, crate::find::field::KIND).as_deref() != Some(kind) {
+            continue;
+        }
+        let id = result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+        if found.replace(id).is_some() {
+            return Err(Rejection::InvalidRequest);
+        }
+    }
+    found.ok_or(Rejection::InvalidRequest)
+}
+
+/// Rows one short reference may touch before it is called unusable.
+const ALIAS_ORDINAL_SCAN: u32 = 32;
+
 fn resolve_entity(
     ctx: &Context<'_>,
     entity: contract::ResolveEntity,
@@ -4263,19 +4368,30 @@ fn resolve_entity(
                 result_text(&row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
                 None,
             )
+        } else if selector.starts_with(DocId::PREFIX) {
+            // A canonical id somebody stopped typing. Unambiguous prefixes
+            // resolve; an ambiguous one is refused rather than guessed.
+            (unique_id_by_prefix(ctx, "issue", selector)?, None)
         } else {
-            let mut parts = selector.rsplitn(3, '-');
-            let suffix = parts.next().ok_or(Rejection::InvalidRequest)?;
-            let ordinal = parts.next().ok_or(Rejection::InvalidRequest)?;
-            let key = parts.next().ok_or(Rejection::InvalidRequest)?;
-            if suffix.len() != 32
-                || data_encoding::HEXLOWER.decode(suffix.as_bytes()).is_err()
-                || ordinal
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .is_none()
+            // `KEY-ORDINAL`, the reference a person is shown, or
+            // `KEY-ORDINAL-SUFFIX`, the full form that names the
+            // collision-proof component outright.
+            let (key, rest) = selector.split_once('-').ok_or(Rejection::InvalidRequest)?;
+            let (ordinal, suffix) = match rest.split_once('-') {
+                Some((ordinal, suffix)) => (ordinal, Some(suffix)),
+                None => (rest, None),
+            };
+            if ordinal
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .is_none()
             {
+                return Err(Rejection::InvalidRequest);
+            }
+            if suffix.is_some_and(|suffix| {
+                suffix.len() != 32 || data_encoding::HEXLOWER.decode(suffix.as_bytes()).is_err()
+            }) {
                 return Err(Rejection::InvalidRequest);
             }
             let project_row = unique_find_row(
@@ -4288,17 +4404,22 @@ fn resolve_entity(
             .ok_or(Rejection::InvalidRequest)?;
             let project =
                 result_text(&project_row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
-            let alias = format!("{ordinal}-{}", suffix.to_ascii_lowercase());
-            let identity = unique_find_row(
-                ctx,
-                crate::find::field::ALIAS_COORDINATE,
-                &alias,
-                "issue_identity",
-                None,
-            )?
-            .ok_or(Rejection::InvalidRequest)?;
-            let doc = result_text(&identity, crate::find::field::SOURCE_ID)
-                .ok_or(Rejection::StateCorrupt)?;
+            let doc = match suffix {
+                Some(suffix) => {
+                    let alias = format!("{ordinal}-{}", suffix.to_ascii_lowercase());
+                    let identity = unique_find_row(
+                        ctx,
+                        crate::find::field::ALIAS_COORDINATE,
+                        &alias,
+                        "issue_identity",
+                        None,
+                    )?
+                    .ok_or(Rejection::InvalidRequest)?;
+                    result_text(&identity, crate::find::field::SOURCE_ID)
+                        .ok_or(Rejection::StateCorrupt)?
+                }
+                None => unique_doc_for_ordinal(ctx, &project, ordinal)?,
+            };
             (doc, Some(project))
         };
         let coordinate = crate::record_store::issue_coordinate_for(ctx, &doc)?
@@ -4318,7 +4439,7 @@ fn resolve_entity(
         let display = coordinate
             .identity
             .alias
-            .render(&project_meta.key)
+            .render_short(&project_meta.key)
             .map_err(|_| Rejection::StateCorrupt)?;
         return Ok(contract::ResolvedEntity {
             id: doc,
@@ -4630,6 +4751,148 @@ fn enrich_issue_relations(
                 .map_err(|_| Rejection::StateCorrupt)
         })
         .transpose()?;
+    Ok(())
+}
+
+/// The alias table for exactly one Issue.
+///
+/// The view paths built an empty one, so every Issue answered with no human
+/// reference at all -- `key_alias` absent and `reff` a bare id prefix, which
+/// is not a reference somebody can use or type back. One Issue needs one
+/// entry, and both halves of it are already at hand: the coordinate the
+/// resolver reads, and the project key the handler has loaded to draw the
+/// row.
+fn aliases_for_issue(
+    ctx: &Context<'_>,
+    catalog: &CatalogState,
+    doc: &str,
+) -> Result<crate::views::DerivedAliases, Rejection> {
+    let mut aliases = crate::views::DerivedAliases::default();
+    let Some(coordinate) = crate::record_store::issue_coordinate_for(ctx, doc)? else {
+        return Ok(aliases);
+    };
+    let Some(project) = catalog.projects.get(&coordinate.placement.project) else {
+        return Ok(aliases);
+    };
+    let Ok(alias) = coordinate.identity.alias.render_short(&project.key) else {
+        return Ok(aliases);
+    };
+    aliases
+        .by_alias
+        .insert(alias.to_ascii_lowercase(), doc.to_string());
+    aliases.by_doc.insert(doc.to_string(), alias.clone());
+    aliases.canonical.insert(doc.to_string(), alias);
+    Ok(aliases)
+}
+
+/// Live and Done-category Issue counts for one project.
+///
+/// The sibling of `membership_counts`, for the roll-ups whose members are
+/// projects rather than Issues. Same two seeks and the same rule: a bare
+/// posting count decides whether measuring is affordable, and a project too
+/// large to measure reports itself unmeasured rather than counting one page.
+fn project_issue_counts(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    project: &str,
+) -> Result<Option<(u32, u32)>, Rejection> {
+    let probe = contract::PageRequest {
+        limit: 1,
+        cursor: None,
+    };
+    let counted = find_kind_page(ctx, "issue", Some(project), &probe, Vec::new(), Vec::new())?;
+    let Some(members) = counted.matched_total() else {
+        return Ok(None);
+    };
+    if members > ENRICHMENT_CEILING {
+        return Ok(None);
+    }
+    let limit = u32::try_from(members).map_err(|_| Rejection::StateCorrupt)?;
+    if limit == 0 {
+        return Ok(Some((0, 0)));
+    }
+    let answer = find_kind_page(
+        ctx,
+        "issue",
+        Some(project),
+        &contract::PageRequest {
+            limit,
+            cursor: None,
+        },
+        Vec::new(),
+        [
+            crate::find::field::STATE,
+            crate::find::field::TOMBSTONE,
+            crate::find::field::PROJECT,
+            crate::find::field::TITLE,
+            crate::find::field::PRIORITY,
+        ]
+        .into_iter()
+        .map(crate::find::field_ref)
+        .collect(),
+    )?;
+    if answer.next_cursor().is_some() {
+        return Ok(None);
+    }
+    apply_project_workflow(ctx, catalog, project)?;
+    let mut total = 0u32;
+    let mut done = 0u32;
+    for row in answer.rows() {
+        if result_bool(row, crate::find::field::TOMBSTONE).unwrap_or(false) {
+            continue;
+        }
+        let Some(state) = result_text(row, crate::find::field::STATE) else {
+            continue;
+        };
+        total = total.saturating_add(1);
+        if issue_status_category(catalog, project, &state)? == StatusCategory::Done {
+            done = done.saturating_add(1);
+        }
+    }
+    Ok(Some((total, done)))
+}
+
+/// Put the relation-held facts a list row shows onto one row.
+///
+/// `issue_page_row` builds from one Find row, which carries the Issue's own
+/// coordinates and none of its memberships -- so assignees, labels and
+/// milestone came back empty on every list and board. A tracker list that
+/// does not say who an Issue is assigned to is not a list of Issues, so this
+/// is enrichment the collection page owes rather than one it may omit.
+///
+/// Three bounded exact seeks per row, on the membership posting that exists
+/// for exactly this. They are index lookups returning a handful of rows each,
+/// not scans, and the page that calls this is already bounded.
+fn enrich_issue_row(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    row: &mut crate::dto::Row,
+    me: Option<&ActorId>,
+) -> Result<(), Rejection> {
+    let doc = row.doc_id.to_string();
+    row.assignees = issue_relation_targets(ctx, &doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?
+        .into_iter()
+        .map(|target| ActorId::parse(&target).ok_or(Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    row.assignee_summary = crate::views::assignee_summary(&row.assignees, me);
+    // A row carries label NAMES, so an id that has no registry entry renders
+    // as itself rather than disappearing -- the same rule the assembled view
+    // applies.
+    let mut names = Vec::new();
+    for label in issue_relation_targets(ctx, &doc, "label", contract::MAX_ISSUE_LABELS)? {
+        crate::record_store::apply_label(ctx, catalog, &label)?;
+        names.push(
+            catalog
+                .labels
+                .get(&label)
+                .map_or_else(|| label.clone(), |meta| meta.name.clone()),
+        );
+    }
+    row.label_names = names;
+    row.milestone = crate::record_store::read_issue_relation(ctx, &doc, "milestone", "")?
+        .filter(|record| record.present)
+        .map(|record| record.target);
+    row.enrichment_complete = true;
     Ok(())
 }
 
@@ -11093,7 +11356,7 @@ impl World for IssuesWorld {
                 let mut catalog = CatalogState::default();
                 crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
                 apply_project_workflow(ctx, &mut catalog, &issue.project)?;
-                let aliases = DerivedAliases::default();
+                let aliases = aliases_for_issue(ctx, &catalog, &doc)?;
                 // View is the bounded issue/content summary. Discussion,
                 // relations, attachments, checks and activity are independent
                 // pages and therefore are intentionally empty here.
@@ -11115,7 +11378,7 @@ impl World for IssuesWorld {
                 let mut catalog = CatalogState::default();
                 crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
                 apply_project_workflow(ctx, &mut catalog, &issue.project)?;
-                let aliases = DerivedAliases::default();
+                let aliases = aliases_for_issue(ctx, &catalog, &doc)?;
                 let resolve = |_comment: &StoredComment| None;
                 let issue = issue_view(
                     &catalog,
@@ -11313,6 +11576,10 @@ impl World for IssuesWorld {
                     }
                     rows.push(row);
                 }
+                let me_actor = me.as_deref().and_then(ActorId::parse);
+                for row in &mut rows {
+                    enrich_issue_row(ctx, &mut catalog, row, me_actor.as_ref())?;
+                }
                 let mut page = page_from_answer(&answer, rows);
                 if !all || project.is_none() || lead.is_some() {
                     // Post-filtered totals are not the source posting total.
@@ -11320,7 +11587,6 @@ impl World for IssuesWorld {
                     // counts membership, and every scalar above narrows it.
                     page.exact_total = None;
                 }
-                let _ = me;
                 Ok(projection(
                     serde_json::to_vec(&page).expect("rows page json"),
                 ))
@@ -11966,11 +12232,39 @@ impl World for IssuesWorld {
                     .map(crate::find::field_ref)
                     .collect(),
                 )?;
-                let items = answer
-                    .rows()
-                    .iter()
-                    .map(initiative_page_row)
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut catalog = CatalogState::default();
+                let mut items = Vec::with_capacity(answer.rows().len());
+                for row in answer.rows() {
+                    let mut item = initiative_page_row(row)?;
+                    // An initiative IS its member projects and what they add
+                    // up to; a row without them is a name and nothing else.
+                    let members =
+                        issue_relation_targets(ctx, &item.id, "project", MAX_ROLLUP_MEMBERS)?;
+                    let mut total = 0u32;
+                    let mut done = 0u32;
+                    let mut measured = true;
+                    for project in &members {
+                        crate::record_store::apply_project(ctx, &mut catalog, project)?;
+                        if let Some(meta) = catalog.projects.get(project) {
+                            item.projects.push(meta.key.clone());
+                        }
+                        match project_issue_counts(ctx, &mut catalog, project)? {
+                            Some((project_total, project_done)) => {
+                                total = total.saturating_add(project_total);
+                                done = done.saturating_add(project_done);
+                            }
+                            // One unmeasurable member makes the roll-up
+                            // unmeasured. A partial sum is not a smaller sum.
+                            None => measured = false,
+                        }
+                    }
+                    if measured {
+                        item.total = total;
+                        item.done = done;
+                        item.enrichment_complete = true;
+                    }
+                    items.push(item);
+                }
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items))
                         .expect("initiatives page json"),
