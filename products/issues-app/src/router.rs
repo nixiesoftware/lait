@@ -259,6 +259,49 @@ enum RefOutcome {
 }
 
 /// The router.
+/// One assembled Issue from a Detail projection's first pages.
+///
+/// Reactions are paged beside the comments rather than inside them, so they
+/// are put back on the comment they mark. A reaction naming a comment this
+/// page does not carry is dropped rather than invented -- the comment page is
+/// the bound, and a reaction with nothing to attach to is not a fact about
+/// this answer.
+fn assemble(detail: issues::contract::IssueDetailProjection) -> IssueView {
+    let mut view = detail.issue;
+    let mut comments = detail.comments.items;
+    for comment in &mut comments {
+        comment.reactions.clear();
+        let Some(id) = comment.id.clone() else {
+            continue;
+        };
+        for record in detail
+            .reactions
+            .items
+            .iter()
+            .filter(|record| record.comment == id && record.on)
+        {
+            let Some(actor) = issues::ids::ActorId::parse(&record.actor) else {
+                continue;
+            };
+            match comment
+                .reactions
+                .iter_mut()
+                .find(|existing| existing.emoji == record.emoji)
+            {
+                Some(existing) => existing.actors.push(actor),
+                None => comment.reactions.push(issues::dto::ReactionDto {
+                    emoji: record.emoji.clone(),
+                    actors: vec![actor],
+                }),
+            }
+        }
+    }
+    view.comments = comments;
+    view.attachments = detail.attachments.items;
+    view.checks = detail.checks.items;
+    view
+}
+
 pub struct IssueRouter<'a> {
     session: &'a Session,
     identity: &'a runtime::world::LocalIdentity,
@@ -1731,13 +1774,21 @@ impl<'a> IssueRouter<'a> {
             }
             Request::IssueView { reff } => {
                 let doc = self.resolve(&selectors, &reff)?;
-                let view: IssueView = self
-                    .query(&IssueQuery::View {
+                // "Show me this Issue" means the Issue, not a summary of it
+                // with its discussion and attachments left blank. The World
+                // keeps those bounded by serving them as separate pages --
+                // `IssueQuery::View` is that bounded core and says so -- and
+                // assembling the first page of each into one answer is this
+                // layer's job. `IssueDetail` remains the way to page further
+                // into any one of them.
+                let detail: issues::contract::IssueDetailProjection = self
+                    .query(&IssueQuery::Detail {
                         doc,
                         me: Some(facts.actor.clone()),
+                        pages: issues::contract::IssueDetailPages::default(),
                     })
                     .map_err(Self::effect_err)?;
-                Ok((Response::Issue(Box::new(view)), false))
+                Ok((Response::Issue(Box::new(assemble(detail))), false))
             }
             Request::IssueDetail { reff, publication } => {
                 let doc = self.resolve(&selectors, &reff)?;

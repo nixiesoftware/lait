@@ -4896,6 +4896,41 @@ fn enrich_issue_row(
     Ok(())
 }
 
+/// The KEYs of the projects a team owns.
+///
+/// A project records its team as its own source coordinate, so this is the
+/// `(kind, source)` posting read in the one direction it already answers --
+/// no reverse coordinate and no scan over projects.
+fn team_project_keys(ctx: &Context<'_>, team: &str) -> Result<Vec<String>, Rejection> {
+    let limit = u32::try_from(MAX_ROLLUP_MEMBERS.saturating_add(1))
+        .map_err(|_| Rejection::LimitExceeded)?;
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::KIND_SOURCE,
+        runtime::find::Atom::Bytes(crate::find::composite_key(["project", team])),
+        &contract::PageRequest {
+            limit,
+            cursor: None,
+        },
+        Vec::new(),
+        vec![crate::find::field_ref(crate::find::field::ENTITY_KEY)],
+    )?;
+    if answer.next_cursor().is_some() {
+        return Err(Rejection::LimitExceeded);
+    }
+    let mut keys = Vec::new();
+    for row in answer.rows() {
+        if result_text(row, crate::find::field::KIND).as_deref() != Some("project") {
+            continue;
+        }
+        if let Some(key) = result_text(row, crate::find::field::ENTITY_KEY) {
+            keys.push(key);
+        }
+    }
+    keys.sort();
+    Ok(keys)
+}
+
 fn apply_project_workflow(
     ctx: &Context<'_>,
     catalog: &mut CatalogState,
@@ -11282,16 +11317,17 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let Some(meta) = issue.attachments.iter().find(|a| a.id == id) else {
-                    return Err(Rejection::InvalidRequest);
-                };
-                let name = meta.name.clone();
+                // The attachment's own record is the one that says whether it
+                // exists, and it carries the name too. Asking the Issue's
+                // in-memory attachment list first refused every detach: that
+                // list is enrichment the core state no longer holds, so it is
+                // always empty and the record read below never ran.
                 let mut record = crate::record_store::read_attachment(ctx, &doc, &id)?
                     .ok_or(Rejection::InvalidRequest)?;
-                if record.tombstone {
+                if record.tombstone || record.issue != doc {
                     return Err(Rejection::InvalidRequest);
                 }
+                let name = record.name.clone();
                 record.tombstone = true;
                 staging.absorb_records(crate::record_store::write_attachment(ctx, &record)?);
                 staging.declare(
@@ -12288,11 +12324,21 @@ impl World for IssuesWorld {
                     .map(crate::find::field_ref)
                     .collect(),
                 )?;
-                let items = answer
-                    .rows()
-                    .iter()
-                    .map(team_page_row)
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut items = Vec::with_capacity(answer.rows().len());
+                for row in answer.rows() {
+                    let mut item = team_page_row(row)?;
+                    // A team is who is on it and what it owns. Both are
+                    // bounded exact seeks: membership from the relation
+                    // posting, ownership from the project's own source
+                    // coordinate, which is where a project records its team.
+                    item.members =
+                        issue_relation_targets(ctx, &item.id, "member", MAX_ROLLUP_MEMBERS)?
+                            .into_iter()
+                            .collect();
+                    item.projects = team_project_keys(ctx, &item.id)?;
+                    item.enrichment_complete = true;
+                    items.push(item);
+                }
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items)).expect("teams page json"),
                 ))
