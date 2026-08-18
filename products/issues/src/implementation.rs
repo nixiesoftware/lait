@@ -98,6 +98,10 @@ fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
     Some(rank::between(lo, hi))
 }
 
+/// Rows a neighbour probe asks for: the adjacent milestone, plus one in case
+/// the first is the milestone being moved.
+const NEIGHBOR_PAGE: u32 = 2;
+
 fn milestone_neighbor(
     ctx: &Context<'_>,
     project: &str,
@@ -106,17 +110,27 @@ fn milestone_neighbor(
     pivot: Vec<u8>,
 ) -> Result<Option<(String, String)>, Rejection> {
     use runtime::find as find_api;
+    // Two rows are wanted and at most one of them is the milestone being
+    // moved, but the ordered scan that finds them walks whatever the index
+    // holds between the pivot and the answer. The hand-written budget here
+    // used to allow eight postings, which happened to cover a project with
+    // two milestones and refused the third with `LimitExceeded` -- reported
+    // to the operator as a corrupt catalog, because this call site also
+    // discarded the typed failure. Derive it the way every other paged
+    // helper in this file does instead, so it scales with the page rather
+    // than with the number of milestones that existed when it was written.
+    let candidates = u64::from(NEIGHBOR_PAGE).saturating_mul(8).max(64);
     let bound = find_api::Bound {
         decoded_bodies: 4,
-        postings_read: 8,
+        postings_read: candidates.saturating_mul(8),
         edges_visited: 1,
-        nodes_visited: 8,
+        nodes_visited: candidates,
         paths_retained: 1,
-        candidates_per_branch: 4,
+        candidates_per_branch: candidates,
         score_evaluations: 1,
-        projected_bytes: 16 * 1024,
-        packed_tokens: 128,
-        wall_millis: 250,
+        projected_bytes: u64::from(NEIGHBOR_PAGE).saturating_mul(16 * 1_024),
+        packed_tokens: u64::from(NEIGHBOR_PAGE).saturating_mul(4_096),
+        wall_millis: 1_000,
     };
     let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
     let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
@@ -161,10 +175,10 @@ fn milestone_neighbor(
             ],
             output: pack,
             bound,
-            page_size: 2,
+            page_size: NEIGHBOR_PAGE,
             cursor: None,
         })
-        .map_err(|_| Rejection::StateCorrupt)?;
+        .map_err(find_rejection)?;
     for row in answer.rows() {
         if result_text(row, crate::find::field::KIND).as_deref() != Some("milestone")
             || result_text(row, crate::find::field::PROJECT).as_deref() != Some(project)
@@ -1723,7 +1737,7 @@ fn find_exists_bytes(ctx: &Context<'_>, field: &str, value: Vec<u8>) -> Result<b
             page_size: 1,
             cursor: None,
         })
-        .map_err(|_| Rejection::StateCorrupt)?;
+        .map_err(find_rejection)?;
     Ok(answer.matched_total().unwrap_or(0) != 0)
 }
 
@@ -2475,6 +2489,17 @@ fn find_issue_rows_by_ids(
     if ids.len() > usize::try_from(contract::MAX_PAGE_SIZE).unwrap_or(usize::MAX) {
         return Err(Rejection::LimitExceeded);
     }
+    // `Seek::Ids` admits `MAX_SEEK_IDS`, which is well under a page. Resolving
+    // a full page in one query would be refused outright, so walk it in the
+    // runtime's own units rather than declaring a ceiling this cannot honour.
+    if ids.len() > runtime::find::MAX_SEEK_IDS {
+        let mut merged = std::collections::BTreeMap::new();
+        let ordered = ids.into_iter().collect::<Vec<_>>();
+        for chunk in ordered.chunks(runtime::find::MAX_SEEK_IDS) {
+            merged.extend(find_issue_rows_by_ids(ctx, chunk.to_vec())?);
+        }
+        return Ok(merged);
+    }
     let count = u64::try_from(ids.len()).unwrap_or(u64::MAX);
     let bound = find_api::Bound {
         decoded_bodies: 1,
@@ -3093,7 +3118,15 @@ fn load_role_for_write(
     catalog: &mut CatalogState,
     role: &str,
 ) -> Result<(), Rejection> {
-    let projection = role_projection(ctx, role)?;
+    // A role being created has no head yet, and that absence is this loader's
+    // ordinary case rather than an error: it leaves the catalog without an
+    // entry, which is exactly what the create path's `contains_key` guard
+    // reads as "the id is free". Refusing here made `RoleCreate` impossible
+    // for every role -- it minted a fresh id and then demanded Find already
+    // know it -- and left the `Conflict` branch below unreachable.
+    let Some(projection) = optional_role_projection(ctx, role)? else {
+        return Ok(());
+    };
     if !projection.summary.conflict_heads.is_empty() {
         return Err(Rejection::Conflict);
     }
@@ -3273,9 +3306,22 @@ fn role_summary_row(row: &runtime::find::ResultRow) -> Result<contract::RoleSumm
     })
 }
 
+/// Read a role that must exist. A reader asking for a role by id is naming
+/// one it believes in, so an absent row is a bad request.
 fn role_projection(ctx: &Context<'_>, role: &str) -> Result<contract::RoleProjection, Rejection> {
-    let row = unique_find_row(ctx, crate::find::field::ENTITY_KEY, role, "role_head", None)?
-        .ok_or(Rejection::InvalidRequest)?;
+    optional_role_projection(ctx, role)?.ok_or(Rejection::InvalidRequest)
+}
+
+/// The same read, for the one caller that must be able to learn the role is
+/// not there: creating it.
+fn optional_role_projection(
+    ctx: &Context<'_>,
+    role: &str,
+) -> Result<Option<contract::RoleProjection>, Rejection> {
+    let Some(row) = unique_find_row(ctx, crate::find::field::ENTITY_KEY, role, "role_head", None)?
+    else {
+        return Ok(None);
+    };
     let summary = role_summary_row(&row)?;
     let revision = if summary.built_in {
         crate::roles::built_in(role).map(|revision| crate::views::StoredRoleRevision {
@@ -3313,7 +3359,7 @@ fn role_projection(ctx: &Context<'_>, role: &str) -> Result<contract::RoleProjec
     } else {
         None
     };
-    Ok(contract::RoleProjection { summary, revision })
+    Ok(Some(contract::RoleProjection { summary, revision }))
 }
 
 fn workflow_projection(
@@ -5761,7 +5807,7 @@ fn find_comment(ctx: &Context<'_>, id: &str) -> Result<Option<FoundComment>, Rej
             page_size: 2,
             cursor: None,
         })
-        .map_err(|_| Rejection::StateCorrupt)?;
+        .map_err(find_rejection)?;
     if answer.rows().len() > 1 {
         return Err(Rejection::StateCorrupt);
     }
@@ -10957,11 +11003,29 @@ impl World for IssuesWorld {
                 me,
                 page,
             } => {
-                // Relation-filter continuation is cut over immediately after
-                // the scalar posting page below. Refuse instead of silently
-                // draining or post-filtering an unbounded tracker.
-                if label.is_some() || milestone.is_some() || mine.is_some() {
-                    return Err(Rejection::InvalidRequest);
+                // A relation filter asks the reverse membership question --
+                // "which issues carry this label" -- so it is seeked on the
+                // reverse coordinate rather than post-filtered out of a page
+                // of every issue. One coordinate leads and any others narrow
+                // the result, because a page can only be bounded by one
+                // posting; which one leads changes what the scan costs, never
+                // what it answers.
+                let lead = label
+                    .as_ref()
+                    .map(|value| ("label", value.clone()))
+                    .or_else(|| milestone.as_ref().map(|value| ("milestone", value.clone())))
+                    .or_else(|| mine.as_ref().map(|value| ("assignee", value.clone())));
+                let mut narrowing: Vec<(&str, String, usize)> = Vec::new();
+                for (kind, value, maximum) in [
+                    ("label", label.clone(), contract::MAX_ISSUE_LABELS),
+                    ("milestone", milestone.clone(), 1),
+                    ("assignee", mine.clone(), contract::MAX_ISSUE_ASSIGNEES),
+                ] {
+                    let Some(value) = value else { continue };
+                    if lead.as_ref().is_some_and(|(led, _)| *led == kind) {
+                        continue;
+                    }
+                    narrowing.push((kind, value, maximum));
                 }
                 let mut predicates = vec![runtime::find::Predicate {
                     field: crate::find::field_ref(crate::find::field::CONFLICTED),
@@ -10982,30 +11046,94 @@ impl World for IssuesWorld {
                         value: runtime::find::Atom::Text(status.clone()),
                     });
                 }
-                let answer = find_kind_page(
-                    ctx,
-                    "issue",
-                    project.as_deref(),
-                    &page,
-                    predicates,
-                    [
-                        crate::find::field::TITLE,
-                        crate::find::field::PROJECT,
-                        crate::find::field::STATE,
-                        crate::find::field::PRIORITY,
-                        crate::find::field::TOMBSTONE,
-                        crate::find::field::DUE_AT,
-                        crate::find::field::ESTIMATE,
-                    ]
-                    .into_iter()
-                    .map(crate::find::field_ref)
-                    .collect(),
-                )?;
+                let (answer, candidates) = match &lead {
+                    Some((kind, value)) => {
+                        let answer = find_field_page(
+                            ctx,
+                            crate::find::field::RELATION_TARGET_KIND,
+                            runtime::find::Atom::Bytes(crate::find::composite_key([
+                                *kind,
+                                value.as_str(),
+                            ])),
+                            &page,
+                            Vec::new(),
+                            Vec::new(),
+                        )?;
+                        let ids = answer
+                            .rows()
+                            .iter()
+                            .map(|row| {
+                                result_text(row, crate::find::field::SOURCE_ID)
+                                    .ok_or(Rejection::StateCorrupt)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let resolved = find_issue_rows_by_ids(ctx, ids.clone())?;
+                        // Keep the posting order the page was cut in: the
+                        // cursor resumes against that order, so re-sorting
+                        // here would make the next page overlap this one.
+                        let rows = ids
+                            .iter()
+                            .filter_map(|id| resolved.get(id).cloned())
+                            .collect::<Vec<_>>();
+                        (answer, rows)
+                    }
+                    None => {
+                        let answer = find_kind_page(
+                            ctx,
+                            "issue",
+                            project.as_deref(),
+                            &page,
+                            predicates,
+                            [
+                                crate::find::field::TITLE,
+                                crate::find::field::PROJECT,
+                                crate::find::field::STATE,
+                                crate::find::field::PRIORITY,
+                                crate::find::field::TOMBSTONE,
+                                crate::find::field::DUE_AT,
+                                crate::find::field::ESTIMATE,
+                            ]
+                            .into_iter()
+                            .map(crate::find::field_ref)
+                            .collect(),
+                        )?;
+                        let rows = answer
+                            .rows()
+                            .iter()
+                            .map(issue_page_row)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        (answer, rows)
+                    }
+                };
                 let mut catalog = CatalogState::default();
                 let mut rows = Vec::new();
-                for result in answer.rows() {
-                    let row = issue_page_row(result)?;
+                for row in candidates {
                     let project_id = row.project_id.as_str();
+                    if lead.is_some() {
+                        // A relation posting carries membership and nothing
+                        // else, so every scalar the other branch expressed as
+                        // a predicate is applied here instead.
+                        if project.as_ref().is_some_and(|want| want != project_id) {
+                            continue;
+                        }
+                        if status.as_ref().is_some_and(|want| want != &row.status) {
+                            continue;
+                        }
+                        if !all && row.tombstone {
+                            continue;
+                        }
+                        let doc = row.doc_id.to_string();
+                        let mut carries_all = true;
+                        for (kind, value, maximum) in &narrowing {
+                            if !issue_relation_targets(ctx, &doc, kind, *maximum)?.contains(value) {
+                                carries_all = false;
+                                break;
+                            }
+                        }
+                        if !carries_all {
+                            continue;
+                        }
+                    }
                     if project.is_none() {
                         crate::record_store::apply_project(ctx, &mut catalog, project_id)?;
                         if catalog
@@ -11027,8 +11155,10 @@ impl World for IssuesWorld {
                     rows.push(row);
                 }
                 let mut page = page_from_answer(&answer, rows);
-                if !all || project.is_none() {
+                if !all || project.is_none() || lead.is_some() {
                     // Post-filtered totals are not the source posting total.
+                    // A relation page is always in that position: its total
+                    // counts membership, and every scalar above narrows it.
                     page.exact_total = None;
                 }
                 let _ = me;

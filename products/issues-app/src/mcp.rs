@@ -18,9 +18,17 @@ use crate::{BoardPos, Filter, IssuesRequest};
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 struct EmptyArgs {}
 
+/// A first page needs no arguments. Requiring one made `{}` a tool error
+/// ("missing field `page_size`") for every list an agent opens without an
+/// opinion about size, which is most of them.
+fn default_page_size() -> u32 {
+    issues::contract::DEFAULT_PAGE_SIZE
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PageArgs {
-    /// Maximum rows in this response (1..=1000).
+    /// Maximum rows in this response (1..=1000). Omit for the default page.
+    #[serde(default = "default_page_size")]
     #[schemars(range(min = 1, max = 1000))]
     page_size: u32,
     /// Opaque continuation emitted by the preceding page.
@@ -693,20 +701,6 @@ struct SpecArgs {
     spec: String,
 }
 
-/// Unlike [`ProjectArgs`], the project is required: a dependency graph is a
-/// property of one project, and there is no sensible whole-space default.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct GeometryArgs {
-    project: String,
-    #[serde(default)]
-    roots: Vec<String>,
-    #[serde(default)]
-    publication: Option<crate::protocol::PublicationCoordinate>,
-    #[serde(default)]
-    #[schemars(with = "Option<serde_json::Value>")]
-    page: Option<issues::geometry::GeometryPageRequest>,
-}
-
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SpecNewArgs {
     project: String,
@@ -845,6 +839,7 @@ pub const WITHOUT_A_TOOL: &[&str] = &[
     "comment_at",
     "detach",
     "follow",
+    "geometry",
     "inbox",
     "issue_attachments",
     "issue_checks",
@@ -947,11 +942,6 @@ pub fn tools() -> Vec<McpTool> {
         tool::<LinkArgs>("link", "Link two issues.", issue_link),
         tool::<LinkArgs>("unlink", "Remove an issue link.", issue_unlink),
         tool::<ParentArgs>("parent", "Set or clear an issue parent.", issue_parent),
-        tool::<GeometryArgs>(
-            "geometry",
-            "Read one bounded, artifact-pinned page of a project's dependency geometry. The first call returns the exact publication and artifact coordinate; pass its cursor for subsequent pages. Never drains the whole project graph into one reply.",
-            geometry,
-        ),
         tool::<RefArgs>(
             "view",
             "Read an issue summary plus bounded first pages of comments, reactions, attachments, checks, and each relation direction; continue large sections with their cursors.",
@@ -1763,16 +1753,6 @@ fn issue_parent(input: Value) -> Result<ClientInvocation, Failure> {
     })
 }
 
-fn geometry(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: GeometryArgs = args(input)?;
-    world(IssuesRequest::Geometry {
-        project: a.project,
-        roots: a.roots,
-        publication: a.publication,
-        page: a.page,
-    })
-}
-
 fn issue_view(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueDetail {
@@ -2468,7 +2448,9 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 81);
+        // 80 rather than 81: `geometry` is not one of them. It is compiled
+        // Blueprint output and is named in `WITHOUT_A_TOOL` for that reason.
+        assert_eq!(tools.len(), 80);
         let qualified: Vec<_> = tools
             .iter()
             .filter(|tool| tool.name().starts_with("issues_"))
