@@ -516,7 +516,14 @@ mod tests {
         let invalidation = classify_body_facts(&space, &[body], &[], &mut baseline);
 
         assert!(invalidation.dirty.is_empty());
-        assert_eq!(invalidation.planes.len(), 1);
-        assert_eq!(invalidation.planes[0].plane, "docs");
+        assert_eq!(invalidation.planes.len(), all_plane_names().len());
+        assert!(invalidation
+            .planes
+            .iter()
+            .all(|plane| plane.scope.is_none()));
+        assert!(invalidation
+            .planes
+            .iter()
+            .any(|plane| plane.plane == "docs"));
     }
 }

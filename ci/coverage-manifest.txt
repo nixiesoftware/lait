@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2200
-pr-platform    1762
-nightly        2228
+pr             2201
+pr-platform    1763
+nightly        2229
 mutants        106
 
 [gates]
@@ -735,6 +735,7 @@ lait-issues dto::tests::default_workflow_has_one_done_column
 lait-issues dto::tests::priority_json_is_lowercase
 lait-issues dto::tests::priority_orders_low_to_high
 lait-issues dto::tests::priority_roundtrips
+lait-issues find::tests::activity_shape_admits_the_bounded_term_and_audience_maxima
 lait-issues find::tests::analyzer_is_normalized_bounded_and_deterministic
 lait-issues find::tests::concurrent_transition_heads_are_visible_and_inert_on_the_board
 lait-issues find::tests::declaration_is_canonical_and_every_source_has_one_extractor

@@ -125,8 +125,17 @@ fn a_sponsored_agent_acts_as_itself_in_one_store() {
         "issues_new",
         serde_json::json!({ "title": "agent-filed issue", "project": "PROJ" }),
     );
+    let filed_issue = filed
+        .get("response")
+        .and_then(|response| response.get("results"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|results| results.first())
+        .and_then(|result| result.get("id"))
+        .and_then(serde_json::Value::as_str);
     assert!(
-        filed.to_string().to_uppercase().contains("PROJ-"),
+        filed["kind"] == "operation"
+            && filed["receipt"]["phase"] == "accepted"
+            && filed_issue.is_some_and(|id| id.starts_with("iss_")),
         "the agent must be able to file an issue as itself: {filed}"
     );
     agent.stop();
