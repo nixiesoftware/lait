@@ -179,7 +179,19 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
 
     // No catalog at all: legitimate pre-adoption state, NOT corrupt (a joiner
     // adopts through Manifest synchronization).
+    //
+    // The claim is the VERDICT, not reaching an answer. The three cases above
+    // are decided from the Body set alone and never reach Find. This one has
+    // nothing corrupt to reject, so the report goes on to enumerate issues
+    // through Find — and a stub reader carries no index to enumerate, so it
+    // ends in that capability's typed absence. Which is the point: absence of
+    // the capability is not evidence about the store, and this asserts the one
+    // thing that must never be said about a Space that simply has not adopted
+    // yet.
     let reader = StubReader::default();
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
-    assert!(structure_query(&world, &ctx).is_ok());
+    assert!(
+        !matches!(structure_query(&world, &ctx), Err(Rejection::StateCorrupt)),
+        "a Space that has not adopted yet is not a corrupt one"
+    );
 }

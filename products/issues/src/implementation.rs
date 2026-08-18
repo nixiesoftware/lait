@@ -1798,7 +1798,13 @@ fn find_rows_equal(
             page_size: 10_000,
             cursor: None,
         })
-        .map_err(|_| Rejection::StateCorrupt)?;
+        // Through the canonical mapping, like every other Find call site. A
+        // blanket `StateCorrupt` here said "your stored state is corrupt"
+        // for every reason a Find can fail — including the capability simply
+        // not being available, which is not a statement about the store at
+        // all. Corrupt is the most severe verdict this World can return and
+        // the one thing a Space cannot recover from by retrying.
+        .map_err(find_rejection)?;
     if answer.next_cursor().is_some() {
         // The legacy Issue DTO has no continuation coordinate. Truncating
         // would silently lie, so oversized enrichment is explicit until the
