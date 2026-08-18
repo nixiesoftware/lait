@@ -366,6 +366,43 @@ opt-level = 3
 [profile.dev.package.frost-rerandomized]
 opt-level = 3
 
+# The convergence scaffold itself. Fabric wraps Loro, and every incoming
+# payload is replayed through it: classification proves the material yields the
+# version its descriptor claims, and application imports it for real. That is
+# CRDT work per artifact per incorporation, and unoptimized it is the single
+# largest cost in the convergence simulation — the same argument as the
+# curve25519/FROST boundaries below, which the measured nextest budgets already
+# assume are built optimized.
+[profile.dev.package.loro]
+opt-level = 3
+
+[profile.dev.package.loro-internal]
+opt-level = 3
+
+[profile.dev.package.loro-common]
+opt-level = 3
+
+[profile.dev.package.loro-delta]
+opt-level = 3
+
+[profile.dev.package.loro-rle]
+opt-level = 3
+
+[profile.dev.package.loro-kv-store]
+opt-level = 3
+
+[profile.dev.package.loro-thunderdome]
+opt-level = 3
+
+[profile.dev.package.loro_fractional_index]
+opt-level = 3
+
+[profile.dev.package.generic-btree]
+opt-level = 3
+
+[profile.dev.package.im]
+opt-level = 3
+
 # Body/content protection is on the convergence hot path now: every incoming
 # artifact is opened before it can be classified, so ChaCha20-Poly1305 runs
 # once per artifact per incorporation rather than once per Space ceremony.
