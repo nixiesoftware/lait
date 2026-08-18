@@ -94,6 +94,15 @@ pub mod field {
     /// audience/membership lookup surface; seeking `source_id` alone would
     /// visit every topology edge on a high-degree issue.
     pub const RELATION_SOURCE_KIND: &str = "relation_source_kind";
+    /// Exact `(relation kind, target entity)` posting: the mirror of
+    /// [`RELATION_SOURCE_KIND`]. Membership is asked in both directions —
+    /// "which labels does this issue carry" and "which issues carry this
+    /// label" — and only a composite keyed the way the question is asked can
+    /// answer it as a direct posting. Without this, the reverse question has
+    /// no bounded plan: seeking `target_id` alone visits every relation of
+    /// every kind pointing at a popular actor, and a Walk from the forward
+    /// posting forfeits both pagination and `matched_total`.
+    pub const RELATION_TARGET_KIND: &str = "relation_target_kind";
     /// Exact actor-prefixed, reverse-time activity coordinate used by the
     /// principal-pinned inbox. Prefix pagination stays inside one immutable
     /// World publication.
@@ -272,6 +281,7 @@ fn schemas_with_sources(sources: Vec<SourceRef>) -> Vec<Schema> {
             (field::GRAPH_SOURCE_ID, FieldKind::Text, false),
             (field::GRAPH_TARGET_ID, FieldKind::Text, false),
             (field::RELATION_SOURCE_KIND, FieldKind::Bytes, false),
+            (field::RELATION_TARGET_KIND, FieldKind::Bytes, false),
             (field::INBOX_ORDER, FieldKind::Bytes, false),
             (field::DEVICE, FieldKind::Text, false),
             (field::REVISION, FieldKind::Text, false),
@@ -606,13 +616,15 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
         return ExtractionShape::new(2, 20, 40, 4 * KIB, 8 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::PROJECT_HIERARCHY_SCHEMA) {
-        // Six relation coordinates, two graph coordinates, two project
-        // coordinates, and two edge targets plus node visibility.
+        // Seven relation coordinates (both membership directions), two
+        // graph coordinates, two project coordinates, and two edge targets
+        // plus node visibility.
         return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::ISSUE_RELATION_SCHEMA) {
-        // Six relation coordinates plus project/kind-project and two edge
-        // targets. Set-like facts never emit graph coordinates.
+        // Seven relation coordinates — membership is posted in both
+        // directions — plus project/kind-project and two edge targets.
+        // Set-like facts never emit graph coordinates.
         return ExtractionShape::new(1, 20, 20, 4 * KIB, 4 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::ENTITY_RELATION_SCHEMA)
@@ -969,6 +981,27 @@ fn relation_identity(kind: &str, source: &str, target: &str) -> [u8; 32] {
     blake3::derive_key("lait.issues.find-relation.v1", &material)
 }
 
+/// Relation kinds whose *reverse* direction is a question the product asks:
+/// "which issues carry this label", "how many issues target this milestone",
+/// "what is assigned to me". These, and only these, also post
+/// [`field::RELATION_TARGET_KIND`].
+///
+/// The set is deliberately closed rather than universal. A notification
+/// audience edge is asked forward-only — once per delivery, from the issue —
+/// and the inbox reads its own ordered coordinate, so posting the reverse for
+/// every recipient would charge `MAX_ISSUE_AUDIENCE` extra postings per
+/// activity record to answer a question nothing asks.
+const MEMBERSHIP_KINDS: [&str; 8] = [
+    "assignee",
+    "follower",
+    "label",
+    "milestone",
+    "cycle",
+    "baseline",
+    "initiative_project",
+    "team_member",
+];
+
 fn relation_with_identity(
     identity: [u8; 32],
     relation_kind: &str,
@@ -990,6 +1023,12 @@ fn relation_with_identity(
             composite_key([relation_kind, source]),
         ),
     ];
+    if MEMBERSHIP_KINDS.contains(&relation_kind) {
+        fields.push(bytes(
+            field::RELATION_TARGET_KIND,
+            composite_key([relation_kind, target]),
+        ));
+    }
     if relation_kind == "parent" || crate::contract::LINK_KINDS.contains(&relation_kind) {
         fields.push(exact_text(field::GRAPH_SOURCE_ID, source));
         fields.push(exact_text(field::GRAPH_TARGET_ID, target));

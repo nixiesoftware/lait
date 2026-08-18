@@ -75,13 +75,19 @@ fn the_implementation_id_is_pinned_and_moving_it_is_deliberate() {
     // descriptor identity. (The first move was durable Exec control adding
     // `issues::contract::verify_spec()` to the Spec section.)
     //
+    // That same rebuild then moved it once more, within this release, by
+    // declaring `relation_target_kind` — the reverse of the membership
+    // posting the rebuild had already introduced. One release, one move: the
+    // two changes ship together and no Space ever ran the intermediate
+    // surface.
+    //
     // Spaces on the previous implementation take the ordinary World-upgrade
     // path, exactly as they did then. What must NOT happen is this constant
     // being refreshed to whatever the build now prints: that turns the pin
     // into a mirror and the gate stops meaning anything.
     assert_eq!(
         id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "f435d299af71f2fe1bcfcc3882c3d9744ff07a22768b2246d93d5992b59bda47",
+        "e8f143511129ff928509dc79dbe56eb5ad1ffbaaddd6e3974664783ca56faa28",
         "the Issues implementation id moved — see COMPATIBILITY.md before updating this"
     );
 }
