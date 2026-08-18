@@ -933,7 +933,12 @@ pub fn board_lane_key(project: &ProjectId, workflow_state: &str) -> BodyKey {
 /// address the same bounded block and the lane topology set exposes any
 /// genuine structural disagreement instead of minting two accidental roots.
 pub fn board_seed_block_id(project: &str, workflow_state: &str) -> String {
-    let mut material = Vec::with_capacity(project.len() + workflow_state.len() + 16);
+    let mut material = Vec::with_capacity(
+        project
+            .len()
+            .saturating_add(workflow_state.len())
+            .saturating_add(16),
+    );
     material.extend_from_slice(
         &u64::try_from(project.len())
             .unwrap_or(u64::MAX)
@@ -2367,7 +2372,8 @@ impl IssueAliasCoordinate {
         );
         let mut ordinal_bytes = [0u8; 8];
         ordinal_bytes.copy_from_slice(&digest[..8]);
-        let ordinal = u64::from_be_bytes(ordinal_bytes) & i64::MAX as u64;
+        let ordinal =
+            u64::from_be_bytes(ordinal_bytes) & u64::try_from(i64::MAX).unwrap_or(u64::MAX);
         Self::for_issue(ordinal.max(1), issue).expect("nonzero deterministic ordinal")
     }
 
@@ -2444,7 +2450,8 @@ impl ReactionRecord {
     pub fn identity(&self) -> String {
         let mut material = Vec::new();
         for value in [&self.comment, &self.emoji, &self.actor] {
-            material.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            material
+                .extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
             material.extend_from_slice(value.as_bytes());
         }
         data_encoding::HEXLOWER.encode(&blake3::derive_key(

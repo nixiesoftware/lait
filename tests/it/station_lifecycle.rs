@@ -61,26 +61,28 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(async {
-        let space = lait::orbital::discover_space(home)
-            .single()
-            .expect("test Space");
-        let call = issues_app::encode_call(&request)?;
-        let reply = lait::control::call_world(
-            home,
-            ControlRoute::World {
-                address: OrbitAddress::for_store(home, space),
-                world: call.world().as_str().to_string(),
-            },
-            call.clone(),
-            None,
-        )
-        .await?;
-        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
-            &call, reply,
-        )?)?)
-    })
-    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+    super::accepted_issue_response(
+        rt.block_on(async {
+            let space = lait::orbital::discover_space(home)
+                .single()
+                .expect("test Space");
+            let call = issues_app::encode_call(&request)?;
+            let reply = lait::control::call_world(
+                home,
+                ControlRoute::World {
+                    address: OrbitAddress::for_store(home, space),
+                    world: call.world().as_str().to_string(),
+                },
+                call.clone(),
+                None,
+            )
+            .await?;
+            Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+                &call, reply,
+            )?)?)
+        })
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+    )
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -173,18 +175,16 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
             estimate: None,
         },
     );
-    assert!(
-        matches!(&resp, IssueResponse::Ref { reff } if reff == "ENG-1"),
-        "{resp:?}"
-    );
+    let IssueResponse::Ref { reff } = resp else {
+        panic!("expected the created Issue ref, got {resp:?}");
+    };
+    assert!(reff.starts_with("ENG-"), "{reff:?}");
 
     // View it back.
     let resp = issue_req(
         &client_rt,
         &home,
-        issues_app::IssuesRequest::IssueView {
-            reff: "ENG-1".into(),
-        },
+        issues_app::IssuesRequest::IssueView { reff: reff.clone() },
     );
     let IssueResponse::Issue(view) = resp else {
         panic!("expected Issue, got {resp:?}");
@@ -200,27 +200,33 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     assert_eq!(view.priority, issues::dto::Priority::High);
 
     // Comment routes too.
-    issue_req(
+    let comment = issue_req(
         &client_rt,
         &home,
         issues_app::IssuesRequest::Comment {
-            reff: "ENG-1".into(),
+            reff: reff.clone(),
             body: "a socket comment".into(),
             reply_to: None,
         },
     );
+    assert!(
+        matches!(comment, IssueResponse::Ref { .. }),
+        "comment failed: {comment:?}"
+    );
     let resp = issue_req(
         &client_rt,
         &home,
-        issues_app::IssuesRequest::IssueView {
-            reff: "ENG-1".into(),
+        issues_app::IssuesRequest::IssueComments {
+            reff,
+            publication: None,
+            page: issues::contract::PageRequest::default(),
         },
     );
-    let IssueResponse::Issue(view) = resp else {
-        panic!("expected Issue");
+    let IssueResponse::Comments { page } = resp else {
+        panic!("expected Comments, got {resp:?}");
     };
-    assert_eq!(view.comments.len(), 1);
-    assert_eq!(view.comments[0].body, "a socket comment");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].body, "a socket comment");
 
     // The space-wide activity feed serves through daemon dispatch (this pins
     // the classification/routing defect where an activity request was refused

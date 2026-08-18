@@ -26,7 +26,7 @@ pub const MAX_DTO_STRING: usize = 256;
 /// DECODED length, not the base64 text length. The generic transport must be
 /// large enough to carry any World payload admitted by Runtime; product
 /// declarations may only tighten this outer ceiling.
-pub const MAX_DTO_PAYLOAD: usize = crate::world::MAX_PAYLOAD_BYTES as usize;
+pub const MAX_DTO_PAYLOAD: usize = 2 * 1024 * 1024;
 
 /// Why a DTO failed validation beyond JSON structure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,7 +396,11 @@ impl ObservationDto {
         for body in &self.bodies {
             body.validate()?;
         }
-        if self.bodies.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if self
+            .bodies
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left >= right))
+        {
             return Err(Invalid::BadIdentifier);
         }
         check_len(&self.frontier_root_hex)?;
@@ -404,7 +408,11 @@ impl ObservationDto {
         for publication in &self.publications {
             publication.validate()?;
         }
-        if self.publications.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if self
+            .publications
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left >= right))
+        {
             return Err(Invalid::BadIdentifier);
         }
         Ok(())

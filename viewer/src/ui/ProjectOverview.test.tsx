@@ -23,6 +23,15 @@ const project: ProjectDto = {
   color: "blue",
 };
 
+const publication = {
+  publication: {
+    manifest_root: Array(32).fill(1),
+    implementation_digest: Array(32).fill(2),
+    extractor_schema_digest: Array(32).fill(3),
+  },
+  materialization: 1,
+};
+
 describe("ProjectOverview", () => {
   let host: HTMLDivElement | null = null;
   let root: ReturnType<typeof createRoot> | null = null;
@@ -51,10 +60,10 @@ describe("ProjectOverview", () => {
     ];
     rpcMock.mockImplementation((_space: string, request: { cmd: string }) => {
       if (request.cmd === "milestone_list") {
-        return Promise.resolve({ kind: "milestones", milestones });
+        return Promise.resolve({ kind: "milestones", page: { publication, items: milestones } });
       }
       if (request.cmd === "project_updates") {
-        return Promise.resolve({ kind: "updates", updates: [] });
+        return Promise.resolve({ kind: "updates", page: { publication, items: [] } });
       }
       throw new Error(`Unexpected request: ${request.cmd}`);
     });
@@ -110,10 +119,10 @@ describe("ProjectOverview", () => {
   it("asks for milestones by project id, not by the display key", async () => {
     rpcMock.mockImplementation((_space: string, request: { cmd: string }) => {
       if (request.cmd === "milestone_list") {
-        return Promise.resolve({ kind: "milestones", milestones: [] });
+        return Promise.resolve({ kind: "milestones", page: { publication, items: [] } });
       }
       if (request.cmd === "project_updates") {
-        return Promise.resolve({ kind: "updates", updates: [] });
+        return Promise.resolve({ kind: "updates", page: { publication, items: [] } });
       }
       throw new Error(`Unexpected request: ${request.cmd}`);
     });

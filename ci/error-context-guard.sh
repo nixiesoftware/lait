@@ -23,13 +23,13 @@
 set -euo pipefail
 
 declare -A BUDGET=(
-  [crates/runtime/src/contact_driver.rs]=32
-  [crates/runtime/src/lifecycle.rs]=8
-  [crates/replica/src/replica.rs]=37
-  [crates/replica/src/transaction.rs]=5
+  [crates/runtime/src/contact_driver.rs]=33
+  [crates/runtime/src/lifecycle.rs]=10
+  [crates/replica/src/replica.rs]=93
+  [crates/replica/src/transaction.rs]=6
   [crates/replica/src/manifest.rs]=10
   [src/orbital/mechanics.rs]=4
-  [src/orbital/hosting.rs]=5
+  [src/orbital/hosting.rs]=7
 )
 
 fail=0

@@ -278,10 +278,10 @@ pub enum PreparedActionOutcome {
 impl PreparedActionOutcome {
     /// The original receipt for a replay, or the candidate receipt for a fresh
     /// request.
-    pub fn receipt(&self) -> &RequestReceipt {
+    pub fn receipt(&self) -> Result<&RequestReceipt, Failure> {
         match self {
             Self::Prepared(prepared) => prepared.receipt(),
-            Self::Replayed(receipt) => receipt,
+            Self::Replayed(receipt) => Ok(receipt),
         }
     }
 }
@@ -942,7 +942,12 @@ impl BodyRecord {
         }
     }
     fn promote_singleton_closure(&mut self) -> Result<(), Failure> {
-        if self.heads.len() != 1 || self.heads[0].artifacts.is_some() {
+        if self.heads.len() != 1
+            || self
+                .heads
+                .first()
+                .is_some_and(|head| head.artifacts.is_some())
+        {
             return Ok(());
         }
         let material = self
@@ -953,7 +958,44 @@ impl BodyRecord {
             .chain(material.delta_tail.iter().copied())
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        self.heads[0].artifacts = Some(artifacts);
+        self.head_mut()?.artifacts = Some(artifacts);
+        Ok(())
+    }
+    /// Use the compact singleton sentinel only when the signed head closure is
+    /// exactly the record-wide causal closure. A receiver may reconstruct the
+    /// same Fabric state under its own sealing material, yielding different
+    /// protected object hashes; in that case the original signed descriptor
+    /// refs must remain explicit so restart and re-export still verify it.
+    fn compact_singleton_closure(&mut self) {
+        if self.heads.len() != 1 {
+            return;
+        }
+        let Some(material) = self.causal.as_ref() else {
+            return;
+        };
+        let Some(head) = self.heads.first() else {
+            return;
+        };
+        let Some(artifacts) = head.artifacts.as_deref() else {
+            return;
+        };
+        let causal_len = 1usize.saturating_add(material.delta_tail.len());
+        let matches = artifacts.len() == causal_len
+            && artifacts.first() == Some(&material.checkpoint)
+            && artifacts.get(1..) == Some(material.delta_tail.as_slice());
+        if matches {
+            if let Some(head) = self.heads.first_mut() {
+                head.artifacts = None;
+            }
+        }
+    }
+    fn replace_causal(&mut self, causal: Option<Arc<CausalMaterial>>) -> Result<(), Failure> {
+        // Freeze the old signed-head coordinate before replacing the derived
+        // record-wide material. The replacement may be a checkpoint or a
+        // locally re-sealed equivalent whose protected refs are different.
+        self.promote_singleton_closure()?;
+        self.causal = causal;
+        self.compact_singleton_closure();
         Ok(())
     }
     /// Total protected artifact bytes across heads (quota ledger input).
@@ -1159,7 +1201,10 @@ impl GenerationFootprint {
                 .ok_or(Failure::Integrity(Defect::Encoding))
         })?;
         if self.sources.len() > MAX_GENERATION_SOURCES
-            || self.sources.windows(2).any(|pair| pair[0] >= pair[1])
+            || self
+                .sources
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left >= right))
             || self.sources.iter().any(|source| source.body_count == 0)
             || readable_bodies > self.body_count
             || (self.body_count == 0) != (self.snapshot_retained_bytes == 0)
@@ -1972,7 +2017,10 @@ impl GenerationFootprint {
             ))
         }) {
             Ok(index) => {
-                let source = &mut self.sources[index];
+                let source = self
+                    .sources
+                    .get_mut(index)
+                    .ok_or(Failure::Integrity(Defect::Index))?;
                 if add {
                     source.body_count = source
                         .body_count
@@ -2042,7 +2090,10 @@ struct BodyDirectoryBuilder {
 
 impl BodyDirectoryBuilder {
     fn push(&mut self, key: Arc<BodyKey>, value: SnapshotBody) {
-        let index = BodyIx(u32::try_from(self.slots.len()).expect("Body directory exceeds u32"));
+        let Ok(raw_index) = u32::try_from(self.slots.len()) else {
+            return;
+        };
+        let index = BodyIx(raw_index);
         self.lookup.push(key.clone(), index);
         self.slots.push_back(Some(BodySlot { key, value }));
     }
@@ -2070,7 +2121,7 @@ impl BodyDirectory {
     }
 
     fn slot(&self, index: BodyIx) -> Option<&BodySlot> {
-        self.slots.get(index.0 as usize)?.as_ref()
+        self.slots.get(usize::try_from(index.0).ok()?)?.as_ref()
     }
 
     fn get(&self, key: &BodyKey) -> Option<&SnapshotBody> {
@@ -2084,12 +2135,15 @@ impl BodyDirectory {
 
     fn insert(&mut self, key: Arc<BodyKey>, value: SnapshotBody) -> Option<SnapshotBody> {
         if let Some(index) = self.body_ix(&key) {
-            let slot = self.slots.get_mut(index.0 as usize)?.as_mut()?;
+            let slot = self
+                .slots
+                .get_mut(usize::try_from(index.0).ok()?)?
+                .as_mut()?;
             return Some(std::mem::replace(&mut slot.value, value));
         }
         let index = if let Some(index) = self.free.iter().next().copied() {
             self.free.remove(&index);
-            let slot = self.slots.get_mut(index.0 as usize)?;
+            let slot = self.slots.get_mut(usize::try_from(index.0).ok()?)?;
             debug_assert!(slot.is_none());
             *slot = Some(BodySlot {
                 key: key.clone(),
@@ -2110,7 +2164,7 @@ impl BodyDirectory {
 
     fn remove(&mut self, key: &BodyKey) -> Option<SnapshotBody> {
         let index = self.lookup.remove(key)?;
-        let slot = self.slots.get_mut(index.0 as usize)?.take()?;
+        let slot = self.slots.get_mut(usize::try_from(index.0).ok()?)?.take()?;
         self.free.insert(index);
         Some(slot.value)
     }
@@ -2221,7 +2275,7 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         self.len == 0
     }
 
-    fn leaf_for<Q>(&self, key: &Q) -> usize
+    fn leaf_for<Q>(&self, key: &Q) -> Option<usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -2229,16 +2283,16 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         let mut low = 0usize;
         let mut high = self.leaves.len();
         while low < high {
-            let mid = low + (high - low) / 2;
-            let leaf = self.leaves.get(mid).expect("snapshot directory midpoint");
-            let last = leaf.last().expect("snapshot directory leaf is non-empty");
+            let mid = low.saturating_add(high.saturating_sub(low) / 2);
+            let leaf = self.leaves.get(mid)?;
+            let last = leaf.last()?;
             if last.key.borrow() < key {
-                low = mid + 1;
+                low = mid.saturating_add(1);
             } else {
                 high = mid;
             }
         }
-        low.min(self.leaves.len().saturating_sub(1))
+        Some(low.min(self.leaves.len().saturating_sub(1)))
     }
 
     fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
@@ -2249,11 +2303,11 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         if self.leaves.is_empty() {
             return None;
         }
-        let leaf = self.leaves.get(self.leaf_for(key))?;
+        let leaf = self.leaves.get(self.leaf_for(key)?)?;
         let position = leaf
             .binary_search_by(|entry| entry.key.borrow().cmp(key))
             .ok()?;
-        let entry = &leaf[position];
+        let entry = leaf.get(position)?;
         Some((&entry.key, &entry.value))
     }
 
@@ -2272,11 +2326,11 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
             self.len = 1;
             return None;
         }
-        let leaf_index = self.leaf_for(&key);
-        let mut leaf = self.leaves[leaf_index].to_vec();
+        let leaf_index = self.leaf_for(&key)?;
+        let mut leaf = self.leaves.get(leaf_index)?.to_vec();
         match leaf.binary_search_by(|entry| entry.key.cmp(&key)) {
             Ok(position) => {
-                let old = std::mem::replace(&mut leaf[position].value, value);
+                let old = std::mem::replace(&mut leaf.get_mut(position)?.value, value);
                 self.leaves.set(leaf_index, Arc::from(leaf));
                 Some(old)
             }
@@ -2288,7 +2342,8 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
                 } else {
                     let right = leaf.split_off(leaf.len() / 2);
                     self.leaves.set(leaf_index, Arc::from(leaf));
-                    self.leaves.insert(leaf_index + 1, Arc::from(right));
+                    self.leaves
+                        .insert(leaf_index.saturating_add(1), Arc::from(right));
                 }
                 None
             }
@@ -2303,8 +2358,8 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         if self.leaves.is_empty() {
             return None;
         }
-        let leaf_index = self.leaf_for(key);
-        let mut leaf = self.leaves[leaf_index].to_vec();
+        let leaf_index = self.leaf_for(key)?;
+        let mut leaf = self.leaves.get(leaf_index)?.to_vec();
         let position = leaf
             .binary_search_by(|entry| entry.key.borrow().cmp(key))
             .ok()?;
@@ -2336,11 +2391,13 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         if limit == 0 || self.leaves.is_empty() {
             return Vec::new();
         }
-        let mut leaf_index = after.map_or(0, |key| self.leaf_for(key));
+        let mut leaf_index = after.and_then(|key| self.leaf_for(key)).unwrap_or(0);
         let mut first = true;
         let mut page = Vec::with_capacity(limit);
         while leaf_index < self.leaves.len() && page.len() < limit {
-            let leaf = &self.leaves[leaf_index];
+            let Some(leaf) = self.leaves.get(leaf_index) else {
+                break;
+            };
             let start = if first {
                 first = false;
                 after.map_or(0, |key| {
@@ -2350,8 +2407,9 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
                 0
             };
             page.extend(
-                leaf[start..]
-                    .iter()
+                leaf.get(start..)
+                    .into_iter()
+                    .flatten()
                     .take(limit.saturating_sub(page.len()))
                     .map(|entry| entry.key.clone()),
             );
@@ -3660,18 +3718,26 @@ impl PreparedAction {
 
     /// The receipt that will become authoritative if this candidate is
     /// finalized.
-    pub fn receipt(&self) -> &RequestReceipt {
-        match self.state.as_ref().expect("prepared action retains state") {
-            PreparedActionState::Noop { receipt } => receipt,
-            PreparedActionState::Mutation { data, .. } => &data.receipt,
+    pub fn receipt(&self) -> Result<&RequestReceipt, Failure> {
+        match self
+            .state
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?
+        {
+            PreparedActionState::Noop { receipt } => Ok(receipt),
+            PreparedActionState::Mutation { data, .. } => Ok(&data.receipt),
         }
     }
 
     /// The exact read coordinate the durable finalize will publish.
-    pub fn candidate_root(&self) -> [u8; 32] {
-        match self.state.as_ref().expect("prepared action retains state") {
-            PreparedActionState::Noop { .. } => self.parent_root,
-            PreparedActionState::Mutation { data, .. } => data.candidate_root,
+    pub fn candidate_root(&self) -> Result<[u8; 32], Failure> {
+        match self
+            .state
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?
+        {
+            PreparedActionState::Noop { .. } => Ok(self.parent_root),
+            PreparedActionState::Mutation { data, .. } => Ok(data.candidate_root),
         }
     }
 
@@ -3690,8 +3756,10 @@ impl PreparedAction {
         if prior.root != self.parent_root || prior.frontier != self.parent_frontier {
             return Err(Failure::ParentManifestUnavailable);
         }
-        let PreparedActionState::Mutation { data, .. } =
-            self.state.as_ref().expect("prepared action retains state")
+        let PreparedActionState::Mutation { data, .. } = self
+            .state
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?
         else {
             return Ok(0);
         };
@@ -3719,8 +3787,10 @@ impl PreparedAction {
         if prior.root != self.parent_root || prior.frontier != self.parent_frontier {
             return Err(Failure::ParentManifestUnavailable);
         }
-        let PreparedActionState::Mutation { data, .. } =
-            self.state.as_ref().expect("prepared action retains state")
+        let PreparedActionState::Mutation { data, .. } = self
+            .state
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?
         else {
             return Ok(prior.clone());
         };
@@ -3900,7 +3970,10 @@ impl PreparedAction {
         ctx: &CommitContext<'_>,
     ) -> Result<RequestReceipt, Failure> {
         self.validate_parent(replica)?;
-        let state = self.state.take().expect("prepared action retains state");
+        let state = self
+            .state
+            .take()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
         let result = replica.finalize_prepared_action(ctx, state);
         self.in_flight.store(false, Ordering::Release);
         result
@@ -3916,7 +3989,10 @@ impl PreparedAction {
         snapshot: &ReadSnapshot,
     ) -> Result<RequestReceipt, Failure> {
         self.validate_parent(replica)?;
-        let state = self.state.take().expect("prepared action retains state");
+        let state = self
+            .state
+            .take()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
         let changed: Vec<BodyKey> = match &state {
             PreparedActionState::Mutation { data, .. } => {
                 data.new_records.keys().cloned().collect()
@@ -4070,6 +4146,7 @@ impl Replica {
     /// immutable publication and Corpus; it is deliberately unavailable to
     /// ordinary callers.
     #[cfg(any(test, feature = "scale-fixtures"))]
+    #[allow(clippy::expect_used)]
     pub fn from_cold_body_records_for_scale(
         rows: impl IntoIterator<Item = (BodyKey, BodyBinding, fabric::Material)>,
     ) -> Self {
@@ -4582,13 +4659,13 @@ impl Replica {
         for (key, held) in self.bodies.iter() {
             let mut record = held.clone();
             if !record.interpreted {
-                record.causal = None;
+                record.replace_causal(None)?;
                 records.insert(key.clone(), record);
                 continue;
             }
             let prior = self.bodies.get(key).and_then(|body| body.causal.as_deref());
             let (material, artifacts) = self.next_causal_material(key, &record, prior, &added)?;
-            record.causal = Some(Arc::new(material));
+            record.replace_causal(Some(Arc::new(material)))?;
             added.extend(artifacts);
             records.insert(key.clone(), record);
         }
@@ -5235,7 +5312,11 @@ impl Replica {
         if let Some((checkpoint, checkpoint_envelope, covered_tail)) =
             self.take_ready_checkpoint(key, prior)
         {
-            let mut delta_tail = prior.delta_tail[covered_tail..].to_vec();
+            let mut delta_tail = prior
+                .delta_tail
+                .get(covered_tail..)
+                .ok_or(Failure::Integrity(Defect::CorruptMaterial))?
+                .to_vec();
             delta_tail.push(reference);
             let plaintext_size = checkpoint
                 .len
@@ -5347,10 +5428,13 @@ impl Replica {
                     &new_objects,
                 )?;
                 if let Some(Some(record)) = changed.get_mut(&key) {
-                    record.causal = Some(Arc::new(material));
+                    record.replace_causal(Some(Arc::new(material)))?;
                 }
                 new_objects.extend(artifacts);
             }
+        }
+        for record in changed.values_mut().flatten() {
+            record.compact_singleton_closure();
         }
         let mut next_generation_footprint = ctx
             .is_some()
@@ -7929,13 +8013,14 @@ impl Replica {
             if let Some(chain) = chain {
                 upgraded.chain = chain;
             }
-            upgraded.causal = if opened.len() == 1 {
+            let causal = if opened.len() == 1 {
                 opened
                     .first()
                     .map(|(_, descriptor, _)| Arc::new(descriptor.material.clone()))
             } else {
                 None
             };
+            upgraded.replace_causal(causal)?;
             if self.durable.is_some() {
                 let mut changed = BTreeMap::from([(key.clone(), Some(upgraded.clone()))]);
                 self.persist(
@@ -8731,15 +8816,18 @@ impl Replica {
                 .ok_or(Failure::Illegitimate(Invalid::IncompleteMaterial))?;
             let _ = decode_artifact_pack(descriptor, pack)?;
             if let Some(record) = new_records.get_mut(key) {
-                let singleton = record.heads.len() == 1;
                 if let Some(head) = record.heads.iter_mut().find(|h| &h.tx == tx_id) {
-                    head.artifacts = (!singleton).then(|| {
+                    // Keep the signed closure explicit until `persist` has
+                    // finalized the record-wide causal Material. It may be a
+                    // locally re-sealed equivalent with different object
+                    // hashes; `persist` compacts only an exact match.
+                    head.artifacts = Some(
                         descriptor
                             .artifact_refs()
                             .copied()
                             .collect::<Vec<_>>()
-                            .into_boxed_slice()
-                    });
+                            .into_boxed_slice(),
+                    );
                     head.transaction = Some(object_ref(&tx_bytes));
                     head.tx_commitment = tx_commitment(&tx_bytes);
                     head.artifact_bytes = descriptor
@@ -9799,17 +9887,17 @@ impl Replica {
         ctx: &CommitContext<'_>,
         state: PreparedActionState,
     ) -> Result<RequestReceipt, Failure> {
-        let PreparedActionState::Mutation { fabric, mut data } = state else {
-            let PreparedActionState::Noop { receipt } = state else {
-                unreachable!();
-            };
-            if self.durable.is_some() {
-                self.persist_receipt_only(&receipt)?;
-            } else {
-                self.receipts
-                    .insert(receipt.scope_key(), (receipt.clone(), None));
+        let (fabric, mut data) = match state {
+            PreparedActionState::Mutation { fabric, data } => (fabric, data),
+            PreparedActionState::Noop { receipt } => {
+                if self.durable.is_some() {
+                    self.persist_receipt_only(&receipt)?;
+                } else {
+                    self.receipts
+                        .insert(receipt.scope_key(), (receipt.clone(), None));
+                }
+                return Ok(receipt);
             }
-            return Ok(receipt);
         };
 
         if ctx.space != &data.manifest_space

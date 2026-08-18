@@ -851,7 +851,7 @@ impl<'a> IssueRouter<'a> {
                         timestamp,
                         operations,
                     } => (Some(operation), Some(timestamp), operations),
-                    _ => unreachable!(),
+                    _ => return Err(Response::err("invalid operation request")),
                 };
                 let operations = operations
                     .into_iter()

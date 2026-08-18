@@ -6,6 +6,11 @@
 //! every publication remains readable. New writes use the same helpers as the
 //! migrator, so human and agent access paths cannot create different shapes.
 
+// Rank/topology maintenance below operates on bounded, validated windows and
+// uses direct index arithmetic to keep each transaction within its declared
+// fixed work envelope.
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use replica::body::{BodyKey, Op};
@@ -199,6 +204,16 @@ fn exact_record_source_matching(
     predicates: &[(&str, &str)],
 ) -> Result<Option<BodyKey>, Rejection> {
     use runtime::find as find_api;
+    let kind_source = field == crate::find::field::SOURCE_ID
+        && matches!(predicates, [(predicate, _)] if *predicate == crate::find::field::KIND);
+    let (seek_field, seek_value) = if kind_source {
+        (
+            crate::find::field::KIND_SOURCE,
+            find_api::Atom::Bytes(crate::find::composite_key([predicates[0].1, value])),
+        )
+    } else {
+        (field, find_api::Atom::Text(value.into()))
+    };
     let bound = find_api::Bound {
         decoded_bodies: 2,
         postings_read: 32,
@@ -223,9 +238,9 @@ fn exact_record_source_matching(
                     id: seek,
                     input: Vec::new(),
                     op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
-                        field: crate::find::field_ref(field),
+                        field: crate::find::field_ref(seek_field),
                         test: find_api::Test::Equal,
-                        value: find_api::Atom::Text(value.into()),
+                        value: seek_value,
                     })),
                     bound,
                 },
@@ -1178,7 +1193,7 @@ fn apply_triage(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rej
         let selected = resolutions
             .get(&triage)
             .and_then(|decision| choices.iter().find(|choice| &choice.decision == decision))
-            .or_else(|| (choices.len() == 1).then(|| &choices[0]));
+            .or_else(|| (choices.len() == 1).then(|| choices.first()).flatten());
         if let Some(decision) = selected {
             item.outcome = match decision.outcome {
                 v4::TriageOutcome::Accepted => "accepted",
@@ -1243,10 +1258,12 @@ fn crockford_128(mut value: u128) -> String {
     let mut out = [b'0'; 26];
     for index in (0..26).rev() {
         let digit = usize::try_from(value & 0x1f).unwrap_or(0);
-        out[index] = ALPHABET[digit];
+        if let (Some(target), Some(symbol)) = (out.get_mut(index), ALPHABET.get(digit)) {
+            *target = *symbol;
+        }
         value >>= 5;
     }
-    String::from_utf8(out.to_vec()).expect("Crockford alphabet is UTF-8")
+    out.into_iter().map(char::from).collect()
 }
 
 fn request_record_id(
@@ -1277,7 +1294,8 @@ pub(crate) fn write_comment(
         let bytes = data_encoding::HEXLOWER
             .decode(identity.as_bytes())
             .map_err(|_| Rejection::StateCorrupt)?;
-        let raw = <[u8; 16]>::try_from(&bytes[..16]).map_err(|_| Rejection::StateCorrupt)?;
+        let raw = <[u8; 16]>::try_from(bytes.get(..16).ok_or(Rejection::StateCorrupt)?)
+            .map_err(|_| Rejection::StateCorrupt)?;
         comment.id = Some(format!("cmt_{}", crockford_128(u128::from_be_bytes(raw))));
     }
     let id = comment.id.clone().ok_or(Rejection::StateCorrupt)?;
@@ -1635,7 +1653,7 @@ fn ordered_block(
             cursor: None,
         })
         .map_err(board_find_rejection)?;
-    for row in answer.rows() {
+    if let Some(row) = answer.rows().first() {
         if packed_text(row, crate::find::field::KIND).as_deref() != Some("board_block")
             || packed_text(row, crate::find::field::PROJECT).as_deref() != Some(project)
             || packed_text(row, crate::find::field::STATE).as_deref() != Some(workflow_state)
@@ -2102,7 +2120,7 @@ fn split_board_block(
         .as_deref()
         .is_some_and(|order| !crate::rank::under_pressure(order))
     {
-        direct_order.expect("checked direct block order")
+        direct_order.ok_or(Rejection::StateCorrupt)?
     } else {
         let mut before = ordered_blocks_page(
             ctx,

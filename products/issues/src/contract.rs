@@ -1939,7 +1939,8 @@ impl PageRequest {
     }
 }
 
-const PAGE_CURSOR_VERSION: u8 = 1;
+const PAGE_CURSOR_VERSION: u8 = 2;
+const PAGE_CURSOR_BINDING_CONTEXT: &str = "lait.issues.page-continuation.v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1947,6 +1948,15 @@ struct PageContinuation {
     version: u8,
     publication: runtime::publication::WorldPublicationId,
     cursor: String,
+    binding: [u8; 32],
+}
+
+fn page_cursor_binding(
+    publication: runtime::publication::WorldPublicationId,
+    cursor: &str,
+) -> Option<[u8; 32]> {
+    let material = postcard::to_stdvec(&(PAGE_CURSOR_VERSION, publication, cursor)).ok()?;
+    Some(blake3::derive_key(PAGE_CURSOR_BINDING_CONTEXT, &material))
 }
 
 /// Wrap one Runtime continuation in the exact portable publication that
@@ -1961,6 +1971,7 @@ pub fn encode_page_cursor(
     let continuation = PageContinuation {
         version: PAGE_CURSOR_VERSION,
         publication,
+        binding: page_cursor_binding(publication, &cursor)?,
         cursor,
     };
     let bytes = postcard::to_stdvec(&continuation).ok()?;
@@ -1976,9 +1987,14 @@ pub fn decode_page_cursor(
     let bytes = data_encoding::BASE64URL_NOPAD
         .decode(encoded.as_bytes())
         .ok()?;
+    if data_encoding::BASE64URL_NOPAD.encode(&bytes) != encoded {
+        return None;
+    }
     let continuation: PageContinuation = postcard::from_bytes(&bytes).ok()?;
     if continuation.version != PAGE_CURSOR_VERSION
         || continuation.cursor.is_empty()
+        || continuation.binding
+            != page_cursor_binding(continuation.publication, &continuation.cursor)?
         || postcard::to_stdvec(&continuation).ok()? != bytes
     {
         return None;

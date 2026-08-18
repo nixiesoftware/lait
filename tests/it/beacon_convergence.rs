@@ -84,9 +84,9 @@ async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Resu
         None,
     )
     .await?;
-    Ok(serde_json::from_value(issues_app::decode_reply(
-        &call, reply,
-    )?)?)
+    Ok(super::accepted_issue_response(serde_json::from_value(
+        issues_app::decode_reply(&call, reply)?,
+    )?))
 }
 
 fn issue_req(
@@ -94,8 +94,10 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(issues_request(home, request))
-        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+    super::accepted_issue_response(
+        rt.block_on(issues_request(home, request))
+            .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+    )
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {

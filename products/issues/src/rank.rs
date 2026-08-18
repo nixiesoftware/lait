@@ -103,6 +103,7 @@ pub fn try_between(lo: &str, hi: Option<&str>) -> Option<String> {
 /// Infallible convenience for bounded fixtures and deterministic migration.
 /// Normal user-action paths use [`try_between`] and invoke the block protocol
 /// on `None` or pressure.
+#[allow(clippy::expect_used)]
 pub fn between(lo: &str, hi: Option<&str>) -> String {
     try_between(lo, hi).expect("canonical ranks have room below the product hard bound")
 }

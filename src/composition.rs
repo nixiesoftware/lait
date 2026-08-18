@@ -53,6 +53,7 @@ pub fn package() -> WorldPackage {
 /// The exact historical Issues package used only while the composition-owned
 /// lifecycle worker advances a consented store. It is installed for exact
 /// Session resolution but is never selected for a new Space.
+#[allow(clippy::expect_used)]
 fn issues_migrator_package() -> WorldPackage {
     let world = IssuesWorld::migrator();
     let implementation = IssuesWorld::migrator_implementation_descriptor()

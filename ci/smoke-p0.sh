@@ -110,24 +110,32 @@ ORBIT="$(printf '%s' "$spaces_json" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
 [ -n "$ORBIT" ] || { echo "::error::no orbit id in:"; echo "$spaces_json"; exit 1; }
 
 issues '{"cmd":"project_new","name":"Engineering","key":"ENG"}' >/dev/null
-issues '{"cmd":"issue_new","title":"fix login race","project":"ENG","priority":"high"}' >/dev/null
-issues '{"cmd":"issue_new","title":"add dark mode","project":"ENG","priority":"low"}' >/dev/null
+first_created="$(issues '{"cmd":"issue_new","title":"fix login race","project":"ENG","priority":"high"}')"
+second_created="$(issues '{"cmd":"issue_new","title":"add dark mode","project":"ENG","priority":"low"}')"
+FIRST_ISSUE="$(printf '%s' "$first_created" | sed -n 's/.*"reff":"\([^"]*\)".*/\1/p')"
+SECOND_ISSUE="$(printf '%s' "$second_created" | sed -n 's/.*"reff":"\([^"]*\)".*/\1/p')"
+[ -n "$FIRST_ISSUE" ] && [ -n "$SECOND_ISSUE" ] || {
+  echo "::error::issue creation did not return canonical refs"
+  echo "$first_created"
+  echo "$second_created"
+  exit 1
+}
 
-board="$(issues '{"cmd":"board","project":"ENG"}')"
+board="$(issues '{"cmd":"board","project":"ENG","page":{}}')"
 has "$board" "fix login race"
 has "$board" "add dark mode"
 
 # The work loop: start assigns + activates; done completes (S§5.7).
-started="$(issues '{"cmd":"issue_start","reff":"ENG-1"}')"
+started="$(issues "{\"cmd\":\"issue_start\",\"reff\":\"$FIRST_ISSUE\"}")"
 has "$started" "in_progress"
-board="$(issues '{"cmd":"board","project":"ENG"}')"
+board="$(issues '{"cmd":"board","project":"ENG","page":{}}')"
 has "$board" "in_progress"
-issues '{"cmd":"issue_done","reff":"ENG-2"}' >/dev/null
-list="$(issues '{"cmd":"list"}')"
+issues "{\"cmd\":\"issue_done\",\"reff\":\"$SECOND_ISSUE\"}" >/dev/null
+list="$(issues '{"cmd":"list","page":{}}')"
 has "$list" "fix login race"
 
 # The activity feed records the transitions.
-act="$(issues '{"cmd":"activity"}')"
+act="$(issues '{"cmd":"activity","page":{}}')"
 has "$act" "created"
 has "$act" "started"
 

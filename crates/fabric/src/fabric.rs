@@ -615,9 +615,11 @@ impl BodySnapshot {
         let SnapshotExport::Collaborative(bytes) = &self.export else {
             return Ok(crate::causal::Version::empty());
         };
-        self.version
+        let version = self
+            .version
             .as_ref()
-            .expect("collaborative snapshot carries a version cell")
+            .ok_or(crate::causal::Invalid::Engine)?;
+        version
             .get_or_init(|| {
                 import_collaborative_doc(bytes, None)
                     .map(|doc| crate::causal::Version::from_frontiers(&doc.oplog_frontiers()))
@@ -2451,15 +2453,16 @@ impl Engine {
                     return Err(Failure::TypeConflict);
                 }
                 if self.bodies.get(key).is_none() {
+                    let version = snapshot
+                        .version
+                        .as_ref()
+                        .ok_or(Failure::Invalid(commit::Invalid::Import))?
+                        .clone();
                     self.bodies.insert(
                         key.clone(),
                         BodyState::FrozenCollab(FrozenCollab {
                             export: bytes.clone(),
-                            version: snapshot
-                                .version
-                                .as_ref()
-                                .expect("collaborative snapshot carries a version cell")
-                                .clone(),
+                            version,
                         }),
                     );
                     return Ok(ImportStatus {

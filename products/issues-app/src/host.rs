@@ -953,7 +953,7 @@ mod tests {
     fn a_world_call_classifies_itself_for_head_policy() {
         let read = parse_web(json!({"cmd": "issue_view", "reff": "ENG-1"})).unwrap();
         assert_eq!(read.access(), ClientAccess::Query);
-        let board = parse_web(json!({"cmd": "board"})).unwrap();
+        let board = parse_web(json!({"cmd": "board", "page": {}})).unwrap();
         assert_eq!(board.access(), ClientAccess::Query);
 
         let write = parse_web(json!({"cmd": "issue_start", "reff": "ENG-1"})).unwrap();

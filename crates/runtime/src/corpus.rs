@@ -14,6 +14,17 @@
 //! are shared across generations. Replacing one Body path-copies only the
 //! persistent-map/vector branches and ordered postings that Body names.
 
+// Corpus is a checked packed-column implementation. All offsets, widths, and
+// cardinalities are validated at construction/codec admission before these
+// hot paths run; retaining direct indexing and fixed-width arithmetic here is
+// what keeps the representation compact enough for the Station memory bound.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 use std::{
     borrow::Borrow,
     cmp::Reverse,

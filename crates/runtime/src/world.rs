@@ -1066,7 +1066,7 @@ impl AnalyticalMemoryReservation {
     ) -> Result<AnalyticalMemoryLease, crate::find::Failure> {
         self.inner
             .take()
-            .expect("analytical reservation converts at most once")
+            .ok_or(crate::find::Failure::CursorCapacityExceeded)?
             .retain(retained_bytes)
             .map(|inner| AnalyticalMemoryLease { _inner: inner })
             .map_err(|_| crate::find::Failure::CursorCapacityExceeded)

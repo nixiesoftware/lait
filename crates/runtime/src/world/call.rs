@@ -20,7 +20,7 @@ use serde::{de, ser::SerializeStruct, Deserialize, Deserializer, Serialize, Seri
 ///
 /// The semantic Runtime applies its own, usually tighter, per-World limits
 /// after a product handler decodes this application request.
-pub const MAX_WORLD_CALL_PAYLOAD: usize = super::MAX_PAYLOAD_BYTES as usize;
+pub const MAX_WORLD_CALL_PAYLOAD: usize = 2 * 1024 * 1024;
 
 /// Maximum decoded response payload accepted by the local World-call boundary.
 ///

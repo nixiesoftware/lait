@@ -338,7 +338,9 @@ impl ExtractionShape {
                 .saturating_add(
                     source_kib.saturating_mul(u64::from(self.growth.nodes_per_source_kib)),
                 )
-                .min(u64::from(self.nodes_per_body)) as u32,
+                .min(u64::from(self.nodes_per_body))
+                .try_into()
+                .unwrap_or(self.nodes_per_body),
             postings: self
                 .growth
                 .base_postings_per_body

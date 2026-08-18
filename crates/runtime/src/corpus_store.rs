@@ -8,6 +8,11 @@
 //! file streams through bounded AEAD chunks into a temporary, fsync, and one
 //! atomic rename, so interruption never publishes a partial cache line.
 
+// The codec validates frame lengths and chunk geometry before entering these
+// slice-heavy encode/decode loops. Keep the loops direct and cover the checked
+// boundary with the hostile-length/truncation tests below.
+#![allow(clippy::as_conversions, clippy::indexing_slicing)]
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 

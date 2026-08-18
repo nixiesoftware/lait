@@ -301,7 +301,7 @@ pub(crate) fn evaluate(request: Evaluation<'_>) -> Result<Answer, Failure> {
     evaluator.meter.finish()?;
     let output = into_output(flow);
     let rows = output_len(&output);
-    if rows > request.query.page_size as usize {
+    if rows > usize::try_from(request.query.page_size).unwrap_or(usize::MAX) {
         return Err(Failure::ContinuationUnavailable);
     }
     Ok(Answer {
@@ -342,12 +342,15 @@ fn linear_plan(query: &Query) -> Option<LinearPlan<'_>> {
     let mut keeps = Vec::new();
     let mut pack = None;
     for (offset, step) in query.steps.iter().enumerate().skip(1) {
-        if step.input.as_slice() != [query.steps[offset - 1].id] {
+        let previous = query.steps.get(offset.saturating_sub(1))?;
+        if step.input.as_slice() != [previous.id] {
             return None;
         }
         match &step.op {
             Op::Keep(keep) if pack.is_none() => keeps.push(keep),
-            Op::Pack(next_pack) if pack.is_none() && offset + 1 == query.steps.len() => {
+            Op::Pack(next_pack)
+                if pack.is_none() && offset.saturating_add(1) == query.steps.len() =>
+            {
                 pack = Some(next_pack);
             }
             Op::Seek(_) | Op::Keep(_) | Op::Walk(_) | Op::Rank(_) | Op::Merge(_) | Op::Pack(_) => {
@@ -381,7 +384,7 @@ fn evaluate_linear_page(request: &Evaluation<'_>) -> Result<Option<Answer>, Fail
         token_counter: request.token_counter,
         meter: Meter::new(limit),
     };
-    let page_size = request.query.page_size as usize;
+    let page_size = usize::try_from(request.query.page_size).unwrap_or(usize::MAX);
     let mut candidates = Vec::with_capacity(page_size);
     let mut next = None;
     let mut failure = None;

@@ -172,11 +172,17 @@ pub fn observation(
 
 fn observation_bound(body_count: usize) -> find_api::Bound {
     let bodies = u64::try_from(body_count).unwrap_or(4_096).clamp(1, 4_096);
+    let candidate_rows = bodies.saturating_mul(512).min(100_000).max(1);
     find_api::Bound {
         decoded_bodies: bodies,
-        postings_read: 1,
+        // `Seek::Bodies` visits the admitted entity rows sourced by every
+        // changed physical Body. A v4 semantic write commonly changes several
+        // record Bodies, and each can project more than one entity row; one
+        // posting was therefore an under-declaration that forced every such
+        // change into the conservative `docs` fallback.
+        postings_read: candidate_rows,
         edges_visited: 1,
-        nodes_visited: bodies.saturating_mul(512).min(100_000).max(1),
+        nodes_visited: candidate_rows,
         paths_retained: 1,
         candidates_per_branch: bodies.saturating_mul(512).min(10_000).max(1),
         score_evaluations: 1,
@@ -335,15 +341,13 @@ fn classify_body_facts(
         }
     }
     if missed {
-        // A removed node has no row in the new publication. Invalidate the
-        // bounded product vocabulary; never re-enter a World-wide digest query.
-        let catalog_body = contract::catalog_body_id(space);
-        if bodies.iter().any(|body| body.body == catalog_body) {
-            for plane in all_plane_names() {
-                planes.insert(((*plane).into(), None));
-            }
-        } else {
-            planes.insert(("docs".into(), None));
+        // A removed node or an auxiliary physical record has no row in the new
+        // publication. Its semantic owner cannot be recovered from that Body
+        // hash alone, so invalidate the fixed product vocabulary. This is a
+        // bounded 15-plane fan-out, never a World-wide digest query, and it
+        // avoids misclassifying an unprojected Spec head as an Issue edit.
+        for plane in all_plane_names() {
+            planes.insert(((*plane).into(), None));
         }
     }
     Invalidation {
@@ -375,20 +379,14 @@ fn conservative_observation(
     bodies: &[BodyKey],
     _baseline: &Option<BTreeMap<CatalogScope, String>>,
 ) -> Invalidation {
-    let catalog = contract::catalog_body_id(space);
-    let mut planes = vec![DirtyPlane {
-        plane: "docs".into(),
-        scope: None,
-    }];
-    if bodies.iter().any(|body| body.body == catalog) {
-        planes = all_plane_names()
-            .iter()
-            .map(|plane| DirtyPlane {
-                plane: (*plane).into(),
-                scope: None,
-            })
-            .collect();
-    }
+    let _ = (space, bodies);
+    let planes = all_plane_names()
+        .iter()
+        .map(|plane| DirtyPlane {
+            plane: (*plane).into(),
+            scope: None,
+        })
+        .collect();
     Invalidation {
         dirty: Vec::new(),
         planes,

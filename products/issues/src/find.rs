@@ -57,6 +57,10 @@ pub mod field {
     pub const KIND_PROJECT_POSITION_DESC: &str = "kind_project_position_desc";
     pub const KIND_CREATED_DESC: &str = "kind_created_desc";
     pub const KIND_PROJECT_CREATED_DESC: &str = "kind_project_created_desc";
+    /// Exact `(kind, source entity)` posting for semantic record lookup.
+    /// Seeking `source_id` alone visits every child record owned by a busy
+    /// Issue and cannot provide a size-independent uniqueness check.
+    pub const KIND_SOURCE: &str = "kind_source";
     pub const KIND_SOURCE_CREATED: &str = "kind_source_created";
     pub const KIND_SOURCE_CREATED_DESC: &str = "kind_source_created_desc";
     pub const PRIORITY: &str = "priority";
@@ -232,6 +236,7 @@ fn schemas_with_sources(sources: Vec<SourceRef>) -> Vec<Schema> {
             (field::KIND_PROJECT_POSITION_DESC, FieldKind::Bytes, false),
             (field::KIND_CREATED_DESC, FieldKind::Bytes, false),
             (field::KIND_PROJECT_CREATED_DESC, FieldKind::Bytes, false),
+            (field::KIND_SOURCE, FieldKind::Bytes, false),
             (field::KIND_SOURCE_CREATED, FieldKind::Bytes, false),
             (field::KIND_SOURCE_CREATED_DESC, FieldKind::Bytes, false),
             (field::PRIORITY, FieldKind::Text, false),
@@ -499,10 +504,20 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
         // coordinate per bounded recipient. Event text lives only on the
         // activity entity; recipient nodes never duplicate the large value.
         let nodes = 2 + crate::contract::MAX_ISSUE_AUDIENCE;
+        // Activity: twelve retained fields plus at most the bounded analyzer
+        // terms. Relation: six fields and two edge targets. Inbox: twelve
+        // scalar/composite fields per recipient. Every node also has its one
+        // visibility posting.
+        const ACTIVITY_POSTINGS: usize = 1 + 2 * 12 + MAX_TERMS_PER_VALUE;
+        const RELATION_POSTINGS: usize = 1 + 2 * 6 + 2;
+        const INBOX_POSTINGS: usize = 1 + 2 * 12;
+        let postings = ACTIVITY_POSTINGS
+            + RELATION_POSTINGS
+            + INBOX_POSTINGS * crate::contract::MAX_ISSUE_AUDIENCE;
         return ExtractionShape::new(
             u32::try_from(nodes).expect("activity extraction bound"),
-            32,
-            u64::try_from(nodes * 12).expect("activity postings bound"),
+            u32::try_from(ACTIVITY_POSTINGS).expect("activity node postings bound"),
+            u64::try_from(postings).expect("activity postings bound"),
             2 * MIB + 16 * KIB,
             2 * MIB + 128 * KIB,
             3 * MIB,
@@ -518,7 +533,7 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
     }
     if *name == schema_id(crate::v4::GOVERNANCE_REVISION_SCHEMA) {
         return ExtractionShape::new(
-            1 + crate::roles::MAX_PREDECESSORS as u32,
+            1u32.saturating_add(u32::try_from(crate::roles::MAX_PREDECESSORS).unwrap_or(u32::MAX)),
             4_128,
             4_256,
             40 * KIB,
@@ -551,7 +566,9 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
         || *name == schema_id(crate::v4::LABEL_SCHEMA)
     {
         let nodes = if *name == schema_id(crate::v4::SPACE_DIRECTORY_SCHEMA) {
-            1 + crate::roles::BUILT_IN_ROLE_IDS.len() as u32
+            1u32.saturating_add(
+                u32::try_from(crate::roles::BUILT_IN_ROLE_IDS.len()).unwrap_or(u32::MAX),
+            )
         } else {
             2
         };
@@ -571,9 +588,17 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
     if *name == schema_id(crate::v4::ISSUE_REACTION_SCHEMA) {
         return ExtractionShape::new(2, 20, 40, 4 * KIB, 8 * KIB, 32 * KIB);
     }
-    if *name == schema_id(crate::v4::PROJECT_HIERARCHY_SCHEMA)
-        || *name == schema_id(crate::v4::ISSUE_RELATION_SCHEMA)
-        || *name == schema_id(crate::v4::ENTITY_RELATION_SCHEMA)
+    if *name == schema_id(crate::v4::PROJECT_HIERARCHY_SCHEMA) {
+        // Six relation coordinates, two graph coordinates, two project
+        // coordinates, and two edge targets plus node visibility.
+        return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::v4::ISSUE_RELATION_SCHEMA) {
+        // Six relation coordinates plus project/kind-project and two edge
+        // targets. Set-like facts never emit graph coordinates.
+        return ExtractionShape::new(1, 20, 20, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::v4::ENTITY_RELATION_SCHEMA)
         || *name == schema_id(crate::v4::REVISION_ALIAS_SCHEMA)
     {
         return ExtractionShape::new(1, 16, 16, 4 * KIB, 4 * KIB, 32 * KIB);
@@ -694,8 +719,9 @@ pub(crate) fn board_lane_prefix(project: &str, state: &str) -> Vec<u8> {
 
 pub(crate) fn composite_prefix_upper(mut prefix: Vec<u8>) -> Option<Vec<u8>> {
     for index in (0..prefix.len()).rev() {
-        if prefix[index] != u8::MAX {
-            prefix[index] = prefix[index].saturating_add(1);
+        let byte = prefix.get_mut(index)?;
+        if *byte != u8::MAX {
+            *byte = byte.saturating_add(1);
             prefix.truncate(index.saturating_add(1));
             return Some(prefix);
         }
@@ -840,6 +866,12 @@ fn entity(
         .join("\n");
     if !searchable.is_empty() {
         fields.push(analyzed_search(&searchable));
+    }
+    if let Some(source) = text_field(&fields, field::SOURCE_ID).map(str::to_owned) {
+        fields.push(bytes(
+            field::KIND_SOURCE,
+            composite_key([kind, source.as_str()]),
+        ));
     }
     if let Some(created_at) = unsigned_field(&fields, field::CREATED_AT) {
         fields.push(bytes(
@@ -3026,6 +3058,96 @@ mod tests {
         assert_eq!(a, relation_identity("blocks", "iss_a", "iss_b"));
         assert_ne!(a, relation_identity("relates", "iss_a", "iss_b"));
         assert_ne!(a, relation_identity("blocks", "iss_b", "iss_a"));
+    }
+
+    #[test]
+    fn activity_shape_admits_the_bounded_term_and_audience_maxima() {
+        let issue = crate::ids::DocId::parse(ISSUE).expect("issue id");
+        let mut recipients = (0..crate::contract::MAX_ISSUE_AUDIENCE)
+            .map(|index| {
+                crate::ids::ActorId::from_incept_hash(&format!("{index:064x}")).to_string()
+            })
+            .collect::<Vec<_>>();
+        recipients.sort();
+        let record = crate::v4::ActivityRecord {
+            issue: ISSUE.into(),
+            event: crate::contract::IssueEvent {
+                k: "started".into(),
+                d: String::new(),
+                a: recipients[0].clone(),
+                t: 1,
+                c: Vec::new(),
+                x: (0..MAX_TERMS_PER_VALUE)
+                    .map(|index| format!("term{index}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                entry: String::new(),
+            },
+            recipients,
+        };
+        let identity = crate::v4::RecordBodyIdentityRecord {
+            owner: ISSUE.into(),
+            record: "activity-shape-bound".into(),
+        };
+        let identity_bytes = identity.encode_canonical().expect("identity");
+        let record_bytes = record.encode_canonical().expect("activity");
+        let mut view = fabric::CollaborativeView::default();
+        view.registers
+            .insert(crate::v4::roots::IDENTITY.into(), identity_bytes.clone());
+        view.registers
+            .insert(crate::v4::roots::RECORD.into(), record_bytes.clone());
+        let body = crate::v4::issue_activity_key(&issue, "activity-shape-bound");
+        let nodes = extract_activity(&body, &view).expect("extract bounded activity");
+        let extraction = BodyExtraction {
+            body,
+            stamp: Vec::new(),
+            nodes,
+        };
+        let source_bytes =
+            u64::try_from(identity_bytes.len() + record_bytes.len()).expect("bounded source size");
+        let shape = extraction_shape(&SourceRef {
+            name: crate::v4::PhysicalSchema::IssueActivity.declaration().id,
+            version: crate::v4::SCHEMA_VERSION,
+        });
+        let postings = |node: &ExtractedNode| {
+            1u64.saturating_add(node.fields.iter().fold(0u64, |total, field| {
+                total
+                    .saturating_add(2)
+                    .saturating_add(u64::try_from(field.terms.len()).unwrap_or(u64::MAX))
+            }))
+            .saturating_add(u64::try_from(node.features.len()).unwrap_or(u64::MAX))
+            .saturating_add(node.edges.iter().fold(0u64, |total, edge| {
+                total.saturating_add(u64::try_from(edge.targets.len()).unwrap_or(u64::MAX))
+            }))
+        };
+        let source_kib = source_bytes.saturating_add(1023) / 1024;
+        let allowed_nodes = u64::from(shape.growth.base_nodes_per_body)
+            .saturating_add(source_kib.saturating_mul(u64::from(shape.growth.nodes_per_source_kib)))
+            .min(u64::from(shape.nodes_per_body));
+        let allowed_postings = shape
+            .growth
+            .base_postings_per_body
+            .saturating_add(source_kib.saturating_mul(shape.growth.postings_per_source_kib))
+            .min(shape.postings_per_body);
+
+        assert_eq!(
+            extraction.nodes.len(),
+            2 + crate::contract::MAX_ISSUE_AUDIENCE
+        );
+        assert_eq!(
+            extraction.nodes[0]
+                .fields
+                .iter()
+                .map(|field| field.terms.len())
+                .sum::<usize>(),
+            MAX_TERMS_PER_VALUE,
+        );
+        assert!(u64::try_from(extraction.nodes.len()).unwrap_or(u64::MAX) <= allowed_nodes);
+        assert!(extraction
+            .nodes
+            .iter()
+            .all(|node| postings(node) <= u64::from(shape.postings_per_node)));
+        assert!(extraction.nodes.iter().map(postings).sum::<u64>() <= allowed_postings);
     }
 
     #[test]

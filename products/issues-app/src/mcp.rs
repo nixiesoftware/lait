@@ -21,6 +21,7 @@ struct EmptyArgs {}
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PageArgs {
     /// Maximum rows in this response (1..=1000).
+    #[schemars(range(min = 1, max = 1000))]
     page_size: u32,
     /// Opaque continuation emitted by the preceding page.
     #[serde(default)]
@@ -73,8 +74,11 @@ struct IssueDetailPageArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpPublicationId {
+    #[schemars(length(min = 32, max = 32))]
     manifest_root: Vec<u8>,
+    #[schemars(length(min = 32, max = 32))]
     implementation_digest: Vec<u8>,
+    #[schemars(length(min = 32, max = 32))]
     extractor_schema_digest: Vec<u8>,
 }
 
@@ -134,6 +138,7 @@ struct ChangeSetArgs {
     operation: Option<String>,
     #[serde(default)]
     timestamp: Option<u64>,
+    #[schemars(length(min = 1, max = 64))]
     operations: Vec<crate::ChangeOperation>,
 }
 
@@ -147,8 +152,7 @@ struct OperationStatusArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct IssueNewArgs {
     title: String,
-    #[serde(default)]
-    project: Option<String>,
+    project: String,
     #[serde(default)]
     assignees: Vec<String>,
     #[serde(default)]
@@ -837,16 +841,35 @@ pub const WITHOUT_A_TOOL: &[&str] = &[
     "access_plan",
     "attach",
     "attachment_get",
+    "comment",
+    "comment_at",
     "detach",
     "follow",
-    "geometry",
     "inbox",
+    "issue_attachments",
+    "issue_checks",
+    "issue_delete",
     "issue_document_upgrade",
+    "issue_link",
+    "issue_milestone",
+    "issue_move",
+    "issue_new",
+    "issue_parent",
+    "issue_reactions",
+    "issue_relations",
+    "issue_restore",
     "issue_text_checkpoint",
     "issue_text_splice",
+    "issue_unlink",
+    "issue_view",
+    "label_delete",
+    "label_edit",
+    "label_new",
+    "label_show",
     "project_delete",
     "project_update_post",
     "project_updates",
+    "react",
     "space_describe",
     "space_rename",
     "spec_document_upgrade",
@@ -1303,7 +1326,9 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
     for kind in branch_kinds {
         let seek_id = find_api::StepId::new(next_id)
             .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-        next_id += 1;
+        next_id = next_id
+            .checked_add(1)
+            .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
         let seek = if let Some(text) = &text {
             find_api::Seek::Term {
                 field: issues::find::field_ref(issues::find::field::SEARCH),
@@ -1361,7 +1386,9 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
             predicates.sort();
             let keep_id = find_api::StepId::new(next_id)
                 .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-            next_id += 1;
+            next_id = next_id
+                .checked_add(1)
+                .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
             steps.push(find_api::Step {
                 id: keep_id,
                 input: vec![seek_id],
@@ -1372,11 +1399,16 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
         }
     }
     let output = if outputs.len() == 1 {
-        outputs[0]
+        outputs
+            .first()
+            .copied()
+            .ok_or_else(|| Failure::new("search plan has no output"))?
     } else {
         let merge_id = find_api::StepId::new(next_id)
             .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-        next_id += 1;
+        next_id = next_id
+            .checked_add(1)
+            .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
         steps.push(find_api::Step {
             id: merge_id,
             input: outputs,
@@ -1513,13 +1545,12 @@ fn present_find_value(value: &runtime::find::Value) -> Value {
 
 fn issue_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueNewArgs = args(input)?;
-    let project = a.project.ok_or_else(Failure::invalid)?;
     let due = match a.due.as_deref() {
         None | Some("none") => None,
         Some(value) => Some(crate::router::parse_due(value).ok_or_else(Failure::invalid)?),
     };
     single_change(crate::protocol::ChangeOperation::IssueCreate {
-        project: crate::protocol::ChangeProject::Existing { project },
+        project: crate::protocol::ChangeProject::Existing { project: a.project },
         title: a.title,
         priority: a.priority,
         status: a.status,
@@ -2365,9 +2396,22 @@ mod tests {
                         .unwrap_or(1);
                     json!("0".repeat(length))
                 }
-                Some("integer" | "number") => json!(0),
+                Some("integer" | "number") => {
+                    schema.get("minimum").cloned().unwrap_or_else(|| json!(0))
+                }
                 Some("boolean") => json!(false),
-                Some("array") => json!([]),
+                Some("array") => {
+                    let length = schema["minItems"]
+                        .as_u64()
+                        .and_then(|length| usize::try_from(length).ok())
+                        .unwrap_or(0);
+                    let item = &schema["items"];
+                    Value::Array(
+                        (0..length)
+                            .map(|_| placeholder(root, item, "array item"))
+                            .collect(),
+                    )
+                }
                 Some("object") => object(root, schema),
                 other => panic!("no placeholder for a required `{name}` of type {other:?}"),
             }
@@ -2417,15 +2461,27 @@ mod tests {
         world_interface::agent_surface_coverage(&defined, &reachable, WITHOUT_A_TOOL)
             .check()
             .unwrap_or_else(|error| {
-                panic!("the agent surface drifted from the command surface: {error}")
+                panic!("the agent surface drifted from the command surface: {error:?}")
             });
     }
 
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 78);
-        assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
+        assert_eq!(tools.len(), 81);
+        let qualified: Vec<_> = tools
+            .iter()
+            .filter(|tool| tool.name().starts_with("issues_"))
+            .map(|tool| tool.name())
+            .collect();
+        assert_eq!(
+            qualified,
+            [
+                "issues_search",
+                "issues_change_set",
+                "issues_operation_status",
+            ]
+        );
         let invocation = tools
             .iter()
             .find(|tool| tool.name() == "view")

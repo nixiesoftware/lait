@@ -712,7 +712,7 @@ fn remote_extraction_does_not_block_prior_reads_and_local_retry_orders_after_con
         write_rx
             .recv_timeout(Duration::from_millis(250))
             .expect("local submit must be refused, not deadlock behind Contact"),
-        Err(runtime::world::Failure::Busy | runtime::world::Failure::Interrupted)
+        Err(runtime::world::Failure::Busy)
     ));
     write.join().unwrap();
 

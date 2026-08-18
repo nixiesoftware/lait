@@ -260,7 +260,7 @@ fn decode_legacy_transaction(bytes: &[u8]) -> Result<LegacyTransaction, Failure>
         .core
         .descriptors
         .windows(2)
-        .any(|pair| pair[0].key() >= pair[1].key())
+        .any(|pair| matches!(pair, [left, right] if left.key() >= right.key()))
     {
         return Err(Failure::Integrity(Defect::CorruptMaterial));
     }

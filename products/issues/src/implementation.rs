@@ -243,7 +243,7 @@ fn milestone_position(
                     )?;
                     (rank, upper.map(|(_, rank)| rank))
                 }
-                _ => unreachable!(),
+                _ => return Err(Rejection::InvalidRequest),
             }
         }
     };
@@ -1969,7 +1969,8 @@ fn find_kind_page(
         bound,
     }];
     let mut output = seek;
-    if !additional.is_empty() {
+    let has_additional = !additional.is_empty();
+    if has_additional {
         let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
         steps.push(find_api::Step {
             id: keep,
@@ -1981,7 +1982,8 @@ fn find_kind_page(
         });
         output = keep;
     }
-    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    let pack =
+        find_api::StepId::new(if has_additional { 3 } else { 2 }).ok_or(Rejection::StateCorrupt)?;
     fields.extend([
         crate::find::field_ref(crate::find::field::ID),
         crate::find::field_ref(crate::find::field::KIND),
@@ -2047,7 +2049,11 @@ fn find_field_test_page(
         paths_retained: candidates,
         candidates_per_branch: candidates,
         score_evaluations: candidates,
-        projected_bytes: u64::from(request.limit).saturating_mul(64 * 1_024),
+        // This helper packs only bounded identity/relation coordinates; large
+        // text values are hydrated from the returned source Body by the
+        // dedicated detail paths. Keep the 129th cap-detection row inside the
+        // schema's honest 8 MiB grant without claiming a 64 KiB tuple.
+        projected_bytes: u64::from(request.limit).saturating_mul(16 * 1_024),
         packed_tokens: u64::from(request.limit).saturating_mul(4_096),
         wall_millis: 5_000,
     };
@@ -2063,7 +2069,8 @@ fn find_field_test_page(
         })),
         bound,
     }];
-    if !additional.is_empty() {
+    let has_additional = !additional.is_empty();
+    if has_additional {
         let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
         steps.push(find_api::Step {
             id: keep,
@@ -2075,7 +2082,8 @@ fn find_field_test_page(
         });
         output = keep;
     }
-    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    let pack =
+        find_api::StepId::new(if has_additional { 3 } else { 2 }).ok_or(Rejection::StateCorrupt)?;
     fields.extend([
         crate::find::field_ref(crate::find::field::ID),
         crate::find::field_ref(crate::find::field::KIND),
@@ -4101,7 +4109,7 @@ fn resolve_entity(
             crate::ids::TeamId::PREFIX,
             crate::find::field::EXACT_NAME,
         ),
-        contract::ResolveEntity::Issue => unreachable!(),
+        contract::ResolveEntity::Issue => return Err(Rejection::InvalidRequest),
     };
     let row = if selector.starts_with(prefix) {
         unique_find_row(ctx, crate::find::field::ID, selector, kind, project)?
@@ -4326,11 +4334,16 @@ fn apply_project_workflow(
         return Err(Rejection::Conflict);
     }
     let revision = projection.revision.ok_or(Rejection::Conflict)?;
-    catalog
+    let revisions = catalog
         .workflow_revisions
         .entry(project.to_string())
-        .or_default()
-        .push(revision);
+        .or_default();
+    if !revisions
+        .iter()
+        .any(|current| current.revision_id == revision.revision_id)
+    {
+        revisions.push(revision);
+    }
     Ok(())
 }
 

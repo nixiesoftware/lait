@@ -609,7 +609,9 @@ pub fn page_after(
                     return Err(Failure::NotCanonicalShape);
                 }
                 if child.count != count(entries.len())?
-                    || entries.windows(2).any(|pair| pair[0].key >= pair[1].key)
+                    || entries
+                        .windows(2)
+                        .any(|pair| matches!(pair, [left, right] if left.key >= right.key))
                     || entries
                         .iter()
                         .any(|entry| entry.value.len() > MAX_VALUE_BYTES)

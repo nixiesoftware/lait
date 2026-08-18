@@ -986,9 +986,8 @@ struct RuntimeGeometryMemoryReservation(runtime::world::AnalyticalMemoryReservat
 impl GeometryMemory for runtime::world::FindHandle {
     fn reserve(&self, transient_bytes: u64) -> Result<Box<dyn GeometryMemoryReservation>, ()> {
         self.reserve_analysis(transient_bytes)
-            .map(|reservation| {
+            .map(|reservation| -> Box<dyn GeometryMemoryReservation> {
                 Box::new(RuntimeGeometryMemoryReservation(reservation))
-                    as Box<dyn GeometryMemoryReservation>
             })
             .map_err(|_| ())
     }
@@ -999,7 +998,7 @@ impl GeometryMemoryReservation for RuntimeGeometryMemoryReservation {
         let Self(reservation) = *self;
         reservation
             .retain(retained_bytes)
-            .map(|lease| Box::new(lease) as Box<dyn GeometryMemoryLease>)
+            .map(|lease| -> Box<dyn GeometryMemoryLease> { Box::new(lease) })
             .map_err(|_| ())
     }
 }
@@ -1089,6 +1088,7 @@ impl std::fmt::Debug for GeometryExecutor {
 }
 
 impl GeometryExecutor {
+    #[allow(clippy::expect_used)]
     fn new(workers: usize, queued_builds: usize) -> Self {
         let (sender, receiver) =
             std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send + 'static>>(queued_builds);
@@ -1494,6 +1494,15 @@ impl RelationKind {
             "duplicates" => Self::Duplicates,
             "contains" => Self::Contains,
             _ => Self::Association,
+        }
+    }
+
+    const fn order(self) -> u8 {
+        match self {
+            Self::Blocks => 0,
+            Self::Duplicates => 1,
+            Self::Contains => 2,
+            Self::Association => 3,
         }
     }
 }
@@ -1952,7 +1961,7 @@ impl CompactGeometry {
                     GeometrySection::ComponentMembers(_) => &compact.members,
                     GeometrySection::ComponentRoots(_) => &compact.roots,
                     GeometrySection::ComponentTerminals(_) => &compact.terminals,
-                    _ => unreachable!(),
+                    _ => return Err(AccessFailure::InvalidPage("component section")),
                 };
                 member_rows(self, &self.component_members, span, start, limit)
             }
@@ -1972,7 +1981,7 @@ impl CompactGeometry {
                 let span = match request.section {
                     GeometrySection::ResidualAt(_) => &compact.at,
                     GeometrySection::ResidualRequires(_) => &compact.requires,
-                    _ => unreachable!(),
+                    _ => return Err(AccessFailure::InvalidPage("residual section")),
                 };
                 member_rows(self, &self.residual_members, span, start, limit)
             }
@@ -2174,8 +2183,8 @@ fn prepare(
             })
         })
         .collect();
-    edges.sort_by_key(|edge| (edge.from, edge.relation as u8, edge.to));
-    edges.dedup_by_key(|edge| (edge.from, edge.relation as u8, edge.to));
+    edges.sort_by_key(|edge| (edge.from, edge.relation.order(), edge.to));
+    edges.dedup_by_key(|edge| (edge.from, edge.relation.order(), edge.to));
     let blocking_fanout = {
         let mut fanout = vec![0u64; dictionary.len()];
         for edge in &edges {

@@ -59,26 +59,28 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(async {
-        let space = lait::orbital::discover_space(home)
-            .single()
-            .expect("test Space");
-        let call = issues_app::encode_call(&request)?;
-        let reply = lait::control::call_world(
-            home,
-            ControlRoute::World {
-                address: OrbitAddress::for_store(home, space),
-                world: call.world().as_str().to_string(),
-            },
-            call.clone(),
-            None,
-        )
-        .await?;
-        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
-            &call, reply,
-        )?)?)
-    })
-    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+    super::accepted_issue_response(
+        rt.block_on(async {
+            let space = lait::orbital::discover_space(home)
+                .single()
+                .expect("test Space");
+            let call = issues_app::encode_call(&request)?;
+            let reply = lait::control::call_world(
+                home,
+                ControlRoute::World {
+                    address: OrbitAddress::for_store(home, space),
+                    world: call.world().as_str().to_string(),
+                },
+                call.clone(),
+                None,
+            )
+            .await?;
+            Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+                &call, reply,
+            )?)?)
+        })
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+    )
 }
 
 fn grant_role(

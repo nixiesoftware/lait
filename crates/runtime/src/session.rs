@@ -1657,6 +1657,19 @@ impl CoreInner {
         self.sync_read_memory()
     }
 
+    /// Create physical governor headroom for bounded transient work which is
+    /// not itself a retained publication. A deliberately lower retained-cache
+    /// ceiling still constrains publication builds, but must not prevent a
+    /// caller from reading the durable receipt that reports that capacity.
+    fn make_transient_read_room(&mut self, additional: u64) -> Result<(), ()> {
+        let limit = self.read_memory.station_bytes.saturating_sub(additional);
+        self.evict_unpinned_read_cache_to(limit);
+        if self.station_read_retained_bytes() > limit {
+            return Err(());
+        }
+        self.sync_read_memory()
+    }
+
     fn install_world_publication(&mut self, world: WorldId, publication: Arc<WorldPublication>) {
         self.world_read_heads
             .insert((world.clone(), publication.id), WorldReadHead::Ready);
@@ -1746,20 +1759,28 @@ impl CoreInner {
                     ),
                     materialization,
                 );
-                if let Ok((corpus, _)) = publication.corpus.apply(crate::corpus::CorpusDelta {
+                match publication.corpus.apply(crate::corpus::CorpusDelta {
                     base: publication.id,
                     next,
-                    snapshot: publication.snapshot.clone(),
+                    // The Corpus has no changed source rows for this World,
+                    // but its publication coordinate is the new global
+                    // Replica generation. Supplying the prior snapshot makes
+                    // the exact-root validation reject this carry-forward and
+                    // leaves an unaffected World permanently `Building`.
+                    snapshot: snapshot.clone(),
                     bodies: Vec::new(),
                 }) {
-                    self.install_world_publication(
+                    Ok((corpus, _)) => self.install_world_publication(
                         world,
                         Arc::new(WorldPublication {
                             id: next,
                             snapshot: snapshot.clone(),
                             corpus: Arc::new(corpus),
                         }),
-                    );
+                    ),
+                    Err(_) => {
+                        record_world_read_failure(self, (world, next), PublicationFailure::Corpus)
+                    }
                 }
             }
         }
@@ -2031,6 +2052,7 @@ impl StationCore {
     /// A core wrapping a Replica directly, for tests that exercise a surface
     /// built over one without standing up a Station.
     #[doc(hidden)]
+    #[cfg(test)]
     pub fn for_test(replica: replica::Replica) -> Self {
         match Self::new(
             Epoch::ZERO,
@@ -2115,17 +2137,51 @@ impl StationCore {
 
     /// Announce that Space authority advanced. Called after the write is
     /// durable, never before.
-    pub fn note_authority_advanced(&self) {
+    pub fn note_authority_advanced(self: &Arc<Self>) {
         // Authority/key arrival can change which retained Bodies are readable
         // without moving the Manifest. No old corpus remains addressable under
-        // that same semantic root; the next exact package access rebuilds it
-        // under a fresh local materialization.
-        {
+        // that same semantic root. Install a fresh materialization as Building
+        // and schedule its rebuild on the bounded publication lane before
+        // returning; callers receive immediate feedback while the prior exact
+        // view stays retained and no write can overtake newly readable truth.
+        let rebuilds = {
             let _replica = self.replica_lock();
             let mut inner = self.lock();
             let snapshot = inner.snapshot.clone();
             let parent = inner.parents.get(&snapshot.root()).copied().flatten();
             inner.publish_snapshot(snapshot, parent, None);
+            inner
+                .world_builders
+                .iter()
+                .map(|(world, builder)| {
+                    (
+                        world.clone(),
+                        crate::publication::PublicationId::new(
+                            inner.snapshot.root(),
+                            builder.implementation,
+                            builder.extractor_schema_digest,
+                        ),
+                        builder.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (world, semantic, builder) in rebuilds {
+            let readiness =
+                self.schedule_receipt_publication(world.clone(), semantic, builder, true);
+            if matches!(
+                readiness,
+                OperationPublication::Capacity
+                    | OperationPublication::GenerationUnavailable
+                    | OperationPublication::ImplementationUnavailable
+                    | OperationPublication::Unavailable
+            ) {
+                tracing::warn!(
+                    ?readiness,
+                    %world,
+                    "authority publication refresh could not be admitted"
+                );
+            }
         }
         self.authority_tick
             .send_modify(|n| *n = n.saturating_add(1));
@@ -2749,6 +2805,7 @@ impl StationCore {
         world_id: WorldId,
         semantic: crate::publication::PublicationId,
         builder: WorldPublicationBuilder,
+        current_only: bool,
     ) -> OperationPublication {
         enum Source {
             Resident(Arc<replica::ReadSnapshot>),
@@ -2768,7 +2825,19 @@ impl StationCore {
             if inner.closed {
                 return OperationPublication::Unavailable;
             }
-            if let Some(publication) = inner.ready_semantic_publication(&world_id, semantic) {
+            let ready = if current_only {
+                inner
+                    .world_publications
+                    .get(&world_id)
+                    .filter(|publication| {
+                        publication.id.publication == semantic
+                            && publication.id.materialization == inner.snapshot_materialization
+                    })
+                    .cloned()
+            } else {
+                inner.ready_semantic_publication(&world_id, semantic)
+            };
+            if let Some(publication) = ready {
                 return OperationPublication::Ready(publication.id);
             }
             let key = (world_id.clone(), semantic);
@@ -2798,7 +2867,19 @@ impl StationCore {
             if inner.closed {
                 return OperationPublication::Unavailable;
             }
-            if let Some(publication) = inner.ready_semantic_publication(&world_id, semantic) {
+            let ready = if current_only {
+                inner
+                    .world_publications
+                    .get(&world_id)
+                    .filter(|publication| {
+                        publication.id.publication == semantic
+                            && publication.id.materialization == inner.snapshot_materialization
+                    })
+                    .cloned()
+            } else {
+                inner.ready_semantic_publication(&world_id, semantic)
+            };
+            if let Some(publication) = ready {
                 return OperationPublication::Ready(publication.id);
             }
             let key = (world_id.clone(), semantic);
@@ -4124,6 +4205,17 @@ fn session_publication_failure(error: PublicationFailure, operation: &'static st
     }
 }
 
+/// A current ambient write meeting a `Building` publication is live but not
+/// yet admissible: Contact or another publication builder has advanced durable
+/// truth and the write must not overtake it. Surface bounded contention, not a
+/// false Station shutdown, so clients preserve their view and retry explicitly.
+fn submission_publication_failure(error: PublicationFailure, operation: &'static str) -> Failure {
+    match error {
+        PublicationFailure::Interrupted => Failure::Busy,
+        other => session_publication_failure(other, operation),
+    }
+}
+
 fn publication_failure_from_find(error: crate::find::Failure) -> PublicationFailure {
     match error {
         crate::find::Failure::Interrupted => PublicationFailure::Interrupted,
@@ -5063,6 +5155,24 @@ fn extract_changed_bodies(
     let mut outputs = Vec::new();
     for body in changed.iter().filter(|body| &body.world == world_id) {
         let binding = snapshot.binding(body);
+        let matching: Vec<_> = extractors
+            .iter()
+            .filter(|extractor| {
+                binding.is_some_and(|binding| {
+                    binding.schema == extractor.source.name
+                        && binding.schema_version == extractor.source.version
+                })
+            })
+            .collect();
+        // Protected Runtime Bodies and product Bodies outside this Find
+        // contract are not Corpus sources. Skip them before asking the public
+        // reader for a stamp; the reader deliberately refuses protected
+        // bindings. A Body present in the prior Corpus still flows through as
+        // an empty-node replacement so a schema/source change removes its old
+        // index rows.
+        if matching.is_empty() && prior.body_stamp(body).is_none() {
+            continue;
+        }
         let stamp = match binding {
             Some(_) => <SnapshotReader as crate::world::BodyReader>::body_stamp(&reader, body)
                 .ok_or_else(|| extractor_publication_failure(None, Some(body), "source-stamp"))?,
@@ -5081,18 +5191,6 @@ fn extract_changed_bodies(
             stamp,
             nodes: Vec::new(),
         };
-        let matching: Vec<_> = extractors
-            .iter()
-            .filter(|extractor| {
-                binding.is_some_and(|binding| {
-                    binding.schema == extractor.source.name
-                        && binding.schema_version == extractor.source.version
-                })
-            })
-            .collect();
-        if matching.is_empty() && prior.body_stamp(body).is_none() {
-            continue;
-        }
         for extractor in matching {
             if !schemas.iter().any(|schema| {
                 schema.reference == extractor.schema && schema.sources.contains(&extractor.source)
@@ -5623,7 +5721,7 @@ impl Session {
             _ => return OperationPublication::ImplementationUnavailable,
         };
         self.core
-            .schedule_receipt_publication(world_id.clone(), semantic, builder)
+            .schedule_receipt_publication(world_id.clone(), semantic, builder, false)
     }
 
     fn operation_status_from_receipt(
@@ -5658,7 +5756,15 @@ impl Session {
         let result = if let Some(reader) = reader {
             let footprint = reader.footprint();
             let (read_memory, station) = {
-                let inner = self.core.lock();
+                let mut inner = self.core.lock();
+                // A cold authenticated receipt lookup is bounded transient
+                // work, not a reason to strand reconstructable publication
+                // caches at the Station ceiling. Reclaim those caches before
+                // asking the shared governor for the declared lookup peak;
+                // current, cursor, and deferred publications remain pinned.
+                inner
+                    .make_transient_read_room(footprint.cold_lookup_transient_upper_bound)
+                    .map_err(|_| Failure::ReadCapacity)?;
                 (inner.read_memory.clone(), inner.station_memory.station)
             };
             let _lookup_memory = read_memory
@@ -6165,7 +6271,7 @@ impl Session {
                 ambient.extractor_schema_digest,
             )
             .map_err(|failure| {
-                session_publication_failure(failure, "pin World submission publication")
+                submission_publication_failure(failure, "pin World submission publication")
             })?;
             let pinned = publication.snapshot.clone();
             let admitted_retained_bytes = inner
@@ -6407,7 +6513,7 @@ impl Session {
                 return self.committed_effect_from_ready_receipt(receipt);
             }
             replica::transaction::PreparedActionOutcome::Prepared(prepared) => {
-                let candidate_receipt = prepared.receipt().clone();
+                let candidate_receipt = prepared.receipt().map_err(commit_failure)?.clone();
                 drop(replica.take());
                 let snapshot_delta_bytes = prepared
                     .candidate_snapshot_delta_bytes_estimate(&prior)
@@ -6514,7 +6620,7 @@ impl Session {
         let committed_publication = fresh
             .as_ref()
             .map(|(_, publication)| publication.id)
-            .expect("fresh prepared action installs one publication");
+            .ok_or(Failure::Persistence)?;
         if let Some((snapshot, publication)) = fresh {
             // Publish the immutable snapshot + corpus and its Observation
             // while still holding the writer. Readers can observe the old
@@ -6812,7 +6918,11 @@ impl Session {
                 let fresh = match outcome {
                     replica::transaction::PreparedActionOutcome::Replayed(_) => None,
                     replica::transaction::PreparedActionOutcome::Prepared(prepared) => {
-                        let candidate_receipt = prepared.receipt().clone();
+                        let candidate_receipt = prepared
+                            .receipt()
+                            .map_err(commit_failure)
+                            .map_err(crate::exec::WorkRefusal::from)?
+                            .clone();
                         drop(replica.take());
                         let snapshot_delta_bytes = prepared
                             .candidate_snapshot_delta_bytes_estimate(&prior)
@@ -6983,6 +7093,7 @@ impl Session {
         self.find_selected(query, Some(publication))
     }
 
+    #[allow(clippy::expect_used)]
     fn find_selected(
         &self,
         mut query: crate::find::Query,
@@ -7577,6 +7688,7 @@ impl Session {
         self.query_selected(query, Some(publication))
     }
 
+    #[allow(clippy::expect_used)]
     fn query_selected(
         &self,
         mut query: Query,
@@ -7622,6 +7734,29 @@ impl Session {
         self.ensure_within_limit(query.payload.len())?;
         let requested = query.publication;
         let principal = self.fresh_principal()?;
+        let cold_generation = if requested_world_publication.is_none() {
+            requested.and_then(|publication| {
+                let inner = self.core.lock();
+                (publication.manifest_root != inner.snapshot.root()
+                    && !inner.generations.contains_key(&publication.manifest_root))
+                .then(|| (publication.manifest_root, inner.snapshot.clone()))
+            })
+        } else {
+            None
+        };
+        let cold_generation = if let Some((root, current)) = cold_generation {
+            let reader = {
+                let replica = self.core.replica_lock();
+                replica.generation_reader(current)
+            };
+            let footprint = reader
+                .generation_footprint(&root)
+                .map_err(|_| Failure::GenerationUnavailable)?
+                .ok_or(Failure::GenerationUnavailable)?;
+            Some((root, reader, footprint))
+        } else {
+            None
+        };
         let (plan, query_world, world_schemas, find_schemas, find_extractors) = {
             let mut inner = self.core.lock();
             if inner.closed {
@@ -7730,7 +7865,17 @@ impl Session {
                             (generation.snapshot.clone(), generation.materialization)
                         })
                     };
-                    let reader = None;
+                    let (reader, footprint) = if snapshot.is_some() {
+                        (None, None)
+                    } else {
+                        let Some((cold_root, reader, footprint)) = cold_generation else {
+                            return Err(Failure::GenerationUnavailable);
+                        };
+                        if cold_root != root {
+                            return Err(Failure::GenerationUnavailable);
+                        }
+                        (Some(reader), Some(footprint))
+                    };
                     let reserved_materialization = if let Some((_, materialization)) = snapshot {
                         materialization
                     } else {
@@ -7750,18 +7895,24 @@ impl Session {
                         ));
                     }
                     // See the Find path above: never price a cold historical
-                    // generation from an unrelated ambient snapshot.
-                    let Some((estimate_snapshot, _)) = snapshot.as_ref() else {
-                        return Err(Failure::GenerationUnavailable);
-                    };
-                    let build_memory = inner
-                        .reserve_full_publication_build(
+                    // generation from an unrelated ambient snapshot. Its
+                    // authenticated footprint includes retained and complete
+                    // reconstruction-transient bounds before any delta I/O.
+                    let build_memory = if let Some((estimate_snapshot, _)) = snapshot.as_ref() {
+                        inner.reserve_full_publication_build(
                             estimate_snapshot,
                             &self.world_id,
                             &find_extractors,
                             true,
                         )
-                        .map_err(|_| Failure::ReadCapacity)?;
+                    } else {
+                        inner.reserve_historical_publication_build(
+                            footprint.as_ref().ok_or(Failure::GenerationUnavailable)?,
+                            &self.world_id,
+                            &find_extractors,
+                        )
+                    }
+                    .map_err(|_| Failure::ReadCapacity)?;
                     let flight = Arc::new(PublicationFlight::new());
                     inner
                         .publication_flights

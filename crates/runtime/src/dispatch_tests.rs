@@ -1486,15 +1486,19 @@ fn cold_historical_status_refuses_a_long_chain_before_delta_io() {
         .unwrap();
     let session = station.dock(&world, &identity).unwrap();
     session.constrain_read_cache_to_resident_only_for_test();
-    assert!(matches!(
-        session
-            .operation_status(request.as_bytes(), payload_hash)
-            .unwrap(),
-        crate::session::OperationStatus::Found {
-            publication: crate::session::OperationPublication::Capacity,
-            ..
-        }
-    ));
+    let status = session
+        .operation_status(request.as_bytes(), payload_hash)
+        .unwrap();
+    assert!(
+        matches!(
+            status,
+            crate::session::OperationStatus::Found {
+                publication: crate::session::OperationPublication::Capacity,
+                ..
+            }
+        ),
+        "unexpected historical status: {status:?}",
+    );
     assert_eq!(session.test_building_memory_bytes(), 0);
     assert_eq!(session.read_cache_stats_for_test().0, 1);
     let _ = std::fs::remove_dir_all(root);
@@ -2409,7 +2413,10 @@ fn active_cursor_lease_survives_hot_publication_eviction_then_expires_typed() {
             },
         );
         result.unwrap_or_else(|failure| {
-            panic!("cursor retention submit {index} failed: {failure:?}")
+            panic!(
+                "cursor retention submit {index} failed: {failure:?}; cache={:?}",
+                session.read_cache_stats_for_test(),
+            )
         });
     }
     let (generations_before_pressure, _, _) = session.read_cache_stats_for_test();
