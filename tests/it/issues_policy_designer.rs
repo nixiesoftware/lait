@@ -115,10 +115,17 @@ fn grant_role(
     }
 }
 
+/// The JSON body of a read, however the surface hands it back.
+///
+/// Listing roles answers with a typed `Roles { page }` now rather than JSON
+/// inside a `Text`; the page serializes to the same shape these assertions
+/// navigate, so the only thing that changed is where the value comes from.
+/// `RoleShow` and `WorkflowShow` still answer with `Text`.
 fn text_of(resp: IssueResponse) -> serde_json::Value {
     match resp {
         IssueResponse::Text { text } => serde_json::from_str(&text).expect("json text"),
-        other => panic!("expected Text, got {other:?}"),
+        IssueResponse::Roles { page } => serde_json::to_value(page).expect("roles page json"),
+        other => panic!("expected a read body, got {other:?}"),
     }
 }
 

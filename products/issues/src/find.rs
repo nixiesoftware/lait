@@ -1801,19 +1801,25 @@ fn extract_governance_heads(
         return Err(Rejection::StateCorrupt);
     }
     let heads = revision_heads(view)?;
-    Ok(vec![entity(
-        &format!("role:{role}"),
-        "role_head",
-        vec![
-            exact_text(field::ENTITY_KEY, role),
-            bytes(
-                field::HEAD_REVISIONS,
-                serde_json::to_vec(&heads).map_err(|_| Rejection::StateCorrupt)?,
-            ),
-            boolean(field::CONFLICTED, heads.len() != 1),
-            boolean(field::TOMBSTONE, false),
-        ],
-    )?])
+    // The Space directory emits a `role_head` node under this same id carrying
+    // `STATE = "built_in"`, and initialising a tracker writes a governance
+    // revision for every built-in role — so this node lands on top of that one
+    // and is what a role lookup reads. Carrying the marker here is what keeps
+    // a built-in role recognisable as one; without it every built-in role
+    // reads back as custom the moment its heads are first written.
+    let mut fields = vec![
+        exact_text(field::ENTITY_KEY, role.clone()),
+        bytes(
+            field::HEAD_REVISIONS,
+            serde_json::to_vec(&heads).map_err(|_| Rejection::StateCorrupt)?,
+        ),
+        boolean(field::CONFLICTED, heads.len() != 1),
+        boolean(field::TOMBSTONE, false),
+    ];
+    if crate::roles::built_in(&role).is_some() {
+        fields.push(exact_text(field::STATE, "built_in"));
+    }
+    Ok(vec![entity(&format!("role:{role}"), "role_head", fields)?])
 }
 
 fn extract_workflow(
