@@ -513,7 +513,12 @@ fn deleting_an_issue_needs_confirmation_it_can_actually_ask_for() {
         false,
     );
     assert_eq!(status, 200, "issue_new: {filed}");
-    let reff = filed["reff"].as_str().expect("a ref").to_string();
+    assert_eq!(filed["kind"], "operation", "issue_new: {filed}");
+    assert_eq!(filed["receipt"]["phase"], "accepted", "issue_new: {filed}");
+    let reff = filed["response"]["reff"]
+        .as_str()
+        .expect("a ref")
+        .to_string();
 
     let (status, question) = head.world(
         &orbit,
@@ -536,7 +541,7 @@ fn deleting_an_issue_needs_confirmation_it_can_actually_ask_for() {
     let (status, listed) = head.world(
         &orbit,
         "issues",
-        serde_json::json!({ "cmd": "list" }),
+        serde_json::json!({ "cmd": "list", "page": { "limit": 100 } }),
         false,
     );
     assert_eq!(status, 200, "list: {listed}");
@@ -556,7 +561,7 @@ fn deleting_an_issue_needs_confirmation_it_can_actually_ask_for() {
     let (_, listed) = head.world(
         &orbit,
         "issues",
-        serde_json::json!({ "cmd": "list" }),
+        serde_json::json!({ "cmd": "list", "page": { "limit": 100 } }),
         false,
     );
     assert!(

@@ -31,6 +31,21 @@ use crate::{
     OPERATION, VERSION,
 };
 
+/// How far the sole-live-project fallback will look before it gives up.
+///
+/// Only the *shape* of the answer matters — one live project or not one — so
+/// this needs to be large enough that a real Space answers within a single
+/// page, not large enough to enumerate everything. A Space that exceeds it
+/// refuses and asks for `-p`, which is the same answer it would give for any
+/// other ambiguity.
+///
+/// It may not simply be raised: `find_kind_page` derives the query bound from
+/// this limit as `limit * 64 KiB` of `projected_bytes`, and the Station policy
+/// ceiling is 8 MiB (`runtime::find::Policy::default`). Anything above 128 is
+/// refused whole as `InvalidRequest` rather than truncated, so this rides the
+/// product-wide page size and stays well inside that ceiling.
+const SOLE_PROJECT_SCAN: u32 = issues::contract::DEFAULT_PAGE_SIZE;
+
 /// The daemon facts the router needs per request: who is acting and the
 /// project-choice inputs. (Membership/standing itself is enforced by the
 /// Session's mechanics guard.)
@@ -488,8 +503,29 @@ impl<'a> IssueRouter<'a> {
         // Auto-selection skips archived projects: a soft-hidden project must not
         // become the default board just because it is the only live-looking one
         // (CUSTOM-9). Explicit refs above still resolve it.
+        //
+        // This is the last link of the documented chain and it is load-bearing:
+        // a freshly founded Space has exactly one project, so every first issue
+        // filed without `-p` arrives here. Reached only after the three cheaper
+        // links miss, so the enumeration is not on the common path.
+        let page = issues::contract::PageRequest {
+            limit: SOLE_PROJECT_SCAN,
+            cursor: None,
+        };
+        let projects: issues::contract::Page<ProjectDto> = self
+            .query_page(&IssueQuery::Projects { page: page.clone() }, &page)
+            .map_err(Self::effect_err)?;
+        let mut live = projects.items.iter().filter(|project| !project.archived);
+        if let Some(only) = live.next() {
+            // A second live project means the answer is genuinely ambiguous; a
+            // truncated scan means we cannot prove it is not, and refusing is
+            // the safe direction in both cases.
+            if live.next().is_none() && projects.next_cursor.is_none() {
+                return Ok(only.id.to_string());
+            }
+        }
         Err(Response::err(
-            "no project chosen — pass -p <project> or configure a default",
+            "no project chosen and no single default — pass -p <project>",
         ))
     }
 
