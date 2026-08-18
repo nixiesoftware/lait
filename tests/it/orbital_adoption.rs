@@ -55,6 +55,27 @@ impl AuthorityView for ExampleAuthority {
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![3]),
         })
     }
+
+    /// Which implementation is active for each hosted World.
+    ///
+    /// A package is registered under an exact reviewed identity and looked up
+    /// by `(world, active_implementation)`, so the authority has to name the
+    /// same identity the registration did. The trait default answers
+    /// `[0u8; 32]` for every World, which matches nothing here and makes both
+    /// packages report as an unknown World.
+    fn active_implementation(
+        &self,
+        world: &replica::body::WorldId,
+        _authority_frontier: &AuthorityFrontier,
+    ) -> Result<Option<[u8; 32]>, String> {
+        Ok(Some(match world.as_str() {
+            "dev.example.files" => [7u8; 32],
+            "dev.example.notes" => [8u8; 32],
+            // Everything else in this file registers bare, which is the
+            // zero identity, and the two must keep agreeing.
+            _ => [0u8; 32],
+        }))
+    }
 }
 
 /// An independent example World: a single tally Body; an intent increments it
