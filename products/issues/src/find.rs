@@ -616,16 +616,22 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
         return ExtractionShape::new(2, 20, 40, 4 * KIB, 8 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::PROJECT_HIERARCHY_SCHEMA) {
-        // Seven relation coordinates (both membership directions), two
-        // graph coordinates, two project coordinates, and two edge targets
-        // plus node visibility.
+        // Six relation coordinates, two graph coordinates, two project
+        // coordinates, and two edge targets plus node visibility. Hierarchy
+        // is not a membership kind and posts no reverse coordinate: it is
+        // read through the graph coordinates, which already carry both ends.
         return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::ISSUE_RELATION_SCHEMA) {
         // Seven relation coordinates — membership is posted in both
         // directions — plus project/kind-project and two edge targets.
         // Set-like facts never emit graph coordinates.
-        return ExtractionShape::new(1, 20, 20, 4 * KIB, 4 * KIB, 32 * KIB);
+        //
+        // Nine fields at two postings each, one node, two edge targets: 21.
+        // The previous 20 admitted the eight-field node with one posting to
+        // spare, which is why declaring the reverse coordinate had to move
+        // this number rather than fit inside it.
+        return ExtractionShape::new(1, 22, 22, 4 * KIB, 4 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::ENTITY_RELATION_SCHEMA)
         || *name == schema_id(crate::records::REVISION_ALIAS_SCHEMA)
@@ -986,20 +992,26 @@ fn relation_identity(kind: &str, source: &str, target: &str) -> [u8; 32] {
 /// "what is assigned to me". These, and only these, also post
 /// [`field::RELATION_TARGET_KIND`].
 ///
-/// The set is deliberately closed rather than universal. A notification
-/// audience edge is asked forward-only — once per delivery, from the issue —
-/// and the inbox reads its own ordered coordinate, so posting the reverse for
-/// every recipient would charge `MAX_ISSUE_AUDIENCE` extra postings per
-/// activity record to answer a question nothing asks.
-const MEMBERSHIP_KINDS: [&str; 8] = [
+/// It is exactly the frozen kind set of
+/// [`crate::records::IssueRelationRecord`], because an issue is the only
+/// entity these point away from and the aggregate is always asked about the
+/// far end. An initiative's projects and a team's members are relations too,
+/// and are absent here on purpose: those are asked *from* the initiative and
+/// the team, which is the forward direction the source posting already
+/// answers.
+///
+/// The set is closed rather than universal for the same reason. A
+/// notification audience edge is asked forward-only — once per delivery, from
+/// the issue — and the inbox reads its own ordered coordinate, so posting the
+/// reverse for every recipient would charge `MAX_ISSUE_AUDIENCE` extra
+/// postings per activity record to answer a question nothing asks.
+const MEMBERSHIP_KINDS: [&str; 6] = [
     "assignee",
     "follower",
     "label",
     "milestone",
     "cycle",
     "baseline",
-    "initiative_project",
-    "team_member",
 ];
 
 fn relation_with_identity(

@@ -2367,6 +2367,102 @@ fn find_source_created_page(
     .map_err(find_rejection)
 }
 
+/// How many member issues a collection row will be enriched over.
+///
+/// Not a product guess: [`runtime::find::MAX_SEEK_IDS`] is the ceiling the
+/// Find layer itself declares for resolving a set of nodes by id, and that
+/// resolution is the second half of every count below.
+const ENRICHMENT_CEILING: u64 = runtime::find::MAX_SEEK_IDS as u64;
+
+/// Live and Done-category issue counts for a collection — the issues whose
+/// `kind` membership relation points at `target`. `None` means the collection
+/// was not measured, which is a different fact from measuring zero.
+///
+/// Two seeks, both linear, because a linear plan is the only shape the
+/// runtime answers with an exact `matched_total` and an honest continuation.
+///
+/// The first is a bare posting count on the reverse membership coordinate. It
+/// visits no rows, so asking it is cheap even for a collection far too large
+/// to enrich — which is exactly what makes it the right gate.
+///
+/// The second resolves those members by id, because it needs two facts the
+/// relation Body cannot hold. An issue's workflow state and its tombstone
+/// both live in the issue's own Bodies, and by design no extractor overlays
+/// them onto a relation node; a soft-deleted issue keeps its membership
+/// precisely so that restoring it restores the membership too.
+///
+/// Above the ceiling this answers `None` rather than counting the first page.
+/// It is the same rule the row-page handler states where it post-filters:
+/// a partial count is not the count.
+fn membership_counts(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    kind: &str,
+    target: &str,
+) -> Result<Option<(u32, u32)>, Rejection> {
+    let coordinate = || runtime::find::Atom::Bytes(crate::find::composite_key([kind, target]));
+    let counted = find_field_page(
+        ctx,
+        crate::find::field::RELATION_TARGET_KIND,
+        coordinate(),
+        &contract::PageRequest {
+            limit: 1,
+            cursor: None,
+        },
+        Vec::new(),
+        Vec::new(),
+    )?;
+    // An absent total is the runtime declining to answer, never a zero.
+    let Some(members) = counted.matched_total() else {
+        return Ok(None);
+    };
+    if members > ENRICHMENT_CEILING {
+        return Ok(None);
+    }
+    let limit = u32::try_from(members).map_err(|_| Rejection::StateCorrupt)?;
+    if limit == 0 {
+        return Ok(Some((0, 0)));
+    }
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::RELATION_TARGET_KIND,
+        coordinate(),
+        &contract::PageRequest {
+            limit,
+            cursor: None,
+        },
+        Vec::new(),
+        [crate::find::field::SOURCE_ID]
+            .into_iter()
+            .map(crate::find::field_ref)
+            .collect(),
+    )?;
+    // The count said this many members exist and the page asked for exactly
+    // that many. A continuation means the two disagree, so measure nothing.
+    if answer.next_cursor().is_some() {
+        return Ok(None);
+    }
+    let mut ids = Vec::with_capacity(answer.rows().len());
+    for row in answer.rows() {
+        ids.push(result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?);
+    }
+    let rows = find_issue_rows_by_ids(ctx, ids)?;
+    let mut total = 0u32;
+    let mut done = 0u32;
+    for row in rows.values() {
+        if row.tombstone {
+            continue;
+        }
+        total = total.saturating_add(1);
+        let project = row.project_id.as_str();
+        apply_project_workflow(ctx, catalog, project)?;
+        if issue_status_category(catalog, project, &row.status)? == StatusCategory::Done {
+            done = done.saturating_add(1);
+        }
+    }
+    Ok(Some((total, done)))
+}
+
 fn find_issue_rows_by_ids(
     ctx: &Context<'_>,
     ids: impl IntoIterator<Item = String>,
@@ -2394,7 +2490,7 @@ fn find_issue_rows_by_ids(
     };
     let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
     let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
-    let fields = [
+    let mut fields = [
         crate::find::field::ID,
         crate::find::field::KIND,
         crate::find::field::TITLE,
@@ -2407,7 +2503,14 @@ fn find_issue_rows_by_ids(
     ]
     .into_iter()
     .map(crate::find::field_ref)
-    .collect();
+    .collect::<Vec<_>>();
+    // Pack takes a canonical set, and a hand-written list is not one: this
+    // array reads in the order a Row is built, which is not sorted order, so
+    // the query was refused as `InvalidSet("pack fields")` for every caller.
+    // Sorting here rather than reordering the literal keeps the list readable
+    // and stops the next field appended to it from reintroducing this.
+    fields.sort();
+    fields.dedup();
     let answer = ctx
         .find(find_api::Query {
             schema: crate::find::entity_schema_ref(),
@@ -3832,7 +3935,10 @@ fn milestone_page_row(
     Ok(crate::dto::MilestoneDto {
         id: result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
         name: result_text(row, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?,
-        description: String::new(),
+        // A milestone's body is its own bounded prose, not the independently
+        // stored large description an issue or project carries, so the
+        // collection page packs it rather than omitting it.
+        description: result_text(row, crate::find::field::TEXT).unwrap_or_default(),
         target_date: result_u64(row, crate::find::field::TARGET_DATE),
         total: 0,
         done: 0,
@@ -11466,6 +11572,7 @@ impl World for IssuesWorld {
                     vec![live_predicate()],
                     [
                         crate::find::field::TITLE,
+                        crate::find::field::TEXT,
                         crate::find::field::TARGET_DATE,
                         crate::find::field::POSITION,
                         crate::find::field::TOMBSTONE,
@@ -11474,11 +11581,23 @@ impl World for IssuesWorld {
                     .map(crate::find::field_ref)
                     .collect(),
                 )?;
-                let items = answer
-                    .rows()
-                    .iter()
-                    .map(milestone_page_row)
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut catalog = CatalogState::default();
+                let mut items = Vec::with_capacity(answer.rows().len());
+                for row in answer.rows() {
+                    let mut item = milestone_page_row(row)?;
+                    // A milestone's progress is the whole reason the row is
+                    // drawn, so measure it where it can be measured exactly
+                    // and say so where it cannot. Reporting the unmeasured
+                    // case as `0 of 0` would render as a complete milestone.
+                    if let Some((total, done)) =
+                        membership_counts(ctx, &mut catalog, "milestone", &item.id)?
+                    {
+                        item.total = total;
+                        item.done = done;
+                        item.enrichment_complete = true;
+                    }
+                    items.push(item);
+                }
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items))
                         .expect("milestones page json"),
