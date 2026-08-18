@@ -31,7 +31,6 @@ mod issues_comment_anchor;
 mod issues_history_contract;
 mod issues_policy_designer;
 mod issues_reference_perf;
-mod issues_world_cache;
 mod lait_daemon;
 mod launcher_safety;
 mod live_control;
