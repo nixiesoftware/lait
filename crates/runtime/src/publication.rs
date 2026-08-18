@@ -218,8 +218,8 @@ mod tests {
 
     #[test]
     fn extractor_identity_is_canonical_and_semantic() {
-        let a = schema("issues.issue", "issues.issue-body");
-        let b = schema("issues.project", "issues.project-body");
+        let a = schema("notes.note", "notes.note-body");
+        let b = schema("notes.project", "notes.project-body");
         let forward =
             ExtractorSchemaDigest::derive(&[a.clone(), b.clone()], &[extractor(&a), extractor(&b)])
                 .unwrap();
@@ -244,10 +244,10 @@ mod tests {
         assert_ne!(
             forward,
             ExtractorSchemaDigest::derive(
-                &[a.clone(), schema("issues.project", "issues.project-body")],
+                &[a.clone(), schema("notes.project", "notes.project-body")],
                 &[
                     changed_semantics,
-                    extractor(&schema("issues.project", "issues.project-body"))
+                    extractor(&schema("notes.project", "notes.project-body"))
                 ],
             )
             .unwrap()
@@ -259,10 +259,10 @@ mod tests {
         assert_ne!(
             forward,
             ExtractorSchemaDigest::derive(
-                &[a.clone(), schema("issues.project", "issues.project-body")],
+                &[a.clone(), schema("notes.project", "notes.project-body")],
                 &[
                     changed_shape,
-                    extractor(&schema("issues.project", "issues.project-body"))
+                    extractor(&schema("notes.project", "notes.project-body"))
                 ],
             )
             .unwrap(),
@@ -274,10 +274,10 @@ mod tests {
         assert_ne!(
             forward,
             ExtractorSchemaDigest::derive(
-                &[a.clone(), schema("issues.project", "issues.project-body")],
+                &[a.clone(), schema("notes.project", "notes.project-body")],
                 &[
                     changed_growth,
-                    extractor(&schema("issues.project", "issues.project-body"))
+                    extractor(&schema("notes.project", "notes.project-body"))
                 ],
             )
             .unwrap(),

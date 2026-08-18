@@ -19,7 +19,7 @@ use runtime::world::{BodyDeclaration, Context, DeniedCause, Rejection};
 use crate::{
     contract,
     ids::{DocId, ProjectId},
-    v4::{self, CanonicalRecord as _, PhysicalSchema},
+    records::{self, CanonicalRecord as _, PhysicalSchema},
     views::{
         CatalogState, Cycle, DerivedAliases, Initiative, IssueState, LabelMeta, Milestone,
         ProjectMeta, ProjectUpdate, Team, TriageItem,
@@ -63,7 +63,7 @@ impl Batch {
                 && (matches!(operation, Op::Create)
                     || matches!(
                         &operation,
-                        Op::RegisterSet { path, .. } if path == v4::roots::IDENTITY
+                        Op::RegisterSet { path, .. } if path == records::roots::IDENTITY
                     ));
             if !duplicate_creation {
                 self.operations.push((body, operation));
@@ -97,7 +97,7 @@ impl Batch {
             self.declarations.push(BodyDeclaration {
                 key: key.clone(),
                 schema: schema.declaration().id,
-                schema_version: v4::SCHEMA_VERSION,
+                schema_version: records::SCHEMA_VERSION,
             });
             // Atomic and ImmutableAtomic Bodies are created by their first
             // ReplaceAtomic under the declaration. `Op::Create` is a
@@ -126,7 +126,7 @@ impl Batch {
             self.operation(
                 key,
                 Op::RegisterSet {
-                    path: v4::roots::IDENTITY.into(),
+                    path: records::roots::IDENTITY.into(),
                     value: identity,
                 },
             );
@@ -138,14 +138,14 @@ impl Batch {
         ctx: &Context<'_>,
         schema: PhysicalSchema,
         coordinate_key: &BodyKey,
-        identity: v4::RecordBodyIdentityRecord,
+        identity: records::RecordBodyIdentityRecord,
         record: Vec<u8>,
     ) -> Result<(), Rejection> {
         if !schema.immutable() {
             return Err(Rejection::ContractViolation);
         }
-        let bytes = canonical(&v4::ImmutableRecordEnvelope { identity, record })?;
-        let key = v4::immutable_record_key(schema, &bytes);
+        let bytes = canonical(&records::ImmutableRecordEnvelope { identity, record })?;
+        let key = records::immutable_record_key(schema, &bytes);
         if coordinate_key.world != key.world {
             return Err(Rejection::ContractViolation);
         }
@@ -308,13 +308,13 @@ fn read_view(
 fn read_immutable(
     ctx: &Context<'_>,
     key: &BodyKey,
-) -> Result<v4::ImmutableRecordEnvelope, Rejection> {
+) -> Result<records::ImmutableRecordEnvelope, Rejection> {
     let bytes = ctx.read_body(key)?.ok_or(Rejection::StateCorrupt)?;
-    v4::ImmutableRecordEnvelope::decode_canonical(&bytes).map_err(|_| Rejection::StateCorrupt)
+    records::ImmutableRecordEnvelope::decode_canonical(&bytes).map_err(|_| Rejection::StateCorrupt)
 }
 
 fn require_identity(view: &fabric::CollaborativeView, expected: &str) -> Result<(), Rejection> {
-    if register(view, v4::roots::IDENTITY) == expected {
+    if register(view, records::roots::IDENTITY) == expected {
         Ok(())
     } else {
         Err(Rejection::StateCorrupt)
@@ -325,8 +325,8 @@ fn require_identity(view: &fabric::CollaborativeView, expected: &str) -> Result<
 /// anchored Issue content Body is never opened for a board or alias lookup.
 #[derive(Debug, Clone)]
 pub(crate) struct IssueCoordinate {
-    pub identity: v4::IssueIdentityRecord,
-    pub placement: v4::BoardPlacement,
+    pub identity: records::IssueIdentityRecord,
+    pub placement: records::BoardPlacement,
     /// Absent only on an incompletely migrated Body. New and migrated Issues
     /// always carry the explicit value so a legacy Catalog tombstone cannot
     /// reappear after restoration.
@@ -339,14 +339,14 @@ pub(crate) fn issue_coordinates(
     let mut out = BTreeMap::new();
     for key in schema_bodies(ctx, PhysicalSchema::IssueIdentity) {
         let envelope = read_immutable(ctx, &key)?;
-        if v4::immutable_record_key(
+        if records::immutable_record_key(
             PhysicalSchema::IssueIdentity,
             &ctx.read_body(&key)?.ok_or(Rejection::StateCorrupt)?,
         ) != key
         {
             return Err(Rejection::StateCorrupt);
         }
-        let identity = v4::IssueIdentityRecord::decode_canonical(&envelope.record)
+        let identity = records::IssueIdentityRecord::decode_canonical(&envelope.record)
             .map_err(|_| Rejection::StateCorrupt)?;
         DocId::parse(&identity.issue).ok_or(Rejection::StateCorrupt)?;
         if envelope.identity.owner != identity.issue || envelope.identity.record != "identity" {
@@ -369,7 +369,7 @@ pub(crate) fn issue_coordinate_for(
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
     let identity_key =
         exact_record_source(ctx, crate::find::field::SOURCE_ID, doc, "issue_identity")?;
-    let placement_key = v4::issue_placement_key(&issue);
+    let placement_key = records::issue_placement_key(&issue);
     let identity_present = identity_key.is_some();
     let placement_present = ctx.body_version(&placement_key).is_some();
     let transition_heads = issue_transition_heads(ctx, doc)?;
@@ -383,12 +383,13 @@ pub(crate) fn issue_coordinate_for(
     let identity_bytes = ctx
         .read_body(&identity_key)?
         .ok_or(Rejection::StateCorrupt)?;
-    if v4::immutable_record_key(PhysicalSchema::IssueIdentity, &identity_bytes) != identity_key {
+    if records::immutable_record_key(PhysicalSchema::IssueIdentity, &identity_bytes) != identity_key
+    {
         return Err(Rejection::StateCorrupt);
     }
-    let identity_envelope = v4::ImmutableRecordEnvelope::decode_canonical(&identity_bytes)
+    let identity_envelope = records::ImmutableRecordEnvelope::decode_canonical(&identity_bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let identity = v4::IssueIdentityRecord::decode_canonical(&identity_envelope.record)
+    let identity = records::IssueIdentityRecord::decode_canonical(&identity_envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     let placement = match transition_heads.as_slice() {
         [] => {
@@ -398,8 +399,9 @@ pub(crate) fn issue_coordinate_for(
             let placement_bytes = ctx
                 .read_body(&placement_key)?
                 .ok_or(Rejection::StateCorrupt)?;
-            let placement_record = v4::IssuePlacementRecord::decode_canonical(&placement_bytes)
-                .map_err(|_| Rejection::StateCorrupt)?;
+            let placement_record =
+                records::IssuePlacementRecord::decode_canonical(&placement_bytes)
+                    .map_err(|_| Rejection::StateCorrupt)?;
             if placement_record.issue != doc {
                 return Err(Rejection::StateCorrupt);
             }
@@ -422,24 +424,28 @@ pub(crate) fn issue_coordinate_for(
     }))
 }
 
-fn issue_meta_for(ctx: &Context<'_>, doc: &str) -> Result<Option<v4::IssueMetaRecord>, Rejection> {
+fn issue_meta_for(
+    ctx: &Context<'_>,
+    doc: &str,
+) -> Result<Option<records::IssueMetaRecord>, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::issue_meta_key(&issue);
+    let key = records::issue_meta_key(&issue);
     if ctx.body_version(&key).is_none() {
         return Ok(None);
     }
     let view = read_view(ctx, &key)?;
     require_identity(&view, doc)?;
-    let created_by = register(&view, v4::roots::CREATED_BY);
-    let record = v4::IssueMetaRecord {
+    let created_by = register(&view, records::roots::CREATED_BY);
+    let record = records::IssueMetaRecord {
         issue: doc.into(),
-        title: register(&view, v4::roots::TITLE),
-        priority: register(&view, v4::roots::PRIORITY),
+        title: register(&view, records::roots::TITLE),
+        priority: register(&view, records::roots::PRIORITY),
         created_by: (!created_by.is_empty()).then_some(created_by),
-        created_at: optional_u64(&view, v4::roots::CREATED_AT).unwrap_or_default(),
-        due_at: optional_u64(&view, v4::roots::DUE_AT),
-        estimate: optional_u64(&view, v4::roots::ESTIMATE).and_then(|value| value.try_into().ok()),
-        tombstone: boolean(&view, v4::roots::TOMBSTONE),
+        created_at: optional_u64(&view, records::roots::CREATED_AT).unwrap_or_default(),
+        due_at: optional_u64(&view, records::roots::DUE_AT),
+        estimate: optional_u64(&view, records::roots::ESTIMATE)
+            .and_then(|value| value.try_into().ok()),
+        tombstone: boolean(&view, records::roots::TOMBSTONE),
     };
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
     Ok(Some(record))
@@ -584,7 +590,7 @@ pub(crate) fn apply_governance_revision(
 ) -> Result<String, Rejection> {
     let envelope = read_immutable(ctx, key)?;
     let identity = envelope.identity;
-    let record = v4::GovernanceRevisionRecord::decode_canonical(&envelope.record)
+    let record = records::GovernanceRevisionRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     if record.role != identity.owner || record.revision.revision_id != identity.record {
         return Err(Rejection::StateCorrupt);
@@ -607,15 +613,15 @@ pub(crate) fn apply_governance_revision(
 
 fn apply_directory(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rejection> {
     let space = &ctx.principal().space;
-    let key = v4::space_directory_key(space);
+    let key = records::space_directory_key(space);
     if ctx.body_version(&key).is_none() {
         return Ok(());
     }
     let view = read_view(ctx, &key)?;
     require_identity(&view, space.as_str())?;
-    let record = v4::SpaceDirectoryRecord {
-        name: register(&view, v4::roots::NAME),
-        description: read_content(ctx, &v4::space_content_key(space), space.as_str())?,
+    let record = records::SpaceDirectoryRecord {
+        name: register(&view, records::roots::NAME),
+        description: read_content(ctx, &records::space_content_key(space), space.as_str())?,
     };
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
     catalog.name = record.name;
@@ -637,7 +643,7 @@ fn read_content(ctx: &Context<'_>, key: &BodyKey, identity: &str) -> Result<Stri
     require_identity(&view, identity)?;
     let description = view
         .texts
-        .get(v4::roots::DESCRIPTION)
+        .get(records::roots::DESCRIPTION)
         .cloned()
         .unwrap_or_default();
     if !contract::valid_text(&description) {
@@ -659,17 +665,17 @@ fn apply_label_key(
     key: &BodyKey,
 ) -> Result<(), Rejection> {
     let view = read_view(ctx, key)?;
-    let id = register(&view, v4::roots::IDENTITY);
+    let id = register(&view, records::roots::IDENTITY);
     let label = crate::ids::LabelId::parse(&id).ok_or(Rejection::StateCorrupt)?;
-    if v4::label_key(&label) != *key {
+    if records::label_key(&label) != *key {
         return Err(Rejection::StateCorrupt);
     }
     let raw = view
         .registers
-        .get(v4::roots::RECORD)
+        .get(records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
     let record =
-        v4::LabelDirectoryEntry::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
+        records::LabelDirectoryEntry::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
     if record.label != id {
         return Err(Rejection::StateCorrupt);
     }
@@ -693,7 +699,7 @@ pub(crate) fn apply_label(
     label: &str,
 ) -> Result<(), Rejection> {
     let label = crate::ids::LabelId::parse(label).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::label_key(&label);
+    let key = records::label_key(&label);
     if ctx.body_version(&key).is_some() {
         apply_label_key(ctx, catalog, &key)?;
     }
@@ -713,23 +719,23 @@ fn apply_project_meta_key(
     key: &BodyKey,
 ) -> Result<(), Rejection> {
     let view = read_view(ctx, key)?;
-    let project = register(&view, v4::roots::IDENTITY);
+    let project = register(&view, records::roots::IDENTITY);
     let project_id = ProjectId::parse(&project).ok_or(Rejection::StateCorrupt)?;
-    if v4::project_meta_key(&project_id) != *key {
+    if records::project_meta_key(&project_id) != *key {
         return Err(Rejection::StateCorrupt);
     }
-    let record = v4::ProjectMetaRecord {
+    let record = records::ProjectMetaRecord {
         project: project.clone(),
-        name: register(&view, v4::roots::NAME),
-        key: register(&view, v4::roots::KEY),
-        color: register(&view, v4::roots::COLOR),
-        description: read_content(ctx, &v4::project_content_key(&project_id), &project)?,
-        lead: register(&view, v4::roots::LEAD),
-        start_date: optional_u64(&view, v4::roots::START_DATE),
-        target_date: optional_u64(&view, v4::roots::TARGET_DATE),
-        archived: boolean(&view, v4::roots::ARCHIVED),
-        team: register(&view, v4::roots::TEAM),
-        tombstone: boolean(&view, v4::roots::TOMBSTONE),
+        name: register(&view, records::roots::NAME),
+        key: register(&view, records::roots::KEY),
+        color: register(&view, records::roots::COLOR),
+        description: read_content(ctx, &records::project_content_key(&project_id), &project)?,
+        lead: register(&view, records::roots::LEAD),
+        start_date: optional_u64(&view, records::roots::START_DATE),
+        target_date: optional_u64(&view, records::roots::TARGET_DATE),
+        archived: boolean(&view, records::roots::ARCHIVED),
+        team: register(&view, records::roots::TEAM),
+        tombstone: boolean(&view, records::roots::TOMBSTONE),
     };
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
     if record.tombstone {
@@ -759,7 +765,7 @@ pub(crate) fn apply_project(
     project: &str,
 ) -> Result<(), Rejection> {
     let project = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::project_meta_key(&project);
+    let key = records::project_meta_key(&project);
     if ctx.body_version(&key).is_some() {
         apply_project_meta_key(ctx, catalog, &key)?;
     }
@@ -788,7 +794,7 @@ pub(crate) fn apply_workflow_revision(
     let envelope = read_immutable(ctx, key)?;
     let identity = envelope.identity;
     ProjectId::parse(&identity.owner).ok_or(Rejection::StateCorrupt)?;
-    let record = v4::ProjectWorkflowRevisionRecord::decode_canonical(&envelope.record)
+    let record = records::ProjectWorkflowRevisionRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     if record.project != identity.owner || record.revision.revision_id != identity.record {
         return Err(Rejection::StateCorrupt);
@@ -822,21 +828,21 @@ fn apply_schedule_key(
     let view = read_view(ctx, key)?;
     let identity = view
         .registers
-        .get(v4::roots::IDENTITY)
+        .get(records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = v4::RecordBodyIdentityRecord::decode_canonical(identity)
+    let identity = records::RecordBodyIdentityRecord::decode_canonical(identity)
         .map_err(|_| Rejection::StateCorrupt)?;
     let project = identity.owner;
     let project_id = ProjectId::parse(&project).ok_or(Rejection::StateCorrupt)?;
-    if v4::project_schedule_key(&project_id, &identity.record) != *key {
+    if records::project_schedule_key(&project_id, &identity.record) != *key {
         return Err(Rejection::StateCorrupt);
     }
     let raw = view
         .registers
-        .get(v4::roots::RECORD)
+        .get(records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    match v4::ScheduleRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)? {
-        v4::ScheduleRecord::Milestone {
+    match records::ScheduleRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)? {
+        records::ScheduleRecord::Milestone {
             milestone,
             project: owner,
             name,
@@ -865,7 +871,7 @@ fn apply_schedule_key(
                     },
                 );
         }
-        v4::ScheduleRecord::Cycle {
+        records::ScheduleRecord::Cycle {
             cycle,
             project: owner,
             name,
@@ -899,7 +905,7 @@ pub(crate) fn apply_schedule_record(
     record: &str,
 ) -> Result<(), Rejection> {
     let project = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::project_schedule_key(&project, record);
+    let key = records::project_schedule_key(&project, record);
     if ctx.body_version(&key).is_some() {
         apply_schedule_key(ctx, catalog, &key)?;
     }
@@ -909,10 +915,12 @@ pub(crate) fn apply_schedule_record(
 fn apply_hierarchy(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rejection> {
     for key in schema_bodies(ctx, PhysicalSchema::ProjectHierarchy) {
         let raw = ctx.read_body(&key)?.ok_or(Rejection::StateCorrupt)?;
-        match v4::TopologyRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)? {
-            v4::TopologyRecord::Parent(record) => {
+        match records::TopologyRecord::decode_canonical(&raw)
+            .map_err(|_| Rejection::StateCorrupt)?
+        {
+            records::TopologyRecord::Parent(record) => {
                 let project = ProjectId::parse(&record.project).ok_or(Rejection::StateCorrupt)?;
-                if v4::project_hierarchy_key(&project, &record.child) != key {
+                if records::project_hierarchy_key(&project, &record.child) != key {
                     return Err(Rejection::StateCorrupt);
                 }
                 match record.parent {
@@ -924,10 +932,10 @@ fn apply_hierarchy(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), 
                     }
                 }
             }
-            v4::TopologyRecord::Link(record) => {
+            records::TopologyRecord::Link(record) => {
                 let project = ProjectId::parse(&record.project).ok_or(Rejection::StateCorrupt)?;
                 let identity = data_encoding::HEXLOWER.encode(&record.relation_identity());
-                if v4::project_hierarchy_key(&project, &identity) != key {
+                if records::project_hierarchy_key(&project, &identity) != key {
                     return Err(Rejection::StateCorrupt);
                 }
                 let edge = (record.from, record.kind, record.to);
@@ -953,7 +961,7 @@ fn apply_updates(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Re
             catalog.project_updates.insert(project.clone(), Vec::new());
         }
         {
-            let record = v4::ProjectUpdateRecord::decode_canonical(&envelope.record)
+            let record = records::ProjectUpdateRecord::decode_canonical(&envelope.record)
                 .map_err(|_| Rejection::StateCorrupt)?;
             if record.project != project || record.update != identity.record {
                 return Err(Rejection::StateCorrupt);
@@ -995,19 +1003,19 @@ fn apply_initiative_key(
     key: &BodyKey,
 ) -> Result<(), Rejection> {
     let view = read_view(ctx, key)?;
-    let id = register(&view, v4::roots::IDENTITY);
+    let id = register(&view, records::roots::IDENTITY);
     let parsed = crate::ids::InitiativeId::parse(&id).ok_or(Rejection::StateCorrupt)?;
-    if v4::initiative_key(&parsed) != *key {
+    if records::initiative_key(&parsed) != *key {
         return Err(Rejection::StateCorrupt);
     }
-    let record = v4::InitiativeRecord {
+    let record = records::InitiativeRecord {
         initiative: id.clone(),
-        name: register(&view, v4::roots::NAME),
-        description: read_content(ctx, &v4::initiative_content_key(&parsed), &id)?,
-        owner: register(&view, v4::roots::OWNER),
-        health: register(&view, v4::roots::HEALTH),
-        target_date: optional_u64(&view, v4::roots::TARGET_DATE),
-        tombstone: boolean(&view, v4::roots::TOMBSTONE),
+        name: register(&view, records::roots::NAME),
+        description: read_content(ctx, &records::initiative_content_key(&parsed), &id)?,
+        owner: register(&view, records::roots::OWNER),
+        health: register(&view, records::roots::HEALTH),
+        target_date: optional_u64(&view, records::roots::TARGET_DATE),
+        tombstone: boolean(&view, records::roots::TOMBSTONE),
     };
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
     catalog.initiatives.insert(
@@ -1033,7 +1041,7 @@ pub(crate) fn apply_initiative(
 ) -> Result<(), Rejection> {
     let initiative =
         crate::ids::InitiativeId::parse(initiative).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::initiative_key(&initiative);
+    let key = records::initiative_key(&initiative);
     if ctx.body_version(&key).is_some() {
         apply_initiative_key(ctx, catalog, &key)?;
     }
@@ -1053,18 +1061,18 @@ fn apply_team_key(
     key: &BodyKey,
 ) -> Result<(), Rejection> {
     let view = read_view(ctx, key)?;
-    let id = register(&view, v4::roots::IDENTITY);
+    let id = register(&view, records::roots::IDENTITY);
     let parsed = crate::ids::TeamId::parse(&id).ok_or(Rejection::StateCorrupt)?;
-    if v4::team_key(&parsed) != *key {
+    if records::team_key(&parsed) != *key {
         return Err(Rejection::StateCorrupt);
     }
-    let record = v4::TeamRecord {
+    let record = records::TeamRecord {
         team: id.clone(),
-        name: register(&view, v4::roots::NAME),
-        key: register(&view, v4::roots::KEY),
-        icon: register(&view, v4::roots::ICON),
-        lead: register(&view, v4::roots::LEAD),
-        tombstone: boolean(&view, v4::roots::TOMBSTONE),
+        name: register(&view, records::roots::NAME),
+        key: register(&view, records::roots::KEY),
+        icon: register(&view, records::roots::ICON),
+        lead: register(&view, records::roots::LEAD),
+        tombstone: boolean(&view, records::roots::TOMBSTONE),
     };
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
     catalog.teams.insert(
@@ -1088,7 +1096,7 @@ pub(crate) fn apply_team(
     team: &str,
 ) -> Result<(), Rejection> {
     let team = crate::ids::TeamId::parse(team).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::team_key(&team);
+    let key = records::team_key(&team);
     if ctx.body_version(&key).is_some() {
         apply_team_key(ctx, catalog, &key)?;
     }
@@ -1098,10 +1106,11 @@ pub(crate) fn apply_team(
 fn apply_entity_relations(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rejection> {
     for key in schema_bodies(ctx, PhysicalSchema::EntityRelation) {
         let raw = ctx.read_body(&key)?.ok_or(Rejection::StateCorrupt)?;
-        let record = v4::EntityRelationRecord::decode_canonical(&raw)
+        let record = records::EntityRelationRecord::decode_canonical(&raw)
             .map_err(|_| Rejection::StateCorrupt)?;
         let identity = record.identity();
-        if record.identity() != identity || v4::entity_relation_key(&record.owner, &identity) != key
+        if record.identity() != identity
+            || records::entity_relation_key(&record.owner, &identity) != key
         {
             return Err(Rejection::StateCorrupt);
         }
@@ -1138,7 +1147,7 @@ fn apply_entity_relations(ctx: &Context<'_>, catalog: &mut CatalogState) -> Resu
 
 fn apply_triage(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rejection> {
     let mut submissions = BTreeMap::<String, TriageItem>::new();
-    let mut decisions = BTreeMap::<String, Vec<v4::TriageDecisionRecord>>::new();
+    let mut decisions = BTreeMap::<String, Vec<records::TriageDecisionRecord>>::new();
     let mut resolutions = BTreeMap::<String, String>::new();
     for key in schema_bodies(ctx, PhysicalSchema::SpaceTriage) {
         let envelope = read_immutable(ctx, &key)?;
@@ -1148,10 +1157,10 @@ fn apply_triage(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rej
         if space_id != ctx.principal().space {
             return Err(Rejection::StateCorrupt);
         }
-        match v4::TriageRecord::decode_canonical(&envelope.record)
+        match records::TriageRecord::decode_canonical(&envelope.record)
             .map_err(|_| Rejection::StateCorrupt)?
         {
-            v4::TriageRecord::Submission(record) => {
+            records::TriageRecord::Submission(record) => {
                 if record.triage != identity.record {
                     return Err(Rejection::StateCorrupt);
                 }
@@ -1168,7 +1177,7 @@ fn apply_triage(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rej
                     },
                 );
             }
-            v4::TriageRecord::Decision(record) => {
+            records::TriageRecord::Decision(record) => {
                 if record.decision != identity.record {
                     return Err(Rejection::StateCorrupt);
                 }
@@ -1177,7 +1186,7 @@ fn apply_triage(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rej
                     .or_default()
                     .push(record);
             }
-            v4::TriageRecord::Resolution(record) => {
+            records::TriageRecord::Resolution(record) => {
                 if record.identity() != identity.record {
                     return Err(Rejection::StateCorrupt);
                 }
@@ -1196,9 +1205,9 @@ fn apply_triage(ctx: &Context<'_>, catalog: &mut CatalogState) -> Result<(), Rej
             .or_else(|| (choices.len() == 1).then(|| choices.first()).flatten());
         if let Some(decision) = selected {
             item.outcome = match decision.outcome {
-                v4::TriageOutcome::Accepted => "accepted",
-                v4::TriageOutcome::Declined => "declined",
-                v4::TriageOutcome::Duplicate => "duplicate",
+                records::TriageOutcome::Accepted => "accepted",
+                records::TriageOutcome::Declined => "declined",
+                records::TriageOutcome::Duplicate => "duplicate",
             }
             .into();
             item.doc = decision.issue.clone().unwrap_or_default();
@@ -1247,7 +1256,7 @@ pub(crate) fn set_map(
     );
 }
 
-pub(crate) fn canonical<T: v4::CanonicalRecord>(record: &T) -> Result<Vec<u8>, Rejection> {
+pub(crate) fn canonical<T: records::CanonicalRecord>(record: &T) -> Result<Vec<u8>, Rejection> {
     record
         .encode_canonical()
         .map_err(|_| Rejection::StateCorrupt)
@@ -1310,17 +1319,17 @@ pub(crate) fn write_comment(
     // Engine-local tree node handles never cross the record Body boundary.
     comment.node = None;
     comment.parent_node = None;
-    let key = v4::issue_comment_key(&issue, &id);
+    let key = records::issue_comment_key(&issue, &id);
     let mut batch = Batch::default();
     batch.immutable_record(
         ctx,
         PhysicalSchema::IssueComment,
         &key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: doc.into(),
             record: id.clone(),
         },
-        canonical(&v4::DiscussionRecord::Comment(comment))?,
+        canonical(&records::DiscussionRecord::Comment(comment))?,
     )?;
     Ok((batch, id))
 }
@@ -1335,7 +1344,7 @@ pub(crate) fn write_reaction(
     on: bool,
 ) -> Result<Batch, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let reaction = v4::ReactionRecord {
+    let reaction = records::ReactionRecord {
         issue: doc.into(),
         comment: comment.into(),
         emoji: emoji.into(),
@@ -1343,13 +1352,13 @@ pub(crate) fn write_reaction(
         on,
     };
     let record = reaction.identity();
-    let key = v4::issue_reaction_key(&issue, &record);
+    let key = records::issue_reaction_key(&issue, &record);
     let mut batch = Batch::default();
     batch.atomic_value(
         ctx,
         PhysicalSchema::IssueReaction,
         &key,
-        canonical(&v4::DiscussionRecord::Reaction(reaction))?,
+        canonical(&records::DiscussionRecord::Reaction(reaction))?,
     )?;
     Ok(batch)
 }
@@ -1363,7 +1372,7 @@ pub(crate) fn write_issue_relation(
     present: bool,
 ) -> Result<Batch, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let record = v4::IssueRelationRecord {
+    let record = records::IssueRelationRecord {
         issue: doc.into(),
         project: project.into(),
         kind: kind.into(),
@@ -1371,7 +1380,7 @@ pub(crate) fn write_issue_relation(
         present,
     };
     let identity = record.identity();
-    let key = v4::issue_relation_key(&issue, &identity);
+    let key = records::issue_relation_key(&issue, &identity);
     let mut batch = Batch::default();
     batch.atomic_value(
         ctx,
@@ -1384,15 +1393,15 @@ pub(crate) fn write_issue_relation(
 
 /// Read one exact enrichment register without enumerating the Issue's other
 /// relations. Singleton kinds ignore `target` in their physical identity; set
-/// kinds include it, matching [`v4::IssueRelationRecord::identity`].
+/// kinds include it, matching [`records::IssueRelationRecord::identity`].
 pub(crate) fn read_issue_relation(
     ctx: &Context<'_>,
     doc: &str,
     kind: &str,
     target: &str,
-) -> Result<Option<v4::IssueRelationRecord>, Rejection> {
+) -> Result<Option<records::IssueRelationRecord>, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let probe = v4::IssueRelationRecord {
+    let probe = records::IssueRelationRecord {
         issue: doc.into(),
         project: String::new(),
         kind: kind.into(),
@@ -1400,17 +1409,17 @@ pub(crate) fn read_issue_relation(
         present: false,
     };
     let identity = probe.identity();
-    let key = v4::issue_relation_key(&issue, &identity);
+    let key = records::issue_relation_key(&issue, &identity);
     if ctx.body_version(&key).is_none() {
         return Ok(None);
     }
     let raw = ctx.read_body(&key)?.ok_or(Rejection::StateCorrupt)?;
-    let record =
-        v4::IssueRelationRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)?;
+    let record = records::IssueRelationRecord::decode_canonical(&raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
     if record.issue != doc
         || record.kind != kind
         || record.identity() != identity
-        || v4::issue_relation_key(&issue, &record.identity()) != key
+        || records::issue_relation_key(&issue, &record.identity()) != key
     {
         return Err(Rejection::StateCorrupt);
     }
@@ -1424,14 +1433,14 @@ pub(crate) fn write_entity_relation(
     target: &str,
     present: bool,
 ) -> Result<Batch, Rejection> {
-    let record = v4::EntityRelationRecord {
+    let record = records::EntityRelationRecord {
         owner: owner.into(),
         kind: kind.into(),
         target: target.into(),
         present,
     };
     let identity = record.identity();
-    let key = v4::entity_relation_key(owner, &identity);
+    let key = records::entity_relation_key(owner, &identity);
     let mut batch = Batch::default();
     batch.atomic_value(
         ctx,
@@ -1482,14 +1491,14 @@ fn write_activity_record(
     recipients: &[String],
 ) -> Result<Batch, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let descriptor = v4::SegmentDescriptor {
+    let descriptor = records::SegmentDescriptor {
         issue: doc.into(),
-        kind: v4::SegmentKind::Activity,
+        kind: records::SegmentKind::Activity,
         record: record.into(),
     };
-    let key = v4::issue_activity_key(&issue, &record);
+    let key = records::issue_activity_key(&issue, &record);
     let mut batch = Batch::default();
-    let activity = v4::ActivityRecord {
+    let activity = records::ActivityRecord {
         issue: doc.into(),
         event: event.clone(),
         recipients: recipients.to_vec(),
@@ -1498,7 +1507,7 @@ fn write_activity_record(
         ctx,
         PhysicalSchema::IssueActivity,
         &key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: descriptor.issue,
             record: descriptor.record,
         },
@@ -1513,19 +1522,19 @@ pub(crate) fn issue_coordinate(
     workflow_state: &str,
     position: String,
     ordinal: u64,
-) -> Result<(v4::IssueIdentityRecord, v4::IssuePlacementRecord), Rejection> {
+) -> Result<(records::IssueIdentityRecord, records::IssuePlacementRecord), Rejection> {
     let doc = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
-    let identity = v4::IssueIdentityRecord {
+    let identity = records::IssueIdentityRecord {
         issue: doc.as_str().into(),
-        alias: v4::IssueAliasCoordinate::for_issue(ordinal, &doc)
+        alias: records::IssueAliasCoordinate::for_issue(ordinal, &doc)
             .map_err(|_| Rejection::StateCorrupt)?,
     };
-    let placement = v4::IssuePlacementRecord {
+    let placement = records::IssuePlacementRecord {
         issue: doc.as_str().into(),
-        placement: v4::BoardPlacement {
+        placement: records::BoardPlacement {
             project: project.into(),
             workflow_state: workflow_state.into(),
-            block: v4::board_seed_block_id(project, workflow_state),
+            block: records::board_seed_block_id(project, workflow_state),
             position,
         },
     };
@@ -1543,7 +1552,7 @@ struct BoardMember {
 
 #[derive(Debug, Default)]
 pub(crate) struct BoardPlacementPlan {
-    pub placement: Option<v4::BoardPlacement>,
+    pub placement: Option<records::BoardPlacement>,
     pub maintenance: Batch,
 }
 
@@ -1782,7 +1791,7 @@ fn board_block_members(
         candidates_per_branch: 256,
         score_evaluations: 1,
         projected_bytes: 512 * 1024,
-        packed_tokens: u64::try_from(v4::BOARD_BLOCK_CAPACITY + 1)
+        packed_tokens: u64::try_from(records::BOARD_BLOCK_CAPACITY + 1)
             .unwrap_or(u64::MAX)
             .saturating_mul(1_024),
         wall_millis: 1_000,
@@ -1857,12 +1866,12 @@ fn board_block_members(
             ],
             output: pack,
             bound,
-            page_size: u32::try_from(v4::BOARD_BLOCK_CAPACITY + 1)
+            page_size: u32::try_from(records::BOARD_BLOCK_CAPACITY + 1)
                 .map_err(|_| Rejection::ContractViolation)?,
             cursor: None,
         })
         .map_err(board_find_rejection)?;
-    if answer.next_cursor().is_some() || answer.rows().len() > v4::BOARD_BLOCK_CAPACITY {
+    if answer.next_cursor().is_some() || answer.rows().len() > records::BOARD_BLOCK_CAPACITY {
         return Err(Rejection::StateCorrupt);
     }
     let mut members = Vec::with_capacity(answer.rows().len());
@@ -1903,7 +1912,7 @@ fn stage_member_overlay(
 ) -> Result<(), Rejection> {
     batch.absorb(write_issue_rank_overlay(
         ctx,
-        &v4::IssueRankOverlay {
+        &records::IssueRankOverlay {
             issue: member.issue.clone(),
             transition: member.transition.clone(),
             project: project.into(),
@@ -1926,17 +1935,22 @@ fn stage_block_order_overlay(
     maintenance: &str,
 ) -> Result<(), Rejection> {
     let project = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::board_block_key(&project, workflow_state, &block.block);
+    let key = records::board_block_key(&project, workflow_state, &block.block);
     if ctx.body_version(&key).is_none() {
         return Err(Rejection::StateCorrupt);
     }
-    let overlay = v4::BoardBlockOrderOverlay {
+    let overlay = records::BoardBlockOrderOverlay {
         block_revision: block.revision.clone(),
         order,
         maintenance: maintenance.into(),
     };
     overlay.validate().map_err(|_| Rejection::StateCorrupt)?;
-    set_register(batch, &key, v4::roots::ORDER_OVERLAY, canonical(&overlay)?);
+    set_register(
+        batch,
+        &key,
+        records::roots::ORDER_OVERLAY,
+        canonical(&overlay)?,
+    );
     Ok(())
 }
 
@@ -1969,10 +1983,10 @@ pub(crate) fn board_placement(
     }
     if topology.is_empty() {
         return Ok(BoardPlacementPlan {
-            placement: Some(v4::BoardPlacement {
+            placement: Some(records::BoardPlacement {
                 project: project.into(),
                 workflow_state: workflow_state.into(),
-                block: v4::board_seed_block_id(project, workflow_state),
+                block: records::board_seed_block_id(project, workflow_state),
                 position: crate::rank::between("", None),
             }),
             maintenance: Batch::default(),
@@ -2040,7 +2054,7 @@ pub(crate) fn board_placement(
     if let Some(local) = crate::rank::try_between(lower, upper) {
         if !crate::rank::under_pressure(&local) {
             return Ok(BoardPlacementPlan {
-                placement: Some(v4::BoardPlacement {
+                placement: Some(records::BoardPlacement {
                     project: project.into(),
                     workflow_state: workflow_state.into(),
                     block,
@@ -2050,7 +2064,7 @@ pub(crate) fn board_placement(
             });
         }
     }
-    if members.len() < v4::BOARD_BLOCK_CAPACITY {
+    if members.len() < records::BOARD_BLOCK_CAPACITY {
         let labels = crate::rank::balanced_between("", None, members.len() + 1)
             .ok_or(Rejection::StateCorrupt)?;
         let maintenance = maintenance_id(ctx)?;
@@ -2069,7 +2083,7 @@ pub(crate) fn board_placement(
             )?;
         }
         return Ok(BoardPlacementPlan {
-            placement: Some(v4::BoardPlacement {
+            placement: Some(records::BoardPlacement {
                 project: project.into(),
                 workflow_state: workflow_state.into(),
                 block,
@@ -2089,7 +2103,7 @@ fn split_board_block(
     members: Vec<BoardMember>,
     insertion: usize,
 ) -> Result<BoardPlacementPlan, Rejection> {
-    if members.len() != v4::BOARD_BLOCK_CAPACITY || insertion > members.len() {
+    if members.len() != records::BOARD_BLOCK_CAPACITY || insertion > members.len() {
         return Err(Rejection::StateCorrupt);
     }
     let request = ctx.request_id().ok_or(Rejection::ContractViolation)?;
@@ -2231,7 +2245,7 @@ fn split_board_block(
         (new_block, right_labels[insertion - split].clone())
     };
     Ok(BoardPlacementPlan {
-        placement: Some(v4::BoardPlacement {
+        placement: Some(records::BoardPlacement {
             project: project.into(),
             workflow_state: workflow_state.into(),
             block,
@@ -2254,14 +2268,14 @@ pub(crate) fn write_issue_coordinate(
     let (_, placement) = issue_coordinate(doc, project, workflow_state, position, ordinal)?;
     write_issue_identity(ctx, batch, doc, ordinal)?;
     let issue = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
-    let placement_key = v4::issue_placement_key(&issue);
+    let placement_key = records::issue_placement_key(&issue);
     batch.atomic_value(
         ctx,
         PhysicalSchema::IssuePlacement,
         &placement_key,
         canonical(&placement)?,
     )?;
-    let meta_key = v4::issue_meta_key(&issue);
+    let meta_key = records::issue_meta_key(&issue);
     batch.ensure_body(
         ctx,
         PhysicalSchema::IssueMeta,
@@ -2271,7 +2285,7 @@ pub(crate) fn write_issue_coordinate(
     set_register(
         batch,
         &meta_key,
-        v4::roots::TOMBSTONE,
+        records::roots::TOMBSTONE,
         if tombstone {
             b"1".to_vec()
         } else {
@@ -2288,18 +2302,18 @@ pub(crate) fn write_issue_identity(
     ordinal: u64,
 ) -> Result<(), Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
-    let identity = v4::IssueIdentityRecord {
+    let identity = records::IssueIdentityRecord {
         issue: doc.into(),
-        alias: v4::IssueAliasCoordinate::for_issue(ordinal, &issue)
+        alias: records::IssueAliasCoordinate::for_issue(ordinal, &issue)
             .map_err(|_| Rejection::StateCorrupt)?,
     };
     identity.validate().map_err(|_| Rejection::StateCorrupt)?;
-    let identity_key = v4::issue_identity_key(&issue);
+    let identity_key = records::issue_identity_key(&issue);
     batch.immutable_record(
         ctx,
         PhysicalSchema::IssueIdentity,
         &identity_key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: doc.into(),
             record: "identity".into(),
         },
@@ -2314,7 +2328,7 @@ pub(crate) fn write_issue_meta(
     tombstone: bool,
 ) -> Result<Batch, Rejection> {
     let parsed = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let record = v4::IssueMetaRecord {
+    let record = records::IssueMetaRecord {
         issue: doc.into(),
         title: issue.title.clone(),
         priority: issue.priority.as_str().into(),
@@ -2325,7 +2339,7 @@ pub(crate) fn write_issue_meta(
         tombstone,
     };
     record.validate().map_err(|_| Rejection::InvalidRequest)?;
-    let key = v4::issue_meta_key(&parsed);
+    let key = records::issue_meta_key(&parsed);
     let mut batch = Batch::default();
     batch.ensure_body(
         ctx,
@@ -2333,30 +2347,35 @@ pub(crate) fn write_issue_meta(
         &key,
         doc.as_bytes().to_vec(),
     );
-    set_register(&mut batch, &key, v4::roots::TITLE, record.title);
-    set_register(&mut batch, &key, v4::roots::PRIORITY, record.priority);
+    set_register(&mut batch, &key, records::roots::TITLE, record.title);
+    set_register(&mut batch, &key, records::roots::PRIORITY, record.priority);
     match record.created_by {
-        Some(actor) => set_register(&mut batch, &key, v4::roots::CREATED_BY, actor),
-        None => clear_register(&mut batch, &key, v4::roots::CREATED_BY),
+        Some(actor) => set_register(&mut batch, &key, records::roots::CREATED_BY, actor),
+        None => clear_register(&mut batch, &key, records::roots::CREATED_BY),
     }
     set_register(
         &mut batch,
         &key,
-        v4::roots::CREATED_AT,
+        records::roots::CREATED_AT,
         record.created_at.to_string(),
     );
     match record.due_at {
-        Some(due) => set_register(&mut batch, &key, v4::roots::DUE_AT, due.to_string()),
-        None => clear_register(&mut batch, &key, v4::roots::DUE_AT),
+        Some(due) => set_register(&mut batch, &key, records::roots::DUE_AT, due.to_string()),
+        None => clear_register(&mut batch, &key, records::roots::DUE_AT),
     }
     match record.estimate {
-        Some(estimate) => set_register(&mut batch, &key, v4::roots::ESTIMATE, estimate.to_string()),
-        None => clear_register(&mut batch, &key, v4::roots::ESTIMATE),
+        Some(estimate) => set_register(
+            &mut batch,
+            &key,
+            records::roots::ESTIMATE,
+            estimate.to_string(),
+        ),
+        None => clear_register(&mut batch, &key, records::roots::ESTIMATE),
     }
     set_register(
         &mut batch,
         &key,
-        v4::roots::TOMBSTONE,
+        records::roots::TOMBSTONE,
         if record.tombstone { "1" } else { "0" },
     );
     Ok(batch)
@@ -2366,14 +2385,14 @@ pub(crate) fn read_attachment(
     ctx: &Context<'_>,
     doc: &str,
     id: &str,
-) -> Result<Option<v4::IssueAttachmentRecord>, Rejection> {
+) -> Result<Option<records::IssueAttachmentRecord>, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::issue_attachment_key(&issue, id);
+    let key = records::issue_attachment_key(&issue, id);
     let Some(raw) = ctx.read_body(&key)? else {
         return Ok(None);
     };
-    let record =
-        v4::IssueAttachmentRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)?;
+    let record = records::IssueAttachmentRecord::decode_canonical(&raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
     if record.issue != doc || record.id != id {
         return Err(Rejection::StateCorrupt);
     }
@@ -2382,11 +2401,11 @@ pub(crate) fn read_attachment(
 
 pub(crate) fn write_attachment(
     ctx: &Context<'_>,
-    record: &v4::IssueAttachmentRecord,
+    record: &records::IssueAttachmentRecord,
 ) -> Result<Batch, Rejection> {
     record.validate().map_err(|_| Rejection::InvalidRequest)?;
     let issue = DocId::parse(&record.issue).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::issue_attachment_key(&issue, &record.id);
+    let key = records::issue_attachment_key(&issue, &record.id);
     let mut batch = Batch::default();
     batch.atomic_value(
         ctx,
@@ -2413,14 +2432,14 @@ pub(crate) fn read_check(
     ctx: &Context<'_>,
     doc: &str,
     run: &str,
-) -> Result<Option<v4::IssueCheckRecord>, Rejection> {
+) -> Result<Option<records::IssueCheckRecord>, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::issue_check_key(&issue, run);
+    let key = records::issue_check_key(&issue, run);
     let Some(raw) = ctx.read_body(&key)? else {
         return Ok(None);
     };
     let record =
-        v4::IssueCheckRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)?;
+        records::IssueCheckRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)?;
     if record.issue != doc || record.run != run {
         return Err(Rejection::StateCorrupt);
     }
@@ -2429,11 +2448,11 @@ pub(crate) fn read_check(
 
 pub(crate) fn write_check(
     ctx: &Context<'_>,
-    record: &v4::IssueCheckRecord,
+    record: &records::IssueCheckRecord,
 ) -> Result<Batch, Rejection> {
     record.validate().map_err(|_| Rejection::InvalidRequest)?;
     let issue = DocId::parse(&record.issue).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::issue_check_key(&issue, &record.run);
+    let key = records::issue_check_key(&issue, &record.run);
     let mut batch = Batch::default();
     batch.atomic_value(ctx, PhysicalSchema::IssueCheck, &key, canonical(record)?)?;
     Ok(batch)
@@ -2501,7 +2520,7 @@ fn ensure_directory(
     batch: &mut Batch,
 ) -> Result<BodyKey, Rejection> {
     let space = &ctx.principal().space;
-    let key = v4::space_directory_key(space);
+    let key = records::space_directory_key(space);
     let absent = ctx.body_version(&key).is_none()
         && !batch
             .declarations
@@ -2517,7 +2536,7 @@ fn ensure_directory(
         set_register(
             batch,
             &key,
-            v4::roots::NAME,
+            records::roots::NAME,
             catalog.name.as_bytes().to_vec(),
         );
     }
@@ -2536,7 +2555,7 @@ fn replace_owned_content(
         return Ok(());
     }
     batch.ensure_body(ctx, schema, key, identity.as_bytes().to_vec());
-    replace_text(ctx, batch, key, v4::roots::DESCRIPTION, description)
+    replace_text(ctx, batch, key, records::roots::DESCRIPTION, description)
 }
 
 pub(crate) fn write_space(
@@ -2547,13 +2566,18 @@ pub(crate) fn write_space(
 ) -> Result<Batch, Rejection> {
     let mut batch = Batch::default();
     let key = ensure_directory(ctx, catalog, &mut batch)?;
-    set_register(&mut batch, &key, v4::roots::NAME, name.as_bytes().to_vec());
+    set_register(
+        &mut batch,
+        &key,
+        records::roots::NAME,
+        name.as_bytes().to_vec(),
+    );
     if let Some(description) = description {
         replace_owned_content(
             ctx,
             &mut batch,
             PhysicalSchema::SpaceContent,
-            &v4::space_content_key(&ctx.principal().space),
+            &records::space_content_key(&ctx.principal().space),
             ctx.principal().space.as_str(),
             description,
         )?;
@@ -2570,15 +2594,20 @@ pub(crate) fn write_label(
 ) -> Result<Batch, Rejection> {
     let label = crate::ids::LabelId::parse(id).ok_or(Rejection::InvalidRequest)?;
     let mut batch = Batch::default();
-    let record = v4::LabelDirectoryEntry {
+    let record = records::LabelDirectoryEntry {
         label: id.into(),
         name: meta.name.clone(),
         color: meta.color.clone(),
         tombstone,
     };
-    let key = v4::label_key(&label);
+    let key = records::label_key(&label);
     batch.ensure_body(ctx, PhysicalSchema::Label, &key, id.as_bytes().to_vec());
-    set_register(&mut batch, &key, v4::roots::RECORD, canonical(&record)?);
+    set_register(
+        &mut batch,
+        &key,
+        records::roots::RECORD,
+        canonical(&record)?,
+    );
     Ok(batch)
 }
 
@@ -2592,7 +2621,7 @@ pub(crate) fn write_project(
 ) -> Result<Batch, Rejection> {
     let project = ProjectId::parse(id).ok_or(Rejection::InvalidRequest)?;
     let mut batch = Batch::default();
-    let key = v4::project_meta_key(&project);
+    let key = records::project_meta_key(&project);
     batch.ensure_body(
         ctx,
         PhysicalSchema::ProjectMeta,
@@ -2600,19 +2629,22 @@ pub(crate) fn write_project(
         id.as_bytes().to_vec(),
     );
     for (path, value) in [
-        (v4::roots::NAME, meta.name.as_str()),
-        (v4::roots::KEY, meta.key.as_str()),
-        (v4::roots::COLOR, meta.color.as_str()),
-        (v4::roots::LEAD, meta.lead.as_str()),
-        (v4::roots::TEAM, meta.team.as_str()),
-        (v4::roots::ARCHIVED, if meta.archived { "1" } else { "0" }),
-        (v4::roots::TOMBSTONE, if tombstone { "1" } else { "0" }),
+        (records::roots::NAME, meta.name.as_str()),
+        (records::roots::KEY, meta.key.as_str()),
+        (records::roots::COLOR, meta.color.as_str()),
+        (records::roots::LEAD, meta.lead.as_str()),
+        (records::roots::TEAM, meta.team.as_str()),
+        (
+            records::roots::ARCHIVED,
+            if meta.archived { "1" } else { "0" },
+        ),
+        (records::roots::TOMBSTONE, if tombstone { "1" } else { "0" }),
     ] {
         set_register(&mut batch, &key, path, value.as_bytes().to_vec());
     }
     for (path, value) in [
-        (v4::roots::START_DATE, meta.start_date),
-        (v4::roots::TARGET_DATE, meta.target_date),
+        (records::roots::START_DATE, meta.start_date),
+        (records::roots::TARGET_DATE, meta.target_date),
     ] {
         match value {
             Some(value) => set_register(&mut batch, &key, path, value.to_string().into_bytes()),
@@ -2624,7 +2656,7 @@ pub(crate) fn write_project(
             ctx,
             &mut batch,
             PhysicalSchema::ProjectContent,
-            &v4::project_content_key(&project),
+            &records::project_content_key(&project),
             id,
             description,
         )?;
@@ -2637,11 +2669,11 @@ pub(crate) fn write_governance_revision(
     revision: &crate::views::StoredRoleRevision,
 ) -> Result<Batch, Rejection> {
     let mut batch = write_governance_revision_record(ctx, revision)?;
-    let record = v4::GovernanceRevisionRecord {
+    let record = records::GovernanceRevisionRecord {
         role: revision.body.role_id.clone(),
         revision: revision.clone(),
     };
-    let heads = v4::governance_heads_key(&record.role);
+    let heads = records::governance_heads_key(&record.role);
     batch.ensure_body(
         ctx,
         PhysicalSchema::GovernanceHeads,
@@ -2652,7 +2684,7 @@ pub(crate) fn write_governance_revision(
         batch.operation(
             &heads,
             Op::SetRemove {
-                path: v4::roots::HEADS.into(),
+                path: records::roots::HEADS.into(),
                 value: predecessor.as_bytes().to_vec(),
             },
         );
@@ -2660,7 +2692,7 @@ pub(crate) fn write_governance_revision(
     batch.operation(
         &heads,
         Op::SetAdd {
-            path: v4::roots::HEADS.into(),
+            path: records::roots::HEADS.into(),
             value: record.revision.revision_id.as_bytes().to_vec(),
         },
     );
@@ -2672,16 +2704,16 @@ pub(crate) fn write_governance_revision_record(
     revision: &crate::views::StoredRoleRevision,
 ) -> Result<Batch, Rejection> {
     let mut batch = Batch::default();
-    let record = v4::GovernanceRevisionRecord {
+    let record = records::GovernanceRevisionRecord {
         role: revision.body.role_id.clone(),
         revision: revision.clone(),
     };
-    let key = v4::governance_revision_key(&record.role, &record.revision.revision_id);
+    let key = records::governance_revision_key(&record.role, &record.revision.revision_id);
     batch.immutable_record(
         ctx,
         PhysicalSchema::GovernanceRevision,
         &key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: record.role.clone(),
             record: record.revision.revision_id.clone(),
         },
@@ -2697,7 +2729,7 @@ pub(crate) fn write_workflow_revision(
 ) -> Result<Batch, Rejection> {
     let mut batch = write_workflow_revision_record(ctx, project, revision)?;
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let heads = v4::workflow_heads_key(&project_id);
+    let heads = records::workflow_heads_key(&project_id);
     batch.ensure_body(
         ctx,
         PhysicalSchema::WorkflowHeads,
@@ -2707,15 +2739,20 @@ pub(crate) fn write_workflow_revision(
     set_register(
         &mut batch,
         &heads,
-        v4::roots::PROJECT,
+        records::roots::PROJECT,
         project.as_bytes().to_vec(),
     );
-    set_register(&mut batch, &heads, v4::roots::KIND, b"workflow".to_vec());
+    set_register(
+        &mut batch,
+        &heads,
+        records::roots::KIND,
+        b"workflow".to_vec(),
+    );
     for predecessor in &revision.predecessor_ids {
         batch.operation(
             &heads,
             Op::SetRemove {
-                path: v4::roots::HEADS.into(),
+                path: records::roots::HEADS.into(),
                 value: predecessor.as_bytes().to_vec(),
             },
         );
@@ -2723,7 +2760,7 @@ pub(crate) fn write_workflow_revision(
     batch.operation(
         &heads,
         Op::SetAdd {
-            path: v4::roots::HEADS.into(),
+            path: records::roots::HEADS.into(),
             value: revision.revision_id.as_bytes().to_vec(),
         },
     );
@@ -2737,8 +2774,8 @@ pub(crate) fn write_workflow_revision_record(
 ) -> Result<Batch, Rejection> {
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
     let mut batch = Batch::default();
-    let key = v4::workflow_revision_key(&project_id, &revision.revision_id);
-    let record = v4::ProjectWorkflowRevisionRecord {
+    let key = records::workflow_revision_key(&project_id, &revision.revision_id);
+    let record = records::ProjectWorkflowRevisionRecord {
         project: project.into(),
         revision: revision.clone(),
     };
@@ -2746,7 +2783,7 @@ pub(crate) fn write_workflow_revision_record(
         ctx,
         PhysicalSchema::WorkflowRevision,
         &key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: project.into(),
             record: revision.revision_id.clone(),
         },
@@ -2761,7 +2798,7 @@ pub(crate) fn write_spec_revision(
 ) -> Result<Batch, Rejection> {
     let mut batch = write_spec_revision_record(ctx, revision)?;
     let spec = crate::ids::SpecId::parse(&revision.body.spec).ok_or(Rejection::InvalidRequest)?;
-    let heads = v4::spec_heads_key(&spec);
+    let heads = records::spec_heads_key(&spec);
     batch.ensure_body(
         ctx,
         PhysicalSchema::SpecHeads,
@@ -2771,20 +2808,20 @@ pub(crate) fn write_spec_revision(
     set_register(
         &mut batch,
         &heads,
-        v4::roots::PROJECT,
+        records::roots::PROJECT,
         revision.body.project.as_bytes().to_vec(),
     );
     set_register(
         &mut batch,
         &heads,
-        v4::roots::KIND,
+        records::roots::KIND,
         revision.body.kind.as_str().as_bytes().to_vec(),
     );
     for predecessor in &revision.predecessors {
         batch.operation(
             &heads,
             Op::SetRemove {
-                path: v4::roots::HEADS.into(),
+                path: records::roots::HEADS.into(),
                 value: predecessor.as_bytes().to_vec(),
             },
         );
@@ -2792,7 +2829,7 @@ pub(crate) fn write_spec_revision(
     batch.operation(
         &heads,
         Op::SetAdd {
-            path: v4::roots::HEADS.into(),
+            path: records::roots::HEADS.into(),
             value: revision.revision.as_bytes().to_vec(),
         },
     );
@@ -2804,16 +2841,16 @@ pub(crate) fn write_spec_revision_record(
     revision: &crate::spec::Revision,
 ) -> Result<Batch, Rejection> {
     let spec = crate::ids::SpecId::parse(&revision.body.spec).ok_or(Rejection::InvalidRequest)?;
-    let record = v4::SpecRevisionRecord {
+    let record = records::SpecRevisionRecord {
         revision: revision.clone(),
     };
-    let coordinate = v4::spec_revision_key(&spec, &revision.revision);
+    let coordinate = records::spec_revision_key(&spec, &revision.revision);
     let mut batch = Batch::default();
     batch.immutable_record(
         ctx,
         PhysicalSchema::SpecRevision,
         &coordinate,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: revision.body.spec.clone(),
             record: revision.revision.clone(),
         },
@@ -2826,7 +2863,7 @@ pub(crate) fn write_issue_transition(
     ctx: &Context<'_>,
     doc: &str,
     predecessors: &[String],
-    placement: &v4::BoardPlacement,
+    placement: &records::BoardPlacement,
     evidence: &str,
     timestamp: u64,
 ) -> Result<(Batch, String), Rejection> {
@@ -2840,7 +2877,7 @@ pub(crate) fn write_issue_transition(
     let mut predecessors = predecessors.to_vec();
     predecessors.sort();
     predecessors.dedup();
-    let record = v4::IssueTransitionRecord {
+    let record = records::IssueTransitionRecord {
         issue: doc.into(),
         predecessors,
         placement: placement.clone(),
@@ -2851,18 +2888,18 @@ pub(crate) fn write_issue_transition(
     let transition = record
         .transition_id()
         .map_err(|_| Rejection::InvalidRequest)?;
-    let coordinate = v4::issue_transition_key(&issue, &transition);
+    let coordinate = records::issue_transition_key(&issue, &transition);
     batch.immutable_record(
         ctx,
         PhysicalSchema::IssueTransition,
         &coordinate,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: doc.into(),
             record: transition.clone(),
         },
         canonical(&record)?,
     )?;
-    let meta = v4::issue_meta_key(&issue);
+    let meta = records::issue_meta_key(&issue);
     batch.ensure_body(
         ctx,
         PhysicalSchema::IssueMeta,
@@ -2874,7 +2911,7 @@ pub(crate) fn write_issue_transition(
             .map_err(Rejection::BodyRead)?
             .ok_or(Rejection::StateCorrupt)?
             .sets
-            .get(v4::roots::PLACEMENT_HEADS)
+            .get(records::roots::PLACEMENT_HEADS)
             .cloned()
             .unwrap_or_default()
     } else {
@@ -2883,7 +2920,7 @@ pub(crate) fn write_issue_transition(
     let mut surviving = existing_heads
         .iter()
         .map(|value| {
-            v4::IssueTransitionHead::decode_canonical(value)
+            records::IssueTransitionHead::decode_canonical(value)
                 .map(|head| head.transition)
                 .map_err(|_| Rejection::StateCorrupt)
         })
@@ -2892,14 +2929,14 @@ pub(crate) fn write_issue_transition(
         surviving.remove(predecessor);
     }
     surviving.insert(transition.clone());
-    if surviving.len() > v4::MAX_CONCURRENT_HEADS {
+    if surviving.len() > records::MAX_CONCURRENT_HEADS {
         return Err(Rejection::LimitExceeded);
     }
     for predecessor in &record.predecessors {
         let encoded = existing_heads
             .iter()
             .find(|value| {
-                v4::IssueTransitionHead::decode_canonical(value)
+                records::IssueTransitionHead::decode_canonical(value)
                     .is_ok_and(|head| head.transition == *predecessor)
             })
             .cloned()
@@ -2907,19 +2944,19 @@ pub(crate) fn write_issue_transition(
         batch.operation(
             &meta,
             Op::SetRemove {
-                path: v4::roots::PLACEMENT_HEADS.into(),
+                path: records::roots::PLACEMENT_HEADS.into(),
                 value: encoded,
             },
         );
     }
-    let head = v4::IssueTransitionHead {
+    let head = records::IssueTransitionHead {
         transition: transition.clone(),
         core: record.core(),
     };
     batch.operation(
         &meta,
         Op::SetAdd {
-            path: v4::roots::PLACEMENT_HEADS.into(),
+            path: records::roots::PLACEMENT_HEADS.into(),
             value: canonical(&head)?,
         },
     );
@@ -2931,9 +2968,9 @@ fn board_block_head(
     project: &str,
     workflow_state: &str,
     block: &str,
-) -> Result<Option<v4::BoardBlockHead>, Rejection> {
+) -> Result<Option<records::BoardBlockHead>, Rejection> {
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::board_block_key(&project_id, workflow_state, block);
+    let key = records::board_block_key(&project_id, workflow_state, block);
     if ctx.body_version(&key).is_none() {
         return Ok(None);
     }
@@ -2943,10 +2980,12 @@ fn board_block_head(
         .ok_or(Rejection::StateCorrupt)?;
     let mut heads = view
         .sets
-        .get(v4::roots::BLOCK_HEADS)
+        .get(records::roots::BLOCK_HEADS)
         .into_iter()
         .flatten()
-        .map(|raw| v4::BoardBlockHead::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt))
+        .map(|raw| {
+            records::BoardBlockHead::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     heads.sort_by(|left, right| left.revision.cmp(&right.revision));
     heads.dedup_by(|left, right| left.revision == right.revision);
@@ -2974,7 +3013,7 @@ fn effective_board_block(
     let head =
         board_block_head(ctx, project, workflow_state, block)?.ok_or(Rejection::StateCorrupt)?;
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::board_block_key(&project_id, workflow_state, block);
+    let key = records::board_block_key(&project_id, workflow_state, block);
     let view = ctx
         .read_collaborative(&key)
         .map_err(Rejection::BodyRead)?
@@ -2982,10 +3021,10 @@ fn effective_board_block(
     let mut order = head.core.order.clone();
     if let Some(raw) = view
         .registers
-        .get(v4::roots::ORDER_OVERLAY)
+        .get(records::roots::ORDER_OVERLAY)
         .filter(|raw| !raw.is_empty())
     {
-        let overlay = v4::BoardBlockOrderOverlay::decode_canonical(raw)
+        let overlay = records::BoardBlockOrderOverlay::decode_canonical(raw)
             .map_err(|_| Rejection::StateCorrupt)?;
         overlay.validate().map_err(|_| Rejection::StateCorrupt)?;
         if overlay.block_revision == head.revision {
@@ -3003,9 +3042,9 @@ fn board_topology_heads(
     ctx: &Context<'_>,
     project: &str,
     workflow_state: &str,
-) -> Result<Vec<v4::BoardTopologyHead>, Rejection> {
+) -> Result<Vec<records::BoardTopologyHead>, Rejection> {
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::board_lane_key(&project_id, workflow_state);
+    let key = records::board_lane_key(&project_id, workflow_state);
     if ctx.body_version(&key).is_none() {
         return Ok(Vec::new());
     }
@@ -3015,11 +3054,11 @@ fn board_topology_heads(
         .ok_or(Rejection::StateCorrupt)?;
     let mut heads = view
         .sets
-        .get(v4::roots::TOPOLOGY_HEADS)
+        .get(records::roots::TOPOLOGY_HEADS)
         .into_iter()
         .flatten()
         .map(|raw| {
-            v4::BoardTopologyHead::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)
+            records::BoardTopologyHead::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)
         })
         .collect::<Result<Vec<_>, _>>()?;
     heads.sort_by(|left, right| left.transition.cmp(&right.transition));
@@ -3048,24 +3087,24 @@ fn ensure_board_topology(
     let mut batch = Batch::default();
     let topology = board_topology_heads(ctx, project, workflow_state)?;
     if topology.is_empty() {
-        let seed = v4::board_seed_block_id(project, workflow_state);
+        let seed = records::board_seed_block_id(project, workflow_state);
         if block != seed {
             return Err(Rejection::StateCorrupt);
         }
-        let block_key = v4::board_block_key(&project_id, workflow_state, &seed);
+        let block_key = records::board_block_key(&project_id, workflow_state, &seed);
         batch.ensure_body(
             ctx,
             PhysicalSchema::BoardBlock,
             &block_key,
             composite_identity([project, workflow_state, &seed]),
         );
-        let core = v4::BoardBlockCore {
+        let core = records::BoardBlockCore {
             project: project.into(),
             workflow_state: workflow_state.into(),
             block: seed.clone(),
             order: crate::rank::between("", None),
         };
-        let head = v4::BoardBlockHead {
+        let head = records::BoardBlockHead {
             revision: core
                 .revision_id()
                 .map_err(|_| Rejection::ContractViolation)?,
@@ -3074,27 +3113,27 @@ fn ensure_board_topology(
         batch.operation(
             &block_key,
             Op::SetAdd {
-                path: v4::roots::BLOCK_HEADS.into(),
+                path: records::roots::BLOCK_HEADS.into(),
                 value: canonical(&head)?,
             },
         );
-        let lane_key = v4::board_lane_key(&project_id, workflow_state);
+        let lane_key = records::board_lane_key(&project_id, workflow_state);
         batch.ensure_body(
             ctx,
             PhysicalSchema::BoardLane,
             &lane_key,
             composite_identity([project, workflow_state]),
         );
-        let topology_core = v4::BoardTopologyCore {
+        let topology_core = records::BoardTopologyCore {
             project: project.into(),
             workflow_state: workflow_state.into(),
             predecessors: Vec::new(),
-            split: v4::BoardTopologySplit {
+            split: records::BoardTopologySplit {
                 source_block: None,
                 created_block: seed,
             },
         };
-        let topology_head = v4::BoardTopologyHead {
+        let topology_head = records::BoardTopologyHead {
             transition: topology_core
                 .transition_id()
                 .map_err(|_| Rejection::ContractViolation)?,
@@ -3103,7 +3142,7 @@ fn ensure_board_topology(
         batch.operation(
             &lane_key,
             Op::SetAdd {
-                path: v4::roots::TOPOLOGY_HEADS.into(),
+                path: records::roots::TOPOLOGY_HEADS.into(),
                 value: canonical(&topology_head)?,
             },
         );
@@ -3134,7 +3173,7 @@ fn stage_board_split_topology(
             Rejection::StateCorrupt
         });
     };
-    let block_key = v4::board_block_key(&project_id, workflow_state, new_block);
+    let block_key = records::board_block_key(&project_id, workflow_state, new_block);
     if ctx.body_version(&block_key).is_some() {
         return Err(Rejection::Conflict);
     }
@@ -3144,13 +3183,13 @@ fn stage_board_split_topology(
         &block_key,
         composite_identity([project, workflow_state, new_block]),
     );
-    let block_core = v4::BoardBlockCore {
+    let block_core = records::BoardBlockCore {
         project: project.into(),
         workflow_state: workflow_state.into(),
         block: new_block.into(),
         order: new_order,
     };
-    let block_head = v4::BoardBlockHead {
+    let block_head = records::BoardBlockHead {
         revision: block_core
             .revision_id()
             .map_err(|_| Rejection::ContractViolation)?,
@@ -3159,21 +3198,21 @@ fn stage_board_split_topology(
     batch.operation(
         &block_key,
         Op::SetAdd {
-            path: v4::roots::BLOCK_HEADS.into(),
+            path: records::roots::BLOCK_HEADS.into(),
             value: canonical(&block_head)?,
         },
     );
-    let lane_key = v4::board_lane_key(&project_id, workflow_state);
-    let core = v4::BoardTopologyCore {
+    let lane_key = records::board_lane_key(&project_id, workflow_state);
+    let core = records::BoardTopologyCore {
         project: project.into(),
         workflow_state: workflow_state.into(),
         predecessors: vec![predecessor.transition.clone()],
-        split: v4::BoardTopologySplit {
+        split: records::BoardTopologySplit {
             source_block: Some(source_block.into()),
             created_block: new_block.into(),
         },
     };
-    let successor = v4::BoardTopologyHead {
+    let successor = records::BoardTopologyHead {
         transition: core
             .transition_id()
             .map_err(|_| Rejection::ContractViolation)?,
@@ -3182,14 +3221,14 @@ fn stage_board_split_topology(
     batch.operation(
         &lane_key,
         Op::SetRemove {
-            path: v4::roots::TOPOLOGY_HEADS.into(),
+            path: records::roots::TOPOLOGY_HEADS.into(),
             value: canonical(predecessor)?,
         },
     );
     batch.operation(
         &lane_key,
         Op::SetAdd {
-            path: v4::roots::TOPOLOGY_HEADS.into(),
+            path: records::roots::TOPOLOGY_HEADS.into(),
             value: canonical(&successor)?,
         },
     );
@@ -3207,9 +3246,9 @@ fn composite_identity<'a>(parts: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
 pub(crate) fn issue_transition_heads(
     ctx: &Context<'_>,
     doc: &str,
-) -> Result<Vec<(String, v4::IssueTransitionRecord)>, Rejection> {
+) -> Result<Vec<(String, records::IssueTransitionRecord)>, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let meta = v4::issue_meta_key(&issue);
+    let meta = records::issue_meta_key(&issue);
     if ctx.body_version(&meta).is_none() {
         return Ok(Vec::new());
     }
@@ -3219,18 +3258,18 @@ pub(crate) fn issue_transition_heads(
         .ok_or(Rejection::StateCorrupt)?;
     let mut ids = view
         .sets
-        .get(v4::roots::PLACEMENT_HEADS)
+        .get(records::roots::PLACEMENT_HEADS)
         .into_iter()
         .flatten()
         .map(|value| {
-            v4::IssueTransitionHead::decode_canonical(value)
+            records::IssueTransitionHead::decode_canonical(value)
                 .map(|head| head.transition)
                 .map_err(|_| Rejection::StateCorrupt)
         })
         .collect::<Result<Vec<_>, _>>()?;
     ids.sort();
     ids.dedup();
-    if ids.len() > v4::MAX_CONCURRENT_HEADS {
+    if ids.len() > records::MAX_CONCURRENT_HEADS {
         return Err(Rejection::LimitExceeded);
     }
     let mut heads = Vec::with_capacity(ids.len());
@@ -3238,9 +3277,9 @@ pub(crate) fn issue_transition_heads(
         let source = exact_record_source(ctx, crate::find::field::ID, &id, "issue_transition")?
             .ok_or(Rejection::StateCorrupt)?;
         let bytes = ctx.read_body(&source)?.ok_or(Rejection::StateCorrupt)?;
-        let envelope = v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        let envelope = records::ImmutableRecordEnvelope::decode_canonical(&bytes)
             .map_err(|_| Rejection::StateCorrupt)?;
-        let record = v4::IssueTransitionRecord::decode_canonical(&envelope.record)
+        let record = records::IssueTransitionRecord::decode_canonical(&envelope.record)
             .map_err(|_| Rejection::StateCorrupt)?;
         if record.issue != doc
             || record
@@ -3252,11 +3291,11 @@ pub(crate) fn issue_transition_heads(
         }
         let projected = view
             .sets
-            .get(v4::roots::PLACEMENT_HEADS)
+            .get(records::roots::PLACEMENT_HEADS)
             .into_iter()
             .flatten()
             .find_map(|value| {
-                v4::IssueTransitionHead::decode_canonical(value)
+                records::IssueTransitionHead::decode_canonical(value)
                     .ok()
                     .filter(|head| head.transition == id)
             })
@@ -3272,21 +3311,21 @@ pub(crate) fn issue_transition_heads(
 fn issue_rank_overlay(
     ctx: &Context<'_>,
     doc: &str,
-) -> Result<Option<v4::IssueRankOverlay>, Rejection> {
+) -> Result<Option<records::IssueRankOverlay>, Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::InvalidRequest)?;
-    let meta = v4::issue_meta_key(&issue);
+    let meta = records::issue_meta_key(&issue);
     if ctx.body_version(&meta).is_none() {
         return Ok(None);
     }
     let view = read_view(ctx, &meta)?;
-    let Some(bytes) = view.registers.get(v4::roots::RANK_OVERLAY) else {
+    let Some(bytes) = view.registers.get(records::roots::RANK_OVERLAY) else {
         return Ok(None);
     };
     if bytes.is_empty() {
         return Ok(None);
     }
     let overlay =
-        v4::IssueRankOverlay::decode_canonical(bytes).map_err(|_| Rejection::StateCorrupt)?;
+        records::IssueRankOverlay::decode_canonical(bytes).map_err(|_| Rejection::StateCorrupt)?;
     overlay.validate().map_err(|_| Rejection::StateCorrupt)?;
     if overlay.issue != doc {
         return Err(Rejection::StateCorrupt);
@@ -3298,8 +3337,8 @@ fn effective_issue_placement(
     ctx: &Context<'_>,
     doc: &str,
     transition: &str,
-    placement: &v4::BoardPlacement,
-) -> Result<v4::BoardPlacement, Rejection> {
+    placement: &records::BoardPlacement,
+) -> Result<records::BoardPlacement, Rejection> {
     let mut effective = placement.clone();
     if let Some(overlay) = issue_rank_overlay(ctx, doc)? {
         if overlay.transition == transition
@@ -3315,11 +3354,11 @@ fn effective_issue_placement(
 
 pub(crate) fn write_issue_rank_overlay(
     ctx: &Context<'_>,
-    overlay: &v4::IssueRankOverlay,
+    overlay: &records::IssueRankOverlay,
 ) -> Result<Batch, Rejection> {
     overlay.validate().map_err(|_| Rejection::InvalidRequest)?;
     let issue = DocId::parse(&overlay.issue).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::issue_meta_key(&issue);
+    let key = records::issue_meta_key(&issue);
     if ctx.body_version(&key).is_none() {
         return Err(Rejection::StateCorrupt);
     }
@@ -3327,7 +3366,7 @@ pub(crate) fn write_issue_rank_overlay(
     set_register(
         &mut batch,
         &key,
-        v4::roots::RANK_OVERLAY,
+        records::roots::RANK_OVERLAY,
         canonical(overlay)?,
     );
     Ok(batch)
@@ -3340,7 +3379,7 @@ pub(crate) fn write_spec_issued_heads(
     add: Option<&str>,
 ) -> Result<Batch, Rejection> {
     let spec = crate::ids::SpecId::parse(spec).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::spec_heads_key(&spec);
+    let key = records::spec_heads_key(&spec);
     // A migration may stage this projection in the same transaction that
     // creates the heads Body. Ordinary callers have already resolved the
     // exact heads source; the substrate still rejects an operation with no
@@ -3351,7 +3390,7 @@ pub(crate) fn write_spec_issued_heads(
         batch.operation(
             &key,
             Op::SetRemove {
-                path: v4::roots::ISSUED_HEADS.into(),
+                path: records::roots::ISSUED_HEADS.into(),
                 value: revision.as_bytes().to_vec(),
             },
         );
@@ -3360,7 +3399,7 @@ pub(crate) fn write_spec_issued_heads(
         batch.operation(
             &key,
             Op::SetAdd {
-                path: v4::roots::ISSUED_HEADS.into(),
+                path: records::roots::ISSUED_HEADS.into(),
                 value: revision.as_bytes().to_vec(),
             },
         );
@@ -3375,7 +3414,7 @@ pub(crate) fn write_baseline_revision(
     let mut batch = write_baseline_revision_record(ctx, revision)?;
     let baseline =
         crate::ids::BaselineId::parse(&revision.body.baseline).ok_or(Rejection::InvalidRequest)?;
-    let heads = v4::baseline_heads_key(&baseline);
+    let heads = records::baseline_heads_key(&baseline);
     batch.ensure_body(
         ctx,
         PhysicalSchema::BaselineHeads,
@@ -3385,15 +3424,20 @@ pub(crate) fn write_baseline_revision(
     set_register(
         &mut batch,
         &heads,
-        v4::roots::PROJECT,
+        records::roots::PROJECT,
         revision.body.project.as_bytes().to_vec(),
     );
-    set_register(&mut batch, &heads, v4::roots::KIND, b"baseline".to_vec());
+    set_register(
+        &mut batch,
+        &heads,
+        records::roots::KIND,
+        b"baseline".to_vec(),
+    );
     for predecessor in &revision.predecessors {
         batch.operation(
             &heads,
             Op::SetRemove {
-                path: v4::roots::HEADS.into(),
+                path: records::roots::HEADS.into(),
                 value: predecessor.as_bytes().to_vec(),
             },
         );
@@ -3401,7 +3445,7 @@ pub(crate) fn write_baseline_revision(
     batch.operation(
         &heads,
         Op::SetAdd {
-            path: v4::roots::HEADS.into(),
+            path: records::roots::HEADS.into(),
             value: revision.revision.as_bytes().to_vec(),
         },
     );
@@ -3414,16 +3458,16 @@ pub(crate) fn write_baseline_revision_record(
 ) -> Result<Batch, Rejection> {
     let baseline =
         crate::ids::BaselineId::parse(&revision.body.baseline).ok_or(Rejection::InvalidRequest)?;
-    let record = v4::BaselineRevisionRecord {
+    let record = records::BaselineRevisionRecord {
         revision: revision.clone(),
     };
-    let coordinate = v4::baseline_revision_key(&baseline, &revision.revision);
+    let coordinate = records::baseline_revision_key(&baseline, &revision.revision);
     let mut batch = Batch::default();
     batch.immutable_record(
         ctx,
         PhysicalSchema::BaselineRevision,
         &coordinate,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: revision.body.baseline.clone(),
             record: revision.revision.clone(),
         },
@@ -3439,14 +3483,14 @@ pub(crate) fn write_baseline_issued_heads(
     add: Option<&str>,
 ) -> Result<Batch, Rejection> {
     let baseline = crate::ids::BaselineId::parse(baseline).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::baseline_heads_key(&baseline);
+    let key = records::baseline_heads_key(&baseline);
     let _ = ctx;
     let mut batch = Batch::default();
     for revision in remove {
         batch.operation(
             &key,
             Op::SetRemove {
-                path: v4::roots::ISSUED_HEADS.into(),
+                path: records::roots::ISSUED_HEADS.into(),
                 value: revision.as_bytes().to_vec(),
             },
         );
@@ -3455,7 +3499,7 @@ pub(crate) fn write_baseline_issued_heads(
         batch.operation(
             &key,
             Op::SetAdd {
-                path: v4::roots::ISSUED_HEADS.into(),
+                path: records::roots::ISSUED_HEADS.into(),
                 value: revision.as_bytes().to_vec(),
             },
         );
@@ -3465,18 +3509,18 @@ pub(crate) fn write_baseline_issued_heads(
 
 pub(crate) fn write_spec_observation(
     ctx: &Context<'_>,
-    record: &v4::SpecObservationRecord,
+    record: &records::SpecObservationRecord,
 ) -> Result<Batch, Rejection> {
     record.validate().map_err(|_| Rejection::InvalidRequest)?;
     let spec = crate::ids::SpecId::parse(record.spec()).ok_or(Rejection::InvalidRequest)?;
     let identity = record.identity();
-    let coordinate = v4::spec_observation_key(&spec, &identity);
+    let coordinate = records::spec_observation_key(&spec, &identity);
     let mut batch = Batch::default();
     batch.immutable_record(
         ctx,
         PhysicalSchema::SpecObservation,
         &coordinate,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: record.spec().into(),
             record: identity,
         },
@@ -3487,15 +3531,15 @@ pub(crate) fn write_spec_observation(
 
 pub(crate) fn write_revision_alias(
     ctx: &Context<'_>,
-    alias: &v4::RevisionAliasRecord,
+    alias: &records::RevisionAliasRecord,
 ) -> Result<Batch, Rejection> {
     let mut batch = Batch::default();
-    let key = v4::revision_alias_key(&alias.spec, &alias.legacy_revision);
+    let key = records::revision_alias_key(&alias.spec, &alias.legacy_revision);
     batch.immutable_record(
         ctx,
         PhysicalSchema::RevisionAlias,
         &key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: alias.spec.clone(),
             record: alias.legacy_revision.clone(),
         },
@@ -3508,7 +3552,7 @@ pub(crate) fn write_project_update(
     ctx: &Context<'_>,
     update: &ProjectUpdate,
 ) -> Result<Batch, Rejection> {
-    let record = v4::ProjectUpdateRecord {
+    let record = records::ProjectUpdateRecord {
         update: update.id.clone(),
         project: update.project_id.clone(),
         author: update.author.clone(),
@@ -3518,13 +3562,13 @@ pub(crate) fn write_project_update(
     };
     let bytes = canonical(&record)?;
     let project = ProjectId::parse(&update.project_id).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::project_updates_key(&project, &record.update);
+    let key = records::project_updates_key(&project, &record.update);
     let mut batch = Batch::default();
     batch.immutable_record(
         ctx,
         PhysicalSchema::ProjectUpdates,
         &key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: update.project_id.clone(),
             record: record.update.clone(),
         },
@@ -3538,18 +3582,18 @@ pub(crate) fn write_milestone(
     milestone: &Milestone,
 ) -> Result<Batch, Rejection> {
     let project = ProjectId::parse(&milestone.project_id).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::project_schedule_key(&project, &milestone.id);
+    let key = records::project_schedule_key(&project, &milestone.id);
     let mut batch = Batch::default();
     batch.ensure_body(
         ctx,
         PhysicalSchema::ProjectSchedule,
         &key,
-        canonical(&v4::RecordBodyIdentityRecord {
+        canonical(&records::RecordBodyIdentityRecord {
             owner: milestone.project_id.clone(),
             record: milestone.id.clone(),
         })?,
     );
-    let record = v4::ScheduleRecord::Milestone {
+    let record = records::ScheduleRecord::Milestone {
         milestone: milestone.id.clone(),
         project: milestone.project_id.clone(),
         name: milestone.name.clone(),
@@ -3558,24 +3602,29 @@ pub(crate) fn write_milestone(
         position: milestone.rank.clone(),
         tombstone: milestone.tombstone,
     };
-    set_register(&mut batch, &key, v4::roots::RECORD, canonical(&record)?);
+    set_register(
+        &mut batch,
+        &key,
+        records::roots::RECORD,
+        canonical(&record)?,
+    );
     Ok(batch)
 }
 
 pub(crate) fn write_cycle(ctx: &Context<'_>, cycle: &Cycle) -> Result<Batch, Rejection> {
     let project = ProjectId::parse(&cycle.project_id).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::project_schedule_key(&project, &cycle.id);
+    let key = records::project_schedule_key(&project, &cycle.id);
     let mut batch = Batch::default();
     batch.ensure_body(
         ctx,
         PhysicalSchema::ProjectSchedule,
         &key,
-        canonical(&v4::RecordBodyIdentityRecord {
+        canonical(&records::RecordBodyIdentityRecord {
             owner: cycle.project_id.clone(),
             record: cycle.id.clone(),
         })?,
     );
-    let record = v4::ScheduleRecord::Cycle {
+    let record = records::ScheduleRecord::Cycle {
         cycle: cycle.id.clone(),
         project: cycle.project_id.clone(),
         name: cycle.name.clone(),
@@ -3583,7 +3632,12 @@ pub(crate) fn write_cycle(ctx: &Context<'_>, cycle: &Cycle) -> Result<Batch, Rej
         end: cycle.end,
         tombstone: cycle.tombstone,
     };
-    set_register(&mut batch, &key, v4::roots::RECORD, canonical(&record)?);
+    set_register(
+        &mut batch,
+        &key,
+        records::roots::RECORD,
+        canonical(&record)?,
+    );
     Ok(batch)
 }
 
@@ -3594,19 +3648,19 @@ pub(crate) fn write_parent(
     parent: Option<String>,
 ) -> Result<Batch, Rejection> {
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let record = v4::HierarchyRecord {
+    let record = records::HierarchyRecord {
         project: project.into(),
         child: child.into(),
         parent,
     };
     let identity = child.to_string();
-    let key = v4::project_hierarchy_key(&project_id, &identity);
+    let key = records::project_hierarchy_key(&project_id, &identity);
     let mut batch = Batch::default();
     batch.atomic_value(
         ctx,
         PhysicalSchema::ProjectHierarchy,
         &key,
-        canonical(&v4::TopologyRecord::Parent(record))?,
+        canonical(&records::TopologyRecord::Parent(record))?,
     )?;
     Ok(batch)
 }
@@ -3620,7 +3674,7 @@ pub(crate) fn write_link(
     present: bool,
 ) -> Result<Batch, Rejection> {
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let record = v4::ProjectLinkRecord {
+    let record = records::ProjectLinkRecord {
         project: project.into(),
         from: from.into(),
         kind: kind.into(),
@@ -3628,13 +3682,13 @@ pub(crate) fn write_link(
         present,
     };
     let identity = data_encoding::HEXLOWER.encode(&record.relation_identity());
-    let key = v4::project_hierarchy_key(&project_id, &identity);
+    let key = records::project_hierarchy_key(&project_id, &identity);
     let mut batch = Batch::default();
     batch.atomic_value(
         ctx,
         PhysicalSchema::ProjectHierarchy,
         &key,
-        canonical(&v4::TopologyRecord::Link(record))?,
+        canonical(&records::TopologyRecord::Link(record))?,
     )?;
     Ok(batch)
 }
@@ -3645,9 +3699,9 @@ pub(crate) fn read_link(
     from: &str,
     kind: &str,
     to: &str,
-) -> Result<Option<v4::ProjectLinkRecord>, Rejection> {
+) -> Result<Option<records::ProjectLinkRecord>, Rejection> {
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
-    let probe = v4::ProjectLinkRecord {
+    let probe = records::ProjectLinkRecord {
         project: project.into(),
         from: from.into(),
         kind: kind.into(),
@@ -3656,13 +3710,13 @@ pub(crate) fn read_link(
     };
     probe.validate().map_err(|_| Rejection::InvalidRequest)?;
     let identity = data_encoding::HEXLOWER.encode(&probe.relation_identity());
-    let key = v4::project_hierarchy_key(&project_id, &identity);
+    let key = records::project_hierarchy_key(&project_id, &identity);
     if ctx.body_version(&key).is_none() {
         return Ok(None);
     }
     let raw = ctx.read_body(&key)?.ok_or(Rejection::StateCorrupt)?;
-    let v4::TopologyRecord::Link(record) =
-        v4::TopologyRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)?
+    let records::TopologyRecord::Link(record) =
+        records::TopologyRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)?
     else {
         return Err(Rejection::StateCorrupt);
     };
@@ -3676,16 +3730,16 @@ pub(crate) fn read_parent(
     ctx: &Context<'_>,
     project: &str,
     child: &str,
-) -> Result<Option<v4::HierarchyRecord>, Rejection> {
+) -> Result<Option<records::HierarchyRecord>, Rejection> {
     let project_id = ProjectId::parse(project).ok_or(Rejection::InvalidRequest)?;
     DocId::parse(child).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::project_hierarchy_key(&project_id, child);
+    let key = records::project_hierarchy_key(&project_id, child);
     if ctx.body_version(&key).is_none() {
         return Ok(None);
     }
     let raw = ctx.read_body(&key)?.ok_or(Rejection::StateCorrupt)?;
-    let v4::TopologyRecord::Parent(record) =
-        v4::TopologyRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)?
+    let records::TopologyRecord::Parent(record) =
+        records::TopologyRecord::decode_canonical(&raw).map_err(|_| Rejection::StateCorrupt)?
     else {
         return Err(Rejection::StateCorrupt);
     };
@@ -3699,7 +3753,7 @@ pub(crate) fn write_triage_submission(
     ctx: &Context<'_>,
     item: &TriageItem,
 ) -> Result<Batch, Rejection> {
-    let record = v4::TriageSubmissionRecord {
+    let record = records::TriageSubmissionRecord {
         triage: item.id.clone(),
         title: item.title.clone(),
         body: item.body.clone(),
@@ -3707,17 +3761,17 @@ pub(crate) fn write_triage_submission(
         submitted_by: item.submitted_by.clone(),
         timestamp: item.ts,
     };
-    let key = v4::space_triage_key(&ctx.principal().space, &record.triage);
+    let key = records::space_triage_key(&ctx.principal().space, &record.triage);
     let mut batch = Batch::default();
     batch.immutable_record(
         ctx,
         PhysicalSchema::SpaceTriage,
         &key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: ctx.principal().space.as_str().into(),
             record: record.triage.clone(),
         },
-        canonical(&v4::TriageRecord::Submission(record))?,
+        canonical(&records::TriageRecord::Submission(record))?,
     )?;
     Ok(batch)
 }
@@ -3743,12 +3797,12 @@ pub(crate) fn write_triage_decision(
         &material,
     ));
     let outcome = match item.outcome.as_str() {
-        "accepted" => v4::TriageOutcome::Accepted,
-        "declined" => v4::TriageOutcome::Declined,
-        "duplicate" => v4::TriageOutcome::Duplicate,
+        "accepted" => records::TriageOutcome::Accepted,
+        "declined" => records::TriageOutcome::Declined,
+        "duplicate" => records::TriageOutcome::Duplicate,
         _ => return Err(Rejection::InvalidRequest),
     };
-    let record = v4::TriageDecisionRecord {
+    let record = records::TriageDecisionRecord {
         decision: decision.clone(),
         triage: item.id.clone(),
         outcome,
@@ -3758,34 +3812,34 @@ pub(crate) fn write_triage_decision(
         issue: (!item.doc.is_empty()).then(|| item.doc.clone()),
         note: item.note.clone(),
     };
-    let key = v4::space_triage_key(&ctx.principal().space, &decision);
+    let key = records::space_triage_key(&ctx.principal().space, &decision);
     batch.immutable_record(
         ctx,
         PhysicalSchema::SpaceTriage,
         &key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: ctx.principal().space.as_str().into(),
             record: decision.clone(),
         },
-        canonical(&v4::TriageRecord::Decision(record))?,
+        canonical(&records::TriageRecord::Decision(record))?,
     )?;
-    let resolution = v4::TriageResolutionRecord {
+    let resolution = records::TriageResolutionRecord {
         triage: item.id.clone(),
         decision,
         resolved_by: item.decided_by.clone(),
         timestamp: item.decided_ts,
     };
     let resolution_identity = resolution.identity();
-    let resolution_key = v4::space_triage_key(&ctx.principal().space, &resolution_identity);
+    let resolution_key = records::space_triage_key(&ctx.principal().space, &resolution_identity);
     batch.immutable_record(
         ctx,
         PhysicalSchema::SpaceTriage,
         &resolution_key,
-        v4::RecordBodyIdentityRecord {
+        records::RecordBodyIdentityRecord {
             owner: ctx.principal().space.as_str().into(),
             record: resolution_identity,
         },
-        canonical(&v4::TriageRecord::Resolution(resolution))?,
+        canonical(&records::TriageRecord::Resolution(resolution))?,
     )?;
     Ok(batch)
 }
@@ -3796,7 +3850,7 @@ pub(crate) fn write_initiative(
     description: Option<&str>,
 ) -> Result<Batch, Rejection> {
     let id = crate::ids::InitiativeId::parse(&initiative.id).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::initiative_key(&id);
+    let key = records::initiative_key(&id);
     let mut batch = Batch::default();
     batch.ensure_body(
         ctx,
@@ -3805,11 +3859,11 @@ pub(crate) fn write_initiative(
         initiative.id.as_bytes().to_vec(),
     );
     for (path, value) in [
-        (v4::roots::NAME, initiative.name.as_str()),
-        (v4::roots::OWNER, initiative.owner.as_str()),
-        (v4::roots::HEALTH, initiative.health.as_str()),
+        (records::roots::NAME, initiative.name.as_str()),
+        (records::roots::OWNER, initiative.owner.as_str()),
+        (records::roots::HEALTH, initiative.health.as_str()),
         (
-            v4::roots::TOMBSTONE,
+            records::roots::TOMBSTONE,
             if initiative.tombstone { "1" } else { "0" },
         ),
     ] {
@@ -3819,17 +3873,17 @@ pub(crate) fn write_initiative(
         Some(target) => set_register(
             &mut batch,
             &key,
-            v4::roots::TARGET_DATE,
+            records::roots::TARGET_DATE,
             target.to_string().into_bytes(),
         ),
-        None => clear_register(&mut batch, &key, v4::roots::TARGET_DATE),
+        None => clear_register(&mut batch, &key, records::roots::TARGET_DATE),
     }
     if let Some(description) = description {
         replace_owned_content(
             ctx,
             &mut batch,
             PhysicalSchema::InitiativeContent,
-            &v4::initiative_content_key(&id),
+            &records::initiative_content_key(&id),
             &initiative.id,
             description,
         )?;
@@ -3839,15 +3893,18 @@ pub(crate) fn write_initiative(
 
 pub(crate) fn write_team(ctx: &Context<'_>, team: &Team) -> Result<Batch, Rejection> {
     let id = crate::ids::TeamId::parse(&team.id).ok_or(Rejection::InvalidRequest)?;
-    let key = v4::team_key(&id);
+    let key = records::team_key(&id);
     let mut batch = Batch::default();
     batch.ensure_body(ctx, PhysicalSchema::Team, &key, team.id.as_bytes().to_vec());
     for (path, value) in [
-        (v4::roots::NAME, team.name.as_str()),
-        (v4::roots::KEY, team.key.as_str()),
-        (v4::roots::ICON, team.icon.as_str()),
-        (v4::roots::LEAD, team.lead.as_str()),
-        (v4::roots::TOMBSTONE, if team.tombstone { "1" } else { "0" }),
+        (records::roots::NAME, team.name.as_str()),
+        (records::roots::KEY, team.key.as_str()),
+        (records::roots::ICON, team.icon.as_str()),
+        (records::roots::LEAD, team.lead.as_str()),
+        (
+            records::roots::TOMBSTONE,
+            if team.tombstone { "1" } else { "0" },
+        ),
     ] {
         set_register(&mut batch, &key, path, value.as_bytes().to_vec());
     }
@@ -3903,7 +3960,7 @@ pub(crate) fn migration_source_coverage_complete() -> bool {
     let mut covered = MIGRATION_BACKFILLED_SCHEMAS
         .iter()
         .copied()
-        .map(|schema| (schema.name().to_string(), v4::SCHEMA_VERSION))
+        .map(|schema| (schema.name().to_string(), records::SCHEMA_VERSION))
         .collect::<BTreeSet<_>>();
     // The anchored description stays in the current Issue Body. Its migrator
     // phase advances the document schema marker and clears scalar title truth
@@ -3915,8 +3972,10 @@ pub(crate) fn migration_source_coverage_complete() -> bool {
     preferred == covered
 }
 
-fn migration_marker(ctx: &Context<'_>) -> Result<Option<v4::MigrationMarkerRecord>, Rejection> {
-    let key = v4::space_directory_key(&ctx.principal().space);
+fn migration_marker(
+    ctx: &Context<'_>,
+) -> Result<Option<records::MigrationMarkerRecord>, Rejection> {
+    let key = records::space_directory_key(&ctx.principal().space);
     if ctx.body_version(&key).is_none() {
         return Ok(None);
     }
@@ -3926,11 +3985,12 @@ fn migration_marker(ctx: &Context<'_>) -> Result<Option<v4::MigrationMarkerRecor
 
 fn migration_marker_from_view(
     view: &fabric::CollaborativeView,
-) -> Result<Option<v4::MigrationMarkerRecord>, Rejection> {
+) -> Result<Option<records::MigrationMarkerRecord>, Rejection> {
     view.registers
-        .get(v4::roots::MIGRATION)
+        .get(records::roots::MIGRATION)
         .map(|raw| {
-            v4::MigrationMarkerRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)
+            records::MigrationMarkerRecord::decode_canonical(raw)
+                .map_err(|_| Rejection::StateCorrupt)
         })
         .transpose()
 }
@@ -3964,7 +4024,7 @@ pub(crate) fn validate_migration_plan(
 pub(crate) fn migration_verification(
     ctx: &Context<'_>,
 ) -> Result<Option<contract::MigrationVerification>, Rejection> {
-    let key = v4::space_directory_key(&ctx.principal().space);
+    let key = records::space_directory_key(&ctx.principal().space);
     if ctx.body_version(&key).is_none() {
         return Ok(None);
     }
@@ -3974,14 +4034,14 @@ pub(crate) fn migration_verification(
     };
     let (audit_records, entries) = view
         .logs
-        .get(v4::roots::MIGRATION_AUDIT)
+        .get(records::roots::MIGRATION_AUDIT)
         .map_or((0, &[][..]), |log| (log.appended, log.entries.as_slice()));
-    if entries.len() > usize::try_from(v4::MIGRATION_AUDIT_RECORDS).unwrap_or(usize::MAX) {
+    if entries.len() > usize::try_from(records::MIGRATION_AUDIT_RECORDS).unwrap_or(usize::MAX) {
         return Err(Rejection::StateCorrupt);
     }
     let mut tail = None;
     for entry in entries {
-        let audit = v4::MigrationAuditRecord::decode_canonical(&entry.value)
+        let audit = records::MigrationAuditRecord::decode_canonical(&entry.value)
             .map_err(|_| Rejection::StateCorrupt)?;
         if audit.batch == marker.batch {
             if tail.replace(audit).is_some() {
@@ -4064,7 +4124,7 @@ fn migration_issue_id(
 ) -> Result<String, Rejection> {
     let doc = view
         .registers
-        .get(v4::roots::ISSUE_ID)
+        .get(records::roots::ISSUE_ID)
         .map(|raw| String::from_utf8_lossy(raw).into_owned())
         .ok_or(Rejection::StateCorrupt)?;
     if contract::issue_key(&doc) != *body {
@@ -4183,14 +4243,14 @@ fn migration_atomic_absent(
 pub(crate) fn migration_immutable_present(
     ctx: &Context<'_>,
     schema: PhysicalSchema,
-    identity: v4::RecordBodyIdentityRecord,
+    identity: records::RecordBodyIdentityRecord,
     record: Vec<u8>,
     semantic_field: &str,
     semantic_value: &str,
     semantic_predicates: &[(&str, &str)],
 ) -> Result<bool, Rejection> {
-    let bytes = canonical(&v4::ImmutableRecordEnvelope { identity, record })?;
-    let expected_key = v4::immutable_record_key(schema, &bytes);
+    let bytes = canonical(&records::ImmutableRecordEnvelope { identity, record })?;
+    let expected_key = records::immutable_record_key(schema, &bytes);
     let Some(source) =
         exact_record_source_matching(ctx, semantic_field, semantic_value, semantic_predicates)?
     else {
@@ -4261,13 +4321,17 @@ pub(crate) fn migration_exact_set(
     expected: &BTreeSet<String>,
     allow_create: bool,
 ) -> Result<Batch, Rejection> {
-    if expected.len() > v4::MAX_CONCURRENT_HEADS {
+    if expected.len() > records::MAX_CONCURRENT_HEADS {
         return Err(Rejection::Conflict);
     }
     let exists = ctx.body_version(key).is_some();
     if exists {
         let view = read_view(ctx, key)?;
-        if view.registers.get(v4::roots::IDENTITY).map(Vec::as_slice) != Some(identity.as_bytes())
+        if view
+            .registers
+            .get(records::roots::IDENTITY)
+            .map(Vec::as_slice)
+            != Some(identity.as_bytes())
             || registers.iter().any(|(path, value)| {
                 view.registers.get(*path).map(Vec::as_slice) != Some(value.as_bytes())
             })
@@ -4311,14 +4375,14 @@ pub(crate) fn migration_exact_set(
 fn equivalent_migration_base_transition(
     body: &BodyKey,
     issue: &IssueState,
-    head: &v4::IssueTransitionRecord,
+    head: &records::IssueTransitionRecord,
 ) -> bool {
     head.predecessors.is_empty()
         && head.placement
-            == (v4::BoardPlacement {
+            == (records::BoardPlacement {
                 project: issue.project.clone(),
                 workflow_state: issue.status.clone(),
-                block: v4::board_seed_block_id(&issue.project, &issue.status),
+                block: records::board_seed_block_id(&issue.project, &issue.status),
                 position: format!("{}V", body.body.render()),
             })
         && head.evidence == "migration"
@@ -4371,7 +4435,7 @@ pub(crate) fn migration_issue_window(
             batch.operation(
                 body,
                 Op::RegisterSet {
-                    path: v4::roots::ISSUE_ID.into(),
+                    path: records::roots::ISSUE_ID.into(),
                     value: doc.as_bytes().to_vec(),
                 },
             );
@@ -4396,7 +4460,7 @@ pub(crate) fn migration_issue_window(
             // true; an explicit false written by a later preferred restore is
             // therefore distinguishable and conflicts on re-consent.
             meta.operations.retain(|(_, operation)| {
-                !matches!(operation, Op::RegisterSet { path, .. } if path == v4::roots::TOMBSTONE)
+                !matches!(operation, Op::RegisterSet { path, .. } if path == records::roots::TOMBSTONE)
             });
             batch.absorb(meta);
         }
@@ -4413,10 +4477,10 @@ pub(crate) fn migration_issue_window(
                     ctx,
                     &doc,
                     &[],
-                    &v4::BoardPlacement {
+                    &records::BoardPlacement {
                         project: issue.project.clone(),
                         workflow_state: issue.status.clone(),
-                        block: v4::board_seed_block_id(&issue.project, &issue.status),
+                        block: records::board_seed_block_id(&issue.project, &issue.status),
                         position,
                     },
                     "migration",
@@ -4467,11 +4531,11 @@ pub(crate) fn migration_issue_window(
         if migration_immutable_present(
             ctx,
             PhysicalSchema::IssueComment,
-            v4::RecordBodyIdentityRecord {
+            records::RecordBodyIdentityRecord {
                 owner: doc.clone(),
                 record: id.clone(),
             },
-            canonical(&v4::DiscussionRecord::Comment(comment.clone()))?,
+            canonical(&records::DiscussionRecord::Comment(comment.clone()))?,
             crate::find::field::ID,
             &id,
             &[
@@ -4505,15 +4569,15 @@ pub(crate) fn migration_issue_window(
             (path.to_string(), emoji, actor)
         };
         let issue_id = DocId::parse(&doc).ok_or(Rejection::StateCorrupt)?;
-        let reaction = v4::ReactionRecord {
+        let reaction = records::ReactionRecord {
             issue: doc.clone(),
             comment: comment.clone(),
             emoji: emoji.clone(),
             actor: actor.clone(),
             on: true,
         };
-        let key = v4::issue_reaction_key(&issue_id, &reaction.identity());
-        let expected = canonical(&v4::DiscussionRecord::Reaction(reaction))?;
+        let key = records::issue_reaction_key(&issue_id, &reaction.identity());
+        let expected = canonical(&records::DiscussionRecord::Reaction(reaction))?;
         return if migration_atomic_absent(ctx, &key, &expected)? {
             write_reaction(ctx, &doc, &comment, &emoji, &actor, true)
         } else {
@@ -4543,14 +4607,14 @@ pub(crate) fn migration_issue_window(
             .map_err(|_| Rejection::StateCorrupt)?
         };
         let issue_id = DocId::parse(&doc).ok_or(Rejection::StateCorrupt)?;
-        let record = v4::IssueRelationRecord {
+        let record = records::IssueRelationRecord {
             issue: doc.clone(),
             project: issue.project.clone(),
             kind: kind.into(),
             target: target.clone(),
             present: true,
         };
-        let key = v4::issue_relation_key(&issue_id, &record.identity());
+        let key = records::issue_relation_key(&issue_id, &record.identity());
         let expected = canonical(&record)?;
         return if migration_atomic_absent(ctx, &key, &expected)? {
             write_issue_relation(ctx, &doc, &issue.project, kind, &target, true)
@@ -4569,7 +4633,7 @@ pub(crate) fn migration_issue_window(
         if legacy.id != id {
             return Err(Rejection::StateCorrupt);
         }
-        let record = v4::IssueAttachmentRecord {
+        let record = records::IssueAttachmentRecord {
             issue: doc,
             id: legacy.id,
             name: legacy.name,
@@ -4582,7 +4646,7 @@ pub(crate) fn migration_issue_window(
             tombstone: false,
         };
         let issue = DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
-        let key = v4::issue_attachment_key(&issue, &record.id);
+        let key = records::issue_attachment_key(&issue, &record.id);
         let expected = canonical(&record)?;
         return if migration_atomic_absent(ctx, &key, &expected)? {
             write_attachment(ctx, &record)
@@ -4597,13 +4661,13 @@ pub(crate) fn migration_issue_window(
             .and_then(|records| records.get(run))
             .ok_or(Rejection::StateCorrupt)?;
         let check = serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
-        let record = v4::IssueCheckRecord {
+        let record = records::IssueCheckRecord {
             issue: doc,
             run: run.into(),
             check,
         };
         let issue = DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
-        let key = v4::issue_check_key(&issue, &record.run);
+        let key = records::issue_check_key(&issue, &record.run);
         let expected = canonical(&record)?;
         return if migration_atomic_absent(ctx, &key, &expected)? {
             write_check(ctx, &record)
@@ -4676,7 +4740,7 @@ pub(crate) fn migration_catalog_window(
             description: description.clone(),
             ..CatalogState::default()
         };
-        let key = v4::space_directory_key(&ctx.principal().space);
+        let key = records::space_directory_key(&ctx.principal().space);
         if ctx.body_version(&key).is_some() {
             let mut current = CatalogState::default();
             apply_space(ctx, &mut current)?;
@@ -4703,7 +4767,8 @@ pub(crate) fn migration_catalog_window(
     }
     if let Some(id) = subitem.strip_prefix("02:label:") {
         let label: LabelMeta = record(view, "labels", id)?;
-        let key = v4::label_key(&crate::ids::LabelId::parse(id).ok_or(Rejection::StateCorrupt)?);
+        let key =
+            records::label_key(&crate::ids::LabelId::parse(id).ok_or(Rejection::StateCorrupt)?);
         if ctx.body_version(&key).is_some() {
             let mut current = CatalogState::default();
             apply_label(ctx, &mut current, id)?;
@@ -4720,14 +4785,14 @@ pub(crate) fn migration_catalog_window(
         if revision.body.role_id != key {
             return Err(Rejection::StateCorrupt);
         }
-        let stored = v4::GovernanceRevisionRecord {
+        let stored = records::GovernanceRevisionRecord {
             role: revision.body.role_id.clone(),
             revision: revision.clone(),
         };
         if migration_immutable_present(
             ctx,
             PhysicalSchema::GovernanceRevision,
-            v4::RecordBodyIdentityRecord {
+            records::RecordBodyIdentityRecord {
                 owner: stored.role.clone(),
                 record: stored.revision.revision_id.clone(),
             },
@@ -4749,14 +4814,14 @@ pub(crate) fn migration_catalog_window(
         if revision.body.role_id != role || revision.revision_id != revision_id {
             return Err(Rejection::StateCorrupt);
         }
-        let stored = v4::GovernanceRevisionRecord {
+        let stored = records::GovernanceRevisionRecord {
             role: role.into(),
             revision: revision.clone(),
         };
         if migration_immutable_present(
             ctx,
             PhysicalSchema::GovernanceRevision,
-            v4::RecordBodyIdentityRecord {
+            records::RecordBodyIdentityRecord {
                 owner: role.into(),
                 record: revision_id.into(),
             },
@@ -4777,17 +4842,17 @@ pub(crate) fn migration_catalog_window(
         return migration_exact_set(
             ctx,
             PhysicalSchema::GovernanceHeads,
-            &v4::governance_heads_key(role),
+            &records::governance_heads_key(role),
             role,
             &[],
-            v4::roots::HEADS,
+            records::roots::HEADS,
             &expected,
             true,
         );
     }
     if let Some(id) = subitem.strip_prefix("10:project:") {
         let meta: ProjectMeta = record(view, "projects", id)?;
-        let key = v4::project_meta_key(&ProjectId::parse(id).ok_or(Rejection::StateCorrupt)?);
+        let key = records::project_meta_key(&ProjectId::parse(id).ok_or(Rejection::StateCorrupt)?);
         if ctx.body_version(&key).is_some() {
             let mut current = CatalogState::default();
             apply_project(ctx, &mut current, id)?;
@@ -4813,14 +4878,14 @@ pub(crate) fn migration_catalog_window(
         if revision.revision_id != revision_id {
             return Err(Rejection::StateCorrupt);
         }
-        let stored = v4::ProjectWorkflowRevisionRecord {
+        let stored = records::ProjectWorkflowRevisionRecord {
             project: project.into(),
             revision: revision.clone(),
         };
         if migration_immutable_present(
             ctx,
             PhysicalSchema::WorkflowRevision,
-            v4::RecordBodyIdentityRecord {
+            records::RecordBodyIdentityRecord {
                 owner: project.into(),
                 record: revision_id.into(),
             },
@@ -4842,10 +4907,15 @@ pub(crate) fn migration_catalog_window(
         return migration_exact_set(
             ctx,
             PhysicalSchema::WorkflowHeads,
-            &v4::workflow_heads_key(&ProjectId::parse(project).ok_or(Rejection::StateCorrupt)?),
+            &records::workflow_heads_key(
+                &ProjectId::parse(project).ok_or(Rejection::StateCorrupt)?,
+            ),
             project,
-            &[(v4::roots::PROJECT, project), (v4::roots::KIND, "workflow")],
-            v4::roots::HEADS,
+            &[
+                (records::roots::PROJECT, project),
+                (records::roots::KIND, "workflow"),
+            ],
+            records::roots::HEADS,
             &expected,
             true,
         );
@@ -4856,7 +4926,7 @@ pub(crate) fn migration_catalog_window(
         if expected != key {
             return Err(Rejection::StateCorrupt);
         }
-        let body = v4::project_schedule_key(
+        let body = records::project_schedule_key(
             &ProjectId::parse(&milestone.project_id).ok_or(Rejection::StateCorrupt)?,
             &milestone.id,
         );
@@ -4882,7 +4952,7 @@ pub(crate) fn migration_catalog_window(
         if expected != key {
             return Err(Rejection::StateCorrupt);
         }
-        let body = v4::project_schedule_key(
+        let body = records::project_schedule_key(
             &ProjectId::parse(&cycle.project_id).ok_or(Rejection::StateCorrupt)?,
             &cycle.id,
         );
@@ -4908,7 +4978,7 @@ pub(crate) fn migration_catalog_window(
         if expected != key {
             return Err(Rejection::StateCorrupt);
         }
-        let stored = v4::ProjectUpdateRecord {
+        let stored = records::ProjectUpdateRecord {
             update: update.id.clone(),
             project: update.project_id.clone(),
             author: update.author.clone(),
@@ -4919,7 +4989,7 @@ pub(crate) fn migration_catalog_window(
         if migration_immutable_present(
             ctx,
             PhysicalSchema::ProjectUpdates,
-            v4::RecordBodyIdentityRecord {
+            records::RecordBodyIdentityRecord {
                 owner: stored.project.clone(),
                 record: stored.update.clone(),
             },
@@ -4940,7 +5010,7 @@ pub(crate) fn migration_catalog_window(
         if initiative.id != id {
             return Err(Rejection::StateCorrupt);
         }
-        let key = v4::initiative_key(
+        let key = records::initiative_key(
             &crate::ids::InitiativeId::parse(id).ok_or(Rejection::StateCorrupt)?,
         );
         if ctx.body_version(&key).is_some() {
@@ -4963,13 +5033,13 @@ pub(crate) fn migration_catalog_window(
         if initiative.id != id || !initiative.projects.iter().any(|value| value == project) {
             return Err(Rejection::StateCorrupt);
         }
-        let record = v4::EntityRelationRecord {
+        let record = records::EntityRelationRecord {
             owner: id.into(),
             kind: "initiative_project".into(),
             target: project.into(),
             present: true,
         };
-        let key = v4::entity_relation_key(id, &record.identity());
+        let key = records::entity_relation_key(id, &record.identity());
         let expected = canonical(&record)?;
         return if migration_atomic_absent(ctx, &key, &expected)? {
             write_entity_relation(ctx, id, "initiative_project", project, true)
@@ -4982,7 +5052,7 @@ pub(crate) fn migration_catalog_window(
         if team.id != id {
             return Err(Rejection::StateCorrupt);
         }
-        let key = v4::team_key(&crate::ids::TeamId::parse(id).ok_or(Rejection::StateCorrupt)?);
+        let key = records::team_key(&crate::ids::TeamId::parse(id).ok_or(Rejection::StateCorrupt)?);
         if ctx.body_version(&key).is_some() {
             let mut current = CatalogState::default();
             apply_team(ctx, &mut current, id)?;
@@ -5002,13 +5072,13 @@ pub(crate) fn migration_catalog_window(
         if team.id != id || !team.members.iter().any(|value| value == member) {
             return Err(Rejection::StateCorrupt);
         }
-        let record = v4::EntityRelationRecord {
+        let record = records::EntityRelationRecord {
             owner: id.into(),
             kind: "team_member".into(),
             target: member.into(),
             present: true,
         };
-        let key = v4::entity_relation_key(id, &record.identity());
+        let key = records::entity_relation_key(id, &record.identity());
         let expected = canonical(&record)?;
         return if migration_atomic_absent(ctx, &key, &expected)? {
             write_entity_relation(ctx, id, "team_member", member, true)
@@ -5021,7 +5091,7 @@ pub(crate) fn migration_catalog_window(
         if triage.id != id {
             return Err(Rejection::StateCorrupt);
         }
-        let stored = v4::TriageSubmissionRecord {
+        let stored = records::TriageSubmissionRecord {
             triage: triage.id.clone(),
             title: triage.title.clone(),
             body: triage.body.clone(),
@@ -5032,11 +5102,11 @@ pub(crate) fn migration_catalog_window(
         if migration_immutable_present(
             ctx,
             PhysicalSchema::SpaceTriage,
-            v4::RecordBodyIdentityRecord {
+            records::RecordBodyIdentityRecord {
                 owner: ctx.principal().space.as_str().into(),
                 record: stored.triage.clone(),
             },
-            canonical(&v4::TriageRecord::Submission(stored))?,
+            canonical(&records::TriageRecord::Submission(stored))?,
             crate::find::field::ID,
             &triage.id,
             &[
@@ -5054,7 +5124,7 @@ pub(crate) fn migration_catalog_window(
 fn migration_identity(
     ctx: &Context<'_>,
     doc: &str,
-) -> Result<Option<v4::IssueIdentityRecord>, Rejection> {
+) -> Result<Option<records::IssueIdentityRecord>, Rejection> {
     let Some(key) = exact_record_source(ctx, crate::find::field::SOURCE_ID, doc, "issue_identity")?
     else {
         return Ok(None);
@@ -5063,7 +5133,7 @@ fn migration_identity(
     if envelope.identity.owner != doc || envelope.identity.record != "identity" {
         return Err(Rejection::StateCorrupt);
     }
-    let identity = v4::IssueIdentityRecord::decode_canonical(&envelope.record)
+    let identity = records::IssueIdentityRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     (identity.issue == doc)
         .then_some(identity)
@@ -5074,7 +5144,7 @@ fn migration_identity(
 fn migration_heads(
     ctx: &Context<'_>,
     doc: &str,
-) -> Result<(String, v4::IssueTransitionRecord), Rejection> {
+) -> Result<(String, records::IssueTransitionRecord), Rejection> {
     let heads = issue_transition_heads(ctx, doc)?;
     match heads.as_slice() {
         [(transition, record)] => Ok((transition.clone(), record.clone())),
@@ -5122,9 +5192,9 @@ pub(crate) fn migration_coordinate_window(
             .and_then(|raw| std::str::from_utf8(raw).ok())
             .and_then(|raw| raw.parse::<u64>().ok())
             .ok_or(Rejection::StateCorrupt)?;
-        let expected = v4::IssueIdentityRecord {
+        let expected = records::IssueIdentityRecord {
             issue: doc.into(),
-            alias: v4::IssueAliasCoordinate::for_issue(ordinal, &issue)
+            alias: records::IssueAliasCoordinate::for_issue(ordinal, &issue)
                 .map_err(|_| Rejection::StateCorrupt)?,
         };
         match migration_identity(ctx, doc)? {
@@ -5146,18 +5216,18 @@ pub(crate) fn migration_coordinate_window(
             return Err(Rejection::StateCorrupt);
         }
         let issue = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
-        let key = v4::issue_meta_key(&issue);
+        let key = records::issue_meta_key(&issue);
         if ctx.body_version(&key).is_none() {
             return Err(Rejection::StateCorrupt);
         }
         let meta = read_view(ctx, &key)?;
-        match meta.registers.get(v4::roots::TOMBSTONE) {
+        match meta.registers.get(records::roots::TOMBSTONE) {
             Some(raw) if raw.as_slice() == b"1" => return Ok(Batch::default()),
             Some(_) => return Err(Rejection::Conflict),
             None => {}
         }
         let mut batch = Batch::default();
-        set_register(&mut batch, &key, v4::roots::TOMBSTONE, b"1".to_vec());
+        set_register(&mut batch, &key, records::roots::TOMBSTONE, b"1".to_vec());
         return Ok(batch);
     }
     if let Some(rest) = subitem.strip_prefix("16:board:") {
@@ -5175,7 +5245,7 @@ pub(crate) fn migration_coordinate_window(
         if head.placement.project != project {
             return Err(Rejection::Conflict);
         }
-        let overlay = v4::IssueRankOverlay {
+        let overlay = records::IssueRankOverlay {
             issue: doc.into(),
             transition,
             project: head.placement.project.clone(),
@@ -5303,8 +5373,8 @@ pub(crate) fn finalize_migration_window(
         .as_ref()
         .map_or(plan.timestamp, |marker| marker.started_at);
     let directory = ensure_directory(ctx, &CatalogState::default(), &mut out)?;
-    let marker = v4::MigrationMarkerRecord {
-        migration: v4::MIGRATION_V3_TO_V4.into(),
+    let marker = records::MigrationMarkerRecord {
+        migration: records::MIGRATION_MARKER.into(),
         source_version: 3,
         target_version: 4,
         publication: plan.source,
@@ -5319,8 +5389,8 @@ pub(crate) fn finalize_migration_window(
     };
     let operations = u32::try_from(out.operations.len().saturating_add(2))
         .map_err(|_| Rejection::LimitExceeded)?;
-    let audit = v4::MigrationAuditRecord {
-        migration: v4::MIGRATION_V3_TO_V4.into(),
+    let audit = records::MigrationAuditRecord {
+        migration: records::MIGRATION_MARKER.into(),
         batch: batch_number,
         actor: actor.into(),
         timestamp: plan.timestamp,
@@ -5333,15 +5403,15 @@ pub(crate) fn finalize_migration_window(
     set_register(
         &mut out,
         &directory,
-        v4::roots::MIGRATION,
+        records::roots::MIGRATION,
         canonical(&marker)?,
     );
     out.operation(
         &directory,
         Op::LogAppend {
-            path: v4::roots::MIGRATION_AUDIT.into(),
+            path: records::roots::MIGRATION_AUDIT.into(),
             value: canonical(&audit)?,
-            retain: v4::MIGRATION_AUDIT_RECORDS,
+            retain: records::MIGRATION_AUDIT_RECORDS,
         },
     );
     if !migration_window_within_bounds(&out) {
@@ -5478,8 +5548,8 @@ mod migration_tests {
             runtime::publication::ExtractorSchemaDigest::from_digest([3; 32]),
         );
         let frontier = replica::frontier::ReplicaFrontier::new([4; 32], 7);
-        let marker = v4::MigrationMarkerRecord {
-            migration: v4::MIGRATION_V3_TO_V4.into(),
+        let marker = records::MigrationMarkerRecord {
+            migration: records::MIGRATION_MARKER.into(),
             source_version: 3,
             target_version: 4,
             publication,
@@ -5492,8 +5562,8 @@ mod migration_tests {
             started_at: 10,
             updated_at: 11,
         };
-        let audit = v4::MigrationAuditRecord {
-            migration: v4::MIGRATION_V3_TO_V4.into(),
+        let audit = records::MigrationAuditRecord {
+            migration: records::MIGRATION_MARKER.into(),
             batch: 9,
             actor: actor.as_str().into(),
             timestamp: 11,
@@ -5505,11 +5575,11 @@ mod migration_tests {
         };
         let mut view = fabric::CollaborativeView::default();
         view.registers.insert(
-            v4::roots::MIGRATION.into(),
+            records::roots::MIGRATION.into(),
             canonical(&marker).expect("marker"),
         );
         view.logs.insert(
-            v4::roots::MIGRATION_AUDIT.into(),
+            records::roots::MIGRATION_AUDIT.into(),
             fabric::LogView {
                 entries: vec![fabric::ListElement {
                     element: "tail".into(),
@@ -5521,7 +5591,7 @@ mod migration_tests {
             },
         );
         let reader = MigrationStatusReader {
-            directory: v4::space_directory_key(&facts.space),
+            directory: records::space_directory_key(&facts.space),
             view,
             reads: AtomicUsize::new(0),
         };
@@ -5538,7 +5608,7 @@ mod migration_tests {
     fn same_semantic_immutable_id_with_different_bytes_is_a_conflict() {
         let doc = DocId::from_digest([0x31; 16]).as_str().to_string();
         let id = "cmt_00000000000000000000000000".to_string();
-        let identity = v4::RecordBodyIdentityRecord {
+        let identity = records::RecordBodyIdentityRecord {
             owner: doc,
             record: id.clone(),
         };
@@ -5554,20 +5624,21 @@ mod migration_tests {
             node: None,
             parent_node: None,
         };
-        let expected = canonical(&v4::ImmutableRecordEnvelope {
+        let expected = canonical(&records::ImmutableRecordEnvelope {
             identity: identity.clone(),
-            record: canonical(&v4::DiscussionRecord::Comment(comment("expected")))
+            record: canonical(&records::DiscussionRecord::Comment(comment("expected")))
                 .expect("expected comment"),
         })
         .expect("expected envelope");
-        let conflicting = canonical(&v4::ImmutableRecordEnvelope {
+        let conflicting = canonical(&records::ImmutableRecordEnvelope {
             identity,
-            record: canonical(&v4::DiscussionRecord::Comment(comment("different")))
+            record: canonical(&records::DiscussionRecord::Comment(comment("different")))
                 .expect("conflicting comment"),
         })
         .expect("conflicting envelope");
-        let expected_key = v4::immutable_record_key(PhysicalSchema::IssueComment, &expected);
-        let conflicting_key = v4::immutable_record_key(PhysicalSchema::IssueComment, &conflicting);
+        let expected_key = records::immutable_record_key(PhysicalSchema::IssueComment, &expected);
+        let conflicting_key =
+            records::immutable_record_key(PhysicalSchema::IssueComment, &conflicting);
 
         assert_ne!(
             expected_key, conflicting_key,
@@ -5618,8 +5689,8 @@ mod migration_tests {
             runtime::publication::ExtractorSchemaDigest::from_digest([0x67; 32]),
         );
         let frontier = replica::frontier::ReplicaFrontier::new([0x68; 32], 8);
-        let marker = v4::MigrationMarkerRecord {
-            migration: v4::MIGRATION_V3_TO_V4.into(),
+        let marker = records::MigrationMarkerRecord {
+            migration: records::MIGRATION_MARKER.into(),
             source_version: 3,
             target_version: 4,
             publication: old_source,
@@ -5634,11 +5705,11 @@ mod migration_tests {
         };
         let mut view = fabric::CollaborativeView::default();
         view.registers.insert(
-            v4::roots::MIGRATION.into(),
+            records::roots::MIGRATION.into(),
             canonical(&marker).expect("marker"),
         );
         let reader = MigrationStatusReader {
-            directory: v4::space_directory_key(&facts.space),
+            directory: records::space_directory_key(&facts.space),
             view,
             reads: AtomicUsize::new(0),
         };
@@ -5688,13 +5759,13 @@ mod migration_tests {
             created_at: 9,
             ..IssueState::default()
         };
-        let expected_placement = v4::BoardPlacement {
+        let expected_placement = records::BoardPlacement {
             project: project.clone(),
             workflow_state: "backlog".into(),
-            block: v4::board_seed_block_id(&project, "backlog"),
+            block: records::board_seed_block_id(&project, "backlog"),
             position: format!("{}V", body.body.render()),
         };
-        let replay = v4::IssueTransitionRecord {
+        let replay = records::IssueTransitionRecord {
             issue: doc.clone(),
             predecessors: Vec::new(),
             placement: expected_placement.clone(),
@@ -5717,7 +5788,7 @@ mod migration_tests {
         ));
 
         let mut differing_scalar = replay;
-        differing_scalar.placement = v4::BoardPlacement {
+        differing_scalar.placement = records::BoardPlacement {
             project,
             workflow_state: "active".into(),
             block: "75".repeat(32),

@@ -287,7 +287,7 @@ mod tests {
     fn release_scale_million_body_keys_share_world_text() {
         const TOTAL: u32 = 1_000_000;
         const MAX_RSS_DELTA: usize = 96 * 1024 * 1024;
-        let world = WorldId::parse("dev.lait.issues").expect("world");
+        let world = WorldId::parse("dev.lait.notes").expect("world");
         let before = resident_bytes();
         let keys = (0..TOTAL)
             .map(|number| {

@@ -1147,7 +1147,7 @@ pub struct SpaceDirectoryRecord {
     pub description: String,
 }
 
-pub const MIGRATION_V3_TO_V4: &str = "issues-v3-to-v4";
+pub const MIGRATION_MARKER: &str = "issues-v3-to-v4";
 
 /// The only mutable migration coordinate. A batch advances `cursor` in the
 /// same transaction as the Bodies it materializes; a crash therefore either
@@ -1183,7 +1183,7 @@ pub struct MigrationMarkerRecord {
 
 impl CanonicalRecord for MigrationMarkerRecord {
     fn validate(&self) -> Result<(), Invalid> {
-        if self.migration != MIGRATION_V3_TO_V4
+        if self.migration != MIGRATION_MARKER
             || self.source_version != 3
             || self.target_version != 4
             || self.publication.implementation_digest == [0; 32]
@@ -1249,7 +1249,7 @@ pub struct MigrationAuditRecord {
 
 impl CanonicalRecord for MigrationAuditRecord {
     fn validate(&self) -> Result<(), Invalid> {
-        if self.migration != MIGRATION_V3_TO_V4
+        if self.migration != MIGRATION_MARKER
             || self.batch == 0
             || !canonical_actor(&self.actor)
             || self.timestamp == 0

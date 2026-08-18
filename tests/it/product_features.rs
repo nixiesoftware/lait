@@ -705,7 +705,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let decisions = items
         .iter()
         .filter_map(|record| match record {
-            issues::v4::TriageRecord::Decision(decision) => Some(decision),
+            issues::records::TriageRecord::Decision(decision) => Some(decision),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -714,7 +714,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         .into_iter()
         .find(|decision| decision.triage == t_accept)
         .unwrap();
-    assert_eq!(accepted.outcome, issues::v4::TriageOutcome::Accepted);
+    assert_eq!(accepted.outcome, issues::records::TriageOutcome::Accepted);
     let accepted_issue = accepted
         .issue
         .clone()

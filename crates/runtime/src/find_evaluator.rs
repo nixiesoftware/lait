@@ -1799,7 +1799,7 @@ mod tests {
 
     fn schema() -> SchemaRef {
         SchemaRef {
-            name: SchemaId::parse("issues.issue").expect("schema"),
+            name: SchemaId::parse("notes.note").expect("schema"),
             version: 1,
         }
     }
@@ -1834,7 +1834,7 @@ mod tests {
 
     fn body(number: u8) -> BodyKey {
         BodyKey::new(
-            WorldId::parse("dev.lait.issues").expect("world"),
+            WorldId::parse("dev.lait.notes").expect("world"),
             BodyId::from_bytes([number; 16]),
         )
     }
@@ -2524,7 +2524,7 @@ mod tests {
     fn query_fixture_types_remain_world_declaration_compatible() {
         let _ = (OpSet::ALL, ModeSet::ALL);
         let _ = SourceRef {
-            name: SchemaId::parse("issues.issue-body").expect("source"),
+            name: SchemaId::parse("notes.note-body").expect("source"),
             version: 1,
         };
     }

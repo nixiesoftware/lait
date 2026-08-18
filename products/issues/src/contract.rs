@@ -2054,7 +2054,7 @@ pub struct IssueDetailProjection {
     pub publication: runtime::publication::WorldPublicationId,
     pub issue: crate::dto::IssueView,
     pub comments: Page<crate::dto::CommentDto>,
-    pub reactions: Page<crate::v4::ReactionRecord>,
+    pub reactions: Page<crate::records::ReactionRecord>,
     pub attachments: Page<crate::dto::AttachmentMetaDto>,
     pub checks: Page<crate::dto::CheckDto>,
     pub outgoing_relations: Page<crate::dto::IssueRelationDto>,

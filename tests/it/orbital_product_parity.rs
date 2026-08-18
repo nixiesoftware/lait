@@ -323,7 +323,7 @@ fn board_continuation_is_exact_across_a_leaf_split() {
     // Fill the deterministic seed leaf exactly. The captured continuation is
     // pinned to this pre-split publication and must remain usable after a
     // later action changes the block topology.
-    for ordinal in 0..issues::v4::BOARD_BLOCK_CAPACITY {
+    for ordinal in 0..issues::records::BOARD_BLOCK_CAPACITY {
         expected.push(create_board_issue(
             &mut driver,
             &project,
@@ -373,7 +373,7 @@ fn board_continuation_is_exact_across_a_leaf_split() {
         .chain(&old_second.rows.items)
         .map(|row| row.doc_id.as_str().to_owned())
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(old_docs.len(), issues::v4::BOARD_BLOCK_CAPACITY);
+    assert_eq!(old_docs.len(), issues::records::BOARD_BLOCK_CAPACITY);
     assert!(!old_docs.contains(&newest));
 
     // The current publication walks block order and then local member order.

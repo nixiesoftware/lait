@@ -1805,7 +1805,7 @@ fn durable_collaborative_images_resolve_cold_and_first_edit_preserves_identity()
     assert_eq!(
         replica.resolve_anchor(&key, &anchor),
         fabric::AnchorResolution::Resolved(9),
-        "hydrating from the causal export preserves Loro operation identities"
+        "hydrating from the causal export preserves scaffold operation identities"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

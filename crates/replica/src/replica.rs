@@ -1600,7 +1600,7 @@ enum SnapshotImage {
     Resident(fabric::BodySnapshot),
     /// Every interpreted durable Body retains only its signed causal closure.
     /// Its binding decides whether exact resolution yields an Atomic value or
-    /// a canonical collaborative export with stable Loro operation ids.
+    /// a canonical collaborative export with stable scaffold operation ids.
     Cold(Arc<CausalMaterial>),
     /// A not-yet-durable candidate is readable from the already-verified hot
     /// image while Corpus validation runs. Runtime clears this cell after the
@@ -1763,7 +1763,7 @@ impl BodyImageResolver {
                     return Err(BodyImageFailure::ModelMismatch);
                 }
                 // The signed Material hint prices the causal artifact working
-                // set; a canonical Loro snapshot can differ from the sum of a
+                // set; a canonical scaffold snapshot can differ from the sum of a
                 // checkpoint and update tail. Validate the actual immutable
                 // export against the same conservative bound Runtime reserves.
                 let largest = std::iter::once(&material.checkpoint)
@@ -4195,13 +4195,13 @@ impl Replica {
         replica
     }
 
-    /// Retain the ordinary durable metadata that accompanies the Issues-v4
+    /// Retain the ordinary durable metadata that accompanies the the record layout
     /// record mix: approximately two record Bodies per attributed operation
     /// and one content declaration per twenty Bodies. These are actual Replica
     /// directories, not fixture-side padding, so release RSS includes the same
     /// scope keys, receipt Bodies, content refs, and refcounts used in service.
     #[cfg(any(test, feature = "scale-fixtures"))]
-    pub fn add_issues_v4_operational_metadata_for_scale(&mut self) {
+    pub fn add_notes_record_operational_metadata_for_scale(&mut self) {
         const BODIES_PER_RECEIPT: usize = 2;
         const BODIES_PER_CONTENT_DECLARATION: usize = 20;
         let space = SpaceId::from_digest([0x91; 16]);

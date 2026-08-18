@@ -78,6 +78,19 @@ fn station() -> (Runtime, Station) {
     (rt, station)
 }
 
+/// The product result inside the durable acknowledgement.
+///
+/// Writes answer with the operation envelope now: the receipt that makes the
+/// operation durable, paired with the result it produced. These tests are
+/// about what the write produced — a handle, a link — rather than about the
+/// receipt, so they unwrap it here and keep asserting on the result.
+fn effect(response: Response) -> Response {
+    match response {
+        Response::Operation { response, .. } => *response,
+        other => other,
+    }
+}
+
 fn facts() -> RouterFacts {
     RouterFacts {
         device: device(),
@@ -125,8 +138,8 @@ fn history_is_attributed_to_an_actor_and_not_to_the_device_it_was_committed_on()
         },
         &facts(),
     );
-    let Response::Ref { reff } = created else {
-        panic!("expected the new issue's handle, got {created:?}");
+    let Response::Ref { reff } = effect(created) else {
+        panic!("expected the new issue's handle");
     };
     router.route(
         Request::Comment {
@@ -243,8 +256,8 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
             },
             &facts(),
         );
-        let Response::Ref { reff } = reply else {
-            panic!("expected issue reference, got {reply:?}");
+        let Response::Ref { reff } = effect(reply) else {
+            panic!("expected issue reference");
         };
         reff
     };
@@ -279,8 +292,8 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
         &facts(),
     );
     assert!(
-        matches!(linked, Response::Ref { .. }),
-        "link reply: {linked:?}"
+        matches!(effect(linked), Response::Ref { .. }),
+        "link reply did not answer with the issue handle"
     );
 
     let geometry_query = |publication| runtime::world::Query {
@@ -301,13 +314,27 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
     // snapshot, then use the canonical id selected by deterministic fixtures.
     // Geometry itself is now a bounded artifact response: summary and one
     // explicit page, never a whole graph serialized by accident.
-    let current: issues::contract::GeometryProjection = serde_json::from_slice(
-        &session
-            .query(geometry_query(None))
-            .expect("current geometry")
-            .bytes,
-    )
-    .expect("current geometry response");
+    // Geometry is built off the request now, so the first ask can legitimately
+    // answer `Pending` with neither summary nor page. Waiting for the artifact
+    // is the caller's job — the projection says which state it is in.
+    let ready_geometry = |query: runtime::world::Query| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let projection: issues::contract::GeometryProjection =
+                serde_json::from_slice(&session.query(query.clone()).expect("geometry").bytes)
+                    .expect("geometry response");
+            match projection.readiness {
+                issues::geometry::GeometryReadiness::Ready => break projection,
+                issues::geometry::GeometryReadiness::Pending
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => panic!("geometry never became ready: {other:?}"),
+            }
+        }
+    };
+    let current = ready_geometry(geometry_query(None));
     let current_summary = current.summary.as_ref().expect("ready summary");
     assert_eq!(current_summary.nodes, 2);
     assert_eq!(current_summary.components, 1);
@@ -322,13 +349,7 @@ fn project_topology_changes_geometry_without_mutating_its_prior_generation() {
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].relation, issues::geometry::RelationKind::Blocks);
 
-    let historical: issues::contract::GeometryProjection = serde_json::from_slice(
-        &session
-            .query(geometry_query(Some(before_link.publication.clone())))
-            .expect("historical geometry")
-            .bytes,
-    )
-    .expect("historical geometry response");
+    let historical = ready_geometry(geometry_query(Some(before_link.publication.clone())));
     let historical_summary = historical.summary.as_ref().expect("ready summary");
     assert_eq!(historical_summary.nodes, 2);
     assert_eq!(historical_summary.components, 2);

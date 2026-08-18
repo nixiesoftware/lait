@@ -353,7 +353,7 @@ struct NodeColumn {
 }
 
 /// Inline the record-shaped singleton case and allocate only true vectors.
-/// Issues relation/activity records overwhelmingly have one node, one field
+/// Relation and activity records overwhelmingly have one node, one field
 /// group, and one edge group; four Arc slice allocations per record dominated
 /// the million-Body publication before this representation.
 #[derive(Debug, Clone)]
@@ -4269,7 +4269,7 @@ impl Corpus {
     }
 
     /// Visit at most `limit` nodes extracted from one durable Body, narrowed
-    /// to the requested Find Schema. Body seeks are the bounded bridge from a
+    /// to the requested Find Schema. Body seeks are the bounded crossing from a
     /// committed change to ordinary query evaluation.
     pub fn visit_body(
         &self,
@@ -5755,14 +5755,14 @@ mod tests {
 
     fn schema() -> SchemaRef {
         SchemaRef {
-            name: SchemaId::parse("issues.issue").expect("schema"),
+            name: SchemaId::parse("notes.note").expect("schema"),
             version: 1,
         }
     }
 
     fn body(number: u8) -> BodyKey {
         BodyKey::new(
-            WorldId::parse("dev.lait.issues").expect("world"),
+            WorldId::parse("dev.lait.notes").expect("world"),
             BodyId::from_bytes([number; 16]),
         )
     }
@@ -5837,7 +5837,7 @@ mod tests {
                 variable_bytes_per_source_byte: 1,
             },
         ));
-        let world = WorldId::parse("dev.lait.issues").expect("world");
+        let world = WorldId::parse("dev.lait.notes").expect("world");
         let full = Corpus::estimate_build_bytes(&snapshot, &world, &[extractor.clone()]);
         let (expected, body_transient, _) = growth_price(&[extractor.shape], 2, 0);
         assert_eq!(full.retained_bytes, expected);
@@ -6228,7 +6228,7 @@ mod tests {
         let mut bytes = [0u8; 16];
         bytes[..8].copy_from_slice(&number.to_be_bytes());
         BodyKey::new(
-            WorldId::parse("dev.lait.issues").expect("world"),
+            WorldId::parse("dev.lait.notes").expect("world"),
             BodyId::from_bytes(bytes),
         )
     }
@@ -6386,7 +6386,7 @@ mod tests {
         }
     }
 
-    fn issues_v4_record_extraction(number: u32, _total: u32) -> BodyExtraction {
+    fn notes_record_extraction(number: u32, _total: u32) -> BodyExtraction {
         let family = number % 100;
         let mut nodes = Vec::new();
         match family {
@@ -6434,7 +6434,7 @@ mod tests {
         0
     }
 
-    fn issues_v4_payload(number: u32) -> usize {
+    fn notes_payload(number: u32) -> usize {
         match number % 100 {
             0..=34 => 350,
             35..=54 => 1_024,
@@ -6533,7 +6533,7 @@ mod tests {
         const MAX_CORPUS_RSS_BYTES_PER_NODE: usize = 4 * 1024;
         const MAX_LOOKUP_100K: std::time::Duration = std::time::Duration::from_secs(5);
         let before_rows = resident_bytes();
-        let hot_key = fabric::Key::from_bytes(b"issues-v4-hot-writer".to_vec());
+        let hot_key = fabric::Key::from_bytes(b"notes-hot-writer".to_vec());
         let mut hot_engine = fabric::Engine::new();
         hot_engine
             .commit(fabric::Transaction::new(
@@ -6559,7 +6559,7 @@ mod tests {
             snapshot_for_test(bodies)
         } else {
             let binding = replica::body::BodyBinding {
-                schema: SchemaId::parse("issues.issue").expect("schema"),
+                schema: SchemaId::parse("notes.note").expect("schema"),
                 schema_version: 1,
                 encoding: EncodingId::parse("postcard").expect("encoding"),
                 mutation_model: replica::body::MUTATION_ATOMIC,
@@ -6573,8 +6573,8 @@ mod tests {
                         cold_scale_material(number, payload_size(number)),
                     )
                 }));
-            if layout == "issues-v4-mix" {
-                replica.add_issues_v4_operational_metadata_for_scale();
+            if layout == "notes-record-mix" {
+                replica.add_notes_record_operational_metadata_for_scale();
             }
             after_replica = resident_bytes();
             let snapshot = Arc::new(replica.cold_read_snapshot_for_scale());
@@ -6630,14 +6630,14 @@ mod tests {
             });
         let combined_retained_estimate =
             publication_retained_estimate.saturating_add(mutable_replica_retained_estimate);
-        let expected_nodes = if layout == "issues-v4-mix" {
+        let expected_nodes = if layout == "notes-record-mix" {
             u64::from(total).saturating_mul(235) / 100
         } else {
             u64::from(total)
         };
         let key = NodeKey {
             schema: schema(),
-            node: NodeId::new(if layout == "issues-v4-mix" {
+            node: NodeId::new(if layout == "notes-record-mix" {
                 (u64::from(total / 2) << 16).to_be_bytes().to_vec()
             } else {
                 (total / 2).to_be_bytes().to_vec()
@@ -6666,7 +6666,7 @@ mod tests {
                 op: Op::Seek(Seek::Field(Predicate {
                     field: FieldRef {
                         schema: schema(),
-                        name: SchemaId::parse(if layout == "issues-v4-mix" {
+                        name: SchemaId::parse(if layout == "notes-record-mix" {
                             "scalar_0"
                         } else {
                             "title"
@@ -6674,7 +6674,7 @@ mod tests {
                         .expect("field"),
                     },
                     test: Test::GreaterOrEqual,
-                    value: Atom::Text(if layout == "issues-v4-mix" {
+                    value: Atom::Text(if layout == "notes-record-mix" {
                         "search".to_owned()
                     } else {
                         "shared".to_owned()
@@ -6749,7 +6749,7 @@ mod tests {
             );
         }
         assert_eq!(work.retained_bytes, corpus.retained_bytes());
-        let expected_postings = if layout == "issues-v4-mix" {
+        let expected_postings = if layout == "notes-record-mix" {
             u64::from(total).saturating_mul(3_440) / 100
         } else {
             u64::from(total) * 5
@@ -6987,27 +6987,27 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "release-scale representative Issues-v4 record mix"]
-    fn release_scale_100k_issues_v4_mix() {
+    #[ignore = "release-scale representative representative record mix"]
+    fn release_scale_100k_notes_record_mix() {
         release_scale(
             100_000,
-            "issues-v4-mix",
+            "notes-record-mix",
             scale_record_extractions,
-            issues_v4_record_extraction,
-            issues_v4_payload,
+            notes_record_extraction,
+            notes_payload,
             true,
         );
     }
 
     #[test]
-    #[ignore = "release-scale representative Issues-v4 record mix"]
-    fn release_scale_1m_issues_v4_mix() {
+    #[ignore = "release-scale representative representative record mix"]
+    fn release_scale_1m_notes_record_mix() {
         release_scale(
             1_000_000,
-            "issues-v4-mix",
+            "notes-record-mix",
             scale_record_extractions,
-            issues_v4_record_extraction,
-            issues_v4_payload,
+            notes_record_extraction,
+            notes_payload,
             true,
         );
     }
@@ -7032,7 +7032,7 @@ mod tests {
             ))
             .expect("template commit");
         let binding = replica::body::BodyBinding {
-            schema: SchemaId::parse("issues.link").expect("schema"),
+            schema: SchemaId::parse("notes.link").expect("schema"),
             schema_version: 1,
             encoding: EncodingId::parse("collab").expect("encoding"),
             mutation_model: replica::body::MUTATION_COLLABORATIVE,

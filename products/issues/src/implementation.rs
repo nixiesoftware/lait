@@ -30,7 +30,7 @@ use runtime::{
 
 use crate::dto::{ActivityEvent, FieldChange, Priority, StatusCategory};
 use crate::ids::{ActorId, DocId, ProjectId};
-use crate::v4::CanonicalRecord as _;
+use crate::records::CanonicalRecord as _;
 
 use super::contract::{
     self, catalog_key, issue_key, EventChange, IssueEffect, IssueEvent, IssueIntent, IssueQuery,
@@ -41,7 +41,7 @@ use super::rank;
 use super::views::{
     board_view, canonical_for, issue_view, label_dto, project_dto, project_row, CatalogState,
     DerivedAliases, Initiative, IssueState, LabelMeta, Milestone, ProjectMeta, RelationState, Team,
-    TriageItem, WorkflowResolutionError,
+    TriageItem,
 };
 
 /// The order milestones read in, and the only place that decides it.
@@ -214,7 +214,7 @@ fn milestone_position(
                 return Err(Rejection::InvalidRequest);
             }
             let mut catalog = CatalogState::default();
-            crate::v4_store::apply_schedule_record(ctx, &mut catalog, project, doc)?;
+            crate::record_store::apply_schedule_record(ctx, &mut catalog, project, doc)?;
             let target = catalog
                 .milestones
                 .get(project)
@@ -270,7 +270,7 @@ enum IssuesPackage {
     /// The preferred implementation installed after the one-time rewrite.
     /// It has no authority to decode aggregate Catalog/Spec/Baseline state or
     /// to advance migration markers.
-    PreferredV4,
+    Preferred,
     /// Historical implementation used only by the resumable migration job.
     Migrator,
 }
@@ -372,13 +372,13 @@ impl IssuesWorld {
     }
 
     pub fn new() -> Self {
-        Self::preferred_v4()
+        Self::preferred()
     }
 
     /// The package activated for ordinary human and agent work after the
     /// migration audit succeeds.  Its descriptor is intentionally unable to
     /// open the old aggregate schemas.
-    pub fn preferred_v4() -> Self {
+    pub fn preferred() -> Self {
         Self {
             id: contract::world_id(),
             signal_schemas: contract::signal_schemas(),
@@ -398,10 +398,10 @@ impl IssuesWorld {
                     mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
                     readable_predecessors: vec![],
                 }];
-                schemas.extend(crate::v4::preferred_schemas());
+                schemas.extend(crate::records::preferred_schemas());
                 schemas
             },
-            package: IssuesPackage::PreferredV4,
+            package: IssuesPackage::Preferred,
         }
     }
 
@@ -409,7 +409,7 @@ impl IssuesWorld {
     /// worker.  It is a separate implementation identity and therefore cannot
     /// silently lend its decoders to the preferred v4 publication.
     pub fn migrator() -> Self {
-        let mut world = Self::preferred_v4();
+        let mut world = Self::preferred();
         world.package = IssuesPackage::Migrator;
         world.find_schemas = crate::find::schemas();
         world.find_extractors = crate::find::extractors();
@@ -421,7 +421,7 @@ impl IssuesWorld {
     /// id is the authority identity the founder activates and every product
     /// transaction pins.
     pub fn implementation_descriptor() -> runtime::world::Implementation {
-        let world = Self::preferred_v4();
+        let world = Self::preferred();
         runtime::world::Implementation::from_registration(
             &world.descriptor(),
             4,
@@ -505,7 +505,7 @@ fn legacy_and_v4_schemas() -> Vec<Schema> {
             readable_predecessors: vec![],
         },
     ];
-    schemas.extend(crate::v4::schemas());
+    schemas.extend(crate::records::schemas());
     // The migrator intentionally combines the historical package with every
     // physical v4 declaration. Keep that union explicit and canonical even if
     // a current content schema is also represented in the physical catalog;
@@ -526,7 +526,7 @@ mod package_descriptor_tests {
 
     #[test]
     fn preferred_descriptor_cannot_open_aggregate_or_predecessor_schemas() {
-        let descriptor = IssuesWorld::preferred_v4().descriptor();
+        let descriptor = IssuesWorld::preferred().descriptor();
         assert_eq!(
             descriptor.limits.max_payload_bytes,
             contract::MAX_PAYLOAD_BYTES
@@ -568,7 +568,7 @@ mod package_descriptor_tests {
             .schemas
             .iter()
             .any(|schema| schema.id == contract::spec_schema()));
-        assert!(crate::v4_store::migration_source_coverage_complete());
+        assert!(crate::record_store::migration_source_coverage_complete());
     }
 }
 
@@ -698,7 +698,7 @@ struct Staging {
 }
 
 impl Staging {
-    fn absorb_v4(&mut self, batch: crate::v4_store::Batch) {
+    fn absorb_records(&mut self, batch: crate::record_store::Batch) {
         let already_declared: std::collections::BTreeSet<BodyKey> = self
             .declarations
             .iter()
@@ -721,7 +721,7 @@ impl Staging {
         self.ops.extend(batch.operations.into_iter().filter(|(body, op)| {
             !(already_declared.contains(body)
                 && (matches!(op, Op::Create)
-                    || matches!(op, Op::RegisterSet { path, .. } if path == crate::v4::roots::IDENTITY)))
+                    || matches!(op, Op::RegisterSet { path, .. } if path == crate::records::roots::IDENTITY)))
         }));
         self.declared.extend(batch.content_refs);
     }
@@ -989,7 +989,7 @@ fn raw_attachments(ctx: &Context<'_>, doc: &str) -> Result<BTreeMap<String, Vec<
     }
     for row in answer.rows() {
         let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-        let record = crate::v4::IssueAttachmentRecord::decode_canonical(&raw)
+        let record = crate::records::IssueAttachmentRecord::decode_canonical(&raw)
             .map_err(|_| Rejection::StateCorrupt)?;
         if record.issue != doc {
             return Err(Rejection::StateCorrupt);
@@ -1028,7 +1028,7 @@ fn raw_checks(ctx: &Context<'_>, doc: &str) -> Result<BTreeMap<String, Vec<u8>>,
     }
     for row in answer.rows() {
         let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-        let record = crate::v4::IssueCheckRecord::decode_canonical(&raw)
+        let record = crate::records::IssueCheckRecord::decode_canonical(&raw)
             .map_err(|_| Rejection::StateCorrupt)?;
         if record.issue != doc
             || records
@@ -1491,7 +1491,7 @@ pub fn prepare_v4_migration_plan(
 /// its completion marker is false.
 fn live_catalog(ctx: &Context<'_>) -> Result<CatalogState, Rejection> {
     let mut catalog = catalog_state(ctx)?;
-    crate::v4_store::apply_catalog(ctx, &mut catalog)?;
+    crate::record_store::apply_catalog(ctx, &mut catalog)?;
     Ok(catalog)
 }
 
@@ -1540,8 +1540,8 @@ fn issue_read_docs(
     let mut coordinates = BTreeMap::new();
     for doc in docs {
         let mut issue = issue_state(ctx, &doc).ok_or(Rejection::StateCorrupt)?;
-        if let Some(coordinate) = crate::v4_store::issue_coordinate_for(ctx, &doc)? {
-            crate::v4_store::apply_issue_coordinate(&mut issue, &coordinate);
+        if let Some(coordinate) = crate::record_store::issue_coordinate_for(ctx, &doc)? {
+            crate::record_store::apply_issue_coordinate(&mut issue, &coordinate);
             let project = catalog
                 .projects
                 .get(&coordinate.placement.project)
@@ -1569,7 +1569,7 @@ fn issue_read_docs(
         );
         issues.insert(doc, Arc::new(issue));
     }
-    crate::v4_store::apply_issue_catalog(catalog, &coordinates);
+    crate::record_store::apply_issue_catalog(catalog, &coordinates);
     Ok(IssueReadSet { aliases, issues })
 }
 
@@ -1578,9 +1578,9 @@ fn issue_detail_read(
     doc: &str,
 ) -> Result<(CatalogState, IssueReadSet), Rejection> {
     let coordinate =
-        crate::v4_store::issue_coordinate_for(ctx, doc)?.ok_or(Rejection::InvalidRequest)?;
+        crate::record_store::issue_coordinate_for(ctx, doc)?.ok_or(Rejection::InvalidRequest)?;
     let mut catalog = CatalogState::default();
-    crate::v4_store::apply_project(ctx, &mut catalog, &coordinate.placement.project)?;
+    crate::record_store::apply_project(ctx, &mut catalog, &coordinate.placement.project)?;
     let read = issue_read_docs(ctx, &mut catalog, [doc.to_owned()])?;
     let labels = read
         .issues
@@ -1588,7 +1588,7 @@ fn issue_detail_read(
         .map(|issue| issue.labels.clone())
         .unwrap_or_default();
     for label in labels {
-        crate::v4_store::apply_label(ctx, &mut catalog, &label)?;
+        crate::record_store::apply_label(ctx, &mut catalog, &label)?;
     }
     Ok((catalog, read))
 }
@@ -1659,7 +1659,7 @@ fn load_labels_for_write(
     names: impl IntoIterator<Item = String>,
 ) -> Result<(), Rejection> {
     for id in ids {
-        crate::v4_store::apply_label(ctx, catalog, &id)?;
+        crate::record_store::apply_label(ctx, catalog, &id)?;
     }
     for name in names {
         let canonical = name.trim().to_ascii_lowercase();
@@ -1671,7 +1671,7 @@ fn load_labels_for_write(
             None,
         )? {
             let id = result_text(&row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
-            crate::v4_store::apply_label(ctx, catalog, &id)?;
+            crate::record_store::apply_label(ctx, catalog, &id)?;
         }
     }
     Ok(())
@@ -3017,7 +3017,7 @@ fn load_workflow_for_write(
     catalog: &mut CatalogState,
     project: &str,
 ) -> Result<(), Rejection> {
-    crate::v4_store::apply_project(ctx, catalog, project)?;
+    crate::record_store::apply_project(ctx, catalog, project)?;
     let projection = workflow_projection(ctx, project)?;
     if !projection.conflict_heads.is_empty() {
         return Err(Rejection::Conflict);
@@ -3040,10 +3040,10 @@ fn triage_submission(
         return Ok(None);
     };
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let crate::v4::TriageRecord::Submission(record) =
-        crate::v4::TriageRecord::decode_canonical(&envelope.record)
+    let crate::records::TriageRecord::Submission(record) =
+        crate::records::TriageRecord::decode_canonical(&envelope.record)
             .map_err(|_| Rejection::StateCorrupt)?
     else {
         return Err(Rejection::StateCorrupt);
@@ -3129,7 +3129,7 @@ fn revision_set(row: &runtime::find::ResultRow, name: &str) -> Result<Vec<String
     let bytes = result_bytes(row, name).ok_or(Rejection::StateCorrupt)?;
     let revisions: Vec<String> =
         serde_json::from_slice(&bytes).map_err(|_| Rejection::StateCorrupt)?;
-    if revisions.len() > crate::v4::MAX_CONCURRENT_HEADS
+    if revisions.len() > crate::records::MAX_CONCURRENT_HEADS
         || revisions.windows(2).any(|pair| pair[0] >= pair[1])
         || revisions
             .iter()
@@ -3144,7 +3144,7 @@ fn revision_head_strings(row: &runtime::find::ResultRow) -> Result<Vec<String>, 
     let bytes =
         result_bytes(row, crate::find::field::HEAD_REVISIONS).ok_or(Rejection::StateCorrupt)?;
     let heads: Vec<String> = serde_json::from_slice(&bytes).map_err(|_| Rejection::StateCorrupt)?;
-    if heads.len() > crate::v4::MAX_CONCURRENT_HEADS
+    if heads.len() > crate::records::MAX_CONCURRENT_HEADS
         || heads.windows(2).any(|pair| pair[0] >= pair[1])
         || heads.iter().any(|head| head.is_empty() || head.len() > 256)
     {
@@ -3190,9 +3190,12 @@ fn role_projection(ctx: &Context<'_>, role: &str) -> Result<contract::RoleProjec
         if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(role) {
             return Err(Rejection::StateCorrupt);
         }
-        let (_, bytes) =
-            immutable_record_bytes(ctx, &row, crate::v4::PhysicalSchema::GovernanceRevision)?;
-        let record = crate::v4::GovernanceRevisionRecord::decode_canonical(&bytes)
+        let (_, bytes) = immutable_record_bytes(
+            ctx,
+            &row,
+            crate::records::PhysicalSchema::GovernanceRevision,
+        )?;
+        let record = crate::records::GovernanceRevisionRecord::decode_canonical(&bytes)
             .map_err(|_| Rejection::StateCorrupt)?;
         if record.role != role || record.revision.revision_id != *head {
             return Err(Rejection::StateCorrupt);
@@ -3229,8 +3232,8 @@ fn workflow_projection(
         )?
         .ok_or(Rejection::StateCorrupt)?;
         let (_, bytes) =
-            immutable_record_bytes(ctx, &row, crate::v4::PhysicalSchema::WorkflowRevision)?;
-        let record = crate::v4::ProjectWorkflowRevisionRecord::decode_canonical(&bytes)
+            immutable_record_bytes(ctx, &row, crate::records::PhysicalSchema::WorkflowRevision)?;
+        let record = crate::records::ProjectWorkflowRevisionRecord::decode_canonical(&bytes)
             .map_err(|_| Rejection::StateCorrupt)?;
         if record.project != project || record.revision.revision_id != *head {
             return Err(Rejection::StateCorrupt);
@@ -3285,9 +3288,9 @@ fn spec_revision_page_row(
     row: &runtime::find::ResultRow,
 ) -> Result<crate::spec::Revision, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let record = crate::v4::SpecRevisionRecord::decode_canonical(&envelope.record)
+    let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     if result_text(row, crate::find::field::REVISION).as_deref()
         != Some(record.revision.revision.as_str())
@@ -3304,9 +3307,9 @@ fn baseline_revision_page_row(
     row: &runtime::find::ResultRow,
 ) -> Result<crate::spec::BaselineRevision, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let record = crate::v4::BaselineRevisionRecord::decode_canonical(&envelope.record)
+    let record = crate::records::BaselineRevisionRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     if result_text(row, crate::find::field::REVISION).as_deref()
         != Some(record.revision.revision.as_str())
@@ -3321,11 +3324,12 @@ fn baseline_revision_page_row(
 fn triage_page_row(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
-) -> Result<crate::v4::TriageRecord, Rejection> {
+) -> Result<crate::records::TriageRecord, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    crate::v4::TriageRecord::decode_canonical(&envelope.record).map_err(|_| Rejection::StateCorrupt)
+    crate::records::TriageRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)
 }
 
 fn spec_reference_page_row(
@@ -3333,9 +3337,9 @@ fn spec_reference_page_row(
     row: &runtime::find::ResultRow,
 ) -> Result<crate::spec::SpecReferenceFact, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let record = crate::v4::SpecRevisionRecord::decode_canonical(&envelope.record)
+    let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     let relation = result_text(row, crate::find::field::RELATION_KIND)
         .and_then(|value| crate::spec::Rel::parse(&value))
@@ -3368,11 +3372,11 @@ fn spec_reference_page_row(
 fn spec_observation_page_row(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
-) -> Result<crate::v4::SpecObservationRecord, Rejection> {
+) -> Result<crate::records::SpecObservationRecord, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    crate::v4::SpecObservationRecord::decode_canonical(&envelope.record)
+    crate::records::SpecObservationRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)
 }
 
@@ -3452,9 +3456,9 @@ fn activity_page_row(
     row: &runtime::find::ResultRow,
 ) -> Result<ActivityEvent, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let record = crate::v4::ActivityRecord::decode_canonical(&envelope.record)
+    let record = crate::records::ActivityRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     let id = result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
     let doc = result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?;
@@ -3495,9 +3499,9 @@ fn inbox_page_row(
     recipient: &ActorId,
 ) -> Result<crate::dto::InboxEntry, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let record = crate::v4::ActivityRecord::decode_canonical(&envelope.record)
+    let record = crate::records::ActivityRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     let doc = result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?;
     let kind = result_text(row, crate::find::field::STATE).ok_or(Rejection::StateCorrupt)?;
@@ -3515,7 +3519,7 @@ fn inbox_page_row(
         .ok_or(Rejection::StateCorrupt)?;
     let title = result_text(&issue, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?;
     let coordinate =
-        crate::v4_store::issue_coordinate_for(ctx, &doc)?.ok_or(Rejection::StateCorrupt)?;
+        crate::record_store::issue_coordinate_for(ctx, &doc)?.ok_or(Rejection::StateCorrupt)?;
     let project = unique_find_row(
         ctx,
         crate::find::field::ID,
@@ -3546,13 +3550,13 @@ fn inbox_page_row(
 fn immutable_record_bytes(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
-    schema: crate::v4::PhysicalSchema,
-) -> Result<(crate::v4::RecordBodyIdentityRecord, Vec<u8>), Rejection> {
+    schema: crate::records::PhysicalSchema,
+) -> Result<(crate::records::RecordBodyIdentityRecord, Vec<u8>), Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::immutable_record_key(schema, &bytes) != row.source {
+    if crate::records::immutable_record_key(schema, &bytes) != row.source {
         return Err(Rejection::StateCorrupt);
     }
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
     Ok((envelope.identity, envelope.record))
 }
@@ -3564,9 +3568,9 @@ fn comment_page_row(
     issue: &IssueState,
 ) -> Result<crate::dto::CommentDto, Rejection> {
     let (identity, bytes) =
-        immutable_record_bytes(ctx, row, crate::v4::PhysicalSchema::IssueComment)?;
-    let crate::v4::DiscussionRecord::Comment(comment) =
-        crate::v4::DiscussionRecord::decode_canonical(&bytes)
+        immutable_record_bytes(ctx, row, crate::records::PhysicalSchema::IssueComment)?;
+    let crate::records::DiscussionRecord::Comment(comment) =
+        crate::records::DiscussionRecord::decode_canonical(&bytes)
             .map_err(|_| Rejection::StateCorrupt)?
     else {
         return Err(Rejection::StateCorrupt);
@@ -3593,10 +3597,10 @@ fn comment_page_row(
 fn reaction_page_row(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
-) -> Result<crate::v4::ReactionRecord, Rejection> {
+) -> Result<crate::records::ReactionRecord, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let crate::v4::DiscussionRecord::Reaction(record) =
-        crate::v4::DiscussionRecord::decode_canonical(&bytes)
+    let crate::records::DiscussionRecord::Reaction(record) =
+        crate::records::DiscussionRecord::decode_canonical(&bytes)
             .map_err(|_| Rejection::StateCorrupt)?
     else {
         return Err(Rejection::StateCorrupt);
@@ -3610,7 +3614,7 @@ fn attachment_page_row(
     row: &runtime::find::ResultRow,
 ) -> Result<crate::dto::AttachmentMetaDto, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let record = crate::v4::IssueAttachmentRecord::decode_canonical(&bytes)
+    let record = crate::records::IssueAttachmentRecord::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
     Ok(crate::dto::AttachmentMetaDto {
@@ -3629,7 +3633,7 @@ fn check_page_row(
     row: &runtime::find::ResultRow,
 ) -> Result<crate::dto::CheckDto, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let record = crate::v4::IssueCheckRecord::decode_canonical(&bytes)
+    let record = crate::records::IssueCheckRecord::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
     let check = record.check;
@@ -3733,7 +3737,7 @@ fn issue_reactions_page(
     ctx: &Context<'_>,
     doc: &str,
     page: &contract::PageRequest,
-) -> Result<contract::Page<crate::v4::ReactionRecord>, Rejection> {
+) -> Result<contract::Page<crate::records::ReactionRecord>, Rejection> {
     let answer = find_field_page(
         ctx,
         crate::find::field::TARGET_ID,
@@ -4052,8 +4056,8 @@ fn resolve_entity(
                 .ok_or(Rejection::StateCorrupt)?;
             (doc, Some(project))
         };
-        let coordinate =
-            crate::v4_store::issue_coordinate_for(ctx, &doc)?.ok_or(Rejection::InvalidRequest)?;
+        let coordinate = crate::record_store::issue_coordinate_for(ctx, &doc)?
+            .ok_or(Rejection::InvalidRequest)?;
         if requested_project
             .as_ref()
             .is_some_and(|project| project != &coordinate.placement.project)
@@ -4061,7 +4065,7 @@ fn resolve_entity(
             return Err(Rejection::InvalidRequest);
         }
         let mut catalog = CatalogState::default();
-        crate::v4_store::apply_project(ctx, &mut catalog, &coordinate.placement.project)?;
+        crate::record_store::apply_project(ctx, &mut catalog, &coordinate.placement.project)?;
         let project_meta = catalog
             .projects
             .get(&coordinate.placement.project)
@@ -4175,7 +4179,7 @@ fn hydrate_issue_enrichment(
                     continue;
                 }
                 let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-                let relation = crate::v4::IssueRelationRecord::decode_canonical(&raw)
+                let relation = crate::records::IssueRelationRecord::decode_canonical(&raw)
                     .map_err(|_| Rejection::StateCorrupt)?;
                 if relation.issue != doc || relation.kind != kind || !relation.present {
                     return Err(Rejection::StateCorrupt);
@@ -4200,10 +4204,10 @@ fn hydrate_issue_enrichment(
             }
             Some("comment") => {
                 let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-                let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+                let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
                     .map_err(|_| Rejection::StateCorrupt)?;
-                let crate::v4::DiscussionRecord::Comment(comment) =
-                    crate::v4::DiscussionRecord::decode_canonical(&envelope.record)
+                let crate::records::DiscussionRecord::Comment(comment) =
+                    crate::records::DiscussionRecord::decode_canonical(&envelope.record)
                         .map_err(|_| Rejection::StateCorrupt)?
                 else {
                     return Err(Rejection::StateCorrupt);
@@ -4212,9 +4216,9 @@ fn hydrate_issue_enrichment(
             }
             Some("activity") => {
                 let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-                let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+                let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
                     .map_err(|_| Rejection::StateCorrupt)?;
-                let mut event = crate::v4::ActivityRecord::decode_canonical(&envelope.record)
+                let mut event = crate::records::ActivityRecord::decode_canonical(&envelope.record)
                     .map_err(|_| Rejection::StateCorrupt)?
                     .event;
                 event.entry =
@@ -4223,7 +4227,7 @@ fn hydrate_issue_enrichment(
             }
             Some("issue_attachment") => {
                 let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-                let record = crate::v4::IssueAttachmentRecord::decode_canonical(&raw)
+                let record = crate::records::IssueAttachmentRecord::decode_canonical(&raw)
                     .map_err(|_| Rejection::StateCorrupt)?;
                 if record.issue != doc {
                     return Err(Rejection::StateCorrupt);
@@ -4242,7 +4246,7 @@ fn hydrate_issue_enrichment(
             }
             Some("issue_check") => {
                 let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-                let record = crate::v4::IssueCheckRecord::decode_canonical(&raw)
+                let record = crate::records::IssueCheckRecord::decode_canonical(&raw)
                     .map_err(|_| Rejection::StateCorrupt)?;
                 if record.issue != doc {
                     return Err(Rejection::StateCorrupt);
@@ -4307,9 +4311,9 @@ fn issue_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
 fn issue_core_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
     let view = ctx.read_collaborative(&issue_key(doc)).ok()??;
     let mut issue = IssueState::from_view(&view);
-    let coordinate = crate::v4_store::issue_coordinate_for(ctx, doc).ok()??;
-    crate::v4_store::apply_issue_coordinate(&mut issue, &coordinate);
-    crate::v4_store::apply_issue_meta(ctx, &mut issue, doc).ok()?;
+    let coordinate = crate::record_store::issue_coordinate_for(ctx, doc).ok()??;
+    crate::record_store::apply_issue_coordinate(&mut issue, &coordinate);
+    crate::record_store::apply_issue_meta(ctx, &mut issue, doc).ok()?;
     // V3 aggregate roots are migration input, never live enrichment truth.
     issue.assignees.clear();
     issue.followers.clear();
@@ -4354,13 +4358,13 @@ fn issue_write_state(
 ) -> Result<(CatalogState, IssueState), Rejection> {
     let issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
     let mut catalog = CatalogState::default();
-    crate::v4_store::apply_project(ctx, &mut catalog, &issue.project)?;
+    crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
     if !catalog.projects.contains_key(&issue.project) {
         return Err(Rejection::StateCorrupt);
     }
     let coordinate =
-        crate::v4_store::issue_coordinate_for(ctx, doc)?.ok_or(Rejection::StateCorrupt)?;
-    crate::v4_store::apply_issue_catalog(
+        crate::record_store::issue_coordinate_for(ctx, doc)?.ok_or(Rejection::StateCorrupt)?;
+    crate::record_store::apply_issue_catalog(
         &mut catalog,
         &BTreeMap::from([(doc.to_owned(), coordinate)]),
     );
@@ -4373,11 +4377,11 @@ fn issue_write_state(
 fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
     let spec_id = crate::ids::SpecId::parse(spec)?;
     let heads = ctx
-        .read_collaborative(&crate::v4::spec_heads_key(&spec_id))
+        .read_collaborative(&crate::records::spec_heads_key(&spec_id))
         .ok()??;
     if heads
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .is_none_or(|identity| identity.as_slice() != spec.as_bytes())
     {
         return None;
@@ -4394,8 +4398,8 @@ fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
         values.dedup();
         Some(values)
     };
-    let explicit_heads = decode_set(crate::v4::roots::HEADS)?;
-    let explicit_issued = decode_set(crate::v4::roots::ISSUED_HEADS)?;
+    let explicit_heads = decode_set(crate::records::roots::HEADS)?;
+    let explicit_issued = decode_set(crate::records::roots::ISSUED_HEADS)?;
     if explicit_heads.is_empty() {
         return None;
     }
@@ -4425,8 +4429,8 @@ fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
             return None;
         };
         let bytes = ctx.read_body(&row.source).ok()??;
-        let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
-        let record = crate::v4::SpecRevisionRecord::decode_canonical(&envelope.record).ok()?;
+        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
+        let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record).ok()?;
         if record.revision.revision != revision || record.revision.body.spec != spec {
             return None;
         }
@@ -4444,11 +4448,11 @@ fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
 fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Baseline> {
     let baseline_id = crate::ids::BaselineId::parse(baseline)?;
     let heads = ctx
-        .read_collaborative(&crate::v4::baseline_heads_key(&baseline_id))
+        .read_collaborative(&crate::records::baseline_heads_key(&baseline_id))
         .ok()??;
     if heads
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .is_none_or(|identity| identity.as_slice() != baseline.as_bytes())
     {
         return None;
@@ -4465,8 +4469,8 @@ fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Base
         values.dedup();
         Some(values)
     };
-    let explicit_heads = decode_set(crate::v4::roots::HEADS)?;
-    let explicit_issued = decode_set(crate::v4::roots::ISSUED_HEADS)?;
+    let explicit_heads = decode_set(crate::records::roots::HEADS)?;
+    let explicit_issued = decode_set(crate::records::roots::ISSUED_HEADS)?;
     if explicit_heads.is_empty() {
         return None;
     }
@@ -4491,8 +4495,9 @@ fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Base
             return None;
         }
         let bytes = ctx.read_body(&row.source).ok()??;
-        let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
-        let record = crate::v4::BaselineRevisionRecord::decode_canonical(&envelope.record).ok()?;
+        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
+        let record =
+            crate::records::BaselineRevisionRecord::decode_canonical(&envelope.record).ok()?;
         if record.revision.revision != revision || record.revision.body.baseline != baseline {
             return None;
         }
@@ -4536,12 +4541,12 @@ fn spec_observation_state(
         return Ok(None);
     }
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let crate::v4::SpecObservationRecord::Assert {
+    let crate::records::SpecObservationRecord::Assert {
         project: _,
         observation: record,
-    } = crate::v4::SpecObservationRecord::decode_canonical(&envelope.record)
+    } = crate::records::SpecObservationRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?
     else {
         return Err(Rejection::StateCorrupt);
@@ -4818,20 +4823,20 @@ fn migration_spec_window(
     subitem: &str,
     view: &fabric::CollaborativeView,
     publication: runtime::publication::PublicationId,
-) -> Result<crate::v4_store::Batch, Rejection> {
+) -> Result<crate::record_store::Batch, Rejection> {
     let (revisions, legacy) = migration_spec_revisions(ctx, body_key, view, publication)?;
     if subitem == "$empty" {
-        return Ok(crate::v4_store::Batch::default());
+        return Ok(crate::record_store::Batch::default());
     }
     if let Some(stored_id) = subitem.strip_prefix("11a:revision:") {
         let revision = revisions.get(stored_id).ok_or(Rejection::StateCorrupt)?;
-        let stored = crate::v4::SpecRevisionRecord {
+        let stored = crate::records::SpecRevisionRecord {
             revision: revision.clone(),
         };
-        let present = crate::v4_store::migration_immutable_present(
+        let present = crate::record_store::migration_immutable_present(
             ctx,
-            crate::v4::PhysicalSchema::SpecRevision,
-            crate::v4::RecordBodyIdentityRecord {
+            crate::records::PhysicalSchema::SpecRevision,
+            crate::records::RecordBodyIdentityRecord {
                 owner: revision.body.spec.clone(),
                 record: revision.revision.clone(),
             },
@@ -4846,20 +4851,20 @@ fn migration_spec_window(
             ],
         )?;
         let mut batch = if present {
-            crate::v4_store::Batch::default()
+            crate::record_store::Batch::default()
         } else {
-            crate::v4_store::write_spec_revision_record(ctx, revision)?
+            crate::record_store::write_spec_revision_record(ctx, revision)?
         };
         if legacy {
-            let alias = crate::v4::RevisionAliasRecord {
+            let alias = crate::records::RevisionAliasRecord {
                 spec: revision.body.spec.clone(),
                 legacy_revision: stored_id.into(),
                 canonical_revision: revision.revision.clone(),
             };
-            if !crate::v4_store::migration_immutable_present(
+            if !crate::record_store::migration_immutable_present(
                 ctx,
-                crate::v4::PhysicalSchema::RevisionAlias,
-                crate::v4::RecordBodyIdentityRecord {
+                crate::records::PhysicalSchema::RevisionAlias,
+                crate::records::RecordBodyIdentityRecord {
                     owner: alias.spec.clone(),
                     record: alias.legacy_revision.clone(),
                 },
@@ -4873,7 +4878,7 @@ fn migration_spec_window(
                     (crate::find::field::RELATION_KIND, "revision_alias"),
                 ],
             )? {
-                batch.absorb(crate::v4_store::write_revision_alias(ctx, &alias)?);
+                batch.absorb(crate::record_store::write_revision_alias(ctx, &alias)?);
             }
         }
         return Ok(batch);
@@ -4892,15 +4897,15 @@ fn migration_spec_window(
             return Err(Rejection::StateCorrupt);
         }
         let semantic_id = observation.observation.clone();
-        let record = crate::v4::SpecObservationRecord::Assert {
+        let record = crate::records::SpecObservationRecord::Assert {
             project: first.body.project.clone(),
             observation,
         };
         let identity = record.identity();
-        if crate::v4_store::migration_immutable_present(
+        if crate::record_store::migration_immutable_present(
             ctx,
-            crate::v4::PhysicalSchema::SpecObservation,
-            crate::v4::RecordBodyIdentityRecord {
+            crate::records::PhysicalSchema::SpecObservation,
+            crate::records::RecordBodyIdentityRecord {
                 owner: record.spec().into(),
                 record: identity,
             },
@@ -4915,9 +4920,9 @@ fn migration_spec_window(
                 (crate::find::field::STATE, "assert"),
             ],
         )? {
-            return Ok(crate::v4_store::Batch::default());
+            return Ok(crate::record_store::Batch::default());
         }
-        return crate::v4_store::write_spec_observation(ctx, &record);
+        return crate::record_store::write_spec_observation(ctx, &record);
     }
     if subitem == "11c:heads" {
         let ids = revisions
@@ -4933,16 +4938,16 @@ fn migration_spec_window(
         }
         let heads = ids.difference(&predecessors).cloned().collect();
         let spec = crate::ids::SpecId::parse(&first.body.spec).ok_or(Rejection::StateCorrupt)?;
-        return crate::v4_store::migration_exact_set(
+        return crate::record_store::migration_exact_set(
             ctx,
-            crate::v4::PhysicalSchema::SpecHeads,
-            &crate::v4::spec_heads_key(&spec),
+            crate::records::PhysicalSchema::SpecHeads,
+            &crate::records::spec_heads_key(&spec),
             &first.body.spec,
             &[
-                (crate::v4::roots::PROJECT, first.body.project.as_str()),
-                (crate::v4::roots::KIND, first.body.kind.as_str()),
+                (crate::records::roots::PROJECT, first.body.project.as_str()),
+                (crate::records::roots::KIND, first.body.kind.as_str()),
             ],
-            crate::v4::roots::HEADS,
+            crate::records::roots::HEADS,
             &heads,
             true,
         );
@@ -4955,21 +4960,21 @@ fn migration_spec_window(
             explicit_issued: Vec::new(),
         };
         let issued = spec_issued_ids(&state);
-        if issued.len() > crate::v4::MAX_CONCURRENT_HEADS {
+        if issued.len() > crate::records::MAX_CONCURRENT_HEADS {
             return Err(Rejection::Conflict);
         }
         let issued = issued.into_iter().collect::<BTreeSet<_>>();
         let spec = crate::ids::SpecId::parse(&first.body.spec).ok_or(Rejection::StateCorrupt)?;
-        return crate::v4_store::migration_exact_set(
+        return crate::record_store::migration_exact_set(
             ctx,
-            crate::v4::PhysicalSchema::SpecHeads,
-            &crate::v4::spec_heads_key(&spec),
+            crate::records::PhysicalSchema::SpecHeads,
+            &crate::records::spec_heads_key(&spec),
             &first.body.spec,
             &[
-                (crate::v4::roots::PROJECT, first.body.project.as_str()),
-                (crate::v4::roots::KIND, first.body.kind.as_str()),
+                (crate::records::roots::PROJECT, first.body.project.as_str()),
+                (crate::records::roots::KIND, first.body.kind.as_str()),
             ],
-            crate::v4::roots::ISSUED_HEADS,
+            crate::records::roots::ISSUED_HEADS,
             &issued,
             false,
         );
@@ -4982,7 +4987,7 @@ fn migration_baseline_window(
     body_key: &BodyKey,
     subitem: &str,
     view: &fabric::CollaborativeView,
-) -> Result<crate::v4_store::Batch, Rejection> {
+) -> Result<crate::record_store::Batch, Rejection> {
     let records = view.maps.get("revisions").ok_or(Rejection::StateCorrupt)?;
     let mut revisions = BTreeMap::<String, crate::spec::BaselineRevision>::new();
     for (stored_id, raw) in records {
@@ -4997,20 +5002,20 @@ fn migration_baseline_window(
     }
     let ordered = ordered_baseline_revisions(revisions)?;
     if subitem == "$empty" {
-        return Ok(crate::v4_store::Batch::default());
+        return Ok(crate::record_store::Batch::default());
     }
     if let Some(stored_id) = subitem.strip_prefix("11d:revision:") {
         let revision = ordered
             .iter()
             .find(|revision| revision.revision == stored_id)
             .ok_or(Rejection::StateCorrupt)?;
-        let stored = crate::v4::BaselineRevisionRecord {
+        let stored = crate::records::BaselineRevisionRecord {
             revision: revision.clone(),
         };
-        return if crate::v4_store::migration_immutable_present(
+        return if crate::record_store::migration_immutable_present(
             ctx,
-            crate::v4::PhysicalSchema::BaselineRevision,
-            crate::v4::RecordBodyIdentityRecord {
+            crate::records::PhysicalSchema::BaselineRevision,
+            crate::records::RecordBodyIdentityRecord {
                 owner: revision.body.baseline.clone(),
                 record: revision.revision.clone(),
             },
@@ -5025,9 +5030,9 @@ fn migration_baseline_window(
                 (crate::find::field::RELATION_KIND, "baseline_revision"),
             ],
         )? {
-            Ok(crate::v4_store::Batch::default())
+            Ok(crate::record_store::Batch::default())
         } else {
-            crate::v4_store::write_baseline_revision_record(ctx, revision)
+            crate::record_store::write_baseline_revision_record(ctx, revision)
         };
     }
     let baseline = ordered
@@ -5050,16 +5055,16 @@ fn migration_baseline_window(
         let first = ordered.first().ok_or(Rejection::StateCorrupt)?;
         let baseline_id =
             crate::ids::BaselineId::parse(&baseline).ok_or(Rejection::StateCorrupt)?;
-        return crate::v4_store::migration_exact_set(
+        return crate::record_store::migration_exact_set(
             ctx,
-            crate::v4::PhysicalSchema::BaselineHeads,
-            &crate::v4::baseline_heads_key(&baseline_id),
+            crate::records::PhysicalSchema::BaselineHeads,
+            &crate::records::baseline_heads_key(&baseline_id),
             &baseline,
             &[
-                (crate::v4::roots::PROJECT, first.body.project.as_str()),
-                (crate::v4::roots::KIND, "baseline"),
+                (crate::records::roots::PROJECT, first.body.project.as_str()),
+                (crate::records::roots::KIND, "baseline"),
             ],
-            crate::v4::roots::HEADS,
+            crate::records::roots::HEADS,
             &heads,
             true,
         );
@@ -5071,23 +5076,23 @@ fn migration_baseline_window(
             explicit_issued: Vec::new(),
         };
         let issued = baseline_issued_ids(&state);
-        if issued.len() > crate::v4::MAX_CONCURRENT_HEADS {
+        if issued.len() > crate::records::MAX_CONCURRENT_HEADS {
             return Err(Rejection::Conflict);
         }
         let issued = issued.into_iter().collect::<BTreeSet<_>>();
         let first = state.revisions.first().ok_or(Rejection::StateCorrupt)?;
         let baseline_id =
             crate::ids::BaselineId::parse(&baseline).ok_or(Rejection::StateCorrupt)?;
-        return crate::v4_store::migration_exact_set(
+        return crate::record_store::migration_exact_set(
             ctx,
-            crate::v4::PhysicalSchema::BaselineHeads,
-            &crate::v4::baseline_heads_key(&baseline_id),
+            crate::records::PhysicalSchema::BaselineHeads,
+            &crate::records::baseline_heads_key(&baseline_id),
             &baseline,
             &[
-                (crate::v4::roots::PROJECT, first.body.project.as_str()),
-                (crate::v4::roots::KIND, "baseline"),
+                (crate::records::roots::PROJECT, first.body.project.as_str()),
+                (crate::records::roots::KIND, "baseline"),
             ],
-            crate::v4::roots::ISSUED_HEADS,
+            crate::records::roots::ISSUED_HEADS,
             &issued,
             false,
         );
@@ -5180,7 +5185,7 @@ fn structure_report(
         plans_without_roots,
         issue_documents_pending,
         baselines: count(all_baselines(ctx).len()),
-        migration: crate::v4_store::migration_verification(ctx)?,
+        migration: crate::record_store::migration_verification(ctx)?,
         complete,
     })
 }
@@ -5243,18 +5248,18 @@ fn canonical_spec_revision(
     spec: &str,
     revision: &str,
 ) -> Result<String, Rejection> {
-    let key = crate::v4::revision_alias_key(spec, revision);
+    let key = crate::records::revision_alias_key(spec, revision);
     if ctx.body_version(&key).is_none() {
         return Ok(revision.into());
     }
     let bytes = ctx.read_body(&key)?.ok_or(Rejection::StateCorrupt)?;
-    let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
     let identity = envelope.identity;
     if identity.owner != spec || identity.record != revision {
         return Err(Rejection::StateCorrupt);
     }
-    let alias = crate::v4::RevisionAliasRecord::decode_canonical(&envelope.record)
+    let alias = crate::records::RevisionAliasRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
     if alias.spec != spec || alias.legacy_revision != revision {
         return Err(Rejection::StateCorrupt);
@@ -5700,8 +5705,8 @@ fn stage_comment(
 ) -> Result<(), Rejection> {
     let mut ev = event("commented", device, ts);
     ev.x = record.b.clone();
-    let (batch, _) = crate::v4_store::write_comment(ctx, doc, record)?;
-    staging.absorb_v4(batch);
+    let (batch, _) = crate::record_store::write_comment(ctx, doc, record)?;
+    staging.absorb_records(batch);
     push_event(staging, ctx, doc, &ev)?;
     Ok(())
 }
@@ -5934,7 +5939,7 @@ fn push_event(
     {
         return Err(Rejection::InvalidRequest);
     }
-    staging.absorb_v4(crate::v4_store::write_activity(
+    staging.absorb_records(crate::record_store::write_activity(
         ctx,
         doc,
         event,
@@ -5983,17 +5988,17 @@ fn transition_gate(
 fn issue_transition_successor(
     ctx: &Context<'_>,
     doc: &str,
-    placement: crate::v4::BoardPlacement,
+    placement: crate::records::BoardPlacement,
     evidence: &str,
     timestamp: u64,
-) -> Result<crate::v4_store::Batch, Rejection> {
-    let heads = crate::v4_store::issue_transition_heads(ctx, doc)?;
+) -> Result<crate::record_store::Batch, Rejection> {
+    let heads = crate::record_store::issue_transition_heads(ctx, doc)?;
     let predecessors = match heads.as_slice() {
         [(head, _)] => vec![head.clone()],
         [] => return Err(Rejection::StateCorrupt),
         _ => return Err(Rejection::Conflict),
     };
-    crate::v4_store::write_issue_transition(
+    crate::record_store::write_issue_transition(
         ctx,
         doc,
         &predecessors,
@@ -6004,10 +6009,10 @@ fn issue_transition_successor(
     .map(|(batch, _)| batch)
 }
 
-fn workflow_rejection(error: WorkflowResolutionError) -> Rejection {
+fn workflow_rejection(error: super::views::Failure) -> Rejection {
     match error {
-        WorkflowResolutionError::Missing => Rejection::StateCorrupt,
-        WorkflowResolutionError::Conflicted => Rejection::Conflict,
+        super::views::Failure::Missing => Rejection::StateCorrupt,
+        super::views::Failure::Conflicted => Rejection::Conflict,
     }
 }
 
@@ -6088,7 +6093,9 @@ fn stage_role_revision(
             .collect(),
         body: revision.body.clone(),
     };
-    staging.absorb_v4(crate::v4_store::write_governance_revision(ctx, &stored)?);
+    staging.absorb_records(crate::record_store::write_governance_revision(
+        ctx, &stored,
+    )?);
     Ok(())
 }
 
@@ -6148,7 +6155,7 @@ fn is_ancestor_live(
     let mut seen = std::collections::BTreeSet::new();
     let mut cursor = start.to_string();
     for _ in 0..MAX_PARENT_WALK {
-        let Some(record) = crate::v4_store::read_parent(ctx, project, &cursor)? else {
+        let Some(record) = crate::record_store::read_parent(ctx, project, &cursor)? else {
             return Ok(false);
         };
         let Some(parent) = record.parent else {
@@ -6204,7 +6211,7 @@ fn stage_project_create(
         color: color.into(),
         ..ProjectMeta::default()
     };
-    staging.absorb_v4(crate::v4_store::write_project(
+    staging.absorb_records(crate::record_store::write_project(
         ctx,
         catalog,
         id,
@@ -6213,7 +6220,7 @@ fn stage_project_create(
         Some(&meta.description),
     )?);
     let workflow = crate::workflow::default_workflow_revision(id);
-    staging.absorb_v4(crate::v4_store::write_workflow_revision(
+    staging.absorb_records(crate::record_store::write_workflow_revision(
         ctx, id, &workflow,
     )?);
     Ok(meta)
@@ -6241,7 +6248,7 @@ fn stage_label_create(
     {
         return Err(Rejection::Conflict);
     }
-    staging.absorb_v4(crate::v4_store::write_label(
+    staging.absorb_records(crate::record_store::write_label(
         ctx,
         &catalog,
         id,
@@ -6263,7 +6270,7 @@ fn stage_label_edit(
     }
     let id = resolve_entity(ctx, contract::ResolveEntity::Label, label, None)?.id;
     let mut catalog = CatalogState::default();
-    crate::v4_store::apply_label(ctx, &mut catalog, &id)?;
+    crate::record_store::apply_label(ctx, &mut catalog, &id)?;
     if let Some(name) = &name {
         load_labels_for_write(ctx, &mut catalog, Vec::new(), [name.clone()])?;
     }
@@ -6300,7 +6307,7 @@ fn stage_label_edit(
             false,
         ));
     }
-    staging.absorb_v4(crate::v4_store::write_label(
+    staging.absorb_records(crate::record_store::write_label(
         ctx, &catalog, &id, &meta, false,
     )?);
     Ok((
@@ -6317,13 +6324,13 @@ fn stage_label_delete(
 ) -> Result<(String, Vec<u8>), Rejection> {
     let id = resolve_entity(ctx, contract::ResolveEntity::Label, label, None)?.id;
     let mut catalog = CatalogState::default();
-    crate::v4_store::apply_label(ctx, &mut catalog, &id)?;
+    crate::record_store::apply_label(ctx, &mut catalog, &id)?;
     let meta = catalog
         .labels
         .get(&id)
         .cloned()
         .ok_or(Rejection::InvalidRequest)?;
-    staging.absorb_v4(crate::v4_store::write_label(
+    staging.absorb_records(crate::record_store::write_label(
         ctx, &catalog, &id, &meta, true,
     )?);
     Ok((id, contract::demand_space_any("catalog.label.configure")))
@@ -6392,7 +6399,7 @@ fn stage_issue_create(
         }
     }
     if let Some(parent) = &parent {
-        staging.absorb_v4(crate::v4_store::write_parent(
+        staging.absorb_records(crate::record_store::write_parent(
             ctx,
             project,
             doc,
@@ -6424,7 +6431,7 @@ fn stage_issue_create(
     staging.issue(&key, Op::Create);
     staging.issue(
         &key,
-        reg(crate::v4::roots::ISSUE_ID, doc.as_bytes().to_vec()),
+        reg(crate::records::roots::ISSUE_ID, doc.as_bytes().to_vec()),
     );
     if body
         .as_deref()
@@ -6450,26 +6457,26 @@ fn stage_issue_create(
         );
     }
     for actor in &assignees {
-        staging.absorb_v4(crate::v4_store::write_issue_relation(
+        staging.absorb_records(crate::record_store::write_issue_relation(
             ctx, doc, project, "assignee", actor, true,
         )?);
     }
     for label in &labels {
-        staging.absorb_v4(crate::v4_store::write_issue_relation(
+        staging.absorb_records(crate::record_store::write_issue_relation(
             ctx, doc, project, "label", label, true,
         )?);
     }
-    let ordinal = crate::v4::IssueAliasCoordinate::deterministic_for_issue(
+    let ordinal = crate::records::IssueAliasCoordinate::deterministic_for_issue(
         &DocId::parse(doc).expect("validated Issue id"),
     )
     .ordinal;
     let placement_plan =
-        crate::v4_store::board_placement(ctx, project, &status, doc, Some(&Pos::Top))?;
+        crate::record_store::board_placement(ctx, project, &status, doc, Some(&Pos::Top))?;
     let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
-    staging.absorb_v4(placement_plan.maintenance);
-    let mut v4 = crate::v4_store::Batch::default();
-    crate::v4_store::write_issue_identity(ctx, &mut v4, doc, ordinal)?;
-    staging.absorb_v4(v4);
+    staging.absorb_records(placement_plan.maintenance);
+    let mut batch = crate::record_store::Batch::default();
+    crate::record_store::write_issue_identity(ctx, &mut batch, doc, ordinal)?;
+    staging.absorb_records(batch);
     let meta = IssueState {
         project: project.into(),
         title,
@@ -6481,10 +6488,12 @@ fn stage_issue_create(
         estimate,
         ..IssueState::default()
     };
-    staging.absorb_v4(crate::v4_store::write_issue_meta(ctx, doc, &meta, false)?);
+    staging.absorb_records(crate::record_store::write_issue_meta(
+        ctx, doc, &meta, false,
+    )?);
     let (transition, _) =
-        crate::v4_store::write_issue_transition(ctx, doc, &[], &placement, "", ts)?;
-    staging.absorb_v4(transition);
+        crate::record_store::write_issue_transition(ctx, doc, &[], &placement, "", ts)?;
+    staging.absorb_records(transition);
     push_event(staging, ctx, doc, &event("created", "", ts))?;
     let create = contract::demand_project_work("issue.create", project);
     if parent.is_some() {
@@ -6537,7 +6546,7 @@ fn stage_spec_create(
         vec![],
     )
     .map_err(|_| Rejection::InvalidRequest)?;
-    staging.absorb_v4(crate::v4_store::write_spec_revision(ctx, &revision)?);
+    staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
     Ok(())
 }
 
@@ -6585,7 +6594,7 @@ fn stage_issue_board_change(
     let position = position
         .map(|position| change_position(ctx, position))
         .transpose()?;
-    let placement = crate::v4_store::board_placement(
+    let placement = crate::record_store::board_placement(
         ctx,
         &held.project,
         &target_status,
@@ -6601,15 +6610,15 @@ fn stage_issue_board_change(
         evidence = serde_json::to_string(&transition_evidence)
             .map_err(|_| Rejection::ContractViolation)?;
     }
-    let mut v4 = placement.maintenance;
-    v4.absorb(issue_transition_successor(
+    let mut batch = placement.maintenance;
+    batch.absorb(issue_transition_successor(
         ctx,
         &doc,
         placement.placement.ok_or(Rejection::StateCorrupt)?,
         &evidence,
         ts,
     )?);
-    staging.absorb_v4(v4);
+    staging.absorb_records(batch);
     let mut change = event("board_changed", "", ts);
     if changed_status {
         change.c.push(EventChange {
@@ -6656,21 +6665,21 @@ fn stage_issue_work(
             to: Some(target.state_id.clone()),
         });
         let placement =
-            crate::v4_store::board_placement(ctx, &held.project, &target.state_id, &doc, None)?;
+            crate::record_store::board_placement(ctx, &held.project, &target.state_id, &doc, None)?;
         let evidence_json =
             serde_json::to_string(&evidence).map_err(|_| Rejection::ContractViolation)?;
-        let mut v4 = placement.maintenance;
-        v4.absorb(issue_transition_successor(
+        let mut batch = placement.maintenance;
+        batch.absorb(issue_transition_successor(
             ctx,
             &doc,
             placement.placement.ok_or(Rejection::StateCorrupt)?,
             &evidence_json,
             ts,
         )?);
-        staging.absorb_v4(v4);
+        staging.absorb_records(batch);
         transition_evidence = Some(evidence_json);
     }
-    let assigned = crate::v4_store::read_issue_relation(ctx, &doc, "assignee", &actor)?
+    let assigned = crate::record_store::read_issue_relation(ctx, &doc, "assignee", &actor)?
         .is_some_and(|relation| relation.present);
     match action {
         WorkAction::Start if !assigned => {
@@ -6679,7 +6688,7 @@ fn stage_issue_work(
                 from: None,
                 to: Some("@me".into()),
             });
-            staging.absorb_v4(crate::v4_store::write_issue_relation(
+            staging.absorb_records(crate::record_store::write_issue_relation(
                 ctx,
                 &doc,
                 &held.project,
@@ -6694,7 +6703,7 @@ fn stage_issue_work(
                 from: Some("@me".into()),
                 to: None,
             });
-            staging.absorb_v4(crate::v4_store::write_issue_relation(
+            staging.absorb_records(crate::record_store::write_issue_relation(
                 ctx,
                 &doc,
                 &held.project,
@@ -6803,7 +6812,7 @@ fn stage_issue_patch(
         meta_changed = true;
     }
     if meta_changed {
-        staging.absorb_v4(crate::v4_store::write_issue_meta(
+        staging.absorb_records(crate::record_store::write_issue_meta(
             ctx,
             &doc,
             &held,
@@ -6823,7 +6832,7 @@ fn stage_issue_patch(
         for actor in current.union(&next) {
             let on = next.contains(actor);
             if current.contains(actor) != on {
-                staging.absorb_v4(crate::v4_store::write_issue_relation(
+                staging.absorb_records(crate::record_store::write_issue_relation(
                     ctx, &doc, &project, "assignee", actor, on,
                 )?);
             }
@@ -6849,7 +6858,7 @@ fn stage_issue_patch(
         for label in current.union(&next) {
             let on = next.contains(label);
             if current.contains(label) != on {
-                staging.absorb_v4(crate::v4_store::write_issue_relation(
+                staging.absorb_records(crate::record_store::write_issue_relation(
                     ctx, &doc, &project, "label", label, on,
                 )?);
             }
@@ -6877,7 +6886,7 @@ fn stage_issue_tombstone(
 ) -> Result<(String, Vec<u8>), Rejection> {
     let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
     let held = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-    staging.absorb_v4(crate::v4_store::write_issue_meta(ctx, &doc, &held, on)?);
+    staging.absorb_records(crate::record_store::write_issue_meta(ctx, &doc, &held, on)?);
     push_event(
         staging,
         ctx,
@@ -6988,7 +6997,7 @@ fn stage_issue_reaction(
     {
         return Err(Rejection::InvalidRequest);
     }
-    staging.absorb_v4(crate::v4_store::write_reaction(
+    staging.absorb_records(crate::record_store::write_reaction(
         ctx,
         &doc,
         &comment,
@@ -7030,12 +7039,12 @@ fn stage_issue_link(
         &other.project
     };
     if !on
-        && !crate::v4_store::read_link(ctx, relation_project, &from, &kind, &to)?
+        && !crate::record_store::read_link(ctx, relation_project, &from, &kind, &to)?
             .is_some_and(|record| record.present)
     {
         return Err(Rejection::InvalidRequest);
     }
-    staging.absorb_v4(crate::v4_store::write_link(
+    staging.absorb_records(crate::record_store::write_link(
         ctx,
         relation_project,
         &from,
@@ -7078,7 +7087,7 @@ fn stage_issue_parent(
             return Err(Rejection::Conflict);
         }
     }
-    staging.absorb_v4(crate::v4_store::write_parent(
+    staging.absorb_records(crate::record_store::write_parent(
         ctx,
         &held.project,
         &doc,
@@ -7141,27 +7150,32 @@ fn stage_issue_move(
         .map(|position| change_position(ctx, position))
         .transpose()?
         .or_else(|| project_changed.then_some(Pos::Top));
-    let placement =
-        crate::v4_store::board_placement(ctx, &effective, &target_status, &doc, position.as_ref())?;
+    let placement = crate::record_store::board_placement(
+        ctx,
+        &effective,
+        &target_status,
+        &doc,
+        position.as_ref(),
+    )?;
     if project_changed {
         held.project.clone_from(&effective);
         held.status.clone_from(&target_status);
-        staging.absorb_v4(crate::v4_store::write_issue_meta(
+        staging.absorb_records(crate::record_store::write_issue_meta(
             ctx,
             &doc,
             &held,
             catalog.tombstones.contains(&doc),
         )?);
     }
-    let mut v4 = placement.maintenance;
-    v4.absorb(issue_transition_successor(
+    let mut batch = placement.maintenance;
+    batch.absorb(issue_transition_successor(
         ctx,
         &doc,
         placement.placement.ok_or(Rejection::StateCorrupt)?,
         "",
         ts,
     )?);
-    staging.absorb_v4(v4);
+    staging.absorb_records(batch);
     push_event(staging, ctx, &doc, &event("moved", "", ts))?;
     Ok((doc, demand, true))
 }
@@ -7196,7 +7210,12 @@ fn stage_issue_milestone(
     let mut catalog = CatalogState::default();
     let label = match &milestone {
         Some(milestone) => {
-            crate::v4_store::apply_schedule_record(ctx, &mut catalog, &held.project, milestone)?;
+            crate::record_store::apply_schedule_record(
+                ctx,
+                &mut catalog,
+                &held.project,
+                milestone,
+            )?;
             let record = catalog
                 .milestones
                 .get(&held.project)
@@ -7204,7 +7223,7 @@ fn stage_issue_milestone(
                 .filter(|record| !record.tombstone)
                 .ok_or(Rejection::InvalidRequest)?;
             if let Some(previous) = held.milestone.as_deref() {
-                staging.absorb_v4(crate::v4_store::write_issue_relation(
+                staging.absorb_records(crate::record_store::write_issue_relation(
                     ctx,
                     &doc,
                     &held.project,
@@ -7213,7 +7232,7 @@ fn stage_issue_milestone(
                     false,
                 )?);
             }
-            staging.absorb_v4(crate::v4_store::write_issue_relation(
+            staging.absorb_records(crate::record_store::write_issue_relation(
                 ctx,
                 &doc,
                 &held.project,
@@ -7224,7 +7243,7 @@ fn stage_issue_milestone(
             record.name.clone()
         }
         None => {
-            staging.absorb_v4(crate::v4_store::write_issue_relation(
+            staging.absorb_records(crate::record_store::write_issue_relation(
                 ctx,
                 &doc,
                 &held.project,
@@ -7297,7 +7316,7 @@ impl World for IssuesWorld {
 
     fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let intent = IssueIntent::from_json(&intent.payload).ok_or(Rejection::InvalidRequest)?;
-        if self.package == IssuesPackage::PreferredV4
+        if self.package == IssuesPackage::Preferred
             && matches!(&intent, IssueIntent::V4Migrate { .. })
         {
             return Err(Rejection::InvalidRequest);
@@ -7374,7 +7393,7 @@ impl World for IssuesWorld {
                                         None,
                                     )?
                                     .id;
-                                    crate::v4_store::apply_project(ctx, catalog, &project)?;
+                                    crate::record_store::apply_project(ctx, catalog, &project)?;
                                     project
                                 }
                                 contract::ChangeProject::Created { operation } => {
@@ -7901,17 +7920,17 @@ impl World for IssuesWorld {
                 // entity-sized records below; the historical Catalog is an
                 // input to the separately installed migrator, never a shadow
                 // truth recreated by a fresh tracker.
-                let directory = crate::v4::space_directory_key(&ctx.principal().space);
+                let directory = crate::records::space_directory_key(&ctx.principal().space);
                 if ctx.body_version(&directory).is_some() {
                     return Err(Rejection::Conflict);
                 }
-                let mut v4 = crate::v4_store::write_space(
+                let mut batch = crate::record_store::write_space(
                     ctx,
                     &initial_catalog,
                     &initial_catalog.name,
                     Some(&initial_catalog.description),
                 )?;
-                v4.absorb(crate::v4_store::write_project(
+                batch.absorb(crate::record_store::write_project(
                     ctx,
                     &initial_catalog,
                     &project_id,
@@ -7919,7 +7938,7 @@ impl World for IssuesWorld {
                     false,
                     Some(&initial_project.description),
                 )?);
-                v4.absorb(crate::v4_store::write_workflow_revision(
+                batch.absorb(crate::record_store::write_workflow_revision(
                     ctx,
                     &project_id,
                     &workflow_revision,
@@ -7931,9 +7950,11 @@ impl World for IssuesWorld {
                         predecessor_ids: Vec::new(),
                         body: revision.body,
                     };
-                    v4.absorb(crate::v4_store::write_governance_revision(ctx, &stored)?);
+                    batch.absorb(crate::record_store::write_governance_revision(
+                        ctx, &stored,
+                    )?);
                 }
-                staging.absorb_v4(v4);
+                staging.absorb_records(batch);
                 // Tracker initialization is a founder-composition admin action.
                 staging.require(contract::demand_admin());
                 Ok(staging.into_effect(None))
@@ -7950,7 +7971,7 @@ impl World for IssuesWorld {
                 {
                     return Err(Rejection::ContractViolation);
                 }
-                crate::v4_store::validate_migration_plan(ctx, &plan)?;
+                crate::record_store::validate_migration_plan(ctx, &plan)?;
                 // The signed plan is only a compact coordinate. Recompute the
                 // canonical next window from the same frozen publication and
                 // reject any substituted Body/subitem/digest before staging.
@@ -7964,7 +7985,7 @@ impl World for IssuesWorld {
                     return Err(Rejection::ContractViolation);
                 }
                 let item = if plan.window.terminal() {
-                    crate::v4_store::Batch::default()
+                    crate::record_store::Batch::default()
                 } else {
                     let body = plan
                         .window
@@ -7976,18 +7997,18 @@ impl World for IssuesWorld {
                         .map_err(Rejection::BodyRead)?
                         .ok_or(Rejection::StateCorrupt)?;
                     match plan.window.phase.as_str() {
-                        "catalog" => crate::v4_store::migration_catalog_window(
+                        "catalog" => crate::record_store::migration_catalog_window(
                             ctx,
                             &plan.window.subitem,
                             view.as_ref(),
                         )?,
-                        "issue" => crate::v4_store::migration_issue_window(
+                        "issue" => crate::record_store::migration_issue_window(
                             ctx,
                             body,
                             &plan.window.subitem,
                             view.as_ref(),
                         )?,
-                        "coordinates" => crate::v4_store::migration_coordinate_window(
+                        "coordinates" => crate::record_store::migration_coordinate_window(
                             ctx,
                             &plan.window.subitem,
                             view.as_ref(),
@@ -8009,7 +8030,7 @@ impl World for IssuesWorld {
                         _ => return Err(Rejection::ContractViolation),
                     }
                 };
-                staging.absorb_v4(crate::v4_store::finalize_migration_window(
+                staging.absorb_records(crate::record_store::finalize_migration_window(
                     ctx, &plan, item,
                 )?);
                 staging.require(contract::demand_admin());
@@ -8031,7 +8052,7 @@ impl World for IssuesWorld {
                 ts,
             } => {
                 let mut catalog = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog, &project)?;
+                crate::record_store::apply_project(ctx, &mut catalog, &project)?;
                 load_labels_for_write(
                     ctx,
                     &mut catalog,
@@ -8079,7 +8100,7 @@ impl World for IssuesWorld {
                 staging.issue(&key, Op::Create);
                 staging.issue(
                     &key,
-                    reg(crate::v4::roots::ISSUE_ID, doc.as_bytes().to_vec()),
+                    reg(crate::records::roots::ISSUE_ID, doc.as_bytes().to_vec()),
                 );
                 if body
                     .as_deref()
@@ -8105,13 +8126,13 @@ impl World for IssuesWorld {
                     );
                 }
                 for who in &assignees {
-                    staging.absorb_v4(crate::v4_store::write_issue_relation(
+                    staging.absorb_records(crate::record_store::write_issue_relation(
                         ctx, &doc, &project, "assignee", who, true,
                     )?);
                 }
                 let (new_labels, label_ids) = reconcile_new_labels(&catalog, &labels, &new_labels);
                 for new_label in &new_labels {
-                    staging.absorb_v4(crate::v4_store::write_label(
+                    staging.absorb_records(crate::record_store::write_label(
                         ctx,
                         &catalog,
                         &new_label.id,
@@ -8123,17 +8144,17 @@ impl World for IssuesWorld {
                     )?);
                 }
                 for label in &label_ids {
-                    staging.absorb_v4(crate::v4_store::write_issue_relation(
+                    staging.absorb_records(crate::record_store::write_issue_relation(
                         ctx, &doc, &project, "label", label, true,
                     )?);
                 }
                 // Alias allocation is Issue-id-derived: creation never
                 // contends on the Space Catalog or a per-project counter.
-                let ordinal = crate::v4::IssueAliasCoordinate::deterministic_for_issue(
+                let ordinal = crate::records::IssueAliasCoordinate::deterministic_for_issue(
                     &DocId::parse(&doc).expect("validated Issue id"),
                 )
                 .ordinal;
-                let placement_plan = crate::v4_store::board_placement(
+                let placement_plan = crate::record_store::board_placement(
                     ctx,
                     &project,
                     DEFAULT_STATUS,
@@ -8141,10 +8162,10 @@ impl World for IssuesWorld {
                     Some(&Pos::Top),
                 )?;
                 let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
-                staging.absorb_v4(placement_plan.maintenance);
-                let mut v4 = crate::v4_store::Batch::default();
-                crate::v4_store::write_issue_identity(ctx, &mut v4, &doc, ordinal)?;
-                staging.absorb_v4(v4);
+                staging.absorb_records(placement_plan.maintenance);
+                let mut batch = crate::record_store::Batch::default();
+                crate::record_store::write_issue_identity(ctx, &mut batch, &doc, ordinal)?;
+                staging.absorb_records(batch);
                 let meta = IssueState {
                     project: project.clone(),
                     title: title.clone(),
@@ -8156,10 +8177,18 @@ impl World for IssuesWorld {
                     estimate,
                     ..IssueState::default()
                 };
-                staging.absorb_v4(crate::v4_store::write_issue_meta(ctx, &doc, &meta, false)?);
-                let (transition, _) =
-                    crate::v4_store::write_issue_transition(ctx, &doc, &[], &placement, "", ts)?;
-                staging.absorb_v4(transition);
+                staging.absorb_records(crate::record_store::write_issue_meta(
+                    ctx, &doc, &meta, false,
+                )?);
+                let (transition, _) = crate::record_store::write_issue_transition(
+                    ctx,
+                    &doc,
+                    &[],
+                    &placement,
+                    "",
+                    ts,
+                )?;
+                staging.absorb_records(transition);
                 push_event(&mut staging, ctx, &doc, &event("created", &device, ts))?;
                 Ok(staging.into_effect(Some(doc)))
             }
@@ -8244,11 +8273,16 @@ impl World for IssuesWorld {
                         from: Some(issue.status.clone()),
                         to: Some(status.clone()),
                     });
-                    let placement_plan =
-                        crate::v4_store::board_placement(ctx, &issue.project, status, &doc, None)?;
+                    let placement_plan = crate::record_store::board_placement(
+                        ctx,
+                        &issue.project,
+                        status,
+                        &doc,
+                        None,
+                    )?;
                     let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
-                    let mut v4 = crate::v4_store::Batch::default();
-                    v4.absorb(placement_plan.maintenance);
+                    let mut batch = crate::record_store::Batch::default();
+                    batch.absorb(placement_plan.maintenance);
                     if changed {
                         let evidence = transition_evidence
                             .as_ref()
@@ -8258,9 +8292,9 @@ impl World for IssuesWorld {
                             .unwrap_or_default();
                         let transition =
                             issue_transition_successor(ctx, &doc, placement, &evidence, ts)?;
-                        v4.absorb(transition);
+                        batch.absorb(transition);
                     }
-                    staging.absorb_v4(v4);
+                    staging.absorb_records(batch);
                 }
                 if let Some(priority) = &priority {
                     changes.push(EventChange {
@@ -8314,7 +8348,7 @@ impl World for IssuesWorld {
                     }
                 }
                 if meta_changed {
-                    staging.absorb_v4(crate::v4_store::write_issue_meta(
+                    staging.absorb_records(crate::record_store::write_issue_meta(
                         ctx,
                         &doc,
                         &issue,
@@ -8503,7 +8537,7 @@ impl World for IssuesWorld {
                     } else {
                         resulting.remove(actor);
                     }
-                    staging.absorb_v4(crate::v4_store::write_issue_relation(
+                    staging.absorb_records(crate::record_store::write_issue_relation(
                         ctx,
                         &doc,
                         &issue.project,
@@ -8555,7 +8589,7 @@ impl World for IssuesWorld {
                 }
                 let (new_labels, label_ids) = reconcile_new_labels(&catalog, &add, &new_labels);
                 for new_label in &new_labels {
-                    staging.absorb_v4(crate::v4_store::write_label(
+                    staging.absorb_records(crate::record_store::write_label(
                         ctx,
                         &catalog,
                         &new_label.id,
@@ -8567,7 +8601,7 @@ impl World for IssuesWorld {
                     )?);
                 }
                 for label in &label_ids {
-                    staging.absorb_v4(crate::v4_store::write_issue_relation(
+                    staging.absorb_records(crate::record_store::write_issue_relation(
                         ctx,
                         &doc,
                         &issue.project,
@@ -8577,7 +8611,7 @@ impl World for IssuesWorld {
                     )?);
                 }
                 for label in &remove {
-                    staging.absorb_v4(crate::v4_store::write_issue_relation(
+                    staging.absorb_records(crate::record_store::write_issue_relation(
                         ctx,
                         &doc,
                         &issue.project,
@@ -8753,14 +8787,14 @@ impl World for IssuesWorld {
                     report: None,
                     verdict: None,
                 };
-                let stored = crate::v4::IssueCheckRecord {
+                let stored = crate::records::IssueCheckRecord {
                     issue: doc.clone(),
                     run: run.clone(),
                     check: record,
                 };
-                staging.absorb_v4(crate::v4_store::write_check(ctx, &stored)?);
+                staging.absorb_records(crate::record_store::write_check(ctx, &stored)?);
                 staging.declare(
-                    &crate::v4::issue_check_key(
+                    &crate::records::issue_check_key(
                         &DocId::parse(&doc).ok_or(Rejection::InvalidRequest)?,
                         &run,
                     ),
@@ -8859,7 +8893,7 @@ impl World for IssuesWorld {
                 if attachments.len() >= contract::MAX_ATTACHMENTS_PER_ISSUE {
                     return Err(Rejection::LimitExceeded);
                 }
-                let mut check = crate::v4_store::read_check(ctx, &doc, &run)?
+                let mut check = crate::record_store::read_check(ctx, &doc, &run)?
                     .ok_or(Rejection::InvalidRequest)?
                     .check;
                 let actual_build = data_encoding::HEXLOWER.encode(&facts.build.as_bytes());
@@ -8878,13 +8912,13 @@ impl World for IssuesWorld {
                 check.report = Some(report.clone());
                 check.verdict = Some(verdict.clone());
                 let source_ref = parse_content_ref(&check.source).ok_or(Rejection::StateCorrupt)?;
-                let check_record = crate::v4::IssueCheckRecord {
+                let check_record = crate::records::IssueCheckRecord {
                     issue: doc.clone(),
                     run: run.clone(),
                     check,
                 };
-                staging.absorb_v4(crate::v4_store::write_check(ctx, &check_record)?);
-                let attachment = crate::v4::IssueAttachmentRecord {
+                staging.absorb_records(crate::record_store::write_check(ctx, &check_record)?);
+                let attachment = crate::records::IssueAttachmentRecord {
                     issue: doc.clone(),
                     id: id.clone(),
                     name: format!("verification-{run}.json"),
@@ -8896,7 +8930,7 @@ impl World for IssuesWorld {
                     content: report.clone(),
                     tombstone: false,
                 };
-                staging.absorb_v4(crate::v4_store::write_attachment(ctx, &attachment)?);
+                staging.absorb_records(crate::record_store::write_attachment(ctx, &attachment)?);
                 let mut acceptance_demand =
                     contract::demand_project_work("issue.verify", &issue.project);
                 let mut changes = Vec::new();
@@ -8925,39 +8959,39 @@ impl World for IssuesWorld {
                             from: Some(issue.status.clone()),
                             to: Some(done.state_id.clone()),
                         });
-                        let placement_plan = crate::v4_store::board_placement(
+                        let placement_plan = crate::record_store::board_placement(
                             ctx,
                             &issue.project,
                             &done.state_id,
                             &doc,
                             None,
                         )?;
-                        let mut v4 = crate::v4_store::Batch::default();
-                        v4.absorb(placement_plan.maintenance);
+                        let mut batch = crate::record_store::Batch::default();
+                        batch.absorb(placement_plan.maintenance);
                         let evidence = transition_evidence
                             .as_ref()
                             .map(|value| {
                                 serde_json::to_string(value).expect("transition evidence JSON")
                             })
                             .unwrap_or_default();
-                        v4.absorb(issue_transition_successor(
+                        batch.absorb(issue_transition_successor(
                             ctx,
                             &doc,
                             placement_plan.placement.ok_or(Rejection::StateCorrupt)?,
                             &evidence,
                             ts,
                         )?);
-                        staging.absorb_v4(v4);
+                        staging.absorb_records(batch);
                     }
                 }
                 staging.require(acceptance_demand);
                 let parsed_doc = DocId::parse(&doc).ok_or(Rejection::InvalidRequest)?;
                 staging.declare(
-                    &crate::v4::issue_check_key(&parsed_doc, &run),
+                    &crate::records::issue_check_key(&parsed_doc, &run),
                     vec![source_ref, report_ref],
                 );
                 staging.declare(
-                    &crate::v4::issue_attachment_key(&parsed_doc, &id),
+                    &crate::records::issue_attachment_key(&parsed_doc, &id),
                     vec![report_ref],
                 );
                 let mut ev = event("check_accepted", ctx.principal().device.as_str(), ts);
@@ -9014,9 +9048,9 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 let mut catalog_storage = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog_storage, &id)?;
+                crate::record_store::apply_project(ctx, &mut catalog_storage, &id)?;
                 if let Some(team) = team.as_deref().filter(|team| !team.is_empty()) {
-                    crate::v4_store::apply_team(ctx, &mut catalog_storage, team)?;
+                    crate::record_store::apply_team(ctx, &mut catalog_storage, team)?;
                 }
                 let catalog = &mut catalog_storage;
                 staging.require(contract::demand_space_any("project.configure"));
@@ -9069,7 +9103,7 @@ impl World for IssuesWorld {
                 }
                 // Serialize the whole record so an edit never drops a field the
                 // caller didn't touch.
-                staging.absorb_v4(crate::v4_store::write_project(
+                staging.absorb_records(crate::record_store::write_project(
                     ctx,
                     &catalog,
                     &id,
@@ -9089,7 +9123,7 @@ impl World for IssuesWorld {
                 ts,
             } => {
                 let mut catalog = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog, &project_id)?;
+                crate::record_store::apply_project(ctx, &mut catalog, &project_id)?;
                 staging.require(contract::demand_space_any("project.configure"));
                 if !catalog.projects.contains_key(&project_id) {
                     return Err(Rejection::InvalidRequest);
@@ -9106,7 +9140,7 @@ impl World for IssuesWorld {
                     body: body.to_string(),
                     health,
                 };
-                staging.absorb_v4(crate::v4_store::write_project_update(ctx, &update)?);
+                staging.absorb_records(crate::record_store::write_project_update(ctx, &update)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::LabelEdit {
@@ -9138,7 +9172,7 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 let mut catalog_storage = CatalogState::default();
-                crate::v4_store::apply_space(ctx, &mut catalog_storage)?;
+                crate::record_store::apply_space(ctx, &mut catalog_storage)?;
                 let catalog = &mut catalog_storage;
                 staging.require(contract::demand_admin());
                 let name = name.trim();
@@ -9148,7 +9182,8 @@ impl World for IssuesWorld {
                 if catalog.name == name {
                     return Ok(staging.into_effect(None));
                 }
-                staging.absorb_v4(crate::v4_store::write_space(ctx, &catalog, name, None)?);
+                staging
+                    .absorb_records(crate::record_store::write_space(ctx, &catalog, name, None)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::SpaceDescribe {
@@ -9157,7 +9192,7 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 let mut catalog_storage = CatalogState::default();
-                crate::v4_store::apply_space(ctx, &mut catalog_storage)?;
+                crate::record_store::apply_space(ctx, &mut catalog_storage)?;
                 let catalog = &mut catalog_storage;
                 staging.require(contract::demand_admin());
                 // Empty clears; no trim so intentional leading/trailing prose is
@@ -9168,7 +9203,7 @@ impl World for IssuesWorld {
                 if !contract::valid_text(&description) {
                     return Err(Rejection::InvalidRequest);
                 }
-                staging.absorb_v4(crate::v4_store::write_space(
+                staging.absorb_records(crate::record_store::write_space(
                     ctx,
                     &catalog,
                     &catalog.name,
@@ -9188,7 +9223,7 @@ impl World for IssuesWorld {
                 let mut catalog_storage = CatalogState::default();
                 load_role_for_write(ctx, &mut catalog_storage, &role_id)?;
                 if let Some(project) = &scope_project {
-                    crate::v4_store::apply_project(ctx, &mut catalog_storage, project)?;
+                    crate::record_store::apply_project(ctx, &mut catalog_storage, project)?;
                 }
                 let catalog = &mut catalog_storage;
                 // Custom ids only: `role_<ULID>`; built-in ids and free-form
@@ -9362,7 +9397,7 @@ impl World for IssuesWorld {
                     .collect::<Result<_, _>>()?;
                 let revision = crate::workflow::build_revision(body, predecessors)
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_workflow_revision(
+                staging.absorb_records(crate::record_store::write_workflow_revision(
                     ctx,
                     &project_id,
                     &revision,
@@ -9382,7 +9417,7 @@ impl World for IssuesWorld {
                 ts,
             } => {
                 let mut catalog = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog, &project)?;
+                crate::record_store::apply_project(ctx, &mut catalog, &project)?;
                 stage_spec_create(
                     &mut staging,
                     ctx,
@@ -9440,7 +9475,7 @@ impl World for IssuesWorld {
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_spec_revision(ctx, &revision)?);
+                staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
                 staging.require(contract::demand_project_work(
                     "spec.write",
                     &head.body.project,
@@ -9476,7 +9511,7 @@ impl World for IssuesWorld {
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_spec_revision(ctx, &revision)?);
+                staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
                 let demand = if matches!(
                     head.body.state,
                     crate::spec::State::Issued | crate::spec::State::Withdrawn
@@ -9528,7 +9563,7 @@ impl World for IssuesWorld {
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_spec_revision(ctx, &revision)?);
+                staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
                 if matches!(
                     state,
                     crate::spec::State::Issued | crate::spec::State::Withdrawn
@@ -9541,7 +9576,7 @@ impl World for IssuesWorld {
                             .map(|revision| revision.revision.clone())
                             .collect(),
                     };
-                    staging.absorb_v4(crate::v4_store::write_spec_issued_heads(
+                    staging.absorb_records(crate::record_store::write_spec_issued_heads(
                         ctx,
                         &spec,
                         &issued,
@@ -9606,7 +9641,7 @@ impl World for IssuesWorld {
                     .collect::<Result<Vec<_>, _>>()?;
                 let revision = crate::spec::build_revision(body, predecessors)
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_spec_revision(ctx, &revision)?);
+                staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
                 staging.require(contract::demand_project_work(
                     "spec.write",
                     &first.body.project,
@@ -9660,9 +9695,9 @@ impl World for IssuesWorld {
                     note,
                 };
                 entry.validate().map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_spec_observation(
+                staging.absorb_records(crate::record_store::write_spec_observation(
                     ctx,
-                    &crate::v4::SpecObservationRecord::Assert {
+                    &crate::records::SpecObservationRecord::Assert {
                         project: first.body.project.clone(),
                         observation: entry,
                     },
@@ -9690,9 +9725,9 @@ impl World for IssuesWorld {
                     .ok_or(Rejection::InvalidRequest)?;
                 let project = first.body.project.clone();
                 let own = entry.observer == ctx.principal().actor.as_str();
-                staging.absorb_v4(crate::v4_store::write_spec_observation(
+                staging.absorb_records(crate::record_store::write_spec_observation(
                     ctx,
-                    &crate::v4::SpecObservationRecord::Retract {
+                    &crate::records::SpecObservationRecord::Retract {
                         project: project.clone(),
                         observation,
                         spec: spec.clone(),
@@ -9720,7 +9755,7 @@ impl World for IssuesWorld {
                 ts,
             } => {
                 let mut catalog = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog, &project)?;
+                crate::record_store::apply_project(ctx, &mut catalog, &project)?;
                 if crate::ids::BaselineId::parse(&baseline).is_none()
                     || !catalog.projects.contains_key(&project)
                     || baseline_state(ctx, &baseline).is_some()
@@ -9743,7 +9778,9 @@ impl World for IssuesWorld {
                     vec![],
                 )
                 .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_baseline_revision(ctx, &revision)?);
+                staging.absorb_records(crate::record_store::write_baseline_revision(
+                    ctx, &revision,
+                )?);
                 staging.require(contract::demand_project_work("baseline.write", &project));
                 Ok(staging.into_effect(Some(baseline)))
             }
@@ -9779,7 +9816,9 @@ impl World for IssuesWorld {
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_baseline_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_baseline_revision(ctx, &revision)?);
+                staging.absorb_records(crate::record_store::write_baseline_revision(
+                    ctx, &revision,
+                )?);
                 staging.require(contract::demand_project_work(
                     "baseline.write",
                     &head.body.project,
@@ -9830,7 +9869,9 @@ impl World for IssuesWorld {
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_baseline_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_baseline_revision(ctx, &revision)?);
+                staging.absorb_records(crate::record_store::write_baseline_revision(
+                    ctx, &revision,
+                )?);
                 if matches!(
                     state,
                     crate::spec::State::Issued | crate::spec::State::Withdrawn
@@ -9843,7 +9884,7 @@ impl World for IssuesWorld {
                             .map(|revision| revision.revision.clone())
                             .collect(),
                     };
-                    staging.absorb_v4(crate::v4_store::write_baseline_issued_heads(
+                    staging.absorb_records(crate::record_store::write_baseline_issued_heads(
                         ctx,
                         &baseline,
                         &issued,
@@ -9899,7 +9940,9 @@ impl World for IssuesWorld {
                     .collect::<Result<Vec<_>, _>>()?;
                 let revision = crate::spec::build_baseline_revision(body, predecessors)
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.absorb_v4(crate::v4_store::write_baseline_revision(ctx, &revision)?);
+                staging.absorb_records(crate::record_store::write_baseline_revision(
+                    ctx, &revision,
+                )?);
                 staging.require(contract::demand_project_work(
                     "baseline.write",
                     &first.body.project,
@@ -9930,7 +9973,7 @@ impl World for IssuesWorld {
                     .or(issue.baseline.as_ref())
                     .map(|binding| serde_json::to_string(binding).expect("Baseline binding JSON"))
                     .unwrap_or_else(|| "none".into());
-                staging.absorb_v4(crate::v4_store::write_issue_relation(
+                staging.absorb_records(crate::record_store::write_issue_relation(
                     ctx,
                     &doc,
                     &issue.project,
@@ -9953,7 +9996,7 @@ impl World for IssuesWorld {
             } => {
                 staging.require(contract::demand_project_any("project.delete", &id));
                 let mut catalog = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog, &id)?;
+                crate::record_store::apply_project(ctx, &mut catalog, &id)?;
                 let Some(meta) = catalog.projects.get(&id).cloned() else {
                     return Err(Rejection::InvalidRequest);
                 };
@@ -9969,7 +10012,7 @@ impl World for IssuesWorld {
                 if referenced {
                     return Err(Rejection::Conflict);
                 }
-                staging.absorb_v4(crate::v4_store::write_project(
+                staging.absorb_records(crate::record_store::write_project(
                     ctx, &catalog, &id, &meta, true, None,
                 )?);
                 Ok(staging.into_effect(None))
@@ -9994,7 +10037,7 @@ impl World for IssuesWorld {
                         return Err(Rejection::LimitExceeded);
                     }
                 }
-                staging.absorb_v4(crate::v4_store::write_issue_relation(
+                staging.absorb_records(crate::record_store::write_issue_relation(
                     ctx,
                     &doc,
                     &issue.project,
@@ -10018,8 +10061,8 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 let mut catalog_storage = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog_storage, &project_id)?;
-                crate::v4_store::apply_schedule_record(
+                crate::record_store::apply_project(ctx, &mut catalog_storage, &project_id)?;
+                crate::record_store::apply_schedule_record(
                     ctx,
                     &mut catalog_storage,
                     &project_id,
@@ -10087,7 +10130,7 @@ impl World for IssuesWorld {
                 if current.as_ref() == Some(&record) {
                     return Ok(staging.into_effect(None));
                 }
-                staging.absorb_v4(crate::v4_store::write_milestone(ctx, &record)?);
+                staging.absorb_records(crate::record_store::write_milestone(ctx, &record)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::IssueMilestone {
@@ -10116,8 +10159,8 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 let mut catalog_storage = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog_storage, &project_id)?;
-                crate::v4_store::apply_schedule_record(
+                crate::record_store::apply_project(ctx, &mut catalog_storage, &project_id)?;
+                crate::record_store::apply_schedule_record(
                     ctx,
                     &mut catalog_storage,
                     &project_id,
@@ -10173,7 +10216,7 @@ impl World for IssuesWorld {
                 if current.as_ref() == Some(&record) {
                     return Ok(staging.into_effect(None));
                 }
-                staging.absorb_v4(crate::v4_store::write_cycle(ctx, &record)?);
+                staging.absorb_records(crate::record_store::write_cycle(ctx, &record)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::IssueCycle {
@@ -10185,7 +10228,7 @@ impl World for IssuesWorld {
                 let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let mut catalog = CatalogState::default();
                 if let Some(cycle) = &cycle {
-                    crate::v4_store::apply_schedule_record(
+                    crate::record_store::apply_schedule_record(
                         ctx,
                         &mut catalog,
                         &issue.project,
@@ -10200,7 +10243,7 @@ impl World for IssuesWorld {
                             .and_then(|cs| cs.get(c))
                             .filter(|r| !r.tombstone)
                             .ok_or(Rejection::InvalidRequest)?;
-                        staging.absorb_v4(crate::v4_store::write_issue_relation(
+                        staging.absorb_records(crate::record_store::write_issue_relation(
                             ctx,
                             &doc,
                             &issue.project,
@@ -10211,7 +10254,7 @@ impl World for IssuesWorld {
                         record.name.clone()
                     }
                     None => {
-                        staging.absorb_v4(crate::v4_store::write_issue_relation(
+                        staging.absorb_records(crate::record_store::write_issue_relation(
                             ctx,
                             &doc,
                             &issue.project,
@@ -10245,7 +10288,7 @@ impl World for IssuesWorld {
             } => {
                 let mut catalog_storage = CatalogState::default();
                 let catalog = &mut catalog_storage;
-                crate::v4_store::apply_initiative(ctx, catalog, &id)?;
+                crate::record_store::apply_initiative(ctx, catalog, &id)?;
                 staging.require(contract::demand_space_any("project.create"));
                 let description_changed = description.is_some();
                 if id.is_empty() {
@@ -10293,7 +10336,7 @@ impl World for IssuesWorld {
                     record.target_date = target;
                 }
                 for project in add_projects.iter().chain(&remove_projects) {
-                    crate::v4_store::apply_project(ctx, catalog, project)?;
+                    crate::record_store::apply_project(ctx, catalog, project)?;
                     if !catalog.projects.contains_key(project) {
                         return Err(Rejection::InvalidRequest);
                     }
@@ -10307,13 +10350,13 @@ impl World for IssuesWorld {
                 {
                     return Ok(staging.into_effect(None));
                 }
-                staging.absorb_v4(crate::v4_store::write_initiative(
+                staging.absorb_records(crate::record_store::write_initiative(
                     ctx,
                     &record,
                     description_changed.then_some(record.description.as_str()),
                 )?);
                 for project in add_projects {
-                    staging.absorb_v4(crate::v4_store::write_entity_relation(
+                    staging.absorb_records(crate::record_store::write_entity_relation(
                         ctx,
                         &record.id,
                         "initiative_project",
@@ -10322,7 +10365,7 @@ impl World for IssuesWorld {
                     )?);
                 }
                 for project in remove_projects {
-                    staging.absorb_v4(crate::v4_store::write_entity_relation(
+                    staging.absorb_records(crate::record_store::write_entity_relation(
                         ctx,
                         &record.id,
                         "initiative_project",
@@ -10346,7 +10389,7 @@ impl World for IssuesWorld {
             } => {
                 let mut catalog_storage = CatalogState::default();
                 let catalog = &mut catalog_storage;
-                crate::v4_store::apply_team(ctx, catalog, &id)?;
+                crate::record_store::apply_team(ctx, catalog, &id)?;
                 staging.require(contract::demand_admin());
                 if id.is_empty() {
                     return Err(Rejection::InvalidRequest);
@@ -10414,9 +10457,9 @@ impl World for IssuesWorld {
                 {
                     return Ok(staging.into_effect(None));
                 }
-                staging.absorb_v4(crate::v4_store::write_team(ctx, &record)?);
+                staging.absorb_records(crate::record_store::write_team(ctx, &record)?);
                 for member in add_members {
-                    staging.absorb_v4(crate::v4_store::write_entity_relation(
+                    staging.absorb_records(crate::record_store::write_entity_relation(
                         ctx,
                         &record.id,
                         "team_member",
@@ -10425,7 +10468,7 @@ impl World for IssuesWorld {
                     )?);
                 }
                 for member in remove_members {
-                    staging.absorb_v4(crate::v4_store::write_entity_relation(
+                    staging.absorb_records(crate::record_store::write_entity_relation(
                         ctx,
                         &record.id,
                         "team_member",
@@ -10460,7 +10503,7 @@ impl World for IssuesWorld {
                     ts,
                     ..Default::default()
                 };
-                staging.absorb_v4(crate::v4_store::write_triage_submission(ctx, &item)?);
+                staging.absorb_records(crate::record_store::write_triage_submission(ctx, &item)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::TriageDecide {
@@ -10496,7 +10539,7 @@ impl World for IssuesWorld {
                         let project = project.ok_or(Rejection::InvalidRequest)?;
                         let doc = doc.ok_or(Rejection::InvalidRequest)?;
                         let mut project_catalog = CatalogState::default();
-                        crate::v4_store::apply_project(ctx, &mut project_catalog, &project)?;
+                        crate::record_store::apply_project(ctx, &mut project_catalog, &project)?;
                         if !project_catalog.projects.contains_key(&project)
                             || DocId::parse(&doc).is_none()
                         {
@@ -10506,7 +10549,7 @@ impl World for IssuesWorld {
                         staging.issue(&key, Op::Create);
                         staging.issue(
                             &key,
-                            reg(crate::v4::roots::ISSUE_ID, doc.as_bytes().to_vec()),
+                            reg(crate::records::roots::ISSUE_ID, doc.as_bytes().to_vec()),
                         );
                         if !item.body.is_empty() {
                             staging.issue(
@@ -10519,11 +10562,12 @@ impl World for IssuesWorld {
                                 },
                             );
                         }
-                        let ordinal = crate::v4::IssueAliasCoordinate::deterministic_for_issue(
-                            &DocId::parse(&doc).expect("validated Issue id"),
-                        )
-                        .ordinal;
-                        let placement_plan = crate::v4_store::board_placement(
+                        let ordinal =
+                            crate::records::IssueAliasCoordinate::deterministic_for_issue(
+                                &DocId::parse(&doc).expect("validated Issue id"),
+                            )
+                            .ordinal;
+                        let placement_plan = crate::record_store::board_placement(
                             ctx,
                             &project,
                             DEFAULT_STATUS,
@@ -10531,10 +10575,10 @@ impl World for IssuesWorld {
                             Some(&Pos::Top),
                         )?;
                         let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
-                        staging.absorb_v4(placement_plan.maintenance);
-                        let mut v4 = crate::v4_store::Batch::default();
-                        crate::v4_store::write_issue_identity(ctx, &mut v4, &doc, ordinal)?;
-                        staging.absorb_v4(v4);
+                        staging.absorb_records(placement_plan.maintenance);
+                        let mut batch = crate::record_store::Batch::default();
+                        crate::record_store::write_issue_identity(ctx, &mut batch, &doc, ordinal)?;
+                        staging.absorb_records(batch);
                         let meta = IssueState {
                             project: project.clone(),
                             title: item.title.clone(),
@@ -10544,9 +10588,10 @@ impl World for IssuesWorld {
                             created_at: ts,
                             ..IssueState::default()
                         };
-                        staging
-                            .absorb_v4(crate::v4_store::write_issue_meta(ctx, &doc, &meta, false)?);
-                        let (transition, _) = crate::v4_store::write_issue_transition(
+                        staging.absorb_records(crate::record_store::write_issue_meta(
+                            ctx, &doc, &meta, false,
+                        )?);
+                        let (transition, _) = crate::record_store::write_issue_transition(
                             ctx,
                             &doc,
                             &[],
@@ -10554,7 +10599,7 @@ impl World for IssuesWorld {
                             "",
                             ts,
                         )?;
-                        staging.absorb_v4(transition);
+                        staging.absorb_records(transition);
                         push_event(&mut staging, ctx, &doc, &event("created", &device, ts))?;
                         accepted_project = Some(project);
                         decided.doc = doc;
@@ -10567,7 +10612,7 @@ impl World for IssuesWorld {
                     }
                     _ => {}
                 }
-                staging.absorb_v4(crate::v4_store::write_triage_decision(
+                staging.absorb_records(crate::record_store::write_triage_decision(
                     ctx,
                     &decided,
                     accepted_project.as_deref(),
@@ -10628,7 +10673,7 @@ impl World for IssuesWorld {
                     }
                 }
                 let name = name.to_string();
-                let record = crate::v4::IssueAttachmentRecord {
+                let record = crate::records::IssueAttachmentRecord {
                     issue: doc.clone(),
                     id: id.clone(),
                     name: name.clone(),
@@ -10640,9 +10685,9 @@ impl World for IssuesWorld {
                     content,
                     tombstone: false,
                 };
-                staging.absorb_v4(crate::v4_store::write_attachment(ctx, &record)?);
+                staging.absorb_records(crate::record_store::write_attachment(ctx, &record)?);
                 staging.declare(
-                    &crate::v4::issue_attachment_key(
+                    &crate::records::issue_attachment_key(
                         &DocId::parse(&doc).ok_or(Rejection::InvalidRequest)?,
                         &id,
                     ),
@@ -10664,15 +10709,15 @@ impl World for IssuesWorld {
                     return Err(Rejection::InvalidRequest);
                 };
                 let name = meta.name.clone();
-                let mut record = crate::v4_store::read_attachment(ctx, &doc, &id)?
+                let mut record = crate::record_store::read_attachment(ctx, &doc, &id)?
                     .ok_or(Rejection::InvalidRequest)?;
                 if record.tombstone {
                     return Err(Rejection::InvalidRequest);
                 }
                 record.tombstone = true;
-                staging.absorb_v4(crate::v4_store::write_attachment(ctx, &record)?);
+                staging.absorb_records(crate::record_store::write_attachment(ctx, &record)?);
                 staging.declare(
-                    &crate::v4::issue_attachment_key(
+                    &crate::records::issue_attachment_key(
                         &DocId::parse(&doc).ok_or(Rejection::InvalidRequest)?,
                         &id,
                     ),
@@ -10688,7 +10733,7 @@ impl World for IssuesWorld {
 
     fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
         let query = IssueQuery::from_json(&query.payload).ok_or(Rejection::InvalidRequest)?;
-        if self.package == IssuesPackage::PreferredV4
+        if self.package == IssuesPackage::Preferred
             && matches!(
                 &query,
                 IssueQuery::V4MigrationStatus | IssueQuery::StructureStatus
@@ -10707,7 +10752,7 @@ impl World for IssuesWorld {
         };
         match query {
             IssueQuery::V4MigrationStatus => Ok(projection(
-                serde_json::to_vec(&crate::v4_store::migration_verification(ctx)?)
+                serde_json::to_vec(&crate::record_store::migration_verification(ctx)?)
                     .expect("migration verification JSON"),
             )),
             IssueQuery::Resolve {
@@ -10730,7 +10775,7 @@ impl World for IssuesWorld {
             IssueQuery::View { doc, me } => {
                 let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let mut catalog = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog, &issue.project)?;
+                crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
                 apply_project_workflow(ctx, &mut catalog, &issue.project)?;
                 let aliases = DerivedAliases::default();
                 // View is the bounded issue/content summary. Discussion,
@@ -10751,7 +10796,7 @@ impl World for IssuesWorld {
             IssueQuery::Detail { doc, me, pages } => {
                 let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let mut catalog = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog, &issue.project)?;
+                crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
                 apply_project_workflow(ctx, &mut catalog, &issue.project)?;
                 let aliases = DerivedAliases::default();
                 let resolve = |_comment: &StoredComment| None;
@@ -10850,7 +10895,7 @@ impl World for IssuesWorld {
                     let row = issue_page_row(result)?;
                     let project_id = row.project_id.as_str();
                     if project.is_none() {
-                        crate::v4_store::apply_project(ctx, &mut catalog, project_id)?;
+                        crate::record_store::apply_project(ctx, &mut catalog, project_id)?;
                         if catalog
                             .projects
                             .get(project_id)
@@ -10881,7 +10926,7 @@ impl World for IssuesWorld {
             }
             IssueQuery::Board { project, me, page } => {
                 let mut catalog = CatalogState::default();
-                crate::v4_store::apply_project(ctx, &mut catalog, &project)?;
+                crate::record_store::apply_project(ctx, &mut catalog, &project)?;
                 apply_project_workflow(ctx, &mut catalog, &project)?;
                 let project_view = catalog
                     .projects
@@ -11561,7 +11606,7 @@ impl World for IssuesWorld {
                 ))
             }
             IssueQuery::Attachment { doc, id } => {
-                let record = crate::v4_store::read_attachment(ctx, &doc, &id)?
+                let record = crate::record_store::read_attachment(ctx, &doc, &id)?
                     .filter(|record| !record.tombstone)
                     .ok_or(Rejection::InvalidRequest)?;
                 Ok(projection(serde_json::to_vec(&record).expect("attachment")))

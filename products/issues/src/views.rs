@@ -718,7 +718,7 @@ impl CatalogState {
         &self,
         project: &str,
         id: &str,
-    ) -> Result<Option<&crate::workflow::WorkflowState>, WorkflowResolutionError> {
+    ) -> Result<Option<&crate::workflow::WorkflowState>, Failure> {
         Ok(self
             .resolved_workflow(project)?
             .body
@@ -731,7 +731,7 @@ impl CatalogState {
         &self,
         project: &str,
         category: StatusCategory,
-    ) -> Result<Option<&crate::workflow::WorkflowState>, WorkflowResolutionError> {
+    ) -> Result<Option<&crate::workflow::WorkflowState>, Failure> {
         Ok(self
             .resolved_workflow(project)?
             .body
@@ -744,7 +744,7 @@ impl CatalogState {
         &self,
         project: &str,
         status: &str,
-    ) -> Result<Option<StatusCategory>, WorkflowResolutionError> {
+    ) -> Result<Option<StatusCategory>, Failure> {
         Ok(self
             .workflow_state(project, status)?
             .and_then(|state| StatusCategory::parse(&state.category)))
@@ -922,9 +922,9 @@ impl IssueState {
             events,
             events_recorded,
         };
-        if let Some(raw) = view.registers.get(crate::v4::roots::BOARD_PLACEMENT) {
+        if let Some(raw) = view.registers.get(crate::records::roots::BOARD_PLACEMENT) {
             if let Ok(placement) =
-                <crate::v4::BoardPlacement as crate::v4::CanonicalRecord>::decode_canonical(raw)
+                <crate::records::BoardPlacement as crate::records::CanonicalRecord>::decode_canonical(raw)
             {
                 state.project = placement.project;
                 state.status = placement.workflow_state;
@@ -1344,7 +1344,7 @@ pub fn board_view(
     project_id: &str,
     issues: &BTreeMap<String, std::sync::Arc<IssueState>>,
     me: Option<&ActorId>,
-) -> Result<Option<BoardView>, WorkflowResolutionError> {
+) -> Result<Option<BoardView>, Failure> {
     let Some(meta) = catalog.projects.get(project_id) else {
         return Ok(None);
     };
@@ -1495,12 +1495,12 @@ impl CatalogState {
     pub fn resolved_workflow(
         &self,
         project: &str,
-    ) -> Result<&crate::workflow::WorkflowRevision, WorkflowResolutionError> {
+    ) -> Result<&crate::workflow::WorkflowRevision, Failure> {
         let heads = self.workflow_heads(project);
         match heads.as_slice() {
             [revision] if !revision.body.tombstone => Ok(revision),
-            [] | [_] => Err(WorkflowResolutionError::Missing),
-            _ => Err(WorkflowResolutionError::Conflicted),
+            [] | [_] => Err(Failure::Missing),
+            _ => Err(Failure::Conflicted),
         }
     }
 
@@ -1526,8 +1526,13 @@ impl CatalogState {
     }
 }
 
+/// Why a workflow could not be resolved for an issue.
+///
+/// Named for what it is to its owner rather than carrying the owner in its
+/// name: callers outside this module say `views::Failure`, which reads the
+/// same way `world::Failure` and `session::Failure` do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowResolutionError {
+pub enum Failure {
     Missing,
     Conflicted,
 }

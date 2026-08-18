@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn new_tracker_forms_directly_on_preferred_v4() {
+    fn new_tracker_forms_directly_on_preferred() {
         let preferred = preferred_implementation();
         assert_eq!(assess_upgrade(None, preferred), UpgradeAssessment::Direct);
         assert_eq!(implementation_id(), preferred.id);

@@ -1026,7 +1026,7 @@ pub enum IssuesResponse {
         page: issues::contract::Page<issues::dto::CommentDto>,
     },
     Reactions {
-        page: issues::contract::Page<issues::v4::ReactionRecord>,
+        page: issues::contract::Page<issues::records::ReactionRecord>,
     },
     Attachments {
         page: issues::contract::Page<issues::dto::AttachmentMetaDto>,
@@ -1074,7 +1074,7 @@ pub enum IssuesResponse {
         page: issues::contract::Page<issues::dto::TeamDto>,
     },
     TriageItems {
-        page: issues::contract::Page<issues::v4::TriageRecord>,
+        page: issues::contract::Page<issues::records::TriageRecord>,
     },
     Attachment {
         name: String,
@@ -1107,7 +1107,7 @@ pub enum IssuesResponse {
         page: issues::contract::Page<issues::spec::SpecReferenceFact>,
     },
     SpecObservations {
-        page: issues::contract::Page<issues::v4::SpecObservationRecord>,
+        page: issues::contract::Page<issues::records::SpecObservationRecord>,
     },
     BaselineRevisions {
         page: issues::contract::Page<issues::spec::BaselineRevision>,

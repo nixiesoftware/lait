@@ -182,7 +182,7 @@ fn identifier_patterns_agree_with_the_rust_parsers() {
     let schema = pattern("SchemaId");
     for (s, ok) in [
         ("note", true),
-        ("issues.catalog-v", true),
+        ("notes.catalog-v", true),
         ("_leading", false),
         ("", false),
         (&"a".repeat(64), false),

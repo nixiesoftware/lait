@@ -1887,7 +1887,7 @@ impl<'a> IssueRouter<'a> {
             } => {
                 let doc = self.resolve(&selectors, &reff)?;
                 let query = IssueQuery::Reactions { doc, page };
-                let page: issues::contract::Page<issues::v4::ReactionRecord> = self
+                let page: issues::contract::Page<issues::records::ReactionRecord> = self
                     .query_coordinate(&query, publication)
                     .map_err(Self::effect_err)?;
                 Ok((Response::Reactions { page }, false))
@@ -2334,7 +2334,7 @@ impl<'a> IssueRouter<'a> {
             }
             Request::TriageList { page } => {
                 let query = IssueQuery::Triage { page: page.clone() };
-                let page: issues::contract::Page<issues::v4::TriageRecord> =
+                let page: issues::contract::Page<issues::records::TriageRecord> =
                     self.query_page(&query, &page).map_err(Self::effect_err)?;
                 Ok((Response::TriageItems { page }, false))
             }
@@ -2827,7 +2827,7 @@ impl<'a> IssueRouter<'a> {
                     project,
                     page: page.clone(),
                 };
-                let page: issues::contract::Page<issues::v4::SpecObservationRecord> =
+                let page: issues::contract::Page<issues::records::SpecObservationRecord> =
                     self.query_page(&query, &page).map_err(Self::effect_err)?;
                 Ok((Response::SpecObservations { page }, false))
             }
@@ -3047,7 +3047,7 @@ impl<'a> IssueRouter<'a> {
                     project: None,
                     page: request.clone(),
                 };
-                let page: issues::contract::Page<issues::v4::SpecObservationRecord> = self
+                let page: issues::contract::Page<issues::records::SpecObservationRecord> = self
                     .query_page(&query, &request)
                     .map_err(Self::effect_err)?;
                 Ok((Response::SpecObservations { page }, true))
@@ -3066,7 +3066,7 @@ impl<'a> IssueRouter<'a> {
                     project: None,
                     page: request.clone(),
                 };
-                let page: issues::contract::Page<issues::v4::SpecObservationRecord> = self
+                let page: issues::contract::Page<issues::records::SpecObservationRecord> = self
                     .query_page(&query, &request)
                     .map_err(Self::effect_err)?;
                 Ok((Response::SpecObservations { page }, true))
