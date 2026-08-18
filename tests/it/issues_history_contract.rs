@@ -49,6 +49,27 @@ impl runtime::world::AuthorityView for WriterAuthority {
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
         })
     }
+
+    /// The reviewed identity rather than the trait's all-zero fixture default.
+    /// Anything that records the publication it was authored at — a Spec
+    /// revision, a geometry artifact — refuses one whose implementation digest
+    /// is zero, so the authority and the registration must name the same
+    /// implementation.
+    fn active_implementation(
+        &self,
+        _world: &replica::body::WorldId,
+        _authority_frontier: &AuthorityFrontier,
+    ) -> Result<Option<[u8; 32]>, String> {
+        Ok(Some(reviewed_implementation()))
+    }
+}
+
+/// The canonical Issues implementation id, as registered and as the authority
+/// reports it active.
+fn reviewed_implementation() -> [u8; 32] {
+    lait::world::IssuesWorld::implementation_descriptor()
+        .id()
+        .expect("the Issues descriptor is canonical")
 }
 
 fn actor() -> ActorId {
@@ -63,7 +84,7 @@ fn device() -> String {
 
 fn station() -> (Runtime, Station) {
     let registry = Builder::new()
-        .register(Arc::new(IssuesWorld::new()))
+        .register_reviewed(Arc::new(IssuesWorld::new()), reviewed_implementation())
         .build()
         .unwrap();
     let rt = Runtime::open(
