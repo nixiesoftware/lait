@@ -2356,12 +2356,23 @@ pub struct IssueAliasCoordinate {
 #[serde(deny_unknown_fields)]
 pub struct IssueIdentityRecord {
     pub issue: String,
+    /// The project the ordinal was counted within.
+    ///
+    /// A number that means "the fourth Issue in ENG" is only a reference when
+    /// something says which project counted it. Without it the coordinate has
+    /// to be searched for across every project at once, and since the number
+    /// is now small and dense, every project has a first Issue and a second
+    /// one -- so that search returns a row per project rather than a row.
+    pub project: String,
     pub alias: IssueAliasCoordinate,
 }
 
 impl CanonicalRecord for IssueIdentityRecord {
     fn validate(&self) -> Result<(), Invalid> {
         let issue = DocId::parse(&self.issue).ok_or(Invalid::Field("issue_identity"))?;
+        if ProjectId::parse(&self.project).is_none() {
+            return Err(Invalid::Field("issue_identity_project"));
+        }
         let expected = IssueAliasCoordinate::for_issue(self.alias.ordinal, &issue)?;
         if self.alias != expected {
             return Err(Invalid::Field("alias_binding"));
@@ -3003,6 +3014,7 @@ mod tests {
         assert_eq!(a.render("OPS").unwrap(), format!("OPS-12-{}", a.suffix()));
         assert!(IssueIdentityRecord {
             issue: ISSUE.into(),
+            project: PROJECT.into(),
             alias: a,
         }
         .validate()
@@ -3010,6 +3022,7 @@ mod tests {
         assert_eq!(
             IssueIdentityRecord {
                 issue: ISSUE.into(),
+                project: PROJECT.into(),
                 alias: b,
             }
             .validate(),

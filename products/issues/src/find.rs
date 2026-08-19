@@ -53,6 +53,17 @@ pub mod field {
     pub const STATE_CATEGORY: &str = "state_category";
     pub const KIND_PROJECT: &str = "kind_project";
     pub const KIND_PROJECT_STATE: &str = "kind_project_state";
+    /// The same `(kind, project, state)` coordinate, posted only while the
+    /// entity is live.
+    ///
+    /// A count is what a roll-up wants, and a count is exactly what an exact
+    /// posting gives for nothing. The tombstoned rows are what stopped it
+    /// being usable: they keep their placement, so counting the coordinate
+    /// counted deleted Issues as live, and excluding them meant resolving
+    /// every member row instead -- which is what put a ceiling on collections
+    /// that did not need one. Absent for a tombstoned entity, so the count
+    /// is the answer.
+    pub const KIND_PROJECT_STATE_LIVE: &str = "kind_project_state_live";
     pub const KIND_PROJECT_POSITION: &str = "kind_project_position";
     pub const KIND_PROJECT_POSITION_DESC: &str = "kind_project_position_desc";
     pub const KIND_CREATED_DESC: &str = "kind_created_desc";
@@ -85,6 +96,15 @@ pub mod field {
     pub const ALIAS_ORDINAL: &str = "alias_ordinal";
     pub const ALIAS_DISAMBIGUATOR: &str = "alias_disambiguator";
     pub const ALIAS_COORDINATE: &str = "alias_coordinate";
+    /// Exact `(project, ordinal)` posting: the reference a person types.
+    ///
+    /// The ordinal alone is not a coordinate. It is counted per project and
+    /// densely, so ordinal one exists in every project at once and seeking it
+    /// across a Space answers with as many rows as there are projects --
+    /// bounded by nothing the reader controls. Paired with its project it is
+    /// one exact seek that answers one row, or two when a partition produced
+    /// the same number twice, which is the case the full form settles.
+    pub const ALIAS_PROJECT_ORDINAL: &str = "alias_project_ordinal";
     pub const RELATION_KIND: &str = "relation_kind";
     pub const SOURCE_ID: &str = "source_id";
     pub const TARGET_ID: &str = "target_id";
@@ -241,6 +261,7 @@ fn schemas_with_sources(sources: Vec<SourceRef>) -> Vec<Schema> {
             (field::STATE_CATEGORY, FieldKind::Text, false),
             (field::KIND_PROJECT, FieldKind::Bytes, false),
             (field::KIND_PROJECT_STATE, FieldKind::Bytes, false),
+            (field::KIND_PROJECT_STATE_LIVE, FieldKind::Bytes, false),
             (field::KIND_PROJECT_POSITION, FieldKind::Bytes, false),
             (field::KIND_PROJECT_POSITION_DESC, FieldKind::Bytes, false),
             (field::KIND_CREATED_DESC, FieldKind::Bytes, false),
@@ -275,6 +296,7 @@ fn schemas_with_sources(sources: Vec<SourceRef>) -> Vec<Schema> {
             (field::ALIAS_ORDINAL, FieldKind::Unsigned, false),
             (field::ALIAS_DISAMBIGUATOR, FieldKind::Bytes, false),
             (field::ALIAS_COORDINATE, FieldKind::Text, false),
+            (field::ALIAS_PROJECT_ORDINAL, FieldKind::Bytes, false),
             (field::RELATION_KIND, FieldKind::Text, false),
             (field::SOURCE_ID, FieldKind::Text, false),
             (field::TARGET_ID, FieldKind::Text, false),
@@ -608,7 +630,9 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
         return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::ISSUE_IDENTITY_SCHEMA) {
-        return ExtractionShape::new(1, 20, 20, 4 * KIB, 4 * KIB, 32 * KIB);
+        // Two more coordinates than it carried: the project the ordinal was
+        // counted in, and the pair that makes the pair seekable.
+        return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::ISSUE_CHECK_SCHEMA) {
         // Five declared coordinates, plus the id and kind every entity
@@ -852,6 +876,16 @@ fn text_field<'a>(fields: &'a [ExtractedField], name: &str) -> Option<&'a str> {
     })
 }
 
+fn boolean_field(fields: &[ExtractedField], name: &str) -> Option<bool> {
+    fields
+        .iter()
+        .find(|item| item.reference == field_ref(name))
+        .and_then(|item| match &item.value {
+            Value::Bool(value) => Some(*value),
+            _ => None,
+        })
+}
+
 fn unsigned_field(fields: &[ExtractedField], name: &str) -> Option<u64> {
     fields.iter().find_map(|item| {
         (item.reference == field_ref(name))
@@ -958,6 +992,12 @@ fn entity(
                 field::KIND_PROJECT_STATE,
                 composite_key([kind, project.as_str(), state.as_str()]),
             ));
+            if !boolean_field(&fields, field::TOMBSTONE).unwrap_or(false) {
+                fields.push(bytes(
+                    field::KIND_PROJECT_STATE_LIVE,
+                    composite_key([kind, project.as_str(), state.as_str()]),
+                ));
+            }
             if kind == "issue" {
                 if let (Some(position), Some(block)) = (
                     text_field(&fields, field::POSITION).map(str::to_owned),
@@ -2039,6 +2079,11 @@ fn extract_issue_identity(
         "issue_identity",
         vec![
             exact_text(field::SOURCE_ID, record.issue),
+            exact_text(field::PROJECT, &record.project),
+            bytes(
+                field::ALIAS_PROJECT_ORDINAL,
+                composite_key([record.project.as_str(), &record.alias.ordinal.to_string()]),
+            ),
             unsigned(field::ALIAS_ORDINAL, record.alias.ordinal),
             bytes(
                 field::ALIAS_DISAMBIGUATOR,
@@ -3263,6 +3308,7 @@ mod tests {
         let issue = crate::ids::DocId::parse(ISSUE).unwrap();
         let identity = crate::records::IssueIdentityRecord {
             issue: ISSUE.into(),
+            project: PROJECT.into(),
             alias: crate::records::IssueAliasCoordinate::for_issue(7, &issue).unwrap(),
         };
         let placement = crate::records::IssuePlacementRecord {

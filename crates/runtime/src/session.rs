@@ -6355,15 +6355,20 @@ impl Session {
             .map_err(|_| Failure::CallbackPanicked)?;
             decision.map_err(Failure::Rejected)?
         };
-        if issued_find_cursor.load(std::sync::atomic::Ordering::Acquire) {
-            let mut inner = self.core.lock();
-            inner
-                .lease_world_publication(self.world_id.clone(), publication.clone())
-                .map_err(|_| Failure::PersistenceCause {
-                    operation: "retain World callback Find cursor publication",
-                    reason: "Station cursor retention capacity exceeded".into(),
-                })?;
-        }
+        // A cursor minted inside a SUBMIT callback is not retained, and the
+        // difference from the query path above is the whole reason: a query
+        // hands its cursor back to the caller, who may present it later, so
+        // the publication it names has to outlive the request. A submission
+        // answers with an effect. Its cursor reaches nobody, and paging
+        // WITHIN the callback is already served by the publication the
+        // callback holds pinned for its own duration.
+        //
+        // Retaining it anyway had a cost that fell on writes: leases are
+        // capped, each commit mints a fresh publication so every lease is a
+        // new key rather than a refresh, and a World that reads a page before
+        // it writes mints a continuation on every call. Enough writes inside
+        // one lease window and the next one is refused for the sake of a
+        // continuation nobody can present.
         let runtime = lower_exec(
             &effect.exec,
             world.exec_specs(),

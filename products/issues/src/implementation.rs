@@ -2472,12 +2472,22 @@ fn find_source_created_page(
 /// than this to detect overflow, so it has to stay under the page ceiling.
 const MAX_ROLLUP_MEMBERS: usize = 256;
 
-/// How many member issues a collection row will be enriched over.
+/// Members one collection row is scanned over before it reports itself
+/// unmeasured.
 ///
-/// Not a product guess: [`runtime::find::MAX_SEEK_IDS`] is the ceiling the
-/// Find layer itself declares for resolving a set of nodes by id, and that
-/// resolution is the second half of every count below.
-const ENRICHMENT_CEILING: u64 = runtime::find::MAX_SEEK_IDS as u64;
+/// This bounds MEMBERSHIP RECORDS READ, not live Issues counted, and the
+/// difference is the whole point: a soft-deleted Issue keeps its membership
+/// so that restoring it restores the membership, so a milestone holding a
+/// hundred live Issues and two hundred deleted ones is three hundred records
+/// to walk and a hundred to report. Bounding it by the answer's size would
+/// call that milestone unmeasurable while it sits comfortably inside what
+/// the reader can afford.
+///
+/// It was `MAX_SEEK_IDS`, which is the largest id set one Find may seek --
+/// an implementation limit of the second pass, promoted by mistake into a
+/// statement about what this product can count. The resolution chunks now,
+/// so that limit bounds a query rather than a collection.
+const MEMBERSHIP_SCAN: u64 = 512;
 
 /// Live and Done-category issue counts for a collection — the issues whose
 /// `kind` membership relation points at `target`. `None` means the collection
@@ -2521,7 +2531,7 @@ fn membership_counts(
     let Some(members) = counted.matched_total() else {
         return Ok(None);
     };
-    if members > ENRICHMENT_CEILING {
+    if members > MEMBERSHIP_SCAN {
         return Ok(None);
     }
     let limit = u32::try_from(members).map_err(|_| Rejection::StateCorrupt)?;
@@ -2551,7 +2561,18 @@ fn membership_counts(
     for row in answer.rows() {
         ids.push(result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?);
     }
-    let rows = find_issue_rows_by_ids(ctx, ids)?;
+    let rows = find_issue_rows_by_ids(ctx, ids.clone())?;
+    // Every member has to be accounted for, or the count is of something
+    // else. A member resolves to no row when its Issue has not converged
+    // here yet, or when its heads disagree so there is no single placement
+    // to read a state from -- and either way the honest answer is that this
+    // collection was not measured. Counting the rest and presenting it as
+    // the total is the failure this whole function is shaped to avoid: a
+    // number that looks measured, is smaller than the truth, and says
+    // nothing about the difference.
+    if rows.len() != ids.len() {
+        return Ok(None);
+    }
     let mut total = 0u32;
     let mut done = 0u32;
     for row in rows.values() {
@@ -2568,6 +2589,15 @@ fn membership_counts(
     Ok(Some((total, done)))
 }
 
+/// Ids resolved in one query.
+///
+/// `MAX_SEEK_IDS` is what the seek admits; this is what the PROJECTION
+/// admits, and it is the smaller of the two. A row is declared at 16 KiB
+/// against an 8 MiB grant, so 512 would be the ceiling and 256 the seek's --
+/// but the walk below re-reads every row to pack it, so this stays at half
+/// the seek's limit rather than at the edge of either.
+const ID_RESOLUTION_CHUNK: usize = 128;
+
 fn find_issue_rows_by_ids(
     ctx: &Context<'_>,
     ids: impl IntoIterator<Item = String>,
@@ -2583,10 +2613,10 @@ fn find_issue_rows_by_ids(
     // `Seek::Ids` admits `MAX_SEEK_IDS`, which is well under a page. Resolving
     // a full page in one query would be refused outright, so walk it in the
     // runtime's own units rather than declaring a ceiling this cannot honour.
-    if ids.len() > runtime::find::MAX_SEEK_IDS {
+    if ids.len() > ID_RESOLUTION_CHUNK {
         let mut merged = std::collections::BTreeMap::new();
         let ordered = ids.into_iter().collect::<Vec<_>>();
-        for chunk in ordered.chunks(runtime::find::MAX_SEEK_IDS) {
+        for chunk in ordered.chunks(ID_RESOLUTION_CHUNK) {
             merged.extend(find_issue_rows_by_ids(ctx, chunk.to_vec())?);
         }
         return Ok(merged);
@@ -2600,7 +2630,17 @@ fn find_issue_rows_by_ids(
         paths_retained: 1,
         candidates_per_branch: count.saturating_mul(2),
         score_evaluations: 1,
-        projected_bytes: count.saturating_mul(64 * 1_024),
+        // Sixteen KiB a row, not sixty-four. This packs bounded identity and
+        // placement coordinates -- large text is hydrated from the source Body
+        // by the detail paths -- and claiming the 64 KiB tuple made the
+        // DECLARED budget exceed the Station's 8 MiB grant above 128 rows.
+        // Find refuses on the declaration before it evaluates anything, so a
+        // request for 129 ids was refused whole, and the chunking below at 256
+        // produced chunks that were each refused in turn. What that cost was a
+        // milestone with two hundred issues reporting its progress as
+        // unreadable rather than as unmeasured, which is the distinction this
+        // file spends its bounds to keep.
+        projected_bytes: count.saturating_mul(16 * 1_024),
         packed_tokens: count.saturating_mul(4_096),
         wall_millis: 5_000,
     };
@@ -4326,11 +4366,17 @@ fn unique_find_row(
 /// it is paid: a short reference naming more than one Issue is refused, and
 /// the refusal is the signal to use the full form, which always resolves.
 ///
-/// The scan is the ordinal's own prefix of the alias coordinate. Every alias
-/// under it is `<ordinal>-<32 lowercase hex>`, and a longer ordinal sorts
-/// above the upper bound because a digit is greater than `-`, so the range
-/// holds exactly the Issues sharing this ordinal -- a handful at worst, and
-/// one almost always.
+/// One exact seek on the `(project, ordinal)` posting.
+///
+/// It used to seek the ordinal's own prefix across the whole Space and then
+/// filter the rows by project, which was survivable only while ordinals were
+/// hashes spread over sixty-three bits: one prefix meant one Issue. Counting
+/// made them small and dense, so ordinal one now exists in every project at
+/// once and that scan returned a row per project -- reading each one's
+/// coordinate to find out which -- until it exceeded its cap and answered
+/// that the reference names nothing.
+///
+/// The pair is what the reference means, so the pair is what is indexed.
 fn unique_doc_for_ordinal(
     ctx: &Context<'_>,
     project: &str,
@@ -4340,22 +4386,16 @@ fn unique_doc_for_ordinal(
         limit: ALIAS_ORDINAL_SCAN,
         cursor: None,
     };
-    // Seek the prefix, not a half-open range closed by a `Keep`. A `Keep`
-    // does not bound a scan: the runtime charges its meter for every row it
-    // visits and only then discards, and a discarded row does not fill the
-    // page either -- so the scan runs to the end of the field and trips the
-    // bound instead of stopping. `Test::Prefix` is bounded by the corpus.
-    let answer = find_field_test_page(
+    let answer = find_field_page(
         ctx,
-        crate::find::field::ALIAS_COORDINATE,
-        runtime::find::Test::Prefix,
-        runtime::find::Atom::Text(format!("{ordinal}-")),
+        crate::find::field::ALIAS_PROJECT_ORDINAL,
+        runtime::find::Atom::Bytes(crate::find::composite_key([project, &ordinal.to_string()])),
         &request,
         Vec::new(),
         vec![crate::find::field_ref(crate::find::field::SOURCE_ID)],
     )?;
-    // More sharing one ordinal than the scan admits is not something to
-    // resolve by taking the first: say the reference is not usable.
+    // More Issues wearing one number than this admits is not something to
+    // settle by taking the first.
     if answer.next_cursor().is_some() {
         return Err(Rejection::InvalidRequest);
     }
@@ -4365,14 +4405,9 @@ fn unique_doc_for_ordinal(
             continue;
         }
         let doc = result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?;
-        let Some(coordinate) = crate::record_store::issue_coordinate_for(ctx, &doc)? else {
-            continue;
-        };
-        if coordinate.placement.project != project {
-            continue;
-        }
         if found.replace(doc).is_some() {
-            // Ambiguous inside one project. The full form is what names it.
+            // Two Issues counted the same number while apart. The short form
+            // cannot say which; the full one always can.
             return Err(Rejection::InvalidRequest);
         }
     }
@@ -4852,69 +4887,60 @@ fn aliases_for_issue(
 
 /// Live and Done-category Issue counts for one project.
 ///
-/// The sibling of `membership_counts`, for the roll-ups whose members are
-/// projects rather than Issues. Same two seeks and the same rule: a bare
-/// posting count decides whether measuring is affordable, and a project too
-/// large to measure reports itself unmeasured rather than counting one page.
+/// Exact, and bounded by the project's workflow rather than by its size.
+/// Every live Issue posts `(kind, project, state)` and a tombstoned one does
+/// not, so one direct posting count per state is the whole answer: sum them
+/// for the total, sum the Done-category ones for the rest. A count that
+/// visits no rows has nothing to cap, so a project of ten thousand Issues
+/// answers as readily as one of ten.
+///
+/// It used to resolve every member row to read its state and its tombstone,
+/// which is why it had a ceiling and why it reported a project past that
+/// ceiling as unmeasured -- a regression against the plane this replaced,
+/// which counted exactly because it held the whole catalog in memory.
 fn project_issue_counts(
     ctx: &Context<'_>,
     catalog: &mut CatalogState,
     project: &str,
 ) -> Result<Option<(u32, u32)>, Rejection> {
-    let probe = contract::PageRequest {
-        limit: 1,
-        cursor: None,
-    };
-    let counted = find_kind_page(ctx, "issue", Some(project), &probe, Vec::new(), Vec::new())?;
-    let Some(members) = counted.matched_total() else {
-        return Ok(None);
-    };
-    if members > ENRICHMENT_CEILING {
-        return Ok(None);
-    }
-    let limit = u32::try_from(members).map_err(|_| Rejection::StateCorrupt)?;
-    if limit == 0 {
-        return Ok(Some((0, 0)));
-    }
-    let answer = find_kind_page(
-        ctx,
-        "issue",
-        Some(project),
-        &contract::PageRequest {
-            limit,
-            cursor: None,
-        },
-        Vec::new(),
-        [
-            crate::find::field::STATE,
-            crate::find::field::TOMBSTONE,
-            crate::find::field::PROJECT,
-            crate::find::field::TITLE,
-            crate::find::field::PRIORITY,
-        ]
-        .into_iter()
-        .map(crate::find::field_ref)
-        .collect(),
-    )?;
-    if answer.next_cursor().is_some() {
-        return Ok(None);
-    }
     apply_project_workflow(ctx, catalog, project)?;
-    let mut total = 0u32;
-    let mut done = 0u32;
-    for row in answer.rows() {
-        if result_bool(row, crate::find::field::TOMBSTONE).unwrap_or(false) {
-            continue;
-        }
-        let Some(state) = result_text(row, crate::find::field::STATE) else {
-            continue;
+    let Some(workflow) = catalog.workflow_head(project) else {
+        return Ok(None);
+    };
+    let states = workflow.body.states.clone();
+    let mut total = 0u64;
+    let mut done = 0u64;
+    for state in &states {
+        let counted = find_field_page(
+            ctx,
+            crate::find::field::KIND_PROJECT_STATE_LIVE,
+            runtime::find::Atom::Bytes(crate::find::composite_key([
+                "issue",
+                project,
+                state.state_id.as_str(),
+            ])),
+            &contract::PageRequest {
+                limit: 1,
+                cursor: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        )?;
+        // An absent total is the runtime declining to answer. One state it
+        // will not count makes the sum a different number, not a smaller
+        // one, so the whole roll-up is unmeasured.
+        let Some(held) = counted.matched_total() else {
+            return Ok(None);
         };
-        total = total.saturating_add(1);
-        if issue_status_category(catalog, project, &state)? == StatusCategory::Done {
-            done = done.saturating_add(1);
+        total = total.saturating_add(held);
+        if crate::dto::StatusCategory::parse(&state.category) == Some(StatusCategory::Done) {
+            done = done.saturating_add(held);
         }
     }
-    Ok(Some((total, done)))
+    Ok(Some((
+        u32::try_from(total).unwrap_or(u32::MAX),
+        u32::try_from(done).unwrap_or(u32::MAX),
+    )))
 }
 
 /// Put the relation-held facts a list row shows onto one row.
@@ -5012,7 +5038,23 @@ fn team_project_keys(ctx: &Context<'_>, team: &str) -> Result<Vec<String>, Rejec
 /// their full form, and never overwrite one another. What a collision costs
 /// is that the short form is ambiguous for those two until somebody says
 /// which -- not that anything is lost.
-fn next_project_ordinal(ctx: &Context<'_>, project: &str) -> Result<u64, Rejection> {
+fn next_project_ordinal(
+    ctx: &Context<'_>,
+    project: &str,
+    run: &mut BTreeMap<String, u64>,
+) -> Result<u64, Rejection> {
+    // What this submission has already handed out, if anything. One action
+    // can create many Issues, and it reads one pinned publication throughout
+    // — which by construction does not contain the Issues it is itself
+    // staging. Counting afresh per Issue therefore returned the same number
+    // every time, so a change set creating sixty-four Issues gave all
+    // sixty-four the same one. That is not the offline collision this design
+    // accepts; it is a collision inside a single operation, every time.
+    if let Some(next) = run.get(project) {
+        let ordinal = *next;
+        run.insert(project.to_string(), ordinal.saturating_add(1));
+        return Ok(ordinal);
+    }
     let counted = find_kind_page(
         ctx,
         "issue",
@@ -5027,7 +5069,9 @@ fn next_project_ordinal(ctx: &Context<'_>, project: &str) -> Result<u64, Rejecti
     // An absent total is the runtime declining to answer, and a number
     // guessed from nothing would collide with every Issue already here.
     let held = counted.matched_total().ok_or(Rejection::LimitExceeded)?;
-    Ok(held.saturating_add(1))
+    let ordinal = held.saturating_add(1);
+    run.insert(project.to_string(), ordinal.saturating_add(1));
+    Ok(ordinal)
 }
 
 fn apply_project_workflow(
@@ -7068,9 +7112,11 @@ fn stage_label_delete(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn stage_issue_create(
     staging: &mut Staging,
     ctx: &Context<'_>,
+    ordinals: &mut BTreeMap<String, u64>,
     doc: &str,
     project: &str,
     title: String,
@@ -7197,13 +7243,13 @@ fn stage_issue_create(
             ctx, doc, project, "label", label, true,
         )?);
     }
-    let ordinal = next_project_ordinal(ctx, project)?;
+    let ordinal = next_project_ordinal(ctx, project, ordinals)?;
     let placement_plan =
         crate::record_store::board_placement(ctx, project, &status, doc, Some(&Pos::Top))?;
     let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
     staging.absorb_records(placement_plan.maintenance);
     let mut batch = crate::record_store::Batch::default();
-    crate::record_store::write_issue_identity(ctx, &mut batch, doc, ordinal)?;
+    crate::record_store::write_issue_identity(ctx, &mut batch, doc, project, ordinal)?;
     staging.absorb_records(batch);
     let meta = IssueState {
         project: project.into(),
@@ -8081,6 +8127,10 @@ impl World for IssuesWorld {
                 let publication = self.portable_publication(ctx)?;
                 let mut created_projects = BTreeMap::<u16, String>::new();
                 let mut created_labels = BTreeMap::<u16, String>::new();
+                // Numbers handed out by THIS action, per project. The pinned
+                // publication cannot see what the action is staging, so the
+                // count is taken once and carried forward from there.
+                let mut ordinal_run = BTreeMap::<String, u64>::new();
                 let mut demand: Option<Vec<u8>> = None;
                 for (index, operation) in operations.into_iter().enumerate() {
                     let ordinal = u16::try_from(index).map_err(|_| Rejection::LimitExceeded)?;
@@ -8232,6 +8282,7 @@ impl World for IssuesWorld {
                             let next = stage_issue_create(
                                 &mut staging,
                                 ctx,
+                                &mut ordinal_run,
                                 &doc,
                                 &project,
                                 title,
@@ -8887,7 +8938,7 @@ impl World for IssuesWorld {
                 // The number a person reads, counted from what the project
                 // already holds. Creation still contends on nothing: this is
                 // a posting count, not a register anybody has to agree on.
-                let ordinal = next_project_ordinal(ctx, &project)?;
+                let ordinal = next_project_ordinal(ctx, &project, &mut BTreeMap::new())?;
                 let placement_plan = crate::record_store::board_placement(
                     ctx,
                     &project,
@@ -8898,7 +8949,9 @@ impl World for IssuesWorld {
                 let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
                 staging.absorb_records(placement_plan.maintenance);
                 let mut batch = crate::record_store::Batch::default();
-                crate::record_store::write_issue_identity(ctx, &mut batch, &doc, ordinal)?;
+                crate::record_store::write_issue_identity(
+                    ctx, &mut batch, &doc, &project, ordinal,
+                )?;
                 staging.absorb_records(batch);
                 let meta = IssueState {
                     project: project.clone(),
@@ -11300,7 +11353,7 @@ impl World for IssuesWorld {
                                 },
                             );
                         }
-                        let ordinal = next_project_ordinal(ctx, &project)?;
+                        let ordinal = next_project_ordinal(ctx, &project, &mut BTreeMap::new())?;
                         let placement_plan = crate::record_store::board_placement(
                             ctx,
                             &project,
@@ -11311,7 +11364,9 @@ impl World for IssuesWorld {
                         let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
                         staging.absorb_records(placement_plan.maintenance);
                         let mut batch = crate::record_store::Batch::default();
-                        crate::record_store::write_issue_identity(ctx, &mut batch, &doc, ordinal)?;
+                        crate::record_store::write_issue_identity(
+                            ctx, &mut batch, &doc, &project, ordinal,
+                        )?;
                         staging.absorb_records(batch);
                         let meta = IssueState {
                             project: project.clone(),
