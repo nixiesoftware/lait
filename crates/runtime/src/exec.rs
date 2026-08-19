@@ -1692,11 +1692,11 @@ impl<'a> Context<'a> {
         if sequence > self.attempt.limits.checkpoints {
             return Err(Failure::CheckpointLimit);
         }
-        let staged_bytes: u64 = self
-            .checkpoint_blobs
-            .iter()
-            .map(|(_, blob)| blob.len() as u64)
-            .sum();
+        let mut staged_bytes: u64 = 0;
+        for (_, blob) in &self.checkpoint_blobs {
+            let held = u64::try_from(blob.len()).map_err(|_| Failure::CheckpointLimit)?;
+            staged_bytes = staged_bytes.saturating_add(held);
+        }
         let added = u64::try_from(bytes.len()).map_err(|_| Failure::CheckpointLimit)?;
         if staged_bytes.saturating_add(added) > self.attempt.limits.checkpoint_bytes {
             return Err(Failure::CheckpointLimit);
