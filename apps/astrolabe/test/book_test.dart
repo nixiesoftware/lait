@@ -16,6 +16,7 @@ import 'package:astrolabe/src/shell/window.dart';
 
 ClientView _view({
   BookFacts? book,
+  CorrespondenceFacts? correspondence,
   List<String> inFlight = const [],
   bool hostAnswered = false,
 }) =>
@@ -35,9 +36,29 @@ ClientView _view({
       storage: const [],
       orbits: const [],
       book: book,
+      correspondence: correspondence,
       notices: const [],
       failures: const [],
       inFlight: inFlight,
+    );
+
+ContactRow _contact({
+  required String id,
+  required String name,
+  bool added = true,
+  bool isAgent = false,
+  String? parentName,
+  int unread = 0,
+}) =>
+    ContactRow(
+      id: id,
+      name: name,
+      devices: const ['device:1'],
+      added: added,
+      isAgent: isAgent,
+      parentId: parentName == null ? null : 'parent',
+      parentName: parentName,
+      unread: unread,
     );
 
 BookFacts _book(
@@ -583,4 +604,52 @@ void main() {
     expect(dismiss.onPressed, isNotNull);
   });
 
+  testWidgets('known contacts are the list; the unknown are behind a badged '
+      'incoming button', (tester) async {
+    CorrespondenceFacts matrix() => CorrespondenceFacts(
+          myDevice: null,
+          contacts: [
+            _contact(id: 'ada', name: 'Ada', added: true, unread: 3),
+            _contact(id: 'turing', name: 'Turing', added: true, isAgent: true),
+            _contact(
+              id: 'ada-assistant',
+              name: "Ada's assistant",
+              added: true,
+              isAgent: true,
+              parentName: 'Ada',
+            ),
+            _contact(id: 'grace', name: 'Grace', added: false),
+            _contact(
+              id: 'grace-bot',
+              name: "Grace's scheduler",
+              added: false,
+              isAgent: true,
+              parentName: 'Grace',
+            ),
+          ],
+          conversations: const [],
+          openTabs: const [],
+          activeTab: null,
+        );
+
+    await _pump(tester, _view(correspondence: matrix()));
+
+    // Known contacts are the list; agents wear the note; unread shows its
+    // count. The two unknowns are NOT in the list — only the band's badge is.
+    expect(find.text('Ada'), findsOneWidget);
+    expect(find.text('Turing'), findsOneWidget);
+    expect(find.text("Ada's agent"), findsOneWidget);
+    expect(find.text('3'), findsOneWidget, reason: 'Ada unread');
+    expect(find.text('Grace'), findsNothing, reason: 'a stranger is hidden');
+    expect(find.text('2'), findsOneWidget, reason: 'incoming badge count');
+    // The door to the unknown is the band's personAdd button.
+    expect(find.byIcon(AppIcons.personAdd), findsOneWidget);
+
+    // Opening it reveals the strangers, and hides the known list.
+    await tester.tap(find.byIcon(AppIcons.personAdd));
+    await tester.pump();
+    expect(find.text('Grace'), findsOneWidget);
+    expect(find.text("Grace's agent"), findsOneWidget);
+    expect(find.text('Ada'), findsNothing, reason: 'known list is hidden now');
+  });
 }

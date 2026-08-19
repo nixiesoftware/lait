@@ -61,12 +61,20 @@ pub fn is_read(req: &Request) -> bool {
 
         Request::Work { request, .. } if !request.is_command() => true,
 
+        // Rendering a surface for this machine's own screen commits nothing:
+        // no assignment, no receiver, no stored bytes. Its invocation is
+        // classified `Query` at the client boundary *and* independently by the
+        // trusted runtime before World code runs, which is a stronger guarantee
+        // than this allowlist could make on its own.
+        Request::DisplayPresent { .. } => true,
+
         Request::AgentAdd { .. }
         | Request::DisplayPairingApprove { .. }
         | Request::DisplayPairingReject { .. }
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
+        | Request::DisplayIdentifierAdmitPassphrase { .. }
         | Request::AgentProvision { .. }
         | Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
@@ -259,6 +267,8 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
+        | Request::DisplayPresent { .. }
+        | Request::DisplayIdentifierAdmitPassphrase { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
         | Request::Members

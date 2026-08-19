@@ -624,6 +624,23 @@ fn production_boundaries_expose_no_fault_injectors() {
 fn concept_crates_expose_only_their_semantic_namespaces() {
     let root = workspace_root();
     let expected: &[(&str, &[&str])] = &[
+        (
+            "correspondence",
+            // The carrier seam is the crate root — `Carrier`, `Sealed`, `Missed`.
+            // Two kinds of module hang off it, and both are legitimate:
+            //
+            // Contractors — `mem` (in-process, for tests) and `post` (the hosted
+            // `lait-post` over HTTP). A new one here should be another contractor.
+            //
+            // The plane's own concepts — `letter` (what crosses: an invitation or
+            // a message, sealed and signed), `mailbox` (the local inbox of opened
+            // letters), and `watch` (noticing an arrival on a timer). These are the
+            // correspondence domain, the same way `actor`/`egress`/`kinship` are
+            // mechanics' domain — a concept crate names its concepts. What must not
+            // appear is a *delivery-mechanism* opinion leaking up from a contractor
+            // into the seam, which is the thing the seam exists not to have.
+            &["letter", "mailbox", "mem", "post", "watch"],
+        ),
         ("fabric", &[]),
         ("journal", &[]),
         (
@@ -632,6 +649,17 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 "actor",
                 "assignment",
                 "authorization",
+                // Whose key is about to be spent on the way out. Public because
+                // the crate that carries correspondence has to take the witness
+                // as an argument — that is the whole enforcement mechanism, and a
+                // witness type nobody outside can name cannot be an argument.
+                //
+                // Deliberately not folded into `authorization`: that module
+                // answers whether an act is permitted, and this one answers whose
+                // signature would make it. A grant can be revoked; a signature
+                // made under somebody else's identity cannot be recalled, so the
+                // two are not degrees of one question.
+                "egress",
                 "ids",
                 // The Space-less relation plane: mutual device links, signed
                 // audience-scoped avowals, and the projection that commits to

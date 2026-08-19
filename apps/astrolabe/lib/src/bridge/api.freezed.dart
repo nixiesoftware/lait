@@ -62,6 +62,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_ReadSpace value)? readSpace,
     TResult Function(ActionRequest_StartHead value)? startHead,
     TResult Function(ActionRequest_StopHead value)? stopHead,
+    TResult Function(ActionRequest_SendMessage value)? sendMessage,
+    TResult Function(ActionRequest_CollectMail value)? collectMail,
+    TResult Function(ActionRequest_BlockSender value)? blockSender,
+    TResult Function(ActionRequest_AcceptContact value)? acceptContact,
+    TResult Function(ActionRequest_OpenConversation value)? openConversation,
+    TResult Function(ActionRequest_FocusConversation value)? focusConversation,
+    TResult Function(ActionRequest_CloseConversation value)? closeConversation,
     TResult Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
     TResult Function(ActionRequest_BookPut value)? bookPut,
     TResult Function(ActionRequest_BookDelete value)? bookDelete,
@@ -85,6 +92,12 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     TResult Function(ActionRequest_DisplayDeviceRevoke value)?
         displayDeviceRevoke,
+    TResult Function(ActionRequest_DisplayIdentifierAdmitPassphrase value)?
+        displayIdentifierAdmitPassphrase,
+    TResult Function(ActionRequest_EnterPresentation value)? enterPresentation,
+    TResult Function(ActionRequest_PresentHere value)? presentHere,
+    TResult Function(ActionRequest_PresentRefresh value)? presentRefresh,
+    TResult Function(ActionRequest_LeavePresentation value)? leavePresentation,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -113,6 +126,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead(_that);
       case ActionRequest_StopHead() when stopHead != null:
         return stopHead(_that);
+      case ActionRequest_SendMessage() when sendMessage != null:
+        return sendMessage(_that);
+      case ActionRequest_CollectMail() when collectMail != null:
+        return collectMail(_that);
+      case ActionRequest_BlockSender() when blockSender != null:
+        return blockSender(_that);
+      case ActionRequest_AcceptContact() when acceptContact != null:
+        return acceptContact(_that);
+      case ActionRequest_OpenConversation() when openConversation != null:
+        return openConversation(_that);
+      case ActionRequest_FocusConversation() when focusConversation != null:
+        return focusConversation(_that);
+      case ActionRequest_CloseConversation() when closeConversation != null:
+        return closeConversation(_that);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that);
       case ActionRequest_BookPut() when bookPut != null:
@@ -153,6 +180,17 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase()
+          when displayIdentifierAdmitPassphrase != null:
+        return displayIdentifierAdmitPassphrase(_that);
+      case ActionRequest_EnterPresentation() when enterPresentation != null:
+        return enterPresentation(_that);
+      case ActionRequest_PresentHere() when presentHere != null:
+        return presentHere(_that);
+      case ActionRequest_PresentRefresh() when presentRefresh != null:
+        return presentRefresh(_that);
+      case ActionRequest_LeavePresentation() when leavePresentation != null:
+        return leavePresentation(_that);
       case _:
         return orElse();
     }
@@ -186,6 +224,16 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_ReadSpace value) readSpace,
     required TResult Function(ActionRequest_StartHead value) startHead,
     required TResult Function(ActionRequest_StopHead value) stopHead,
+    required TResult Function(ActionRequest_SendMessage value) sendMessage,
+    required TResult Function(ActionRequest_CollectMail value) collectMail,
+    required TResult Function(ActionRequest_BlockSender value) blockSender,
+    required TResult Function(ActionRequest_AcceptContact value) acceptContact,
+    required TResult Function(ActionRequest_OpenConversation value)
+        openConversation,
+    required TResult Function(ActionRequest_FocusConversation value)
+        focusConversation,
+    required TResult Function(ActionRequest_CloseConversation value)
+        closeConversation,
     required TResult Function(ActionRequest_ForgetOrbit value) forgetOrbit,
     required TResult Function(ActionRequest_BookPut value) bookPut,
     required TResult Function(ActionRequest_BookDelete value) bookDelete,
@@ -210,6 +258,16 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     required TResult Function(ActionRequest_DisplayDeviceRevoke value)
         displayDeviceRevoke,
+    required TResult Function(
+            ActionRequest_DisplayIdentifierAdmitPassphrase value)
+        displayIdentifierAdmitPassphrase,
+    required TResult Function(ActionRequest_EnterPresentation value)
+        enterPresentation,
+    required TResult Function(ActionRequest_PresentHere value) presentHere,
+    required TResult Function(ActionRequest_PresentRefresh value)
+        presentRefresh,
+    required TResult Function(ActionRequest_LeavePresentation value)
+        leavePresentation,
   }) {
     final _that = this;
     switch (_that) {
@@ -237,6 +295,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead(_that);
       case ActionRequest_StopHead():
         return stopHead(_that);
+      case ActionRequest_SendMessage():
+        return sendMessage(_that);
+      case ActionRequest_CollectMail():
+        return collectMail(_that);
+      case ActionRequest_BlockSender():
+        return blockSender(_that);
+      case ActionRequest_AcceptContact():
+        return acceptContact(_that);
+      case ActionRequest_OpenConversation():
+        return openConversation(_that);
+      case ActionRequest_FocusConversation():
+        return focusConversation(_that);
+      case ActionRequest_CloseConversation():
+        return closeConversation(_that);
       case ActionRequest_ForgetOrbit():
         return forgetOrbit(_that);
       case ActionRequest_BookPut():
@@ -273,6 +345,16 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke():
         return displayDeviceRevoke(_that);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase():
+        return displayIdentifierAdmitPassphrase(_that);
+      case ActionRequest_EnterPresentation():
+        return enterPresentation(_that);
+      case ActionRequest_PresentHere():
+        return presentHere(_that);
+      case ActionRequest_PresentRefresh():
+        return presentRefresh(_that);
+      case ActionRequest_LeavePresentation():
+        return leavePresentation(_that);
     }
   }
 
@@ -302,6 +384,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_ReadSpace value)? readSpace,
     TResult? Function(ActionRequest_StartHead value)? startHead,
     TResult? Function(ActionRequest_StopHead value)? stopHead,
+    TResult? Function(ActionRequest_SendMessage value)? sendMessage,
+    TResult? Function(ActionRequest_CollectMail value)? collectMail,
+    TResult? Function(ActionRequest_BlockSender value)? blockSender,
+    TResult? Function(ActionRequest_AcceptContact value)? acceptContact,
+    TResult? Function(ActionRequest_OpenConversation value)? openConversation,
+    TResult? Function(ActionRequest_FocusConversation value)? focusConversation,
+    TResult? Function(ActionRequest_CloseConversation value)? closeConversation,
     TResult? Function(ActionRequest_ForgetOrbit value)? forgetOrbit,
     TResult? Function(ActionRequest_BookPut value)? bookPut,
     TResult? Function(ActionRequest_BookDelete value)? bookDelete,
@@ -325,6 +414,12 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentRevoke,
     TResult? Function(ActionRequest_DisplayDeviceRevoke value)?
         displayDeviceRevoke,
+    TResult? Function(ActionRequest_DisplayIdentifierAdmitPassphrase value)?
+        displayIdentifierAdmitPassphrase,
+    TResult? Function(ActionRequest_EnterPresentation value)? enterPresentation,
+    TResult? Function(ActionRequest_PresentHere value)? presentHere,
+    TResult? Function(ActionRequest_PresentRefresh value)? presentRefresh,
+    TResult? Function(ActionRequest_LeavePresentation value)? leavePresentation,
   }) {
     final _that = this;
     switch (_that) {
@@ -352,6 +447,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead(_that);
       case ActionRequest_StopHead() when stopHead != null:
         return stopHead(_that);
+      case ActionRequest_SendMessage() when sendMessage != null:
+        return sendMessage(_that);
+      case ActionRequest_CollectMail() when collectMail != null:
+        return collectMail(_that);
+      case ActionRequest_BlockSender() when blockSender != null:
+        return blockSender(_that);
+      case ActionRequest_AcceptContact() when acceptContact != null:
+        return acceptContact(_that);
+      case ActionRequest_OpenConversation() when openConversation != null:
+        return openConversation(_that);
+      case ActionRequest_FocusConversation() when focusConversation != null:
+        return focusConversation(_that);
+      case ActionRequest_CloseConversation() when closeConversation != null:
+        return closeConversation(_that);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that);
       case ActionRequest_BookPut() when bookPut != null:
@@ -392,6 +501,17 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase()
+          when displayIdentifierAdmitPassphrase != null:
+        return displayIdentifierAdmitPassphrase(_that);
+      case ActionRequest_EnterPresentation() when enterPresentation != null:
+        return enterPresentation(_that);
+      case ActionRequest_PresentHere() when presentHere != null:
+        return presentHere(_that);
+      case ActionRequest_PresentRefresh() when presentRefresh != null:
+        return presentRefresh(_that);
+      case ActionRequest_LeavePresentation() when leavePresentation != null:
+        return leavePresentation(_that);
       case _:
         return null;
     }
@@ -412,7 +532,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
     TResult Function()? refresh,
-    TResult Function(String entryPath)? open,
+    TResult Function(String world, String entryPath)? open,
     TResult Function(String world)? updateWorld,
     TResult Function(String id)? startDevice,
     TResult Function(String id)? stopDevice,
@@ -423,6 +543,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String orbit)? readSpace,
     TResult Function()? startHead,
     TResult Function(String id)? stopHead,
+    TResult Function(String to, String body)? sendMessage,
+    TResult Function()? collectMail,
+    TResult Function(String person)? blockSender,
+    TResult Function(String person)? acceptContact,
+    TResult Function(String person)? openConversation,
+    TResult Function(String person)? focusConversation,
+    TResult Function(String person)? closeConversation,
     TResult Function(String space)? forgetOrbit,
     TResult Function(String? card, String name, String? note)? bookPut,
     TResult Function(String card)? bookDelete,
@@ -456,6 +583,13 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     TResult Function(String assignment)? displayAssignmentRevoke,
     TResult Function(String device)? displayDeviceRevoke,
+    TResult Function(String passphrase)? displayIdentifierAdmitPassphrase,
+    TResult Function()? enterPresentation,
+    TResult Function(String orbit, String world, String surface, String input,
+            String title)?
+        presentHere,
+    TResult Function()? presentRefresh,
+    TResult Function()? leavePresentation,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -463,7 +597,7 @@ extension ActionRequestPatterns on ActionRequest {
       case ActionRequest_Refresh() when refresh != null:
         return refresh();
       case ActionRequest_Open() when open != null:
-        return open(_that.entryPath);
+        return open(_that.world, _that.entryPath);
       case ActionRequest_UpdateWorld() when updateWorld != null:
         return updateWorld(_that.world);
       case ActionRequest_StartDevice() when startDevice != null:
@@ -484,6 +618,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead();
       case ActionRequest_StopHead() when stopHead != null:
         return stopHead(_that.id);
+      case ActionRequest_SendMessage() when sendMessage != null:
+        return sendMessage(_that.to, _that.body);
+      case ActionRequest_CollectMail() when collectMail != null:
+        return collectMail();
+      case ActionRequest_BlockSender() when blockSender != null:
+        return blockSender(_that.person);
+      case ActionRequest_AcceptContact() when acceptContact != null:
+        return acceptContact(_that.person);
+      case ActionRequest_OpenConversation() when openConversation != null:
+        return openConversation(_that.person);
+      case ActionRequest_FocusConversation() when focusConversation != null:
+        return focusConversation(_that.person);
+      case ActionRequest_CloseConversation() when closeConversation != null:
+        return closeConversation(_that.person);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that.space);
       case ActionRequest_BookPut() when bookPut != null:
@@ -537,6 +685,18 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase()
+          when displayIdentifierAdmitPassphrase != null:
+        return displayIdentifierAdmitPassphrase(_that.passphrase);
+      case ActionRequest_EnterPresentation() when enterPresentation != null:
+        return enterPresentation();
+      case ActionRequest_PresentHere() when presentHere != null:
+        return presentHere(
+            _that.orbit, _that.world, _that.surface, _that.input, _that.title);
+      case ActionRequest_PresentRefresh() when presentRefresh != null:
+        return presentRefresh();
+      case ActionRequest_LeavePresentation() when leavePresentation != null:
+        return leavePresentation();
       case _:
         return orElse();
     }
@@ -558,7 +718,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult when<TResult extends Object?>({
     required TResult Function() refresh,
-    required TResult Function(String entryPath) open,
+    required TResult Function(String world, String entryPath) open,
     required TResult Function(String world) updateWorld,
     required TResult Function(String id) startDevice,
     required TResult Function(String id) stopDevice,
@@ -569,6 +729,13 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(String orbit) readSpace,
     required TResult Function() startHead,
     required TResult Function(String id) stopHead,
+    required TResult Function(String to, String body) sendMessage,
+    required TResult Function() collectMail,
+    required TResult Function(String person) blockSender,
+    required TResult Function(String person) acceptContact,
+    required TResult Function(String person) openConversation,
+    required TResult Function(String person) focusConversation,
+    required TResult Function(String person) closeConversation,
     required TResult Function(String space) forgetOrbit,
     required TResult Function(String? card, String name, String? note) bookPut,
     required TResult Function(String card) bookDelete,
@@ -610,13 +777,21 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     required TResult Function(String assignment) displayAssignmentRevoke,
     required TResult Function(String device) displayDeviceRevoke,
+    required TResult Function(String passphrase)
+        displayIdentifierAdmitPassphrase,
+    required TResult Function() enterPresentation,
+    required TResult Function(String orbit, String world, String surface,
+            String input, String title)
+        presentHere,
+    required TResult Function() presentRefresh,
+    required TResult Function() leavePresentation,
   }) {
     final _that = this;
     switch (_that) {
       case ActionRequest_Refresh():
         return refresh();
       case ActionRequest_Open():
-        return open(_that.entryPath);
+        return open(_that.world, _that.entryPath);
       case ActionRequest_UpdateWorld():
         return updateWorld(_that.world);
       case ActionRequest_StartDevice():
@@ -637,6 +812,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead();
       case ActionRequest_StopHead():
         return stopHead(_that.id);
+      case ActionRequest_SendMessage():
+        return sendMessage(_that.to, _that.body);
+      case ActionRequest_CollectMail():
+        return collectMail();
+      case ActionRequest_BlockSender():
+        return blockSender(_that.person);
+      case ActionRequest_AcceptContact():
+        return acceptContact(_that.person);
+      case ActionRequest_OpenConversation():
+        return openConversation(_that.person);
+      case ActionRequest_FocusConversation():
+        return focusConversation(_that.person);
+      case ActionRequest_CloseConversation():
+        return closeConversation(_that.person);
       case ActionRequest_ForgetOrbit():
         return forgetOrbit(_that.space);
       case ActionRequest_BookPut():
@@ -686,6 +875,17 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke():
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase():
+        return displayIdentifierAdmitPassphrase(_that.passphrase);
+      case ActionRequest_EnterPresentation():
+        return enterPresentation();
+      case ActionRequest_PresentHere():
+        return presentHere(
+            _that.orbit, _that.world, _that.surface, _that.input, _that.title);
+      case ActionRequest_PresentRefresh():
+        return presentRefresh();
+      case ActionRequest_LeavePresentation():
+        return leavePresentation();
     }
   }
 
@@ -704,7 +904,7 @@ extension ActionRequestPatterns on ActionRequest {
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function()? refresh,
-    TResult? Function(String entryPath)? open,
+    TResult? Function(String world, String entryPath)? open,
     TResult? Function(String world)? updateWorld,
     TResult? Function(String id)? startDevice,
     TResult? Function(String id)? stopDevice,
@@ -715,6 +915,13 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String orbit)? readSpace,
     TResult? Function()? startHead,
     TResult? Function(String id)? stopHead,
+    TResult? Function(String to, String body)? sendMessage,
+    TResult? Function()? collectMail,
+    TResult? Function(String person)? blockSender,
+    TResult? Function(String person)? acceptContact,
+    TResult? Function(String person)? openConversation,
+    TResult? Function(String person)? focusConversation,
+    TResult? Function(String person)? closeConversation,
     TResult? Function(String space)? forgetOrbit,
     TResult? Function(String? card, String name, String? note)? bookPut,
     TResult? Function(String card)? bookDelete,
@@ -748,13 +955,20 @@ extension ActionRequestPatterns on ActionRequest {
         displayAssignmentPut,
     TResult? Function(String assignment)? displayAssignmentRevoke,
     TResult? Function(String device)? displayDeviceRevoke,
+    TResult? Function(String passphrase)? displayIdentifierAdmitPassphrase,
+    TResult? Function()? enterPresentation,
+    TResult? Function(String orbit, String world, String surface, String input,
+            String title)?
+        presentHere,
+    TResult? Function()? presentRefresh,
+    TResult? Function()? leavePresentation,
   }) {
     final _that = this;
     switch (_that) {
       case ActionRequest_Refresh() when refresh != null:
         return refresh();
       case ActionRequest_Open() when open != null:
-        return open(_that.entryPath);
+        return open(_that.world, _that.entryPath);
       case ActionRequest_UpdateWorld() when updateWorld != null:
         return updateWorld(_that.world);
       case ActionRequest_StartDevice() when startDevice != null:
@@ -775,6 +989,20 @@ extension ActionRequestPatterns on ActionRequest {
         return startHead();
       case ActionRequest_StopHead() when stopHead != null:
         return stopHead(_that.id);
+      case ActionRequest_SendMessage() when sendMessage != null:
+        return sendMessage(_that.to, _that.body);
+      case ActionRequest_CollectMail() when collectMail != null:
+        return collectMail();
+      case ActionRequest_BlockSender() when blockSender != null:
+        return blockSender(_that.person);
+      case ActionRequest_AcceptContact() when acceptContact != null:
+        return acceptContact(_that.person);
+      case ActionRequest_OpenConversation() when openConversation != null:
+        return openConversation(_that.person);
+      case ActionRequest_FocusConversation() when focusConversation != null:
+        return focusConversation(_that.person);
+      case ActionRequest_CloseConversation() when closeConversation != null:
+        return closeConversation(_that.person);
       case ActionRequest_ForgetOrbit() when forgetOrbit != null:
         return forgetOrbit(_that.space);
       case ActionRequest_BookPut() when bookPut != null:
@@ -828,6 +1056,18 @@ extension ActionRequestPatterns on ActionRequest {
         return displayAssignmentRevoke(_that.assignment);
       case ActionRequest_DisplayDeviceRevoke() when displayDeviceRevoke != null:
         return displayDeviceRevoke(_that.device);
+      case ActionRequest_DisplayIdentifierAdmitPassphrase()
+          when displayIdentifierAdmitPassphrase != null:
+        return displayIdentifierAdmitPassphrase(_that.passphrase);
+      case ActionRequest_EnterPresentation() when enterPresentation != null:
+        return enterPresentation();
+      case ActionRequest_PresentHere() when presentHere != null:
+        return presentHere(
+            _that.orbit, _that.world, _that.surface, _that.input, _that.title);
+      case ActionRequest_PresentRefresh() when presentRefresh != null:
+        return presentRefresh();
+      case ActionRequest_LeavePresentation() when leavePresentation != null:
+        return leavePresentation();
       case _:
         return null;
     }
@@ -857,8 +1097,10 @@ class ActionRequest_Refresh extends ActionRequest {
 /// @nodoc
 
 class ActionRequest_Open extends ActionRequest {
-  const ActionRequest_Open({required this.entryPath}) : super._();
+  const ActionRequest_Open({required this.world, required this.entryPath})
+      : super._();
 
+  final String world;
   final String entryPath;
 
   /// Create a copy of ActionRequest
@@ -873,16 +1115,17 @@ class ActionRequest_Open extends ActionRequest {
     return identical(this, other) ||
         (other.runtimeType == runtimeType &&
             other is ActionRequest_Open &&
+            (identical(other.world, world) || other.world == world) &&
             (identical(other.entryPath, entryPath) ||
                 other.entryPath == entryPath));
   }
 
   @override
-  int get hashCode => Object.hash(runtimeType, entryPath);
+  int get hashCode => Object.hash(runtimeType, world, entryPath);
 
   @override
   String toString() {
-    return 'ActionRequest.open(entryPath: $entryPath)';
+    return 'ActionRequest.open(world: $world, entryPath: $entryPath)';
   }
 }
 
@@ -893,7 +1136,7 @@ abstract mixin class $ActionRequest_OpenCopyWith<$Res>
           ActionRequest_Open value, $Res Function(ActionRequest_Open) _then) =
       _$ActionRequest_OpenCopyWithImpl;
   @useResult
-  $Res call({String entryPath});
+  $Res call({String world, String entryPath});
 }
 
 /// @nodoc
@@ -908,9 +1151,14 @@ class _$ActionRequest_OpenCopyWithImpl<$Res>
   /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   $Res call({
+    Object? world = null,
     Object? entryPath = null,
   }) {
     return _then(ActionRequest_Open(
+      world: null == world
+          ? _self.world
+          : world // ignore: cast_nullable_to_non_nullable
+              as String,
       entryPath: null == entryPath
           ? _self.entryPath
           : entryPath // ignore: cast_nullable_to_non_nullable
@@ -1487,6 +1735,429 @@ class _$ActionRequest_StopHeadCopyWithImpl<$Res>
       id: null == id
           ? _self.id
           : id // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_SendMessage extends ActionRequest {
+  const ActionRequest_SendMessage({required this.to, required this.body})
+      : super._();
+
+  final String to;
+  final String body;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_SendMessageCopyWith<ActionRequest_SendMessage> get copyWith =>
+      _$ActionRequest_SendMessageCopyWithImpl<ActionRequest_SendMessage>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_SendMessage &&
+            (identical(other.to, to) || other.to == to) &&
+            (identical(other.body, body) || other.body == body));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, to, body);
+
+  @override
+  String toString() {
+    return 'ActionRequest.sendMessage(to: $to, body: $body)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_SendMessageCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_SendMessageCopyWith(ActionRequest_SendMessage value,
+          $Res Function(ActionRequest_SendMessage) _then) =
+      _$ActionRequest_SendMessageCopyWithImpl;
+  @useResult
+  $Res call({String to, String body});
+}
+
+/// @nodoc
+class _$ActionRequest_SendMessageCopyWithImpl<$Res>
+    implements $ActionRequest_SendMessageCopyWith<$Res> {
+  _$ActionRequest_SendMessageCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_SendMessage _self;
+  final $Res Function(ActionRequest_SendMessage) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? to = null,
+    Object? body = null,
+  }) {
+    return _then(ActionRequest_SendMessage(
+      to: null == to
+          ? _self.to
+          : to // ignore: cast_nullable_to_non_nullable
+              as String,
+      body: null == body
+          ? _self.body
+          : body // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_CollectMail extends ActionRequest {
+  const ActionRequest_CollectMail() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_CollectMail);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.collectMail()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_BlockSender extends ActionRequest {
+  const ActionRequest_BlockSender({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_BlockSenderCopyWith<ActionRequest_BlockSender> get copyWith =>
+      _$ActionRequest_BlockSenderCopyWithImpl<ActionRequest_BlockSender>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_BlockSender &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.blockSender(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_BlockSenderCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_BlockSenderCopyWith(ActionRequest_BlockSender value,
+          $Res Function(ActionRequest_BlockSender) _then) =
+      _$ActionRequest_BlockSenderCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_BlockSenderCopyWithImpl<$Res>
+    implements $ActionRequest_BlockSenderCopyWith<$Res> {
+  _$ActionRequest_BlockSenderCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_BlockSender _self;
+  final $Res Function(ActionRequest_BlockSender) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_BlockSender(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_AcceptContact extends ActionRequest {
+  const ActionRequest_AcceptContact({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_AcceptContactCopyWith<ActionRequest_AcceptContact>
+      get copyWith => _$ActionRequest_AcceptContactCopyWithImpl<
+          ActionRequest_AcceptContact>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_AcceptContact &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.acceptContact(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_AcceptContactCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_AcceptContactCopyWith(
+          ActionRequest_AcceptContact value,
+          $Res Function(ActionRequest_AcceptContact) _then) =
+      _$ActionRequest_AcceptContactCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_AcceptContactCopyWithImpl<$Res>
+    implements $ActionRequest_AcceptContactCopyWith<$Res> {
+  _$ActionRequest_AcceptContactCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_AcceptContact _self;
+  final $Res Function(ActionRequest_AcceptContact) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_AcceptContact(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_OpenConversation extends ActionRequest {
+  const ActionRequest_OpenConversation({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_OpenConversationCopyWith<ActionRequest_OpenConversation>
+      get copyWith => _$ActionRequest_OpenConversationCopyWithImpl<
+          ActionRequest_OpenConversation>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_OpenConversation &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.openConversation(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_OpenConversationCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_OpenConversationCopyWith(
+          ActionRequest_OpenConversation value,
+          $Res Function(ActionRequest_OpenConversation) _then) =
+      _$ActionRequest_OpenConversationCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_OpenConversationCopyWithImpl<$Res>
+    implements $ActionRequest_OpenConversationCopyWith<$Res> {
+  _$ActionRequest_OpenConversationCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_OpenConversation _self;
+  final $Res Function(ActionRequest_OpenConversation) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_OpenConversation(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_FocusConversation extends ActionRequest {
+  const ActionRequest_FocusConversation({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_FocusConversationCopyWith<ActionRequest_FocusConversation>
+      get copyWith => _$ActionRequest_FocusConversationCopyWithImpl<
+          ActionRequest_FocusConversation>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_FocusConversation &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.focusConversation(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_FocusConversationCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_FocusConversationCopyWith(
+          ActionRequest_FocusConversation value,
+          $Res Function(ActionRequest_FocusConversation) _then) =
+      _$ActionRequest_FocusConversationCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_FocusConversationCopyWithImpl<$Res>
+    implements $ActionRequest_FocusConversationCopyWith<$Res> {
+  _$ActionRequest_FocusConversationCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_FocusConversation _self;
+  final $Res Function(ActionRequest_FocusConversation) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_FocusConversation(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_CloseConversation extends ActionRequest {
+  const ActionRequest_CloseConversation({required this.person}) : super._();
+
+  final String person;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_CloseConversationCopyWith<ActionRequest_CloseConversation>
+      get copyWith => _$ActionRequest_CloseConversationCopyWithImpl<
+          ActionRequest_CloseConversation>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_CloseConversation &&
+            (identical(other.person, person) || other.person == person));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, person);
+
+  @override
+  String toString() {
+    return 'ActionRequest.closeConversation(person: $person)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_CloseConversationCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_CloseConversationCopyWith(
+          ActionRequest_CloseConversation value,
+          $Res Function(ActionRequest_CloseConversation) _then) =
+      _$ActionRequest_CloseConversationCopyWithImpl;
+  @useResult
+  $Res call({String person});
+}
+
+/// @nodoc
+class _$ActionRequest_CloseConversationCopyWithImpl<$Res>
+    implements $ActionRequest_CloseConversationCopyWith<$Res> {
+  _$ActionRequest_CloseConversationCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_CloseConversation _self;
+  final $Res Function(ActionRequest_CloseConversation) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? person = null,
+  }) {
+    return _then(ActionRequest_CloseConversation(
+      person: null == person
+          ? _self.person
+          : person // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }
@@ -2939,6 +3610,683 @@ class _$ActionRequest_DisplayDeviceRevokeCopyWithImpl<$Res>
       device: null == device
           ? _self.device
           : device // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_DisplayIdentifierAdmitPassphrase extends ActionRequest {
+  const ActionRequest_DisplayIdentifierAdmitPassphrase(
+      {required this.passphrase})
+      : super._();
+
+  final String passphrase;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_DisplayIdentifierAdmitPassphraseCopyWith<
+          ActionRequest_DisplayIdentifierAdmitPassphrase>
+      get copyWith =>
+          _$ActionRequest_DisplayIdentifierAdmitPassphraseCopyWithImpl<
+              ActionRequest_DisplayIdentifierAdmitPassphrase>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_DisplayIdentifierAdmitPassphrase &&
+            (identical(other.passphrase, passphrase) ||
+                other.passphrase == passphrase));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, passphrase);
+
+  @override
+  String toString() {
+    return 'ActionRequest.displayIdentifierAdmitPassphrase(passphrase: $passphrase)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_DisplayIdentifierAdmitPassphraseCopyWith<
+    $Res> implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_DisplayIdentifierAdmitPassphraseCopyWith(
+          ActionRequest_DisplayIdentifierAdmitPassphrase value,
+          $Res Function(ActionRequest_DisplayIdentifierAdmitPassphrase) _then) =
+      _$ActionRequest_DisplayIdentifierAdmitPassphraseCopyWithImpl;
+  @useResult
+  $Res call({String passphrase});
+}
+
+/// @nodoc
+class _$ActionRequest_DisplayIdentifierAdmitPassphraseCopyWithImpl<$Res>
+    implements $ActionRequest_DisplayIdentifierAdmitPassphraseCopyWith<$Res> {
+  _$ActionRequest_DisplayIdentifierAdmitPassphraseCopyWithImpl(
+      this._self, this._then);
+
+  final ActionRequest_DisplayIdentifierAdmitPassphrase _self;
+  final $Res Function(ActionRequest_DisplayIdentifierAdmitPassphrase) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? passphrase = null,
+  }) {
+    return _then(ActionRequest_DisplayIdentifierAdmitPassphrase(
+      passphrase: null == passphrase
+          ? _self.passphrase
+          : passphrase // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_EnterPresentation extends ActionRequest {
+  const ActionRequest_EnterPresentation() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_EnterPresentation);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.enterPresentation()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_PresentHere extends ActionRequest {
+  const ActionRequest_PresentHere(
+      {required this.orbit,
+      required this.world,
+      required this.surface,
+      required this.input,
+      required this.title})
+      : super._();
+
+  final String orbit;
+  final String world;
+  final String surface;
+  final String input;
+  final String title;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_PresentHereCopyWith<ActionRequest_PresentHere> get copyWith =>
+      _$ActionRequest_PresentHereCopyWithImpl<ActionRequest_PresentHere>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_PresentHere &&
+            (identical(other.orbit, orbit) || other.orbit == orbit) &&
+            (identical(other.world, world) || other.world == world) &&
+            (identical(other.surface, surface) || other.surface == surface) &&
+            (identical(other.input, input) || other.input == input) &&
+            (identical(other.title, title) || other.title == title));
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(runtimeType, orbit, world, surface, input, title);
+
+  @override
+  String toString() {
+    return 'ActionRequest.presentHere(orbit: $orbit, world: $world, surface: $surface, input: $input, title: $title)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_PresentHereCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_PresentHereCopyWith(ActionRequest_PresentHere value,
+          $Res Function(ActionRequest_PresentHere) _then) =
+      _$ActionRequest_PresentHereCopyWithImpl;
+  @useResult
+  $Res call(
+      {String orbit, String world, String surface, String input, String title});
+}
+
+/// @nodoc
+class _$ActionRequest_PresentHereCopyWithImpl<$Res>
+    implements $ActionRequest_PresentHereCopyWith<$Res> {
+  _$ActionRequest_PresentHereCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_PresentHere _self;
+  final $Res Function(ActionRequest_PresentHere) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? orbit = null,
+    Object? world = null,
+    Object? surface = null,
+    Object? input = null,
+    Object? title = null,
+  }) {
+    return _then(ActionRequest_PresentHere(
+      orbit: null == orbit
+          ? _self.orbit
+          : orbit // ignore: cast_nullable_to_non_nullable
+              as String,
+      world: null == world
+          ? _self.world
+          : world // ignore: cast_nullable_to_non_nullable
+              as String,
+      surface: null == surface
+          ? _self.surface
+          : surface // ignore: cast_nullable_to_non_nullable
+              as String,
+      input: null == input
+          ? _self.input
+          : input // ignore: cast_nullable_to_non_nullable
+              as String,
+      title: null == title
+          ? _self.title
+          : title // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_PresentRefresh extends ActionRequest {
+  const ActionRequest_PresentRefresh() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_PresentRefresh);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.presentRefresh()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_LeavePresentation extends ActionRequest {
+  const ActionRequest_LeavePresentation() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_LeavePresentation);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.leavePresentation()';
+  }
+}
+
+/// @nodoc
+mixin _$PresentedScene {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is PresentedScene);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'PresentedScene()';
+  }
+}
+
+/// @nodoc
+class $PresentedSceneCopyWith<$Res> {
+  $PresentedSceneCopyWith(PresentedScene _, $Res Function(PresentedScene) __);
+}
+
+/// Adds pattern-matching-related methods to [PresentedScene].
+extension PresentedScenePatterns on PresentedScene {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(PresentedScene_Frame value)? frame,
+    TResult Function(PresentedScene_Blank value)? blank,
+    TResult Function(PresentedScene_Unsupported value)? unsupported,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame() when frame != null:
+        return frame(_that);
+      case PresentedScene_Blank() when blank != null:
+        return blank(_that);
+      case PresentedScene_Unsupported() when unsupported != null:
+        return unsupported(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(PresentedScene_Frame value) frame,
+    required TResult Function(PresentedScene_Blank value) blank,
+    required TResult Function(PresentedScene_Unsupported value) unsupported,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame():
+        return frame(_that);
+      case PresentedScene_Blank():
+        return blank(_that);
+      case PresentedScene_Unsupported():
+        return unsupported(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(PresentedScene_Frame value)? frame,
+    TResult? Function(PresentedScene_Blank value)? blank,
+    TResult? Function(PresentedScene_Unsupported value)? unsupported,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame() when frame != null:
+        return frame(_that);
+      case PresentedScene_Blank() when blank != null:
+        return blank(_that);
+      case PresentedScene_Unsupported() when unsupported != null:
+        return unsupported(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String mediaType, int width, int height, Uint8List bytes)?
+        frame,
+    TResult Function(String reason)? blank,
+    TResult Function(String output)? unsupported,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame() when frame != null:
+        return frame(_that.mediaType, _that.width, _that.height, _that.bytes);
+      case PresentedScene_Blank() when blank != null:
+        return blank(_that.reason);
+      case PresentedScene_Unsupported() when unsupported != null:
+        return unsupported(_that.output);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(
+            String mediaType, int width, int height, Uint8List bytes)
+        frame,
+    required TResult Function(String reason) blank,
+    required TResult Function(String output) unsupported,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame():
+        return frame(_that.mediaType, _that.width, _that.height, _that.bytes);
+      case PresentedScene_Blank():
+        return blank(_that.reason);
+      case PresentedScene_Unsupported():
+        return unsupported(_that.output);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String mediaType, int width, int height, Uint8List bytes)?
+        frame,
+    TResult? Function(String reason)? blank,
+    TResult? Function(String output)? unsupported,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case PresentedScene_Frame() when frame != null:
+        return frame(_that.mediaType, _that.width, _that.height, _that.bytes);
+      case PresentedScene_Blank() when blank != null:
+        return blank(_that.reason);
+      case PresentedScene_Unsupported() when unsupported != null:
+        return unsupported(_that.output);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class PresentedScene_Frame extends PresentedScene {
+  const PresentedScene_Frame(
+      {required this.mediaType,
+      required this.width,
+      required this.height,
+      required this.bytes})
+      : super._();
+
+  /// `png`, `jpeg`, or `webp`.
+  final String mediaType;
+  final int width;
+  final int height;
+  final Uint8List bytes;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $PresentedScene_FrameCopyWith<PresentedScene_Frame> get copyWith =>
+      _$PresentedScene_FrameCopyWithImpl<PresentedScene_Frame>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is PresentedScene_Frame &&
+            (identical(other.mediaType, mediaType) ||
+                other.mediaType == mediaType) &&
+            (identical(other.width, width) || other.width == width) &&
+            (identical(other.height, height) || other.height == height) &&
+            const DeepCollectionEquality().equals(other.bytes, bytes));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, mediaType, width, height,
+      const DeepCollectionEquality().hash(bytes));
+
+  @override
+  String toString() {
+    return 'PresentedScene.frame(mediaType: $mediaType, width: $width, height: $height, bytes: $bytes)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $PresentedScene_FrameCopyWith<$Res>
+    implements $PresentedSceneCopyWith<$Res> {
+  factory $PresentedScene_FrameCopyWith(PresentedScene_Frame value,
+          $Res Function(PresentedScene_Frame) _then) =
+      _$PresentedScene_FrameCopyWithImpl;
+  @useResult
+  $Res call({String mediaType, int width, int height, Uint8List bytes});
+}
+
+/// @nodoc
+class _$PresentedScene_FrameCopyWithImpl<$Res>
+    implements $PresentedScene_FrameCopyWith<$Res> {
+  _$PresentedScene_FrameCopyWithImpl(this._self, this._then);
+
+  final PresentedScene_Frame _self;
+  final $Res Function(PresentedScene_Frame) _then;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? mediaType = null,
+    Object? width = null,
+    Object? height = null,
+    Object? bytes = null,
+  }) {
+    return _then(PresentedScene_Frame(
+      mediaType: null == mediaType
+          ? _self.mediaType
+          : mediaType // ignore: cast_nullable_to_non_nullable
+              as String,
+      width: null == width
+          ? _self.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as int,
+      height: null == height
+          ? _self.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as int,
+      bytes: null == bytes
+          ? _self.bytes
+          : bytes // ignore: cast_nullable_to_non_nullable
+              as Uint8List,
+    ));
+  }
+}
+
+/// @nodoc
+
+class PresentedScene_Blank extends PresentedScene {
+  const PresentedScene_Blank({required this.reason}) : super._();
+
+  /// `source_unavailable`, `unsupported`, or `program_ended`.
+  final String reason;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $PresentedScene_BlankCopyWith<PresentedScene_Blank> get copyWith =>
+      _$PresentedScene_BlankCopyWithImpl<PresentedScene_Blank>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is PresentedScene_Blank &&
+            (identical(other.reason, reason) || other.reason == reason));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, reason);
+
+  @override
+  String toString() {
+    return 'PresentedScene.blank(reason: $reason)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $PresentedScene_BlankCopyWith<$Res>
+    implements $PresentedSceneCopyWith<$Res> {
+  factory $PresentedScene_BlankCopyWith(PresentedScene_Blank value,
+          $Res Function(PresentedScene_Blank) _then) =
+      _$PresentedScene_BlankCopyWithImpl;
+  @useResult
+  $Res call({String reason});
+}
+
+/// @nodoc
+class _$PresentedScene_BlankCopyWithImpl<$Res>
+    implements $PresentedScene_BlankCopyWith<$Res> {
+  _$PresentedScene_BlankCopyWithImpl(this._self, this._then);
+
+  final PresentedScene_Blank _self;
+  final $Res Function(PresentedScene_Blank) _then;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? reason = null,
+  }) {
+    return _then(PresentedScene_Blank(
+      reason: null == reason
+          ? _self.reason
+          : reason // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class PresentedScene_Unsupported extends PresentedScene {
+  const PresentedScene_Unsupported({required this.output}) : super._();
+
+  final String output;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $PresentedScene_UnsupportedCopyWith<PresentedScene_Unsupported>
+      get copyWith =>
+          _$PresentedScene_UnsupportedCopyWithImpl<PresentedScene_Unsupported>(
+              this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is PresentedScene_Unsupported &&
+            (identical(other.output, output) || other.output == output));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, output);
+
+  @override
+  String toString() {
+    return 'PresentedScene.unsupported(output: $output)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $PresentedScene_UnsupportedCopyWith<$Res>
+    implements $PresentedSceneCopyWith<$Res> {
+  factory $PresentedScene_UnsupportedCopyWith(PresentedScene_Unsupported value,
+          $Res Function(PresentedScene_Unsupported) _then) =
+      _$PresentedScene_UnsupportedCopyWithImpl;
+  @useResult
+  $Res call({String output});
+}
+
+/// @nodoc
+class _$PresentedScene_UnsupportedCopyWithImpl<$Res>
+    implements $PresentedScene_UnsupportedCopyWith<$Res> {
+  _$PresentedScene_UnsupportedCopyWithImpl(this._self, this._then);
+
+  final PresentedScene_Unsupported _self;
+  final $Res Function(PresentedScene_Unsupported) _then;
+
+  /// Create a copy of PresentedScene
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? output = null,
+  }) {
+    return _then(PresentedScene_Unsupported(
+      output: null == output
+          ? _self.output
+          : output // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

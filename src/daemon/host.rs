@@ -684,7 +684,7 @@ impl Listener {
                 Flow::Next(reader, write_half)
             }
             (ControlRoute::Daemon, request) => {
-                let response = match self.display.handle_control(&request) {
+                let response = match self.display.handle_control(&request).await {
                     Some(response) => response,
                     None => crate::orbits::bootstrap::dispatch(&self.router, request)
                         .await
@@ -970,10 +970,11 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    fn new(router: Arc<Router>, home: &Path) -> Result<Self> {
+    fn new(router: Arc<Router>, home: &Path, device_seed: &[u8; 32]) -> Result<Self> {
         let display = Arc::new(crate::display::DisplayRuntime::open(
             &home.join("display"),
             router.clone(),
+            device_seed,
         )?);
         Ok(Self {
             endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),
@@ -1008,10 +1009,44 @@ impl Daemon {
             Self::join_world_upgrades(world_upgrades).await;
             return served;
         }
+        // Take the port before committing to it, so "another daemon already holds
+        // it" is separable from "our service broke". The port is fixed and bound
+        // on `0.0.0.0`, which makes the coordinator a machine-wide singleton — so
+        // on any machine that already runs a daemon, this is the *ordinary* case
+        // rather than an exceptional one.
+        //
+        // It used to be fatal to the whole daemon, which meant a second identity
+        // could not come up at all and a supervisor could not start a head for
+        // it. The concern underneath that was right — never advertise an origin
+        // receivers cannot reach — but the remedy was one size too large: the
+        // answer to "cannot host displays" is to not host them and say so, not to
+        // refuse to be a daemon.
+        let display_listener = match crate::display::bind_display(&self.display.tls).await {
+            // Kept, not dropped. Dropping it made this a guess rather than a
+            // reservation: the port could be taken between here and the serving
+            // bind, and that failure arrives on a path where the degradation below
+            // does not run — so the daemon died on exactly the race this handles.
+            Ok(listener) => listener,
+            Err(error) if crate::display::is_port_taken(&error) => {
+                tracing::warn!(
+                    %error,
+                    "another daemon on this machine holds the display port; \
+                     serving without display coordination"
+                );
+                let served = self.endpoint.clone().serve(home).await;
+                Self::join_staging(staging).await;
+                return served;
+            }
+            Err(error) => {
+                Self::join_staging(staging).await;
+                return Err(error).context("serve daemon display HTTPS");
+            }
+        };
         let display = self.display.clone();
         let display_stop = self.endpoint.subscribe_stop();
         let endpoint = self.endpoint.clone();
-        let mut display_service = Box::pin(async move { display.serve(display_stop).await });
+        let mut display_service =
+            Box::pin(async move { display.serve_on(display_listener, display_stop).await });
         let mut control_service = Box::pin(async move { endpoint.serve(home).await });
         let outcome = tokio::select! {
             endpoint_result = &mut control_service => {
@@ -1358,9 +1393,13 @@ impl Stop {
 }
 
 impl Runner {
-    pub(crate) fn start(home: PathBuf, router: Arc<Router>) -> Result<Self> {
+    /// `device_seed` is this identity's own seed, threaded through as a value
+    /// rather than re-read here: the daemon is the identity singleton, and a
+    /// second read is a second chance to disagree about which identity is
+    /// running.
+    pub(crate) fn start(home: PathBuf, router: Arc<Router>, device_seed: [u8; 32]) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
-        let daemon = Arc::new(Daemon::new(router, &home)?);
+        let daemon = Arc::new(Daemon::new(router, &home, &device_seed)?);
         Ok(Self {
             home,
             daemon,
@@ -1406,7 +1445,7 @@ pub async fn run_lait_daemon(
     // boot, deliberately — never as a side effect of a later write (the
     // address book's author path is load-only by design).
     std::fs::create_dir_all(&identity)?;
-    crate::config::load_or_create_identity(&identity)?;
+    let device_seed = crate::config::load_or_create_identity(&identity)?;
     let config_root = crate::config::config_root()?;
     let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&config_root);
@@ -1415,7 +1454,7 @@ pub async fn run_lait_daemon(
         Catalog::new(identity, agents_base, self_contained),
         packages,
     ));
-    let runner = Runner::start(home, router)?;
+    let runner = Runner::start(home, router, device_seed)?;
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -1779,6 +1818,7 @@ pub(crate) fn runner_with_factory(
             factory,
             crate::world::packages(),
         )),
+        [0x5a; 32],
     )
 }
 

@@ -26,6 +26,7 @@ ClientView _view({
           kind: 'browser',
           origin: 'http://127.0.0.1:55170/',
           owned: true,
+  state: 'running',
         ),
       ],
       devices: const [],

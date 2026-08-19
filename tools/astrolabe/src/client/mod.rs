@@ -10,6 +10,7 @@
 //! things it reaches, and the smallest.
 
 pub mod book;
+pub mod correspondence;
 pub mod display;
 pub mod error;
 pub mod heads;
@@ -18,6 +19,7 @@ pub mod http;
 pub mod launch;
 pub mod library;
 pub mod presence;
+pub mod reach;
 pub mod space;
 pub mod storage;
 pub mod update;
@@ -55,19 +57,25 @@ impl Client {
     /// holding its stream would have a window in which events vanish.
     pub async fn start(config: Config) -> ClientResult<(Self, Signals)> {
         let selection = selection_for(config.identity.as_deref());
-        lait::host_client::ensure_lait_daemon_with_executable(&selection, &config.executable)
-            .await
-            .map_err(|error| {
-                let message = format!("start or attach to the identity daemon: {error:#}");
-                if error
-                    .downcast_ref::<lait::control::ForeignDaemon>()
-                    .is_some()
-                {
-                    ClientError::refused(message)
-                } else {
-                    ClientError::unreachable(message)
-                }
-            })?;
+        // The sidecar is what makes this a hosted identity. Skipping it is a
+        // deliberate standalone launch: the daemon-backed planes will report
+        // unreachable, but the window comes up at once instead of waiting on a
+        // daemon that is not meant to be there.
+        if !config.skip_sidecar {
+            lait::host_client::ensure_lait_daemon_with_executable(&selection, &config.executable)
+                .await
+                .map_err(|error| {
+                    let message = format!("start or attach to the identity daemon: {error:#}");
+                    if error
+                        .downcast_ref::<lait::control::ForeignDaemon>()
+                        .is_some()
+                    {
+                        ClientError::refused(message)
+                    } else {
+                        ClientError::unreachable(message)
+                    }
+                })?;
+        }
         let (supervisor, signals) = Supervisor::start(SupervisorConfig {
             state_root: config.state_root,
             executable: config.executable,
@@ -158,6 +166,26 @@ pub struct Config {
     pub staging: lait_workbench::Staging,
     /// `None` selects the ordinary per-user identity.
     pub identity: Option<PathBuf>,
+    /// Do not spawn or wait for the identity daemon (the `lait` sidecar).
+    ///
+    /// The client comes up standalone: the Library, the correspondence desk and
+    /// anything else that does not need a hosted identity work; the parts that
+    /// do show as unreachable rather than blocking the whole window for the
+    /// twenty seconds `ensure_lait_daemon` waits. Set from `LAIT_SKIP_SIDECAR`
+    /// for a demo or a dev run against a machine with no daemon — and off by
+    /// default, because the ordinary launch *is* the identity host.
+    pub skip_sidecar: bool,
+    /// Stand up the in-process correspondence fixture, from
+    /// `LAIT_CORRESPONDENCE_DEMO`. Off by default: correspondence is connected
+    /// to no carrier until a real one exists, and the actions refuse honestly.
+    /// On, it drives and validates the chat UI with no daemon.
+    pub correspondence_demo: bool,
+    /// The base URL of a hosted Post to carry **real** correspondence over, from
+    /// `LAIT_POST_URL`. `Some` connects the client to a live `lait-post` and
+    /// takes precedence over the demo fixture — real carriage beats a loopback
+    /// one. `None` (the default) leaves correspondence on the fixture, or
+    /// unconnected.
+    pub post_url: Option<String>,
 }
 
 impl Config {
@@ -168,6 +196,22 @@ impl Config {
             observation_interval: lait_workbench::OBSERVATION_INTERVAL,
             staging: lait_workbench::Staging::Direct,
             identity: None,
+            skip_sidecar: false,
+            correspondence_demo: false,
+            post_url: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::Config;
+    use std::path::PathBuf;
+
+    /// The correspondence fixture is opt-in: absent from a default Config.
+    #[test]
+    fn the_correspondence_fixture_is_off_by_default() {
+        let config = Config::new(PathBuf::from("state"), PathBuf::from("lait"));
+        assert!(!config.correspondence_demo);
     }
 }

@@ -70,6 +70,18 @@ enum Mode {
         /// because it selects the same thing: the daemon this head starts or
         /// attaches to is the one at that home.
         home: Option<String>,
+        /// The one World this head serves.
+        ///
+        /// `None` falls back to `$LAIT_WORLD`, and then to the sole World a
+        /// build hosts — the same ladder `lait mcp` climbs, resolved by the
+        /// same `registry.pin`, so a build with several Worlds and no pin
+        /// refuses here exactly as it refuses there rather than picking one.
+        ///
+        /// A head that knows which World it is, is a head a supervisor can
+        /// stop *definitively*. The alternative — one head serving everything —
+        /// makes "is this World running" unanswerable, and every control built
+        /// on the answer speculative.
+        world: Option<String>,
     },
 }
 
@@ -77,6 +89,7 @@ const USAGE: &str = "lait is not a command surface — it is three processes:\n\
      \x20 lait daemon [--home <dir>]      the identity-scoped host\n\
      \x20 lait mcp                        the stdio head for an agent\n\
      \x20 lait [--json] [--port <n>] [--orbit <sel>] [--open] [--home <dir>]\n\
+     \x20      [--world <mount>]           one head, one World\n\
      \x20                                 the local app, and the daemon under it\n\
      \x20 lait --version                  which build this is\n\
      everything else is a request one of those three carries.";
@@ -131,6 +144,7 @@ impl Mode {
             _ => {
                 let (mut json, mut open) = (false, false);
                 let (mut port, mut orbit, mut home) = (None, None, None);
+                let mut world = None;
                 while let Some(flag) = args.next() {
                     match flag {
                         "--json" => json = true,
@@ -138,6 +152,11 @@ impl Mode {
                         "--port" => port = Some(next(&mut args, "--port")?),
                         "--orbit" => orbit = Some(next(&mut args, "--orbit")?),
                         "--home" => home = Some(next(&mut args, "--home")?),
+                        // The same pin `lait mcp` takes, on the other head
+                        // kind. One head, one World — so stopping a head is a
+                        // statement about that World and not about whatever
+                        // else happened to share the process.
+                        "--world" => world = Some(next(&mut args, "--world")?),
                         other => return Err(unknown(other)),
                     }
                 }
@@ -147,6 +166,7 @@ impl Mode {
                     orbit,
                     open,
                     home,
+                    world,
                 }
             }
         };
@@ -209,6 +229,7 @@ impl Mode {
                 orbit,
                 open,
                 home,
+                world,
             } => {
                 let port = match port {
                     Some(p) => p.parse::<u16>().map_err(|_| {
@@ -228,7 +249,13 @@ impl Mode {
                     identity: home.map(std::path::PathBuf::from),
                     store,
                 };
-                lait::serve::run(port, open, json, selection).await
+                // Resolved before the listener binds, so a build that cannot
+                // say which World this head is refuses to be one — rather than
+                // coming up, announcing an address, and answering for whatever
+                // mount a request happens to name.
+                let world =
+                    world.or_else(|| std::env::var("LAIT_WORLD").ok().filter(|s| !s.is_empty()));
+                lait::serve::run(port, open, json, selection, world).await
             }
         }
     }

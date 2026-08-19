@@ -30,13 +30,52 @@ pub struct Deposited {
 /// What a Post keeps its deposits in.
 pub trait Store {
     /// Accept one envelope and return its id.
-    fn put(&mut self, sender: &DeviceId, envelope: &Envelope) -> anyhow::Result<String>;
+    ///
+    /// `now` is passed in rather than read here because a store that reads the
+    /// clock cannot be tested against one, and because `deposited_at` is the
+    /// carrier's own observation — the one fact on [`Deposited`] that does not
+    /// come from the envelope.
+    fn put(&mut self, sender: &DeviceId, envelope: &Envelope, now: u64) -> anyhow::Result<String>;
     /// Everything waiting for this device that has not expired.
     fn list(&self, device: &DeviceId, now: u64) -> anyhow::Result<Vec<Deposited>>;
+    /// How many deposits this device is holding, expired ones included.
+    ///
+    /// Separate from [`Store::list`], and deliberately a different question.
+    /// `list` answers what is *deliverable*; this answers what *occupies the
+    /// mailbox*, which is what a capacity ceiling is about — material past its
+    /// window still costs bytes until the sweep collects it.
+    ///
+    /// It is also the only shape a filesystem store can answer cheaply. Expiry
+    /// lives inside each record, so filtering on it would mean decoding every
+    /// file on every deposit, and a ceiling that reads the whole mailbox to
+    /// decide whether the mailbox is full is the amplifier it exists to prevent.
+    /// Counting names is O(entries) and touches no contents.
+    ///
+    /// The consequence, stated so nobody has to infer it: a mailbox at its
+    /// ceiling frees itself when [`Post::sweep`] runs, not the instant a window
+    /// lapses.
+    fn count(&self, device: &DeviceId) -> anyhow::Result<usize>;
     /// Drop the named deposits belonging to this device. Returns how many went.
     fn drop_all(&mut self, device: &DeviceId, ids: &[String]) -> anyhow::Result<usize>;
     /// Drop everything past its window. Returns how many went.
     fn sweep(&mut self, now: u64) -> anyhow::Result<usize>;
+
+    /// Record, or clear, `recipient`'s block of `sender`.
+    ///
+    /// Recipient-owned state: only the recipient authors it, and the carrier
+    /// stores it without adjudicating — it holds no key and decides nothing about
+    /// who anybody is. Idempotent, because a block is a set membership: blocking a
+    /// sender already blocked, or clearing one already clear, is a no-op, which is
+    /// what makes a replayed request harmless.
+    fn set_block(
+        &mut self,
+        recipient: &DeviceId,
+        sender: &DeviceId,
+        blocked: bool,
+    ) -> anyhow::Result<()>;
+
+    /// Whether `recipient` has blocked `sender`.
+    fn is_blocked(&self, recipient: &DeviceId, sender: &DeviceId) -> anyhow::Result<bool>;
 }
 
 /// A deterministic id for a deposit: the content, so the same envelope
@@ -46,12 +85,24 @@ pub trait Store {
 /// sure landed should not double a recipient's mailbox, and the retry is the
 /// common case for a carrier whose whole purpose is reaching someone who is not
 /// there.
-fn deposit_id(sender: &DeviceId, envelope: &Envelope) -> String {
+///
+/// The fields are hashed in the order [`Envelope::preimage`] frames them, and
+/// they cover every field the signature covers — including `envelope_version`.
+/// Leaving the version out made two envelopes that differ only in their sealing
+/// construction collapse to one id, so the second `put` silently overwrote the
+/// first: signed as distinct, stored as the same thing. Nothing ships a second
+/// construction yet, which is exactly why this is cheap to fix now.
+///
+/// Unframed concatenation is safe here only because every field ahead of
+/// `sealed` is fixed width — two 64-char ids and two integers. Anything
+/// variable-length added above `sealed` needs framing first.
+pub(crate) fn deposit_id(sender: &DeviceId, envelope: &Envelope) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"lait/post/1/deposit-id");
     hasher.update(sender.as_str().as_bytes());
     hasher.update(envelope.recipient.as_str().as_bytes());
     hasher.update(&envelope.expires_at.to_be_bytes());
+    hasher.update(&envelope.envelope_version.to_be_bytes());
     hasher.update(&envelope.sealed);
     data_encoding::HEXLOWER.encode(&hasher.finalize().as_bytes()[..16])
 }
@@ -62,10 +113,12 @@ pub struct MemStore {
     /// Keyed by recipient, then by deposit id — so a fetch is one lookup and
     /// never a scan of everybody's mail.
     held: BTreeMap<DeviceId, BTreeMap<String, Deposited>>,
+    /// Per recipient, the senders they have blocked.
+    blocks: BTreeMap<DeviceId, std::collections::BTreeSet<DeviceId>>,
 }
 
 impl Store for MemStore {
-    fn put(&mut self, sender: &DeviceId, envelope: &Envelope) -> anyhow::Result<String> {
+    fn put(&mut self, sender: &DeviceId, envelope: &Envelope, now: u64) -> anyhow::Result<String> {
         let id = deposit_id(sender, envelope);
         self.held
             .entry(envelope.recipient.clone())
@@ -76,7 +129,7 @@ impl Store for MemStore {
                     id: id.clone(),
                     sender: sender.clone(),
                     envelope: envelope.clone(),
-                    deposited_at: envelope.expires_at,
+                    deposited_at: now,
                 },
             );
         Ok(id)
@@ -94,6 +147,10 @@ impl Store for MemStore {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    fn count(&self, device: &DeviceId) -> anyhow::Result<usize> {
+        Ok(self.held.get(device).map(BTreeMap::len).unwrap_or(0))
     }
 
     fn drop_all(&mut self, device: &DeviceId, ids: &[String]) -> anyhow::Result<usize> {
@@ -119,6 +176,33 @@ impl Store for MemStore {
         self.held.retain(|_, box_of| !box_of.is_empty());
         Ok(gone)
     }
+
+    fn set_block(
+        &mut self,
+        recipient: &DeviceId,
+        sender: &DeviceId,
+        blocked: bool,
+    ) -> anyhow::Result<()> {
+        if blocked {
+            self.blocks
+                .entry(recipient.clone())
+                .or_default()
+                .insert(sender.clone());
+        } else if let Some(set) = self.blocks.get_mut(recipient) {
+            set.remove(sender);
+            if set.is_empty() {
+                self.blocks.remove(recipient);
+            }
+        }
+        Ok(())
+    }
+
+    fn is_blocked(&self, recipient: &DeviceId, sender: &DeviceId) -> anyhow::Result<bool> {
+        Ok(self
+            .blocks
+            .get(recipient)
+            .is_some_and(|set| set.contains(sender)))
+    }
 }
 
 /// On disk: one directory per recipient, one file per deposit.
@@ -140,17 +224,43 @@ impl FsStore {
         Ok(Self { root })
     }
 
-    fn box_dir(&self, device: &DeviceId) -> PathBuf {
+    fn box_hash(device: &DeviceId) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"lait/post/1/mailbox");
         hasher.update(device.as_str().as_bytes());
+        data_encoding::HEXLOWER.encode(&hasher.finalize().as_bytes()[..16])
+    }
+
+    fn box_dir(&self, device: &DeviceId) -> PathBuf {
+        self.root.join(Self::box_hash(device))
+    }
+
+    /// Where a recipient's block list lives.
+    ///
+    /// A `.blocks` *file*, not a directory, and beside the mailbox dirs on
+    /// purpose: [`FsStore::sweep`] walks the root and treats each entry as a
+    /// mailbox, so a `read_dir` on a file fails and the block file is skipped —
+    /// it is never mistaken for expired mail and collected. Named by the same
+    /// hash as the mailbox, so the filesystem is no more a list of who blocks
+    /// whom than it is a list of who holds a mailbox.
+    fn blocks_file(&self, recipient: &DeviceId) -> PathBuf {
         self.root
-            .join(data_encoding::HEXLOWER.encode(&hasher.finalize().as_bytes()[..16]))
+            .join(format!("{}.blocks", Self::box_hash(recipient)))
+    }
+
+    fn read_blocks(&self, recipient: &DeviceId) -> std::collections::BTreeSet<DeviceId> {
+        std::fs::read_to_string(self.blocks_file(recipient))
+            .map(|text| {
+                text.lines()
+                    .filter_map(DeviceId::parse)
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default()
     }
 }
 
 impl Store for FsStore {
-    fn put(&mut self, sender: &DeviceId, envelope: &Envelope) -> anyhow::Result<String> {
+    fn put(&mut self, sender: &DeviceId, envelope: &Envelope, now: u64) -> anyhow::Result<String> {
         let id = deposit_id(sender, envelope);
         let dir = self.box_dir(&envelope.recipient);
         std::fs::create_dir_all(&dir)?;
@@ -158,7 +268,7 @@ impl Store for FsStore {
             id: id.clone(),
             sender: sender.clone(),
             envelope: envelope.clone(),
-            deposited_at: envelope.expires_at,
+            deposited_at: now,
         };
         // Written beside and renamed, so a reader never sees half a deposit.
         let staged = dir.join(format!("{id}.staged"));
@@ -190,6 +300,18 @@ impl Store for FsStore {
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
+    }
+
+    fn count(&self, device: &DeviceId) -> anyhow::Result<usize> {
+        let Ok(entries) = std::fs::read_dir(self.box_dir(device)) else {
+            // No directory is no mailbox, which is zero rather than an error —
+            // the first deposit to a device is the thing that creates one.
+            return Ok(0);
+        };
+        Ok(entries
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
+            .count())
     }
 
     fn drop_all(&mut self, device: &DeviceId, ids: &[String]) -> anyhow::Result<usize> {
@@ -234,8 +356,54 @@ impl Store for FsStore {
                     gone += 1;
                 }
             }
+            // An emptied mailbox directory goes too. Files were collected and the
+            // directory was not, so every device ever deposited to left one behind
+            // permanently — and a directory that outlives its contents is a record
+            // that somebody had a mailbox here, which is the one thing the hashed
+            // name exists to avoid. `remove_dir` refuses a non-empty directory, so
+            // this cannot take a mailbox that still holds something.
+            let _ = std::fs::remove_dir(mailbox.path());
         }
         Ok(gone)
+    }
+
+    fn set_block(
+        &mut self,
+        recipient: &DeviceId,
+        sender: &DeviceId,
+        blocked: bool,
+    ) -> anyhow::Result<()> {
+        let mut set = self.read_blocks(recipient);
+        let changed = if blocked {
+            set.insert(sender.clone())
+        } else {
+            set.remove(sender)
+        };
+        if !changed {
+            // Already in the wanted state. A no-op write would still touch the
+            // disk on every replayed request, so it is skipped — the idempotence
+            // is real, not just observable.
+            return Ok(());
+        }
+        let path = self.blocks_file(recipient);
+        if set.is_empty() {
+            // The last block cleared: the file goes, so an unblocked recipient
+            // leaves no standing record of ever having blocked anybody.
+            let _ = std::fs::remove_file(&path);
+            return Ok(());
+        }
+        let body: String = set
+            .iter()
+            .map(|device| format!("{}\n", device.as_str()))
+            .collect();
+        let staged = path.with_extension("blocks.staged");
+        std::fs::write(&staged, body)?;
+        std::fs::rename(staged, path)?;
+        Ok(())
+    }
+
+    fn is_blocked(&self, recipient: &DeviceId, sender: &DeviceId) -> anyhow::Result<bool> {
+        Ok(self.read_blocks(recipient).contains(sender))
     }
 }
 
@@ -261,13 +429,13 @@ mod tests {
         let bob = device_from_seed(&[3u8; 32]);
 
         let first = store
-            .put(&sender, &envelope(&alice, b"one", NOW + 100))
+            .put(&sender, &envelope(&alice, b"one", NOW + 100), NOW)
             .expect("put");
         store
-            .put(&sender, &envelope(&alice, b"two", NOW + 100))
+            .put(&sender, &envelope(&alice, b"two", NOW + 100), NOW)
             .expect("put");
         store
-            .put(&sender, &envelope(&bob, b"bob's", NOW + 100))
+            .put(&sender, &envelope(&bob, b"bob's", NOW + 100), NOW)
             .expect("put");
 
         assert_eq!(store.list(&alice, NOW).expect("list").len(), 2);
@@ -275,7 +443,7 @@ mod tests {
 
         // The same envelope again is the same deposit, not a second one.
         let again = store
-            .put(&sender, &envelope(&alice, b"one", NOW + 100))
+            .put(&sender, &envelope(&alice, b"one", NOW + 100), NOW + 5)
             .expect("put");
         assert_eq!(again, first, "a retry is not a duplicate");
         assert_eq!(store.list(&alice, NOW).expect("list").len(), 2);
@@ -293,7 +461,7 @@ mod tests {
         assert_eq!(store.list(&bob, NOW).expect("list").len(), 1);
 
         store
-            .put(&sender, &envelope(&alice, b"brief", NOW + 10))
+            .put(&sender, &envelope(&alice, b"brief", NOW + 10), NOW)
             .expect("put");
         assert_eq!(store.list(&alice, NOW + 50).expect("list").len(), 1);
         assert_eq!(store.sweep(NOW + 50).expect("sweep"), 1);
@@ -311,6 +479,113 @@ mod tests {
     }
 
     #[test]
+    fn a_deposit_records_when_it_arrived_and_not_when_it_expires() {
+        // These two were the same field for as long as `put` had no clock to
+        // read, so `deposited_at` reported the expiry it was assigned. Keep the
+        // two numbers far apart, or the assertion cannot tell them apart.
+        let expires_at = NOW + 100;
+
+        fn check(store: &mut dyn Store, expires_at: u64) {
+            let alice = device_from_seed(&[2u8; 32]);
+            store
+                .put(
+                    &device_from_seed(&[1u8; 32]),
+                    &envelope(&alice, b"x", expires_at),
+                    NOW,
+                )
+                .expect("put");
+
+            let held = store.list(&alice, NOW).expect("list");
+            assert_eq!(held.len(), 1);
+            assert_eq!(
+                held[0].deposited_at, NOW,
+                "arrival is the carrier's own fact"
+            );
+            assert_eq!(held[0].envelope.expires_at, expires_at);
+            assert_ne!(
+                held[0].deposited_at, held[0].envelope.expires_at,
+                "recording the expiry as the arrival time is the defect this pins"
+            );
+        }
+
+        check(&mut MemStore::default(), expires_at);
+        // The directory has to outlive the store, so it is bound here rather
+        // than persisted — a test that leaks a temp dir per run is its own bug.
+        let dir = tempfile::tempdir().expect("a root");
+        check(&mut FsStore::open(dir.path()).expect("open"), expires_at);
+    }
+
+    #[test]
+    fn two_sealing_constructions_are_two_deposits() {
+        // The version rides the record, is covered by the deposit signature, and
+        // was missing from the id — so a v2 envelope collided with its v1 twin
+        // and the second `put` overwrote the first.
+        let mut store = MemStore::default();
+        let sender = device_from_seed(&[1u8; 32]);
+        let alice = device_from_seed(&[2u8; 32]);
+
+        let mut v1 = envelope(&alice, b"same bytes", NOW + 100);
+        v1.envelope_version = 1;
+        let mut v2 = v1.clone();
+        v2.envelope_version = 2;
+
+        let first = store.put(&sender, &v1, NOW).expect("put");
+        let second = store.put(&sender, &v2, NOW).expect("put");
+
+        assert_ne!(
+            first, second,
+            "envelopes signed as distinct must not be stored as one"
+        );
+        assert_eq!(
+            store.list(&alice, NOW).expect("list").len(),
+            2,
+            "neither construction may silently overwrite the other"
+        );
+    }
+
+    #[test]
+    fn a_swept_mailbox_leaves_no_directory_behind() {
+        let dir = tempfile::tempdir().expect("a root");
+        let mut store = FsStore::open(dir.path()).expect("open");
+        let alice = device_from_seed(&[2u8; 32]);
+        store
+            .put(
+                &device_from_seed(&[1u8; 32]),
+                &envelope(&alice, b"x", NOW + 10),
+                NOW,
+            )
+            .expect("put");
+        assert_eq!(count_dirs(dir.path()), 1, "a deposit creates a mailbox");
+
+        assert_eq!(store.sweep(NOW + 50).expect("sweep"), 1);
+        assert_eq!(
+            count_dirs(dir.path()),
+            0,
+            "an emptied mailbox directory is a standing record that somebody had one \
+             here, which is what the hashed name exists to avoid"
+        );
+
+        // And a mailbox that still holds something is untouched.
+        store
+            .put(
+                &device_from_seed(&[1u8; 32]),
+                &envelope(&alice, b"keep", NOW + 10_000),
+                NOW,
+            )
+            .expect("put");
+        assert_eq!(store.sweep(NOW + 50).expect("sweep"), 0);
+        assert_eq!(count_dirs(dir.path()), 1, "a live mailbox survives a sweep");
+    }
+
+    fn count_dirs(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root)
+            .expect("read root")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .count()
+    }
+
+    #[test]
     fn a_mailbox_directory_does_not_name_its_owner() {
         let dir = tempfile::tempdir().expect("a root");
         let mut store = FsStore::open(dir.path()).expect("open");
@@ -319,6 +594,7 @@ mod tests {
             .put(
                 &device_from_seed(&[1u8; 32]),
                 &envelope(&alice, b"x", NOW + 10),
+                NOW,
             )
             .expect("put");
 
@@ -343,6 +619,7 @@ mod tests {
             .put(
                 &device_from_seed(&[1u8; 32]),
                 &envelope(&alice, b"x", NOW + 10),
+                NOW,
             )
             .expect("put");
 

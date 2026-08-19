@@ -367,6 +367,13 @@ pub fn bundled_client_packages() -> WorldClientRegistry {
         .unwrap_or_default()
 }
 
+/// The mount of the World a head serves when nothing pinned one.
+///
+/// The *mount*, not the World id: a head is pinned by the name a person types
+/// and a URL carries. `PRODUCT_WORLD` beside it is the id, and the two are
+/// deliberately different strings for different jobs.
+pub const PRODUCT_WORLD_MOUNT: &str = issues_app::MOUNT;
+
 /// The reviewed IssuesWorld implementation id shipped by this build.
 pub fn implementation_id() -> [u8; 32] {
     issues_app::lifecycle::implementation_id()
