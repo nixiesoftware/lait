@@ -12560,6 +12560,8 @@ fn provisional_view(
         checks: vec![],
         provisional: true,
         corrupt_records: vec![],
+        more_comments: None,
+        reactions_complete: true,
     }
 }
 

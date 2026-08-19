@@ -129,6 +129,19 @@ impl IssuesCallHandler {
     }
 }
 
+/// Reactions asked for beside one page of comments.
+///
+/// Four per comment across a default page. That covers an ordinary thread
+/// outright, and anything past it is reported by `reactions_complete`
+/// rather than drawn as absence -- which is what makes a figure here a
+/// tuning choice rather than a correctness one.
+///
+/// It is not the maximum page. A page declares a projection budget that
+/// grows with its limit, and asking for the maximum exceeded the grant and
+/// refused the whole view -- so the number that was meant to make reactions
+/// complete instead made the Issue unreadable.
+const REACTIONS_PER_VIEW: u32 = 4 * issues::contract::DEFAULT_PAGE_SIZE;
+
 /// How long a retryable refusal is waited out, and how the waiting grows.
 ///
 /// The thing usually holding the mutation lane is convergence incorporating a
@@ -330,6 +343,10 @@ fn assemble(detail: issues::contract::IssueDetailProjection) -> IssueView {
     view.comments = comments;
     view.attachments = detail.attachments.items;
     view.checks = detail.checks.items;
+    // Say where this answer stops. A first page that cannot be told apart
+    // from a whole discussion is the wrong answer, not a smaller one.
+    view.more_comments = detail.comments.next_cursor;
+    view.reactions_complete = detail.reactions.next_cursor.is_none();
     view
 }
 
@@ -1812,11 +1829,20 @@ impl<'a> IssueRouter<'a> {
                 // assembling the first page of each into one answer is this
                 // layer's job. `IssueDetail` remains the way to page further
                 // into any one of them.
+                // Reactions are paged independently of the comments they
+                // mark, so the default page would leave a busy thread's later
+                // reactions unread and those comments would draw as though
+                // nobody had reacted. Ask for as many as this Issue is
+                // allowed to have across the comment page it accompanies;
+                // what is still missing after that is reported rather than
+                // rendered as absence.
+                let mut pages = issues::contract::IssueDetailPages::default();
+                pages.reactions.limit = REACTIONS_PER_VIEW;
                 let detail: issues::contract::IssueDetailProjection = self
                     .query(&IssueQuery::Detail {
                         doc,
                         me: Some(facts.actor.clone()),
-                        pages: issues::contract::IssueDetailPages::default(),
+                        pages,
                     })
                     .map_err(Self::effect_err)?;
                 Ok((Response::Issue(Box::new(assemble(detail))), false))
