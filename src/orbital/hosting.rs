@@ -4411,6 +4411,10 @@ fn content_refusal(error: &runtime::plane::freight::content::Failure) -> Content
             ContentErrorCode::NotResident,
             "the descriptor is here and the bytes are not".to_string(),
         ),
+        E::Sealed => (
+            ContentErrorCode::Sealed,
+            "the bytes are here and this Station holds no key for them".to_string(),
+        ),
         E::Bounds => (
             ContentErrorCode::Bounds,
             "the range is outside what this call may return".to_string(),

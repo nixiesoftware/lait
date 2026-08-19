@@ -964,3 +964,58 @@ fn serving_can_be_refused_for_the_bytes_named_and_allowed_for_others() {
     // to serve is not refusing to read.
     assert!(fx.host.read_range(&policy, &withheld, 0, 8).is_ok());
 }
+
+/// A Station that can seal but holds no opening key: lazy revocation, arrived.
+struct NoKeys;
+impl ContentKeys for NoKeys {
+    fn sealing_key(&self) -> Option<AuthorizedBodyKey> {
+        Some(AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY))
+    }
+    fn opening_key(&self, _epoch: &[u8; 16]) -> Option<AuthorizedBodyKey> {
+        None
+    }
+}
+
+#[test]
+fn sealed_bytes_are_not_reported_as_missing_ones() {
+    // The two absences call for opposite moves, so a demand-paged read that
+    // cannot tell them apart retries a fetch that can never help.
+    let fx = fixture("sealed");
+    let space = space();
+    let signer = replica::transaction::SeedSigner(&WRITER_SEED);
+    let auth = Authorizer::default();
+    let allow = |a: ContentAction<'_>| auth.check(a);
+
+    let content = fx
+        .host
+        .ingest(
+            &policy(&space, &allow),
+            [1u8; 16],
+            &mut std::io::Cursor::new(b"sealed to an epoch we will forget".to_vec()),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+
+    // Every byte is resident; only the key is gone.
+    let stranger = ContentPolicy {
+        space: &space,
+        keys: Arc::new(NoKeys),
+        authorize: &allow,
+        max_content_len: u64::MAX,
+    };
+    assert_eq!(
+        fx.host.read_range(&stranger, &content, 0, 8),
+        Err(Failure::Sealed)
+    );
+    assert!(
+        !Failure::Sealed.fetchable(),
+        "no transfer produces a key, so a paging loop must not retry"
+    );
+    assert!(Failure::NotResident.fetchable());
+
+    // And the same bytes open for a Station that holds the epoch.
+    assert!(fx
+        .host
+        .read_range(&policy(&space, &allow), &content, 0, 8)
+        .is_ok());
+}

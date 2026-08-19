@@ -46,9 +46,10 @@ pub enum Failure {
     Denied { demand: Vec<u8> },
     /// No committed descriptor for this reference.
     Unknown,
-    /// The chunk is not held locally. Expected — content is
-    /// descriptor-complete, not byte-complete — and plan 14 is what fetches it.
+    /// Not held locally. Content is descriptor-complete, not byte-complete.
     NotResident,
+    /// Held, and sealed to an epoch this Station has no key for.
+    Sealed,
     /// The content or the request exceeded a bound.
     Bounds,
     /// The store or cache refused.
@@ -65,6 +66,15 @@ pub enum Storage {
     Replica,
     Cache,
     Encoding,
+}
+
+impl Failure {
+    /// Whether fetching could change this answer.
+    ///
+    /// The question a demand-paged read asks before retrying.
+    pub fn fetchable(&self) -> bool {
+        matches!(self, Failure::NotResident)
+    }
 }
 
 impl std::fmt::Display for Failure {
@@ -369,7 +379,7 @@ impl ContentHost {
         let key = policy
             .keys
             .opening_key(&descriptor.epoch)
-            .ok_or(Failure::NotResident)?;
+            .ok_or(Failure::Sealed)?;
 
         let chunk_len = descriptor.chunk_plaintext_len as u64;
         let end = offset

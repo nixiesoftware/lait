@@ -160,6 +160,7 @@ fn refuse_content(code: ContentErrorCode, message: &str) -> Response {
         ContentErrorCode::Denied => (StatusCode::FORBIDDEN, ErrorKind::Error),
         ContentErrorCode::Unknown => (StatusCode::NOT_FOUND, ErrorKind::NotFound),
         ContentErrorCode::NotResident => (StatusCode::CONFLICT, ErrorKind::Error),
+        ContentErrorCode::Sealed => (StatusCode::GONE, ErrorKind::Error),
         ContentErrorCode::Bounds => (StatusCode::RANGE_NOT_SATISFIABLE, ErrorKind::Error),
         ContentErrorCode::Storage => (StatusCode::SERVICE_UNAVAILABLE, ErrorKind::Error),
         ContentErrorCode::Invalid => (StatusCode::UNPROCESSABLE_ENTITY, ErrorKind::Error),
