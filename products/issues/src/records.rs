@@ -1518,11 +1518,34 @@ impl SpecObservationRecord {
         }
     }
 
+    /// The record-body identity for this observation.
+    ///
+    /// A digest, like every other identity in this file, because the value
+    /// has to satisfy `RecordBodyIdentityRecord`'s grammar: lowercase
+    /// alphanumerics, dot, underscore and dash. The readable form this used
+    /// to build -- `assert:obs_01K0…` -- violated it twice over, on the
+    /// separator and on the uppercase Crockford of the id, so encoding the
+    /// envelope failed and every assert and retract was refused as a corrupt
+    /// store.
+    ///
+    /// The tag is inside the digest rather than beside it: an assert and a
+    /// retraction of the same observation are different records and must not
+    /// share a Body.
     pub fn identity(&self) -> String {
-        match self {
-            Self::Assert { observation, .. } => format!("assert:{}", observation.observation),
-            Self::Retract { observation, .. } => format!("retract:{observation}"),
+        let (tag, observation) = match self {
+            Self::Assert { observation, .. } => ("assert", observation.observation.as_str()),
+            Self::Retract { observation, .. } => ("retract", observation.as_str()),
+        };
+        let mut material = Vec::new();
+        for value in [tag, observation] {
+            material
+                .extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            material.extend_from_slice(value.as_bytes());
         }
+        data_encoding::HEXLOWER.encode(&blake3::derive_key(
+            "lait.issues.spec-observation.v1",
+            &material,
+        ))
     }
 }
 

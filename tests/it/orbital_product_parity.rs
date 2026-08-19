@@ -1150,12 +1150,14 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         .open(Activation::offline())
         .unwrap();
     let driver = Driver::dock(&station);
-    let view: IssueView = driver.query(&IssueQuery::View {
+    // Discussion is its own page; `View` is the bounded summary.
+    let detail: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
         doc: doc.clone(),
         me: None,
+        pages: contract::IssueDetailPages::default(),
     });
-    assert_eq!(view.title, "First issue");
-    assert_eq!(view.comments.len(), 1);
+    assert_eq!(detail.issue.title, "First issue");
+    assert_eq!(detail.comments.items.len(), 1);
     assert_eq!(
         driver.resolve(&short_alias(&doc2)).as_deref(),
         Some(doc2.as_str())

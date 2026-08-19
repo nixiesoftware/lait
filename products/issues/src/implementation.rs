@@ -3615,15 +3615,26 @@ fn spec_reference_page_row(
     })
 }
 
+/// The observation a `spec_observation_fact` row asserts.
+///
+/// The page is a page of observations, not of the records that carry them:
+/// projecting the record put its storage tag on the wire and made the answer
+/// undecodable as what it claims to be. A retraction is a fact about an
+/// observation rather than one itself, and posts its own node kind, so it
+/// does not appear here.
 fn spec_observation_page_row(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
-) -> Result<crate::records::SpecObservationRecord, Rejection> {
+) -> Result<Option<crate::spec::Observation>, Rejection> {
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
     let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    crate::records::SpecObservationRecord::decode_canonical(&envelope.record)
-        .map_err(|_| Rejection::StateCorrupt)
+    let record = crate::records::SpecObservationRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    Ok(match record {
+        crate::records::SpecObservationRecord::Assert { observation, .. } => Some(observation),
+        crate::records::SpecObservationRecord::Retract { .. } => None,
+    })
 }
 
 fn issue_page_row(row: &runtime::find::ResultRow) -> Result<crate::dto::Row, Rejection> {
@@ -4264,24 +4275,24 @@ fn unique_find_row(
 fn unique_doc_for_ordinal(
     ctx: &Context<'_>,
     project: &str,
-    ordinal: &str,
+    ordinal: u64,
 ) -> Result<String, Rejection> {
     let request = contract::PageRequest {
         limit: ALIAS_ORDINAL_SCAN,
         cursor: None,
     };
+    // Seek the prefix, not a half-open range closed by a `Keep`. A `Keep`
+    // does not bound a scan: the runtime charges its meter for every row it
+    // visits and only then discards, and a discarded row does not fill the
+    // page either -- so the scan runs to the end of the field and trips the
+    // bound instead of stopping. `Test::Prefix` is bounded by the corpus.
     let answer = find_field_test_page(
         ctx,
         crate::find::field::ALIAS_COORDINATE,
-        runtime::find::Test::GreaterOrEqual,
+        runtime::find::Test::Prefix,
         runtime::find::Atom::Text(format!("{ordinal}-")),
         &request,
-        vec![runtime::find::Predicate {
-            field: crate::find::field_ref(crate::find::field::ALIAS_COORDINATE),
-            test: runtime::find::Test::Less,
-            // 'g' is the first character above lowercase hex.
-            value: runtime::find::Atom::Text(format!("{ordinal}-g")),
-        }],
+        Vec::new(),
         vec![crate::find::field_ref(crate::find::field::SOURCE_ID)],
     )?;
     // More sharing one ordinal than the scan admits is not something to
@@ -4315,20 +4326,16 @@ fn unique_id_by_prefix(ctx: &Context<'_>, kind: &str, prefix: &str) -> Result<St
         limit: ALIAS_ORDINAL_SCAN,
         cursor: None,
     };
-    let mut upper = prefix.to_string();
-    // Canonical ids are Crockford base32, so no character above 'z' occurs.
-    upper.push('{');
+    // Bounded by the prefix itself. The `id` field is posted by every entity
+    // node, so a half-open range would scan every kind that sorts after this
+    // one -- most of the corpus -- and trip the bound rather than answering.
     let answer = find_field_test_page(
         ctx,
         crate::find::field::ID,
-        runtime::find::Test::GreaterOrEqual,
+        runtime::find::Test::Prefix,
         runtime::find::Atom::Text(prefix.to_string()),
         &request,
-        vec![runtime::find::Predicate {
-            field: crate::find::field_ref(crate::find::field::ID),
-            test: runtime::find::Test::Less,
-            value: runtime::find::Atom::Text(upper),
-        }],
+        Vec::new(),
         Vec::new(),
     )?;
     if answer.next_cursor().is_some() {
@@ -4381,14 +4388,13 @@ fn resolve_entity(
                 Some((ordinal, suffix)) => (ordinal, Some(suffix)),
                 None => (rest, None),
             };
-            if ordinal
-                .parse::<u64>()
-                .ok()
-                .filter(|value| *value > 0)
-                .is_none()
-            {
+            // Reparse rather than carrying the typed text through: a padded
+            // `ENG-000483102` validates and then matches no posting, because
+            // the coordinate is written from the number.
+            let Some(canonical_ordinal) = ordinal.parse::<u64>().ok().filter(|value| *value > 0)
+            else {
                 return Err(Rejection::InvalidRequest);
-            }
+            };
             if suffix.is_some_and(|suffix| {
                 suffix.len() != 32 || data_encoding::HEXLOWER.decode(suffix.as_bytes()).is_err()
             }) {
@@ -4418,7 +4424,7 @@ fn resolve_entity(
                     result_text(&identity, crate::find::field::SOURCE_ID)
                         .ok_or(Rejection::StateCorrupt)?
                 }
-                None => unique_doc_for_ordinal(ctx, &project, ordinal)?,
+                None => unique_doc_for_ordinal(ctx, &project, canonical_ordinal)?,
             };
             (doc, Some(project))
         };
@@ -5157,12 +5163,26 @@ fn spec_observation_state(
     Ok(Some(record))
 }
 
+/// Every Spec in the Space.
+///
+/// Enumerating `spec_schema()` Bodies answers nothing: no such Body is
+/// written any more. A Spec is a heads Body plus its revision records, which
+/// is what `spec_state` reads and what `baseline_state` reads for its own
+/// kind -- so enumerate the heads and assemble each the same way. Reading the
+/// retired kind is why a Packet reported every governing Spec as missing.
 fn all_specs(ctx: &Context<'_>) -> Vec<crate::spec::Spec> {
     let mut specs: Vec<_> = ctx
-        .bodies_with_schema(&contract::world_id(), &contract::spec_schema())
+        .bodies_with_schema(
+            &contract::world_id(),
+            &crate::records::PhysicalSchema::SpecHeads.declaration().id,
+        )
         .iter()
         .filter_map(|key| ctx.read_collaborative(key).ok().flatten())
-        .map(|view| crate::spec::Spec::from_view(&view))
+        .filter_map(|view| {
+            let id = view.registers.get(crate::records::roots::IDENTITY)?;
+            String::from_utf8(id.clone()).ok()
+        })
+        .filter_map(|spec| spec_state(ctx, &spec))
         .filter(|spec| !spec.revisions.is_empty())
         .collect();
     specs.sort_by(|a, b| {
@@ -5179,12 +5199,22 @@ fn all_specs(ctx: &Context<'_>) -> Vec<crate::spec::Spec> {
     specs
 }
 
+/// Every Baseline in the Space, read the way `baseline_state` reads one.
 fn all_baselines(ctx: &Context<'_>) -> Vec<crate::spec::Baseline> {
     let mut baselines: Vec<_> = ctx
-        .bodies_with_schema(&contract::world_id(), &contract::baseline_schema())
+        .bodies_with_schema(
+            &contract::world_id(),
+            &crate::records::PhysicalSchema::BaselineHeads
+                .declaration()
+                .id,
+        )
         .iter()
         .filter_map(|key| ctx.read_collaborative(key).ok().flatten())
-        .map(|view| crate::spec::Baseline::from_view(&view))
+        .filter_map(|view| {
+            let id = view.registers.get(crate::records::roots::IDENTITY)?;
+            String::from_utf8(id.clone()).ok()
+        })
+        .filter_map(|baseline| baseline_state(ctx, &baseline))
         .filter(|baseline| !baseline.revisions.is_empty())
         .collect();
     baselines.sort_by(|a, b| {
@@ -12078,7 +12108,10 @@ impl World for IssuesWorld {
                     .rows()
                     .iter()
                     .map(|row| spec_observation_page_row(ctx, row))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items))
                         .expect("spec observations page json"),
