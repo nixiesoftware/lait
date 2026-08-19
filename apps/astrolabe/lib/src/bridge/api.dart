@@ -10,7 +10,7 @@ part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `actor_address`, `attach_paths`, `attach_to`, `attach`, `authored_name_for`, `card_presence`, `emit`, `emit`, `empty`, `env_flag`, `into_action`, `len`, `new`, `parse_agent_client`, `parse_mcp_scope`, `project`, `space_ref`, `view_of`, `world_people`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`, `Watchers`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseNotAllowedOwner): `push`
 
 /// Start the core, or attach to the one that is already running.
@@ -125,6 +125,17 @@ sealed class ActionRequest with _$ActionRequest {
     required String to,
     required String body,
   }) = ActionRequest_SendMessage;
+
+  /// Publish this identity's reach so it can be handed to somebody. Acts on
+  /// nobody — showing a friend code is not befriending anyone.
+  const factory ActionRequest.shareReach() = ActionRequest_ShareReach;
+
+  /// Take a correspondent in, by the announcement they handed over. The one
+  /// of the pair that creates a relationship, which is why it is named for
+  /// the person rather than for the artifact.
+  const factory ActionRequest.addCorrespondent({
+    required String announcement,
+  }) = ActionRequest_AddCorrespondent;
 
   /// Ask the carrier for anything waiting, and file it into conversations.
   const factory ActionRequest.collectMail() = ActionRequest_CollectMail;
@@ -668,6 +679,15 @@ class CorrespondenceFacts {
   /// writes to. `None` until the plane is known.
   final String? myDevice;
 
+  /// What this identity hands somebody so they can reach it, rendered for
+  /// copying. `None` until something has been published. Not a Card (that is
+  /// the address book's, and asserts nothing) and not an address (that is the
+  /// directory's, and is short and spoken).
+  final String? myReach;
+
+  /// Which conversation is this identity's own, when the backend has one.
+  final String? me;
+
   /// The people this identity can reach. A person folds all their devices into
   /// one contact, and a click on one opens a chat.
   final List<ContactRow> contacts;
@@ -684,6 +704,8 @@ class CorrespondenceFacts {
 
   const CorrespondenceFacts({
     this.myDevice,
+    this.myReach,
+    this.me,
     required this.contacts,
     required this.conversations,
     required this.openTabs,
@@ -693,6 +715,8 @@ class CorrespondenceFacts {
   @override
   int get hashCode =>
       myDevice.hashCode ^
+      myReach.hashCode ^
+      me.hashCode ^
       contacts.hashCode ^
       conversations.hashCode ^
       openTabs.hashCode ^
@@ -704,6 +728,8 @@ class CorrespondenceFacts {
       other is CorrespondenceFacts &&
           runtimeType == other.runtimeType &&
           myDevice == other.myDevice &&
+          myReach == other.myReach &&
+          me == other.me &&
           contacts == other.contacts &&
           conversations == other.conversations &&
           openTabs == other.openTabs &&

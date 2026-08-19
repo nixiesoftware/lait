@@ -78,3 +78,7 @@ schedule = { path = "../../crates/schedule" }
 signage = { package = "lait-signage", path = "../../products/signage" }
 signage-app = { package = "lait-signage-app", path = "../../products/signage-app" }
 tempfile = "3"
+# A real Post, stood up in-process, so the two-client correspondence test drives
+# the same carriage a deployed one does rather than a mock of it.
+lait-post = { path = "../../crates/post" }
+axum = "0.8"

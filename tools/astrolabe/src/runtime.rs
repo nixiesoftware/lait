@@ -131,6 +131,12 @@ pub enum Action {
         body: String,
     },
     CollectMail,
+    /// Publish this identity's reach and report the card to hand over.
+    ShareReach,
+    /// Take in a correspondent's announcement.
+    AddCorrespondent {
+        announcement: String,
+    },
     BlockSender(String),
     AcceptContact(String),
     OpenConversation(String),
@@ -243,6 +249,8 @@ impl Action {
             Self::StopHead(id) => format!("head.stop:{id}"),
             Self::SendMessage { to, .. } => format!("correspondence.send:{to}"),
             Self::CollectMail => "correspondence.collect".into(),
+            Self::ShareReach => "reach.share".into(),
+            Self::AddCorrespondent { .. } => "reach.add".into(),
             Self::BlockSender(person) => format!("correspondence.block:{person}"),
             Self::AcceptContact(person) => format!("correspondence.accept:{person}"),
             Self::OpenConversation(person) => format!("correspondence.open:{person}"),
@@ -296,6 +304,8 @@ impl Action {
     pub fn what(&self) -> String {
         match self {
             Self::Refresh => "re-read this machine".into(),
+            Self::ShareReach => "publish how to reach you".into(),
+            Self::AddCorrespondent { .. } => "add a correspondent".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
             Self::StartDevice(id) => format!("start {id}"),
@@ -568,39 +578,51 @@ fn now_secs() -> u64 {
 /// Choose the correspondence backend: a real hosted-Post plane when one is
 /// named, else the fixture when opted in, else none (which refuses honestly).
 /// Post wins — real carriage beats a loopback one.
-fn build_correspondent(
+/// Public because the composition is the thing worth testing.
+///
+/// A test that stood its own plane up would prove the plane and miss the wiring
+/// — and the two times this client's seams have been wrong, every component was
+/// correct and the composition was not. `identity_home` resolving the wrong
+/// directory is exactly that class of defect, and it is invisible to anything
+/// that does not come through here.
+pub fn build_correspondent(
+    identity: Option<&std::path::Path>,
     post_url: Option<String>,
     demo: bool,
 ) -> Option<std::sync::Mutex<crate::client::correspondence::Correspondent>> {
     use crate::client::correspondence::{Correspondent, DemoCarrier, PostBackend};
     if let Some(base) = post_url {
-        return match PostBackend::found(launch_seeds(), base, now_secs()) {
+        // The identity's own seeds, so the address survives a restart. An
+        // identity with no key is not one this client may mint: leave
+        // correspondence unconnected, which refuses in words.
+        let Ok(home) = identity_home(identity) else {
+            return None;
+        };
+        let Ok(seeds) = lait::config::load_or_create_kinship_seeds(&home) else {
+            return None;
+        };
+        // A corrupt reach file is not "no correspondents": re-founding over it
+        // would change the address a person has already handed out.
+        let Ok(held) = addressbook::ReachStore::at(&home).load() else {
+            return None;
+        };
+        return match PostBackend::restore_at(seeds, held, base, now_secs(), Some(home)) {
             Ok(backend) => Some(std::sync::Mutex::new(Correspondent::Post(backend))),
-            // Only too-few-seeds can fail founding, which cannot happen here;
-            // if it somehow does, leave correspondence unconnected rather than
-            // silently fall back to a fixture the person did not ask for.
             Err(_) => None,
         };
     }
     demo.then(|| std::sync::Mutex::new(Correspondent::Demo(DemoCarrier::new(now_secs()))))
 }
 
-/// Two per-launch device seeds for this identity's Post profile, derived from
-/// the wall clock so each launch founds a distinct self-profile — which keeps a
-/// persistent Post from crossing one run's mail into the next. The daemon
-/// supplies the identity's real, stable seeds in place of these.
-fn launch_seeds() -> Vec<[u8; 32]> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos())
-        .to_le_bytes();
-    let mk = |tag: u8| {
-        let mut seed = [0u8; 32];
-        seed[..16].copy_from_slice(&stamp);
-        seed[16] = tag;
-        seed
-    };
-    vec![mk(1), mk(2)]
+/// Where this identity's durable state lives. Public for the same reason as
+/// [`build_correspondent`]: a test that computes this itself is not testing it.
+pub fn identity_home(identity: Option<&std::path::Path>) -> Result<std::path::PathBuf, ()> {
+    match identity {
+        Some(home) => lait::config::Selection::for_identity(home),
+        None => lait::config::Selection::default(),
+    }
+    .identity_dir()
+    .map_err(|_| ())
 }
 
 async fn serve(
@@ -613,6 +635,7 @@ async fn serve(
     let state_root = config.state_root.clone();
     let correspondence_demo = config.correspondence_demo;
     let post_url = config.post_url.clone();
+    let identity = config.identity.clone();
     let remembered = crate::screen::load(&state_root);
     let (client, signals) = match Client::start(config).await {
         Ok(started) => started,
@@ -658,7 +681,7 @@ async fn serve(
                 .map(Into::into),
         ),
         state_root,
-        correspondence: build_correspondent(post_url, correspondence_demo),
+        correspondence: build_correspondent(identity.as_deref(), post_url, correspondence_demo),
     });
 
     // A machine that was a screen comes back as one, before the first read.
@@ -1063,12 +1086,32 @@ impl Worker {
                 self.correspond(|correspondence| correspondence.send(to, body, now))?;
                 Ok(Outcome::Silent)
             }
-            Action::CollectMail => {
-                let now = now_secs();
+            // Publishing and learning both change durable reach state, so they go
+            // through `correspond` like every other correspondence act — which
+            // is also what persists them.
+            Action::ShareReach => {
+                // The card itself reaches the surface as `CorrespondenceFacts.
+                // my_reach`; the notice says what happened. Putting a kilobyte of
+                // base32 through a one-line status channel would be a second
+                // copy of a value the view already holds, in the place least
+                // able to show it.
+                self.correspond(|correspondence| correspondence.announce().map(|_| ()))?;
+                Ok(Outcome::Said("ready to hand over".into()))
+            }
+            Action::AddCorrespondent { announcement } => {
+                let mut learned = String::new();
                 self.correspond(|correspondence| {
-                    correspondence.collect(now);
+                    learned = correspondence.learn(announcement)?;
                     Ok(())
                 })?;
+                Ok(Outcome::Said(format!("added {learned}")))
+            }
+            Action::CollectMail => {
+                let now = now_secs();
+                // A carrier that could not be asked answers here as a retryable
+                // failure rather than as silence. Silence is what an empty
+                // mailbox looks like, and the two are not the same fact.
+                self.correspond(|correspondence| correspondence.collect(now))?;
                 Ok(Outcome::Silent)
             }
             Action::BlockSender(person) => {
@@ -1076,38 +1119,27 @@ impl Worker {
                 self.correspond(|correspondence| correspondence.block(person, now))?;
                 Ok(Outcome::Said(format!("blocked {person}")))
             }
+            // The four below say what they did only after the backend has said
+            // it did it. `correspond` propagates a refusal, so a backend that
+            // cannot carry the operation stops the notice with it — the shape
+            // `BlockSender` already had, and the reason it was the only one of
+            // the five that never claimed an act it had not performed.
             Action::AcceptContact(person) => {
-                let person = person.clone();
-                self.correspond(move |correspondence| {
-                    correspondence.accept(&person);
-                    Ok(())
-                })?;
-                Ok(Outcome::Said("added to contacts".into()))
+                self.correspond(|correspondence| correspondence.accept(person))?;
+                Ok(Outcome::Said(format!("added {person} to contacts")))
             }
             // Opening, focusing and closing tabs are shared-model navigation:
             // a click in one window moves the tab the chat window then draws.
             Action::OpenConversation(person) => {
-                let person = person.clone();
-                self.correspond(move |correspondence| {
-                    correspondence.open(&person);
-                    Ok(())
-                })?;
+                self.correspond(|correspondence| correspondence.open(person))?;
                 Ok(Outcome::Silent)
             }
             Action::FocusConversation(person) => {
-                let person = person.clone();
-                self.correspond(move |correspondence| {
-                    correspondence.focus(&person);
-                    Ok(())
-                })?;
+                self.correspond(|correspondence| correspondence.focus(person))?;
                 Ok(Outcome::Silent)
             }
             Action::CloseConversation(person) => {
-                let person = person.clone();
-                self.correspond(move |correspondence| {
-                    correspondence.close(&person);
-                    Ok(())
-                })?;
+                self.correspond(|correspondence| correspondence.close(person))?;
                 Ok(Outcome::Silent)
             }
             Action::SpaceFound { home, name, nick } => {

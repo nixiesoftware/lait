@@ -591,6 +591,13 @@ pub struct CorrespondenceFacts {
     /// This identity's own device id on the plane — the address a correspondent
     /// writes to. `None` until the plane is known.
     pub my_device: Option<String>,
+    /// What this identity hands somebody so they can reach it, rendered for
+    /// copying. `None` until something has been published. Not a Card (that is
+    /// the address book's, and asserts nothing) and not an address (that is the
+    /// directory's, and is short and spoken).
+    pub my_reach: Option<String>,
+    /// Which conversation is this identity's own, when the backend has one.
+    pub me: Option<String>,
     /// The people this identity can reach. A person folds all their devices into
     /// one contact, and a click on one opens a chat.
     pub contacts: Vec<ContactRow>,
@@ -769,6 +776,15 @@ pub enum ActionRequest {
         to: String,
         body: String,
     },
+    /// Publish this identity's reach so it can be handed to somebody. Acts on
+    /// nobody — showing a friend code is not befriending anyone.
+    ShareReach,
+    /// Take a correspondent in, by the announcement they handed over. The one
+    /// of the pair that creates a relationship, which is why it is named for
+    /// the person rather than for the artifact.
+    AddCorrespondent {
+        announcement: String,
+    },
     /// Ask the carrier for anything waiting, and file it into conversations.
     CollectMail,
     /// Block a person at the carrier, so no device of theirs lands again. Also
@@ -937,6 +953,8 @@ impl ActionRequest {
             Self::StartHead => Action::StartHead,
             Self::StopHead { id } => Action::StopHead(id),
             Self::SendMessage { to, body } => Action::SendMessage { to, body },
+            Self::ShareReach => Action::ShareReach,
+            Self::AddCorrespondent { announcement } => Action::AddCorrespondent { announcement },
             Self::CollectMail => Action::CollectMail,
             Self::BlockSender { person } => Action::BlockSender(person),
             Self::AcceptContact { person } => Action::AcceptContact(person),
@@ -1785,6 +1803,8 @@ fn project(app: &App) -> ClientView {
         }),
         correspondence: app.correspondence().map(|corr| CorrespondenceFacts {
             my_device: corr.my_device.clone(),
+            my_reach: corr.my_reach.clone(),
+            me: corr.me.clone(),
             contacts: corr
                 .contacts
                 .iter()

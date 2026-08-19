@@ -54,9 +54,12 @@ CorrespondenceFacts _facts({
   List<ChatMessageRow> messages = const [],
   List<String> openTabs = const ['ada'],
   String? activeTab = 'ada',
+  String? myReach,
 }) =>
     CorrespondenceFacts(
       myDevice: null,
+      myReach: myReach,
+      me: null,
       contacts: [
         ContactRow(
           id: 'ada',
@@ -74,6 +77,33 @@ CorrespondenceFacts _facts({
       ],
       openTabs: openTabs,
       activeTab: activeTab,
+    );
+
+/// What the hosted backend actually emits when nobody has been reached yet:
+/// this identity's own conversation, open and active. Never an empty tab list —
+/// `PostBackend::snapshot` cannot produce one, which is why gating the exchange
+/// on "no tabs" hid it on the only arm where it works.
+CorrespondenceFacts _postShaped({String? myReach}) => CorrespondenceFacts(
+      myDevice: 'device:mine',
+      myReach: myReach,
+      me: 'prf_me',
+      contacts: [
+        ContactRow(
+          id: 'prf_me',
+          name: 'You (over the Post)',
+          devices: const ['device:mine'],
+          added: true,
+          isAgent: false,
+          parentId: null,
+          parentName: null,
+          unread: 0,
+        ),
+      ],
+      conversations: const [
+        ConversationRow(peerId: 'prf_me', peerName: 'You (over the Post)', messages: []),
+      ],
+      openTabs: const ['prf_me'],
+      activeTab: 'prf_me',
     );
 
 Future<List<ActionRequest>> _pump(
@@ -166,6 +196,113 @@ void main() {
     );
     expect(find.text('Invitation to a Space'), findsOneWidget);
     expect(find.text('Open'), findsOneWidget);
+  });
+
+  testWidgets(
+      'an unbuilt control is drawn disabled, and pressing it asks for nothing',
+      (tester) async {
+    // The three controls on this surface with nothing behind them yet: the
+    // invitation's Open and Decline (no action carries entering a Space), and
+    // the composer's attach (`Content` has no attachment variant).
+    //
+    // Each was previously wired to an empty closure, which draws a control that
+    // looks live, accepts the press, and does nothing — the failure this suite
+    // could not see, because a test that asserts a button *renders* passes
+    // either way. Pressing them is the assertion that matters.
+    final asked = await _pump(
+      tester,
+      _view(
+        correspondence: _facts(messages: [
+          _message(mine: false, kind: 'invitation', body: null),
+        ]),
+      ),
+    );
+
+    await tester.tap(find.text('Open'), warnIfMissed: false);
+    await tester.tap(find.text('Decline'), warnIfMissed: false);
+    await tester.tap(
+      find.bySemanticsLabel(RegExp('^Attach a file')),
+      warnIfMissed: false,
+    );
+    await tester.pump();
+
+    expect(
+      asked,
+      isEmpty,
+      reason: 'a control with nothing behind it asks for nothing when pressed',
+    );
+    // And it says so rather than looking ready: the label carries the reason,
+    // so the disabled state is legible without hovering for a tooltip.
+    expect(find.bySemanticsLabel(RegExp('not available yet')), findsWidgets);
+  });
+
+  testWidgets('with nobody reached yet, the exchange is what the chat offers',
+      (tester) async {
+    final asked = await _pump(tester, _view(correspondence: _postShaped()));
+
+    await tester.tap(find.byKey(const ValueKey('reach-share')));
+    await tester.pump();
+    expect(asked, [const ActionRequest.shareReach()]);
+
+    asked.clear();
+    // An empty paste asks for nothing — a refusal round trip is not how a
+    // surface says "you have not typed anything yet".
+    await tester.tap(find.byKey(const ValueKey('reach-add')));
+    await tester.pump();
+    expect(asked, isEmpty);
+
+    await tester.enterText(find.byKey(const ValueKey('reach-paste')), '  abc  ');
+    await tester.tap(find.byKey(const ValueKey('reach-add')));
+    await tester.pump();
+    expect(asked, [const ActionRequest.addCorrespondent(announcement: 'abc')]);
+  });
+
+  testWidgets('a published card is shown to copy, not re-published',
+      (tester) async {
+    // Announcing bumps the epoch and appends to the kinship log, so a surface
+    // that re-asked on every build would grow the log for nothing.
+    final asked = await _pump(
+      tester,
+      _view(correspondence: _postShaped(myReach: 'aebagbafaydqqcik')),
+    );
+    expect(find.byKey(const ValueKey('reach-card')), findsOneWidget);
+    expect(find.byKey(const ValueKey('reach-share')), findsNothing);
+    expect(asked, isEmpty);
+  });
+
+  testWidgets('sharing already under way does not ask twice', (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        correspondence: _postShaped(),
+        inFlight: [ActionKeys.shareReach],
+      ),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('reach-share')),
+      warnIfMissed: false,
+    );
+    await tester.pump();
+    expect(asked, isEmpty);
+  });
+
+  testWidgets('once someone is reached the transcript returns, and the exchange '
+      'is a control rather than the body', (tester) async {
+    // The regression guard for the defect this fixture exists to expose: the
+    // offer must not be gated on a tab state a backend never emits, and must
+    // not squat on the conversation once there is one.
+    await _pump(tester, _view(correspondence: _facts()));
+    expect(find.byKey(const ValueKey('reach-paste')), findsNothing);
+    expect(find.byKey(const ValueKey('chat-input')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('reach-toggle')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('reach-paste')), findsOneWidget);
+    expect(find.byKey(const ValueKey('chat-input')), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('reach-toggle')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('chat-input')), findsOneWidget);
   });
 
   testWidgets('Block asks to block the active person', (tester) async {

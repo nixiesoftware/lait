@@ -241,6 +241,12 @@ default-filter = '''
 # state root and a locked running image. The one platform where it had been
 # wrong was the one platform not testing it.
 #
+# `astrolabe::correspond` joins them for the same reason and is the same shape
+# of surface: two identity homes under one root, `create_new` on a key file, an
+# atomic replace that renames over an existing path, and an fsync that has to
+# land before a crash window closes. Every one of those is where NTFS and POSIX
+# disagree, and the file it exercises is the one holding a person's address.
+#
 # Excluded from `kind(lib)`: the two mechanics ceremony gates, which are CPU
 # gates rather than platform gates — 10,000 iterations of real DKG proves the
 # same thing on every OS, and on a 2-core windows-latest it proves it slowly.
@@ -258,6 +264,7 @@ default-filter = '''
         + (binary_id(lait::it) & test(content_ipc::))
         + binary_id(astrolabe::launch)
         + binary_id(astrolabe::packaging)
+        + binary_id(astrolabe::correspond)
     )
     - (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
 '''

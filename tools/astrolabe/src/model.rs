@@ -39,6 +39,23 @@ pub struct Correspondence {
     /// This identity's own device on the plane — the address a correspondent
     /// writes to.
     pub my_device: Option<String>,
+    /// What this identity hands somebody so they can reach it — an
+    /// [`Announcement`](addressbook::Announcement), rendered. `None` when this
+    /// backend has none to give: the fixture, or a plane that has never
+    /// published.
+    ///
+    /// Three words, three things, and they are easy to blur. A **Card** is your
+    /// private note about somebody and is evidence of nothing. An
+    /// **Announcement** is this: signed, verifiable, and made to travel. An
+    /// **address** is the short spoken handle a directory issues
+    /// (`tin-harbor-quiet-4417`) which resolves *to* an announcement. Naming
+    /// two of them alike would blur them exactly where the difference decides
+    /// whether a letter can be sealed.
+    pub my_reach: Option<String>,
+    /// Which conversation is this identity's own, if the backend has one. Said
+    /// rather than inferred: a surface counting contacts cannot tell "nobody
+    /// reached yet" from "one correspondent" without knowing which is you.
+    pub me: Option<String>,
     /// The people this identity can hold a conversation with. A person folds all
     /// of their devices into one entry; a message from any of them is one
     /// conversation.

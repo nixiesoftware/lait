@@ -63,6 +63,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_StartHead value)? startHead,
     TResult Function(ActionRequest_StopHead value)? stopHead,
     TResult Function(ActionRequest_SendMessage value)? sendMessage,
+    TResult Function(ActionRequest_ShareReach value)? shareReach,
+    TResult Function(ActionRequest_AddCorrespondent value)? addCorrespondent,
     TResult Function(ActionRequest_CollectMail value)? collectMail,
     TResult Function(ActionRequest_BlockSender value)? blockSender,
     TResult Function(ActionRequest_AcceptContact value)? acceptContact,
@@ -128,6 +130,10 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that);
       case ActionRequest_SendMessage() when sendMessage != null:
         return sendMessage(_that);
+      case ActionRequest_ShareReach() when shareReach != null:
+        return shareReach(_that);
+      case ActionRequest_AddCorrespondent() when addCorrespondent != null:
+        return addCorrespondent(_that);
       case ActionRequest_CollectMail() when collectMail != null:
         return collectMail(_that);
       case ActionRequest_BlockSender() when blockSender != null:
@@ -225,6 +231,9 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_StartHead value) startHead,
     required TResult Function(ActionRequest_StopHead value) stopHead,
     required TResult Function(ActionRequest_SendMessage value) sendMessage,
+    required TResult Function(ActionRequest_ShareReach value) shareReach,
+    required TResult Function(ActionRequest_AddCorrespondent value)
+        addCorrespondent,
     required TResult Function(ActionRequest_CollectMail value) collectMail,
     required TResult Function(ActionRequest_BlockSender value) blockSender,
     required TResult Function(ActionRequest_AcceptContact value) acceptContact,
@@ -297,6 +306,10 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that);
       case ActionRequest_SendMessage():
         return sendMessage(_that);
+      case ActionRequest_ShareReach():
+        return shareReach(_that);
+      case ActionRequest_AddCorrespondent():
+        return addCorrespondent(_that);
       case ActionRequest_CollectMail():
         return collectMail(_that);
       case ActionRequest_BlockSender():
@@ -385,6 +398,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_StartHead value)? startHead,
     TResult? Function(ActionRequest_StopHead value)? stopHead,
     TResult? Function(ActionRequest_SendMessage value)? sendMessage,
+    TResult? Function(ActionRequest_ShareReach value)? shareReach,
+    TResult? Function(ActionRequest_AddCorrespondent value)? addCorrespondent,
     TResult? Function(ActionRequest_CollectMail value)? collectMail,
     TResult? Function(ActionRequest_BlockSender value)? blockSender,
     TResult? Function(ActionRequest_AcceptContact value)? acceptContact,
@@ -449,6 +464,10 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that);
       case ActionRequest_SendMessage() when sendMessage != null:
         return sendMessage(_that);
+      case ActionRequest_ShareReach() when shareReach != null:
+        return shareReach(_that);
+      case ActionRequest_AddCorrespondent() when addCorrespondent != null:
+        return addCorrespondent(_that);
       case ActionRequest_CollectMail() when collectMail != null:
         return collectMail(_that);
       case ActionRequest_BlockSender() when blockSender != null:
@@ -544,6 +563,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function()? startHead,
     TResult Function(String id)? stopHead,
     TResult Function(String to, String body)? sendMessage,
+    TResult Function()? shareReach,
+    TResult Function(String announcement)? addCorrespondent,
     TResult Function()? collectMail,
     TResult Function(String person)? blockSender,
     TResult Function(String person)? acceptContact,
@@ -620,6 +641,10 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that.id);
       case ActionRequest_SendMessage() when sendMessage != null:
         return sendMessage(_that.to, _that.body);
+      case ActionRequest_ShareReach() when shareReach != null:
+        return shareReach();
+      case ActionRequest_AddCorrespondent() when addCorrespondent != null:
+        return addCorrespondent(_that.announcement);
       case ActionRequest_CollectMail() when collectMail != null:
         return collectMail();
       case ActionRequest_BlockSender() when blockSender != null:
@@ -730,6 +755,8 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function() startHead,
     required TResult Function(String id) stopHead,
     required TResult Function(String to, String body) sendMessage,
+    required TResult Function() shareReach,
+    required TResult Function(String announcement) addCorrespondent,
     required TResult Function() collectMail,
     required TResult Function(String person) blockSender,
     required TResult Function(String person) acceptContact,
@@ -814,6 +841,10 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that.id);
       case ActionRequest_SendMessage():
         return sendMessage(_that.to, _that.body);
+      case ActionRequest_ShareReach():
+        return shareReach();
+      case ActionRequest_AddCorrespondent():
+        return addCorrespondent(_that.announcement);
       case ActionRequest_CollectMail():
         return collectMail();
       case ActionRequest_BlockSender():
@@ -916,6 +947,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function()? startHead,
     TResult? Function(String id)? stopHead,
     TResult? Function(String to, String body)? sendMessage,
+    TResult? Function()? shareReach,
+    TResult? Function(String announcement)? addCorrespondent,
     TResult? Function()? collectMail,
     TResult? Function(String person)? blockSender,
     TResult? Function(String person)? acceptContact,
@@ -991,6 +1024,10 @@ extension ActionRequestPatterns on ActionRequest {
         return stopHead(_that.id);
       case ActionRequest_SendMessage() when sendMessage != null:
         return sendMessage(_that.to, _that.body);
+      case ActionRequest_ShareReach() when shareReach != null:
+        return shareReach();
+      case ActionRequest_AddCorrespondent() when addCorrespondent != null:
+        return addCorrespondent(_that.announcement);
       case ActionRequest_CollectMail() when collectMail != null:
         return collectMail();
       case ActionRequest_BlockSender() when blockSender != null:
@@ -1808,6 +1845,94 @@ class _$ActionRequest_SendMessageCopyWithImpl<$Res>
       body: null == body
           ? _self.body
           : body // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_ShareReach extends ActionRequest {
+  const ActionRequest_ShareReach() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is ActionRequest_ShareReach);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ActionRequest.shareReach()';
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_AddCorrespondent extends ActionRequest {
+  const ActionRequest_AddCorrespondent({required this.announcement})
+      : super._();
+
+  final String announcement;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_AddCorrespondentCopyWith<ActionRequest_AddCorrespondent>
+      get copyWith => _$ActionRequest_AddCorrespondentCopyWithImpl<
+          ActionRequest_AddCorrespondent>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_AddCorrespondent &&
+            (identical(other.announcement, announcement) ||
+                other.announcement == announcement));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, announcement);
+
+  @override
+  String toString() {
+    return 'ActionRequest.addCorrespondent(announcement: $announcement)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_AddCorrespondentCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_AddCorrespondentCopyWith(
+          ActionRequest_AddCorrespondent value,
+          $Res Function(ActionRequest_AddCorrespondent) _then) =
+      _$ActionRequest_AddCorrespondentCopyWithImpl;
+  @useResult
+  $Res call({String announcement});
+}
+
+/// @nodoc
+class _$ActionRequest_AddCorrespondentCopyWithImpl<$Res>
+    implements $ActionRequest_AddCorrespondentCopyWith<$Res> {
+  _$ActionRequest_AddCorrespondentCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_AddCorrespondent _self;
+  final $Res Function(ActionRequest_AddCorrespondent) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? announcement = null,
+  }) {
+    return _then(ActionRequest_AddCorrespondent(
+      announcement: null == announcement
+          ? _self.announcement
+          : announcement // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

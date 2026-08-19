@@ -34,3 +34,8 @@ pub const MAX_ADDRESSBOOK_HISTORY_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_BUNDLE_BYTES: usize = 256 * 1024;
 /// Cards in one shareable bundle.
 pub const MAX_CARDS_PER_BUNDLE: usize = 128;
+
+/// One reach announcement, encoded. It arrives from a stranger and carries a
+/// projection whose every body is signature-checked, so the bound is what keeps
+/// a paste from becoming unbounded verification work.
+pub const MAX_ANNOUNCEMENT_BYTES: usize = 256 * 1024;

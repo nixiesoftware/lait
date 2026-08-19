@@ -13,7 +13,10 @@
 library;
 
 import 'package:covalence/covalence.dart' hide Image, Surface;
-import 'package:flutter/material.dart' show MaterialApp, Scaffold, ThemeMode;
+// `SelectableText` because the card is long and its whole purpose is being
+// copied out; a plain `Text` would make a person retype it.
+import 'package:flutter/material.dart'
+    show MaterialApp, Scaffold, SelectableText, ThemeMode;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 
@@ -73,7 +76,8 @@ class _ChatTabs extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final client = ClientScope.of(context);
-    final facts = ClientScope.watch(context).correspondence;
+    final view = ClientScope.watch(context);
+    final facts = view.correspondence;
     final tabs = facts?.openTabs ?? const <String>[];
     if (tabs.isEmpty) {
       return Align(
@@ -86,15 +90,23 @@ class _ChatTabs extends StatelessWidget {
       scrollDirection: Axis.horizontal,
       child: Row(
         children: [
+          // Each tab gates on its own keys. The core has emitted these all
+          // along and nothing consulted them, so a tab stayed live across the
+          // round trip — long enough to press it four times and read three
+          // answers, which is the thing `in_flight` exists to prevent.
           for (final id in tabs)
             _Tab(
               name: _nameOf(facts, id),
               agent: _isAgent(facts, id),
               active: id == active,
-              onTap: () =>
-                  client.dispatch(ActionRequest.focusConversation(person: id)),
-              onClose: () =>
-                  client.dispatch(ActionRequest.closeConversation(person: id)),
+              onTap: view.inFlight.contains(ActionKeys.focusConversation(id))
+                  ? null
+                  : () => client
+                      .dispatch(ActionRequest.focusConversation(person: id)),
+              onClose: view.inFlight.contains(ActionKeys.closeConversation(id))
+                  ? null
+                  : () => client
+                      .dispatch(ActionRequest.closeConversation(person: id)),
             ),
           t.gap.x(Space.sm),
         ],
@@ -115,8 +127,13 @@ class _Tab extends StatelessWidget {
   final String name;
   final bool agent;
   final bool active;
-  final VoidCallback onTap;
-  final VoidCallback onClose;
+
+  /// Null while this tab's own focus is in flight. `GestureDetector` takes a
+  /// null callback as "not interactive", so the gate needs no second flag.
+  final VoidCallback? onTap;
+
+  /// Null while this tab's own close is in flight.
+  final VoidCallback? onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -204,6 +221,10 @@ class _ChatBodyState extends State<ChatBody> {
     setState(() {});
   }
 
+  /// Whether the person asked to reach somebody new. Draft state, which is the
+  /// one kind of state a surface may hold.
+  bool _reaching = false;
+
   @override
   Widget build(BuildContext context) {
     final client = ClientScope.of(context);
@@ -218,6 +239,15 @@ class _ChatBodyState extends State<ChatBody> {
         .firstOrNull;
     if (conversation == null) return const SizedBox();
 
+    // Reaching somebody is an act, not an empty state. A backend always has at
+    // least this identity's own conversation open, so gating the offer on "no
+    // tabs" put it behind a condition the hosted plane can never reach. Offered
+    // unprompted while there is nobody to talk to, and from the header after.
+    final me = facts?.me;
+    final alone = me != null &&
+        (facts?.contacts ?? const <ContactRow>[])
+            .every((contact) => contact.id == me);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -226,21 +256,29 @@ class _ChatBodyState extends State<ChatBody> {
           agent: _isAgent(facts, active),
           collecting: view.inFlight.contains(ActionKeys.collectMail),
           blocking: view.inFlight.contains(ActionKeys.blockSender(active)),
+          reaching: _reaching || alone,
+          onReach: alone ? null : () => setState(() => _reaching = !_reaching),
           onCollect: () => client.dispatch(const ActionRequest.collectMail()),
           onBlock: () =>
               client.dispatch(ActionRequest.blockSender(person: active)),
         ),
-        Expanded(child: _Transcript(conversation: conversation)),
-        _Composer(
-          draft: _draft(active),
-          sending: view.inFlight.contains(ActionKeys.sendMessage(active)),
-          onSend: () => _send(client, active),
-        ),
+        if (_reaching || alone)
+          const Expanded(child: _Reach())
+        else ...[
+          Expanded(child: _Transcript(conversation: conversation)),
+          _Composer(
+            draft: _draft(active),
+            sending: view.inFlight.contains(ActionKeys.sendMessage(active)),
+            onSend: () => _send(client, active),
+          ),
+        ],
       ],
     );
   }
 }
 
+/// No conversation at all — the Demo fixture and an unconnected plane. A hosted
+/// plane always has this identity's own conversation, so it never lands here.
 class _EmptyChat extends StatelessWidget {
   const _EmptyChat();
 
@@ -259,6 +297,122 @@ class _EmptyChat extends StatelessWidget {
   }
 }
 
+/// Reaching somebody for the first time: what you hand over, and a field for
+/// what they hand back. One exchange, over whatever channel two people already
+/// share.
+///
+/// What is swapped is an `Announcement` — not a Card (the address book's, and
+/// evidence of nothing) and not an address (the directory's, and short).
+class _Reach extends StatelessWidget {
+  const _Reach();
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final client = ClientScope.of(context);
+    final view = ClientScope.watch(context);
+    final card = view.correspondence?.myReach;
+    final sharing = view.inFlight.contains(ActionKeys.shareReach);
+    final adding = view.inFlight.contains(ActionKeys.addCorrespondent);
+
+    return SingleChildScrollView(
+      child: Padding(
+        padding: t.padding.all(Space.xl3),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Reach someone new', style: context.labelStyle),
+            t.gap.y(Space.xs),
+            Text(
+              'Swap these once, over any channel you already share. '
+              'Yours names your devices; theirs names theirs.',
+              style: context.proseStyle,
+            ),
+            t.gap.y(Space.md),
+            if (card == null)
+              Button(
+                key: const ValueKey('reach-share'),
+                onPressed: sharing
+                    ? null
+                    : () =>
+                        client.dispatch(const ActionRequest.shareReach()),
+                label: 'Show how to reach me',
+                variant: ButtonVariant.secondary,
+              )
+            else
+              SelectableText(
+                card,
+                key: const ValueKey('reach-card'),
+                style: context.proseStyle.copyWith(fontFamily: 'monospace'),
+                maxLines: 4,
+              ),
+            t.gap.y(Space.md),
+            _AddCorrespondent(adding: adding),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Their announcement, pasted. Verified rather than trusted: `absorb`
+/// re-derives the profile from its genesis and refuses a substituted device
+/// set, so a forged one is caught here rather than believed.
+class _AddCorrespondent extends StatefulWidget {
+  const _AddCorrespondent({required this.adding});
+
+  final bool adding;
+
+  @override
+  State<_AddCorrespondent> createState() => _AddCorrespondentState();
+}
+
+class _AddCorrespondentState extends State<_AddCorrespondent> {
+  final _draft = TextEditingController();
+
+  @override
+  void dispose() {
+    _draft.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final client = ClientScope.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Textarea(
+          key: const ValueKey('reach-paste'),
+          controller: _draft,
+          hint: 'Paste theirs',
+          minLines: 2,
+          maxLines: 4,
+        ),
+        t.gap.y(Space.xs),
+        Button(
+          key: const ValueKey('reach-add'),
+          onPressed: widget.adding
+              ? null
+              : () {
+                  final pasted = _draft.text.trim();
+                  if (pasted.isEmpty) {
+                    return;
+                  }
+                  client.dispatch(
+                    ActionRequest.addCorrespondent(announcement: pasted),
+                  );
+                  _draft.clear();
+                },
+          label: 'Add them',
+          variant: ButtonVariant.primary,
+        ),
+      ],
+    );
+  }
+}
+
 /// A slim header: who this is, and the two acts on a whole conversation.
 class _ConversationHeader extends StatelessWidget {
   const _ConversationHeader({
@@ -266,6 +420,8 @@ class _ConversationHeader extends StatelessWidget {
     required this.agent,
     required this.collecting,
     required this.blocking,
+    required this.reaching,
+    required this.onReach,
     required this.onCollect,
     required this.onBlock,
   });
@@ -274,6 +430,14 @@ class _ConversationHeader extends StatelessWidget {
   final bool agent;
   final bool collecting;
   final bool blocking;
+
+  /// Whether the exchange is showing instead of the transcript.
+  final bool reaching;
+
+  /// Null when there is nobody to talk to yet — the exchange is already the
+  /// body, and a control that toggles back to an empty transcript is a control
+  /// that does nothing worth doing.
+  final VoidCallback? onReach;
   final VoidCallback onCollect;
   final VoidCallback onBlock;
 
@@ -295,6 +459,16 @@ class _ConversationHeader extends StatelessWidget {
             const Badge(label: 'AI', variant: BadgeVariant.outline),
           ],
           const Spacer(),
+          Button(
+            key: const ValueKey('reach-toggle'),
+            onPressed: onReach,
+            icon: AppIcons.personAdd,
+            semanticLabel: reaching ? 'Back to the conversation' : 'Reach someone new',
+            variant: reaching ? ButtonVariant.secondary : ButtonVariant.ghost,
+            size: ButtonSize.iconSm,
+            tooltip: reaching ? 'Back to the conversation' : 'Reach someone new',
+          ),
+          t.gap.x(Space.xxs),
           Button(
             onPressed: collecting ? null : onCollect,
             icon: AppIcons.refresh,
@@ -607,17 +781,23 @@ class _InvitationCard extends StatelessWidget {
                 style: context.proseStyle,
               ),
               t.gap.y(Space.sm),
+              // Both disabled, and the prose above already says why: an
+              // invitation verifies against its Space on its own, but nothing
+              // downstream carries the act yet — there is no `ActionRequest`
+              // for entering a Space, so `Action::SpaceEnter` is handled in the
+              // runtime and reachable from nowhere. An enabled button here
+              // would be a promise the whole chain cannot keep.
               Row(
                 children: [
                   Button(
-                    onPressed: () {},
+                    onPressed: null,
                     label: 'Open',
                     variant: ButtonVariant.primary,
                     size: ButtonSize.sm,
                   ),
                   t.gap.x(Space.xs),
                   Button(
-                    onPressed: () {},
+                    onPressed: null,
                     label: 'Decline',
                     variant: ButtonVariant.ghost,
                     size: ButtonSize.sm,
@@ -658,15 +838,19 @@ class _Composer extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           // Attachments and emoji: a group apart from the input, as asked.
+          // Both are drawn and inert, because neither exists yet: `Content` has
+          // two variants, `Message` and `Invitation`, and no attachment among
+          // them. Drawn rather than hidden so the composer keeps its shape, and
+          // muted rather than silent so pressing one is not mistaken for a bug.
           _RailButton(
-            semanticLabel: 'Attach a file',
-            onTap: () {},
+            semanticLabel: 'Attach a file (not available yet)',
+            onTap: null,
             child: Icon(AppIcons.attachFile, size: t.font.md),
           ),
           t.gap.x(Space.xxs),
           _RailButton(
-            semanticLabel: 'Emoji',
-            onTap: () {},
+            semanticLabel: 'Emoji (not available yet)',
+            onTap: null,
             child: Text('🙂', style: TextStyle(fontSize: t.font.md)),
           ),
           t.gap.x(Space.sm),
@@ -704,12 +888,22 @@ class _RailButton extends StatelessWidget {
 
   final Widget child;
   final String semanticLabel;
-  final VoidCallback onTap;
+
+  /// Null draws the control muted and inert.
+  ///
+  /// This was a non-nullable `VoidCallback`, which made `() {}` the only way to
+  /// express "does nothing" — and an empty closure is indistinguishable from a
+  /// working button until you press it. A nullable callback moves the whole
+  /// class of defect into the type: a control with nothing behind it now has to
+  /// *say so*, and the analyzer will not let it pretend otherwise.
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
+    final enabled = onTap != null;
     return Semantics(
       button: true,
+      enabled: enabled,
       label: semanticLabel,
       child: GestureDetector(
         onTap: onTap,
@@ -718,8 +912,10 @@ class _RailButton extends StatelessWidget {
           dimension: 36,
           child: Center(
             child: IconTheme(
-              data: IconThemeData(color: context.text.l800),
-              child: child,
+              data: IconThemeData(
+                color: enabled ? context.text.l800 : context.text.l500,
+              ),
+              child: Opacity(opacity: enabled ? 1 : 0.5, child: child),
             ),
           ),
         ),

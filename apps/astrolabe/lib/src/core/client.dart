@@ -309,6 +309,8 @@ abstract final class ActionKeys {
       'display.device.revoke:$device';
   static String sendMessage(String to) => 'correspondence.send:$to';
   static const String collectMail = 'correspondence.collect';
+  static const String shareReach = 'reach.share';
+  static const String addCorrespondent = 'reach.add';
   static String blockSender(String person) => 'correspondence.block:$person';
   static String acceptContact(String person) =>
       'correspondence.accept:$person';
