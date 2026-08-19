@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             2201
+pr             2197
 pr-platform    1763
-nightly        2229
+nightly        2225
 mutants        106
 
 [gates]
@@ -793,6 +793,25 @@ lait-issues rank::tests::inserts_before_the_first
 lait-issues rank::tests::inserts_between_neighbours
 lait-issues rank::tests::rejects_noncanonical_and_exhausted_seams
 lait-issues rank::tests::survives_repeated_insertion_at_the_same_seam
+lait-issues record_store::migration_tests::delayed_equivalent_transition_is_quiet_but_a_preferred_move_conflicts
+lait-issues record_store::migration_tests::delayed_source_epoch_keeps_global_batch_and_resets_only_its_cursor
+lait-issues record_store::migration_tests::final_head_projection_is_causal_when_child_id_sorts_before_parent
+lait-issues record_store::migration_tests::migration_status_reads_only_the_bounded_marker_and_audit_body
+lait-issues record_store::migration_tests::one_window_cannot_exceed_the_operation_or_byte_envelope
+lait-issues record_store::migration_tests::same_semantic_immutable_id_with_different_bytes_is_a_conflict
+lait-issues record_store::migration_tests::terminal_activation_remains_closed_while_migrator_reads_are_partial
+lait-issues records::tests::alias_coordinates_do_not_drift_when_ordinals_collide
+lait-issues records::tests::board_placement_is_one_canonical_value
+lait-issues records::tests::body_coordinates_are_domain_separated
+lait-issues records::tests::collaboration_records_have_stable_single_record_bodies
+lait-issues records::tests::compact_records_do_not_embed_product_strings
+lait-issues records::tests::embedded_revision_claims_rebuild_to_their_content_ids
+lait-issues records::tests::immutable_record_address_commits_to_the_complete_payload
+lait-issues records::tests::one_million_same_ordinal_aliases_keep_the_full_collision_coordinate
+lait-issues records::tests::relation_nodes_have_stable_direct_routing
+lait-issues records::tests::schema_vocabulary_is_unique_and_canonical
+lait-issues records::tests::triage_decisions_preserve_races_as_distinct_claims
+lait-issues records::tests::unknown_fields_fail_closed
 lait-issues roles::tests::a_one_bit_body_change_moves_the_revision_id
 lait-issues roles::tests::admission_evidence_always_contains_the_read_baseline
 lait-issues roles::tests::built_in_bodies_and_revision_ids_are_golden
@@ -807,25 +826,6 @@ lait-issues spec::tests::legacy_plan_phases_collapse_to_sorted_unique_roots
 lait-issues spec::tests::plan_roots_are_canonical_and_unique
 lait-issues spec::tests::structured_plan_changes_are_part_of_revision_identity
 lait-issues spec::tests::structured_plan_data_belongs_only_to_plan_specs
-lait-issues v4::tests::alias_coordinates_do_not_drift_when_ordinals_collide
-lait-issues v4::tests::board_placement_is_one_canonical_value
-lait-issues v4::tests::body_coordinates_are_domain_separated
-lait-issues v4::tests::collaboration_records_have_stable_single_record_bodies
-lait-issues v4::tests::compact_records_do_not_embed_product_strings
-lait-issues v4::tests::embedded_revision_claims_rebuild_to_their_content_ids
-lait-issues v4::tests::immutable_record_address_commits_to_the_complete_payload
-lait-issues v4::tests::one_million_same_ordinal_aliases_keep_the_full_collision_coordinate
-lait-issues v4::tests::relation_nodes_have_stable_direct_routing
-lait-issues v4::tests::schema_vocabulary_is_unique_and_canonical
-lait-issues v4::tests::triage_decisions_preserve_races_as_distinct_claims
-lait-issues v4::tests::unknown_fields_fail_closed
-lait-issues v4_store::migration_tests::delayed_equivalent_transition_is_quiet_but_a_preferred_move_conflicts
-lait-issues v4_store::migration_tests::delayed_source_epoch_keeps_global_batch_and_resets_only_its_cursor
-lait-issues v4_store::migration_tests::final_head_projection_is_causal_when_child_id_sorts_before_parent
-lait-issues v4_store::migration_tests::migration_status_reads_only_the_bounded_marker_and_audit_body
-lait-issues v4_store::migration_tests::one_window_cannot_exceed_the_operation_or_byte_envelope
-lait-issues v4_store::migration_tests::same_semantic_immutable_id_with_different_bytes_is_a_conflict
-lait-issues v4_store::migration_tests::terminal_activation_remains_closed_while_migrator_reads_are_partial
 lait-issues views::comment_thread_tests::a_thread_spanning_the_cutover_reads_in_clock_order
 lait-issues views::comment_thread_tests::a_thread_stored_as_a_flat_list_still_reads
 lait-issues views::comment_thread_tests::a_threaded_comment_carries_its_node_and_its_parent_edge
@@ -863,7 +863,7 @@ lait-issues-app host::tests::migration_is_not_a_public_tracker_command
 lait-issues-app host::tests::rejects_incomplete_access_grants_before_the_host_sees_them
 lait-issues-app host::tests::web_inbox_clear_is_a_complete_command_not_a_world_query
 lait-issues-app lifecycle::tests::historical_tracker_requires_the_distinct_migrator
-lait-issues-app lifecycle::tests::new_tracker_forms_directly_on_preferred_v4
+lait-issues-app lifecycle::tests::new_tracker_forms_directly_on_preferred
 lait-issues-app lifecycle::tests::project_key_policy_is_product_owned
 lait-issues-app mcp::tests::every_protocol_command_is_reachable_through_a_tool
 lait-issues-app mcp::tests::every_tool_publishes_an_object_input_schema
@@ -1035,9 +1035,6 @@ lait::it issues_history_contract::project_topology_changes_geometry_without_muta
 lait::it issues_policy_designer::role_access_and_workflow_authoring_round_trip_over_the_daemon
 lait::it issues_reference_perf::corpus_spec_rejects_unknown_missing_and_mistyped_fields
 lait::it issues_reference_perf::issues_reference_performance_gate
-lait::it issues_world_cache::a_zero_root_context_is_never_cached
-lait::it issues_world_cache::the_issues_world_cache_never_serves_across_roots
-lait::it issues_world_cache::the_per_issue_memo_honors_the_version_stamp
 lait::it lait_daemon::two_orbits_share_one_lait_daemon_process
 lait::it launcher_safety::a_dead_daemon_is_reported_dead_and_a_live_one_is_not
 lait::it launcher_safety::a_newer_daemon_is_named_and_never_replaced
@@ -1671,11 +1668,11 @@ runtime corpus::tests::empty_delta_moves_coordinate_and_shares_body_columns
 runtime corpus::tests::full_build_indexes_schema_exact_value_and_term
 runtime corpus::tests::link_targets_share_the_interned_node_identity
 runtime corpus::tests::ordered_posting_removes_and_reuses_dense_identity
-runtime corpus::tests::release_scale_100k_issues_v4_mix
 runtime corpus::tests::release_scale_100k_links
+runtime corpus::tests::release_scale_100k_notes_record_mix
 runtime corpus::tests::release_scale_100k_record_bodies
-runtime corpus::tests::release_scale_1m_issues_v4_mix
 runtime corpus::tests::release_scale_1m_links
+runtime corpus::tests::release_scale_1m_notes_record_mix
 runtime corpus::tests::release_scale_1m_record_bodies
 runtime corpus_store::tests::adjacent_publications_write_only_changed_segments
 runtime corpus_store::tests::encrypted_segments_roundtrip_and_manifest_commits
