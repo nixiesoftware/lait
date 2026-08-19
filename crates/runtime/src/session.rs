@@ -3501,6 +3501,27 @@ impl crate::exec::FindDelegate for AttemptFindDelegate<'_> {
     }
 }
 
+/// The host's bounded content reader for one dispatched Attempt.
+///
+/// Ref admission happened in `exec::Context::read_content` — only content the
+/// Run's committed truth names reaches this. The host's own content
+/// authorization still applies and can only narrow further.
+struct AttemptContentDelegate<'a> {
+    #[allow(clippy::type_complexity)]
+    read: &'a dyn Fn(&replica::content::ContentRef, u64, usize) -> Result<Vec<u8>, Failure>,
+}
+
+impl crate::exec::ContentDelegate for AttemptContentDelegate<'_> {
+    fn read(
+        &self,
+        content: &replica::content::ContentRef,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, crate::exec::Failure> {
+        (self.read)(content, offset, len).map_err(|_| crate::exec::Failure::Handler)
+    }
+}
+
 fn read_failure(failure: crate::exec::ReadFailure) -> Failure {
     match failure {
         crate::exec::ReadFailure::Invalid(invalid) => Failure::Rejected(exec_invalid(invalid)),
@@ -7683,6 +7704,21 @@ impl Session {
         package: &crate::exec::Package,
         mut put_output: impl FnMut(&[u8]) -> Result<replica::content::ContentRef, Failure>,
     ) -> Result<crate::exec::PerformReport, Failure> {
+        self.perform_with(package, &mut put_output, None)
+    }
+
+    /// [`Self::perform`] with the host's full capability facets: the output
+    /// sealer plus an optional bounded content reader. Absence of the reader
+    /// means every in-Attempt content read refuses as unavailable.
+    #[allow(clippy::type_complexity)]
+    pub fn perform_with(
+        &self,
+        package: &crate::exec::Package,
+        put_output: &mut dyn FnMut(&[u8]) -> Result<replica::content::ContentRef, Failure>,
+        read_content: Option<
+            &dyn Fn(&replica::content::ContentRef, u64, usize) -> Result<Vec<u8>, Failure>,
+        >,
+    ) -> Result<crate::exec::PerformReport, Failure> {
         self.ensure_live()?;
         if !self.core.try_begin_perform() {
             return Ok(crate::exec::PerformReport::default());
@@ -7727,7 +7763,8 @@ impl Session {
                         .push(crate::exec::PerformStep::Began { run, attempt });
                 }
                 Some(PerformAction::Invoke { run, attempt }) => {
-                    match self.invoke_and_complete(package, run, attempt, &mut put_output) {
+                    match self.invoke_and_complete(package, run, attempt, put_output, read_content)
+                    {
                         Ok(step) => {
                             self.core.release_attempt(attempt);
                             report.steps.push(step);
@@ -7881,7 +7918,14 @@ impl Session {
         let Some(spec) = spec else {
             return false;
         };
-        if !matches!(spec.resume, crate::exec::Resume::Restart) {
+        // Restart re-tries from nothing; Checkpoint re-tries from this Run's
+        // own latest committed save (or from nothing when none was saved).
+        // Both are the same Station mechanically recovering its own work —
+        // never a choice among candidates, so the provisional selector holds.
+        if !matches!(
+            spec.resume,
+            crate::exec::Resume::Restart | crate::exec::Resume::Checkpoint { .. }
+        ) {
             return false;
         }
         // Attempt ids are content hashes, so list order is not time. A later
@@ -7904,6 +7948,25 @@ impl Session {
         let mut intent =
             crate::exec::Try::local_first(run, self.principal.station.clone(), self.epoch)
                 .map_err(exec_invalid)?;
+        // A Checkpoint-mode Run resumes from its own latest committed save.
+        // The coordinate comes from the Run's durable truth, never from the
+        // failed Attempt's memory of itself.
+        let resumes = self
+            .world
+            .exec_specs()
+            .iter()
+            .find(|spec| {
+                spec.name == run.started.spec.name && spec.version == run.started.spec.version
+            })
+            .is_some_and(|spec| matches!(spec.resume, crate::exec::Resume::Checkpoint { .. }));
+        if resumes {
+            intent.checkpoint = run
+                .attempts
+                .iter()
+                .flat_map(|attempt| attempt.checkpoints.iter())
+                .max_by_key(|fact| (fact.value.checkpoint.sequence, fact.event))
+                .map(|fact| fact.value.checkpoint.clone());
+        }
         let now = mechanics::wallclock::now_millis();
         let inner = self.core.lock();
         if inner.closed {
@@ -7942,7 +8005,10 @@ impl Session {
         package: &crate::exec::Package,
         run: crate::exec::RunId,
         attempt: crate::exec::AttemptId,
-        put_output: &mut impl FnMut(&[u8]) -> Result<replica::content::ContentRef, Failure>,
+        put_output: &mut dyn FnMut(&[u8]) -> Result<replica::content::ContentRef, Failure>,
+        read_content: Option<
+            &dyn Fn(&replica::content::ContentRef, u64, usize) -> Result<Vec<u8>, Failure>,
+        >,
     ) -> Result<crate::exec::PerformStep, Failure> {
         let reader = {
             let inner = self.core.lock();
@@ -7965,17 +8031,17 @@ impl Session {
                 self.extractor_schema_digest,
             ),
         };
+        let content_delegate = read_content.map(|read| AttemptContentDelegate { read });
+        let facets = crate::exec::Facets {
+            find: Some(&delegate),
+            content: content_delegate
+                .as_ref()
+                .map(|held| held as &dyn crate::exec::ContentDelegate),
+        };
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let dispatcher = crate::exec::Dispatcher::new(package, crate::exec::InProcess::new());
         let mut completion = dispatcher
-            .invoke(
-                &reader,
-                &self.world_id,
-                run,
-                attempt,
-                &cancel,
-                Some(&delegate),
-            )
+            .invoke(&reader, &self.world_id, run, attempt, &cancel, facets)
             .map_err(|failure| match failure {
                 crate::exec::DispatchFailure::Backend(crate::exec::Failure::Cancelled) => {
                     Failure::Rejected(Rejection::InvalidRequest)
@@ -7985,6 +8051,19 @@ impl Session {
                 }
                 _ => Failure::Rejected(Rejection::ContractViolation),
             })?;
+        // Checkpoint bytes seal through the same host authority as outputs:
+        // a Saved event can only name content the host actually holds.
+        let staged_blobs: Vec<Vec<u8>> =
+            completion.checkpoint_blobs().map(<[u8]>::to_vec).collect();
+        if !staged_blobs.is_empty() {
+            let mut sealed = Vec::with_capacity(staged_blobs.len());
+            for blob in &staged_blobs {
+                sealed.push(put_output(blob)?);
+            }
+            completion
+                .bind_checkpoint_content(sealed)
+                .map_err(|_| Failure::Rejected(Rejection::ContractViolation))?;
+        }
         if !completion.output_blobs().is_empty() {
             let mut refs = Vec::new();
             let mut bytes = 0u64;
@@ -8108,6 +8187,20 @@ impl Session {
                 .map_err(ambient_failure)?;
             let pinned_reader =
                 SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone());
+            // A Saved event may only name sealed content this Station holds.
+            // The blob path guarantees that by construction; the staged-ref
+            // path is where a handler could fabricate a coordinate, and a
+            // durable checkpoint whose bytes nobody holds is a Run that can
+            // never actually resume — refuse it before it exists.
+            if let crate::exec::RunEventKind::Saved(saved) = &kind {
+                use crate::exec::ReservedBodyReader as _;
+                if pinned_reader
+                    .content_descriptor(&saved.checkpoint.content)
+                    .is_none()
+                {
+                    return Err(Failure::Rejected(Rejection::ContractViolation));
+                }
+            }
             let runtime = lower_lifecycle_event(
                 &pinned_reader,
                 self.world.exec_specs(),
@@ -8370,6 +8463,29 @@ impl Session {
             "exec.test.began",
         )?;
         Ok((run, attempt))
+    }
+
+    /// Commit one Saved fact through the real lifecycle path, so a test can
+    /// stage the crash window — a durable checkpoint with no `Returned` —
+    /// that an in-process backend cannot otherwise produce.
+    #[cfg(test)]
+    pub(crate) fn test_checkpoint(
+        &self,
+        run: crate::exec::RunId,
+        attempt: crate::exec::AttemptId,
+        checkpoint: crate::exec::CheckpointRef,
+    ) -> Result<(), Failure> {
+        let content = vec![checkpoint.content];
+        self.commit_perform_event(
+            run,
+            crate::exec::RunEventKind::Saved(crate::exec::Saved {
+                run,
+                attempt,
+                checkpoint,
+            }),
+            &content,
+            "exec.test.saved",
+        )
     }
 
     /// Admit one generic bounded Find request against a pinned read generation.

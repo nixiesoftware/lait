@@ -1419,6 +1419,28 @@ pub trait FindDelegate {
     fn find(&self, query: crate::find::Query) -> Result<crate::find::Answer, crate::find::Failure>;
 }
 
+/// One bounded plaintext-range read delegated to the host's content plane.
+///
+/// The dispatching host implements this over its own content authority; the
+/// handler never holds it. Every read reaches the delegate only after
+/// [`Context::read_content`] proved the ref is named by the Run's committed
+/// truth — a handler cannot browse the content plane, only open what its
+/// Started inputs and its own resume checkpoint already name.
+pub trait ContentDelegate {
+    fn read(&self, content: &ContentRef, offset: u64, len: usize) -> Result<Vec<u8>, Failure>;
+}
+
+/// The capability facets a host lends one dispatched Attempt.
+///
+/// Every field is optional on purpose: absence is the refusal, and a facet
+/// joins this struct in the same commit as the bounded facade that honours
+/// it — never before.
+#[derive(Default, Clone, Copy)]
+pub struct Facets<'a> {
+    pub find: Option<&'a dyn FindDelegate>,
+    pub content: Option<&'a dyn ContentDelegate>,
+}
+
 /// A bounded, authenticated view of one admitted local Attempt.
 ///
 /// There is intentionally no World, Replica, Engine, Mechanics, device-key,
@@ -1436,11 +1458,16 @@ pub struct Context<'a> {
     children: Vec<Start>,
     output_blobs: Vec<Vec<u8>>,
     find: Option<&'a dyn FindDelegate>,
+    content: Option<&'a dyn ContentDelegate>,
     /// Declared query work already admitted, in wall milliseconds. Charged
     /// from each admitted query's own bound before evaluation, so the sum a
     /// handler can ask for never exceeds the Attempt's wall budget even
     /// though the first backend's enforcement is advisory.
     query_wall_charged: u64,
+    /// Checkpoint bytes staged for Runtime to seal after the callback. Each
+    /// entry carries its minted coordinates with a placeholder ContentRef
+    /// that binding replaces once the host has sealed the blob.
+    checkpoint_blobs: Vec<(CheckpointRef, Vec<u8>)>,
 }
 
 impl std::fmt::Debug for Context<'_> {
@@ -1484,7 +1511,9 @@ impl<'a> Context<'a> {
             children: Vec::new(),
             output_blobs: Vec::new(),
             find: None,
+            content: None,
             query_wall_charged: 0,
+            checkpoint_blobs: Vec::new(),
         })
     }
 
@@ -1494,6 +1523,48 @@ impl<'a> Context<'a> {
     pub(crate) fn with_find(mut self, delegate: &'a dyn FindDelegate) -> Self {
         self.find = Some(delegate);
         self
+    }
+
+    /// Attach the host's bounded content delegate. Without one, every
+    /// [`Context::read_content`] refuses as unavailable rather than
+    /// pretending empty bytes answered.
+    pub(crate) fn with_content(mut self, delegate: &'a dyn ContentDelegate) -> Self {
+        self.content = Some(delegate);
+        self
+    }
+
+    /// The checkpoint this Attempt was admitted to resume from, when the
+    /// authorized `Try` carried one. `None` means a fresh start — a handler
+    /// must not guess a checkpoint the lease did not bind.
+    pub fn resume_checkpoint(&self) -> Option<&CheckpointRef> {
+        self.attempt.checkpoint.as_ref()
+    }
+
+    /// Read one bounded plaintext range of content this Run's truth names.
+    ///
+    /// Fail-closed before the host is asked: the ref must be one of the
+    /// `Started` input ContentRefs or this Attempt's resume checkpoint.
+    /// Everything else refuses — an Attempt reads what it was commissioned
+    /// with, never what the Station happens to hold.
+    pub fn read_content(
+        &self,
+        content: &ContentRef,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, Failure> {
+        let Some(delegate) = self.content else {
+            return Err(Failure::ContentUnavailable);
+        };
+        let named = self.run.started.input_content.contains(content)
+            || self
+                .attempt
+                .checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.content == *content);
+        if !named {
+            return Err(Failure::ContentRefused);
+        }
+        delegate.read(content, offset, len)
     }
 
     /// Run one bounded Find query inside this Attempt.
@@ -1596,13 +1667,7 @@ impl<'a> Context<'a> {
     /// Stage an immutable checkpoint reference for Runtime to validate,
     /// attribute, and commit after the handler returns.
     pub fn save_checkpoint(&mut self, checkpoint: CheckpointRef) -> Result<(), Failure> {
-        let committed =
-            u32::try_from(self.attempt.checkpoints.len()).map_err(|_| Failure::CheckpointLimit)?;
-        let staged = u32::try_from(self.checkpoints.len()).map_err(|_| Failure::CheckpointLimit)?;
-        let expected = committed
-            .checked_add(staged)
-            .and_then(|count| count.checked_add(1))
-            .ok_or(Failure::CheckpointLimit)?;
+        let expected = self.next_checkpoint_sequence()?;
         if checkpoint.build != self.attempt.build
             || checkpoint.sequence != expected
             || expected > self.attempt.limits.checkpoints
@@ -1611,6 +1676,57 @@ impl<'a> Context<'a> {
         }
         self.checkpoints.push(checkpoint);
         Ok(())
+    }
+
+    /// Stage checkpoint bytes for Runtime to seal, attribute, and commit
+    /// after the handler returns.
+    ///
+    /// The in-process backend has no content authority — that is the point of
+    /// the boundary — so the bytes travel out with the completion, the host
+    /// seals them exactly as it seals output blobs, and the `Saved` event is
+    /// committed only once the sealed ContentRef is bound. The staged
+    /// coordinates are minted here so the sequence chain stays the handler's
+    /// declared order.
+    pub fn save_checkpoint_bytes(&mut self, bytes: Vec<u8>) -> Result<(), Failure> {
+        let sequence = self.next_checkpoint_sequence()?;
+        if sequence > self.attempt.limits.checkpoints {
+            return Err(Failure::CheckpointLimit);
+        }
+        let staged_bytes: u64 = self
+            .checkpoint_blobs
+            .iter()
+            .map(|(_, blob)| blob.len() as u64)
+            .sum();
+        let added = u64::try_from(bytes.len()).map_err(|_| Failure::CheckpointLimit)?;
+        if staged_bytes.saturating_add(added) > self.attempt.limits.checkpoint_bytes {
+            return Err(Failure::CheckpointLimit);
+        }
+        self.checkpoint_blobs.push((
+            CheckpointRef {
+                content: ContentRef {
+                    content_id: [0; 32],
+                },
+                build: self.attempt.build,
+                sequence,
+            },
+            bytes,
+        ));
+        Ok(())
+    }
+
+    fn next_checkpoint_sequence(&self) -> Result<u32, Failure> {
+        let committed =
+            u32::try_from(self.attempt.checkpoints.len()).map_err(|_| Failure::CheckpointLimit)?;
+        let staged = u32::try_from(
+            self.checkpoints
+                .len()
+                .saturating_add(self.checkpoint_blobs.len()),
+        )
+        .map_err(|_| Failure::CheckpointLimit)?;
+        committed
+            .checked_add(staged)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(Failure::CheckpointLimit)
     }
 
     /// Stage one independently bounded child Run.
@@ -1655,12 +1771,17 @@ impl<'a> Context<'a> {
     }
 
     fn validate_staged(&self, spec: &Spec, build: &Build) -> Result<(), Failure> {
-        if !self.checkpoints.is_empty()
+        let staged_any = !self.checkpoints.is_empty() || !self.checkpoint_blobs.is_empty();
+        if staged_any
             && !matches!(
                 &spec.resume,
                 Resume::Checkpoint { codec }
                     if build.checkpoint.as_ref() == Some(codec)
                         && self.checkpoints.iter().all(|checkpoint| checkpoint.build == build.id)
+                        && self
+                            .checkpoint_blobs
+                            .iter()
+                            .all(|(checkpoint, _)| checkpoint.build == build.id)
             )
         {
             return Err(Failure::InvalidCheckpoint);
@@ -1668,9 +1789,18 @@ impl<'a> Context<'a> {
         Ok(())
     }
 
-    fn take_staged(&mut self) -> (Vec<CheckpointRef>, Vec<Start>, Vec<Vec<u8>>) {
+    #[allow(clippy::type_complexity)]
+    fn take_staged(
+        &mut self,
+    ) -> (
+        Vec<CheckpointRef>,
+        Vec<(CheckpointRef, Vec<u8>)>,
+        Vec<Start>,
+        Vec<Vec<u8>>,
+    ) {
         (
             std::mem::take(&mut self.checkpoints),
+            std::mem::take(&mut self.checkpoint_blobs),
             std::mem::take(&mut self.children),
             std::mem::take(&mut self.output_blobs),
         )
@@ -1683,6 +1813,7 @@ impl<'a> Context<'a> {
 pub struct Completion {
     candidate: Candidate,
     checkpoints: Vec<CheckpointRef>,
+    checkpoint_blobs: Vec<(CheckpointRef, Vec<u8>)>,
     children: Vec<Start>,
     output_blobs: Vec<Vec<u8>>,
 }
@@ -1712,6 +1843,33 @@ impl Completion {
     ) -> Result<(), Failure> {
         self.candidate.content = content;
         self.candidate.content_bytes = content_bytes;
+        Ok(())
+    }
+
+    /// Checkpoint bytes the handler staged for the host to seal, in the
+    /// order their coordinates were minted.
+    pub fn checkpoint_blobs(&self) -> impl Iterator<Item = &[u8]> {
+        self.checkpoint_blobs
+            .iter()
+            .map(|(_, bytes)| bytes.as_slice())
+    }
+
+    /// Bind sealed ContentRefs onto the staged checkpoint blobs, in order.
+    ///
+    /// After binding, the checkpoints are one sequence-ordered set — a
+    /// `Saved` event can only ever name content the host actually sealed.
+    pub fn bind_checkpoint_content(&mut self, content: Vec<ContentRef>) -> Result<(), Failure> {
+        if content.len() != self.checkpoint_blobs.len() {
+            return Err(Failure::InvalidCheckpoint);
+        }
+        for ((checkpoint, _), sealed) in self.checkpoint_blobs.drain(..).zip(content) {
+            self.checkpoints.push(CheckpointRef {
+                content: sealed,
+                ..checkpoint
+            });
+        }
+        self.checkpoints
+            .sort_by_key(|checkpoint| checkpoint.sequence);
         Ok(())
     }
 
@@ -1784,6 +1942,14 @@ pub enum Failure {
     /// Admitting this query's declared work ceiling would exceed the
     /// Attempt's remaining wall budget.
     QueryBudget,
+    /// This Attempt was dispatched without a content delegate, so the handler
+    /// can read no bytes at all — distinct from a refused ref: nothing could
+    /// have been asked.
+    ContentUnavailable,
+    /// The named ContentRef is not one this Run's committed truth entitles
+    /// the Attempt to read: not a Started input and not this Attempt's
+    /// resume checkpoint. Admission fails before the host is asked.
+    ContentRefused,
 }
 
 impl std::fmt::Display for Failure {
@@ -1844,10 +2010,11 @@ impl InProcess {
         .map_err(|_| Failure::Handler)??;
         candidate.validate_with_spec(selection.spec)?;
         context.validate_staged(selection.spec, selection.build)?;
-        let (checkpoints, children, output_blobs) = context.take_staged();
+        let (checkpoints, checkpoint_blobs, children, output_blobs) = context.take_staged();
         Ok(Completion {
             candidate,
             checkpoints,
+            checkpoint_blobs,
             children,
             output_blobs,
         })
@@ -2003,7 +2170,7 @@ impl<'a> Dispatcher<'a> {
         run: RunId,
         attempt: AttemptId,
         cancel_asked: &AtomicBool,
-        find: Option<&dyn FindDelegate>,
+        facets: Facets<'_>,
     ) -> Result<Completion, DispatchFailure> {
         let unresolved = self.observe(snapshot, world)?;
         let unresolved = unresolved
@@ -2041,8 +2208,11 @@ impl<'a> Dispatcher<'a> {
             cancel_asked,
         )
         .map_err(DispatchFailure::Backend)?;
-        if let Some(delegate) = find {
+        if let Some(delegate) = facets.find {
             context = context.with_find(delegate);
+        }
+        if let Some(delegate) = facets.content {
+            context = context.with_content(delegate);
         }
         let completion = self
             .backend
@@ -2994,6 +3164,10 @@ pub struct WorkAttempt {
     pub build: BuildId,
     #[serde(default)]
     pub offer: Option<OfferId>,
+    /// The committed checkpoint this Attempt was admitted to resume from,
+    /// when its lease bound one.
+    #[serde(default)]
+    pub checkpoint: Option<CheckpointRef>,
     pub began: Vec<EventId>,
     pub checkpoints: Vec<WorkCheckpoint>,
     pub returned: Vec<WorkReturn>,
@@ -3031,6 +3205,7 @@ impl WorkState {
                 station: attempt.station.clone(),
                 build: attempt.build,
                 offer: attempt.offer,
+                checkpoint: attempt.checkpoint.clone(),
                 began: attempt.began.iter().map(|fact| fact.event).collect(),
                 checkpoints: attempt
                     .checkpoints
@@ -5635,7 +5810,7 @@ mod tests {
                 run(0x90),
                 attempt(0x91),
                 &cancel,
-                None,
+                Facets::default(),
             ),
             Err(DispatchFailure::Run(run(0x90)))
         );
@@ -5650,7 +5825,7 @@ mod tests {
                 root,
                 attempt(0x91),
                 &cancel,
-                None,
+                Facets::default(),
             ),
             Err(DispatchFailure::Attempt(attempt(0x91)))
         );
@@ -5670,7 +5845,7 @@ mod tests {
                 run,
                 attempt,
                 &cancel,
-                None,
+                Facets::default(),
             )
             .unwrap();
         assert_eq!(completion.candidate().inline, [1, 2, 3]);
@@ -5737,7 +5912,7 @@ mod tests {
         context.start_child(child.clone()).unwrap();
         assert_eq!(context.start_child(child), Err(Failure::ChildLimit));
 
-        let (checkpoints, children, output_blobs) = context.take_staged();
+        let (checkpoints, checkpoint_blobs, children, output_blobs) = context.take_staged();
         let completion = Completion {
             candidate: Candidate {
                 output: spec().output.schema,
@@ -5749,6 +5924,7 @@ mod tests {
                 evidence: Vec::new(),
             },
             checkpoints,
+            checkpoint_blobs,
             children,
             output_blobs,
         };
