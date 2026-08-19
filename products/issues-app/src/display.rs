@@ -529,13 +529,20 @@ mod tests {
     }
 
     fn row(reff: &str, alias: &str, title: &str, provisional: bool) -> Value {
+        row_in("backlog", reff, alias, title, provisional)
+    }
+
+    /// A row in one named workflow state. The state is on the row now: the
+    /// board is delivered as one ordered page plus the workflow it is read
+    /// against, and `status` is what puts a row in a column.
+    fn row_in(state: &str, reff: &str, alias: &str, title: &str, provisional: bool) -> Value {
         serde_json::json!({
             "reff": reff,
             "doc_id": "iss_01JV9VBLGTK0BME1R9KS2H5GIC",
             "project_id": "prj_01JV9VB8C96C5A4HCML1REEL5L",
             "key_alias": alias,
             "title": title,
-            "status": "backlog",
+            "status": state,
             "priority": "high",
             "assignee_summary": "",
             "assignees": [],
@@ -545,8 +552,30 @@ mod tests {
     }
 
     /// `IssuesResponse::Board` is an internally-tagged *newtype* variant, so
-    /// the `BoardView` fields sit beside `kind` rather than under a key.
+    /// the `BoardPage` fields sit beside `kind` rather than under a key.
+    ///
+    /// These fixtures are still written as columns, because columns are what
+    /// the surface draws and what each test is about. The wire no longer
+    /// carries them: it carries the workflow and one ordered page of rows,
+    /// and the surface groups. So this takes the readable form and flattens
+    /// it into the shape that actually arrives — which also keeps the tests
+    /// honest about the grouping being the surface's own work.
     fn board(columns: Value) -> Value {
+        let columns = columns.as_array().cloned().unwrap_or_default();
+        let workflow: Vec<Value> = columns
+            .iter()
+            .map(|column| column["state"].clone())
+            .collect();
+        let rows: Vec<Value> = columns
+            .iter()
+            .flat_map(|column| {
+                column["rows"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+            })
+            .collect();
         serde_json::json!({
             "kind": "board",
             "schema_version": 5,
@@ -556,13 +585,36 @@ mod tests {
                 "key": "ENG",
                 "color": "blue",
             },
-            "columns": columns,
+            "workflow": workflow,
+            "rows": {
+                "publication": {
+                    "materialization": 0,
+                    "publication": {
+                        "extractor_schema_digest": vec![0u8; 32],
+                        "implementation_digest": vec![0u8; 32],
+                        "manifest_root": vec![0u8; 32],
+                    },
+                },
+                "items": rows,
+                "next_cursor": null,
+                "exact_total": null,
+            },
         })
     }
 
+    /// One column, named. The state id is derived from the name so that two
+    /// columns in one fixture are two columns after grouping rather than one.
     fn column(name: &str, rows: Vec<Value>) -> Value {
+        let id = name.to_ascii_lowercase().replace(' ', "-");
+        let rows: Vec<Value> = rows
+            .into_iter()
+            .map(|mut row| {
+                row["status"] = Value::String(id.clone());
+                row
+            })
+            .collect();
         serde_json::json!({
-            "state": { "id": "backlog", "name": name, "category": "backlog", "color": "gray" },
+            "state": { "id": id, "name": name, "category": "backlog", "color": "gray" },
             "rows": rows,
         })
     }
