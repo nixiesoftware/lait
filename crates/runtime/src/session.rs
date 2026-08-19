@@ -2071,6 +2071,10 @@ pub struct StationCore {
 struct ExecGate {
     inflight: std::collections::BTreeSet<crate::exec::AttemptId>,
     busy: bool,
+    /// The last Run this Station's drain served, per World: the next pass
+    /// starts after it, so one busy Run cannot monopolize the sorted scan.
+    cursor: std::collections::BTreeMap<WorldId, crate::exec::RunId>,
+    pacing: crate::lifecycle::ExecPacing,
 }
 
 impl StationCore {
@@ -2154,6 +2158,8 @@ impl StationCore {
             exec: std::sync::Mutex::new(ExecGate {
                 inflight: std::collections::BTreeSet::new(),
                 busy: false,
+                cursor: std::collections::BTreeMap::new(),
+                pacing: crate::lifecycle::ExecPacing::default(),
             }),
             exec_tick: tokio::sync::watch::Sender::new(0),
         })
@@ -2165,6 +2171,25 @@ impl StationCore {
 
     pub(crate) fn note_exec(&self) {
         self.exec_tick.send_modify(|n| *n = n.saturating_add(1));
+    }
+
+    pub(crate) fn set_exec_pacing(&self, pacing: crate::lifecycle::ExecPacing) {
+        self.exec.lock_recovering().pacing = pacing;
+    }
+
+    pub fn exec_pacing(&self) -> crate::lifecycle::ExecPacing {
+        self.exec.lock_recovering().pacing
+    }
+
+    fn perform_cursor(&self, world: &WorldId) -> Option<crate::exec::RunId> {
+        self.exec.lock_recovering().cursor.get(world).copied()
+    }
+
+    fn advance_perform_cursor(&self, world: &WorldId, run: crate::exec::RunId) {
+        self.exec
+            .lock_recovering()
+            .cursor
+            .insert(world.clone(), run);
     }
 
     fn try_begin_perform(&self) -> bool {
@@ -7731,7 +7756,8 @@ impl Session {
         }
         let _guard = Guard(&self.core);
         let mut report = crate::exec::PerformReport::default();
-        for _ in 0..16 {
+        let actions = self.core.exec_pacing().actions_per_pass;
+        for _ in 0..actions {
             let next = self.next_perform_action(package)?;
             match next {
                 None => break,
@@ -7837,8 +7863,18 @@ impl Session {
         let reader =
             SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone());
         drop(inner);
-        let unresolved =
+        let mut unresolved =
             crate::exec::scan_unresolved(&reader, &self.world_id).map_err(read_failure)?;
+        // Round-robin over the sorted scan: start after the last Run served,
+        // so progress interleaves instead of the lowest id finishing first
+        // while the rest wait. In-flight duties and fresh Tries rotate alike.
+        if let Some(cursor) = self.core.perform_cursor(&self.world_id) {
+            let split = unresolved
+                .iter()
+                .position(|item| item.run.id > cursor)
+                .unwrap_or(0);
+            unresolved.rotate_left(split);
+        }
         for item in unresolved {
             if let Some(attempt) = item.run.attempts.iter().rev().find(|attempt| {
                 attempt.station == self.principal.station
@@ -7847,6 +7883,8 @@ impl Session {
                     && attempt.failures.is_empty()
                     && attempt.cancellations.is_empty()
             }) {
+                self.core
+                    .advance_perform_cursor(&self.world_id, item.run.id);
                 return Ok(Some(PerformAction::Recover {
                     run: item.run.id,
                     attempt: attempt.id,
@@ -7863,6 +7901,8 @@ impl Session {
                     attempt.began.as_slice(),
                     [began] if began.predecessors.contains(&attempt.leased_event)
                 );
+                self.core
+                    .advance_perform_cursor(&self.world_id, item.run.id);
                 if !began {
                     return Ok(Some(PerformAction::Begin {
                         run: item.run.id,
@@ -7882,6 +7922,8 @@ impl Session {
             }
             if self.can_local_try(package, &item.run) {
                 let intent = self.local_try_intent(&item.run)?;
+                self.core
+                    .advance_perform_cursor(&self.world_id, item.run.id);
                 return Ok(Some(PerformAction::Try(intent)));
             }
         }

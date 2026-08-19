@@ -207,11 +207,45 @@ impl CancelToken {
     }
 }
 
+/// How the local Exec drain paces its own labor.
+///
+/// Options rather than constants, per the compatibility doctrine: a bound an
+/// operator cannot set is decorative. Every field paces the Station's *own*
+/// work — none of this ranks candidates for a Run, which stays behind the
+/// direction gate. Hand-written `Default` because zero fails closed: a
+/// zero-action pass performs nothing, forever.
+///
+/// There is deliberately no failure backoff here yet. Under the current
+/// failure classes only an Unknown-classed stale lease is ever re-tried,
+/// and delaying that would delay honest crash recovery; a retry loop a
+/// backoff could tame only exists once an external performer backend can
+/// die mid-Attempt. The field joins this struct in the same commit as the
+/// backend that makes it real — never before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecPacing {
+    /// Most perform actions one drain pass may commit.
+    pub actions_per_pass: u32,
+    /// The idle beat between drain passes; a fresh commit still wakes the
+    /// drain immediately through the exec tick.
+    pub drain_interval: Duration,
+}
+
+impl Default for ExecPacing {
+    fn default() -> Self {
+        Self {
+            actions_per_pass: 16,
+            drain_interval: Duration::from_millis(50),
+        }
+    }
+}
+
 /// Options for activating an Orbit into a Station.
 #[derive(Debug, Default)]
 pub struct Activation {
     /// The deadline for draining tracked tasks at dormancy.
     pub drain_deadline: Duration,
+    /// How the local Exec drain paces its own labor.
+    pub exec: ExecPacing,
     /// The content plane's local policy: how much disk it may hold, and how
     /// large a single content this Station will accept.
     pub content: ContentOptions,
@@ -233,6 +267,7 @@ impl Activation {
     pub fn offline() -> Self {
         Self {
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
+            exec: ExecPacing::default(),
             content: ContentOptions::default(),
             find: crate::find::Policy::default(),
             planes: PlaneOptions::default(),
@@ -663,6 +698,7 @@ impl Orbit {
             )
             .map_err(|_| Failure::ReadCapacity)?,
         );
+        core.set_exec_pacing(options.exec);
 
         // The resident cache lives beside the store rather than inside it: the
         // journal's promise is that everything a root names is present, and a
@@ -1015,6 +1051,11 @@ impl Station {
 
     /// Watch for durable Exec outbox work. The Station host drains on this
     /// tick; product RPCs do not.
+    /// How this activation paces its local Exec drain.
+    pub fn exec_pacing(&self) -> ExecPacing {
+        self.core.exec_pacing()
+    }
+
     pub fn exec_tick(&self) -> tokio::sync::watch::Receiver<u64> {
         self.core.exec_tick()
     }
@@ -1691,6 +1732,7 @@ mod tests {
         let orbit = rt.create().unwrap();
         let space = orbit.space_id().clone();
         let opts = Activation {
+            exec: Default::default(),
             drain_deadline: Duration::from_millis(20),
             ..Default::default()
         };

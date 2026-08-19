@@ -97,6 +97,7 @@ impl runtime::world::AuthorityView for Permissive {
 
 fn options() -> Activation {
     Activation {
+        exec: Default::default(),
         planes: Default::default(),
         content: Default::default(),
         find: Default::default(),
@@ -138,6 +139,7 @@ impl replica::convergence::AuthorityIncorporator for Accepting {
 /// that passes for a reason unrelated to what it claims.
 fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> Activation {
     Activation {
+        exec: Default::default(),
         planes: Default::default(),
         content: Default::default(),
         find: Default::default(),

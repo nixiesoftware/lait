@@ -1476,6 +1476,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -1491,6 +1492,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),

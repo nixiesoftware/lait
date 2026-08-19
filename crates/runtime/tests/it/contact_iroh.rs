@@ -290,6 +290,7 @@ fn a_real_iroh_contact_converges_two_stations() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),
@@ -304,6 +305,7 @@ fn a_real_iroh_contact_converges_two_stations() {
         .materialize(&coords)
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             planes: Default::default(),
             content: Default::default(),
             find: Default::default(),

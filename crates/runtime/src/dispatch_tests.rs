@@ -2495,6 +2495,7 @@ fn station_find_policy_can_only_tighten_a_query() {
         .create()
         .unwrap()
         .open(Activation {
+            exec: Default::default(),
             find: crate::find::Policy {
                 bound: find_bound(1),
             },
@@ -3403,6 +3404,7 @@ fn invalid_station_find_policy_refuses_activation() {
 
     assert!(matches!(
         rt.create().unwrap().open(Activation {
+            exec: Default::default(),
             find: crate::find::Policy { bound: invalid },
             ..Activation::default()
         }),
@@ -5597,6 +5599,137 @@ fn an_attempt_reads_only_content_its_run_names() {
     // The handler asserted both halves of fork 3 in-Attempt; a Returned step
     // means the commissioned input was readable and the foreign ref refused.
     assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+}
+
+// ===== Fair drain: composition tests for the pacing forks ================
+//
+// Rotation is per action, the field norm — a Temporal task queue interleaves
+// activities from many workflows the same way — so three commissioned Runs
+// make progress together instead of finishing in RunId order. Pacing is an
+// Activation option, not a constant, and the round-robin cursor lives in
+// activation memory: durable truth stays the Attempt ledger.
+
+#[test]
+fn the_drain_interleaves_runs_instead_of_finishing_the_lowest_id_first() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    for seed in [0x71u8, 0x72, 0x73] {
+        session
+            .submit(
+                identity
+                    .sign_action(
+                        &session,
+                        crate::action::RequestId::from_bytes([seed; 16]),
+                        Intent {
+                            schema: SchemaId::parse("agent.request").unwrap(),
+                            schema_version: 1,
+                            payload: vec![seed],
+                        },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    let package = echo_package(&build);
+    let report = session
+        .perform(&package, |_| {
+            panic!("the echo handler stages no output content");
+        })
+        .unwrap();
+    // The first three actions lease three distinct Runs: progress rotates
+    // rather than driving the lowest RunId to completion first.
+    let leased: Vec<_> = report
+        .steps
+        .iter()
+        .take(3)
+        .filter_map(|step| match step {
+            crate::exec::PerformStep::Tried { run, .. } => Some(*run),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(leased.len(), 3, "the first three actions are three leases");
+    assert_eq!(
+        leased
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "three distinct Runs, not one Run three times"
+    );
+    // And everything still completes within the pass.
+    let returned = report
+        .steps
+        .iter()
+        .filter(|step| matches!(step, crate::exec::PerformStep::Returned { .. }))
+        .count();
+    assert_eq!(returned, 3);
+}
+
+#[test]
+fn perform_pacing_is_an_activation_option_not_a_constant() {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: world.descriptor(),
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = crate::lifecycle::Runtime::open(
+        temp_root(),
+        registry,
+        Arc::new(SeedAuthority),
+        test_keys(),
+    );
+    let station = rt
+        .create()
+        .unwrap()
+        .open(Activation {
+            exec: crate::lifecycle::ExecPacing {
+                actions_per_pass: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"paced".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = echo_package(&build);
+    let first = session
+        .perform(&package, |_| {
+            panic!("the echo handler stages no output content");
+        })
+        .unwrap();
+    assert_eq!(
+        first.steps.len(),
+        2,
+        "a two-action pass stops after two actions"
+    );
+    let second = session
+        .perform(&package, |_| {
+            panic!("the echo handler stages no output content");
+        })
+        .unwrap();
+    assert!(second
         .steps
         .iter()
         .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));

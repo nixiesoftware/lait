@@ -706,6 +706,7 @@ impl StationHost {
         advertise.dedup();
         advertise.truncate(runtime::beacon::MAX_ROUTE_HINTS);
         let activation = Activation {
+            exec: Default::default(),
             content: Default::default(),
             find: Default::default(),
             // Both planes on, which is what `lait/freight/1` being advertised
@@ -1141,7 +1142,7 @@ impl StationHost {
     async fn exec_drain_loop(self: Arc<Self>) {
         let mut stop_rx = self.stop_tx.subscribe();
         let mut tick = self.station.exec_tick();
-        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        let mut interval = tokio::time::interval(self.station.exec_pacing().drain_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // The first interval tick is immediate; skip it so activation and the
         // first control call are not racing a perform pass.
