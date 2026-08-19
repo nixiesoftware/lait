@@ -728,6 +728,46 @@ mod tests {
     const BOB_B: [u8; 32] = [41u8; 32];
     const NOW: u64 = 1_800_000_000;
 
+    /// **A device outside the genesis pair cannot publish**, and this is the
+    /// constraint device-join has to design around.
+    ///
+    /// `Registry::project` signs the head with whichever seed it is handed, and
+    /// `absorb` refuses any head whose signer is not one of the two devices in
+    /// the genesis link (`Failure::Unanchored`) — deliberately, since that
+    /// anchor is what stops a stranger substituting a device set. So `canonical`
+    /// today conflates two authorities that are not the same: *composing and
+    /// sealing a letter*, which any live device may do, and *signing a head a
+    /// correspondent will accept*, which only a genesis root may do.
+    ///
+    /// Pinned rather than fixed: splitting the two is the next piece of work,
+    /// and it is worth this being a failing expectation somebody reads rather
+    /// than a surprise somebody hits.
+    #[test]
+    fn a_device_outside_the_genesis_pair_cannot_publish_a_head_anyone_will_take() {
+        let (a, b, c) = ([81u8; 32], [82u8; 32], [83u8; 32]);
+        let mut plane = ReachPlane::found(vec![a, b, c], NOW).expect("found");
+
+        let joined_later = device_from_seed(&c);
+        plane
+            .make_canonical(&joined_later)
+            .expect("it is a device this identity holds");
+
+        let reader = Standing {
+            device: Some(device_from_seed(&[91u8; 32])),
+            ..Standing::default()
+        };
+        let announcement = plane.announce(Audience::Public, &reader).expect("announce");
+
+        let mut theirs = Registry::new();
+        assert!(
+            matches!(
+                theirs.absorb(announcement.projection, &announcement.genesis, &reader),
+                Err(registry::Failure::Unanchored)
+            ),
+            "a head signed off the genesis pair is refused by every reader"
+        );
+    }
+
     /// Handing the canonical role to another device leaves the address alone.
     ///
     /// This is what lets a real second machine take over from the seed a client
