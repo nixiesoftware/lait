@@ -1,6 +1,6 @@
 # Third-party notices
 
-lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, each offered under its own terms. This file is generated from `Cargo.lock` by `ci/third-party-notices.sh` and CI fails when it stops matching — do not edit it by hand.
+lait is offered under `PolyForm-Noncommercial-1.0.0`. It is built from the crates below, each offered under its own terms. This file is generated from `Cargo.lock` by `ci/third-party-notices.sh` and CI fails when it stops matching — do not edit it by hand.
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 

@@ -2,6 +2,7 @@
   "name": "@nixie/astrolabe-roku-receiver",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Production Roku receiver for Astrolabe Display",
   "scripts": {
     "check": "bsc --project bsconfig.json",

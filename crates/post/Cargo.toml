@@ -4,7 +4,7 @@ version = "0.7.8"
 edition = "2021"
 rust-version = "1.92"
 description = "The Post: deposit, fetch and acknowledge sealed correspondence for a recipient who is not online."
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 # Not published, for the same reason `lait-relay` is not: one of lait's internal
 # boundaries made runnable, rather than a library surface.
 publish = false

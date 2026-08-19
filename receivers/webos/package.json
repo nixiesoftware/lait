@@ -2,6 +2,7 @@
   "name": "@nixie/astrolabe-webos-receiver",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Production hosted webOS receiver for Astrolabe Display",
   "scripts": {
     "sync:runtime": "node scripts/sync-runtime.mjs",

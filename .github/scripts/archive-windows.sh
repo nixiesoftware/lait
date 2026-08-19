@@ -16,7 +16,7 @@ ARCHIVE="${NAME}.zip"
 rm -f "$ARCHIVE" "${ARCHIVE}.sha256" lait.exe
 # Flat archive: binary + misc docs at the zip root (matches the published layout).
 cp "$BIN" lait.exe
-7z a "$ARCHIVE" lait.exe CHANGELOG.md LICENSE-APACHE LICENSE-MIT README.md >/dev/null
+7z a "$ARCHIVE" lait.exe CHANGELOG.md LICENSE README.md >/dev/null
 sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
 
 echo "built $ARCHIVE"

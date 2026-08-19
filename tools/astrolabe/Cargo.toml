@@ -5,7 +5,7 @@ edition = "2021"
 # MSRV: the workspace figure. See the root manifest for what drives it.
 rust-version = "1.92"
 description = "The local client through which a person reaches the Worlds their device serves"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [lints]
