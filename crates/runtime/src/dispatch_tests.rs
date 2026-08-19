@@ -6343,3 +6343,370 @@ fn an_answer_committed_after_started_is_invisible_to_the_pinned_attempt() {
         .iter()
         .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
 }
+
+// ===== The subprocess performer: composition tests (unix) ================
+//
+// The M1 fork probes, written before the mechanism. The architectural bet:
+// an external performer is a `Handler` implementation, not a new dispatcher
+// seam — the Handler trait is already the performer contract, and "backend"
+// names what enforces limits and what trust is claimed, which is exactly
+// what `Enforcement` states per handler. Ray and Temporal both wrap worker
+// processes in a framework protocol; here the protocol is the trait, and
+// the OCI runtime spec's spawn contract (argv, stdio, limits) is the
+// reference for the child side.
+//
+// Trust surface: v1 spawns only programs named at composition — the same
+// trust as a compiled-in handler, no new surface. A subprocess is a process
+// boundary, never a sandbox; the threat model's line holds: capability is
+// added, trust is not.
+
+#[cfg(unix)]
+mod subprocess_perform {
+    use super::*;
+
+    fn transform_spec() -> crate::exec::Spec {
+        let payload = |name| crate::exec::PayloadSpec {
+            schema: exec_schema(name),
+            max_inline_bytes: 4 * 1024,
+            max_content_refs: 0,
+            max_content_bytes: 0,
+            read: exec_demand("payload.read"),
+            max_additional_input_bytes: 0,
+        };
+        crate::exec::Spec {
+            name: SchemaId::parse("batch.transform").unwrap(),
+            version: 1,
+            access: crate::exec::Access {
+                start: exec_demand("run.start"),
+                offer: exec_demand("run.offer"),
+                control: exec_demand("run.control"),
+                accept: exec_demand("run.accept"),
+            },
+            input: payload("batch.input"),
+            output: payload("batch.output"),
+            mode: crate::exec::Mode::Unary,
+            resume: crate::exec::Resume::Restart,
+            effects: crate::exec::Effects::Pure,
+            accept: crate::exec::AcceptRule::World,
+            queries: Vec::new(),
+            service: None,
+            links: Vec::new(),
+            limits: crate::exec::Limits {
+                attempts: 3,
+                events: 16,
+                checkpoints: 0,
+                child_runs: 0,
+                progress_bytes: 64 * 1024,
+                checkpoint_bytes: 0,
+                wall_millis: 5_000,
+            },
+        }
+    }
+
+    fn transform_build(world: &WorldId) -> crate::exec::Build {
+        let spec = transform_spec();
+        let seed = [0xA1; 32];
+        crate::exec::Build {
+            id: crate::exec::BuildId::from_bytes([0; 32]),
+            world: world.clone(),
+            world_build: [0; 32],
+            spec: crate::exec::SchemaRef {
+                name: spec.name,
+                version: spec.version,
+            },
+            handler: replica::content::ContentRef {
+                content_id: *blake3::hash(b"test/subprocess/uppercase/1").as_bytes(),
+            },
+            dependencies: None,
+            environment: [0xA2; 32],
+            config: Vec::new(),
+            checkpoint: None,
+            replay_commands: None,
+            compatible_from: Vec::new(),
+            publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+            signature: crate::exec::Signature {
+                signer: mechanics::actor::device_from_seed(&seed),
+                algorithm: 1,
+                bytes: [0; 64],
+            },
+        }
+        .sign(&seed)
+        .unwrap()
+    }
+
+    struct TransformWorld {
+        id: WorldId,
+        schemas: Vec<Schema>,
+        specs: Vec<crate::exec::Spec>,
+        build: crate::exec::BuildId,
+        wall_millis: u64,
+    }
+
+    impl TransformWorld {
+        fn new(build: crate::exec::BuildId, wall_millis: u64) -> Self {
+            Self {
+                id: WorldId::parse("com.example.exec-batch").unwrap(),
+                schemas: vec![Schema {
+                    id: SchemaId::parse("batch.request").unwrap(),
+                    version: 1,
+                    encoding: EncodingId::parse("bytes").unwrap(),
+                    mutation: MutationModel::Atomic,
+                    readable_predecessors: Vec::new(),
+                }],
+                specs: vec![transform_spec()],
+                build,
+                wall_millis,
+            }
+        }
+
+        fn marker(&self) -> BodyKey {
+            BodyKey::new(self.id.clone(), BodyId::from_bytes([0x61; 16]))
+        }
+    }
+
+    impl World for TransformWorld {
+        fn id(&self) -> WorldId {
+            self.id.clone()
+        }
+
+        fn schemas(&self) -> &[Schema] {
+            &self.schemas
+        }
+
+        fn exec_specs(&self) -> &[crate::exec::Spec] {
+            &self.specs
+        }
+
+        fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+            Ok(Effect {
+                content_refs: Vec::new(),
+                exec: vec![crate::exec::Cmd::Start(crate::exec::Start {
+                    spec: exec_schema("batch.transform"),
+                    build: self.build,
+                    input: crate::exec::Input {
+                        inline: intent.payload.clone(),
+                        content: Vec::new(),
+                        content_bytes: 0,
+                    },
+                    parent: None,
+                    source: None,
+                    service: None,
+                    resources: Vec::new(),
+                    limits: crate::exec::Limits {
+                        wall_millis: self.wall_millis,
+                        ..transform_spec().limits
+                    },
+                    queries: Vec::new(),
+                })],
+                operations: vec![(
+                    self.marker(),
+                    Op::ReplaceAtomic {
+                        value: intent.payload.clone(),
+                    },
+                )],
+                bodies: vec![self.marker()],
+                effect: b"queued".to_vec(),
+                declarations: Vec::new(),
+                demand: exec_demand("request.write"),
+            })
+        }
+
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+            Err(Rejection::InvalidRequest)
+        }
+    }
+
+    fn transform_station(
+        wall_millis: u64,
+    ) -> (crate::lifecycle::Station, WorldId, crate::exec::Build) {
+        let build = transform_build(&WorldId::parse("com.example.exec-batch").unwrap());
+        let world = Arc::new(TransformWorld::new(build.id, wall_millis));
+        let world_id = world.id();
+        let station = station_with(world.descriptor(), world);
+        (station, world_id, build)
+    }
+
+    fn subprocess_package(
+        build: &crate::exec::Build,
+        program: &str,
+        args: &[&str],
+    ) -> crate::exec::Package {
+        crate::exec::Package::new()
+            .with_spec(transform_spec())
+            .with_build(build.clone())
+            .with_handler(Arc::new(crate::exec::Subprocess::new(
+                &transform_spec(),
+                build,
+                std::path::PathBuf::from(program),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            )))
+    }
+
+    fn start_run(
+        session: &crate::session::Session,
+        station: &crate::lifecycle::Station,
+        world_id: &WorldId,
+        identity: &crate::world::LocalIdentity,
+        seed: u8,
+        payload: &[u8],
+    ) -> crate::exec::RunId {
+        let request = crate::action::RequestId::from_bytes([seed; 16]);
+        session
+            .submit(
+                identity
+                    .sign_action(
+                        session,
+                        request,
+                        Intent {
+                            schema: SchemaId::parse("batch.request").unwrap(),
+                            schema_version: 1,
+                            payload: payload.to_vec(),
+                        },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        crate::exec::derive_run_id(
+            station.space_id(),
+            world_id,
+            identity.device(),
+            request.as_bytes(),
+            0,
+        )
+    }
+
+    /// The reference batch transform: real bytes through a real child.
+    /// Input rides stdin, output rides stdout, exit zero is Succeeded, and
+    /// the Outcome's usage carries measured wall time.
+    #[test]
+    fn a_subprocess_transforms_committed_input_into_a_sealed_outcome() {
+        let (station, world_id, build) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(
+            &session,
+            &station,
+            &world_id,
+            &identity,
+            0xE1,
+            b"make me loud",
+        );
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "tr a-z A-Z"]);
+        let report = session
+            .perform(&package, |_| panic!("inline output stages no content"))
+            .unwrap();
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+        )));
+        let crate::exec::WorkReply::State(state) = session
+            .work(
+                crate::exec::WorkRequest::Inspect {
+                    world: world_id.clone(),
+                    run,
+                },
+                [0xE2; 16],
+            )
+            .unwrap()
+        else {
+            panic!("inspect returns lifecycle state");
+        };
+        assert_eq!(state.attempts.len(), 1);
+        assert_eq!(state.attempts[0].returned.len(), 1);
+        assert_eq!(
+            state.attempts[0].returned[0].terminal,
+            crate::exec::TerminalClass::Succeeded
+        );
+    }
+
+    /// A child that exits nonzero is an honest ApplicationFailed Outcome —
+    /// returned and judged, never a dispatch error.
+    #[test]
+    fn a_nonzero_exit_is_an_application_failure_not_a_dispatch_error() {
+        let (station, world_id, build) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xE3, b"doomed");
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "exit 3"]);
+        let report = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+        )));
+        let crate::exec::WorkReply::State(state) = session
+            .work(
+                crate::exec::WorkRequest::Inspect {
+                    world: world_id.clone(),
+                    run,
+                },
+                [0xE4; 16],
+            )
+            .unwrap()
+        else {
+            panic!("inspect returns lifecycle state");
+        };
+        assert_eq!(
+            state.attempts[0].returned[0].terminal,
+            crate::exec::TerminalClass::ApplicationFailed
+        );
+    }
+
+    /// The wall limit is enforced by killing the child — Process-grade
+    /// enforcement, honestly claimed — and the Attempt fails rather than
+    /// parking forever. The durable ledger still allows another Attempt.
+    #[test]
+    fn a_wall_limited_child_is_killed_and_the_attempt_fails_honestly() {
+        let (station, world_id, build) = transform_station(400);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xE5, b"stall");
+        let package = subprocess_package(&build, "/bin/sh", &["-c", "sleep 30"]);
+        let began = std::time::Instant::now();
+        let report = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "the kill happens at the wall, not at the child's leisure"
+        );
+        assert!(report.steps.iter().any(|step| matches!(
+            step,
+            crate::exec::PerformStep::Failed { run: failed, .. } if *failed == run
+        )));
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+    }
+
+    /// A committed cancellation before dispatch means the child never spawns.
+    #[test]
+    fn a_cancelled_run_never_spawns_its_child() {
+        let (station, world_id, build) = transform_station(5_000);
+        let identity = writer();
+        let session = station.dock(&world_id, &identity).unwrap();
+        let run = start_run(&session, &station, &world_id, &identity, 0xE6, b"never");
+        session
+            .work(
+                crate::exec::WorkRequest::Cancel {
+                    world: world_id.clone(),
+                    run,
+                },
+                [0xE7; 16],
+            )
+            .unwrap();
+        // A program whose execution would be unmissable if it ran.
+        let sentinel =
+            std::env::temp_dir().join(format!("lait-subprocess-sentinel-{}", std::process::id()));
+        let _ = std::fs::remove_file(&sentinel);
+        let command = format!("touch {}", sentinel.display());
+        let package = subprocess_package(&build, "/bin/sh", &["-c", &command]);
+        let report = session.perform(&package, |_| panic!("no content")).unwrap();
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+        assert!(
+            !sentinel.exists(),
+            "a cancelled Run's child must never have run"
+        );
+    }
+}

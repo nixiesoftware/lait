@@ -1981,6 +1981,157 @@ pub enum Enforcement {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InProcess;
 
+/// A performer that realizes one Build as a local child process.
+///
+/// Deliberately not a new dispatch seam: the [`Handler`] trait is already
+/// the performer contract, and what distinguishes a backend is what it
+/// enforces and claims — which is exactly what [`Enforcement`] states.
+/// Input rides stdin; output rides stdout, bounded by the Attempt's
+/// progress budget before the Spec's own output ceiling judges it; exit
+/// zero is `Succeeded` and nonzero `ApplicationFailed` — a child that runs
+/// and fails has *returned*, and acceptance judges it like any Outcome.
+/// The wall limit is enforced by killing the child, and a committed
+/// cancellation is honored both before spawn and mid-run through the
+/// cancellation watch.
+///
+/// Two boundaries stated plainly. This build spawns only the program named
+/// at composition, keyed to the Build's artifact identity — the same trust
+/// as a compiled-in handler, no new surface; content-addressed artifact
+/// materialization is the later general path. And a subprocess is a process
+/// boundary, never a sandbox: the enforcement claim is [`Enforcement::Process`]
+/// where the platform can kill and reap, and it does not make the child's
+/// behavior trustworthy.
+pub struct Subprocess {
+    binding: HandlerBinding,
+    output: SchemaRef,
+    program: std::path::PathBuf,
+    args: Vec<String>,
+}
+
+impl Subprocess {
+    pub fn new(spec: &Spec, build: &Build, program: std::path::PathBuf, args: Vec<String>) -> Self {
+        Self {
+            binding: HandlerBinding {
+                spec: build.spec.clone(),
+                build: build.id,
+                artifact: build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+            output: spec.output.schema.clone(),
+            program,
+            args,
+        }
+    }
+
+    /// What this performer actually enforces: a real process boundary the
+    /// host can kill and reap. Never claimed as isolation.
+    pub const fn enforcement() -> Enforcement {
+        Enforcement::Process
+    }
+}
+
+impl Handler for Subprocess {
+    fn binding(&self) -> &HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(&self, context: &mut Context<'_>) -> Result<Candidate, Failure> {
+        use std::io::{Read, Write};
+        if context.cancel_asked() {
+            return Err(Failure::Cancelled);
+        }
+        let wall = std::time::Duration::from_millis(context.limits().wall_millis);
+        let mut child = std::process::Command::new(&self.program)
+            .args(&self.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|_| Failure::Handler)?;
+        let mut stdin = child.stdin.take().ok_or(Failure::Handler)?;
+        let input = context.input_inline().to_vec();
+        let feeder = std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+        let mut stdout = child.stdout.take().ok_or(Failure::Handler)?;
+        let ceiling = usize::try_from(context.limits().progress_bytes).unwrap_or(usize::MAX);
+        let collector = std::thread::spawn(move || {
+            let mut collected = Vec::new();
+            let mut chunk = [0u8; 8 * 1024];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        if collected.len().saturating_add(read) > ceiling {
+                            break;
+                        }
+                        let Some(filled) = chunk.get(..read) else {
+                            break;
+                        };
+                        collected.extend_from_slice(filled);
+                    }
+                    Err(_) => break,
+                }
+            }
+            collected
+        });
+        let began = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = feeder.join();
+                    let _ = collector.join();
+                    return Err(Failure::Handler);
+                }
+            }
+            if context.cancel_asked() {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = feeder.join();
+                let _ = collector.join();
+                return Err(Failure::Cancelled);
+            }
+            if began.elapsed() >= wall {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = feeder.join();
+                let _ = collector.join();
+                return Err(Failure::Handler);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let _ = feeder.join();
+        let inline = collector.join().unwrap_or_default();
+        let wall_spent = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let usage = SchemaId::parse(WALL_TIME_MS)
+            .map(|name| {
+                vec![Resource {
+                    name,
+                    amount: wall_spent,
+                }]
+            })
+            .unwrap_or_default();
+        Ok(Candidate {
+            output: self.output.clone(),
+            inline,
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: if status.success() {
+                TerminalClass::Succeeded
+            } else {
+                TerminalClass::ApplicationFailed
+            },
+            usage,
+            evidence: Vec::new(),
+        })
+    }
+}
+
 impl InProcess {
     pub const fn new() -> Self {
         Self
