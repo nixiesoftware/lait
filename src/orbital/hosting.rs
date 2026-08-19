@@ -1145,8 +1145,6 @@ impl StationHost {
         let mut interval = tokio::time::interval(self.station.exec_pacing().drain_interval);
         // Retention rides a slow beat of its own: hygiene must happen whether
         // or not anything is being performed, and never at drain frequency.
-        let mut last_swept = std::time::Instant::now();
-        const RETENTION_BEAT: Duration = Duration::from_secs(60);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // The first interval tick is immediate; skip it so activation and the
         // first control call are not racing a perform pass.
@@ -1171,36 +1169,6 @@ impl StationHost {
                 break;
             }
             self.drain_exec();
-            if last_swept.elapsed() >= RETENTION_BEAT {
-                last_swept = std::time::Instant::now();
-                self.sweep_exec();
-            }
-        }
-    }
-
-    fn sweep_exec(&self) {
-        let worlds: Vec<_> = self.worlds.world_ids().cloned().collect();
-        for world in worlds {
-            if !self.ensure_world_session(&world) {
-                continue;
-            }
-            self.worlds.with_primary(&world, |session| {
-                let Ok(implementation) = self.station.active_implementation(session.world_id(), &self.identity) else {
-                    return;
-                };
-                let Some(host) = self.worlds.host_for(session.world_id(), implementation) else {
-                    return;
-                };
-                match host.sweep_runs(session) {
-                    Ok(collected) if !collected.is_empty() => {
-                        tracing::debug!(world = %session.world_id(), count = collected.len(), "retired resolved Exec Runs");
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, world = %session.world_id(), "Exec retention sweep did not complete");
-                    }
-                }
-            });
         }
     }
 

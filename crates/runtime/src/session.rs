@@ -8546,6 +8546,10 @@ impl Session {
     /// The operator window on top is counted in activation memory from when
     /// this activation first saw the Run collectible.
     ///
+    /// Deliberately not an ambient background collector: disposal is a
+    /// decision, and this is the mechanism an authorized surface invokes.
+    /// Nothing calls it on a beat.
+    ///
     /// Product truth is expected to survive disposal by design: the adopter
     /// contract keeps World records self-describing precisely so a node that
     /// cannot consult a Run Body — including one whose Body is gone — still
