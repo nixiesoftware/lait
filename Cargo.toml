@@ -10,6 +10,7 @@ members = [
     "crates/post",
     "crates/relay",
     "crates/replica",
+    "crates/register",
     "crates/runtime",
     "crates/schedule",
     "crates/world-interface",
