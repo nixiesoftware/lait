@@ -23,6 +23,22 @@ impl SignageRequest {
             Self::ProgramPut { .. } | Self::ProgramDelete { .. } => Access::Command,
         }
     }
+
+    /// The question a client must ask before running this, or `None` when the
+    /// request is unremarkable.
+    ///
+    /// Only deletion asks. A delete tombstones a replicated Body, so it is not
+    /// a local erasure that the author can reconsider — it converges to every
+    /// replica of the Space, and the Body plane carries no undo. A put is
+    /// ordinary authoring and a query changes nothing.
+    pub fn destructive_question(&self) -> Option<String> {
+        match self {
+            Self::ProgramDelete { program } => Some(format!(
+                "Delete signage program {program}? This removes it for everyone in the Space."
+            )),
+            Self::ProgramGet { .. } | Self::ProgramList | Self::ProgramPut { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
