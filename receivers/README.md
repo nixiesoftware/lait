@@ -19,9 +19,14 @@ stage opaque frame assets or assignment-bound live grants, advance with
 monotonic time, report bounded health, and render native
 trust/source/delivery/refusal states. webOS, Tizen, and Web-PKI Android TV
 builds consume the coordinator's bounded CMAF stream through MSE. Roku and tvOS
-consume its real HLS-v3 MPEG-TS edge through their native video stacks. A receiver cannot name a
-World, Space, surface, operation, acting identity, filesystem path, external
-media URL, or product route.
+consume its real HLS-v3 MPEG-TS edge through their native video stacks. A
+receiver cannot name a World, Space, surface, operation, acting identity,
+filesystem path, external media URL, or product route.
+
+The current delivery order is the native desktop/reference receiver first and
+LG webOS second. Android TV, Roku, Tizen, and tvOS remain maintained
+conformance implementations; production qualification and distribution for
+those platforms are deferred until the desktop and webOS release gates hold.
 
 The reference receiver consumes the pinned self-hosted bootstrap copied from
 Astrolabe Displays and verifies that exact certificate before it sends pairing
