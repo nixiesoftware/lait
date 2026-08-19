@@ -165,6 +165,30 @@ mod imp {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr);
+        // Its own process group, which is what the windows branch below already
+        // achieves with `CREATE_NO_WINDOW` and explains at length: sharing the
+        // spawner's group means "a Ctrl-C or a closed terminal delivers a control
+        // event to a process whose whole contract is to outlive the command that
+        // started it". This branch did the thing that comment warns against.
+        //
+        // It became urgent rather than untidy when heads gained their own process
+        // groups and a graceful stop that signals one. A head runs
+        // `host_client::ensure_lait_daemon`, so a head can be the process that
+        // spawns the machine's daemon — after a staged upgrade replaces the binary,
+        // or any time the daemon died mid-session. With the daemon inheriting the
+        // head's group, "stop this World" delivered SIGTERM to the identity daemon
+        // as well: a node-wide off switch reachable from a per-World control, and
+        // from *close and stay online*, with nothing in either path able to see it.
+        //
+        // A new group rather than `setsid`: it is a safe stable API with no
+        // `pre_exec`, and it closes this completely, since group-directed signals
+        // and a terminal's foreground-group signals both stop reaching. A new
+        // *session* would additionally drop the controlling terminal, which is
+        // worth having and is a separate change — this one is the bug.
+        {
+            use std::os::unix::process::CommandExt as _;
+            cmd.process_group(0);
+        }
         // `--home` is a global flag the child turns into its own `LAIT_HOME`,
         // selecting a self-contained daemon identity.
         if let Some(identity) = identity {
@@ -527,5 +551,61 @@ mod imp {
             return Err(io::Error::last_os_error());
         }
         try_wait(c)?.ok_or_else(|| io::Error::other("terminated process is still running"))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod group_isolation {
+    //! A spawned daemon must not be in its spawner's process group.
+    //!
+    //! Its whole contract is to outlive whoever started it, and the windows branch
+    //! has said so in prose since it was written. What made this worth a test is
+    //! that heads gained their own process groups and a graceful stop that signals
+    //! one: a head runs `ensure_lait_daemon`, so a head can be the daemon's parent,
+    //! and a daemon sharing the head's group turned "stop this World" into a
+    //! node-wide off switch. No test in the supervisor could see it — the two
+    //! halves are in different crates.
+
+    /// The daemon's process group is its own, not this process's.
+    ///
+    /// Driven through the real `imp::spawn`, not through a `Command` this test
+    /// builds. A first draft asserted the arrangement on its own command and would
+    /// have passed with the fix deleted from production — proving that
+    /// `process_group(0)` does what the manual says, which nobody doubted.
+    ///
+    /// The payload is a temporary script because `spawn` always appends `daemon` as
+    /// an argument: a real long-running child is needed for `getpgid` to have
+    /// something to answer about, and the script ignores its arguments and sleeps.
+    #[test]
+    fn a_spawned_daemon_leads_its_own_process_group() {
+        let dir = tempfile::tempdir().expect("a tempdir");
+        let script = dir.path().join("fake-daemon");
+        std::fs::write(&script, "#!/bin/sh\nsleep 5\n").expect("write the script");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("make it executable");
+        }
+
+        let mut child = super::spawn(&script, None, None).expect("spawn a daemon");
+        let pid = i32::try_from(child.id()).expect("a pid fits an i32");
+
+        // SAFETY: the documented POSIX form; `getpgid` only reads.
+        let child_group = unsafe { libc::getpgid(pid) };
+        // SAFETY: as above, for this process.
+        let ours = unsafe { libc::getpgid(0) };
+
+        assert_eq!(
+            child_group, pid,
+            "a daemon must lead its own group, or a group-directed signal aimed at \
+             its spawner reaches it"
+        );
+        assert_ne!(
+            child_group, ours,
+            "a daemon in its spawner's group is a node-wide off switch reachable \
+             from any per-World stop"
+        );
+
+        let _ = child.force_kill_and_wait();
     }
 }

@@ -5,8 +5,9 @@
 //!
 //! - [`WorldId`] — 3–63 lowercase ASCII bytes in reverse-domain form.
 //! - [`SchemaId`] / [`EncodingId`] — 1–63 lowercase ASCII `[a-z0-9][a-z0-9._-]*`.
-//! - [`BodyId`] — 128 CSPRNG bits, lowercase unpadded base32; Runtime mints it,
-//!   World code cannot choose the randomness.
+//! - [`BodyId`] — 128 canonical bits, lowercase unpadded base32. Ordinary
+//!   mutable Bodies use CSPRNG bits; create-once atomic Bodies derive the bits
+//!   from their schema coordinate and canonical value.
 //! - [`BodyKey`] — `{ world, body }`, the durable addressable key of a Body.
 
 use std::sync::Arc;
@@ -140,9 +141,10 @@ impl std::fmt::Display for EncodingId {
     }
 }
 
-/// A Body identity — 128 CSPRNG bits, rendered lowercase unpadded base32 (26
-/// chars). Runtime mints it from the OS CSPRNG; **World code cannot choose the
-/// randomness**. Stored as the canonical 16 raw bytes so comparison is over
+/// A Body identity — 128 canonical bits, rendered lowercase unpadded base32
+/// (26 chars). Runtime mints ordinary ids from the OS CSPRNG; the substrate
+/// derives create-once atomic ids from their canonical value. World code cannot
+/// supply arbitrary raw bits. Stored as 16 raw bytes so comparison is over
 /// bytes, not the display string.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BodyId([u8; 16]);
@@ -285,7 +287,7 @@ mod tests {
     fn release_scale_million_body_keys_share_world_text() {
         const TOTAL: u32 = 1_000_000;
         const MAX_RSS_DELTA: usize = 96 * 1024 * 1024;
-        let world = WorldId::parse("dev.lait.issues").expect("world");
+        let world = WorldId::parse("dev.lait.notes").expect("world");
         let before = resident_bytes();
         let keys = (0..TOTAL)
             .map(|number| {

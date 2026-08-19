@@ -30,6 +30,7 @@ mod engine;
 mod error;
 mod ids;
 mod mapping;
+pub mod registry;
 mod store;
 mod types;
 
@@ -45,6 +46,7 @@ pub use engine::{Action, BookEngine};
 pub use error::Error;
 pub use ids::{CardId, PathHash};
 pub use mapping::BODY_KEY;
+pub use registry::Registry;
 pub use store::Store;
 pub use types::{
     Author, Book, Card, Coverage, DerivedObservation, Evidence, Field, GroupLink, Handle,

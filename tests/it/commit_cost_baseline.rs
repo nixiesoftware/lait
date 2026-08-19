@@ -121,6 +121,7 @@ fn request(n: u64) -> [u8; 16] {
 fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, Op)]) {
     let space = space();
     let signer = SeedSigner(&WRITER_SEED);
+    let actor = mechanics::ids::ActorId::from_incept_hash(&"d".repeat(64));
     let ctx = CommitContext {
         space: &space,
         signer: &signer,
@@ -132,7 +133,7 @@ fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, Op)]) {
         .commit_action(
             &ctx,
             &CommitAuthorization {
-                actor: "baseline",
+                actor: actor.as_str(),
                 parent_manifest_root: [0u8; 32],
                 demand: demand(),
                 intent_digest: [7u8; 32],
@@ -147,7 +148,7 @@ fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, Op)]) {
             &[7u8; 32],
             Vec::new(),
             Vec::new(),
-            "baseline",
+            actor.as_str(),
             ops,
             &bindings,
             &[],

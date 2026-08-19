@@ -50,12 +50,14 @@
 mod action;
 mod admission;
 pub mod beacon;
+pub(crate) mod body_image;
 mod budget;
 pub mod change;
 mod contact_driver;
 mod content_host;
 pub mod coordinates;
 pub(crate) mod corpus;
+pub(crate) mod corpus_store;
 /// The identity-scoped correspondence dial tone (`lait/correspondence/1`).
 pub mod correspondence;
 #[cfg(test)]
@@ -95,4 +97,7 @@ pub use lifecycle::{
     Exit, ExitReason, Integrity, Interruption, Orbit, OrbitStatus, Persistence,
     RemovalConfirmation, Runtime, Station, StorageReading,
 };
-pub use session::{Session, WorldGeneration, WorldSnapshotId};
+pub use session::{
+    DurableOperationReceipt, LifecycleSourceStatus, OperationPublication, OperationStatus, Session,
+    WorldGeneration, WorldSnapshotId,
+};

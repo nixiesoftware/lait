@@ -132,7 +132,7 @@ fn commit_body(replica: &mut Replica, seq: u8, key: &BodyKey, value: &[u8]) {
         .commit_action(
             &context,
             &CommitAuthorization {
-                actor: "plane",
+                actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
                 parent_manifest_root: [0u8; 32],
                 demand: demand(),
                 intent_digest: [7u8; 32],

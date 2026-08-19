@@ -5,6 +5,24 @@ pub use crate::crypto::{
     AuthorizedBodyKey, ContentChunkBinding, DeviceSealed, SpaceKey, BODY_ENVELOPE_OVERHEAD,
     BODY_EPOCH_ID_LEN, KEY_LEN,
 };
+/// Multi-path custody for a secret that is not an authority share.
+///
+/// Only the general half of [`crate::custody`] crosses this seam. [`Package`]
+/// and its FROST payload stay inside, because they bind themselves to a space,
+/// an authority and a holder — comparisons that mean nothing to a caller with
+/// none of those, and which an outside caller supplying its own values could
+/// only perform against itself.
+///
+/// What a process-level adapter legitimately needs is the module's other
+/// lesson: one data-encryption key under several independent unlock paths, so
+/// the operating-system profile is never the durability boundary. The display
+/// coordinator's identifier key is the first such holder outside this crate.
+///
+/// [`Package`]: crate::custody::Package
+pub mod custody {
+    pub use crate::custody::{Argon2Params, Custodied, SlotSpec, UnlockKey, CUSTODIED_VERSION};
+}
+
 pub use crate::demand::{
     policy_evidence_digest, AuthorizationDemand, AuthorizationReceipt, Invalid, PolicyCapability,
     Resource, WorldAssignmentEvidence, MAX_CHILDREN, MAX_DEMAND_BYTES, MAX_DEMAND_DEPTH,

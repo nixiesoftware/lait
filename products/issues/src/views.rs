@@ -718,7 +718,7 @@ impl CatalogState {
         &self,
         project: &str,
         id: &str,
-    ) -> Result<Option<&crate::workflow::WorkflowState>, WorkflowResolutionError> {
+    ) -> Result<Option<&crate::workflow::WorkflowState>, Failure> {
         Ok(self
             .resolved_workflow(project)?
             .body
@@ -731,7 +731,7 @@ impl CatalogState {
         &self,
         project: &str,
         category: StatusCategory,
-    ) -> Result<Option<&crate::workflow::WorkflowState>, WorkflowResolutionError> {
+    ) -> Result<Option<&crate::workflow::WorkflowState>, Failure> {
         Ok(self
             .resolved_workflow(project)?
             .body
@@ -744,7 +744,7 @@ impl CatalogState {
         &self,
         project: &str,
         status: &str,
-    ) -> Result<Option<StatusCategory>, WorkflowResolutionError> {
+    ) -> Result<Option<StatusCategory>, Failure> {
         Ok(self
             .workflow_state(project, status)?
             .and_then(|state| StatusCategory::parse(&state.category)))
@@ -922,9 +922,9 @@ impl IssueState {
             events,
             events_recorded,
         };
-        if let Some(raw) = view.registers.get(crate::v4::roots::BOARD_PLACEMENT) {
+        if let Some(raw) = view.registers.get(crate::records::roots::BOARD_PLACEMENT) {
             if let Ok(placement) =
-                <crate::v4::BoardPlacement as crate::v4::CanonicalRecord>::decode_canonical(raw)
+                <crate::records::BoardPlacement as crate::records::CanonicalRecord>::decode_canonical(raw)
             {
                 state.project = placement.project;
                 state.status = placement.workflow_state;
@@ -1089,7 +1089,7 @@ pub fn canonical_for(aliases: &DerivedAliases, doc: &str) -> String {
     })
 }
 
-fn assignee_summary(assignees: &[ActorId], me: Option<&ActorId>) -> String {
+pub(crate) fn assignee_summary(assignees: &[ActorId], me: Option<&ActorId>) -> String {
     let mine = me.is_some_and(|m| assignees.contains(m));
     match (assignees.len(), mine) {
         (0, _) => String::new(),
@@ -1148,6 +1148,7 @@ pub fn project_row(
         priority,
         assignee_summary: assignee_summary(&assignees, me),
         assignees,
+        enrichment_complete: true,
         tombstone: catalog.tombstones.contains(doc),
         provisional: issue.is_none(),
         due_date,
@@ -1278,11 +1279,11 @@ pub fn issue_view(
                 spec: check.spec.clone(),
                 version: check.v,
                 build: check.build.clone(),
+                package_filled: check.package_filled,
                 source: check.source.clone(),
                 state: check.state.clone(),
                 by: check.by.clone(),
                 ts: check.ts,
-                package_filled: check.package_filled,
                 attempt: check.attempt.clone(),
                 report: check.report.clone(),
                 verdict: check.verdict.clone(),
@@ -1290,6 +1291,11 @@ pub fn issue_view(
             .collect(),
         provisional: false,
         corrupt_records: issue.check_corrupt_records.clone(),
+        // This builder is handed a fully materialised Issue, so what it
+        // shows is what there is: no page was cut and no reaction was left
+        // unread.
+        more_comments: None,
+        reactions_complete: true,
     }
 }
 
@@ -1325,6 +1331,7 @@ pub fn project_dto(id: &str, meta: &ProjectMeta) -> Option<ProjectDto> {
         target_date: meta.target_date,
         archived: meta.archived,
         team: meta.team.clone(),
+        enrichment_complete: true,
     })
 }
 
@@ -1343,7 +1350,7 @@ pub fn board_view(
     project_id: &str,
     issues: &BTreeMap<String, std::sync::Arc<IssueState>>,
     me: Option<&ActorId>,
-) -> Result<Option<BoardView>, WorkflowResolutionError> {
+) -> Result<Option<BoardView>, Failure> {
     let Some(meta) = catalog.projects.get(project_id) else {
         return Ok(None);
     };
@@ -1494,12 +1501,12 @@ impl CatalogState {
     pub fn resolved_workflow(
         &self,
         project: &str,
-    ) -> Result<&crate::workflow::WorkflowRevision, WorkflowResolutionError> {
+    ) -> Result<&crate::workflow::WorkflowRevision, Failure> {
         let heads = self.workflow_heads(project);
         match heads.as_slice() {
             [revision] if !revision.body.tombstone => Ok(revision),
-            [] | [_] => Err(WorkflowResolutionError::Missing),
-            _ => Err(WorkflowResolutionError::Conflicted),
+            [] | [_] => Err(Failure::Missing),
+            _ => Err(Failure::Conflicted),
         }
     }
 
@@ -1525,8 +1532,13 @@ impl CatalogState {
     }
 }
 
+/// Why a workflow could not be resolved for an issue.
+///
+/// Named for what it is to its owner rather than carrying the owner in its
+/// name: callers outside this module say `views::Failure`, which reads the
+/// same way `world::Failure` and `session::Failure` do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowResolutionError {
+pub enum Failure {
     Missing,
     Conflicted,
 }

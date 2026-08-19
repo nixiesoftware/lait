@@ -27,13 +27,20 @@ use crate::ids::{
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
+/// A healthy document has one current semantic head. This ceiling does not
+/// invent a winner under adversarial concurrency; it makes an over-wide
+/// conflict a typed contract violation before extraction or hydration can
+/// become proportional to an unbounded collaborative set.
+pub const MAX_CONCURRENT_HEADS: usize = 64;
 // High-churn collaboration records are deliberately one record per Body.
 // Body cardinality is the scalable dimension; an append-only "current
 // segment" would merely move the coarse invalidation boundary.
 pub const MIGRATION_AUDIT_RECORDS: u64 = 1_024;
 
 pub const SPACE_DIRECTORY_SCHEMA: &str = "issues_space_directory";
+pub const SPACE_CONTENT_SCHEMA: &str = "issues_space_content";
 pub const PROJECT_META_SCHEMA: &str = "issues_project_meta";
+pub const PROJECT_CONTENT_SCHEMA: &str = "issues_project_content";
 pub const PROJECT_SCHEDULE_SCHEMA: &str = "issues_project_schedule";
 pub const PROJECT_HIERARCHY_SCHEMA: &str = "issues_project_hierarchy";
 pub const PROJECT_UPDATES_SCHEMA: &str = "issues_project_updates";
@@ -45,18 +52,31 @@ pub const ISSUE_RELATION_SCHEMA: &str = "issues_issue_relation";
 pub const ISSUE_IDENTITY_SCHEMA: &str = "issues_issue_identity";
 pub const ISSUE_META_SCHEMA: &str = "issues_issue_meta";
 pub const ISSUE_PLACEMENT_SCHEMA: &str = "issues_issue_placement";
+pub const ISSUE_TRANSITION_SCHEMA: &str = "issues_issue_transition";
+pub const BOARD_BLOCK_SCHEMA: &str = "issues_board_block";
+pub const BOARD_LANE_SCHEMA: &str = "issues_board_lane";
 pub const ISSUE_ATTACHMENT_SCHEMA: &str = "issues_issue_attachment";
 pub const ISSUE_CHECK_SCHEMA: &str = "issues_issue_check";
 pub const INITIATIVE_SCHEMA: &str = "issues_initiative";
+pub const INITIATIVE_CONTENT_SCHEMA: &str = "issues_initiative_content";
 pub const TEAM_SCHEMA: &str = "issues_team";
 pub const LABEL_SCHEMA: &str = "issues_label";
 pub const ENTITY_RELATION_SCHEMA: &str = "issues_entity_relation";
 pub const REVISION_ALIAS_SCHEMA: &str = "issues_revision_alias";
 pub const GOVERNANCE_REVISION_SCHEMA: &str = "issues_governance_revision";
+pub const GOVERNANCE_HEADS_SCHEMA: &str = "issues_governance_heads";
 pub const WORKFLOW_REVISION_SCHEMA: &str = "issues_workflow_revision";
+pub const WORKFLOW_HEADS_SCHEMA: &str = "issues_workflow_heads";
+pub const SPEC_REVISION_SCHEMA: &str = "issues_spec_revision";
+pub const SPEC_HEADS_SCHEMA: &str = "issues_spec_heads";
+pub const SPEC_OBSERVATION_SCHEMA: &str = "issues_spec_observation";
+pub const BASELINE_REVISION_SCHEMA: &str = "issues_baseline_revision";
+pub const BASELINE_HEADS_SCHEMA: &str = "issues_baseline_heads";
 
 pub const SPACE_DIRECTORY_ENCODING: &str = "lait.issues.space-directory.v1";
+pub const SPACE_CONTENT_ENCODING: &str = "lait.issues.space-content.v1";
 pub const PROJECT_META_ENCODING: &str = "lait.issues.project-meta.v1";
+pub const PROJECT_CONTENT_ENCODING: &str = "lait.issues.project-content.v1";
 pub const PROJECT_SCHEDULE_ENCODING: &str = "lait.issues.project-schedule.v1";
 pub const PROJECT_HIERARCHY_ENCODING: &str = "lait.issues.project-hierarchy.v1";
 pub const PROJECT_UPDATES_ENCODING: &str = "lait.issues.project-updates.v1";
@@ -68,15 +88,26 @@ pub const ISSUE_RELATION_ENCODING: &str = "lait.issues.issue-relation.v1";
 pub const ISSUE_IDENTITY_ENCODING: &str = "lait.issues.issue-identity.v1";
 pub const ISSUE_META_ENCODING: &str = "lait.issues.issue-meta.v1";
 pub const ISSUE_PLACEMENT_ENCODING: &str = "lait.issues.issue-placement.v1";
+pub const ISSUE_TRANSITION_ENCODING: &str = "lait.issues.issue-transition.v1";
+pub const BOARD_BLOCK_ENCODING: &str = "lait.issues.board-block.v1";
+pub const BOARD_LANE_ENCODING: &str = "lait.issues.board-lane.v1";
 pub const ISSUE_ATTACHMENT_ENCODING: &str = "lait.issues.issue-attachment.v1";
 pub const ISSUE_CHECK_ENCODING: &str = "lait.issues.issue-check.v1";
 pub const INITIATIVE_ENCODING: &str = "lait.issues.initiative.v1";
+pub const INITIATIVE_CONTENT_ENCODING: &str = "lait.issues.initiative-content.v1";
 pub const TEAM_ENCODING: &str = "lait.issues.team.v1";
 pub const LABEL_ENCODING: &str = "lait.issues.label.v1";
 pub const ENTITY_RELATION_ENCODING: &str = "lait.issues.entity-relation.v1";
 pub const REVISION_ALIAS_ENCODING: &str = "lait.issues.revision-alias.v1";
 pub const GOVERNANCE_REVISION_ENCODING: &str = "lait.issues.governance-revision.v1";
+pub const GOVERNANCE_HEADS_ENCODING: &str = "lait.issues.governance-heads.v1";
 pub const WORKFLOW_REVISION_ENCODING: &str = "lait.issues.workflow-revision.v1";
+pub const WORKFLOW_HEADS_ENCODING: &str = "lait.issues.workflow-heads.v1";
+pub const SPEC_REVISION_ENCODING: &str = "lait.issues.spec-revision.v1";
+pub const SPEC_HEADS_ENCODING: &str = "lait.issues.spec-heads.v1";
+pub const SPEC_OBSERVATION_ENCODING: &str = "lait.issues.spec-observation.v1";
+pub const BASELINE_REVISION_ENCODING: &str = "lait.issues.baseline-revision.v1";
+pub const BASELINE_HEADS_ENCODING: &str = "lait.issues.baseline-heads.v1";
 
 /// Typed roots within each collaborative Body. A path is listed once here so
 /// migration, extractors, and writers do not grow three spellings for it.
@@ -119,6 +150,22 @@ pub mod roots {
     pub const CREATED_AT: &str = "created_at";
     pub const DUE_AT: &str = "due_at";
     pub const ESTIMATE: &str = "estimate";
+    /// Add-wins current workflow-transition heads for one Issue.  Concurrent
+    /// successors remain visible rather than being collapsed by a placement
+    /// register winner.
+    pub const PLACEMENT_HEADS: &str = "placement_heads";
+    pub const RANK_OVERLAY: &str = "rank_overlay";
+    /// Add-wins, self-authenticating identity of one order-maintenance block.
+    /// More than one head is a typed topology conflict, never an LWW winner.
+    pub const BLOCK_HEADS: &str = "block_heads";
+    /// Non-semantic order label fenced to one exact block head.
+    pub const ORDER_OVERLAY: &str = "order_overlay";
+    /// Predecessor-bound structural heads for one `(project,state)` lane.
+    pub const TOPOLOGY_HEADS: &str = "topology_heads";
+    pub const HEADS: &str = "heads";
+    pub const ISSUED_HEADS: &str = "issued_heads";
+    pub const PROJECT: &str = "project";
+    pub const KIND: &str = "kind";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -148,16 +195,22 @@ const SPACE_DIRECTORY_ROOTS: &[RootSpec] = &[
         algebra: RootAlgebra::Register,
     },
     RootSpec {
-        path: roots::DESCRIPTION,
-        algebra: RootAlgebra::Text,
-    },
-    RootSpec {
         path: roots::MIGRATION,
         algebra: RootAlgebra::Register,
     },
     RootSpec {
         path: roots::MIGRATION_AUDIT,
         algebra: RootAlgebra::Log,
+    },
+];
+const CONTENT_ROOTS: &[RootSpec] = &[
+    RootSpec {
+        path: roots::IDENTITY,
+        algebra: RootAlgebra::Register,
+    },
+    RootSpec {
+        path: roots::DESCRIPTION,
+        algebra: RootAlgebra::Text,
     },
 ];
 const PROJECT_META_ROOTS: &[RootSpec] = &[
@@ -176,10 +229,6 @@ const PROJECT_META_ROOTS: &[RootSpec] = &[
     RootSpec {
         path: roots::COLOR,
         algebra: RootAlgebra::Register,
-    },
-    RootSpec {
-        path: roots::DESCRIPTION,
-        algebra: RootAlgebra::Text,
     },
     RootSpec {
         path: roots::LEAD,
@@ -296,6 +345,28 @@ const REVISION_RECORD_ROOTS: &[RootSpec] = &[
         algebra: RootAlgebra::Register,
     },
 ];
+const HEADS_ROOTS: &[RootSpec] = &[
+    RootSpec {
+        path: roots::IDENTITY,
+        algebra: RootAlgebra::Register,
+    },
+    RootSpec {
+        path: roots::PROJECT,
+        algebra: RootAlgebra::Register,
+    },
+    RootSpec {
+        path: roots::KIND,
+        algebra: RootAlgebra::Register,
+    },
+    RootSpec {
+        path: roots::HEADS,
+        algebra: RootAlgebra::Set,
+    },
+    RootSpec {
+        path: roots::ISSUED_HEADS,
+        algebra: RootAlgebra::Set,
+    },
+];
 const INITIATIVE_ROOTS: &[RootSpec] = &[
     RootSpec {
         path: roots::IDENTITY,
@@ -304,10 +375,6 @@ const INITIATIVE_ROOTS: &[RootSpec] = &[
     RootSpec {
         path: roots::NAME,
         algebra: RootAlgebra::Register,
-    },
-    RootSpec {
-        path: roots::DESCRIPTION,
-        algebra: RootAlgebra::Text,
     },
     RootSpec {
         path: roots::OWNER,
@@ -386,12 +453,48 @@ const ISSUE_META_ROOTS: &[RootSpec] = &[
         path: roots::TOMBSTONE,
         algebra: RootAlgebra::Register,
     },
+    RootSpec {
+        path: roots::PLACEMENT_HEADS,
+        algebra: RootAlgebra::Set,
+    },
+    RootSpec {
+        path: roots::RANK_OVERLAY,
+        algebra: RootAlgebra::Register,
+    },
+];
+
+const BOARD_BLOCK_ROOTS: &[RootSpec] = &[
+    RootSpec {
+        path: roots::IDENTITY,
+        algebra: RootAlgebra::Register,
+    },
+    RootSpec {
+        path: roots::BLOCK_HEADS,
+        algebra: RootAlgebra::Set,
+    },
+    RootSpec {
+        path: roots::ORDER_OVERLAY,
+        algebra: RootAlgebra::Register,
+    },
+];
+
+const BOARD_LANE_ROOTS: &[RootSpec] = &[
+    RootSpec {
+        path: roots::IDENTITY,
+        algebra: RootAlgebra::Register,
+    },
+    RootSpec {
+        path: roots::TOPOLOGY_HEADS,
+        algebra: RootAlgebra::Set,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PhysicalSchema {
     SpaceDirectory,
+    SpaceContent,
     ProjectMeta,
+    ProjectContent,
     ProjectSchedule,
     ProjectHierarchy,
     ProjectUpdates,
@@ -403,20 +506,33 @@ pub enum PhysicalSchema {
     IssueIdentity,
     IssueMeta,
     IssuePlacement,
+    IssueTransition,
+    BoardBlock,
+    BoardLane,
     IssueAttachment,
     IssueCheck,
     Initiative,
+    InitiativeContent,
     Team,
     Label,
     EntityRelation,
     RevisionAlias,
     GovernanceRevision,
+    GovernanceHeads,
     WorkflowRevision,
+    WorkflowHeads,
+    SpecRevision,
+    SpecHeads,
+    SpecObservation,
+    BaselineRevision,
+    BaselineHeads,
 }
 
-pub const PHYSICAL_SCHEMAS: [PhysicalSchema; 22] = [
+pub const PHYSICAL_SCHEMAS: [PhysicalSchema; 35] = [
     PhysicalSchema::SpaceDirectory,
+    PhysicalSchema::SpaceContent,
     PhysicalSchema::ProjectMeta,
+    PhysicalSchema::ProjectContent,
     PhysicalSchema::ProjectSchedule,
     PhysicalSchema::ProjectHierarchy,
     PhysicalSchema::ProjectUpdates,
@@ -428,18 +544,35 @@ pub const PHYSICAL_SCHEMAS: [PhysicalSchema; 22] = [
     PhysicalSchema::IssueIdentity,
     PhysicalSchema::IssueMeta,
     PhysicalSchema::IssuePlacement,
+    PhysicalSchema::IssueTransition,
+    PhysicalSchema::BoardBlock,
+    PhysicalSchema::BoardLane,
     PhysicalSchema::IssueAttachment,
     PhysicalSchema::IssueCheck,
     PhysicalSchema::Initiative,
+    PhysicalSchema::InitiativeContent,
     PhysicalSchema::Team,
     PhysicalSchema::Label,
     PhysicalSchema::EntityRelation,
     PhysicalSchema::RevisionAlias,
     PhysicalSchema::GovernanceRevision,
+    PhysicalSchema::GovernanceHeads,
     PhysicalSchema::WorkflowRevision,
+    PhysicalSchema::WorkflowHeads,
+    PhysicalSchema::SpecRevision,
+    PhysicalSchema::SpecHeads,
+    PhysicalSchema::SpecObservation,
+    PhysicalSchema::BaselineRevision,
+    PhysicalSchema::BaselineHeads,
 ];
 
 impl PhysicalSchema {
+    pub const fn preferred(self) -> bool {
+        // The Atomic placement register is a migration source only.  Current
+        // board truth is the predecessor-bound transition/head plane.
+        !matches!(self, Self::IssuePlacement)
+    }
+
     pub const fn immutable(self) -> bool {
         matches!(
             self,
@@ -451,6 +584,10 @@ impl PhysicalSchema {
                 | Self::WorkflowRevision
                 | Self::IssueIdentity
                 | Self::IssueComment
+                | Self::IssueTransition
+                | Self::SpecRevision
+                | Self::SpecObservation
+                | Self::BaselineRevision
         )
     }
 
@@ -471,7 +608,9 @@ impl PhysicalSchema {
     pub const fn name(self) -> &'static str {
         match self {
             Self::SpaceDirectory => SPACE_DIRECTORY_SCHEMA,
+            Self::SpaceContent => SPACE_CONTENT_SCHEMA,
             Self::ProjectMeta => PROJECT_META_SCHEMA,
+            Self::ProjectContent => PROJECT_CONTENT_SCHEMA,
             Self::ProjectSchedule => PROJECT_SCHEDULE_SCHEMA,
             Self::ProjectHierarchy => PROJECT_HIERARCHY_SCHEMA,
             Self::ProjectUpdates => PROJECT_UPDATES_SCHEMA,
@@ -483,22 +622,35 @@ impl PhysicalSchema {
             Self::IssueIdentity => ISSUE_IDENTITY_SCHEMA,
             Self::IssueMeta => ISSUE_META_SCHEMA,
             Self::IssuePlacement => ISSUE_PLACEMENT_SCHEMA,
+            Self::IssueTransition => ISSUE_TRANSITION_SCHEMA,
+            Self::BoardBlock => BOARD_BLOCK_SCHEMA,
+            Self::BoardLane => BOARD_LANE_SCHEMA,
             Self::IssueAttachment => ISSUE_ATTACHMENT_SCHEMA,
             Self::IssueCheck => ISSUE_CHECK_SCHEMA,
             Self::Initiative => INITIATIVE_SCHEMA,
+            Self::InitiativeContent => INITIATIVE_CONTENT_SCHEMA,
             Self::Team => TEAM_SCHEMA,
             Self::Label => LABEL_SCHEMA,
             Self::EntityRelation => ENTITY_RELATION_SCHEMA,
             Self::RevisionAlias => REVISION_ALIAS_SCHEMA,
             Self::GovernanceRevision => GOVERNANCE_REVISION_SCHEMA,
+            Self::GovernanceHeads => GOVERNANCE_HEADS_SCHEMA,
             Self::WorkflowRevision => WORKFLOW_REVISION_SCHEMA,
+            Self::WorkflowHeads => WORKFLOW_HEADS_SCHEMA,
+            Self::SpecRevision => SPEC_REVISION_SCHEMA,
+            Self::SpecHeads => SPEC_HEADS_SCHEMA,
+            Self::SpecObservation => SPEC_OBSERVATION_SCHEMA,
+            Self::BaselineRevision => BASELINE_REVISION_SCHEMA,
+            Self::BaselineHeads => BASELINE_HEADS_SCHEMA,
         }
     }
 
     pub const fn encoding(self) -> &'static str {
         match self {
             Self::SpaceDirectory => SPACE_DIRECTORY_ENCODING,
+            Self::SpaceContent => SPACE_CONTENT_ENCODING,
             Self::ProjectMeta => PROJECT_META_ENCODING,
+            Self::ProjectContent => PROJECT_CONTENT_ENCODING,
             Self::ProjectSchedule => PROJECT_SCHEDULE_ENCODING,
             Self::ProjectHierarchy => PROJECT_HIERARCHY_ENCODING,
             Self::ProjectUpdates => PROJECT_UPDATES_ENCODING,
@@ -510,22 +662,35 @@ impl PhysicalSchema {
             Self::IssueIdentity => ISSUE_IDENTITY_ENCODING,
             Self::IssueMeta => ISSUE_META_ENCODING,
             Self::IssuePlacement => ISSUE_PLACEMENT_ENCODING,
+            Self::IssueTransition => ISSUE_TRANSITION_ENCODING,
+            Self::BoardBlock => BOARD_BLOCK_ENCODING,
+            Self::BoardLane => BOARD_LANE_ENCODING,
             Self::IssueAttachment => ISSUE_ATTACHMENT_ENCODING,
             Self::IssueCheck => ISSUE_CHECK_ENCODING,
             Self::Initiative => INITIATIVE_ENCODING,
+            Self::InitiativeContent => INITIATIVE_CONTENT_ENCODING,
             Self::Team => TEAM_ENCODING,
             Self::Label => LABEL_ENCODING,
             Self::EntityRelation => ENTITY_RELATION_ENCODING,
             Self::RevisionAlias => REVISION_ALIAS_ENCODING,
             Self::GovernanceRevision => GOVERNANCE_REVISION_ENCODING,
+            Self::GovernanceHeads => GOVERNANCE_HEADS_ENCODING,
             Self::WorkflowRevision => WORKFLOW_REVISION_ENCODING,
+            Self::WorkflowHeads => WORKFLOW_HEADS_ENCODING,
+            Self::SpecRevision => SPEC_REVISION_ENCODING,
+            Self::SpecHeads => SPEC_HEADS_ENCODING,
+            Self::SpecObservation => SPEC_OBSERVATION_ENCODING,
+            Self::BaselineRevision => BASELINE_REVISION_ENCODING,
+            Self::BaselineHeads => BASELINE_HEADS_ENCODING,
         }
     }
 
     pub const fn roots(self) -> &'static [RootSpec] {
         match self {
             Self::SpaceDirectory => SPACE_DIRECTORY_ROOTS,
+            Self::SpaceContent => CONTENT_ROOTS,
             Self::ProjectMeta => PROJECT_META_ROOTS,
+            Self::ProjectContent => CONTENT_ROOTS,
             Self::ProjectSchedule => PROJECT_SCHEDULE_ROOTS,
             Self::ProjectHierarchy => PROJECT_HIERARCHY_ROOTS,
             Self::ProjectUpdates => PROJECT_UPDATES_ROOTS,
@@ -535,15 +700,25 @@ impl PhysicalSchema {
             Self::IssueRelation => ISSUE_RELATION_ROOTS,
             Self::IssueMeta => ISSUE_META_ROOTS,
             Self::IssueIdentity
+            | Self::IssueTransition
             | Self::IssuePlacement
             | Self::IssueAttachment
             | Self::IssueCheck => REVISION_RECORD_ROOTS,
+            Self::BoardBlock => BOARD_BLOCK_ROOTS,
+            Self::BoardLane => BOARD_LANE_ROOTS,
             Self::Initiative => INITIATIVE_ROOTS,
+            Self::InitiativeContent => CONTENT_ROOTS,
             Self::Team => TEAM_ROOTS,
             Self::Label => LABEL_ROOTS,
             Self::EntityRelation => ENTITY_RELATION_ROOTS,
             Self::RevisionAlias | Self::GovernanceRevision | Self::WorkflowRevision => {
                 REVISION_RECORD_ROOTS
+            }
+            Self::SpecRevision | Self::SpecObservation | Self::BaselineRevision => {
+                REVISION_RECORD_ROOTS
+            }
+            Self::GovernanceHeads | Self::WorkflowHeads | Self::SpecHeads | Self::BaselineHeads => {
+                HEADS_ROOTS
             }
         }
     }
@@ -551,7 +726,9 @@ impl PhysicalSchema {
     fn domain(self) -> &'static [u8] {
         match self {
             Self::SpaceDirectory => b"lait/issues-v4/space-directory/1",
+            Self::SpaceContent => b"lait/issues-v4/space-content/1",
             Self::ProjectMeta => b"lait/issues-v4/project-meta/1",
+            Self::ProjectContent => b"lait/issues-v4/project-content/1",
             Self::ProjectSchedule => b"lait/issues-v4/project-schedule/1",
             Self::ProjectHierarchy => b"lait/issues-v4/project-hierarchy/1",
             Self::ProjectUpdates => b"lait/issues-v4/project-updates/1",
@@ -563,15 +740,26 @@ impl PhysicalSchema {
             Self::IssueIdentity => b"lait/issues-v4/issue-identity/1",
             Self::IssueMeta => b"lait/issues-v4/issue-meta/1",
             Self::IssuePlacement => b"lait/issues-v4/issue-placement/1",
+            Self::IssueTransition => b"lait/issues-v4/issue-transition/1",
+            Self::BoardBlock => b"lait/issues-v4/board-block/1",
+            Self::BoardLane => b"lait/issues-v4/board-lane/1",
             Self::IssueAttachment => b"lait/issues-v4/issue-attachment/1",
             Self::IssueCheck => b"lait/issues-v4/issue-check/1",
             Self::Initiative => b"lait/issues-v4/initiative/1",
+            Self::InitiativeContent => b"lait/issues-v4/initiative-content/1",
             Self::Team => b"lait/issues-v4/team/1",
             Self::Label => b"lait/issues-v4/label/1",
             Self::EntityRelation => b"lait/issues-v4/entity-relation/1",
             Self::RevisionAlias => b"lait/issues-v4/revision-alias/1",
             Self::GovernanceRevision => b"lait/issues-v4/governance-revision/1",
+            Self::GovernanceHeads => b"lait/issues-v4/governance-heads/1",
             Self::WorkflowRevision => b"lait/issues-v4/workflow-revision/1",
+            Self::WorkflowHeads => b"lait/issues-v4/workflow-heads/1",
+            Self::SpecRevision => b"lait/issues-v4/spec-revision/1",
+            Self::SpecHeads => b"lait/issues-v4/spec-heads/1",
+            Self::SpecObservation => b"lait/issues-v4/spec-observation/1",
+            Self::BaselineRevision => b"lait/issues-v4/baseline-revision/1",
+            Self::BaselineHeads => b"lait/issues-v4/baseline-heads/1",
         }
     }
 
@@ -580,7 +768,9 @@ impl PhysicalSchema {
             id: SchemaId::parse(self.name()).expect("v4 schema id"),
             version: SCHEMA_VERSION,
             encoding: EncodingId::parse(self.encoding()).expect("v4 encoding id"),
-            mutation: if self.atomic() {
+            mutation: if self.immutable() {
+                MutationModel::ImmutableAtomic
+            } else if self.atomic() {
                 MutationModel::Atomic
             } else {
                 MutationModel::Collaborative(CollaborativeSchema::default())
@@ -596,6 +786,15 @@ pub fn schemas() -> Vec<Schema> {
     PHYSICAL_SCHEMAS
         .iter()
         .copied()
+        .map(PhysicalSchema::declaration)
+        .collect()
+}
+
+pub fn preferred_schemas() -> Vec<Schema> {
+    PHYSICAL_SCHEMAS
+        .iter()
+        .copied()
+        .filter(|schema| schema.preferred())
         .map(PhysicalSchema::declaration)
         .collect()
 }
@@ -620,12 +819,35 @@ fn key(schema: PhysicalSchema, coordinates: &[&str]) -> BodyKey {
     BodyKey::new(crate::contract::world_id(), body_id(schema, coordinates))
 }
 
+/// Derive the only valid Body address for one canonical create-once record.
+/// Semantic coordinates remain inside the envelope and in Corpus fields; they
+/// do not choose which immutable payload wins after peers converge.
+pub fn immutable_record_key(schema: PhysicalSchema, canonical_envelope: &[u8]) -> BodyKey {
+    assert!(schema.immutable(), "immutable record schema");
+    let declaration = schema.declaration();
+    replica::body::immutable_body_key(
+        &crate::contract::world_id(),
+        &declaration.id,
+        declaration.version,
+        &declaration.encoding,
+        canonical_envelope,
+    )
+}
+
 pub fn space_directory_key(space: &crate::ids::SpaceId) -> BodyKey {
     key(PhysicalSchema::SpaceDirectory, &[space.as_str()])
 }
 
+pub fn space_content_key(space: &crate::ids::SpaceId) -> BodyKey {
+    key(PhysicalSchema::SpaceContent, &[space.as_str()])
+}
+
 pub fn project_meta_key(project: &ProjectId) -> BodyKey {
     key(PhysicalSchema::ProjectMeta, &[project.as_str()])
+}
+
+pub fn project_content_key(project: &ProjectId) -> BodyKey {
+    key(PhysicalSchema::ProjectContent, &[project.as_str()])
 }
 
 pub fn project_schedule_key(project: &ProjectId, record: &str) -> BodyKey {
@@ -686,8 +908,61 @@ pub fn issue_check_key(issue: &DocId, run: &str) -> BodyKey {
     key(PhysicalSchema::IssueCheck, &[issue.as_str(), run])
 }
 
+pub fn issue_transition_key(issue: &DocId, transition: &str) -> BodyKey {
+    key(
+        PhysicalSchema::IssueTransition,
+        &[issue.as_str(), transition],
+    )
+}
+
+pub fn board_block_key(project: &ProjectId, workflow_state: &str, block: &str) -> BodyKey {
+    key(
+        PhysicalSchema::BoardBlock,
+        &[project.as_str(), workflow_state, block],
+    )
+}
+
+pub fn board_lane_key(project: &ProjectId, workflow_state: &str) -> BodyKey {
+    key(
+        PhysicalSchema::BoardLane,
+        &[project.as_str(), workflow_state],
+    )
+}
+
+/// Deterministic first leaf for a lane. Concurrent first inserts therefore
+/// address the same bounded block and the lane topology set exposes any
+/// genuine structural disagreement instead of minting two accidental roots.
+pub fn board_seed_block_id(project: &str, workflow_state: &str) -> String {
+    let mut material = Vec::with_capacity(
+        project
+            .len()
+            .saturating_add(workflow_state.len())
+            .saturating_add(16),
+    );
+    material.extend_from_slice(
+        &u64::try_from(project.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    material.extend_from_slice(project.as_bytes());
+    material.extend_from_slice(
+        &u64::try_from(workflow_state.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    material.extend_from_slice(workflow_state.as_bytes());
+    data_encoding::HEXLOWER.encode(&blake3::derive_key(
+        "lait.issues.board-seed-block.v1",
+        &material,
+    ))
+}
+
 pub fn initiative_key(initiative: &InitiativeId) -> BodyKey {
     key(PhysicalSchema::Initiative, &[initiative.as_str()])
+}
+
+pub fn initiative_content_key(initiative: &InitiativeId) -> BodyKey {
+    key(PhysicalSchema::InitiativeContent, &[initiative.as_str()])
 }
 
 pub fn team_key(team: &TeamId) -> BodyKey {
@@ -710,11 +985,42 @@ pub fn governance_revision_key(role: &str, revision: &str) -> BodyKey {
     key(PhysicalSchema::GovernanceRevision, &[role, revision])
 }
 
+pub fn governance_heads_key(role: &str) -> BodyKey {
+    key(PhysicalSchema::GovernanceHeads, &[role])
+}
+
 pub fn workflow_revision_key(project: &ProjectId, revision: &str) -> BodyKey {
     key(
         PhysicalSchema::WorkflowRevision,
         &[project.as_str(), revision],
     )
+}
+
+pub fn workflow_heads_key(project: &ProjectId) -> BodyKey {
+    key(PhysicalSchema::WorkflowHeads, &[project.as_str()])
+}
+
+pub fn spec_revision_key(spec: &crate::ids::SpecId, revision: &str) -> BodyKey {
+    key(PhysicalSchema::SpecRevision, &[spec.as_str(), revision])
+}
+
+pub fn spec_heads_key(spec: &crate::ids::SpecId) -> BodyKey {
+    key(PhysicalSchema::SpecHeads, &[spec.as_str()])
+}
+
+pub fn spec_observation_key(spec: &crate::ids::SpecId, record: &str) -> BodyKey {
+    key(PhysicalSchema::SpecObservation, &[spec.as_str(), record])
+}
+
+pub fn baseline_revision_key(baseline: &crate::ids::BaselineId, revision: &str) -> BodyKey {
+    key(
+        PhysicalSchema::BaselineRevision,
+        &[baseline.as_str(), revision],
+    )
+}
+
+pub fn baseline_heads_key(baseline: &crate::ids::BaselineId) -> BodyKey {
+    key(PhysicalSchema::BaselineHeads, &[baseline.as_str()])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -764,6 +1070,10 @@ fn canonical_actor(value: &str) -> bool {
     ActorId::parse(value).is_some_and(|actor| actor.as_str() == value)
 }
 
+fn canonical_optional_actor(value: &str) -> bool {
+    value.is_empty() || canonical_actor(value)
+}
+
 fn token(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
@@ -781,6 +1091,13 @@ fn decode_digest(value: &str, field: &'static str) -> Result<[u8; 32], Invalid> 
         .decode(value.as_bytes())
         .map_err(|_| Invalid::Field(field))?;
     <[u8; 32]>::try_from(decoded.as_slice()).map_err(|_| Invalid::Field(field))
+}
+
+fn digest_id(value: &str) -> bool {
+    value.len() == 64
+        && data_encoding::HEXLOWER
+            .decode(value.as_bytes())
+            .is_ok_and(|bytes| bytes.len() == 32)
 }
 
 /// Identity of an entity-sized collection Body. `owner` scopes the record and
@@ -830,7 +1147,7 @@ pub struct SpaceDirectoryRecord {
     pub description: String,
 }
 
-pub const MIGRATION_V3_TO_V4: &str = "issues-v3-to-v4";
+pub const MIGRATION_MARKER: &str = "issues-v3-to-v4";
 
 /// The only mutable migration coordinate. A batch advances `cursor` in the
 /// same transaction as the Bodies it materializes; a crash therefore either
@@ -845,6 +1162,15 @@ pub struct MigrationMarkerRecord {
     /// The immutable interpretation used for every rewritten revision. A
     /// multi-batch migration crosses Manifest roots but must not change ids.
     pub publication: runtime::publication::PublicationId,
+    /// Exact causal cut enumerated by the lifecycle planner. An empty
+    /// frontier is accepted only for an in-progress legacy checkpoint; a
+    /// completed marker must name the frozen source frontier which the host
+    /// retains after preferred activation.
+    pub source_frontier: replica::frontier::ReplicaFrontier,
+    /// True only when every cursor step was prepared from the exact source
+    /// above through Runtime's lifecycle-only reader.
+    #[serde(default)]
+    pub source_snapshot_pinned: bool,
     pub batch: u64,
     #[serde(default)]
     pub cursor: String,
@@ -857,11 +1183,14 @@ pub struct MigrationMarkerRecord {
 
 impl CanonicalRecord for MigrationMarkerRecord {
     fn validate(&self) -> Result<(), Invalid> {
-        if self.migration != MIGRATION_V3_TO_V4
+        if self.migration != MIGRATION_MARKER
             || self.source_version != 3
             || self.target_version != 4
             || self.publication.implementation_digest == [0; 32]
             || self.publication.extractor_schema_digest.digest() == [0; 32]
+            || (self.complete
+                && (!self.source_snapshot_pinned
+                    || self.source_frontier == replica::frontier::ReplicaFrontier::EMPTY))
             || self.batch == 0
             || !canonical_actor(&self.actor)
             || self.started_at == 0
@@ -920,7 +1249,7 @@ pub struct MigrationAuditRecord {
 
 impl CanonicalRecord for MigrationAuditRecord {
     fn validate(&self) -> Result<(), Invalid> {
-        if self.migration != MIGRATION_V3_TO_V4
+        if self.migration != MIGRATION_MARKER
             || self.batch == 0
             || !canonical_actor(&self.actor)
             || self.timestamp == 0
@@ -1072,7 +1401,7 @@ impl CanonicalRecord for ProjectMetaRecord {
         )?;
         optional_bounded(
             &self.description,
-            crate::contract::MAX_METADATA_DESCRIPTION_BYTES,
+            crate::contract::MAX_TEXT_BYTES,
             "description",
         )?;
         if (!self.lead.is_empty() && !canonical_actor(&self.lead))
@@ -1115,6 +1444,143 @@ impl CanonicalRecord for ProjectWorkflowRevisionRecord {
             return Err(Invalid::Field("workflow"));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecRevisionRecord {
+    pub revision: crate::spec::Revision,
+}
+
+impl CanonicalRecord for SpecRevisionRecord {
+    fn validate(&self) -> Result<(), Invalid> {
+        let predecessors = self
+            .revision
+            .predecessors
+            .iter()
+            .map(|value| decode_digest(value, "predecessor"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rebuilt = crate::spec::build_revision(self.revision.body.clone(), predecessors)
+            .map_err(|_| Invalid::Field("spec_revision"))?;
+        if rebuilt != self.revision {
+            return Err(Invalid::Field("spec_revision"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineRevisionRecord {
+    pub revision: crate::spec::BaselineRevision,
+}
+
+impl CanonicalRecord for BaselineRevisionRecord {
+    fn validate(&self) -> Result<(), Invalid> {
+        let predecessors = self
+            .revision
+            .predecessors
+            .iter()
+            .map(|value| decode_digest(value, "predecessor"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rebuilt =
+            crate::spec::build_baseline_revision(self.revision.body.clone(), predecessors)
+                .map_err(|_| Invalid::Field("baseline_revision"))?;
+        if rebuilt != self.revision {
+            return Err(Invalid::Field("baseline_revision"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SpecObservationRecord {
+    Assert {
+        project: String,
+        observation: crate::spec::Observation,
+    },
+    Retract {
+        project: String,
+        observation: String,
+        spec: String,
+        actor: String,
+        timestamp: u64,
+    },
+}
+
+impl SpecObservationRecord {
+    pub fn spec(&self) -> &str {
+        match self {
+            Self::Assert { observation, .. } => &observation.spec,
+            Self::Retract { spec, .. } => spec,
+        }
+    }
+
+    /// The record-body identity for this observation.
+    ///
+    /// A digest, like every other identity in this file, because the value
+    /// has to satisfy `RecordBodyIdentityRecord`'s grammar: lowercase
+    /// alphanumerics, dot, underscore and dash. The readable form this used
+    /// to build -- `assert:obs_01K0…` -- violated it twice over, on the
+    /// separator and on the uppercase Crockford of the id, so encoding the
+    /// envelope failed and every assert and retract was refused as a corrupt
+    /// store.
+    ///
+    /// The tag is inside the digest rather than beside it: an assert and a
+    /// retraction of the same observation are different records and must not
+    /// share a Body.
+    pub fn identity(&self) -> String {
+        let (tag, observation) = match self {
+            Self::Assert { observation, .. } => ("assert", observation.observation.as_str()),
+            Self::Retract { observation, .. } => ("retract", observation.as_str()),
+        };
+        let mut material = Vec::new();
+        for value in [tag, observation] {
+            material
+                .extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            material.extend_from_slice(value.as_bytes());
+        }
+        data_encoding::HEXLOWER.encode(&blake3::derive_key(
+            "lait.issues.spec-observation.v1",
+            &material,
+        ))
+    }
+}
+
+impl CanonicalRecord for SpecObservationRecord {
+    fn validate(&self) -> Result<(), Invalid> {
+        match self {
+            Self::Assert {
+                project,
+                observation,
+            } => {
+                if ProjectId::parse(project).is_none() {
+                    return Err(Invalid::Field("spec_observation"));
+                }
+                observation
+                    .validate()
+                    .map_err(|_| Invalid::Field("spec_observation"))
+            }
+            Self::Retract {
+                project,
+                observation,
+                spec,
+                actor,
+                timestamp,
+            } => {
+                if ProjectId::parse(project).is_none()
+                    || crate::ids::ObservationId::parse(observation).is_none()
+                    || crate::ids::SpecId::parse(spec).is_none()
+                    || ActorId::parse(actor).is_none()
+                    || *timestamp == 0
+                {
+                    return Err(Invalid::Field("spec_observation"));
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1448,9 +1914,7 @@ impl CanonicalRecord for TriageRecord {
 }
 
 fn valid_position(position: &str) -> bool {
-    !position.is_empty()
-        && position.len() <= 256
-        && position.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    crate::rank::valid(position)
 }
 
 /// Project, workflow state, and position are replaced as one value. There is
@@ -1461,6 +1925,10 @@ fn valid_position(position: &str) -> bool {
 pub struct BoardPlacement {
     pub project: String,
     pub workflow_state: String,
+    /// Stable leaf-block identity. Board order is `(block order, local
+    /// position, IssueId)`; a dense leaf is split instead of extending one
+    /// flat fractional label forever.
+    pub block: String,
     pub position: String,
 }
 
@@ -1468,6 +1936,7 @@ impl CanonicalRecord for BoardPlacement {
     fn validate(&self) -> Result<(), Invalid> {
         if ProjectId::parse(&self.project).is_none()
             || !token(&self.workflow_state, 64)
+            || !digest_id(&self.block)
             || !valid_position(&self.position)
         {
             return Err(Invalid::Field("board_placement"));
@@ -1481,6 +1950,278 @@ impl CanonicalRecord for BoardPlacement {
 pub struct IssuePlacementRecord {
     pub issue: String,
     pub placement: BoardPlacement,
+}
+
+/// One immutable predecessor-bound workflow move.  The mutable IssueMeta Body
+/// contains only the add-wins set of current transition ids; the complete
+/// intent and authorization evidence live here and therefore survive a race.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueTransitionRecord {
+    pub issue: String,
+    pub predecessors: Vec<String>,
+    pub placement: BoardPlacement,
+    pub actor: String,
+    pub timestamp: u64,
+    #[serde(default)]
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueTransitionHead {
+    pub transition: String,
+    /// The complete bounded identity preimage. Extraction can authenticate
+    /// current placement from this one Body without consulting another Body
+    /// (which would make deltas order-dependent). Large diagnostic evidence
+    /// stays only in the immutable transition record.
+    pub core: IssueTransitionCore,
+}
+
+/// Optional maintenance label for one exact transition head. User intent stays
+/// immutable in [`IssueTransitionRecord`]; this compact register may shorten a
+/// variable path only while the named head, project and state are still
+/// current. A concurrent move makes the overlay inert in either delivery
+/// order, so maintenance can never overwrite the move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueRankOverlay {
+    pub issue: String,
+    pub transition: String,
+    pub project: String,
+    pub workflow_state: String,
+    pub block: String,
+    pub position: String,
+    pub maintenance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueTransitionCore {
+    pub issue: String,
+    pub predecessors: Vec<String>,
+    pub placement: BoardPlacement,
+    pub actor: String,
+    pub timestamp: u64,
+}
+
+impl IssueTransitionCore {
+    pub fn transition_id(&self) -> Result<String, Invalid> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| Invalid::Encoding)?;
+        Ok(data_encoding::HEXLOWER.encode(&blake3::derive_key(
+            "lait.issues.workflow-transition.v2",
+            &bytes,
+        )))
+    }
+}
+
+impl CanonicalRecord for IssueTransitionHead {
+    fn validate(&self) -> Result<(), Invalid> {
+        if self.core.transition_id()? != self.transition {
+            return Err(Invalid::Field("issue_transition_head"));
+        }
+        Ok(())
+    }
+}
+
+impl CanonicalRecord for IssueRankOverlay {
+    fn validate(&self) -> Result<(), Invalid> {
+        if DocId::parse(&self.issue).is_none()
+            || self.transition.len() != 64
+            || data_encoding::HEXLOWER
+                .decode(self.transition.as_bytes())
+                .map_or(true, |bytes| bytes.len() != 32)
+            || ProjectId::parse(&self.project).is_none()
+            || !token(&self.workflow_state, 64)
+            || !digest_id(&self.block)
+            || !valid_position(&self.position)
+            || !token(&self.maintenance, 128)
+        {
+            return Err(Invalid::Field("issue_rank_overlay"));
+        }
+        Ok(())
+    }
+}
+
+/// Maximum live members in one board leaf before an insertion atomically
+/// splits it. The moving card occupies one slot in the relabel plan, so at
+/// most this many exact-head Issue overlays are ever staged by one action.
+pub const BOARD_BLOCK_CAPACITY: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardBlockCore {
+    pub project: String,
+    pub workflow_state: String,
+    pub block: String,
+    pub order: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardBlockHead {
+    pub revision: String,
+    pub core: BoardBlockCore,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardBlockOrderOverlay {
+    pub block_revision: String,
+    pub order: String,
+    pub maintenance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardTopologySplit {
+    pub source_block: Option<String>,
+    pub created_block: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardTopologyCore {
+    pub project: String,
+    pub workflow_state: String,
+    pub predecessors: Vec<String>,
+    pub split: BoardTopologySplit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardTopologyHead {
+    pub transition: String,
+    pub core: BoardTopologyCore,
+}
+
+impl BoardBlockCore {
+    pub fn revision_id(&self) -> Result<String, Invalid> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| Invalid::Encoding)?;
+        Ok(data_encoding::HEXLOWER
+            .encode(&blake3::derive_key("lait.issues.board-block.v1", &bytes)))
+    }
+}
+
+impl BoardTopologyCore {
+    pub fn transition_id(&self) -> Result<String, Invalid> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| Invalid::Encoding)?;
+        Ok(data_encoding::HEXLOWER
+            .encode(&blake3::derive_key("lait.issues.board-topology.v1", &bytes)))
+    }
+}
+
+impl CanonicalRecord for BoardBlockCore {
+    fn validate(&self) -> Result<(), Invalid> {
+        if ProjectId::parse(&self.project).is_none()
+            || !token(&self.workflow_state, 64)
+            || !digest_id(&self.block)
+            || !valid_position(&self.order)
+        {
+            return Err(Invalid::Field("board_block"));
+        }
+        Ok(())
+    }
+}
+
+impl CanonicalRecord for BoardBlockHead {
+    fn validate(&self) -> Result<(), Invalid> {
+        if self.core.revision_id()? != self.revision {
+            return Err(Invalid::Field("board_block_head"));
+        }
+        Ok(())
+    }
+}
+
+impl CanonicalRecord for BoardBlockOrderOverlay {
+    fn validate(&self) -> Result<(), Invalid> {
+        if !digest_id(&self.block_revision)
+            || !valid_position(&self.order)
+            || !token(&self.maintenance, 128)
+        {
+            return Err(Invalid::Field("board_block_order_overlay"));
+        }
+        Ok(())
+    }
+}
+
+impl CanonicalRecord for BoardTopologyCore {
+    fn validate(&self) -> Result<(), Invalid> {
+        if ProjectId::parse(&self.project).is_none()
+            || !token(&self.workflow_state, 64)
+            || self.predecessors.len() > MAX_CONCURRENT_HEADS
+            || !sorted_unique(&self.predecessors)
+            || self.predecessors.iter().any(|id| !digest_id(id))
+            || self
+                .split
+                .source_block
+                .as_deref()
+                .is_some_and(|id| !digest_id(id))
+            || !digest_id(&self.split.created_block)
+        {
+            return Err(Invalid::Field("board_topology"));
+        }
+        Ok(())
+    }
+}
+
+impl CanonicalRecord for BoardTopologyHead {
+    fn validate(&self) -> Result<(), Invalid> {
+        if self.core.transition_id()? != self.transition {
+            return Err(Invalid::Field("board_topology_head"));
+        }
+        Ok(())
+    }
+}
+
+impl IssueTransitionRecord {
+    pub fn core(&self) -> IssueTransitionCore {
+        IssueTransitionCore {
+            issue: self.issue.clone(),
+            predecessors: self.predecessors.clone(),
+            placement: self.placement.clone(),
+            actor: self.actor.clone(),
+            timestamp: self.timestamp,
+        }
+    }
+
+    pub fn transition_id(&self) -> Result<String, Invalid> {
+        self.validate()?;
+        self.core().transition_id()
+    }
+}
+
+impl CanonicalRecord for IssueTransitionCore {
+    fn validate(&self) -> Result<(), Invalid> {
+        if DocId::parse(&self.issue).is_none()
+            || self.issue == self.placement.project
+            || ActorId::parse(&self.actor).is_none()
+            || self.timestamp == 0
+            || self.predecessors.len() > MAX_CONCURRENT_HEADS
+            || !sorted_unique(&self.predecessors)
+            || self.predecessors.iter().any(|predecessor| {
+                predecessor.len() != 64
+                    || data_encoding::HEXLOWER
+                        .decode(predecessor.as_bytes())
+                        .map_or(true, |bytes| bytes.len() != 32)
+            })
+        {
+            return Err(Invalid::Field("issue_transition_core"));
+        }
+        self.placement.validate()
+    }
+}
+
+impl CanonicalRecord for IssueTransitionRecord {
+    fn validate(&self) -> Result<(), Invalid> {
+        if self.evidence.len() > 64 * 1_024 {
+            return Err(Invalid::Field("issue_transition"));
+        }
+        self.core().validate()
+    }
 }
 
 impl CanonicalRecord for IssuePlacementRecord {
@@ -1615,12 +2356,23 @@ pub struct IssueAliasCoordinate {
 #[serde(deny_unknown_fields)]
 pub struct IssueIdentityRecord {
     pub issue: String,
+    /// The project the ordinal was counted within.
+    ///
+    /// A number that means "the fourth Issue in ENG" is only a reference when
+    /// something says which project counted it. Without it the coordinate has
+    /// to be searched for across every project at once, and since the number
+    /// is now small and dense, every project has a first Issue and a second
+    /// one -- so that search returns a row per project rather than a row.
+    pub project: String,
     pub alias: IssueAliasCoordinate,
 }
 
 impl CanonicalRecord for IssueIdentityRecord {
     fn validate(&self) -> Result<(), Invalid> {
         let issue = DocId::parse(&self.issue).ok_or(Invalid::Field("issue_identity"))?;
+        if ProjectId::parse(&self.project).is_none() {
+            return Err(Invalid::Field("issue_identity_project"));
+        }
         let expected = IssueAliasCoordinate::for_issue(self.alias.ordinal, &issue)?;
         if self.alias != expected {
             return Err(Invalid::Field("alias_binding"));
@@ -1644,9 +2396,19 @@ impl IssueAliasCoordinate {
         })
     }
 
-    /// Allocate without a shared counter.  The ordinal is a stable 63-bit
-    /// display hint derived from the Issue id; the independent 128-bit
-    /// disambiguator remains the collision-proof identity component.
+    /// Allocate without a shared counter.
+    ///
+    /// The ordinal is derived from the Issue id and the disambiguator is an
+    /// independent 128 bits of the same, so the pair is collision-proof
+    /// without anybody agreeing on a number. That is what makes an Issue
+    /// nameable the moment it exists, on a device that has spoken to nobody.
+    ///
+    /// This coordinate is the DURABLE one and is deliberately not small. It
+    /// is what a reference resolves against and what survives being written
+    /// down; shortening it to fit a person's eye trades an unambiguous
+    /// identity for a prettier one, and the identity is the part that has to
+    /// keep working. What a person reads is a separate question, answered
+    /// somewhere that can afford to be wrong and re-derived.
     pub fn deterministic_for_issue(issue: &DocId) -> Self {
         let digest = blake3::derive_key(
             "lait.issues.alias-coordinate.ordinal.v1",
@@ -1654,23 +2416,9 @@ impl IssueAliasCoordinate {
         );
         let mut ordinal_bytes = [0u8; 8];
         ordinal_bytes.copy_from_slice(&digest[..8]);
-        let high_bit_clear = u64::try_from(i64::MAX).unwrap_or(u64::MAX);
-        let ordinal = (u64::from_be_bytes(ordinal_bytes) & high_bit_clear).max(1);
-        match Self::for_issue(ordinal, issue) {
-            Ok(coordinate) => coordinate,
-            Err(_) => {
-                let digest = blake3::derive_key(
-                    "lait.issues.alias-coordinate.v1",
-                    issue.as_str().as_bytes(),
-                );
-                let mut disambiguator = [0u8; 16];
-                disambiguator.copy_from_slice(&digest[..16]);
-                Self {
-                    ordinal,
-                    disambiguator,
-                }
-            }
-        }
+        let ordinal =
+            u64::from_be_bytes(ordinal_bytes) & u64::try_from(i64::MAX).unwrap_or(u64::MAX);
+        Self::for_issue(ordinal.max(1), issue).expect("nonzero deterministic ordinal")
     }
 
     pub fn suffix(self) -> String {
@@ -1680,17 +2428,38 @@ impl IssueAliasCoordinate {
     /// Render an alias that is stable without consulting any collision group.
     /// The fixed disambiguator is intentionally always present: conditionally
     /// adding one after an offline collision would rename an existing Issue.
+    /// The full, always-unambiguous reference. This is the canonical form: it
+    /// names the collision-proof component explicitly, so it resolves without
+    /// consulting anything else.
     pub fn render(self, project_key: &str) -> Result<String, Invalid> {
+        Self::check_project_key(project_key)?;
+        self.validate()?;
+        Ok(format!("{project_key}-{}-{}", self.ordinal, self.suffix()))
+    }
+
+    /// The reference a person is shown: the project key and the ordinal, and
+    /// nothing else.
+    ///
+    /// This is rendered unconditionally, without asking whether the ordinal is
+    /// unique. Checking would cost a lookup per row -- a hundred of them to
+    /// draw one page of a list -- to change what a handful of references look
+    /// like. The ambiguity is real but it belongs where it is observed: a
+    /// short reference that names more than one Issue is refused at lookup,
+    /// naming the full forms it could have meant.
+    pub fn render_short(self, project_key: &str) -> Result<String, Invalid> {
+        Self::check_project_key(project_key)?;
+        self.validate()?;
+        Ok(format!("{project_key}-{}", self.ordinal))
+    }
+
+    fn check_project_key(project_key: &str) -> Result<(), Invalid> {
         if project_key.is_empty()
             || project_key.len() > 8
             || !project_key.bytes().all(|byte| byte.is_ascii_uppercase())
         {
             return Err(Invalid::Field("project_key"));
         }
-        self.validate()?;
-        let suffix = self.suffix();
-        let short = suffix.get(..8).unwrap_or(suffix.as_str());
-        Ok(format!("{project_key}-{}-{short}", self.ordinal))
+        Ok(())
     }
 }
 
@@ -1748,8 +2517,8 @@ impl ReactionRecord {
     pub fn identity(&self) -> String {
         let mut material = Vec::new();
         for value in [&self.comment, &self.emoji, &self.actor] {
-            let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
-            material.extend_from_slice(&len.to_be_bytes());
+            material
+                .extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
             material.extend_from_slice(value.as_bytes());
         }
         data_encoding::HEXLOWER.encode(&blake3::derive_key(
@@ -1816,17 +2585,29 @@ impl CanonicalRecord for DiscussionRecord {
 pub struct ActivityRecord {
     pub issue: String,
     pub event: crate::contract::IssueEvent,
+    /// Actors addressed by this event at its authoring snapshot. This is a
+    /// causal notification fact, not a second copy of current assignment or
+    /// follow state: concurrent membership changes not observed by the event
+    /// author do not retroactively rewrite an immutable activity record.
+    pub recipients: Vec<String>,
 }
 
 impl CanonicalRecord for ActivityRecord {
     fn validate(&self) -> Result<(), Invalid> {
+        let canonical_recipients = self.recipients.windows(2).all(|pair| pair[0] < pair[1]);
         if DocId::parse(&self.issue).is_none()
             || self.event.k.is_empty()
             || self.event.k.len() > 64
-            || !canonical_actor(&self.event.a)
+            // Historical activity predates explicit actor attribution. An
+            // empty actor preserves that honest absence; current writers
+            // always stamp the authenticated Context actor.
+            || !canonical_optional_actor(&self.event.a)
             || self.event.t == 0
             || self.event.x.len() > crate::contract::MAX_TEXT_BYTES
             || self.event.c.len() > crate::contract::MAX_NAME_BYTES
+            || self.recipients.len() > crate::contract::MAX_ISSUE_AUDIENCE
+            || !canonical_recipients
+            || self.recipients.iter().any(|actor| !canonical_actor(actor))
         {
             Err(Invalid::Field("activity"))
         } else {
@@ -1967,7 +2748,7 @@ impl CanonicalRecord for InitiativeRecord {
         nonempty_bounded(&self.name, crate::contract::MAX_NAME_BYTES, "name")?;
         optional_bounded(
             &self.description,
-            crate::contract::MAX_METADATA_DESCRIPTION_BYTES,
+            crate::contract::MAX_TEXT_BYTES,
             "description",
         )
     }
@@ -2066,7 +2847,7 @@ pub fn validate_sorted_unique_ids(values: &[String]) -> Result<(), Invalid> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
 
     const PROJECT: &str = "prj_00000000000000000000000000";
     const ISSUE: &str = "iss_00000000000000000000000000";
@@ -2087,10 +2868,16 @@ mod tests {
             .all(|(declaration, physical)| {
                 declaration.version == SCHEMA_VERSION
                     && declaration.readable_predecessors.is_empty()
-                    && matches!(
-                        (&declaration.mutation, physical.atomic()),
-                        (MutationModel::Atomic, true) | (MutationModel::Collaborative(_), false)
-                    )
+                    && match (
+                        &declaration.mutation,
+                        physical.immutable(),
+                        physical.atomic(),
+                    ) {
+                        (MutationModel::ImmutableAtomic, true, true)
+                        | (MutationModel::Atomic, false, true)
+                        | (MutationModel::Collaborative(_), false, false) => true,
+                        _ => false,
+                    }
             }));
         assert!(PHYSICAL_SCHEMAS
             .iter()
@@ -2103,6 +2890,35 @@ mod tests {
             let paths: BTreeSet<_> = schema.roots().iter().map(|root| root.path).collect();
             assert_eq!(paths.len(), schema.roots().len(), "{:?}", schema);
         }
+    }
+
+    #[test]
+    fn immutable_record_address_commits_to_the_complete_payload() {
+        let identity = RecordBodyIdentityRecord {
+            owner: ISSUE.into(),
+            record: "identity".into(),
+        };
+        let first = ImmutableRecordEnvelope {
+            identity: identity.clone(),
+            record: b"first".to_vec(),
+        }
+        .encode_canonical()
+        .unwrap();
+        let second = ImmutableRecordEnvelope {
+            identity,
+            record: b"second".to_vec(),
+        }
+        .encode_canonical()
+        .unwrap();
+        let first_key = immutable_record_key(PhysicalSchema::IssueIdentity, &first);
+        assert_eq!(
+            first_key,
+            immutable_record_key(PhysicalSchema::IssueIdentity, &first)
+        );
+        assert_ne!(
+            first_key,
+            immutable_record_key(PhysicalSchema::IssueIdentity, &second)
+        );
     }
 
     #[test]
@@ -2131,20 +2947,23 @@ mod tests {
         let placement = BoardPlacement {
             project: PROJECT.into(),
             workflow_state: "in_progress".into(),
+            block: board_seed_block_id(PROJECT, "in_progress"),
             position: "V0z".into(),
         };
         let bytes = placement.encode_canonical().unwrap();
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
             format!(
-                "{{\"position\":\"V0z\",\"project\":\"{PROJECT}\",\"workflow_state\":\"in_progress\"}}"
+                "{{\"block\":\"{}\",\"position\":\"V0z\",\"project\":\"{PROJECT}\",\"workflow_state\":\"in_progress\"}}",
+                board_seed_block_id(PROJECT, "in_progress")
             )
         );
         assert_eq!(BoardPlacement::decode_canonical(&bytes), Ok(placement));
         assert_eq!(
             BoardPlacement::decode_canonical(
                 format!(
-                    "{{ \"position\":\"V0z\",\"project\":\"{PROJECT}\",\"workflow_state\":\"in_progress\"}}"
+                    "{{ \"block\":\"{}\",\"position\":\"V0z\",\"project\":\"{PROJECT}\",\"workflow_state\":\"in_progress\"}}",
+                    board_seed_block_id(PROJECT, "in_progress")
                 )
                 .as_bytes()
             ),
@@ -2192,8 +3011,10 @@ mod tests {
         assert_eq!(a, again);
         assert_ne!(a, b);
         assert_eq!(a.suffix().len(), 32);
+        assert_eq!(a.render("OPS").unwrap(), format!("OPS-12-{}", a.suffix()));
         assert!(IssueIdentityRecord {
             issue: ISSUE.into(),
+            project: PROJECT.into(),
             alias: a,
         }
         .validate()
@@ -2201,11 +3022,27 @@ mod tests {
         assert_eq!(
             IssueIdentityRecord {
                 issue: ISSUE.into(),
+                project: PROJECT.into(),
                 alias: b,
             }
             .validate(),
             Err(Invalid::Field("alias_binding"))
         );
+    }
+
+    #[test]
+    fn one_million_same_ordinal_aliases_keep_the_full_collision_coordinate() {
+        let mut rendered_suffixes = HashSet::<[u8; 16]>::with_capacity(1_000_000);
+        for value in 0u128..1_000_000 {
+            let issue = DocId::from_digest(value.to_be_bytes());
+            let alias = IssueAliasCoordinate::for_issue(1, &issue).unwrap();
+            let rendered = alias.render("OPS").unwrap();
+            let suffix = rendered.strip_prefix("OPS-1-").unwrap();
+            let decoded = data_encoding::HEXLOWER.decode(suffix.as_bytes()).unwrap();
+            let coordinate: [u8; 16] = decoded.try_into().unwrap();
+            assert!(rendered_suffixes.insert(coordinate), "collision at {value}");
+        }
+        assert_eq!(rendered_suffixes.len(), 1_000_000);
     }
 
     #[test]

@@ -114,6 +114,9 @@ pub enum Failure {
     /// canonical digest that binds publications and cursors.
     InvalidExtractorSchema(crate::find::Invalid),
     WorldPublicationUnavailable(WorldId),
+    /// The composition-wide read-memory governor refused another Station or
+    /// publication build before allocating beyond its physical envelope.
+    ReadCapacity,
     UnknownWorld(WorldId),
 }
 
@@ -343,6 +346,7 @@ pub struct Runtime {
     /// protected material. Supplied by the composition root; absent keys fail
     /// closed (local writes refuse, remote material stays opaque).
     keys: Arc<dyn BodyKeySource>,
+    read_memory: Arc<crate::session::ReadMemoryGovernor>,
 }
 
 impl Runtime {
@@ -360,6 +364,7 @@ impl Runtime {
             root: None,
             authority: Arc::new(DenyAllAuthority),
             keys: Arc::new(NoBodyKeys),
+            read_memory: crate::session::ReadMemoryGovernor::process_default(),
         }
     }
 
@@ -378,6 +383,7 @@ impl Runtime {
             root: Some(root.into()),
             authority,
             keys,
+            read_memory: crate::session::ReadMemoryGovernor::process_default(),
         }
     }
 
@@ -416,6 +422,7 @@ impl Runtime {
             self.registry.clone(),
             self.authority.clone(),
             self.keys.clone(),
+            self.read_memory.clone(),
             epoch,
             lock,
         ))
@@ -450,6 +457,7 @@ impl Runtime {
             self.registry.clone(),
             self.authority.clone(),
             self.keys.clone(),
+            self.read_memory.clone(),
             epoch,
             lock,
         ))
@@ -469,6 +477,7 @@ impl Runtime {
             self.registry.clone(),
             self.authority.clone(),
             self.keys.clone(),
+            self.read_memory.clone(),
             epoch,
             lock,
         ))
@@ -505,6 +514,7 @@ pub struct Orbit {
     registry: Catalog,
     authority: Arc<dyn AuthorityView>,
     keys: Arc<dyn BodyKeySource>,
+    read_memory: Arc<crate::session::ReadMemoryGovernor>,
     epoch: Epoch,
     lock: StoreLock,
 }
@@ -524,6 +534,7 @@ impl Orbit {
         registry: Catalog,
         authority: Arc<dyn AuthorityView>,
         keys: Arc<dyn BodyKeySource>,
+        read_memory: Arc<crate::session::ReadMemoryGovernor>,
         epoch: Epoch,
         lock: StoreLock,
     ) -> Self {
@@ -532,6 +543,7 @@ impl Orbit {
             registry,
             authority,
             keys,
+            read_memory,
             epoch,
             lock,
         }
@@ -583,6 +595,9 @@ impl Orbit {
                 for schema in &reg.schemas {
                     let model = match schema.mutation {
                         replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
+                        replica::body::MutationModel::ImmutableAtomic => {
+                            replica::body::MUTATION_IMMUTABLE_ATOMIC
+                        }
                         replica::body::MutationModel::Collaborative(_) => {
                             replica::body::MUTATION_COLLABORATIVE
                         }
@@ -599,12 +614,21 @@ impl Orbit {
                 // schemas are interpretable even though package composition
                 // forbids the World from declaring or writing them itself.
                 for schema in crate::exec::body_schemas() {
+                    let model = match schema.mutation {
+                        replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
+                        replica::body::MutationModel::ImmutableAtomic => {
+                            replica::body::MUTATION_IMMUTABLE_ATOMIC
+                        }
+                        replica::body::MutationModel::Collaborative(_) => {
+                            replica::body::MUTATION_COLLABORATIVE
+                        }
+                    };
                     supported.declare(
                         id.clone(),
                         schema.id,
                         schema.version,
                         schema.encoding,
-                        replica::body::MUTATION_COLLABORATIVE,
+                        model,
                     );
                 }
             }
@@ -619,7 +643,22 @@ impl Orbit {
         } else {
             options.observation_capacity
         };
-        let core = Arc::new(crate::session::StationCore::new(epoch, capacity, replica));
+        // Corpus images are local acceleration, never Replica authority. A
+        // missing/unwrappable cache key or corrupt cache directory disables
+        // warm reopen for this activation but cannot block durable truth.
+        let corpus_images = crate::corpus_store::CorpusImageStore::open(self.store.dir())
+            .ok()
+            .map(Arc::new);
+        let core = Arc::new(
+            crate::session::StationCore::new(
+                epoch,
+                capacity,
+                replica,
+                self.read_memory.clone(),
+                corpus_images,
+            )
+            .map_err(|_| Failure::ReadCapacity)?,
+        );
 
         // The resident cache lives beside the store rather than inside it: the
         // journal's promise is that everything a root names is present, and a
@@ -667,6 +706,7 @@ impl Orbit {
             registry: self.registry,
             authority: self.authority,
             keys: self.keys,
+            read_memory: self.read_memory,
             epoch,
             lock: Some(self.lock),
             alive: Arc::new(AtomicBool::new(true)),
@@ -885,6 +925,7 @@ pub struct Station {
     registry: Catalog,
     authority: Arc<dyn AuthorityView>,
     keys: Arc<dyn BodyKeySource>,
+    read_memory: Arc<crate::session::ReadMemoryGovernor>,
     epoch: Epoch,
     /// The exclusive store lock. `Some` while live; taken out (and either moved
     /// into the returned Orbit or dropped) exactly once at dormancy/exit, so it
@@ -1421,6 +1462,7 @@ impl Station {
             self.registry,
             self.authority,
             self.keys,
+            self.read_memory,
             self.epoch,
             lock,
         ))
@@ -1453,6 +1495,7 @@ impl Station {
                 self.registry,
                 self.authority,
                 self.keys,
+                self.read_memory,
                 self.epoch,
                 lock,
             ),

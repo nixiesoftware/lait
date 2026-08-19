@@ -4,7 +4,7 @@ version = "0.7.8"
 edition = "2021"
 rust-version = "1.92"
 description = "Client interfaces and application protocol for LAIT's bundled Issues World"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [lints]
@@ -19,6 +19,14 @@ mechanics = { path = "../../crates/mechanics" }
 replica = { path = "../../crates/replica" }
 runtime = { path = "../../crates/runtime" }
 world-interface = { path = "../../crates/world-interface" }
+
+# The board wall renders to PNG frames. A receiver is handed pixels rather than
+# product vocabulary, so the drawing lives with the package that owns the
+# meaning — the same shape `lait-signage-app` uses for its own surface, and
+# duplicated rather than shared because products do not depend on each other.
+font8x8 = "0.3.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+sha2 = "0.10"
 
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

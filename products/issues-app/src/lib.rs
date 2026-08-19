@@ -26,6 +26,7 @@
 //! composed it decides what a person sees.
 
 pub mod decorate;
+pub mod display;
 pub mod document;
 pub mod host;
 pub mod lifecycle;
@@ -36,8 +37,10 @@ pub mod router;
 
 pub use protocol::{
     classify_failure, decode_call, decode_reply, encode_call, encode_reply, AccessAssignment,
-    BoardPos, ChangeEffect, ChangeOperation, ChangeProject, Filter, IssuesErrorKind, IssuesRequest,
-    IssuesResponse, OPERATION, VERSION,
+    BoardPos, ChangeEffect, ChangeLabel, ChangeOperation, ChangePosition, ChangeProject,
+    ChangeWorkAction, Filter, IssuesErrorKind, IssuesRequest, IssuesResponse, OperationPhase,
+    OperationReadiness, OperationReceipt, PublicationCoordinate, WorldPublicationCoordinate,
+    OPERATION, VERSION,
 };
 pub use router::{IssueRouter, IssuesCallHandler, RouterFacts};
 
@@ -100,6 +103,12 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
             // which is what keeps listing free.
             .with_accent(0x004C_6EF5)?
             .with_routes(ROUTES)
+            // A board on a screen. Registered here rather than anywhere near
+            // the receiver, which is the whole claim the surface contract
+            // makes: a second, unlike World reaches a television with no
+            // television application update and no product vocabulary crossing
+            // the boundary.
+            .and_then(|package| package.with_display_surface(display::board_wall_surface()?))
     })
 }
 
@@ -208,7 +217,7 @@ mod tests {
             classify_failure(&bad).map(|(failure, _)| failure),
             Some(world_interface::Failure::invalid())
         );
-        let fine = serde_json::to_value(IssuesResponse::List { rows: Vec::new() }).unwrap();
+        let fine = serde_json::to_value(IssuesResponse::Ok { message: None }).unwrap();
         assert_eq!(classify_failure(&fine), None);
     }
 }

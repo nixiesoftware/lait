@@ -16,15 +16,17 @@ use serde::{Deserialize, Serialize};
 
 /// The DTO protocol version. Bumped only on a breaking DTO change; a consumer
 /// sending another version is rejected, never negotiated (clean-break formats).
-pub const DTO_PROTOCOL_VERSION: u32 = 1;
+pub const DTO_PROTOCOL_VERSION: u32 = 2;
 
 /// The maximum length of a DTO identifier string (World/schema ids, request
 /// ids). Bounds every string the surface accepts.
 pub const MAX_DTO_STRING: usize = 256;
 
-/// The maximum decoded payload/effect/projection bytes (1 MiB) — checked on
-/// the DECODED length, not the base64 text length.
-pub const MAX_DTO_PAYLOAD: usize = 1024 * 1024;
+/// The maximum decoded payload/effect/projection bytes — checked on the
+/// DECODED length, not the base64 text length. The generic transport must be
+/// large enough to carry any World payload admitted by Runtime; product
+/// declarations may only tighten this outer ceiling.
+pub const MAX_DTO_PAYLOAD: usize = 2 * 1024 * 1024;
 
 /// Why a DTO failed validation beyond JSON structure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +192,7 @@ impl SignedSubmitDto {
 json_codec!(SignedSubmitDto);
 
 /// Portable semantic World publication coordinate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublicationIdDto {
     pub manifest_root_hex: String,
@@ -213,7 +215,7 @@ impl PublicationIdDto {
 }
 
 /// Complete Station-local read publication coordinate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct WorldPublicationIdDto {
     pub publication: PublicationIdDto,
@@ -263,6 +265,9 @@ json_codec!(QueryRequestDto);
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommittedEffectDto {
     pub protocol_version: u32,
+    /// Hex of the signed 16-byte persistent operation coordinate. The
+    /// matching Observation attribution carries the same value.
+    pub operation_id_hex: String,
     /// Base64 of the application effect bytes.
     pub effect_b64: String,
     /// Hex of the 32-byte Replica frontier root.
@@ -276,6 +281,8 @@ pub struct CommittedEffectDto {
 impl CommittedEffectDto {
     fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
+        check_len(&self.operation_id_hex)?;
+        check_hex16(&self.operation_id_hex)?;
         check_b64_payload(&self.effect_b64)?;
         check_len(&self.frontier_root_hex)?;
         check_hex32(&self.frontier_root_hex)?;
@@ -331,8 +338,40 @@ impl ObservationCursorDto {
 }
 json_codec!(ObservationCursorDto);
 
-/// An observation DTO — a bounded invalidation signal, carrying no state.
-/// `reset: true` means the consumer must rebaseline and re-query.
+/// One affected World and the exact immutable read publication installed for
+/// it at this Observation's durable frontier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AffectedWorldPublicationDto {
+    pub world: String,
+    pub publication: WorldPublicationIdDto,
+}
+
+impl AffectedWorldPublicationDto {
+    fn validate(&self) -> Result<(), Invalid> {
+        check_world(&self.world)?;
+        self.publication.validate()
+    }
+}
+
+/// One affected Body with its complete World namespace.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AffectedBodyDto {
+    pub world: String,
+    pub body_id_hex: String,
+}
+
+impl AffectedBodyDto {
+    fn validate(&self) -> Result<(), Invalid> {
+        check_world(&self.world)?;
+        check_len(&self.body_id_hex)?;
+        check_hex16(&self.body_id_hex)
+    }
+}
+
+/// An observation DTO — a bounded Station-wide invalidation signal, carrying
+/// no state. `reset: true` means the consumer must rebaseline and re-query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ObservationDto {
@@ -340,23 +379,43 @@ pub struct ObservationDto {
     pub epoch: u64,
     pub sequence: u64,
     pub reset: bool,
-    pub world: String,
-    /// Hex of the affected 16-byte Body ids (empty on reset).
-    pub scope_body_ids_hex: Vec<String>,
+    /// Canonically sorted full Body coordinates. Bare Body ids are ambiguous
+    /// because one Station observation may span multiple Worlds.
+    pub bodies: Vec<AffectedBodyDto>,
     pub frontier_root_hex: String,
     pub frontier_transaction_count: u64,
+    /// Canonically sorted exact read coordinates for every affected World.
+    /// Empty on reset and authority-only observations. Text offsets may be
+    /// applied only to a projection carrying the matching coordinate.
+    pub publications: Vec<AffectedWorldPublicationDto>,
 }
 
 impl ObservationDto {
     fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
-        check_world(&self.world)?;
-        for id in &self.scope_body_ids_hex {
-            check_len(id)?;
-            check_hex16(id)?;
+        for body in &self.bodies {
+            body.validate()?;
+        }
+        if self
+            .bodies
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left >= right))
+        {
+            return Err(Invalid::BadIdentifier);
         }
         check_len(&self.frontier_root_hex)?;
-        check_hex32(&self.frontier_root_hex)
+        check_hex32(&self.frontier_root_hex)?;
+        for publication in &self.publications {
+            publication.validate()?;
+        }
+        if self
+            .publications
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left >= right))
+        {
+            return Err(Invalid::BadIdentifier);
+        }
+        Ok(())
     }
 }
 json_codec!(ObservationDto);
@@ -404,6 +463,22 @@ impl ErrorDto {
             E::ImplementationUnavailable => "implementation-unavailable",
             E::Conflict => "conflict",
             E::LimitExceeded => "limit-exceeded",
+            E::BodyRead(failure) => match failure {
+                crate::world::BodyReadFailure::CapabilityUnavailable => {
+                    "body-read-capability-unavailable"
+                }
+                crate::world::BodyReadFailure::Opaque(_) => "body-opaque",
+                crate::world::BodyReadFailure::NotCollaborative(_) => "body-not-collaborative",
+                crate::world::BodyReadFailure::SchemaAhead(_) => "body-schema-ahead",
+                crate::world::BodyReadFailure::KeyUnavailable(_) => "body-key-unavailable",
+                crate::world::BodyReadFailure::Corrupt(_) => "body-material-corrupt",
+                crate::world::BodyReadFailure::Capacity(_) => "body-read-capacity",
+                crate::world::BodyReadFailure::MaterialUnavailable(_) => {
+                    "body-material-unavailable"
+                }
+                crate::world::BodyReadFailure::PublicationExpired(_) => "body-publication-expired",
+                crate::world::BodyReadFailure::Interrupted(_) => "body-read-interrupted",
+            },
             E::StateCorrupt => "world-state-corrupt",
             E::ContractViolation => "contract-violation",
         }
@@ -435,6 +510,8 @@ pub fn schema_bundle() -> serde_json::Value {
     add!(CommittedEffectDto, "CommittedEffectDto");
     add!(ProjectionDto, "ProjectionDto");
     add!(ObservationCursorDto, "ObservationCursorDto");
+    add!(AffectedWorldPublicationDto, "AffectedWorldPublicationDto");
+    add!(AffectedBodyDto, "AffectedBodyDto");
     add!(ObservationDto, "ObservationDto");
     add!(ErrorDto, "ErrorDto");
     serde_json::json!({
@@ -534,14 +611,14 @@ mod tests {
         let dto = sample();
         let json = dto.to_json();
         let text = String::from_utf8(json.clone()).unwrap();
-        assert!(text.contains("\"protocolVersion\":1"));
+        assert!(text.contains("\"protocolVersion\":2"));
         assert!(text.contains("\"schemaVersion\":1"));
         assert_eq!(SubmitRequestDto::from_json(&json).unwrap(), dto);
     }
 
     #[test]
     fn an_unknown_field_is_rejected() {
-        let json = br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":1,"requestIdHex":"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","payloadB64":"","surprise":true}"#;
+        let json = br#"{"protocolVersion":2,"world":"w.x","schema":"s","schemaVersion":1,"requestIdHex":"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","payloadB64":"","surprise":true}"#;
         assert!(matches!(
             SubmitRequestDto::from_json(json),
             Err(Invalid::Malformed)
@@ -550,7 +627,7 @@ mod tests {
 
     #[test]
     fn a_missing_mandatory_field_is_rejected() {
-        let json = br#"{"protocolVersion":1,"world":"w.x","schema":"s","payloadB64":""}"#;
+        let json = br#"{"protocolVersion":2,"world":"w.x","schema":"s","payloadB64":""}"#;
         assert!(matches!(
             SubmitRequestDto::from_json(json),
             Err(Invalid::Malformed)
@@ -603,6 +680,7 @@ mod tests {
         // A frontier root that is not 32 decoded bytes.
         let e = CommittedEffectDto {
             protocol_version: DTO_PROTOCOL_VERSION,
+            operation_id_hex: "0c".repeat(16),
             effect_b64: "AA==".into(),
             frontier_root_hex: "ab".repeat(31),
             frontier_transaction_count: 3,
@@ -657,10 +735,16 @@ mod tests {
             epoch: 1,
             sequence: 5,
             reset: true,
-            world: "com.example.notes".into(),
-            scope_body_ids_hex: vec!["0b".repeat(16)],
+            bodies: vec![AffectedBodyDto {
+                world: "com.example.notes".into(),
+                body_id_hex: "0b".repeat(16),
+            }],
             frontier_root_hex: "cd".repeat(32),
             frontier_transaction_count: 5,
+            publications: vec![AffectedWorldPublicationDto {
+                world: "com.example.notes".into(),
+                publication: publication(),
+            }],
         };
         assert_eq!(ObservationDto::from_json(&o.to_json()).unwrap(), o);
         let e = ErrorDto {

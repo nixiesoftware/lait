@@ -524,7 +524,10 @@ pub enum BodyExport {
 #[derive(Debug, Clone)]
 pub struct BodySnapshot {
     export: SnapshotExport,
-    version: Arc<OnceLock<Result<crate::causal::Version, crate::causal::Invalid>>>,
+    /// Atomic Bodies have the known empty causal version and therefore need
+    /// no heap cell. Collaborative snapshots share the lazy/verified cell
+    /// with their frozen Engine state.
+    version: Option<Arc<OnceLock<Result<crate::causal::Version, crate::causal::Invalid>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -551,24 +554,22 @@ impl BodySnapshot {
             BodyExport::Atomic(bytes) => Self::from_atomic(bytes.into()),
             BodyExport::Collaborative(bytes) => Self {
                 export: SnapshotExport::Collaborative(bytes.into()),
-                version: Arc::new(OnceLock::new()),
+                version: Some(Arc::new(OnceLock::new())),
             },
         })
     }
 
     fn from_atomic(export: Arc<[u8]>) -> Self {
-        let version = Arc::new(OnceLock::new());
-        let _ = version.set(Ok(crate::causal::Version::empty()));
         Self {
             export: SnapshotExport::Atomic(export),
-            version,
+            version: None,
         }
     }
 
     fn from_frozen(frozen: &FrozenCollab) -> Self {
         Self {
             export: SnapshotExport::Collaborative(frozen.export.clone()),
-            version: frozen.version.clone(),
+            version: Some(frozen.version.clone()),
         }
     }
 
@@ -576,6 +577,28 @@ impl BodySnapshot {
         match &self.export {
             SnapshotExport::Atomic(bytes) => Some(bytes.to_vec()),
             SnapshotExport::Collaborative(_) => None,
+        }
+    }
+
+    /// Share the exact immutable Atomic bytes without copying them.
+    ///
+    /// A caller that obtains this from a governed cold-image cache must keep
+    /// its cache pin/lease alive for at least as long as the returned `Arc`.
+    /// Resident publication snapshots need no second lease because the
+    /// publication itself already accounts for and pins their export.
+    pub fn read_shared(&self) -> Option<Arc<[u8]>> {
+        match &self.export {
+            SnapshotExport::Atomic(bytes) => Some(bytes.clone()),
+            SnapshotExport::Collaborative(_) => None,
+        }
+    }
+
+    /// Share the exact canonical retained export for either mutation model.
+    /// Frozen collaborative images return the same `Arc` held by the Engine;
+    /// this never imports, projects, serializes, or copies their Loro state.
+    pub fn canonical_export_shared(&self) -> Arc<[u8]> {
+        match &self.export {
+            SnapshotExport::Atomic(bytes) | SnapshotExport::Collaborative(bytes) => bytes.clone(),
         }
     }
 
@@ -589,12 +612,18 @@ impl BodySnapshot {
     }
 
     pub fn version(&self) -> Result<crate::causal::Version, crate::causal::Invalid> {
-        self.version
-            .get_or_init(|| match &self.export {
-                SnapshotExport::Atomic(_) => Ok(crate::causal::Version::empty()),
-                SnapshotExport::Collaborative(bytes) => import_collaborative_doc(bytes, None)
+        let SnapshotExport::Collaborative(bytes) = &self.export else {
+            return Ok(crate::causal::Version::empty());
+        };
+        let version = self
+            .version
+            .as_ref()
+            .ok_or(crate::causal::Invalid::Engine)?;
+        version
+            .get_or_init(|| {
+                import_collaborative_doc(bytes, None)
                     .map(|doc| crate::causal::Version::from_frontiers(&doc.oplog_frontiers()))
-                    .map_err(|_| crate::causal::Invalid::Engine),
+                    .map_err(|_| crate::causal::Invalid::Engine)
             })
             .clone()
     }
@@ -603,12 +632,45 @@ impl BodySnapshot {
     /// sparse; importing one retained Body here is preferable to making every
     /// query serialize behind the writer merely because some queries can ask
     /// for an anchor.
-    pub fn anchor(&self, key: &Key, path: &str, position: u64) -> Option<crate::causal::Anchor> {
+    /// Mint an anchor from this exact collaborative image while preserving the
+    /// distinction between a model mismatch, a schema this build cannot
+    /// project, and malformed retained material.
+    pub fn try_anchor(
+        &self,
+        key: &Key,
+        path: &str,
+        position: u64,
+    ) -> Result<crate::causal::Anchor, ProjectionFailure> {
         let SnapshotExport::Collaborative(bytes) = &self.export else {
-            return None;
+            return Err(ProjectionFailure::NotCollaborative);
         };
-        let doc = import_collaborative_doc(bytes, None).ok()?;
-        anchor_in_doc(&doc, key, path, position).ok()
+        let doc =
+            import_collaborative_doc(bytes, None).map_err(|_| ProjectionFailure::Malformed)?;
+        // Validate the declared collaborative root vocabulary before minting
+        // a position from it. An unknown root is schema-ahead, not corruption
+        // and not an absent Body.
+        project_collaborative_doc(&doc)?;
+        anchor_in_doc(&doc, key, path, position).map_err(|_| ProjectionFailure::Malformed)
+    }
+
+    pub fn anchor(&self, key: &Key, path: &str, position: u64) -> Option<crate::causal::Anchor> {
+        self.try_anchor(key, path, position).ok()
+    }
+
+    /// Resolve an anchor against this exact collaborative image without
+    /// turning an import/schema failure into ordinary positional drift.
+    pub fn try_resolve(
+        &self,
+        key: &Key,
+        anchor: &crate::causal::Anchor,
+    ) -> Result<crate::causal::AnchorResolution, ProjectionFailure> {
+        let SnapshotExport::Collaborative(bytes) = &self.export else {
+            return Err(ProjectionFailure::NotCollaborative);
+        };
+        let doc =
+            import_collaborative_doc(bytes, None).map_err(|_| ProjectionFailure::Malformed)?;
+        project_collaborative_doc(&doc)?;
+        Ok(resolve_in_doc(&doc, key, anchor))
     }
 
     pub fn resolve(
@@ -616,13 +678,8 @@ impl BodySnapshot {
         key: &Key,
         anchor: &crate::causal::Anchor,
     ) -> crate::causal::AnchorResolution {
-        let SnapshotExport::Collaborative(bytes) = &self.export else {
-            return crate::causal::AnchorResolution::Drifted;
-        };
-        let Ok(doc) = import_collaborative_doc(bytes, None) else {
-            return crate::causal::AnchorResolution::Drifted;
-        };
-        resolve_in_doc(&doc, key, anchor)
+        self.try_resolve(key, anchor)
+            .unwrap_or(crate::causal::AnchorResolution::Drifted)
     }
 
     pub fn export(&self) -> BodyExport {
@@ -682,6 +739,14 @@ pub struct Engine {
     /// compact exports; this bounded recency set prevents a broad sequence of
     /// writes from turning the whole store back into live `LoroDoc`s.
     hot: std::collections::VecDeque<Key>,
+    /// Durable Replica owns the authoritative causal closure for cold Bodies.
+    /// In that mode an LRU eviction drops the frozen export instead of keeping
+    /// a second unbounded semantic store beside the Journal/read publication.
+    external_collaborative_images: bool,
+    /// Bodies displaced while a transaction is being prepared. They stay as
+    /// frozen exports until finalize/rollback so a batch touching more than
+    /// the hot cap can still export every touched Body atomically.
+    external_evicted: std::collections::VecDeque<Key>,
 }
 
 /// One Body's live state.
@@ -1234,7 +1299,16 @@ impl Engine {
             writer: crate::op::mint_activation_peer(),
             bodies: BTreeMap::new(),
             hot: std::collections::VecDeque::new(),
+            external_collaborative_images: false,
+            external_evicted: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Declare that durable causal material outside this Engine can restore a
+    /// collaborative Body on demand. At most the mutation-hot LRU remains in
+    /// memory; evicted writers are removed rather than frozen indefinitely.
+    pub fn use_external_collaborative_images(&mut self) {
+        self.external_collaborative_images = true;
     }
 
     /// This activation's writer id.
@@ -1250,6 +1324,25 @@ impl Engine {
     /// Number of retained Bodies without cloning the key directory.
     pub fn body_count(&self) -> u64 {
         u64::try_from(self.bodies.len()).unwrap_or(u64::MAX)
+    }
+
+    /// Release one immutable Atomic writer image after its durable causal
+    /// closure has been published elsewhere.
+    ///
+    /// Fabric deliberately does not retain a parallel semantic directory:
+    /// callers must own the durable Body presence/binding/material record and
+    /// re-import the exact verified snapshot before an operation whose
+    /// semantics require the prior value. Collaborative Bodies are never
+    /// released through this seam because their live causal writer state is
+    /// richer than a whole-value Atomic replacement.
+    pub fn release_atomic_image(&mut self, key: &Key) -> bool {
+        if matches!(self.bodies.get(key), Some(BodyState::Atomic(_))) {
+            self.bodies.remove(key);
+            self.hot.retain(|candidate| candidate != key);
+            true
+        } else {
+            false
+        }
     }
 
     fn loro_err(e: impl std::fmt::Display) -> Failure {
@@ -1276,9 +1369,27 @@ impl Engine {
             };
             if &cold != key {
                 self.cool_body(&cold)?;
+                if self.external_collaborative_images {
+                    self.external_evicted.push_back(cold);
+                }
             }
         }
         Ok(())
+    }
+
+    fn drain_external_evictions(&mut self) {
+        if !self.external_collaborative_images {
+            self.external_evicted.clear();
+            return;
+        }
+        while let Some(key) = self.external_evicted.pop_front() {
+            if self.hot.iter().any(|hot| hot == &key) {
+                continue;
+            }
+            if matches!(self.bodies.get(&key), Some(BodyState::FrozenCollab(_))) {
+                self.bodies.remove(&key);
+            }
+        }
     }
 
     fn make_hot(&mut self, key: &Key) -> Result<(), Failure> {
@@ -2021,7 +2132,9 @@ impl Engine {
     /// its `LoroDoc`, while [`Engine::reserve_hot`] freezes the least-recently
     /// used Body when the cap is reached.
     pub fn finalize(&mut self, prepared: Prepared) -> Receipt {
-        prepared.receipt
+        let receipt = prepared.receipt;
+        self.drain_external_evictions();
+        receipt
     }
 
     /// Restore the exact semantic state that preceded a preparation.
@@ -2066,6 +2179,7 @@ impl Engine {
             tracing::error!(unrestored, "fabric rollback did not restore all bodies");
             return Err(Failure::OutcomeUnknown);
         }
+        self.drain_external_evictions();
         Ok(())
     }
 
@@ -2339,11 +2453,16 @@ impl Engine {
                     return Err(Failure::TypeConflict);
                 }
                 if self.bodies.get(key).is_none() {
+                    let version = snapshot
+                        .version
+                        .as_ref()
+                        .ok_or(Failure::Invalid(commit::Invalid::Import))?
+                        .clone();
                     self.bodies.insert(
                         key.clone(),
                         BodyState::FrozenCollab(FrozenCollab {
                             export: bytes.clone(),
-                            version: snapshot.version.clone(),
+                            version,
                         }),
                     );
                     return Ok(ImportStatus {
@@ -3131,7 +3250,10 @@ mod tests {
         assert!(Arc::ptr_eq(&frozen.export, collaborative_read));
         assert!(Arc::ptr_eq(
             &frozen.version,
-            &collaborative_snapshot.version
+            collaborative_snapshot
+                .version
+                .as_ref()
+                .expect("collaborative snapshot carries a version cell")
         ));
     }
 
@@ -3203,7 +3325,13 @@ mod tests {
             panic!("proof snapshot changed model");
         };
         assert!(Arc::ptr_eq(&frozen.export, expected_export));
-        assert!(Arc::ptr_eq(&frozen.version, &verified.version));
+        assert!(Arc::ptr_eq(
+            &frozen.version,
+            verified
+                .version
+                .as_ref()
+                .expect("collaborative snapshot carries a version cell")
+        ));
         assert_eq!(recovered.version(&key).unwrap(), expected_version);
         assert!(recovered.hot.is_empty());
     }

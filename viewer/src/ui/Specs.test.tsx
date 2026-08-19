@@ -14,6 +14,15 @@ vi.mock("../api", () => ({ rpc: rpcMock, spaceRpc: spaceRpcMock }));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
 
+const publication = {
+  publication: {
+    manifest_root: Array(32).fill(1),
+    implementation_digest: Array(32).fill(2),
+    extractor_schema_digest: Array(32).fill(3),
+  },
+  materialization: 1,
+};
+
 function spec(
   id: string,
   kind: SpecKind,
@@ -30,6 +39,11 @@ function spec(
     text,
     state,
     links: [],
+    publication: {
+      manifest_root: Array(32).fill(1),
+      implementation_digest: Array(32).fill(2),
+      extractor_schema_digest: Array(32).fill(3),
+    },
     author: "act_1",
     ts: 1_770_000_000,
   };
@@ -73,10 +87,29 @@ describe("Specs", () => {
     history: SpecRevision[] = [],
   ) {
     rpcMock.mockImplementation((_space: string, request: { cmd: string; spec?: string }) => {
-      if (request.cmd === "spec_list") return Promise.resolve({ kind: "specs", specs });
+      if (request.cmd === "spec_list") {
+        return Promise.resolve({
+          kind: "specs",
+          page: {
+            publication,
+            items: specs.map((view) => ({
+              spec: view.spec,
+              project: view.project,
+              kind: view.kind,
+              heads: view.heads,
+              issued: view.issued,
+              conflicted: view.heads.length !== 1,
+              view: view.heads.length === 1 ? view : null,
+            })),
+          },
+        });
+      }
       if (request.cmd === "access_list") return Promise.resolve({ kind: "assignments", rows: grants });
       if (request.cmd === "spec_history") {
-        return Promise.resolve({ kind: "spec_revisions", revisions: history });
+        return Promise.resolve({
+          kind: "spec_revisions",
+          page: { publication, items: history },
+        });
       }
       if (request.cmd === "spec_show") {
         const found = specs.find((candidate) => candidate.spec === request.spec);
@@ -173,7 +206,7 @@ describe("Specs", () => {
     // Two facts, not one: the issued revision still governs while its successor
     // is written, so the row may not collapse to the head.
     expect(row("spc_ahead")).toContain("Issued · draft ahead");
-    expect(row("spc_conf")).toContain("Concurrent heads");
+    expect(row("spc_conf")).toContain("conflicted");
   });
 
   it("opens a row as a document", async () => {

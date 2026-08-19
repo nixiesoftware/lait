@@ -61,8 +61,9 @@ pub enum Mutation {
 /// `start`/`end` let a browser that does not embed the convergence engine draw
 /// the immediate highlight. The anchors let Runtime re-resolve the same range
 /// after later publications. A client applies the offsets only to the
-/// Observation's stamped frontier; a root/frontier mismatch requires a fresh
-/// projection.
+/// Observation's exact [`WorldPublicationId`](crate::publication::WorldPublicationId);
+/// a publication mismatch requires a fresh projection even when the portable
+/// Manifest root happens to match across two local materializations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StableTextRange {

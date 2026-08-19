@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 # MSRV: the workspace figure. See the root manifest for what drives it.
 rust-version = "1.92"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 description = "The stub launcher: applies a verified staged tree by rename, then starts the client"
 publish = false
 

@@ -1,9 +1,3 @@
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::as_conversions,
-    clippy::indexing_slicing,
-    reason = "Find evaluation steps over compact u32 node identities"
-)]
 //! Gate-first bounded evaluation over one immutable read corpus.
 //!
 //! This module owns no authority facts. Its caller supplies the exact granted
@@ -24,8 +18,9 @@ use crate::{
     corpus::Corpus,
     find::{
         self, Atom, Bound, Direction, EdgeRef, Emit, ExtractedField, ExtractedNode, FeatureRef,
-        FieldRef, GateRef, Keep, MergeMethod, MissingFeature, Mode, NodeKey, Op, Pack, Predicate,
-        Query, RankBy, Seek, Step, StepId, Term, Test, Unique, Value, Walk, WalkOrder,
+        FieldRange, FieldRef, GateRef, Keep, MergeMethod, MissingFeature, Mode, NodeKey, Op, Pack,
+        Predicate, Query, RangeEndpoint, RankBy, Seek, Step, StepId, Term, Test, Unique, Value,
+        Walk, WalkOrder,
     },
 };
 
@@ -306,7 +301,7 @@ pub(crate) fn evaluate(request: Evaluation<'_>) -> Result<Answer, Failure> {
     evaluator.meter.finish()?;
     let output = into_output(flow);
     let rows = output_len(&output);
-    if rows > request.query.page_size as usize {
+    if rows > usize::try_from(request.query.page_size).unwrap_or(usize::MAX) {
         return Err(Failure::ContinuationUnavailable);
     }
     Ok(Answer {
@@ -336,6 +331,7 @@ fn linear_plan(query: &Query) -> Option<LinearPlan<'_>> {
             | Seek::Bodies(_)
             | Seek::Ids(_)
             | Seek::Field(_)
+            | Seek::FieldRange(_)
             | Seek::Term {
                 kind: Term::Token,
                 ..
@@ -346,12 +342,15 @@ fn linear_plan(query: &Query) -> Option<LinearPlan<'_>> {
     let mut keeps = Vec::new();
     let mut pack = None;
     for (offset, step) in query.steps.iter().enumerate().skip(1) {
-        if step.input.as_slice() != [query.steps[offset - 1].id] {
+        let previous = query.steps.get(offset.saturating_sub(1))?;
+        if step.input.as_slice() != [previous.id] {
             return None;
         }
         match &step.op {
             Op::Keep(keep) if pack.is_none() => keeps.push(keep),
-            Op::Pack(next_pack) if pack.is_none() && offset + 1 == query.steps.len() => {
+            Op::Pack(next_pack)
+                if pack.is_none() && offset.saturating_add(1) == query.steps.len() =>
+            {
                 pack = Some(next_pack);
             }
             Op::Seek(_) | Op::Keep(_) | Op::Walk(_) | Op::Rank(_) | Op::Merge(_) | Op::Pack(_) => {
@@ -385,7 +384,7 @@ fn evaluate_linear_page(request: &Evaluation<'_>) -> Result<Option<Answer>, Fail
         token_counter: request.token_counter,
         meter: Meter::new(limit),
     };
-    let page_size = request.query.page_size as usize;
+    let page_size = usize::try_from(request.query.page_size).unwrap_or(usize::MAX);
     let mut candidates = Vec::with_capacity(page_size);
     let mut next = None;
     let mut failure = None;
@@ -461,6 +460,50 @@ fn evaluate_linear_page(request: &Evaluation<'_>) -> Result<Option<Answer>, Fail
                 |gate| gates.allows_ref(gate),
                 |value, key, body, row| {
                     match evaluator.page_allowed(body, row, Some(predicate), &plan.keeps) {
+                        Ok(true) => {}
+                        Ok(false) => return true,
+                        Err(error) => {
+                            failure = Some(error);
+                            return false;
+                        }
+                    }
+                    if candidates.len() == page_size {
+                        next = Some(PagePosition::Field { value, key });
+                        return false;
+                    }
+                    candidates.push(Candidate::node(row.key.clone()));
+                    if let Err(error) = evaluator.observe_candidates(candidates.len()) {
+                        failure = Some(error);
+                        return false;
+                    }
+                    true
+                },
+            );
+        }
+        Seek::FieldRange(range) => {
+            let start = match resume {
+                None => None,
+                Some(PagePosition::Field { value, key }) => Some((value, key)),
+                Some(_) => return Err(Failure::Invalid(find::Invalid::InvalidCursor)),
+            };
+            let lower = atom_value(range.lower.atom());
+            let upper = atom_value(range.upper.atom());
+            let lower_bound = match &range.lower {
+                RangeEndpoint::Inclusive(_) => std::ops::Bound::Included(&lower),
+                RangeEndpoint::Exclusive(_) => std::ops::Bound::Excluded(&lower),
+            };
+            let upper_bound = match &range.upper {
+                RangeEndpoint::Inclusive(_) => std::ops::Bound::Included(&upper),
+                RangeEndpoint::Exclusive(_) => std::ops::Bound::Excluded(&upper),
+            };
+            corpus.scan_field_interval(
+                &range.field,
+                lower_bound,
+                upper_bound,
+                start,
+                |gate| gates.allows_ref(gate),
+                |value, key, body, row| {
+                    match evaluator.page_allowed(body, row, None, &plan.keeps) {
                         Ok(true) => {}
                         Ok(false) => return true,
                         Err(error) => {
@@ -577,7 +620,7 @@ fn evaluate_linear_page(request: &Evaluation<'_>) -> Result<Option<Answer>, Fail
                 *kind == Term::Prefix,
                 start,
                 |gate| gates.allows_ref(gate),
-                |key, body, row| {
+                |key, body, row, frequency| {
                     match evaluator.page_allowed(body, row, None, &plan.keeps) {
                         Ok(true) => {}
                         Ok(false) => return true,
@@ -586,23 +629,14 @@ fn evaluate_linear_page(request: &Evaluation<'_>) -> Result<Option<Answer>, Fail
                             return false;
                         }
                     }
-                    if !row.fields.iter().any(|candidate| {
-                        evaluator.field_allowed(candidate)
-                            && candidate.reference == *field
-                            && candidate.terms.iter().any(|term| match kind {
-                                Term::Token => term.as_ref() == text.as_bytes(),
-                                Term::Prefix => term.starts_with(text.as_bytes()),
-                                Term::Phrase => false,
-                            })
-                    }) {
-                        return true;
-                    }
                     if candidates.len() == page_size {
                         next = Some(PagePosition::Term { key });
                         return false;
                     }
                     let mut candidate = Candidate::node(row.key.clone());
-                    candidate.term_scores.insert(field.clone(), 1);
+                    candidate
+                        .term_scores
+                        .insert(field.clone(), u64::from(frequency));
                     candidates.push(candidate);
                     if let Err(error) = evaluator.observe_candidates(candidates.len()) {
                         failure = Some(error);
@@ -730,6 +764,10 @@ impl Evaluator<'_> {
             }
             Seek::Field(predicate) => {
                 let candidates = self.visit_field(predicate)?;
+                Ok(Flow::Nodes(candidates))
+            }
+            Seek::FieldRange(range) => {
+                let candidates = self.visit_field_interval(range)?;
                 Ok(Flow::Nodes(candidates))
             }
             Seek::Term { field, text, kind } => {
@@ -864,6 +902,50 @@ impl Evaluator<'_> {
         Ok(candidates)
     }
 
+    fn visit_field_interval(&mut self, range: &FieldRange) -> Result<Vec<Candidate>, Failure> {
+        let lower = atom_value(range.lower.atom());
+        let upper = atom_value(range.upper.atom());
+        let lower_bound = match &range.lower {
+            RangeEndpoint::Inclusive(_) => std::ops::Bound::Included(&lower),
+            RangeEndpoint::Exclusive(_) => std::ops::Bound::Excluded(&lower),
+        };
+        let upper_bound = match &range.upper {
+            RangeEndpoint::Inclusive(_) => std::ops::Bound::Included(&upper),
+            RangeEndpoint::Exclusive(_) => std::ops::Bound::Excluded(&upper),
+        };
+        let corpus = self.corpus;
+        let gates = self.gates;
+        let mut candidates = Vec::new();
+        let mut failure = None;
+        corpus.scan_field_interval(
+            &range.field,
+            lower_bound,
+            upper_bound,
+            None,
+            |gate| gates.allows_ref(gate),
+            |_, _, body, row| {
+                if !self.node_allowed(row) {
+                    return true;
+                }
+                if let Err(error) = self.visit_posting_row(body, row) {
+                    failure = Some(error);
+                    return false;
+                }
+                candidates.push(Candidate::node(row.key.clone()));
+                if let Err(error) = self.observe_candidates(candidates.len()) {
+                    failure = Some(error);
+                    return false;
+                }
+                true
+            },
+        );
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        canonical_candidates(&mut candidates);
+        Ok(candidates)
+    }
+
     fn visit_term(
         &mut self,
         field: &FieldRef,
@@ -874,7 +956,7 @@ impl Evaluator<'_> {
         let gates = self.gates;
         let mut candidates = Vec::new();
         let mut failure = None;
-        let mut accept = |body: &BodyKey, row: &ExtractedNode| {
+        let mut accept = |body: &BodyKey, row: &ExtractedNode, frequency: u32| {
             if !self.node_allowed(row) {
                 return true;
             }
@@ -882,21 +964,11 @@ impl Evaluator<'_> {
                 failure = Some(error);
                 return false;
             }
-            let score = row
-                .fields
-                .iter()
-                .filter(|candidate| self.field_allowed(candidate) && candidate.reference == *field)
-                .flat_map(|candidate| candidate.terms.iter())
-                .filter(|term| match kind {
-                    Term::Token | Term::Phrase => term.as_ref() == probe,
-                    Term::Prefix => term.starts_with(probe),
-                })
-                .count();
-            if score != 0 {
+            if frequency != 0 {
                 let mut candidate = Candidate::node(row.key.clone());
                 candidate
                     .term_scores
-                    .insert(field.clone(), usize_u64(score));
+                    .insert(field.clone(), u64::from(frequency));
                 candidates.push(candidate);
                 if let Err(error) = self.observe_candidates(candidates.len()) {
                     failure = Some(error);
@@ -1727,7 +1799,7 @@ mod tests {
 
     fn schema() -> SchemaRef {
         SchemaRef {
-            name: SchemaId::parse("issues.issue").expect("schema"),
+            name: SchemaId::parse("notes.note").expect("schema"),
             version: 1,
         }
     }
@@ -1762,7 +1834,7 @@ mod tests {
 
     fn body(number: u8) -> BodyKey {
         BodyKey::new(
-            WorldId::parse("dev.lait.issues").expect("world"),
+            WorldId::parse("dev.lait.notes").expect("world"),
             BodyId::from_bytes([number; 16]),
         )
     }
@@ -1794,7 +1866,7 @@ mod tests {
     }
 
     fn corpus(rows: Vec<ExtractedNode>) -> Corpus {
-        let bodies = rows
+        let bodies: Vec<BodyExtraction> = rows
             .into_iter()
             .enumerate()
             .map(|(offset, node)| BodyExtraction {
@@ -1803,7 +1875,8 @@ mod tests {
                 nodes: vec![node],
             })
             .collect();
-        Corpus::build(coordinate(1), Limits::default(), bodies)
+        let snapshot = crate::corpus::snapshot_for_test(&bodies);
+        Corpus::build(coordinate(1), Limits::default(), snapshot, bodies)
             .expect("corpus")
             .0
     }
@@ -1970,6 +2043,58 @@ mod tests {
         assert_eq!(output_keys(&answer), vec![node(1), node(2)]);
         assert_eq!(answer.next_position, None);
         assert_eq!(answer.usage.postings_read, 2);
+    }
+
+    #[test]
+    fn bounded_field_range_stops_before_later_postings_and_resumes_exactly() {
+        let corpus = corpus(vec![
+            row(1, "aa", None),
+            row(2, "ab", None),
+            row(3, "ac", None),
+            row(4, "ad", None),
+            row(5, "zz", None),
+        ]);
+        let query = Query {
+            schema: schema(),
+            publication: None,
+            mode: Mode::Exact,
+            steps: vec![step(
+                1,
+                Vec::new(),
+                Op::Seek(Seek::FieldRange(FieldRange {
+                    field: field(),
+                    lower: RangeEndpoint::Inclusive(Atom::Text("ab".to_owned())),
+                    upper: RangeEndpoint::Exclusive(Atom::Text("ad".to_owned())),
+                })),
+            )],
+            output: StepId::new(1).expect("output"),
+            bound: bound(),
+            page_size: 1,
+            cursor: None,
+        };
+
+        let first =
+            run_page(&corpus, &query, &GrantedGates::default(), None).expect("first interval page");
+        assert_eq!(output_keys(&first), vec![node(2)]);
+        assert_eq!(
+            first.usage.postings_read, 2,
+            "one row plus exact look-ahead"
+        );
+        let second = run_page(
+            &corpus,
+            &query,
+            &GrantedGates::default(),
+            first.next_position,
+        )
+        .expect("second interval page");
+        assert_eq!(output_keys(&second), vec![node(3)]);
+        assert_eq!(second.usage.postings_read, 1);
+        assert_eq!(second.next_position, None);
+        assert_eq!(
+            first.usage.postings_read + second.usage.postings_read,
+            3,
+            "the evaluator never visits the exclusive upper endpoint or later values"
+        );
     }
 
     #[test]
@@ -2386,6 +2511,7 @@ mod tests {
             .apply(CorpusDelta {
                 base: coordinate(1),
                 next: coordinate(2),
+                snapshot: corpus.snapshot(),
                 bodies: Vec::new(),
             })
             .expect("coordinate delta");
@@ -2398,7 +2524,7 @@ mod tests {
     fn query_fixture_types_remain_world_declaration_compatible() {
         let _ = (OpSet::ALL, ModeSet::ALL);
         let _ = SourceRef {
-            name: SchemaId::parse("issues.issue-body").expect("source"),
+            name: SchemaId::parse("notes.note-body").expect("source"),
             version: 1,
         };
     }

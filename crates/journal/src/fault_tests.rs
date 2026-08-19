@@ -4,7 +4,7 @@
 //! mixture. Plus integrity classification, orphan GC, counter monotonicity,
 //! and required-set semantics.
 
-use journal::{Failure, Index, Object, Store, FAULT_POINTS};
+use journal::{Deferred, Failure, Index, Object, Store, FAULT_POINTS};
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +17,90 @@ fn temp_root(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn install_deferred_index_fixture(
+    root: &std::path::Path,
+    count: u32,
+) -> (journal::index::ChildRef, Vec<journal::index::IndexEntry>) {
+    std::fs::create_dir_all(root.join("objects")).unwrap();
+    std::fs::create_dir_all(root.join("journal")).unwrap();
+    let value = {
+        let mut value = vec![2u8];
+        value.extend_from_slice(&1u64.to_be_bytes());
+        value
+    };
+    let entries: Vec<journal::index::IndexEntry> = (0..count)
+        .map(|ordinal| journal::index::IndexEntry {
+            key: journal::object_content_hash(&ordinal.to_be_bytes()),
+            value: value.clone(),
+        })
+        .collect();
+    let mut sink = journal::index::NodeSink::default();
+    let root_ref = journal::index::build_index(entries.clone(), &mut sink)
+        .unwrap()
+        .unwrap();
+    for bytes in sink.written {
+        let hash = journal::object_content_hash(&bytes);
+        let name = hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        std::fs::write(root.join("objects").join(name), bytes).unwrap();
+    }
+    let manifest = journal::Manifest {
+        format_version: journal::STORE_FORMAT_VERSION,
+        sequence: 1,
+        eager_object_index_root: None,
+        deferred_object_index_root: Some((root_ref.hash, root_ref.count)),
+        caller_meta: None,
+        caller_index_roots: Vec::new(),
+        lazy_caller_index_roots: Vec::new(),
+    };
+    std::fs::write(
+        root.join("current-manifest"),
+        postcard::to_stdvec(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(root.join("counter"), 1u64.to_le_bytes()).unwrap();
+    (root_ref, entries)
+}
+
+fn leaf_for_key(
+    root: &std::path::Path,
+    mut current: journal::index::ChildRef,
+    key: &[u8; 32],
+) -> [u8; 32] {
+    for depth in 0..journal::index::MAX_DEPTH {
+        let name = current
+            .hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let bytes = std::fs::read(root.join("objects").join(name)).unwrap();
+        match journal::index::IndexNode::decode_canonical(&bytes).unwrap() {
+            journal::index::IndexNode::Leaf(_) => return current.hash,
+            journal::index::IndexNode::Branch(children) => {
+                let byte = key[depth / 2];
+                let slot = if depth.is_multiple_of(2) {
+                    usize::from(byte >> 4)
+                } else {
+                    usize::from(byte & 0x0f)
+                };
+                current = children[slot].unwrap();
+            }
+        }
+    }
+    panic!("fixture path did not reach a leaf")
+}
+
+fn make_fixture_a_lazy_caller_index(root: &std::path::Path, index: journal::index::ChildRef) {
+    let path = root.join("current-manifest");
+    let bytes = std::fs::read(&path).unwrap();
+    let mut manifest: journal::Manifest = postcard::from_bytes(&bytes).unwrap();
+    manifest.deferred_object_index_root = None;
+    manifest.lazy_caller_index_roots = vec![(index.hash, index.count)];
+    std::fs::write(path, postcard::to_stdvec(&manifest).unwrap()).unwrap();
 }
 
 #[test]
@@ -88,13 +172,19 @@ fn dropping_a_requirement_collects_the_object_but_not_before() {
         "the bytes outlive the requirement until a sweep"
     );
 
-    // The sweep runs at open, and only then is it gone.
+    // Open is payload-directory independent. Detached maintenance performs the
+    // mark/sweep explicitly, and only then is the orphan gone.
     drop(store);
     let store = Store::open(&root).unwrap();
     let required = store.required_objects().unwrap();
     assert_eq!(required.len(), 1);
     assert_eq!(store.read_object(&required[0]).unwrap(), b"second");
-    assert!(store.read_object(&first).is_err(), "swept at open");
+    assert_eq!(store.read_object(&first).unwrap(), b"first");
+    store.collect_unreachable().unwrap();
+    assert!(
+        store.read_object(&first).is_err(),
+        "swept by detached maintenance"
+    );
 }
 
 #[test]
@@ -158,9 +248,14 @@ fn a_crash_at_every_fault_point_recovers_to_a_complete_state() {
         let mut faulty = Store::open(&root)
             .unwrap()
             .with_fault_injector(Box::new(move |name| name == point));
-        let result = faulty.commit(
-            &[b"new-object".to_vec()],
+        let lazy = [b"new-object".to_vec()];
+        let result = faulty.commit_classified(
             &[],
+            &[],
+            Deferred {
+                added: &lazy,
+                removed: &[],
+            },
             Index::NONE,
             b"new-meta".to_vec(),
         );
@@ -280,7 +375,7 @@ fn a_missing_counter_on_a_committed_store_fails_closed() {
 }
 
 #[test]
-fn orphans_and_temps_are_collected_on_open() {
+fn detached_collection_removes_orphans_and_temps() {
     let root = temp_root("gc");
     let mut store = Store::open(&root).unwrap();
     store
@@ -293,6 +388,7 @@ fn orphans_and_temps_are_collected_on_open() {
     std::fs::write(root.join("objects").join("ab".repeat(32)), b"junk").unwrap();
 
     let store = Store::open(&root).unwrap();
+    store.collect_unreachable().unwrap();
     let names: Vec<String> = std::fs::read_dir(root.join("objects"))
         .unwrap()
         .flatten()
@@ -315,6 +411,291 @@ fn orphans_and_temps_are_collected_on_open() {
         b"kept"
     );
     assert_eq!(store.caller_meta().unwrap().unwrap(), b"m");
+}
+
+#[test]
+fn deferred_payloads_are_not_read_at_open_and_fail_typed_on_exact_read() {
+    for (tag, remove) in [("corrupt", false), ("missing", true)] {
+        let root = temp_root(&format!("lazy-{tag}"));
+        let payload = vec![0x5au8; 2 * 1024 * 1024];
+        let reference = Object {
+            hash: journal::object_content_hash(&payload),
+            len: u64::try_from(payload.len()).unwrap(),
+        };
+        let mut store = Store::open(&root).unwrap();
+        store
+            .commit_classified(
+                &[],
+                &[],
+                Deferred {
+                    added: &[payload],
+                    removed: &[],
+                },
+                Index::NONE,
+                b"lazy".to_vec(),
+            )
+            .unwrap();
+        drop(store);
+        let path = root.join("objects").join(
+            reference
+                .hash
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        );
+        if remove {
+            std::fs::remove_file(&path).unwrap();
+        } else {
+            std::fs::write(&path, b"hostile").unwrap();
+        }
+
+        // If open touched even one deferred payload, this would fail here.
+        journal::watch_recovery_object_reads(reference.hash);
+        let store = Store::open(&root).expect("deferred payload is verified lazily");
+        assert_eq!(
+            journal::watched_recovery_object_reads(),
+            0,
+            "recovery performed no read of the watched deferred payload"
+        );
+        assert!(store.is_required(&reference.hash).unwrap());
+        assert!(matches!(
+            store.reader().read_object(&reference),
+            Err(Failure::Integrity(
+                journal::Defect::MissingObject | journal::Defect::CorruptObject
+            ))
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[test]
+fn deferred_open_reads_one_root_at_one_hundred_thousand_entries() {
+    let root = temp_root("lazy-index-100k");
+    install_deferred_index_fixture(&root, 100_000);
+    let store = Store::open(&root).expect("open authenticates only the deferred root");
+    assert_eq!(
+        journal::recovery_index_node_reads(),
+        1,
+        "deferred recovery cost is root-sized, not entry-sized"
+    );
+    drop(store);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn lazy_caller_open_reads_one_root_at_one_hundred_thousand_entries() {
+    let root = temp_root("lazy-caller-100k");
+    let (index, _) = install_deferred_index_fixture(&root, 100_000);
+    make_fixture_a_lazy_caller_index(&root, index);
+    let store = Store::open(&root).expect("open authenticates only the ownership root");
+    assert_eq!(journal::recovery_index_node_reads(), 1);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "release-scale one-million-entry deferred-index startup gate"]
+fn deferred_open_reads_one_root_at_one_million_entries() {
+    let root = temp_root("lazy-index-1m");
+    let (index, _) = install_deferred_index_fixture(&root, 1_000_000);
+    make_fixture_a_lazy_caller_index(&root, index);
+    let store = Store::open(&root).expect("open authenticates only the deferred root");
+    assert_eq!(journal::recovery_index_node_reads(), 1);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn corrupt_unopened_deferred_leaf_fails_lookup_and_scrub_without_collecting() {
+    let root = temp_root("lazy-corrupt-leaf");
+    let (root_ref, entries) = install_deferred_index_fixture(&root, 4_096);
+    let target = entries.first().unwrap().key;
+    let leaf = leaf_for_key(&root, root_ref, &target);
+    let leaf_path = root.join("objects").join(
+        leaf.iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    );
+    std::fs::write(&leaf_path, b"corrupt unopened leaf").unwrap();
+    let orphan = b"must-not-be-collected-on-corrupt-index";
+    let orphan_hash = journal::object_content_hash(orphan);
+    let orphan_path = root.join("objects").join(
+        orphan_hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    );
+    std::fs::write(&orphan_path, orphan).unwrap();
+
+    let store = Store::open(&root).expect("unopened deferred subtrees are lazy");
+    assert_eq!(journal::recovery_index_node_reads(), 1);
+    assert!(matches!(
+        store.is_required(&target),
+        Err(Failure::Integrity(journal::Defect::CorruptIndex))
+    ));
+    assert!(matches!(
+        store.collect_unreachable(),
+        Err(Failure::Integrity(journal::Defect::CorruptIndex))
+    ));
+    assert!(
+        orphan_path.exists(),
+        "scrub failure never guesses reachability"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn deferred_reader_enforces_hostile_length_and_gc_lease() {
+    let root = temp_root("lazy-pin");
+    let payload = b"leased-payload".to_vec();
+    let reference = Object {
+        hash: journal::object_content_hash(&payload),
+        len: u64::try_from(payload.len()).unwrap(),
+    };
+    let mut store = Store::open(&root).unwrap();
+    store
+        .commit_classified(
+            &[],
+            &[],
+            Deferred {
+                added: &[payload],
+                removed: &[],
+            },
+            Index::NONE,
+            b"pinned".to_vec(),
+        )
+        .unwrap();
+    let reader = store.reader();
+    let hostile = Object {
+        len: reference.len.saturating_add(1),
+        ..reference
+    };
+    assert!(matches!(
+        reader.read_object(&hostile),
+        Err(Failure::Integrity(journal::Defect::CorruptObject))
+    ));
+    drop(reader);
+
+    store
+        .commit_classified(
+            &[],
+            &[],
+            Deferred {
+                added: &[],
+                removed: &[reference.hash],
+            },
+            Index::NONE,
+            b"unpinned-from-manifest".to_vec(),
+        )
+        .unwrap();
+    let reader = store.reader();
+    let lease = reader.pin_objects(&[reference]);
+    store.collect_unreachable().unwrap();
+    assert_eq!(
+        reader.read_object(&reference).unwrap(),
+        b"leased-payload",
+        "a pinned exact publication survives detached GC"
+    );
+    drop(lease);
+    drop(reader);
+    store.collect_unreachable().unwrap();
+    assert!(matches!(
+        store.reader().read_object(&reference),
+        Err(Failure::Integrity(journal::Defect::MissingObject))
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn deferred_root_lease_keeps_a_whole_old_publication_without_enumeration() {
+    let root = temp_root("lazy-root-pin");
+    let payload = b"root-leased-payload".to_vec();
+    let reference = Object {
+        hash: journal::object_content_hash(&payload),
+        len: u64::try_from(payload.len()).unwrap(),
+    };
+    let mut store = Store::open(&root).unwrap();
+    store
+        .commit_classified(
+            &[],
+            &[],
+            Deferred {
+                added: &[payload],
+                removed: &[],
+            },
+            Index::NONE,
+            b"root-pinned".to_vec(),
+        )
+        .unwrap();
+    // Reader creation pins one root coordinate, not every entry it reaches.
+    let old_publication = store.reader();
+    store
+        .commit_classified(
+            &[],
+            &[],
+            Deferred {
+                added: &[],
+                removed: &[reference.hash],
+            },
+            Index::NONE,
+            b"current-no-longer-needs-it".to_vec(),
+        )
+        .unwrap();
+    store.collect_unreachable().unwrap();
+    assert_eq!(
+        old_publication.read_object(&reference).unwrap(),
+        b"root-leased-payload"
+    );
+    drop(old_publication);
+    store.collect_unreachable().unwrap();
+    assert!(matches!(
+        store.reader().read_object(&reference),
+        Err(Failure::Integrity(journal::Defect::MissingObject))
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn oversized_sparse_payload_is_rejected_before_bounded_allocation() {
+    let root = temp_root("lazy-hostile-sparse");
+    let payload = b"authenticated-small-payload".to_vec();
+    let reference = Object {
+        hash: journal::object_content_hash(&payload),
+        len: u64::try_from(payload.len()).unwrap(),
+    };
+    let mut store = Store::open(&root).unwrap();
+    store
+        .commit_classified(
+            &[],
+            &[],
+            Deferred {
+                added: &[payload],
+                removed: &[],
+            },
+            Index::NONE,
+            b"sparse".to_vec(),
+        )
+        .unwrap();
+    let path = root.join("objects").join(
+        reference
+            .hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    );
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(8 * 1024 * 1024 * 1024)
+        .unwrap();
+    assert!(matches!(
+        store
+            .reader()
+            .read_object_bounded(&reference, reference.len),
+        Err(Failure::Integrity(journal::Defect::CorruptObject))
+    ));
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -357,6 +738,7 @@ fn required_set_tracks_live_state_not_commit_history() {
                 &removed,
                 Index {
                     roots: &roots,
+                    lazy_roots: &[],
                     nodes: &sink.written,
                 },
                 format!("meta-{round}").into_bytes(),

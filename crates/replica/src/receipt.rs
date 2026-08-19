@@ -230,7 +230,7 @@ mod tests {
         // scope, so the anchor asserts the exact leading bytes.
         let r = receipt();
         let bytes = r.encode();
-        assert_eq!(bytes[0], 1, "version leads");
+        assert_eq!(bytes[0], 2, "version leads");
         let scope = scope_key(&r.space, &r.world, &r.device, &r.request);
         assert_eq!(
             &bytes[1..1 + scope.len()],

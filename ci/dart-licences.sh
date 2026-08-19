@@ -72,7 +72,7 @@ while read -r name version; do
 done <<<"$packages"
 
 if [ "$failed" -ne 0 ]; then
-  echo "dart-licences: the Dart closure would put lait's dual offer in question." >&2
+  echo "dart-licences: the Dart closure would impose terms on top of lait's own offer." >&2
   exit 1
 fi
 

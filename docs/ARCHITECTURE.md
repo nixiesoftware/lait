@@ -294,6 +294,26 @@ signed World action
   -> bounded value-free change Observation
 ```
 
+Every path in that sequence obeys **Constant-Time Feedback Continuity**:
+
+> Every intent produces bounded feedback before work proportional to the
+> action begins. The client renders either a deterministic optimistic
+> projection or an explicit pending operation, preserves it together with the
+> existing exact view throughout processing, and atomically reconciles it with
+> the matching terminal publication.
+
+Human and agent access paths use the same signed operation identity,
+attribution, phases, bounded progress, and terminal result. `Sending` is a
+client-local one-frame transition that precedes network work. `Accepted`
+requires a bounded durable operation receipt; `Committed` names the exact
+`WorldPublicationId`. Long work runs off UI, reactor, Replica-mutation, and
+publication-install locks. Refresh preserves loaded pages, cursor/selection,
+scroll position, and optimism rather than blanking or snapping back. A refusal
+removes or marks the optimistic projection visibly and carries its typed cause.
+Action size may change terminal latency, never time-to-feedback, interactivity,
+or visual continuity. This is a governing invariant of every touched path, not
+a separate repair pass.
+
 The Manifest rename is the authoritative Body-plane commit point. The journal
 protocol reserves a monotonic sequence, stages immutable objects, records
 material readiness, atomically replaces the Manifest last, and then performs

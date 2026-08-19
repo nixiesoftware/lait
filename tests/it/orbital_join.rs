@@ -313,15 +313,17 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     )
     .unwrap();
     station_f.contact(&station_id(&JOINER_SEED)).unwrap();
-    let view: IssueView = query(
+    // Discussion is its own page; `View` is the bounded summary.
+    let detail: contract::IssueDetailProjection = query(
         &session_f,
-        &IssueQuery::View {
+        &IssueQuery::Detail {
             doc: doc.clone(),
             me: None,
+            pages: contract::IssueDetailPages::default(),
         },
     );
-    assert_eq!(view.comments.len(), 1);
-    assert_eq!(view.comments[0].body, "joined and commenting");
+    assert_eq!(detail.comments.items.len(), 1);
+    assert_eq!(detail.comments.items[0].body, "joined and commenting");
 
     let _ = station_f.vacate();
     let _ = station_j.vacate();

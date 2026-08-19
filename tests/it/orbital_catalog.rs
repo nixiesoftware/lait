@@ -48,17 +48,21 @@ struct StubReader {
 }
 
 impl runtime::world::BodyReader for StubReader {
-    fn read_body(&self, _key: &replica::body::BodyKey) -> Option<Vec<u8>> {
-        None
+    fn read_body(
+        &self,
+        _key: &replica::body::BodyKey,
+    ) -> Result<Option<runtime::world::BodyBytes>, runtime::world::BodyReadFailure> {
+        Ok(None)
     }
     fn read_collaborative_body(
         &self,
         key: &replica::body::BodyKey,
-    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
-        self.views
+    ) -> Result<Option<runtime::world::CollaborativeBody>, runtime::world::BodyReadFailure> {
+        Ok(self
+            .views
             .get(key)
             .cloned()
-            .ok_or(fabric::projection::Failure::NotCollaborative)
+            .map(runtime::world::CollaborativeBody::owned))
     }
     fn body_version(&self, _key: &replica::body::BodyKey) -> Option<fabric::Version> {
         None
@@ -68,15 +72,15 @@ impl runtime::world::BodyReader for StubReader {
         _key: &replica::body::BodyKey,
         _path: &str,
         _position: u64,
-    ) -> Option<fabric::Anchor> {
-        None
+    ) -> Result<Option<fabric::Anchor>, runtime::world::BodyReadFailure> {
+        Ok(None)
     }
     fn resolve_anchor(
         &self,
         _key: &replica::body::BodyKey,
         _anchor: &fabric::Anchor,
-    ) -> fabric::AnchorResolution {
-        fabric::AnchorResolution::Drifted
+    ) -> Result<fabric::AnchorResolution, runtime::world::BodyReadFailure> {
+        Ok(fabric::AnchorResolution::Drifted)
     }
     fn content_status(
         &self,
@@ -105,14 +109,14 @@ fn principal(space: &mechanics::ids::SpaceId) -> runtime::world::PrincipalFacts 
     }
 }
 
-fn snapshot_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Result<(), Rejection> {
+fn structure_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Result<(), Rejection> {
     world
         .query(
             ctx,
             Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
-                payload: contract::IssueQuery::Snapshot.to_json(),
+                payload: contract::IssueQuery::StructureStatus.to_json(),
                 publication: None,
             },
         )
@@ -122,7 +126,7 @@ fn snapshot_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Result
 #[test]
 fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     let space = mechanics::ids::SpaceId::mint(&mechanics::ids::SystemUlidSource);
-    let world = lait::world::IssuesWorld::new();
+    let world = lait::world::IssuesWorld::migrator();
     let facts = principal(&space);
     let right = contract::catalog_key(&space);
     let wrong = replica::body::BodyKey::new(
@@ -140,7 +144,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
         .insert(wrong.clone(), fabric::CollaborativeView::default());
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
-        matches!(snapshot_query(&world, &ctx), Err(Rejection::StateCorrupt)),
+        matches!(structure_query(&world, &ctx), Err(Rejection::StateCorrupt)),
         "a misplaced catalog is never chosen"
     );
 
@@ -157,7 +161,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
         .insert(wrong, fabric::CollaborativeView::default());
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
-        matches!(snapshot_query(&world, &ctx), Err(Rejection::StateCorrupt)),
+        matches!(structure_query(&world, &ctx), Err(Rejection::StateCorrupt)),
         "a duplicate catalog is never merged"
     );
 
@@ -169,13 +173,25 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     };
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
-        matches!(snapshot_query(&world, &ctx), Err(Rejection::StateCorrupt)),
+        matches!(structure_query(&world, &ctx), Err(Rejection::StateCorrupt)),
         "a wrong-model catalog is corrupt"
     );
 
     // No catalog at all: legitimate pre-adoption state, NOT corrupt (a joiner
     // adopts through Manifest synchronization).
+    //
+    // The claim is the VERDICT, not reaching an answer. The three cases above
+    // are decided from the Body set alone and never reach Find. This one has
+    // nothing corrupt to reject, so the report goes on to enumerate issues
+    // through Find — and a stub reader carries no index to enumerate, so it
+    // ends in that capability's typed absence. Which is the point: absence of
+    // the capability is not evidence about the store, and this asserts the one
+    // thing that must never be said about a Space that simply has not adopted
+    // yet.
     let reader = StubReader::default();
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
-    assert!(snapshot_query(&world, &ctx).is_ok());
+    assert!(
+        !matches!(structure_query(&world, &ctx), Err(Rejection::StateCorrupt)),
+        "a Space that has not adopted yet is not a corrupt one"
+    );
 }

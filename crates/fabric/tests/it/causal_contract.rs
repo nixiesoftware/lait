@@ -106,7 +106,7 @@ fn a_delta_from_an_unknown_base_is_refused_by_name() {
 
     // A base naming operations this replica has never seen.
     let stranger = Version {
-        format_version: 1,
+        format_version: fabric::CAUSAL_FORMAT_VERSION,
         heads: vec![fabric::OpHead {
             writer: 99,
             sequence: 7,
@@ -291,7 +291,7 @@ fn relation_says_undetermined_rather_than_guessing() {
     );
 
     let unseen = Version {
-        format_version: 1,
+        format_version: fabric::CAUSAL_FORMAT_VERSION,
         heads: vec![fabric::OpHead {
             writer: 4242,
             sequence: 1,
@@ -322,6 +322,41 @@ fn an_anchor_follows_its_text_across_a_concurrent_edit() {
         ),
         AnchorResolution::Drifted => panic!("a live position must not drift"),
     }
+}
+
+#[test]
+fn immutable_image_anchor_failures_remain_typed() {
+    let mut fabric = Engine::new();
+    commit(&mut fabric, "seed", vec![splice(&key(), 0, "hello")]);
+    let image = fabric
+        .body_snapshot(&key())
+        .unwrap()
+        .expect("collaborative image");
+    let anchor = image.try_anchor(&key(), "body", 2).unwrap();
+    assert_eq!(
+        image.try_resolve(&key(), &anchor).unwrap(),
+        AnchorResolution::Resolved(2)
+    );
+
+    let atomic = fabric::BodySnapshot::from_export(
+        &other_key(),
+        fabric::BodyExport::Atomic(b"value".to_vec()),
+    )
+    .unwrap();
+    assert_eq!(
+        atomic.try_anchor(&other_key(), "body", 0),
+        Err(fabric::projection::Failure::NotCollaborative)
+    );
+
+    let malformed = fabric::BodySnapshot::from_export(
+        &other_key(),
+        fabric::BodyExport::Collaborative(b"not a loro export".to_vec()),
+    )
+    .unwrap();
+    assert_eq!(
+        malformed.try_anchor(&other_key(), "body", 0),
+        Err(fabric::projection::Failure::Malformed)
+    );
 }
 
 #[test]
@@ -542,20 +577,23 @@ fn the_checkpoint_policy_is_decided_by_size_not_by_time() {
 fn body_material_is_the_same_size_however_long_the_body_lives() {
     use fabric::{ArtifactRef, Material};
     let material = |tail: usize, history: u64| Material {
-        format_version: 1,
+        format_version: fabric::CAUSAL_FORMAT_VERSION,
         checkpoint: ArtifactRef {
             hash: [1u8; 32],
             len: 4096,
+            epoch: [7u8; 16],
         },
         delta_tail: (0..tail)
             .map(|i| ArtifactRef {
                 hash: [i as u8; 32],
                 len: 105,
+                epoch: [7u8; 16],
             })
             .collect(),
         history_root: Some([9u8; 32]),
         history_count: history,
         version: Version::empty(),
+        plaintext_size: 4096,
     };
     // History is behind a root, so a Body with a thousand archives commits the
     // same bytes as one with none.
@@ -591,7 +629,7 @@ fn causal_encodings_are_canonical() {
 
     // An unsorted head set is not a canonical version, whatever it decodes to.
     let unsorted = Version {
-        format_version: 1,
+        format_version: fabric::CAUSAL_FORMAT_VERSION,
         heads: vec![
             fabric::OpHead {
                 writer: 9,
@@ -686,7 +724,7 @@ fn a_replacement_artifact_cannot_flatten_a_collaborative_body() {
     let outcome = fabric.import_artifact(
         &key(),
         &Artifact::Replace {
-            format_version: 1,
+            format_version: fabric::CAUSAL_FORMAT_VERSION,
             bytes: b"a flat value".to_vec(),
         },
     );

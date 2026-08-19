@@ -184,15 +184,16 @@ pub trait AnchorSource: Send + Sync {
         key: &replica::body::BodyKey,
         path: &str,
         position: u64,
-    ) -> Option<fabric::Anchor>;
+    ) -> Result<Option<fabric::Anchor>, crate::world::BodyReadFailure>;
 
-    /// Where that position is now. Total: never an error, never a mutation,
-    /// and never a silently wrong index.
+    /// Where that position is now. A deleted/retired position is `Drifted`;
+    /// inability to obtain the exact governed Body image is an error and must
+    /// be rendered as unresolved, never as a silently wrong index.
     fn resolve_anchor(
         &self,
         key: &replica::body::BodyKey,
         anchor: &fabric::Anchor,
-    ) -> fabric::AnchorResolution;
+    ) -> Result<fabric::AnchorResolution, crate::world::BodyReadFailure>;
 }
 
 /// Where a peer's position is, as of this read.
@@ -816,22 +817,27 @@ impl LiveHandle {
 
     /// Mint an anchor at a position inside a Body.
     ///
-    /// `None` when the World id does not parse, when there is no Replica, or
-    /// when the position names nothing the algebra can bind — all three are the
-    /// same answer to a caller: there is no anchor to send.
+    /// `Ok(None)` means only that the target/position names nothing the algebra
+    /// can bind. A missing projection capability or failure to resolve the
+    /// exact cold Body image remains typed; callers must refresh/retry rather
+    /// than silently publishing presence without the requested caret.
     pub fn anchor(
         &self,
         world: &str,
         body: [u8; 16],
         field: &str,
         position: u64,
-    ) -> Option<Vec<u8>> {
-        let key = body_key(world, body)?;
-        let anchor = self
+    ) -> Result<Option<Vec<u8>>, crate::world::BodyReadFailure> {
+        let Some(key) = body_key(world, body) else {
+            return Ok(None);
+        };
+        let anchors = self
             .anchors
-            .as_ref()?
-            .anchor_in_body(&key, field, position)?;
-        Some(anchor.encode())
+            .as_ref()
+            .ok_or(crate::world::BodyReadFailure::CapabilityUnavailable)?;
+        Ok(anchors
+            .anchor_in_body(&key, field, position)?
+            .map(|anchor| anchor.encode()))
     }
 
     /// Everything currently believed, resolved against the Bodies as they stand.
@@ -949,8 +955,9 @@ impl LiveHandle {
                 return CaretState::Unresolved;
             };
             match source.resolve_anchor(&key, &decoded) {
-                fabric::AnchorResolution::Resolved(at) => CaretState::At(at),
-                fabric::AnchorResolution::Drifted => CaretState::Drifted,
+                Ok(fabric::AnchorResolution::Resolved(at)) => CaretState::At(at),
+                Ok(fabric::AnchorResolution::Drifted) => CaretState::Drifted,
+                Err(_) => CaretState::Unresolved,
             }
         };
         (anchor.map(&one), focus.map(&one), None)

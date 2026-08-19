@@ -18,20 +18,157 @@ use crate::{BoardPos, Filter, IssuesRequest};
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 struct EmptyArgs {}
 
+/// A first page needs no arguments. Requiring one made `{}` a tool error
+/// ("missing field `page_size`") for every list an agent opens without an
+/// opinion about size, which is most of them.
+fn default_page_size() -> u32 {
+    issues::contract::DEFAULT_PAGE_SIZE
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PageArgs {
+    /// Maximum rows in this response (1..=1000). Omit for the default page.
+    #[serde(default = "default_page_size")]
+    #[schemars(range(min = 1, max = 1000))]
+    page_size: u32,
+    /// Opaque continuation emitted by the preceding page.
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+impl PageArgs {
+    fn into_request(self) -> issues::contract::PageRequest {
+        issues::contract::PageRequest {
+            limit: self.page_size,
+            cursor: self.cursor,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PageOnlyArgs {
+    #[serde(flatten)]
+    page: PageArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RefPageArgs {
+    reff: String,
+    #[serde(flatten)]
+    page: PageArgs,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum IssueDetailSection {
+    Comments,
+    Reactions,
+    Attachments,
+    Checks,
+    OutgoingRelations,
+    IncomingRelations,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IssueDetailPageArgs {
+    reff: String,
+    section: IssueDetailSection,
+    /// Portable publication coordinate returned by the first detail response.
+    /// It keeps hydration on the same implementation/extractor semantics.
+    publication: McpPublicationId,
+    #[serde(flatten)]
+    page: PageArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpPublicationId {
+    #[schemars(length(min = 32, max = 32))]
+    manifest_root: Vec<u8>,
+    #[schemars(length(min = 32, max = 32))]
+    implementation_digest: Vec<u8>,
+    #[schemars(length(min = 32, max = 32))]
+    extractor_schema_digest: Vec<u8>,
+}
+
+impl McpPublicationId {
+    fn coordinate(self) -> Result<crate::PublicationCoordinate, Failure> {
+        let digest = |name: &str, bytes: Vec<u8>| {
+            if bytes.len() != 32 {
+                return Err(Failure::new(format!(
+                    "{name} must contain exactly 32 bytes"
+                )));
+            }
+            Ok(data_encoding::HEXLOWER.encode(&bytes))
+        };
+        Ok(crate::PublicationCoordinate {
+            manifest_root: digest("manifest_root", self.manifest_root)?,
+            implementation_digest: digest("implementation_digest", self.implementation_digest)?,
+            extractor_schema_digest: digest(
+                "extractor_schema_digest",
+                self.extractor_schema_digest,
+            )?,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectPageArgs {
+    project: String,
+    #[serde(flatten)]
+    page: PageArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct OptionalProjectPageArgs {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(flatten)]
+    page: PageArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpecPageArgs {
+    spec: String,
+    #[serde(flatten)]
+    page: PageArgs,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BaselinePageArgs {
+    baseline: String,
+    #[serde(flatten)]
+    page: PageArgs,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ChangeSetArgs {
+    #[serde(default)]
+    operation: Option<String>,
+    #[serde(default)]
+    timestamp: Option<u64>,
+    #[schemars(length(min = 1, max = 64))]
+    operations: Vec<crate::ChangeOperation>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct OperationStatusArgs {
+    operation: String,
+    timestamp: u64,
     operations: Vec<crate::ChangeOperation>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct IssueNewArgs {
     title: String,
-    #[serde(default)]
-    project: Option<String>,
+    project: String,
     #[serde(default)]
     assignees: Vec<String>,
     #[serde(default)]
     priority: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    parent: Option<String>,
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
@@ -46,6 +183,11 @@ struct IssueNewArgs {
 struct InboxArgs {
     #[serde(default)]
     clear: bool,
+    #[serde(flatten)]
+    page: PageArgs,
+    /// Exact coordinate returned by the preceding inbox page.
+    #[serde(default)]
+    publication: Option<McpPublicationId>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -256,6 +398,9 @@ struct CommentAtArgs {
     end: Option<u64>,
     #[serde(default)]
     reply_to: Option<String>,
+    /// Exact `publication` returned by `issue_detail`; stale coordinates are
+    /// refused instead of being reinterpreted against current text.
+    source: crate::protocol::WorldPublicationCoordinate,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -297,12 +442,16 @@ struct ListArgs {
     milestone: Option<String>,
     #[serde(default)]
     all: bool,
+    #[serde(flatten)]
+    page: PageArgs,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct BoardArgs {
     #[serde(default)]
     project: Option<String>,
+    #[serde(flatten)]
+    page: PageArgs,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -338,6 +487,8 @@ struct ProjectEditArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct MilestoneListArgs {
     project: String,
+    #[serde(flatten)]
+    page: PageArgs,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -370,6 +521,8 @@ struct IssueMilestoneArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CycleListArgs {
     project: String,
+    #[serde(flatten)]
+    page: PageArgs,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -445,11 +598,23 @@ struct LabelNewArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ActivityArgs {
-    /// Opaque resume token from a previous call's `last`; omit for the whole
-    /// feed.
+struct LabelEditArgs {
+    label: String,
     #[serde(default)]
-    since: Option<String>,
+    name: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LabelDeleteArgs {
+    label: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ActivityArgs {
+    #[serde(flatten)]
+    page: PageArgs,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -537,13 +702,6 @@ struct ProjectArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SpecArgs {
     spec: String,
-}
-
-/// Unlike [`ProjectArgs`], the project is required: a dependency graph is a
-/// property of one project, and there is no sensible whole-space default.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ProjectGraphArgs {
-    project: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -680,18 +838,36 @@ pub const WITHOUT_A_TOOL: &[&str] = &[
     "access_plan",
     "attach",
     "attachment_get",
+    "comment",
+    "comment_at",
     "detach",
     "follow",
     "geometry",
     "inbox",
+    "issue_attachments",
+    "issue_checks",
+    "issue_delete",
     "issue_document_upgrade",
+    "issue_link",
+    "issue_milestone",
+    "issue_move",
+    "issue_new",
+    "issue_parent",
+    "issue_reactions",
+    "issue_relations",
+    "issue_restore",
     "issue_text_checkpoint",
     "issue_text_splice",
+    "issue_unlink",
+    "issue_view",
     "label_delete",
     "label_edit",
+    "label_new",
+    "label_show",
     "project_delete",
     "project_update_post",
     "project_updates",
+    "react",
     "space_describe",
     "space_rename",
     "spec_document_upgrade",
@@ -711,6 +887,11 @@ pub fn tools() -> Vec<McpTool> {
             "issues_change_set",
             "Atomically create dependent Issues records in one publication. Operations are ordered; later Specs/Plans may reference an earlier project_create by operation ordinal. The planner enforces product limits, preconditions, and retry-stable identities.",
             issues_change_set,
+        ),
+        tool::<OperationStatusArgs>(
+            "issues_operation_status",
+            "Read a ChangeSet's durable receipt and local publication readiness without resubmitting it.",
+            issues_operation_status,
         ),
         tool::<IssueNewArgs>(
             "new",
@@ -764,28 +945,21 @@ pub fn tools() -> Vec<McpTool> {
         tool::<LinkArgs>("link", "Link two issues.", issue_link),
         tool::<LinkArgs>("unlink", "Remove an issue link.", issue_unlink),
         tool::<ParentArgs>("parent", "Set or clear an issue parent.", issue_parent),
-        tool::<RefArgs>("graph", "Read an issue graph neighborhood.", issue_graph),
-        tool::<ProjectGraphArgs>(
-            "project_graph",
-            "Read a project's whole dependency graph — every blocks/relates edge and parent link between its live issues, in one call. Use this to work out what is unblocked and in what order work has to happen; `graph` answers the same question for a single issue.",
-            project_graph,
+        tool::<RefArgs>(
+            "view",
+            "Read an issue summary plus bounded first pages of comments, reactions, attachments, checks, and each relation direction; continue large sections with their cursors.",
+            issue_view,
         ),
-        tool::<RefArgs>("view", "Read a full issue.", issue_view),
+        tool::<IssueDetailPageArgs>(
+            "view_page",
+            "Continue exactly one issue-detail section at the publication returned by view; never drains or crosses into a newer publication.",
+            issue_view_page,
+        ),
         tool::<ListArgs>("list", "List issue rows.", list),
         tool::<BoardArgs>("board", "Render a project board.", board),
-        tool::<RefArgs>("history", "Read an issue's history.", history),
-        tool::<EmptyArgs>(
-            "structure_status",
-            "Audit current Blueprint records that still depend on compatibility readers.",
-            structure_status,
-        ),
-        tool::<EmptyArgs>(
-            "structure_migrate",
-            "Materialize current Blueprint topology and Spec heads into native structures.",
-            structure_migrate,
-        ),
+        tool::<RefPageArgs>("history", "Read one page of issue history.", history),
         tool::<ProjectNewArgs>("project_new", "Create a project.", project_new),
-        tool::<EmptyArgs>("project_list", "List projects.", project_list),
+        tool::<PageOnlyArgs>("project_list", "List one page of projects.", project_list),
         tool::<ProjectEditArgs>(
             "project_edit",
             "Edit a project: name, color, description, lead, dates, archive, \
@@ -821,23 +995,29 @@ pub fn tools() -> Vec<McpTool> {
             "Assign or clear an issue's cycle. Pass cycle=\"none\" to clear.",
             issue_cycle,
         ),
-        tool::<EmptyArgs>("team_list", "List teams.", team_list),
+        tool::<PageOnlyArgs>("team_list", "List one page of teams.", team_list),
         tool::<TeamSetArgs>(
             "team_set",
             "Create, edit, or remove a team. Omit team to create; pass team \
              (name, key, or tm_ id) to edit; remove=true tombstones it.",
             team_set,
         ),
-        tool::<EmptyArgs>("initiative_list", "List initiatives.", initiative_list),
+        tool::<PageOnlyArgs>(
+            "initiative_list",
+            "List one page of initiatives.",
+            initiative_list,
+        ),
         tool::<InitiativeSetArgs>(
             "initiative_set",
             "Create, edit, or remove an initiative, including its project membership.",
             initiative_set,
         ),
         tool::<LabelNewArgs>("label_new", "Create a label.", label_new),
-        tool::<EmptyArgs>("label_list", "List labels.", label_list),
+        tool::<LabelEditArgs>("label_edit", "Edit a label.", label_edit),
+        tool::<LabelDeleteArgs>("label_delete", "Delete a label.", label_delete),
+        tool::<PageOnlyArgs>("label_list", "List one page of labels.", label_list),
         tool::<ActivityArgs>("activity", "Read recent IssuesWorld transitions.", activity),
-        tool::<EmptyArgs>("role_list", "List role definitions.", role_list),
+        tool::<PageArgs>("role_list", "List role definitions.", role_list),
         tool::<RoleShowArgs>("role_show", "Read one role definition.", role_show),
         tool::<RoleCreateArgs>("role_create", "Create a custom role.", role_create),
         tool::<RoleEditArgs>("role_edit", "Edit a custom role.", role_edit),
@@ -873,16 +1053,20 @@ pub fn tools() -> Vec<McpTool> {
             "Replace a project's workflow.",
             workflow_set,
         ),
-        tool::<ProjectArgs>("spec_list", "List Specs, optionally by project.", spec_list),
+        tool::<OptionalProjectPageArgs>(
+            "spec_list",
+            "List one page of Specs, optionally by project.",
+            spec_list,
+        ),
         tool::<SpecArgs>("spec_show", "Read one versioned Spec.", spec_show),
-        tool::<ProjectArgs>(
+        tool::<OptionalProjectPageArgs>(
             "spec_links",
-            "Every typed link asserted in scope, with the standing of the revision asserting it.",
+            "One page of typed links asserted in scope, with the standing of each asserting revision.",
             spec_links,
         ),
-        tool::<SpecArgs>(
+        tool::<SpecPageArgs>(
             "spec_history",
-            "Every revision of one Spec, oldest first, with its predecessors.",
+            "One exact-publication page of Spec revisions and predecessors.",
             spec_history,
         ),
         tool::<SpecNewArgs>(
@@ -913,9 +1097,9 @@ pub fn tools() -> Vec<McpTool> {
             "Resolve concurrent Spec heads.",
             spec_resolve,
         ),
-        tool::<ProjectArgs>(
+        tool::<OptionalProjectPageArgs>(
             "spec_observations",
-            "Every observation filed in scope — notes about the graph that bind \
+            "One page of observations filed in scope — notes about the graph that bind \
              nobody's document and never govern anything.",
             spec_observations,
         ),
@@ -934,15 +1118,15 @@ pub fn tools() -> Vec<McpTool> {
              the project's issuing capability.",
             spec_retract,
         ),
-        tool::<ProjectArgs>(
+        tool::<OptionalProjectPageArgs>(
             "baseline_list",
-            "List Baselines, optionally by project.",
+            "List one page of Baselines, optionally by project.",
             baseline_list,
         ),
         tool::<BaselineArgs>("baseline_show", "Read one Baseline.", baseline_show),
-        tool::<BaselineArgs>(
+        tool::<BaselinePageArgs>(
             "baseline_history",
-            "Every revision of one Baseline, oldest first.",
+            "One exact-publication page of Baseline revisions.",
             baseline_history,
         ),
         tool::<BaselineNewArgs>(
@@ -1135,7 +1319,9 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
     for kind in branch_kinds {
         let seek_id = find_api::StepId::new(next_id)
             .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-        next_id = next_id.saturating_add(1);
+        next_id = next_id
+            .checked_add(1)
+            .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
         let seek = if let Some(text) = &text {
             find_api::Seek::Term {
                 field: issues::find::field_ref(issues::find::field::SEARCH),
@@ -1193,7 +1379,9 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
             predicates.sort();
             let keep_id = find_api::StepId::new(next_id)
                 .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-            next_id = next_id.saturating_add(1);
+            next_id = next_id
+                .checked_add(1)
+                .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
             steps.push(find_api::Step {
                 id: keep_id,
                 input: vec![seek_id],
@@ -1203,12 +1391,17 @@ fn issues_search(input: Value) -> Result<ClientInvocation, Failure> {
             outputs.push(keep_id);
         }
     }
-    let output = if let [only] = outputs.as_slice() {
-        *only
+    let output = if outputs.len() == 1 {
+        outputs
+            .first()
+            .copied()
+            .ok_or_else(|| Failure::new("search plan has no output"))?
     } else {
         let merge_id = find_api::StepId::new(next_id)
             .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
-        next_id = next_id.saturating_add(1);
+        next_id = next_id
+            .checked_add(1)
+            .ok_or_else(|| Failure::new("search plan exceeds the bounded DAG"))?;
         steps.push(find_api::Step {
             id: merge_id,
             input: outputs,
@@ -1251,7 +1444,33 @@ fn issues_change_set(input: Value) -> Result<ClientInvocation, Failure> {
         return Err(Failure::invalid());
     }
     world(IssuesRequest::ChangeSet {
+        operation: Some(args.operation.unwrap_or_else(|| {
+            data_encoding::HEXLOWER.encode(&runtime::world::RequestId::mint().as_bytes())
+        })),
+        timestamp: Some(
+            args.timestamp
+                .unwrap_or_else(mechanics::wallclock::now_secs),
+        ),
         operations: args.operations,
+    })
+}
+
+fn issues_operation_status(input: Value) -> Result<ClientInvocation, Failure> {
+    let args: OperationStatusArgs = args(input)?;
+    world(IssuesRequest::OperationStatus {
+        operation: args.operation,
+        timestamp: args.timestamp,
+        operations: args.operations,
+    })
+}
+
+fn single_change(operation: crate::protocol::ChangeOperation) -> Result<ClientInvocation, Failure> {
+    world(IssuesRequest::ChangeSet {
+        operation: Some(
+            data_encoding::HEXLOWER.encode(&runtime::world::RequestId::mint().as_bytes()),
+        ),
+        timestamp: Some(mechanics::wallclock::now_secs()),
+        operations: vec![operation],
     })
 }
 
@@ -1319,15 +1538,24 @@ fn present_find_value(value: &runtime::find::Value) -> Value {
 
 fn issue_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueNewArgs = args(input)?;
-    world(IssuesRequest::IssueNew {
+    let due = match a.due.as_deref() {
+        None | Some("none") => None,
+        Some(value) => Some(crate::router::parse_due(value).ok_or_else(Failure::invalid)?),
+    };
+    single_change(crate::protocol::ChangeOperation::IssueCreate {
+        project: crate::protocol::ChangeProject::Existing { project: a.project },
         title: a.title,
-        project: a.project,
-        project_hint: None,
-        assignees: a.assignees,
         priority: a.priority,
-        labels: a.labels,
+        status: a.status,
+        parent: a.parent,
+        assignees: a.assignees,
+        labels: a
+            .labels
+            .into_iter()
+            .map(|label| crate::protocol::ChangeLabel::Existing { label })
+            .collect(),
         body: a.body,
-        due: a.due,
+        due,
         estimate: a.estimate,
     })
 }
@@ -1398,7 +1626,18 @@ fn accept_check(input: Value) -> Result<ClientInvocation, Failure> {
 
 fn inbox(input: Value) -> Result<ClientInvocation, Failure> {
     let a: InboxArgs = args(input)?;
-    local(LOCAL_INBOX, json!({ "clear": a.clear }))
+    let publication = a
+        .publication
+        .map(McpPublicationId::coordinate)
+        .transpose()?;
+    local(
+        LOCAL_INBOX,
+        json!({
+            "clear": a.clear,
+            "page": a.page.into_request(),
+            "publication": publication,
+        }),
+    )
 }
 
 fn issue_edit(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1416,10 +1655,12 @@ fn issue_edit(input: Value) -> Result<ClientInvocation, Failure> {
 
 fn issue_move(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueMoveArgs = args(input)?;
-    world(IssuesRequest::IssueMove {
-        reff: a.reff,
-        project: a.project,
-        pos: a.position.as_deref().and_then(parse_position),
+    single_change(crate::protocol::ChangeOperation::IssueMove {
+        issue: a.reff,
+        project: a
+            .project
+            .map(|project| crate::protocol::ChangeProject::Existing { project }),
+        position: a.position.as_deref().and_then(parse_change_position),
     })
 }
 
@@ -1443,29 +1684,30 @@ fn label(input: Value) -> Result<ClientInvocation, Failure> {
 
 fn comment(input: Value) -> Result<ClientInvocation, Failure> {
     let a: CommentArgs = args(input)?;
-    world(IssuesRequest::Comment {
-        reff: a.reff,
+    single_change(crate::protocol::ChangeOperation::IssueComment {
+        issue: a.reff,
         body: a.body,
-        reply_to: a.reply_to,
+        parent: a.reply_to,
     })
 }
 
 fn comment_at(input: Value) -> Result<ClientInvocation, Failure> {
     let a: CommentAtArgs = args(input)?;
-    world(IssuesRequest::CommentAt {
-        reff: a.reff,
+    single_change(crate::protocol::ChangeOperation::IssueCommentAt {
+        issue: a.reff,
         body: a.body,
         field: a.field,
         start: a.start,
         end: a.end,
-        reply_to: a.reply_to,
+        parent: a.reply_to,
+        source: a.source,
     })
 }
 
 fn react(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ReactArgs = args(input)?;
-    world(IssuesRequest::React {
-        reff: a.reff,
+    single_change(crate::protocol::ChangeOperation::IssueReaction {
+        issue: a.reff,
         comment: a.comment,
         emoji: a.emoji,
         on: !a.remove,
@@ -1474,57 +1716,100 @@ fn react(input: Value) -> Result<ClientInvocation, Failure> {
 
 fn issue_delete(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
-    world(IssuesRequest::IssueDelete { reff: a.reff })
+    single_change(crate::protocol::ChangeOperation::IssueTombstone {
+        issue: a.reff,
+        on: true,
+    })
 }
 
 fn issue_restore(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
-    world(IssuesRequest::IssueRestore { reff: a.reff })
+    single_change(crate::protocol::ChangeOperation::IssueTombstone {
+        issue: a.reff,
+        on: false,
+    })
 }
 
 fn issue_link(input: Value) -> Result<ClientInvocation, Failure> {
     let a: LinkArgs = args(input)?;
-    world(IssuesRequest::IssueLink {
-        reff: a.reff,
+    single_change(crate::protocol::ChangeOperation::IssueLink {
+        issue: a.reff,
         kind: a.kind,
         target: a.target,
+        on: true,
     })
 }
 
 fn issue_unlink(input: Value) -> Result<ClientInvocation, Failure> {
     let a: LinkArgs = args(input)?;
-    world(IssuesRequest::IssueUnlink {
-        reff: a.reff,
+    single_change(crate::protocol::ChangeOperation::IssueLink {
+        issue: a.reff,
         kind: a.kind,
         target: a.target,
+        on: false,
     })
 }
 
 fn issue_parent(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ParentArgs = args(input)?;
-    world(IssuesRequest::IssueParent {
-        reff: a.reff,
+    single_change(crate::protocol::ChangeOperation::IssueParent {
+        issue: a.reff,
         parent: a.parent,
     })
 }
 
-fn issue_graph(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: RefArgs = args(input)?;
-    world(IssuesRequest::IssueGraph { reff: a.reff })
-}
-
-fn project_graph(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: ProjectGraphArgs = args(input)?;
-    world(IssuesRequest::ProjectGraph { project: a.project })
-}
-
 fn issue_view(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
-    world(IssuesRequest::IssueView { reff: a.reff })
+    world(IssuesRequest::IssueDetail {
+        reff: a.reff,
+        publication: None,
+    })
+}
+
+fn issue_view_page(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: IssueDetailPageArgs = args(input)?;
+    let page = a.page.into_request();
+    let publication = Some(a.publication.coordinate()?);
+    let request = match a.section {
+        IssueDetailSection::Comments => IssuesRequest::IssueComments {
+            reff: a.reff,
+            publication,
+            page,
+        },
+        IssueDetailSection::Reactions => IssuesRequest::IssueReactions {
+            reff: a.reff,
+            publication,
+            page,
+        },
+        IssueDetailSection::Attachments => IssuesRequest::IssueAttachments {
+            reff: a.reff,
+            publication,
+            page,
+        },
+        IssueDetailSection::Checks => IssuesRequest::IssueChecks {
+            reff: a.reff,
+            publication,
+            page,
+        },
+        IssueDetailSection::OutgoingRelations => IssuesRequest::IssueRelations {
+            reff: a.reff,
+            direction: issues::dto::RelationDirection::Out,
+            publication,
+            page,
+        },
+        IssueDetailSection::IncomingRelations => IssuesRequest::IssueRelations {
+            reff: a.reff,
+            direction: issues::dto::RelationDirection::In,
+            publication,
+            page,
+        },
+    };
+    world(request)
 }
 
 fn list(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ListArgs = args(input)?;
+    let page = a.page.into_request();
     world(IssuesRequest::List {
         project: a.project,
         filter: Filter {
@@ -1534,6 +1819,7 @@ fn list(input: Value) -> Result<ClientInvocation, Failure> {
             milestone: a.milestone,
             all: a.all,
         },
+        page,
     })
 }
 
@@ -1542,22 +1828,17 @@ fn board(input: Value) -> Result<ClientInvocation, Failure> {
     world(IssuesRequest::Board {
         project: a.project,
         project_hint: None,
+        page: a.page.into_request(),
     })
 }
 
 fn history(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: RefArgs = args(input)?;
-    world(IssuesRequest::History { reff: a.reff })
-}
-
-fn structure_status(input: Value) -> Result<ClientInvocation, Failure> {
-    let _: EmptyArgs = args(input)?;
-    world(IssuesRequest::StructureStatus)
-}
-
-fn structure_migrate(input: Value) -> Result<ClientInvocation, Failure> {
-    let _: EmptyArgs = args(input)?;
-    world(IssuesRequest::StructureMigrate)
+    let a: RefPageArgs = args(input)?;
+    world(IssuesRequest::History {
+        reff: a.reff,
+        publication: None,
+        page: a.page.into_request(),
+    })
 }
 
 fn project_new(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1570,8 +1851,10 @@ fn project_new(input: Value) -> Result<ClientInvocation, Failure> {
 }
 
 fn project_list(input: Value) -> Result<ClientInvocation, Failure> {
-    let _: EmptyArgs = args(input)?;
-    world(IssuesRequest::ProjectList)
+    let a: PageOnlyArgs = args(input)?;
+    world(IssuesRequest::ProjectList {
+        page: a.page.into_request(),
+    })
 }
 
 fn project_edit(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1591,7 +1874,10 @@ fn project_edit(input: Value) -> Result<ClientInvocation, Failure> {
 
 fn milestone_list(input: Value) -> Result<ClientInvocation, Failure> {
     let a: MilestoneListArgs = args(input)?;
-    world(IssuesRequest::MilestoneList { project: a.project })
+    world(IssuesRequest::MilestoneList {
+        project: a.project,
+        page: a.page.into_request(),
+    })
 }
 
 fn milestone_set(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1609,15 +1895,18 @@ fn milestone_set(input: Value) -> Result<ClientInvocation, Failure> {
 
 fn issue_milestone(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueMilestoneArgs = args(input)?;
-    world(IssuesRequest::IssueMilestone {
-        reff: a.reff,
-        milestone: a.milestone,
+    single_change(crate::protocol::ChangeOperation::IssueMilestone {
+        issue: a.reff,
+        milestone: a.milestone.filter(|milestone| milestone != "none"),
     })
 }
 
 fn cycle_list(input: Value) -> Result<ClientInvocation, Failure> {
     let a: CycleListArgs = args(input)?;
-    world(IssuesRequest::CycleList { project: a.project })
+    world(IssuesRequest::CycleList {
+        project: a.project,
+        page: a.page.into_request(),
+    })
 }
 
 fn cycle_set(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1641,8 +1930,10 @@ fn issue_cycle(input: Value) -> Result<ClientInvocation, Failure> {
 }
 
 fn team_list(input: Value) -> Result<ClientInvocation, Failure> {
-    let _: EmptyArgs = args(input)?;
-    world(IssuesRequest::TeamList)
+    let a: PageOnlyArgs = args(input)?;
+    world(IssuesRequest::TeamList {
+        page: a.page.into_request(),
+    })
 }
 
 fn team_set(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1660,8 +1951,10 @@ fn team_set(input: Value) -> Result<ClientInvocation, Failure> {
 }
 
 fn initiative_list(input: Value) -> Result<ClientInvocation, Failure> {
-    let _: EmptyArgs = args(input)?;
-    world(IssuesRequest::InitiativeList)
+    let a: PageOnlyArgs = args(input)?;
+    world(IssuesRequest::InitiativeList {
+        page: a.page.into_request(),
+    })
 }
 
 fn initiative_set(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1681,25 +1974,45 @@ fn initiative_set(input: Value) -> Result<ClientInvocation, Failure> {
 
 fn label_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: LabelNewArgs = args(input)?;
-    world(IssuesRequest::LabelNew {
+    single_change(crate::protocol::ChangeOperation::LabelCreate {
+        name: a.name,
+        color: a.color.unwrap_or_else(|| "gray".into()),
+    })
+}
+
+fn label_edit(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: LabelEditArgs = args(input)?;
+    single_change(crate::protocol::ChangeOperation::LabelEdit {
+        label: a.label,
         name: a.name,
         color: a.color,
     })
 }
 
+fn label_delete(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: LabelDeleteArgs = args(input)?;
+    single_change(crate::protocol::ChangeOperation::LabelDelete { label: a.label })
+}
+
 fn label_list(input: Value) -> Result<ClientInvocation, Failure> {
-    let _: EmptyArgs = args(input)?;
-    world(IssuesRequest::LabelList)
+    let a: PageOnlyArgs = args(input)?;
+    world(IssuesRequest::LabelList {
+        page: a.page.into_request(),
+    })
 }
 
 fn activity(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ActivityArgs = args(input)?;
-    world(IssuesRequest::Activity { since: a.since })
+    world(IssuesRequest::Activity {
+        page: a.page.into_request(),
+    })
 }
 
 fn role_list(input: Value) -> Result<ClientInvocation, Failure> {
-    let _: EmptyArgs = args(input)?;
-    world(IssuesRequest::RoleList)
+    let page: PageArgs = args(input)?;
+    world(IssuesRequest::RoleList {
+        page: page.into_request(),
+    })
 }
 
 fn role_show(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1793,8 +2106,11 @@ fn workflow_set(input: Value) -> Result<ClientInvocation, Failure> {
 }
 
 fn spec_list(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: ProjectArgs = args(input)?;
-    world(IssuesRequest::SpecList { project: a.project })
+    let a: OptionalProjectPageArgs = args(input)?;
+    world(IssuesRequest::SpecList {
+        project: a.project,
+        page: a.page.into_request(),
+    })
 }
 
 fn spec_show(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1803,18 +2119,27 @@ fn spec_show(input: Value) -> Result<ClientInvocation, Failure> {
 }
 
 fn spec_links(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: ProjectArgs = args(input)?;
-    world(IssuesRequest::SpecReferences { project: a.project })
+    let a: OptionalProjectPageArgs = args(input)?;
+    world(IssuesRequest::SpecReferences {
+        project: a.project,
+        page: a.page.into_request(),
+    })
 }
 
 fn spec_history(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: SpecArgs = args(input)?;
-    world(IssuesRequest::SpecHistory { spec: a.spec })
+    let a: SpecPageArgs = args(input)?;
+    world(IssuesRequest::SpecHistory {
+        spec: a.spec,
+        page: a.page.into_request(),
+    })
 }
 
 fn spec_observations(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: ProjectArgs = args(input)?;
-    world(IssuesRequest::SpecObservations { project: a.project })
+    let a: OptionalProjectPageArgs = args(input)?;
+    world(IssuesRequest::SpecObservations {
+        project: a.project,
+        page: a.page.into_request(),
+    })
 }
 
 fn spec_observe(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1877,8 +2202,11 @@ fn spec_resolve(input: Value) -> Result<ClientInvocation, Failure> {
 }
 
 fn baseline_list(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: ProjectArgs = args(input)?;
-    world(IssuesRequest::BaselineList { project: a.project })
+    let a: OptionalProjectPageArgs = args(input)?;
+    world(IssuesRequest::BaselineList {
+        project: a.project,
+        page: a.page.into_request(),
+    })
 }
 
 fn baseline_show(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1889,9 +2217,10 @@ fn baseline_show(input: Value) -> Result<ClientInvocation, Failure> {
 }
 
 fn baseline_history(input: Value) -> Result<ClientInvocation, Failure> {
-    let a: BaselineArgs = args(input)?;
+    let a: BaselinePageArgs = args(input)?;
     world(IssuesRequest::BaselineHistory {
         baseline: a.baseline,
+        page: a.page.into_request(),
     })
 }
 
@@ -1979,6 +2308,15 @@ fn parse_position(value: &str) -> Option<BoardPos> {
     }
 }
 
+fn parse_change_position(value: &str) -> Option<crate::protocol::ChangePosition> {
+    parse_position(value).map(|position| match position {
+        BoardPos::Top => crate::protocol::ChangePosition::Top,
+        BoardPos::Bottom => crate::protocol::ChangePosition::Bottom,
+        BoardPos::Before { reff } => crate::protocol::ChangePosition::Before { issue: reff },
+        BoardPos::After { reff } => crate::protocol::ChangePosition::After { issue: reff },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2043,9 +2381,22 @@ mod tests {
                         .unwrap_or(1);
                     json!("0".repeat(length))
                 }
-                Some("integer" | "number") => json!(0),
+                Some("integer" | "number") => {
+                    schema.get("minimum").cloned().unwrap_or_else(|| json!(0))
+                }
                 Some("boolean") => json!(false),
-                Some("array") => json!([]),
+                Some("array") => {
+                    let length = schema["minItems"]
+                        .as_u64()
+                        .and_then(|length| usize::try_from(length).ok())
+                        .unwrap_or(0);
+                    let item = &schema["items"];
+                    Value::Array(
+                        (0..length)
+                            .map(|_| placeholder(root, item, "array item"))
+                            .collect(),
+                    )
+                }
                 Some("object") => object(root, schema),
                 other => panic!("no placeholder for a required `{name}` of type {other:?}"),
             }
@@ -2095,15 +2446,29 @@ mod tests {
         world_interface::agent_surface_coverage(&defined, &reachable, WITHOUT_A_TOOL)
             .check()
             .unwrap_or_else(|error| {
-                panic!("the agent surface drifted from the command surface: {error}")
+                panic!("the agent surface drifted from the command surface: {error:?}")
             });
     }
 
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 78);
-        assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
+        // 80 rather than 81: `geometry` is not one of them. It is compiled
+        // Blueprint output and is named in `WITHOUT_A_TOOL` for that reason.
+        assert_eq!(tools.len(), 80);
+        let qualified: Vec<_> = tools
+            .iter()
+            .filter(|tool| tool.name().starts_with("issues_"))
+            .map(|tool| tool.name())
+            .collect();
+        assert_eq!(
+            qualified,
+            [
+                "issues_search",
+                "issues_change_set",
+                "issues_operation_status",
+            ]
+        );
         let invocation = tools
             .iter()
             .find(|tool| tool.name() == "view")

@@ -36,8 +36,9 @@ pub const WORLD_ACTION_DOMAIN: &[u8] = b"lait/world-action/1";
 /// The Ed25519 algorithm tag.
 pub const SIG_ALG_ED25519: u8 = 1;
 
-/// The maximum action payload size (1 MiB).
-pub const MAX_PAYLOAD: usize = 1024 * 1024;
+/// The absolute action substrate ceiling. Reviewed Worlds declare an equal or
+/// smaller decoded payload bound in their signed implementation contract.
+pub const MAX_PAYLOAD: usize = crate::world::MAX_PAYLOAD_BYTES as usize;
 
 /// 128 random caller-supplied bits correlating a request for idempotency. It is
 /// a diagnostic/idempotency aid, never Body identity.
@@ -88,7 +89,7 @@ pub struct WorldActionHeader {
 }
 
 /// A signed World action. `version` is exactly 1; `signature_algorithm` is 1
-/// (Ed25519). The payload is at most 1 MiB.
+/// (Ed25519). The payload is at most the Runtime World payload ceiling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedWorldAction {
     pub version: u8,
@@ -110,7 +111,7 @@ pub enum Invalid {
     UnsupportedVersion(u8),
     /// `signature_algorithm` was not 1 (Ed25519).
     UnsupportedSignatureAlgorithm(u8),
-    /// The payload exceeded 1 MiB.
+    /// The payload exceeded the Runtime World payload ceiling.
     PayloadTooLarge,
     /// The header's `payload_hash` did not match the payload.
     PayloadHashMismatch,

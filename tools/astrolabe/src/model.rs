@@ -26,6 +26,87 @@ use lait_workbench::{
 };
 
 use crate::client::book::BookSnapshot;
+
+/// The App-owned model of this identity's correspondence.
+///
+/// Correspondence is drawn as **conversations**, never an inbox: a person is
+/// reached from the address book, and a click opens a chat. This holds the
+/// people one can reach, the transcript of each conversation, and which
+/// conversations are open as tabs — all whole values the core replaces, because
+/// Dart holds no correspondence state of its own.
+#[derive(Debug, Clone, Default)]
+pub struct Correspondence {
+    /// This identity's own device on the plane — the address a correspondent
+    /// writes to.
+    pub my_device: Option<String>,
+    /// The people this identity can hold a conversation with. A person folds all
+    /// of their devices into one entry; a message from any of them is one
+    /// conversation.
+    pub contacts: Vec<Contact>,
+    /// One transcript per person, in send order, mixing what was sent and
+    /// received.
+    pub conversations: Vec<Conversation>,
+    /// Which conversations are open as tabs, in tab order. Shared state, so a
+    /// click in the address book opens the tab the chat window then draws.
+    pub open_tabs: Vec<String>,
+    /// The focused tab, if any.
+    pub active_tab: Option<String>,
+}
+
+/// A person one can message, with every device that is them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contact {
+    /// Stable person id — what a tab is keyed on.
+    pub id: String,
+    /// The name a person reads.
+    pub name: String,
+    /// Every device that is this person. A message from any is this person's.
+    pub devices: Vec<String>,
+    /// Whether this person is in the address book. An **added** contact sits in
+    /// the normal list; an **unadded** one (a stranger who wrote first) sits in
+    /// the incoming section, the way Steam parts friends from requests.
+    pub added: bool,
+    /// Whether this correspondent is an agent rather than a person — it wears
+    /// the AI mark.
+    pub is_agent: bool,
+    /// If this is a contact's agent, whose. `None` for a person or a standalone
+    /// agent.
+    pub parent_id: Option<String>,
+    /// The name of the parent, when there is one, so a surface can say "Ada's
+    /// assistant" without a second lookup.
+    pub parent_name: Option<String>,
+    /// How many received messages have not been seen — the unread badge. Cleared
+    /// when the conversation is opened.
+    pub unread: u32,
+}
+
+/// One person's conversation: who it is with, and every message either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conversation {
+    pub peer_id: String,
+    pub peer_name: String,
+    pub messages: Vec<ChatMessage>,
+}
+
+/// One message in a conversation, sent or received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessage {
+    /// True if this identity sent it, false if it was received. Drives which
+    /// side of the chat it is drawn on.
+    pub mine: bool,
+    /// The message kind, so the chat draws a custom component per type:
+    /// `message` (text) or `invitation`.
+    pub kind: String,
+    /// The text, for a `message`. `None` for an invitation.
+    pub body: Option<String>,
+    /// When it was written, unix seconds.
+    pub sent_at: u64,
+    /// The device it was written by — the proven signer for a received message.
+    pub from_device: String,
+    /// Whether the carrier's word matched the proof, for a received message.
+    /// Always true for a sent one.
+    pub provenance_agrees: bool,
+}
 use crate::client::heads::McpBindingOutcome;
 use crate::client::host::HostContext;
 use crate::client::library::{LaunchTicket, LibraryEntry, WorldStanding};
@@ -59,6 +140,9 @@ pub struct App {
     /// Self-hosted receiver enrollment, assignments, and health. `None` until
     /// the identity daemon's display service has answered once.
     display: Option<lait::control::DisplayCoordinatorView>,
+    /// This machine as a screen. `None` is not Big Picture; `Some` is, whether
+    /// or not it has drawn anything yet.
+    presentation: Option<Presentation>,
     /// The last MCP binding authored or previewed. Held because a preview is
     /// only useful if it stays on screen long enough to be read.
     mcp: Option<McpBindingOutcome>,
@@ -71,6 +155,9 @@ pub struct App {
     space: Option<SpaceView>,
     /// The identity's address book. `None` until the first successful read.
     book: Option<BookSnapshot>,
+    /// This identity's correspondence, once read. `None` before the first read —
+    /// loading, not an empty mailbox.
+    correspondence: Option<Correspondence>,
     /// What passive presence sampling last measured. `None` until a pass has
     /// run; a pass that could not run leaves the last measurement in place,
     /// under the staleness the model already wears.
@@ -158,7 +245,10 @@ impl App {
             Update::Heads(heads) => self.heads = heads,
             Update::Context(context) => self.absorb_context(*context),
             Update::Display(display) => self.display = Some(*display),
+            Update::Presentation(presentation) => self.absorb_presentation(*presentation),
+            Update::PresentationEnded => self.presentation = None,
             Update::Book(book) => self.book = Some(book),
+            Update::Correspondence(correspondence) => self.correspondence = Some(correspondence),
             Update::Presence(presence) => self.presence = Some(presence),
             Update::Signal(signal) => self.consume(&signal),
             Update::Done { key, outcome } => {
@@ -347,6 +437,29 @@ impl App {
         self.display.as_ref()
     }
 
+    pub fn presentation(&self) -> Option<&Presentation> {
+        self.presentation.as_ref()
+    }
+
+    /// Keep the last verified render across a failed re-ask, and only for the
+    /// *same* selection.
+    ///
+    /// A screen that has been showing a program should not go dark because one
+    /// re-ask timed out; it should say it is stale. But a selection that
+    /// changed has no claim on the previous one's pixels — inheriting them
+    /// would draw one program under another program's name, which is worse
+    /// than an empty screen because it is legible and wrong.
+    fn absorb_presentation(&mut self, mut next: Presentation) {
+        if next.rendered.is_none() && next.selection.is_some() {
+            if let Some(held) = self.presentation.as_ref() {
+                if held.selection == next.selection {
+                    next.rendered.clone_from(&held.rendered);
+                }
+            }
+        }
+        self.presentation = Some(next);
+    }
+
     pub fn mcp(&self) -> Option<&McpBindingOutcome> {
         self.mcp.as_ref()
     }
@@ -369,6 +482,14 @@ impl App {
 
     pub fn book(&self) -> Option<&BookSnapshot> {
         self.book.as_ref()
+    }
+
+    pub fn correspondence(&self) -> Option<&Correspondence> {
+        self.correspondence.as_ref()
+    }
+
+    pub fn absorb_correspondence(&mut self, correspondence: Correspondence) {
+        self.correspondence = Some(correspondence);
     }
 
     pub fn presence(&self) -> Option<&crate::client::presence::PresenceMap> {
@@ -527,6 +648,47 @@ fn describe_exit(report: &ExitReport) -> String {
         said = format!("{said} — still running: {}", left.join(", "));
     }
     said
+}
+
+/// This machine acting as a screen.
+///
+/// The *member* profile: the client holds the Space these pixels came from, so
+/// there is no pairing, no credential and no assignment behind this — only a
+/// choice made here, which is why leaving is always available and revocation is
+/// simply the Query no longer answering.
+#[derive(Debug, Clone)]
+pub struct Presentation {
+    /// What this screen was told to show, or `None` for a screen that has been
+    /// entered and not yet pointed at anything.
+    ///
+    /// Being a screen and showing something are separate facts. Requiring a
+    /// selection to enter would make the mode a property of the content, which
+    /// is backwards: a person presses the control to *become* a screen, and
+    /// choosing is what they do once they are one.
+    pub selection: Option<PresentationSelection>,
+    /// The last successful render. Kept across a failed refresh, so a screen
+    /// that briefly could not be re-asked keeps showing what it last verified
+    /// instead of going blank on a stumble.
+    pub rendered: Option<lait::control::DisplayPresentationView>,
+    /// Why the last attempt did not answer. Held *beside* `rendered` rather
+    /// than replacing it: "this is stale and here is why" and "there is nothing
+    /// to show" are different things to tell somebody standing in front of a
+    /// screen.
+    pub failure: Option<String>,
+}
+
+/// What a member screen was told to show. Exactly the tuple an assignment
+/// commits, minus everything an assignment adds for a stranger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationSelection {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    /// The package's own input, uncanonicalized. The daemon hands it to the
+    /// package's canonicalizer; nothing here inspects it.
+    pub input: String,
+    /// What to call this on screen while it is loading or refusing.
+    pub title: String,
 }
 
 #[cfg(test)]

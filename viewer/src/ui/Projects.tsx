@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowRight } from "lucide-react";
 
 import { rpc } from "../api";
+import { boardView } from "../projectStore";
 import type { BoardView, ProjectDto } from "../types";
 import { ApplicationState, LoadingState } from "./AppState";
 import { catalogColor } from "./colors";
@@ -36,13 +37,17 @@ export function Projects({
   useEffect(() => {
     let alive = true;
     setBoards(null);
-    void Promise.allSettled(projects.map((project) => rpc(spaceId, { cmd: "board", project: project.key })))
+    void Promise.allSettled(projects.map((project) => rpc(spaceId, {
+      cmd: "board",
+      project: project.key,
+      page: { limit: 100, cursor: null },
+    })))
       .then((results) => {
         if (!alive) return;
         const next = new Map<string, BoardView>();
         for (const result of results) {
           if (result.status === "fulfilled" && result.value.kind === "board") {
-            next.set(result.value.project.id, result.value);
+            next.set(result.value.project.id, boardView(result.value));
           }
         }
         setBoards(next);

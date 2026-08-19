@@ -280,15 +280,20 @@ mod tests {
             .query(runtime::world::Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
-                payload: contract::IssueQuery::Snapshot.to_json(),
+                payload: contract::IssueQuery::Projects {
+                    page: contract::PageRequest {
+                        limit: 1,
+                        cursor: None,
+                    },
+                }
+                .to_json(),
                 publication: None,
             })
-            .expect("snapshot");
-        let value: serde_json::Value =
-            serde_json::from_slice(&projection.bytes).expect("snapshot JSON");
-        let count = value["catalog"]["projects"]
-            .as_object()
-            .map_or(0, serde_json::Map::len);
+            .expect("project page");
+        let page: contract::Page<issues::dto::ProjectDto> =
+            serde_json::from_slice(&projection.bytes).expect("project page JSON");
+        let count = usize::try_from(page.exact_total.unwrap_or(page.items.len() as u64))
+            .unwrap_or(usize::MAX);
         let _ = station.vacate();
         count
     }

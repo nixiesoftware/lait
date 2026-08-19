@@ -29,7 +29,18 @@ use serde::{Deserialize, Serialize};
 pub const MAX_HEADS: usize = 256;
 
 /// The encoded generation of the causal artifact formats.
-pub const CAUSAL_FORMAT_VERSION: u8 = 1;
+pub const CAUSAL_FORMAT_VERSION: u8 = 2;
+
+/// Protected Body-key epoch coordinate carried by every artifact reference.
+/// The epoch is part of the signed closure, allowing a publication reader to
+/// pin the exact opening capability without reading/decrypting every object at
+/// snapshot construction time.
+pub const ARTIFACT_EPOCH_ID_LEN: usize = 16;
+
+/// A canonical Body image cannot exceed the protected artifact envelope.
+/// `Material::plaintext_size` is an authenticated admission hint and is still
+/// checked against the decoded image before callers allocate from it.
+pub const MAX_MATERIAL_PLAINTEXT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One operation's identity: who wrote it and where in their sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -418,6 +429,7 @@ impl CheckpointPolicy {
 pub struct ArtifactRef {
     pub hash: [u8; 32],
     pub len: u64,
+    pub epoch: [u8; ARTIFACT_EPOCH_ID_LEN],
 }
 
 /// What a collaborative Body's head commits: enough to reconstruct current
@@ -441,6 +453,12 @@ pub struct Material {
     pub history_root: Option<[u8; 32]>,
     pub history_count: u64,
     pub version: Version,
+    /// Signed upper/accounting coordinate for the canonical Body image.
+    /// Atomic/immutable Bodies publish their exact canonical byte length;
+    /// collaborative material may publish a conservative closure-derived
+    /// bound. Resolvers never trust this as an allocation instruction and
+    /// verify the decoded image before returning it.
+    pub plaintext_size: u64,
 }
 
 impl Material {
@@ -464,6 +482,9 @@ impl Material {
     pub fn validate(&self) -> Result<(), Invalid> {
         if self.format_version != CAUSAL_FORMAT_VERSION {
             return Err(Invalid::NonCanonical);
+        }
+        if self.plaintext_size > MAX_MATERIAL_PLAINTEXT_BYTES {
+            return Err(Invalid::Bounds);
         }
         let policy = CheckpointPolicy::default();
         if !policy.admits(

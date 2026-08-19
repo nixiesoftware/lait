@@ -4,8 +4,9 @@
 #
 # ## Why this exists
 #
-# lait is offered as `MIT OR Apache-2.0`, and that offer is only meaningful if
-# the closure under it is permissive too. `cargo deny check licenses` already
+# lait is offered as `PolyForm-Noncommercial-1.0.0`. That the closure beneath it
+# stays permissive is what keeps the offer ours to make — a copyleft dependency
+# would impose terms on top of it. `cargo deny check licenses` already
 # fails the build on a denied licence — that is the gate. This is the *record*:
 # the list a person who receives a lait binary is owed, naming what is in it and
 # under what terms.
@@ -87,7 +88,7 @@ out = []
 out.append("# Third-party notices")
 out.append("")
 out.append(
-    "lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, "
+    "lait is offered under `PolyForm-Noncommercial-1.0.0`. It is built from the crates below, "
     "each offered under its own terms. This file is generated from `Cargo.lock` by "
     "`ci/third-party-notices.sh` and CI fails when it stops matching — do not edit it "
     "by hand."

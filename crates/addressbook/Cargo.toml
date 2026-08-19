@@ -4,7 +4,7 @@ version = "0.7.11"
 edition = "2021"
 rust-version = "1.92"
 description = "Identity-scoped address book: a typed projection over one Fabric Body. A leaf — it names fabric and mechanics, never daemon, Runtime, Replica, World, or a product."
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [dependencies]

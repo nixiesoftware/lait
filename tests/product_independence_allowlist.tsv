@@ -20,17 +20,23 @@
 # becomes its own crate this file moves to the binary and the library is
 # product-free outright, at which point these rows go.
 src/composition.rs	CatalogScope	D
+src/composition.rs	ImplementationCoordinate	D
 src/composition.rs	InitialProject	D
+src/composition.rs	MOUNT	D
 src/composition.rs	IssuesCallHandler	D
 src/composition.rs	PROGRAM_SCHEMA_VERSION	D
 src/composition.rs	Programs	D
 src/composition.rs	SignageCallHandler	D
+src/composition.rs	UpgradeContext	D
+src/composition.rs	assess_upgrade	D
 src/composition.rs	bootstrap_tracker	D
 src/composition.rs	for_space	D
 src/composition.rs	founder_capabilities	D
 src/composition.rs	founder_policy	D
 src/composition.rs	implementation_id	D
 src/composition.rs	issues	D
+src/composition.rs	issues_app	D
+src/composition.rs	migrator_implementation	D
 src/composition.rs	new	D
 src/composition.rs	observation	D
 src/composition.rs	package	D
@@ -39,5 +45,6 @@ src/composition.rs	ring_state	D
 src/composition.rs	signage	D
 src/composition.rs	signage_app	D
 src/composition.rs	status	D
+src/composition.rs	upgrade_step	D
 src/composition.rs	verify_spec	D
 src/composition.rs	world_id	D

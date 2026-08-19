@@ -3,7 +3,7 @@ import { Dialog, Divider, DropdownMenu, DropdownMenuItem, Switch } from "@astryx
 import { useEffect, useRef, useState } from "react";
 import { LayoutTemplate, Maximize2, Minimize2, Trash2, X } from "lucide-react";
 
-import { rpc } from "../api";
+import { useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, loadFields, saveDraft, saveFields } from "../core/drafts";
 import { plainDocument } from "../core/document";
 import { loadTemplates, removeTemplate, saveTemplate, type IssueTemplate } from "../core/templates";
@@ -37,12 +37,9 @@ import { short } from "./time";
  * underneath as pills you can ignore. Filing an issue should cost a title and
  * Enter; everything else is optional and stays out of the way until wanted.
  *
- * One wrinkle worth naming: `issue_new` takes title/body/priority/labels/assignees
- * but **not status** — a new issue lands in `DEFAULT_STATUS` by construction. So
- * when you open the composer from a column's `+`, honouring that column costs a
- * second request (`issue_edit`), and therefore a second commit and a second
- * activity row (S§7.1). That is an honest record of what happened — filed, then
- * moved — and it only happens when you asked for a non-default column.
+ * Creation, initial workflow state, labels and assignment enter one bounded
+ * ChangeSet, so the first painted operation and its eventual exact publication
+ * describe one durable fact rather than a create/edit adapter sequence.
  */
 export function NewIssue({
   spaceId,
@@ -87,6 +84,7 @@ export function NewIssue({
   onError: (m: string) => void;
   onCreated: (message: string) => void;
 }) {
+  const projectStore = useProjectViewerStore();
   const draftSubject = `new:${projectKey}`;
   // Read once, at mount. The composer is remounted by the expand/collapse hop,
   // and this is what carries the whole draft — prose and pills — across it.
@@ -124,7 +122,6 @@ export function NewIssue({
     priority !== "none" || project !== projectKey);
 
   const state = states.find((s) => s.id === status) ?? null;
-  const landsIn = states[0]?.id ?? "backlog";
 
   /**
    * The title takes focus, and `autoFocus` is not enough to give it.
@@ -249,10 +246,10 @@ export function NewIssue({
     setFailure("");
     let created: string | null = null;
     try {
-      const r = await rpc(spaceId, {
-        cmd: "issue_new",
+      created = await projectStore.createIssue(spaceId, {
         title: t,
         body: plainDocument(body.trim()),
+        status,
         ...(priority !== "none" ? { priority } : {}),
         ...(picked.length ? { labels: picked } : {}),
         ...(assignees.length ? { assignees } : {}),
@@ -272,14 +269,8 @@ export function NewIssue({
         // every time. `board` learned this same lesson (see `useProjectBoard`);
         // this is the write side of it.
         project,
-        ...(due ? { due } : {}),
+        ...(due ? { due: Math.floor(Date.parse(`${due}T00:00:00Z`) / 1_000) } : {}),
       });
-      if (r.kind === "ref") created = r.reff;
-      // `issue_new` can't set status, so honour a non-default column with a
-      // follow-up rather than pretending the field exists.
-      if (r.kind === "ref" && status !== landsIn) {
-        await rpc(spaceId, { cmd: "issue_edit", reff: r.reff, status });
-      }
       if (again) {
         // "Create more": keep the scaffolding, clear the prose. Filing five
         // related issues shouldn't mean re-picking the same labels five times.
@@ -683,10 +674,7 @@ export function NewIssue({
         onCancel={() => setNewLabel(null)}
         onCreate={(labelName, color) => {
           setNewLabel(null);
-          // Register the label with its colour, then add it to the picked set —
-          // `issue_new` attaches by name, so the label already carries its colour
-          // by the time the issue is created.
-          void rpc(spaceId, { cmd: "label_new", name: labelName, color })
+          void projectStore.createLabel(spaceId, labelName, color)
             .then(() => setPicked((p) => (p.includes(labelName) ? p : [...p, labelName])))
             .catch((e) => onError(e instanceof Error ? e.message : String(e)));
         }}

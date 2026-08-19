@@ -66,4 +66,8 @@ mod manifest_atomicity_tests;
 #[cfg(test)]
 mod manifest_fixture_tests;
 
-pub use replica::{generation, GenerationReader, ReadGeneration, ReadSnapshot, Replica};
+pub use replica::{
+    generation, BodyImageBounds, BodyImageFailure, BodyImageId, BodyImagePresence, BodyIx,
+    GenerationFootprint, GenerationReader, GenerationSourceFootprint, ReadGeneration, ReadSnapshot,
+    ReceiptAbsence, ReceiptCheck, ReceiptFootprint, ReceiptReader, Replica,
+};

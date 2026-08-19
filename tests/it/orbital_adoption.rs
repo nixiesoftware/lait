@@ -55,6 +55,27 @@ impl AuthorityView for ExampleAuthority {
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![3]),
         })
     }
+
+    /// Which implementation is active for each hosted World.
+    ///
+    /// A package is registered under an exact reviewed identity and looked up
+    /// by `(world, active_implementation)`, so the authority has to name the
+    /// same identity the registration did. The trait default answers
+    /// `[0u8; 32]` for every World, which matches nothing here and makes both
+    /// packages report as an unknown World.
+    fn active_implementation(
+        &self,
+        world: &replica::body::WorldId,
+        _authority_frontier: &AuthorityFrontier,
+    ) -> Result<Option<[u8; 32]>, String> {
+        Ok(Some(match world.as_str() {
+            "dev.example.files" => [7u8; 32],
+            "dev.example.notes" => [8u8; 32],
+            // Everything else in this file registers bare, which is the
+            // zero identity, and the two must keep agreeing.
+            _ => [0u8; 32],
+        }))
+    }
 }
 
 /// An independent example World: a single tally Body; an intent increments it
@@ -86,11 +107,12 @@ impl TallyWorld {
     fn body(&self) -> BodyKey {
         BodyKey::new(self.id.clone(), self.body_id.clone())
     }
-    fn current(&self, ctx: &Context<'_>) -> u64 {
-        ctx.read_body(&self.body())
-            .and_then(|b| String::from_utf8(b).ok())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
+    fn current(&self, ctx: &Context<'_>) -> Result<u64, Rejection> {
+        let Some(bytes) = ctx.read_body(&self.body())? else {
+            return Ok(0);
+        };
+        let value = std::str::from_utf8(&bytes).map_err(|_| Rejection::StateCorrupt)?;
+        value.parse().map_err(|_| Rejection::StateCorrupt)
     }
 }
 
@@ -102,7 +124,7 @@ impl World for TallyWorld {
         &self.schemas
     }
     fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
-        let next = self.current(ctx) + intent.payload.len() as u64;
+        let next = self.current(ctx)? + intent.payload.len() as u64;
         let key = self.body();
         Ok(Effect {
             content_refs: Vec::new(),
@@ -124,7 +146,7 @@ impl World for TallyWorld {
             demand: any_demand(),
             schema: SchemaId::parse("tally").unwrap(),
             schema_version: 1,
-            bytes: self.current(ctx).to_string().into_bytes(),
+            bytes: self.current(ctx)?.to_string().into_bytes(),
             frontier: ReplicaFrontier::EMPTY, // overwritten by Runtime
             publication: None,
         })

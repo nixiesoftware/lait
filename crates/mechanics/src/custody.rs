@@ -374,6 +374,154 @@ impl UnlockKey {
 /// Argon2id over the passphrase. Memory-hard on purpose: a share package is
 /// meant to be carried and stored, so its passphrase slot must survive an
 /// attacker who has the file and unlimited offline guesses.
+/// Current custodied-secret format version.
+pub const CUSTODIED_VERSION: u16 = 1;
+
+/// Domain for the purpose-bound payload key.
+const CUSTODIED_DOMAIN: &str = "lait/custodied/1";
+
+/// A secret held under several independent unlock paths, bound to a purpose.
+///
+/// # Why this is not a [`Package`]
+///
+/// [`Package`] carries an *authority share*, and binds itself to a space, an
+/// authority, a ceremony, a principal and a leaf — the comparisons
+/// [`Package::verify_and_open`] makes before an indispensable share is
+/// installed. A secret that is none of those things has nothing to compare, so
+/// putting one in that envelope would mean inventing a space and a holder for
+/// it, and every one of those checks would become theatre performed against
+/// values the writer chose.
+///
+/// What generalises is the other half, and it is the half the module exists
+/// for: **one data-encryption key, wrapped by several independent
+/// [`KeySlot`]s**, so adding an unlock path re-encrypts nothing and losing one
+/// costs convenience rather than the secret. Any secret whose only protection
+/// is the operating-system profile has the accidental-founder problem this
+/// module was written to name, whether or not it is an authority share.
+///
+/// # What it binds instead
+///
+/// A `purpose` string, mixed into the payload key rather than merely recorded
+/// beside it. A secret sealed for one purpose does not decrypt under another,
+/// so misfiling is a decrypt failure rather than a policy question — the same
+/// property [`crypto::seal_to_bound`] buys by putting its context in `info`,
+/// and the reason a caller cannot open a display coordinator's key by asking
+/// for it under some other name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Custodied {
+    pub version: u16,
+    /// Recorded for diagnosis. It is *not* what makes opening safe — the key
+    /// derivation is — so a reader that trusts this field alone has learned
+    /// nothing an author could not have written.
+    pub purpose: String,
+    encrypted_payload: Vec<u8>,
+    key_slots: Vec<KeySlot>,
+}
+
+impl Custodied {
+    /// Seal `secret` under a fresh DEK wrapped by every slot in `slot_specs`.
+    pub fn seal(purpose: &str, secret: &[u8], slot_specs: &[SlotSpec]) -> Result<Self> {
+        if purpose.is_empty() {
+            return Err(anyhow!("a custodied secret needs a purpose to bind to"));
+        }
+        if slot_specs.is_empty() {
+            return Err(anyhow!("a custodied secret needs at least one unlock slot"));
+        }
+        let dek = crypto::random_key().map_err(|failure| anyhow!("protection: {failure:?}"))?;
+        let encrypted_payload = crypto::aead_encrypt(&payload_key(purpose, &dek), secret)
+            .map_err(|failure| anyhow!("protection: {failure:?}"))?;
+        let key_slots = slot_specs
+            .iter()
+            .map(|spec| spec.wrap(&dek))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Custodied {
+            version: CUSTODIED_VERSION,
+            purpose: purpose.to_string(),
+            encrypted_payload,
+            key_slots,
+        })
+    }
+
+    /// Open the secret with one unlock method, for the purpose the caller
+    /// expects.
+    ///
+    /// `purpose` is the caller's *expectation*, not the envelope's claim: it is
+    /// mixed into the key, so naming the wrong one fails to decrypt even though
+    /// the slot opened.
+    pub fn open(&self, purpose: &str, key: &UnlockKey) -> Result<Vec<u8>> {
+        let dek = self.unwrap_dek(key)?;
+        crypto::aead_decrypt(&payload_key(purpose, &dek), &self.encrypted_payload).ok_or_else(
+            || {
+                anyhow!(
+                    "the custodied secret did not decrypt — wrong key, wrong purpose, or corrupt"
+                )
+            },
+        )
+    }
+
+    /// Add an unlock path, proving one already held.
+    ///
+    /// The payload is untouched: only the DEK is re-wrapped, which is the whole
+    /// reason slots are independent. Admitting a path that is already present
+    /// is refused rather than silently duplicated, so a slot list stays a set of
+    /// distinct answers to "who can open this".
+    pub fn admit(&mut self, key: &UnlockKey, spec: &SlotSpec) -> Result<()> {
+        let dek = self.unwrap_dek(key)?;
+        let slot = spec.wrap(&dek)?;
+        if self.key_slots.iter().any(|held| same_path(held, &slot)) {
+            return Err(anyhow!(
+                "this custodied secret already has a {} slot for that holder",
+                slot.kind()
+            ));
+        }
+        self.key_slots.push(slot);
+        Ok(())
+    }
+
+    /// Whether any slot survives leaving this machine. A secret with no
+    /// portable slot is one profile loss from gone.
+    pub fn has_portable_slot(&self) -> bool {
+        self.key_slots.iter().any(KeySlot::is_portable)
+    }
+
+    /// The unlock paths this secret holds, for status output.
+    pub fn slot_kinds(&self) -> Vec<&'static str> {
+        self.key_slots.iter().map(KeySlot::kind).collect()
+    }
+
+    fn unwrap_dek(&self, key: &UnlockKey) -> Result<SpaceKey> {
+        if self.version != CUSTODIED_VERSION {
+            return Err(anyhow!(
+                "custodied secret version {} is not supported by this build",
+                self.version
+            ));
+        }
+        self.key_slots
+            .iter()
+            .find_map(|slot| key.unwrap(slot))
+            .ok_or_else(|| anyhow!("no slot in this secret can be opened with that key"))
+    }
+}
+
+/// Two slots are the same *path* when losing one would not leave the other —
+/// which is per-holder for a recovery key and per-kind for the rest.
+fn same_path(held: &KeySlot, candidate: &KeySlot) -> bool {
+    match (held, candidate) {
+        (KeySlot::RecoveryKey { recipient: a, .. }, KeySlot::RecoveryKey { recipient: b, .. }) => {
+            a == b
+        }
+        (KeySlot::WindowsDpapi { .. }, KeySlot::WindowsDpapi { .. }) => true,
+        (KeySlot::Passphrase { .. }, KeySlot::Passphrase { .. }) => true,
+        _ => false,
+    }
+}
+
+/// Bind the purpose into the key that encrypts the payload, so a secret sealed
+/// for one purpose is undecryptable under another.
+fn payload_key(purpose: &str, dek: &SpaceKey) -> SpaceKey {
+    blake3::derive_key(&format!("{CUSTODIED_DOMAIN} {purpose}"), dek.as_slice())
+}
+
 fn derive_passphrase_key(
     passphrase: &str,
     salt: &[u8; 16],
@@ -429,6 +577,151 @@ mod tests {
             index: 1,
         });
         (ws, authority, principal, leaf, payload, group_key)
+    }
+
+    const IDENTIFIER: &str = "lait/display/identifier-key/1";
+
+    #[test]
+    fn a_custodied_secret_survives_losing_one_unlock_path() {
+        let device = crypto::device_from_seed(&[9u8; 32]);
+        let secret = [3u8; 32];
+        let held = Custodied::seal(
+            IDENTIFIER,
+            &secret,
+            &[
+                SlotSpec::WindowsDpapi {
+                    wrapped_dek: b"a profile-bound convenience".to_vec(),
+                },
+                SlotSpec::RecoveryKey {
+                    recipient: device.clone(),
+                },
+            ],
+        )
+        .unwrap();
+
+        // The profile is gone: its slot cannot be unwrapped, and the secret is
+        // still here. That is the whole point of the split.
+        assert_eq!(
+            held.open(
+                IDENTIFIER,
+                &UnlockKey::RecoveryKey {
+                    seed: [9u8; 32],
+                    me: device,
+                },
+            )
+            .unwrap(),
+            secret
+        );
+        assert!(held.has_portable_slot());
+    }
+
+    #[test]
+    fn a_secret_sealed_for_one_purpose_does_not_open_as_another() {
+        let device = crypto::device_from_seed(&[11u8; 32]);
+        let held = Custodied::seal(
+            IDENTIFIER,
+            &[5u8; 32],
+            &[SlotSpec::RecoveryKey {
+                recipient: device.clone(),
+            }],
+        )
+        .unwrap();
+        let key = UnlockKey::RecoveryKey {
+            seed: [11u8; 32],
+            me: device,
+        };
+
+        // The slot opens — the caller genuinely holds it — and the payload
+        // still refuses, because the purpose is in the key rather than beside
+        // it. A misfiling is a decrypt failure, not a policy question.
+        assert!(held.open("lait/some-other-secret/1", &key).is_err());
+        assert!(held.open(IDENTIFIER, &key).is_ok());
+    }
+
+    #[test]
+    fn admitting_a_path_re_wraps_the_key_and_never_the_payload() {
+        let first = crypto::device_from_seed(&[13u8; 32]);
+        let second = crypto::device_from_seed(&[17u8; 32]);
+        let secret = [23u8; 32];
+        let mut held = Custodied::seal(
+            IDENTIFIER,
+            &secret,
+            &[SlotSpec::RecoveryKey {
+                recipient: first.clone(),
+            }],
+        )
+        .unwrap();
+        let ciphertext = held.encrypted_payload.clone();
+
+        held.admit(
+            &UnlockKey::RecoveryKey {
+                seed: [13u8; 32],
+                me: first,
+            },
+            &SlotSpec::RecoveryKey {
+                recipient: second.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            held.encrypted_payload, ciphertext,
+            "admitting a reader re-encrypted the secret"
+        );
+        assert_eq!(
+            held.open(
+                IDENTIFIER,
+                &UnlockKey::RecoveryKey {
+                    seed: [17u8; 32],
+                    me: second,
+                },
+            )
+            .unwrap(),
+            secret
+        );
+    }
+
+    #[test]
+    fn a_stranger_cannot_admit_a_path() {
+        let holder = crypto::device_from_seed(&[29u8; 32]);
+        let stranger = crypto::device_from_seed(&[31u8; 32]);
+        let mut held = Custodied::seal(
+            IDENTIFIER,
+            &[37u8; 32],
+            &[SlotSpec::RecoveryKey { recipient: holder }],
+        )
+        .unwrap();
+
+        let refused = held.admit(
+            &UnlockKey::RecoveryKey {
+                seed: [31u8; 32],
+                me: stranger.clone(),
+            },
+            &SlotSpec::RecoveryKey {
+                recipient: stranger,
+            },
+        );
+        assert!(refused.is_err(), "a stranger admitted itself");
+        assert_eq!(held.slot_kinds(), vec!["recovery-key"]);
+    }
+
+    #[test]
+    fn a_dpapi_only_secret_reports_itself_as_one_profile_from_gone() {
+        let held = Custodied::seal(
+            IDENTIFIER,
+            &[41u8; 32],
+            &[SlotSpec::WindowsDpapi {
+                wrapped_dek: b"only this profile".to_vec(),
+            }],
+        )
+        .unwrap();
+        assert!(!held.has_portable_slot());
+    }
+
+    #[test]
+    fn a_custodied_secret_needs_a_purpose_and_a_slot() {
+        assert!(Custodied::seal("", &[1u8; 32], &[]).is_err());
+        assert!(Custodied::seal(IDENTIFIER, &[1u8; 32], &[]).is_err());
     }
 
     #[test]

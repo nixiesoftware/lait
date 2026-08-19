@@ -143,8 +143,38 @@ struct Inner {
     /// and never will be — an MCP head is spawned by an agent's harness, so
     /// there is no handle for this map to hold.
     heads: StdMutex<BTreeMap<String, OwnedHead>>,
+    /// Head keys with a spawn in flight.
+    ///
+    /// The map alone cannot exclude a second spawn, because `spawn_head` checks it,
+    /// then releases the lock for up to `READY_TIMEOUT` while a process starts and
+    /// announces itself, then inserts. Two concurrent asks for one World both passed
+    /// the check, both started a real head, and the second `insert` dropped the first
+    /// `OwnedHead` — which neither kills nor waits, so it became an orphan holding a
+    /// port and a live run credential, unlistable and unstoppable.
+    ///
+    /// A reservation taken under the same lock as the check closes the window
+    /// without holding a lock across the wait. This is what actually prevents two
+    /// heads for one World; keying by mount was necessary and never sufficient.
+    starting: StdMutex<std::collections::BTreeSet<String>>,
     start_timeout: Duration,
     stop_timeout: Duration,
+}
+
+/// Holds a head key's spawn reservation, and gives it back however the spawn ends.
+///
+/// A guard rather than a `remove` at each exit, because `spawn_head` has several —
+/// the announce timeout, a spawn error, and success — and the one that would be
+/// forgotten is the one that matters: a reservation left behind by a failed spawn
+/// makes that World unstartable for the life of the process.
+struct Reservation<'a> {
+    starting: &'a StdMutex<std::collections::BTreeSet<String>>,
+    id: String,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        lock_recovering(self.starting).remove(&self.id);
+    }
 }
 
 /// The sampler is owned by the supervisor it samples, so it cannot outlive one.
@@ -419,6 +449,7 @@ impl Supervisor {
                 observation: Mutex::new(()),
                 observer: StdMutex::new(None),
                 heads: StdMutex::new(BTreeMap::new()),
+                starting: StdMutex::new(std::collections::BTreeSet::new()),
                 start_timeout,
                 stop_timeout,
             }),
@@ -1354,13 +1385,18 @@ impl Supervisor {
     /// trying to replace. That is the tax this whole initiative exists to
     /// remove, and a head started from the workspace target would reintroduce
     /// it on the one process a person is most likely to leave running.
-    pub async fn start_head(&self, device_id: &str) -> Result<HeadFacts, SupervisorError> {
+    pub async fn start_head(
+        &self,
+        device_id: &str,
+        world: &str,
+    ) -> Result<HeadFacts, SupervisorError> {
         let device = self.device(device_id).await?;
         let home = device.home.clone();
         self.spawn_head(
-            format!("{device_id}-browser"),
+            format!("{device_id}-browser:{world}"),
             Some(device_id.to_owned()),
             Some(home),
+            Some(world),
         )
         .await
     }
@@ -1380,19 +1416,58 @@ impl Supervisor {
     pub async fn start_identity_head(
         &self,
         home: Option<&Path>,
+        world: &str,
     ) -> Result<HeadFacts, SupervisorError> {
-        let id = identity_head_id(home);
-        // A head that is already up for this identity *is* the answer. Starting
-        // a second would work and would still be wrong: two heads mean two run
+        let id = identity_head_id(home, world);
+        // A head that is already up for this identity *is* the answer. Starting a
+        // second would work and would still be wrong: two heads mean two run
         // credentials and two ports for one identity, and the second is the one
         // nothing later can find.
-        let running = lock_recovering(&self.inner.heads)
-            .get(&id)
-            .map(|head| head.facts().clone());
-        if let Some(existing) = running {
+        //
+        // **"Already up" is polled, not assumed, and that is a fix rather than a
+        // refinement.** Exited heads now stay listed so a person can see that the
+        // thing they opened died — and this lookup returned the entry
+        // unconditionally, so the two composed into: a World whose head crashed
+        // could never be opened again, because every `Open` handed back the dead
+        // head's stale URL. Two correct changes, one broken composition, and a
+        // symptom that would have read as "the browser opens on nothing".
+        //
+        // Three answers, because there are three states:
+        let existing = {
+            let mut heads = lock_recovering(&self.inner.heads);
+            // Polled once, and the answer decides all three branches.
+            let polled = heads
+                .get_mut(&id)
+                .map(|head| (head.refresh(), head.facts().clone()));
+            match polled {
+                None => None,
+                // Alive. Reuse it, which is the whole point of the key.
+                Some((crate::HeadState::Running, facts)) => Some(facts),
+                // Gone. Take it out so the spawn below replaces it. Safe precisely
+                // because it is gone: dropping the handle cannot orphan a process
+                // `try_wait` has already reaped.
+                Some((crate::HeadState::Exited { .. }, _)) => {
+                    heads.remove(&id);
+                    None
+                }
+                // Unknown: neither reuse nor replace. Reusing hands out a URL this
+                // process cannot vouch for; replacing might start a second head
+                // while the first is still serving. Saying so is the only honest
+                // answer, and it is the arm that exists because the state has three
+                // values rather than two.
+                Some((crate::HeadState::Unknown { why }, _)) => {
+                    return Err(SupervisorError::Internal(anyhow::anyhow!(
+                        "head '{id}' could not be polled, so it is neither reused nor \
+                         replaced: {why}"
+                    )))
+                }
+            }
+        };
+        if let Some(existing) = existing {
             return Ok(existing);
         }
-        self.spawn_head(id, None, home.map(Path::to_path_buf)).await
+        self.spawn_head(id, None, home.map(Path::to_path_buf), Some(world))
+            .await
     }
 
     async fn spawn_head(
@@ -1400,24 +1475,47 @@ impl Supervisor {
         id: String,
         device: Option<String>,
         home: Option<PathBuf>,
+        world: Option<&str>,
     ) -> Result<HeadFacts, SupervisorError> {
+        // Check and reserve together, under one lock, so a concurrent ask cannot
+        // pass the check while this one is still starting a process.
         {
             let heads = lock_recovering(&self.inner.heads);
+            let mut starting = lock_recovering(&self.inner.starting);
             if heads.contains_key(&id) {
                 return Err(SupervisorError::AlreadyExists(format!(
                     "head '{id}' is already running"
                 )));
             }
+            if !starting.insert(id.clone()) {
+                return Err(SupervisorError::AlreadyExists(format!(
+                    "head '{id}' is already starting"
+                )));
+            }
         }
+        // Released on every exit from here, including the error paths — a
+        // reservation that outlived a failed spawn would make that World
+        // permanently unstartable.
+        let _reservation = Reservation {
+            starting: &self.inner.starting,
+            id: id.clone(),
+        };
 
         let executable = self.inner.executable.clone();
         let facts_id = id.clone();
         let owner = device.clone();
+        let world = world.map(str::to_owned);
         // Spawning and waiting for a readiness line are blocking, and both must
         // stay off whatever runtime thread asked: a head that takes its full
         // startup budget would otherwise stall every other task on that thread.
         let head = tokio::task::spawn_blocking(move || {
-            start_browser(&executable, facts_id, owner, home.as_deref())
+            start_browser(
+                &executable,
+                facts_id,
+                owner,
+                home.as_deref(),
+                world.as_deref(),
+            )
         })
         .await
         .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head start: {error}")))?
@@ -1435,10 +1533,30 @@ impl Supervisor {
     /// rather than started, and listing one would mean reading an agent
     /// harness's configuration — which is CLIENT-20's other half and belongs to
     /// whoever owns that file, not here.
+    /// Every head this supervisor started, polled rather than remembered.
+    ///
+    /// **It polls.** That is the fix, not a detail: this used to clone facts
+    /// recorded at spawn, so a head that had crashed read as running for the rest
+    /// of the process's life and a person could not tell "I stopped it" from "it
+    /// had already died". Devices were polled on every snapshot
+    /// (`refresh_owned_process`); heads were the one lifecycle object here that
+    /// was not.
+    ///
+    /// `&mut` is not needed by callers because the poll happens behind the same
+    /// lock the list is read under — a head cannot be handed out as running and
+    /// then found dead in the same breath.
+    ///
+    /// An exited head stays in the list. Removing it would make a row that died
+    /// indistinguishable from one that was never started, which is the same
+    /// absence-versus-verdict confusion in a different costume.
     pub fn list_heads(&self) -> Vec<HeadFacts> {
-        lock_recovering(&self.inner.heads)
-            .values()
-            .map(|head| head.facts().clone())
+        let mut heads = lock_recovering(&self.inner.heads);
+        heads
+            .values_mut()
+            .map(|head| {
+                head.refresh();
+                head.facts().clone()
+            })
             .collect()
     }
 
@@ -1447,7 +1565,9 @@ impl Supervisor {
     /// The handle is the proof, exactly as it is for a daemon. There is no
     /// pid-based path here at all, which is what makes "no external process can
     /// be stopped" true of heads by construction rather than by check.
-    pub async fn stop_head(&self, id: &str) -> Result<(), SupervisorError> {
+    /// Returns *which* success it was: stopped, or already gone. A caller that
+    /// discards the distinction is choosing to; one that never had it could not.
+    pub async fn stop_head(&self, id: &str) -> Result<crate::heads::Stopped, SupervisorError> {
         let head = lock_recovering(&self.inner.heads).remove(id);
         let head = head.ok_or_else(|| {
             SupervisorError::NotFound(format!(
@@ -1455,12 +1575,27 @@ impl Supervisor {
             ))
         })?;
         let device = head.facts().device.clone();
-        tokio::task::spawn_blocking(move || head.stop())
+        let outcome = tokio::task::spawn_blocking(move || head.stop())
             .await
             .map_err(|error| SupervisorError::Internal(anyhow::anyhow!("join head stop: {error}")))?
             .map_err(SupervisorError::Internal)?;
-        self.publish(EventKind::LifecycleChanged, device, "browser head stopped");
-        Ok(())
+        // The two successes are published differently, because the second one is
+        // news. A person who presses stop on a World that had already crashed
+        // should learn that it crashed, not be told their button worked.
+        self.publish(
+            EventKind::LifecycleChanged,
+            device,
+            match &outcome {
+                crate::heads::Stopped::Stopped => "browser head stopped",
+                crate::heads::Stopped::Forced => {
+                    "browser head did not shut down in time and was forced"
+                }
+                crate::heads::Stopped::WasAlreadyGone { .. } => {
+                    "browser head had already exited before it was stopped"
+                }
+            },
+        );
+        Ok(outcome)
     }
 
     /// The image devices are spawned from, once one has been staged.
@@ -1855,10 +1990,25 @@ fn path_text(path: &Path) -> String {
 /// generated id would let an identity accumulate heads nobody can find again,
 /// and a counter would make "is there already a head for this identity" a scan
 /// of every value instead of a lookup.
-fn identity_head_id(home: Option<&Path>) -> String {
+/// One head per identity *and World*.
+///
+/// The World is in the key because it is in the head: two Worlds are two
+/// processes, so a key that named only the identity would find the first and
+/// hand it back for the second — which is the shared-head behaviour the pin
+/// exists to end, reintroduced one layer up.
+///
+/// **The mount is not optional, and that is the whole guarantee.** It used to be
+/// `Option<&str>` spelled into the key as `world.unwrap_or("default")`, while the
+/// facts recorded what the head *announced*. So one caller asking for `None` and
+/// another asking for `Some("issues")` built two different keys for one World:
+/// two heads, two ports, two run credentials, both listed, both matching the
+/// row — and `stop` reached one of them while the row went on saying Running.
+/// Resolving "which World did they mean" belongs to whoever knows the build, and
+/// a key cannot be built here without an answer.
+fn identity_head_id(home: Option<&Path>, world: &str) -> String {
     match home {
-        Some(home) => format!("identity:{}", path_text(home)),
-        None => "identity:default".to_owned(),
+        Some(home) => format!("identity:{}:{world}", path_text(home)),
+        None => format!("identity:default:{world}"),
     }
 }
 
@@ -2182,6 +2332,112 @@ mod tests {
             supervisor.stop_head("somebody-elses-head").await,
             Err(SupervisorError::NotFound(_))
         ));
+    }
+
+    /// A World whose head died can be opened again.
+    ///
+    /// The regression this exists for was a composition, not a mistake in either
+    /// half. Exited heads stay listed so a person can see that the thing they
+    /// opened died; `start_identity_head` reused whatever was under the key. Put
+    /// together: every `Open` on a crashed World handed back the dead head's stale
+    /// URL, forever, and the symptom would have read as "the browser opens on
+    /// nothing".
+    ///
+    /// Driven through the map directly rather than by spawning a real `lait`: the
+    /// property under test is what the lookup does with a dead entry, and a test
+    /// that needed the binary would be testing the launcher instead.
+    #[tokio::test]
+    async fn a_world_whose_head_died_is_opened_again_rather_than_handed_a_dead_url() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+
+        let id = identity_head_id(Some(directory.path()), "issues");
+        lock_recovering(&supervisor.inner.heads)
+            .insert(id.clone(), crate::heads::dead_head_for_test(id.clone()));
+
+        // It reports as exited rather than running, which is the first half.
+        let listed = supervisor.list_heads();
+        assert_eq!(listed.len(), 1, "a dead head stays listed");
+        assert!(
+            matches!(listed[0].state, crate::HeadState::Exited { .. }),
+            "a dead head reports exited, not running: {:?}",
+            listed[0].state
+        );
+
+        // And the second half: asking for that World does not hand the dead entry
+        // back. It has no `lait` to spawn here, so the *shape* of the answer is what
+        // matters — anything but `Ok(dead facts)` proves the entry was not reused.
+        let asked = supervisor
+            .start_identity_head(Some(directory.path()), "issues")
+            .await;
+        match asked {
+            Ok(facts) => panic!(
+                "a dead head was handed back as the answer: {:?} / {:?}",
+                facts.state, facts.url
+            ),
+            Err(error) => {
+                let said = format!("{error}");
+                assert!(
+                    !said.contains("could not be polled"),
+                    "a dead head must be replaced, not reported unpollable: {said}"
+                );
+            }
+        }
+        assert!(
+            !lock_recovering(&supervisor.inner.heads).contains_key(&id),
+            "the dead entry must be taken out of the map so a spawn can replace it"
+        );
+    }
+
+    /// Two concurrent asks for one World start one head, not two.
+    ///
+    /// The window this closes was 20 seconds wide and invisible to every other test:
+    /// `spawn_head` checked the map, released the lock while a real process started
+    /// and announced itself, then inserted. Two asks both passed the check, both
+    /// started a `lait`, and the second insert dropped the first `OwnedHead` —
+    /// which neither kills nor waits — leaving an orphan holding a port and a live
+    /// run credential, unlistable and unstoppable.
+    ///
+    /// Keying by mount was claimed to have fixed this and did not: the key was never
+    /// the hole. Concurrency was.
+    ///
+    /// Asserted through the reservation rather than by spawning two real heads: the
+    /// property is mutual exclusion over one key, and a test that raced two binaries
+    /// would be slow and would only *usually* interleave the way that matters.
+    #[tokio::test]
+    async fn two_concurrent_asks_for_one_world_do_not_both_start_a_head() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let alive = Arc::new(AtomicBool::new(false));
+        let supervisor = fake_supervisor(alive, directory.path());
+        let id = identity_head_id(Some(directory.path()), "issues");
+
+        // Stand in for a spawn already in flight for this key, which is exactly the
+        // state the old code could not represent.
+        lock_recovering(&supervisor.inner.starting).insert(id.clone());
+
+        let second = supervisor
+            .start_identity_head(Some(directory.path()), "issues")
+            .await;
+        match second {
+            Err(SupervisorError::AlreadyExists(said)) => assert!(
+                said.contains("already starting"),
+                "the second ask must be told a spawn is in flight, not handed a \
+                 second head: {said}"
+            ),
+            other => panic!(
+                "a second concurrent ask was not excluded: {:?}",
+                other.map(|facts| facts.id)
+            ),
+        }
+
+        // And the reservation is given back, so a failed or finished spawn does not
+        // make the World permanently unstartable.
+        lock_recovering(&supervisor.inner.starting).remove(&id);
+        assert!(
+            !lock_recovering(&supervisor.inner.starting).contains(&id),
+            "a reservation must not outlive its spawn"
+        );
     }
 
     /// An owned device is never routed through the unowned path: a handle is

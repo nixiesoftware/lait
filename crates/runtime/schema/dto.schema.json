@@ -1,6 +1,128 @@
 {
   "$defs": {
+    "AffectedBodyDto": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "One affected Body with its complete World namespace.",
+      "properties": {
+        "bodyIdHex": {
+          "type": "string"
+        },
+        "world": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "world",
+        "bodyIdHex"
+      ],
+      "title": "AffectedBodyDto",
+      "type": "object"
+    },
+    "AffectedWorldPublicationDto": {
+      "$defs": {
+        "PublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Portable semantic World publication coordinate.",
+          "properties": {
+            "extractorSchemaDigestHex": {
+              "type": "string"
+            },
+            "implementationDigestHex": {
+              "type": "string"
+            },
+            "manifestRootHex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "manifestRootHex",
+            "implementationDigestHex",
+            "extractorSchemaDigestHex"
+          ],
+          "type": "object"
+        },
+        "WorldPublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Complete Station-local read publication coordinate.",
+          "properties": {
+            "materialization": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "publication": {
+              "$ref": "#/$defs/PublicationIdDto"
+            }
+          },
+          "required": [
+            "publication",
+            "materialization"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "One affected World and the exact immutable read publication installed for\nit at this Observation's durable frontier.",
+      "properties": {
+        "publication": {
+          "$ref": "#/$defs/WorldPublicationIdDto"
+        },
+        "world": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "world",
+        "publication"
+      ],
+      "title": "AffectedWorldPublicationDto",
+      "type": "object"
+    },
     "CommittedEffectDto": {
+      "$defs": {
+        "PublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Portable semantic World publication coordinate.",
+          "properties": {
+            "extractorSchemaDigestHex": {
+              "type": "string"
+            },
+            "implementationDigestHex": {
+              "type": "string"
+            },
+            "manifestRootHex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "manifestRootHex",
+            "implementationDigestHex",
+            "extractorSchemaDigestHex"
+          ],
+          "type": "object"
+        },
+        "WorldPublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Complete Station-local read publication coordinate.",
+          "properties": {
+            "materialization": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "publication": {
+              "$ref": "#/$defs/PublicationIdDto"
+            }
+          },
+          "required": [
+            "publication",
+            "materialization"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "description": "A submit response DTO: the committed effect, frontier, and touched scopes.\nCarries no replicated state. An identical replay returns the identical DTO.",
@@ -18,10 +140,17 @@
           "minimum": 0,
           "type": "integer"
         },
+        "operationIdHex": {
+          "description": "Hex of the signed 16-byte persistent operation coordinate. The\nmatching Observation attribution carries the same value.",
+          "type": "string"
+        },
         "protocolVersion": {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "publication": {
+          "$ref": "#/$defs/WorldPublicationIdDto"
         },
         "scopeBodyIdsHex": {
           "description": "Hex of the touched 16-byte Body ids.",
@@ -33,10 +162,12 @@
       },
       "required": [
         "protocolVersion",
+        "operationIdHex",
         "effectB64",
         "frontierRootHex",
         "frontierTransactionCount",
-        "scopeBodyIdsHex"
+        "scopeBodyIdsHex",
+        "publication"
       ],
       "title": "CommittedEffectDto",
       "type": "object"
@@ -97,10 +228,93 @@
       "type": "object"
     },
     "ObservationDto": {
+      "$defs": {
+        "AffectedBodyDto": {
+          "additionalProperties": false,
+          "description": "One affected Body with its complete World namespace.",
+          "properties": {
+            "bodyIdHex": {
+              "type": "string"
+            },
+            "world": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "world",
+            "bodyIdHex"
+          ],
+          "type": "object"
+        },
+        "AffectedWorldPublicationDto": {
+          "additionalProperties": false,
+          "description": "One affected World and the exact immutable read publication installed for\nit at this Observation's durable frontier.",
+          "properties": {
+            "publication": {
+              "$ref": "#/$defs/WorldPublicationIdDto"
+            },
+            "world": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "world",
+            "publication"
+          ],
+          "type": "object"
+        },
+        "PublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Portable semantic World publication coordinate.",
+          "properties": {
+            "extractorSchemaDigestHex": {
+              "type": "string"
+            },
+            "implementationDigestHex": {
+              "type": "string"
+            },
+            "manifestRootHex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "manifestRootHex",
+            "implementationDigestHex",
+            "extractorSchemaDigestHex"
+          ],
+          "type": "object"
+        },
+        "WorldPublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Complete Station-local read publication coordinate.",
+          "properties": {
+            "materialization": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "publication": {
+              "$ref": "#/$defs/PublicationIdDto"
+            }
+          },
+          "required": [
+            "publication",
+            "materialization"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "An observation DTO — a bounded invalidation signal, carrying no state.\n`reset: true` means the consumer must rebaseline and re-query.",
+      "description": "An observation DTO — a bounded Station-wide invalidation signal, carrying\nno state. `reset: true` means the consumer must rebaseline and re-query.",
       "properties": {
+        "bodies": {
+          "description": "Canonically sorted full Body coordinates. Bare Body ids are ambiguous\nbecause one Station observation may span multiple Worlds.",
+          "items": {
+            "$ref": "#/$defs/AffectedBodyDto"
+          },
+          "type": "array"
+        },
         "epoch": {
           "format": "uint64",
           "minimum": 0,
@@ -119,23 +333,20 @@
           "minimum": 0,
           "type": "integer"
         },
-        "reset": {
-          "type": "boolean"
-        },
-        "scopeBodyIdsHex": {
-          "description": "Hex of the affected 16-byte Body ids (empty on reset).",
+        "publications": {
+          "description": "Canonically sorted exact read coordinates for every affected World.\nEmpty on reset and authority-only observations. Text offsets may be\napplied only to a projection carrying the matching coordinate.",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/AffectedWorldPublicationDto"
           },
           "type": "array"
+        },
+        "reset": {
+          "type": "boolean"
         },
         "sequence": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
-        },
-        "world": {
-          "type": "string"
         }
       },
       "required": [
@@ -143,15 +354,57 @@
         "epoch",
         "sequence",
         "reset",
-        "world",
-        "scopeBodyIdsHex",
+        "bodies",
         "frontierRootHex",
-        "frontierTransactionCount"
+        "frontierTransactionCount",
+        "publications"
       ],
       "title": "ObservationDto",
       "type": "object"
     },
     "ProjectionDto": {
+      "$defs": {
+        "PublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Portable semantic World publication coordinate.",
+          "properties": {
+            "extractorSchemaDigestHex": {
+              "type": "string"
+            },
+            "implementationDigestHex": {
+              "type": "string"
+            },
+            "manifestRootHex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "manifestRootHex",
+            "implementationDigestHex",
+            "extractorSchemaDigestHex"
+          ],
+          "type": "object"
+        },
+        "WorldPublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Complete Station-local read publication coordinate.",
+          "properties": {
+            "materialization": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "publication": {
+              "$ref": "#/$defs/PublicationIdDto"
+            }
+          },
+          "required": [
+            "publication",
+            "materialization"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "description": "A projection DTO — derived local output, never replicated state.",
@@ -173,6 +426,9 @@
           "minimum": 0,
           "type": "integer"
         },
+        "publication": {
+          "$ref": "#/$defs/WorldPublicationIdDto"
+        },
         "schema": {
           "type": "string"
         },
@@ -188,12 +444,59 @@
         "schemaVersion",
         "bytesB64",
         "frontierRootHex",
-        "frontierTransactionCount"
+        "frontierTransactionCount",
+        "publication"
       ],
       "title": "ProjectionDto",
       "type": "object"
     },
+    "PublicationIdDto": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Portable semantic World publication coordinate.",
+      "properties": {
+        "extractorSchemaDigestHex": {
+          "type": "string"
+        },
+        "implementationDigestHex": {
+          "type": "string"
+        },
+        "manifestRootHex": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifestRootHex",
+        "implementationDigestHex",
+        "extractorSchemaDigestHex"
+      ],
+      "title": "PublicationIdDto",
+      "type": "object"
+    },
     "QueryRequestDto": {
+      "$defs": {
+        "PublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Portable semantic World publication coordinate.",
+          "properties": {
+            "extractorSchemaDigestHex": {
+              "type": "string"
+            },
+            "implementationDigestHex": {
+              "type": "string"
+            },
+            "manifestRootHex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "manifestRootHex",
+            "implementationDigestHex",
+            "extractorSchemaDigestHex"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "description": "A query request DTO.",
@@ -205,6 +508,16 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "publication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicationIdDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "schema": {
           "type": "string"
@@ -314,6 +627,50 @@
         "payloadB64"
       ],
       "title": "SubmitRequestDto",
+      "type": "object"
+    },
+    "WorldPublicationIdDto": {
+      "$defs": {
+        "PublicationIdDto": {
+          "additionalProperties": false,
+          "description": "Portable semantic World publication coordinate.",
+          "properties": {
+            "extractorSchemaDigestHex": {
+              "type": "string"
+            },
+            "implementationDigestHex": {
+              "type": "string"
+            },
+            "manifestRootHex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "manifestRootHex",
+            "implementationDigestHex",
+            "extractorSchemaDigestHex"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Complete Station-local read publication coordinate.",
+      "properties": {
+        "materialization": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "publication": {
+          "$ref": "#/$defs/PublicationIdDto"
+        }
+      },
+      "required": [
+        "publication",
+        "materialization"
+      ],
+      "title": "WorldPublicationIdDto",
       "type": "object"
     }
   },

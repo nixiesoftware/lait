@@ -1,16 +1,40 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity as ActivityIcon, AlertTriangle } from "lucide-react";
 
 import { rpc } from "../api";
 import { describeEventRich, type EventPhraseContext, type NameResolver } from "../core/activity";
 import { groupActivity } from "../core/inbox";
 import { boundedTail, indexBy } from "../core/performance";
-import type { ActivityEvent, MemberDto, WorkflowState } from "../types";
+import type { ActivityEvent, MemberDto, WorkflowState, WorldPublicationId } from "../types";
 import { EmptyState, LoadingState } from "./AppState";
 import { memberName } from "./Avatar";
 import { when } from "./time";
 import { Button } from "@astryxdesign/core";
 import { interactiveRow } from "./primitives";
+
+const publicationKey = (source: WorldPublicationId) => {
+  const hex = (bytes: readonly number[]) => bytes
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return [
+    hex(source.publication.manifest_root),
+    hex(source.publication.implementation_digest),
+    hex(source.publication.extractor_schema_digest),
+    source.materialization,
+  ].join(":");
+};
+
+const activityKey = (event: ActivityEvent) =>
+  event.cursor ?? `${event.doc_id ?? "space"}:${event.seq}`;
+
+const appendUniqueActivity = (
+  current: readonly ActivityEvent[],
+  incoming: readonly ActivityEvent[],
+) => {
+  const rows = new Map(current.map((event) => [activityKey(event), event]));
+  for (const event of incoming) rows.set(activityKey(event), event);
+  return [...rows.values()];
+};
 
 /**
  * The space feed.
@@ -55,6 +79,9 @@ export function Activity({
 }) {
   const [events, setEvents] = useState<ActivityEvent[] | null>(null);
   const [visibleCount, setVisibleCount] = useState(80);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [publication, setPublication] = useState<WorldPublicationId | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const memberByKey = useMemo(
     () => indexBy(members, (member) => member.key),
     [members],
@@ -82,20 +109,48 @@ export function Activity({
     [events, projectIssues],
   );
 
+  const load = useCallback(
+    async (
+      alive: () => boolean,
+      cursor: string | null = null,
+      pinned: WorldPublicationId | null = null,
+      append = false,
+    ) => {
+      if (append) setLoadingMore(true);
+      try {
+        const r = await rpc(spaceId, {
+          cmd: "activity",
+          page: { limit: 100, cursor },
+        });
+        if (!alive() || r.kind !== "activity") return;
+        if (pinned && publicationKey(r.page.publication) !== publicationKey(pinned)) {
+          throw new Error("Activity continuation crossed publications; refresh the feed");
+        }
+        setEvents((current) => append
+          ? appendUniqueActivity(current ?? [], r.page.items)
+          : r.page.items);
+        setNextCursor(r.page.next_cursor ?? null);
+        setPublication(r.page.publication);
+      } catch (e) {
+        if (alive()) onError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (alive() && append) setLoadingMore(false);
+      }
+    },
+    [spaceId, onError],
+  );
+
   useEffect(() => {
     let alive = true;
-    void (async () => {
-      try {
-        const r = await rpc(spaceId, { cmd: "activity" });
-        if (alive && r.kind === "activity") setEvents(r.events);
-      } catch (e) {
-        if (alive) onError(e instanceof Error ? e.message : String(e));
-      }
-    })();
+    setEvents(null);
+    setNextCursor(null);
+    setPublication(null);
+    setVisibleCount(80);
+    void load(() => alive);
     return () => {
       alive = false;
     };
-  }, [spaceId, revision, onError]);
+  }, [load, revision]);
 
   if (!scopedEvents) {
     return (
@@ -107,16 +162,38 @@ export function Activity({
   }
   if (scopedEvents.length === 0) {
     return (
-      <EmptyState
-        icon={<ActivityIcon className="size-icon-lg" />}
-        title={projectName ? `No activity in ${projectName}` : "No activity yet"}
-        body={projectName ? "Changes to this project's issues will appear here." : "Changes made in this session will appear here."}
-      />
+      <div className="flex min-h-0 flex-1 flex-col">
+        <EmptyState
+          icon={<ActivityIcon className="size-icon-lg" />}
+          title={projectName ? `No activity in ${projectName}` : "No activity yet"}
+          body={projectName ? "No matching changes are present on this page." : "Changes made in this session will appear here."}
+        />
+        {nextCursor && publication && (
+          <Button
+            onClick={() => void load(() => true, nextCursor, publication, true)}
+            isLoading={loadingMore}
+            label="Load older activity"
+            variant="ghost"
+            size="sm"
+          />
+        )}
+      </div>
     );
   }
 
   return (
     <ul className="min-h-0 flex-1 overflow-y-auto">
+      {nextCursor && publication && (
+        <li className="border-line/60 border-b p-2 text-center">
+          <Button
+            onClick={() => void load(() => true, nextCursor, publication, true)}
+            isLoading={loadingMore}
+            label="Load older activity"
+            variant="ghost"
+            size="sm"
+          />
+        </li>
+      )}
       {scopedEvents.length > visibleCount && (
         <li className="border-line/60 border-b p-2 text-center">
           <Button

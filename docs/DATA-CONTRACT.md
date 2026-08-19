@@ -193,9 +193,11 @@ Checkpoint creation is prepared before a collaborative Body reaches the hard
 tail bound. Crossing the soft watermark captures an immutable causal seed and
 builds the full checkpoint away from the committing writer. A later edit may
 install that checkpoint together with only the deltas it did not cover. The
-hard bound remains a protocol invariant and has a defensive synchronous
-fallback, but an ordinary edit at the bound does not pay snapshot work merely
-because it was the Nth edit.
+256-delta/8-MiB target is a maintenance watermark, not an action-path snapshot
+trigger. If the bounded worker cannot catch up, the tail may advance only to
+the explicit 4096-delta/128-MiB emergency envelope; beyond it the write returns
+typed checkpoint backpressure. No edit synchronously serializes a full Body
+merely because it was the Nth edit.
 
 Content references are Manifest data — they must survive a restart and reach
 every participant — while the bytes they name are not.
@@ -517,6 +519,11 @@ unchanged roots. Find is the only query evaluator: viewer, CLI, controller,
 Exec, and agent access paths submit the same typed operator DAG through a
 Session. Disclosure gates run before traversal, ranking, counts, and packing, so
 unauthorized material cannot influence even an aggregate or order.
+An ordered interval is one `Seek::FieldRange` with explicit inclusive or
+exclusive endpoints. Corpus seeks to the lower endpoint and stops at the upper
+endpoint before evaluator work; expressing the upper bound as a later `Keep`
+is not equivalent because it can visit unrelated postings after the interval
+and violate both deep-lookup latency and bounded metering.
 
 Activity, inbox, boards, graphs, aliases, and policy views remain
 reconstructable from canonical Bodies and Mechanics history. An Observation
@@ -530,6 +537,19 @@ client may use the range for cursor/highlight movement and a `Seek::Bodies` Find
 to refresh all affected entities in one bounded query. Dirty, reset, overrun,
 or expired coordinates require a fresh projection read.
 
+Feedback has one operation-correlated phase contract across human and agent
+access paths. `Sending` is painted locally within one frame before network or
+action-sized work. `Accepted` exists only after a bounded durable operation
+receipt, and `Committed` carries the exact terminal `WorldPublicationId`.
+While work is pending, the client retains the prior exact projection, loaded
+pages, selection, cursor, scroll position, and any deterministic optimistic
+overlay; refresh may not blank, collapse, or fall back to a different
+publication. Bounded progress is transient and may be coalesced, but it keeps
+the same operation identity and runs off UI, reactor, Replica, and publication
+locks. A refusal visibly reconciles the optimistic overlay with its typed
+cause. Therefore action size may affect completion time but never bounded
+time-to-feedback, continued interaction, or visual continuity.
+
 Blueprint is the Issues World bundled in Lait, not another layer in the generic
 engine. Lait owns publication, extraction, gates, Find, and causal storage.
 Blueprint owns the meanings and physical sharding of Issue, relation, Plan,
@@ -537,11 +557,30 @@ project, team, label, milestone, status, and closure.
 
 An Issue remains the durable core anchor. Its existing Body key and
 collaborative history survive migration so range anchors retain their Body and
-operation identity. V4 adds a stable Issue identity/alias root and one atomic
-`BoardPlacement { lane, rank, tie_break }` root; lane and rank cannot merge from
-different concurrent moves. Enrichment does not accumulate inside that core:
-comments, reactions, durable activity, labels, assignments, membership, and
-other independently edited relationships are record-addressed Bodies.
+operation identity. V4 adds stable identity and alias roots; current board truth
+is not one flat placement register. Every move authors an immutable,
+predecessor-bound `IssueTransitionRecord` whose placement names a project,
+workflow state, stable block, and local position. Issue metadata retains an
+add-wins set of self-authenticating transition heads. Exactly one head emits a
+board placement, zero means absent or migration-incomplete, and multiple
+causally maximal heads are an explicit visible conflict that is inert on the
+board until a successor resolves it. Enrichment does not accumulate inside the
+Issue core: comments, reactions, durable activity, labels, assignments,
+membership, and other independently edited relationships are record-addressed
+Bodies.
+
+Board order is two-level and exact-publication scoped. A lane carries
+predecessor-bound topology heads; each stable `BoardBlock` carries an
+authenticated block-order label; each sole Issue transition carries a local
+label within that block. A leaf holds at most 128 Issues. Splitting a full leaf
+relabels at most that leaf and publishes exact-transition-fenced Issue overlays
+atomically with the topology successor; block maintenance is likewise fenced to
+the exact block revision. A stale overlay is ignored if its transition,
+project, state, or block no longer matches. Public traversal orders workflow
+states by their declaration, then blocks by `(block_order, BlockId)`, then
+members by `(local_position, IssueId)`, using one exact-`WorldPublicationId`
+nested continuation. No flat `PROJECT_STATE_POSITION` projection is current
+board truth.
 
 The old Space-wide Catalog is not replaced by one merely smaller project blob,
 nor by shards whose size depends on an unenforceable concurrent tail counter.
@@ -555,13 +594,16 @@ surface; aggregate maps are not a second authoritative catalog. A stable
 relation is extracted as its own node, so each corpus node has one source Body
 and reverse traversal does not require cross-Body row assembly.
 
-V3 to v4 is one administrator-authored, crash-resumable migration protocol, not
-one unbounded transaction. Its durable marker, canonical cursor, and audit log
-advance in deterministic batches below Replica's operation and byte ceilings.
-Issue roots are added in place. New record Bodies have deterministic keys, so a
-retry cannot allocate a second home for the same fact. A completed migration
-activates v4-only interpretation; pre-v1 Worlds use one-time migrations instead
-of carrying compatibility branches indefinitely.
+V3 to v4 is one launcher-authorized, crash-resumable migration protocol, not one
+unbounded transaction and not a public Issue intent. Accepting the exact World
+update mints an in-process step capability bound to the source, migrator, and
+target identities; the caller cannot supply its actor or invoke the protocol
+through MCP. Its durable marker, canonical cursor, and audit log advance in
+deterministic batches below Replica's operation and byte ceilings. Issue roots
+are added in place. New record Bodies have deterministic keys, so a retry cannot
+allocate a second home for the same fact. A completed migration activates
+v4-only interpretation; pre-v1 Worlds use one-time migrations instead of
+carrying compatibility branches indefinitely.
 
 A Plan remains `Spec::Kind::Plan` and uses the immutable Spec revision DAG,
 links, lifecycle, and baseline semantics. A Plan revision stores a bounded root

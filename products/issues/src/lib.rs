@@ -32,12 +32,12 @@ pub mod handler;
 pub mod ids;
 mod implementation;
 mod rank;
+mod record_store;
+pub mod records;
 pub mod roles;
 pub mod spec;
 #[cfg(test)]
 mod test_allocation;
-pub mod v4;
-mod v4_store;
 pub mod views;
 pub mod workflow;
 

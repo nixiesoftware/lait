@@ -21,15 +21,15 @@ use replica::body::{BodyKey, SchemaId};
 use runtime::{
     find::{
         Analyzer, AnalyzerRef, BodyExtraction, Bound, Edge, EdgeRef, ExtractedEdge, ExtractedField,
-        ExtractedNode, Extractor, Field, FieldKind, FieldRef, Gate, GateRef, ModeSet, NodeId,
-        NodeKey, OpSet, Schema, SchemaRef, SourceRef, Value,
+        ExtractedNode, ExtractionGrowth, ExtractionShape, Extractor, Field, FieldKind, FieldRef,
+        Gate, GateRef, ModeSet, NodeId, NodeKey, OpSet, Schema, SchemaRef, SourceRef, Value,
     },
     world::{ExtractionContext, Rejection},
 };
 use unicode_normalization::UnicodeNormalization as _;
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::{contract, ids::ProjectId, v4::CanonicalRecord as _};
+use crate::{contract, ids::ProjectId, records::CanonicalRecord as _};
 
 pub const ENTITY_SCHEMA: &str = "issues_entity";
 pub const ENTITY_SCHEMA_VERSION: u32 = 1;
@@ -53,8 +53,27 @@ pub mod field {
     pub const STATE_CATEGORY: &str = "state_category";
     pub const KIND_PROJECT: &str = "kind_project";
     pub const KIND_PROJECT_STATE: &str = "kind_project_state";
-    pub const PROJECT_STATE_POSITION: &str = "project_state_position";
-    pub const PROJECT_STATE_POSITION_DESC: &str = "project_state_position_desc";
+    /// The same `(kind, project, state)` coordinate, posted only while the
+    /// entity is live.
+    ///
+    /// A count is what a roll-up wants, and a count is exactly what an exact
+    /// posting gives for nothing. The tombstoned rows are what stopped it
+    /// being usable: they keep their placement, so counting the coordinate
+    /// counted deleted Issues as live, and excluding them meant resolving
+    /// every member row instead -- which is what put a ceiling on collections
+    /// that did not need one. Absent for a tombstoned entity, so the count
+    /// is the answer.
+    pub const KIND_PROJECT_STATE_LIVE: &str = "kind_project_state_live";
+    pub const KIND_PROJECT_POSITION: &str = "kind_project_position";
+    pub const KIND_PROJECT_POSITION_DESC: &str = "kind_project_position_desc";
+    pub const KIND_CREATED_DESC: &str = "kind_created_desc";
+    pub const KIND_PROJECT_CREATED_DESC: &str = "kind_project_created_desc";
+    /// Exact `(kind, source entity)` posting for semantic record lookup.
+    /// Seeking `source_id` alone visits every child record owned by a busy
+    /// Issue and cannot provide a size-independent uniqueness check.
+    pub const KIND_SOURCE: &str = "kind_source";
+    pub const KIND_SOURCE_CREATED: &str = "kind_source_created";
+    pub const KIND_SOURCE_CREATED_DESC: &str = "kind_source_created_desc";
     pub const PRIORITY: &str = "priority";
     pub const AUTHOR: &str = "author";
     pub const CREATED_AT: &str = "created_at";
@@ -65,12 +84,53 @@ pub mod field {
     pub const ARCHIVED: &str = "archived";
     pub const TOMBSTONE: &str = "tombstone";
     pub const POSITION: &str = "position";
+    pub const BLOCK: &str = "block";
+    pub const PROJECT_STATE_BLOCK_ORDER: &str = "project_state_block_order";
+    pub const PROJECT_STATE_BLOCK_ORDER_DESC: &str = "project_state_block_order_desc";
+    pub const PROJECT_STATE_BLOCK_MEMBER: &str = "project_state_block_member";
+    pub const PROJECT_STATE_BLOCK_MEMBER_DESC: &str = "project_state_block_member_desc";
+    /// Exact immutable workflow-transition id which currently owns an Issue's
+    /// sole board placement. Bounded rank maintenance fences every overlay to
+    /// this value, so a concurrent user move makes stale relabeling inert.
+    pub const PLACEMENT_TRANSITION: &str = "placement_transition";
     pub const ALIAS_ORDINAL: &str = "alias_ordinal";
     pub const ALIAS_DISAMBIGUATOR: &str = "alias_disambiguator";
+    pub const ALIAS_COORDINATE: &str = "alias_coordinate";
+    /// Exact `(project, ordinal)` posting: the reference a person types.
+    ///
+    /// The ordinal alone is not a coordinate. It is counted per project and
+    /// densely, so ordinal one exists in every project at once and seeking it
+    /// across a Space answers with as many rows as there are projects --
+    /// bounded by nothing the reader controls. Paired with its project it is
+    /// one exact seek that answers one row, or two when a partition produced
+    /// the same number twice, which is the case the full form settles.
+    pub const ALIAS_PROJECT_ORDINAL: &str = "alias_project_ordinal";
     pub const RELATION_KIND: &str = "relation_kind";
     pub const SOURCE_ID: &str = "source_id";
     pub const TARGET_ID: &str = "target_id";
+    pub const GRAPH_SOURCE_ID: &str = "graph_source_id";
+    pub const GRAPH_TARGET_ID: &str = "graph_target_id";
+    /// Exact `(relation kind, source entity)` posting. This is the bounded
+    /// audience/membership lookup surface; seeking `source_id` alone would
+    /// visit every topology edge on a high-degree issue.
+    pub const RELATION_SOURCE_KIND: &str = "relation_source_kind";
+    /// Exact `(relation kind, target entity)` posting: the mirror of
+    /// [`RELATION_SOURCE_KIND`]. Membership is asked in both directions —
+    /// "which labels does this issue carry" and "which issues carry this
+    /// label" — and only a composite keyed the way the question is asked can
+    /// answer it as a direct posting. Without this, the reverse question has
+    /// no bounded plan: seeking `target_id` alone visits every relation of
+    /// every kind pointing at a popular actor, and a Walk from the forward
+    /// posting forfeits both pagination and `matched_total`.
+    pub const RELATION_TARGET_KIND: &str = "relation_target_kind";
+    /// Exact actor-prefixed, reverse-time activity coordinate used by the
+    /// principal-pinned inbox. Prefix pagination stays inside one immutable
+    /// World publication.
+    pub const INBOX_ORDER: &str = "inbox_order";
+    pub const DEVICE: &str = "device";
     pub const REVISION: &str = "revision";
+    pub const HEAD_REVISIONS: &str = "head_revisions";
+    pub const ISSUED_REVISIONS: &str = "issued_revisions";
     pub const HEAD: &str = "head";
     pub const ISSUED: &str = "issued";
     pub const CONFLICTED: &str = "conflicted";
@@ -127,30 +187,67 @@ fn source(name: &str, version: u32) -> SourceRef {
     }
 }
 
-fn sources() -> Vec<SourceRef> {
-    let mut sources = vec![
-        source(contract::ISSUE_SCHEMA, 1),
-        source(contract::ISSUE_SCHEMA, 2),
-        source(contract::ISSUE_SCHEMA, contract::ISSUE_SCHEMA_VERSION),
-        source(contract::SPEC_SCHEMA, contract::SPEC_SCHEMA_VERSION),
-        source(contract::BASELINE_SCHEMA, contract::BASELINE_SCHEMA_VERSION),
-    ];
+fn migration_sources() -> Vec<SourceRef> {
+    // Historical aggregate Bodies are raw inputs to the bounded migrator,
+    // never corpus sources. In particular, declaring their unbounded
+    // revision maps as extractors would make honest build admission
+    // impossible and would revive the old coarse query path.
+    let mut sources = vec![source(
+        contract::ISSUE_SCHEMA,
+        contract::ISSUE_SCHEMA_VERSION,
+    )];
     sources.extend(
-        crate::v4::PHYSICAL_SCHEMAS
+        crate::records::PHYSICAL_SCHEMAS
             .iter()
-            .map(|schema| source(schema.name(), crate::v4::SCHEMA_VERSION)),
+            .map(|schema| source(schema.name(), crate::records::SCHEMA_VERSION)),
     );
     sources.sort();
     sources.dedup();
     sources
 }
 
+/// Sources admitted by the preferred v4 implementation.  The long-lived
+/// Issue Body remains the anchored description source at its current exact
+/// binding; every other source is a v4 physical record.  Aggregate
+/// Spec/Baseline Bodies and readable Issue predecessors belong exclusively to
+/// the historical migrator package.
+fn preferred_sources() -> Vec<SourceRef> {
+    let mut sources = vec![source(
+        contract::ISSUE_SCHEMA,
+        contract::ISSUE_SCHEMA_VERSION,
+    )];
+    sources.extend(
+        crate::records::PHYSICAL_SCHEMAS
+            .iter()
+            .filter(|schema| schema.preferred())
+            .map(|schema| source(schema.name(), crate::records::SCHEMA_VERSION)),
+    );
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
+pub(crate) fn preferred_source_coordinates() -> BTreeSet<(String, u32)> {
+    preferred_sources()
+        .into_iter()
+        .map(|source| (source.name.as_str().to_string(), source.version))
+        .collect()
+}
+
 pub fn schemas() -> Vec<Schema> {
+    schemas_with_sources(migration_sources())
+}
+
+pub fn preferred_schemas() -> Vec<Schema> {
+    schemas_with_sources(preferred_sources())
+}
+
+fn schemas_with_sources(sources: Vec<SourceRef>) -> Vec<Schema> {
     let schema = entity_schema_ref();
     let analyzer = analyzer_ref();
     let mut declaration = Schema {
         reference: schema.clone(),
-        sources: sources(),
+        sources,
         fields: [
             (field::ID, FieldKind::Text, false),
             (field::KIND, FieldKind::Text, false),
@@ -164,8 +261,14 @@ pub fn schemas() -> Vec<Schema> {
             (field::STATE_CATEGORY, FieldKind::Text, false),
             (field::KIND_PROJECT, FieldKind::Bytes, false),
             (field::KIND_PROJECT_STATE, FieldKind::Bytes, false),
-            (field::PROJECT_STATE_POSITION, FieldKind::Bytes, false),
-            (field::PROJECT_STATE_POSITION_DESC, FieldKind::Bytes, false),
+            (field::KIND_PROJECT_STATE_LIVE, FieldKind::Bytes, false),
+            (field::KIND_PROJECT_POSITION, FieldKind::Bytes, false),
+            (field::KIND_PROJECT_POSITION_DESC, FieldKind::Bytes, false),
+            (field::KIND_CREATED_DESC, FieldKind::Bytes, false),
+            (field::KIND_PROJECT_CREATED_DESC, FieldKind::Bytes, false),
+            (field::KIND_SOURCE, FieldKind::Bytes, false),
+            (field::KIND_SOURCE_CREATED, FieldKind::Bytes, false),
+            (field::KIND_SOURCE_CREATED_DESC, FieldKind::Bytes, false),
             (field::PRIORITY, FieldKind::Text, false),
             (field::AUTHOR, FieldKind::Text, false),
             (field::CREATED_AT, FieldKind::Unsigned, false),
@@ -176,12 +279,36 @@ pub fn schemas() -> Vec<Schema> {
             (field::ARCHIVED, FieldKind::Bool, false),
             (field::TOMBSTONE, FieldKind::Bool, false),
             (field::POSITION, FieldKind::Text, false),
+            (field::BLOCK, FieldKind::Text, false),
+            (field::PROJECT_STATE_BLOCK_ORDER, FieldKind::Bytes, false),
+            (
+                field::PROJECT_STATE_BLOCK_ORDER_DESC,
+                FieldKind::Bytes,
+                false,
+            ),
+            (field::PROJECT_STATE_BLOCK_MEMBER, FieldKind::Bytes, false),
+            (
+                field::PROJECT_STATE_BLOCK_MEMBER_DESC,
+                FieldKind::Bytes,
+                false,
+            ),
+            (field::PLACEMENT_TRANSITION, FieldKind::Text, false),
             (field::ALIAS_ORDINAL, FieldKind::Unsigned, false),
             (field::ALIAS_DISAMBIGUATOR, FieldKind::Bytes, false),
+            (field::ALIAS_COORDINATE, FieldKind::Text, false),
+            (field::ALIAS_PROJECT_ORDINAL, FieldKind::Bytes, false),
             (field::RELATION_KIND, FieldKind::Text, false),
             (field::SOURCE_ID, FieldKind::Text, false),
             (field::TARGET_ID, FieldKind::Text, false),
+            (field::GRAPH_SOURCE_ID, FieldKind::Text, false),
+            (field::GRAPH_TARGET_ID, FieldKind::Text, false),
+            (field::RELATION_SOURCE_KIND, FieldKind::Bytes, false),
+            (field::RELATION_TARGET_KIND, FieldKind::Bytes, false),
+            (field::INBOX_ORDER, FieldKind::Bytes, false),
+            (field::DEVICE, FieldKind::Text, false),
             (field::REVISION, FieldKind::Text, false),
+            (field::HEAD_REVISIONS, FieldKind::Bytes, false),
+            (field::ISSUED_REVISIONS, FieldKind::Bytes, false),
             (field::HEAD, FieldKind::Bool, false),
             (field::ISSUED, FieldKind::Bool, false),
             (field::CONFLICTED, FieldKind::Bool, false),
@@ -221,7 +348,7 @@ pub fn schemas() -> Vec<Schema> {
             candidates_per_branch: 10_000,
             score_evaluations: 100_000,
             projected_bytes: 8 * 1_024 * 1_024,
-            packed_tokens: 32_768,
+            packed_tokens: 8 * 1024 * 1024,
             wall_millis: 10_000,
         },
     };
@@ -230,7 +357,15 @@ pub fn schemas() -> Vec<Schema> {
 }
 
 pub fn extractors() -> Vec<Extractor> {
-    sources()
+    extractors_for(migration_sources())
+}
+
+pub fn preferred_extractors() -> Vec<Extractor> {
+    extractors_for(preferred_sources())
+}
+
+fn extractors_for(sources: Vec<SourceRef>) -> Vec<Extractor> {
+    sources
         .into_iter()
         .map(|source| Extractor {
             schema: entity_schema_ref(),
@@ -239,9 +374,307 @@ pub fn extractors() -> Vec<Extractor> {
                 &postcard::to_stdvec(&source).expect("canonical extractor source"),
             ),
             abi_version: runtime::find::EXTRACTOR_ABI_VERSION,
+            shape: extraction_shape(&source),
             source,
         })
         .collect()
+}
+
+/// Enforceable maxima for one physical Body. These are deliberately grouped
+/// by physical record family, not by observed averages. Large text is bounded
+/// by the product's 1 MiB semantic ceiling; relation-heavy immutable revision
+/// records use the exact collection ceilings in `spec`.
+fn extraction_shape(source: &SourceRef) -> ExtractionShape {
+    const KIB: u64 = 1_024;
+    const MIB: u64 = 1_024 * KIB;
+    let name = &source.name;
+    if *name == schema_id(contract::ISSUE_SCHEMA)
+        || *name == schema_id(crate::records::SPACE_CONTENT_SCHEMA)
+        || *name == schema_id(crate::records::PROJECT_CONTENT_SCHEMA)
+        || *name == schema_id(crate::records::INITIATIVE_CONTENT_SCHEMA)
+    {
+        // One content node: retained text plus its bounded normalized terms.
+        return ExtractionShape::new(
+            1,
+            4_128,
+            4_128,
+            2 * MIB + 16 * KIB,
+            2 * MIB + 16 * KIB,
+            3 * MIB,
+        )
+        .with_growth(ExtractionGrowth {
+            base_nodes_per_body: 1,
+            nodes_per_source_kib: 0,
+            base_postings_per_body: 16,
+            postings_per_source_kib: 512,
+            base_variable_bytes_per_body: 4 * KIB,
+            variable_bytes_per_source_byte: 3,
+        });
+    }
+    if *name == schema_id(crate::records::SPEC_REVISION_SCHEMA) {
+        // entity + ownership + predecessors + links + Plan roots
+        let nodes = 2
+            + crate::spec::MAX_PREDECESSORS
+            + crate::spec::MAX_LINKS
+            + crate::spec::MAX_PLAN_ROOTS;
+        return ExtractionShape::new(
+            u32::try_from(nodes).expect("Spec extraction bound"),
+            4_128,
+            10_000,
+            2 * MIB + 16 * KIB,
+            4 * MIB,
+            4 * MIB,
+        )
+        .with_growth(ExtractionGrowth {
+            base_nodes_per_body: 2,
+            nodes_per_source_kib: 100,
+            base_postings_per_body: 32,
+            postings_per_source_kib: 1_024,
+            base_variable_bytes_per_body: 8 * KIB,
+            variable_bytes_per_source_byte: 4,
+        });
+    }
+    if *name == schema_id(crate::records::BASELINE_REVISION_SCHEMA) {
+        // entity + ownership + predecessors + members. Baseline titles are
+        // capped at 256 bytes, so relation identifiers dominate each node.
+        let nodes = 2 + crate::spec::MAX_PREDECESSORS + crate::spec::MAX_MEMBERS;
+        return ExtractionShape::new(
+            u32::try_from(nodes).expect("Baseline extraction bound"),
+            512,
+            20_000,
+            8 * KIB,
+            5 * MIB,
+            2 * MIB,
+        )
+        .with_growth(ExtractionGrowth {
+            base_nodes_per_body: 2,
+            nodes_per_source_kib: 100,
+            base_postings_per_body: 32,
+            postings_per_source_kib: 64,
+            base_variable_bytes_per_body: 8 * KIB,
+            variable_bytes_per_source_byte: 4,
+        });
+    }
+    if *name == schema_id(crate::records::ISSUE_META_SCHEMA) {
+        return ExtractionShape::new(
+            u32::try_from(crate::records::MAX_CONCURRENT_HEADS + 2)
+                .expect("Issue head extraction bound"),
+            2_080,
+            3_200,
+            16 * KIB,
+            320 * KIB,
+            256 * KIB,
+        );
+    }
+    if *name == schema_id(crate::records::BOARD_BLOCK_SCHEMA)
+        || *name == schema_id(crate::records::BOARD_LANE_SCHEMA)
+    {
+        // One canonical entity node. Collaborative sets are capped by
+        // MAX_CONCURRENT_HEADS; conflicting structural heads stay one compact
+        // typed-conflict projection rather than fanning out into candidates.
+        return ExtractionShape::new(1, 32, 32, 8 * KIB, 8 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::records::GOVERNANCE_HEADS_SCHEMA)
+        || *name == schema_id(crate::records::WORKFLOW_HEADS_SCHEMA)
+        || *name == schema_id(crate::records::SPEC_HEADS_SCHEMA)
+        || *name == schema_id(crate::records::BASELINE_HEADS_SCHEMA)
+    {
+        return ExtractionShape::new(
+            u32::try_from(1 + 2 * crate::records::MAX_CONCURRENT_HEADS)
+                .expect("revision head extraction bound"),
+            64,
+            4_096,
+            8 * KIB,
+            1_100 * KIB,
+            256 * KIB,
+        );
+    }
+    if *name == schema_id(crate::records::WORKFLOW_REVISION_SCHEMA) {
+        // revision + two nodes/state + predecessor relations
+        let nodes = 1 + 2 * crate::workflow::MAX_STATES + crate::workflow::MAX_PREDECESSORS;
+        return ExtractionShape::new(
+            u32::try_from(nodes).expect("workflow extraction bound"),
+            192,
+            200_000,
+            4 * KIB,
+            5 * MIB,
+            3 * MIB,
+        )
+        .with_growth(ExtractionGrowth {
+            base_nodes_per_body: 1,
+            nodes_per_source_kib: 4,
+            base_postings_per_body: 24,
+            postings_per_source_kib: 256,
+            base_variable_bytes_per_body: 4 * KIB,
+            variable_bytes_per_source_byte: 6,
+        });
+    }
+    if *name == schema_id(crate::records::ISSUE_COMMENT_SCHEMA)
+        || *name == schema_id(crate::records::PROJECT_UPDATES_SCHEMA)
+        || *name == schema_id(crate::records::SPACE_TRIAGE_SCHEMA)
+        || *name == schema_id(crate::records::SPEC_OBSERVATION_SCHEMA)
+    {
+        return ExtractionShape::new(
+            4,
+            4_128,
+            4_200,
+            2 * MIB + 16 * KIB,
+            2 * MIB + 64 * KIB,
+            3 * MIB,
+        )
+        .with_growth(ExtractionGrowth {
+            // Every schema in this group emits a FIXED set of nodes — one
+            // entity plus its relation edges — decided by which record variant
+            // it is, never by how much text it carries. A triage decision is
+            // the widest at four (entity, triage, project, issue); a comment
+            // reply is three (entity, issue, the comment it answers); a project
+            // update is two; a Spec observation is one. So the node allowance
+            // is structural and the per-KiB term is zero: a longer comment does
+            // not earn another edge, and should not have to.
+            //
+            // Postings and bytes are the size-proportional half and keep their
+            // growth — those really do scale with the text.
+            //
+            // This was `base: 1, per_kib: 1`, which allowed two nodes on any
+            // body under a kilobyte. Every reply emits three, so every reply
+            // was refused for output shape, which fails the whole candidate
+            // publication — the comment never became findable, and the next
+            // reply to it was refused as though its parent did not exist.
+            base_nodes_per_body: 4,
+            nodes_per_source_kib: 0,
+            base_postings_per_body: 20,
+            postings_per_source_kib: 512,
+            base_variable_bytes_per_body: 4 * KIB,
+            variable_bytes_per_source_byte: 3,
+        });
+    }
+    if *name == schema_id(crate::records::ISSUE_ACTIVITY_SCHEMA) {
+        // One activity entity, one issue edge, and at most one compact inbox
+        // coordinate per bounded recipient. Event text lives only on the
+        // activity entity; recipient nodes never duplicate the large value.
+        let nodes = 2 + crate::contract::MAX_ISSUE_AUDIENCE;
+        // Activity: twelve retained fields plus at most the bounded analyzer
+        // terms. Relation: six fields and two edge targets. Inbox: twelve
+        // scalar/composite fields per recipient. Every node also has its one
+        // visibility posting.
+        const ACTIVITY_POSTINGS: usize = 1 + 2 * 12 + MAX_TERMS_PER_VALUE;
+        const RELATION_POSTINGS: usize = 1 + 2 * 6 + 2;
+        const INBOX_POSTINGS: usize = 1 + 2 * 12;
+        let postings = ACTIVITY_POSTINGS
+            + RELATION_POSTINGS
+            + INBOX_POSTINGS * crate::contract::MAX_ISSUE_AUDIENCE;
+        return ExtractionShape::new(
+            u32::try_from(nodes).expect("activity extraction bound"),
+            u32::try_from(ACTIVITY_POSTINGS).expect("activity node postings bound"),
+            u64::try_from(postings).expect("activity postings bound"),
+            2 * MIB + 16 * KIB,
+            2 * MIB + 128 * KIB,
+            3 * MIB,
+        )
+        .with_growth(ExtractionGrowth {
+            base_nodes_per_body: 2,
+            nodes_per_source_kib: 32,
+            base_postings_per_body: 24,
+            postings_per_source_kib: 384,
+            base_variable_bytes_per_body: 8 * KIB,
+            variable_bytes_per_source_byte: 3,
+        });
+    }
+    if *name == schema_id(crate::records::GOVERNANCE_REVISION_SCHEMA) {
+        return ExtractionShape::new(
+            1u32.saturating_add(u32::try_from(crate::roles::MAX_PREDECESSORS).unwrap_or(u32::MAX)),
+            4_128,
+            4_256,
+            40 * KIB,
+            96 * KIB,
+            128 * KIB,
+        );
+    }
+    if *name == schema_id(crate::records::ISSUE_TRANSITION_SCHEMA) {
+        // One transition entity, one issue edge, and one predecessor edge for
+        // every observed concurrent head. `entity` adds ten canonical ordered
+        // coordinates to the seven transition fields, so that node owns 35
+        // postings (one schema row plus two per field); relation nodes own 19.
+        let nodes = crate::records::MAX_CONCURRENT_HEADS + 2;
+        return ExtractionShape::new(
+            u32::try_from(nodes).expect("transition extraction bound"),
+            40,
+            u64::try_from(35 + 19 * (nodes - 1)).expect("transition postings bound"),
+            8 * KIB,
+            80 * KIB,
+            128 * KIB,
+        );
+    }
+    if *name == schema_id(crate::records::PROJECT_SCHEDULE_SCHEMA) {
+        return ExtractionShape::new(2, 4_128, 4_144, 48 * KIB, 52 * KIB, 128 * KIB);
+    }
+    if *name == schema_id(crate::records::PROJECT_META_SCHEMA)
+        || *name == schema_id(crate::records::SPACE_DIRECTORY_SCHEMA)
+        || *name == schema_id(crate::records::INITIATIVE_SCHEMA)
+        || *name == schema_id(crate::records::TEAM_SCHEMA)
+        || *name == schema_id(crate::records::LABEL_SCHEMA)
+    {
+        let nodes = if *name == schema_id(crate::records::SPACE_DIRECTORY_SCHEMA) {
+            1u32.saturating_add(
+                u32::try_from(crate::roles::BUILT_IN_ROLE_IDS.len()).unwrap_or(u32::MAX),
+            )
+        } else {
+            2
+        };
+        return ExtractionShape::new(nodes, 2_080, 8_384, 16 * KIB, 64 * KIB, 128 * KIB);
+    }
+    if *name == schema_id(crate::records::ISSUE_ATTACHMENT_SCHEMA) {
+        return ExtractionShape::new(1, 128, 128, 8 * KIB, 8 * KIB, 64 * KIB);
+    }
+    if *name == schema_id(crate::records::ISSUE_PLACEMENT_SCHEMA) {
+        return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::records::ISSUE_IDENTITY_SCHEMA) {
+        // Two more coordinates than it carried: the project the ordinal was
+        // counted in, and the pair that makes the pair seekable.
+        return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::records::ISSUE_CHECK_SCHEMA) {
+        // Five declared coordinates, plus the id and kind every entity
+        // carries, plus the four ordered coordinates `entity` derives for a
+        // node that has both a source and a creation time: eleven fields,
+        // twenty-three postings with the node itself. It shared the identity
+        // record's twenty, which nothing caught because a verification could
+        // not be started at all -- the content it names was invisible to the
+        // submit that names it, so this Body was never written.
+        return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::records::ISSUE_REACTION_SCHEMA) {
+        return ExtractionShape::new(2, 20, 40, 4 * KIB, 8 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::records::PROJECT_HIERARCHY_SCHEMA) {
+        // Six relation coordinates, two graph coordinates, two project
+        // coordinates, and two edge targets plus node visibility. Hierarchy
+        // is not a membership kind and posts no reverse coordinate: it is
+        // read through the graph coordinates, which already carry both ends.
+        return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::records::ISSUE_RELATION_SCHEMA) {
+        // Seven relation coordinates — membership is posted in both
+        // directions — plus project/kind-project and two edge targets.
+        // Set-like facts never emit graph coordinates.
+        //
+        // Nine fields at two postings each, one node, two edge targets: 21.
+        // The previous 20 admitted the eight-field node with one posting to
+        // spare, which is why declaring the reverse coordinate had to move
+        // this number rather than fit inside it.
+        return ExtractionShape::new(1, 22, 22, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::records::ENTITY_RELATION_SCHEMA)
+        || *name == schema_id(crate::records::REVISION_ALIAS_SCHEMA)
+    {
+        return ExtractionShape::new(1, 16, 16, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    // A declaration omission is a package bug. Keep the fallback small so a
+    // newly introduced extractor cannot silently reserve tracker-scale memory
+    // under an unrelated generic maximum; its focused test will fail shape
+    // admission until this match is extended deliberately.
+    ExtractionShape::new(2, 32, 64, 8 * KIB, 16 * KIB, 64 * KIB)
 }
 
 fn terms(value: &str) -> Vec<Arc<[u8]>> {
@@ -273,8 +706,23 @@ fn analyzed_text(name: &str, value: impl Into<String>) -> ExtractedField {
     let value = value.into();
     ExtractedField {
         reference: field_ref(name),
-        terms: terms(&value),
+        // TITLE/TEXT are projection material. The synthetic SEARCH field owns
+        // the one token copy so the corpus does not retain duplicate postings
+        // for the same human text.
+        terms: Vec::new(),
         value: Value::text(value),
+        gate: None,
+    }
+}
+
+fn analyzed_search(value: &str) -> ExtractedField {
+    ExtractedField {
+        reference: field_ref(field::SEARCH),
+        terms: terms(value),
+        // Search values are never packed; canonical TITLE/TEXT remain on the
+        // node (or are hydrated from the source Body). Avoid retaining a
+        // second full 1 MiB string solely to own term postings.
+        value: Value::text(String::new()),
         gate: None,
     }
 }
@@ -336,27 +784,81 @@ pub(crate) fn board_lane_prefix(project: &str, state: &str) -> Vec<u8> {
     composite_key([project, state])
 }
 
-pub(crate) fn board_position_key(
-    project: &str,
-    state: &str,
-    position: &str,
-    issue: &str,
-) -> Vec<u8> {
-    composite_key([project, state, position, issue])
+pub(crate) fn composite_prefix_upper(mut prefix: Vec<u8>) -> Option<Vec<u8>> {
+    for index in (0..prefix.len()).rev() {
+        let byte = prefix.get_mut(index)?;
+        if *byte != u8::MAX {
+            *byte = byte.saturating_add(1);
+            prefix.truncate(index.saturating_add(1));
+            return Some(prefix);
+        }
+    }
+    None
 }
 
-/// Same lane with the terminal rank byte order inverted. This lets a bounded
-/// ascending posting seek return the immediate predecessor without scanning
-/// every earlier card.
-pub(crate) fn board_position_desc_key(
+pub(crate) fn board_block_order_key(
     project: &str,
     state: &str,
+    order: &str,
+    block: &str,
+) -> Vec<u8> {
+    composite_key([project, state, order, block])
+}
+
+pub(crate) fn board_block_order_desc_key(
+    project: &str,
+    state: &str,
+    order: &str,
+    block: &str,
+) -> Vec<u8> {
+    let mut encoded = composite_key([project, state]);
+    encoded.extend(
+        composite_key([order, block])
+            .into_iter()
+            .map(|byte| 0xff_u8 - byte),
+    );
+    encoded
+}
+
+pub(crate) fn board_block_member_key(
+    project: &str,
+    state: &str,
+    block: &str,
     position: &str,
     issue: &str,
 ) -> Vec<u8> {
-    let mut encoded = board_lane_prefix(project, state);
+    composite_key([project, state, block, position, issue])
+}
+
+pub(crate) fn board_block_member_desc_key(
+    project: &str,
+    state: &str,
+    block: &str,
+    position: &str,
+    issue: &str,
+) -> Vec<u8> {
+    let mut encoded = composite_key([project, state, block]);
     encoded.extend(
         composite_key([position, issue])
+            .into_iter()
+            .map(|byte| 0xff_u8 - byte),
+    );
+    encoded
+}
+
+pub(crate) fn entity_position_key(kind: &str, project: &str, position: &str, id: &str) -> Vec<u8> {
+    composite_key([kind, project, position, id])
+}
+
+pub(crate) fn entity_position_desc_key(
+    kind: &str,
+    project: &str,
+    position: &str,
+    id: &str,
+) -> Vec<u8> {
+    let mut encoded = composite_key([kind, project]);
+    encoded.extend(
+        composite_key([position, id])
             .into_iter()
             .map(|byte| 0xff_u8 - byte),
     );
@@ -372,6 +874,55 @@ fn text_field<'a>(fields: &'a [ExtractedField], name: &str) -> Option<&'a str> {
                 _ => None,
             })
     })
+}
+
+fn boolean_field(fields: &[ExtractedField], name: &str) -> Option<bool> {
+    fields
+        .iter()
+        .find(|item| item.reference == field_ref(name))
+        .and_then(|item| match &item.value {
+            Value::Bool(value) => Some(*value),
+            _ => None,
+        })
+}
+
+fn unsigned_field(fields: &[ExtractedField], name: &str) -> Option<u64> {
+    fields.iter().find_map(|item| {
+        (item.reference == field_ref(name))
+            .then_some(&item.value)
+            .and_then(|value| match value {
+                Value::Unsigned(value) => Some(*value),
+                _ => None,
+            })
+    })
+}
+
+pub(crate) fn created_desc_key(
+    kind: &str,
+    project: Option<&str>,
+    created_at: u64,
+    id: &str,
+) -> Vec<u8> {
+    let mut encoded = project.map_or_else(
+        || composite_key([kind]),
+        |project| composite_key([kind, project]),
+    );
+    encoded.extend_from_slice(&(!created_at).to_be_bytes());
+    encoded.extend_from_slice(&composite_key([id]));
+    encoded
+}
+
+pub(crate) fn source_created_key(
+    kind: &str,
+    source: &str,
+    created_at: u64,
+    id: &str,
+    descending: bool,
+) -> Vec<u8> {
+    let mut encoded = composite_key([kind, source]);
+    encoded.extend_from_slice(&if descending { !created_at } else { created_at }.to_be_bytes());
+    encoded.extend_from_slice(&composite_key([id]));
+    encoded
 }
 
 fn entity(
@@ -391,27 +942,76 @@ fn entity(
         .collect::<Vec<_>>()
         .join("\n");
     if !searchable.is_empty() {
-        fields.push(analyzed_text(field::SEARCH, searchable));
+        fields.push(analyzed_search(&searchable));
+    }
+    if let Some(source) = text_field(&fields, field::SOURCE_ID).map(str::to_owned) {
+        fields.push(bytes(
+            field::KIND_SOURCE,
+            composite_key([kind, source.as_str()]),
+        ));
+    }
+    if let Some(created_at) = unsigned_field(&fields, field::CREATED_AT) {
+        fields.push(bytes(
+            field::KIND_CREATED_DESC,
+            created_desc_key(kind, None, created_at, id),
+        ));
+        if let Some(source) = text_field(&fields, field::SOURCE_ID).map(str::to_owned) {
+            fields.push(bytes(
+                field::KIND_SOURCE_CREATED,
+                source_created_key(kind, &source, created_at, id, false),
+            ));
+            fields.push(bytes(
+                field::KIND_SOURCE_CREATED_DESC,
+                source_created_key(kind, &source, created_at, id, true),
+            ));
+        }
     }
     if let Some(project) = text_field(&fields, field::PROJECT).map(str::to_owned) {
         fields.push(bytes(
             field::KIND_PROJECT,
             composite_key([kind, project.as_str()]),
         ));
+        if let Some(created_at) = unsigned_field(&fields, field::CREATED_AT) {
+            fields.push(bytes(
+                field::KIND_PROJECT_CREATED_DESC,
+                created_desc_key(kind, Some(&project), created_at, id),
+            ));
+        }
+        if let Some(position) = text_field(&fields, field::POSITION).map(str::to_owned) {
+            fields.push(bytes(
+                field::KIND_PROJECT_POSITION,
+                entity_position_key(kind, &project, &position, id),
+            ));
+            fields.push(bytes(
+                field::KIND_PROJECT_POSITION_DESC,
+                entity_position_desc_key(kind, &project, &position, id),
+            ));
+        }
         if let Some(state) = text_field(&fields, field::STATE).map(str::to_owned) {
             fields.push(bytes(
                 field::KIND_PROJECT_STATE,
                 composite_key([kind, project.as_str(), state.as_str()]),
             ));
-            if let Some(position) = text_field(&fields, field::POSITION).map(str::to_owned) {
+            if !boolean_field(&fields, field::TOMBSTONE).unwrap_or(false) {
                 fields.push(bytes(
-                    field::PROJECT_STATE_POSITION,
-                    board_position_key(&project, &state, &position, id),
+                    field::KIND_PROJECT_STATE_LIVE,
+                    composite_key([kind, project.as_str(), state.as_str()]),
                 ));
-                fields.push(bytes(
-                    field::PROJECT_STATE_POSITION_DESC,
-                    board_position_desc_key(&project, &state, &position, id),
-                ));
+            }
+            if kind == "issue" {
+                if let (Some(position), Some(block)) = (
+                    text_field(&fields, field::POSITION).map(str::to_owned),
+                    text_field(&fields, field::BLOCK).map(str::to_owned),
+                ) {
+                    fields.push(bytes(
+                        field::PROJECT_STATE_BLOCK_MEMBER,
+                        board_block_member_key(&project, &state, &block, &position, id),
+                    ));
+                    fields.push(bytes(
+                        field::PROJECT_STATE_BLOCK_MEMBER_DESC,
+                        board_block_member_desc_key(&project, &state, &block, &position, id),
+                    ));
+                }
             }
         }
     }
@@ -435,6 +1035,33 @@ fn relation_identity(kind: &str, source: &str, target: &str) -> [u8; 32] {
     blake3::derive_key("lait.issues.find-relation.v1", &material)
 }
 
+/// Relation kinds whose *reverse* direction is a question the product asks:
+/// "which issues carry this label", "how many issues target this milestone",
+/// "what is assigned to me". These, and only these, also post
+/// [`field::RELATION_TARGET_KIND`].
+///
+/// It is exactly the frozen kind set of
+/// [`crate::records::IssueRelationRecord`], because an issue is the only
+/// entity these point away from and the aggregate is always asked about the
+/// far end. An initiative's projects and a team's members are relations too,
+/// and are absent here on purpose: those are asked *from* the initiative and
+/// the team, which is the forward direction the source posting already
+/// answers.
+///
+/// The set is closed rather than universal for the same reason. A
+/// notification audience edge is asked forward-only — once per delivery, from
+/// the issue — and the inbox reads its own ordered coordinate, so posting the
+/// reverse for every recipient would charge `MAX_ISSUE_AUDIENCE` extra
+/// postings per activity record to answer a question nothing asks.
+const MEMBERSHIP_KINDS: [&str; 6] = [
+    "assignee",
+    "follower",
+    "label",
+    "milestone",
+    "cycle",
+    "baseline",
+];
+
 fn relation_with_identity(
     identity: [u8; 32],
     relation_kind: &str,
@@ -451,9 +1078,27 @@ fn relation_with_identity(
         exact_text(field::RELATION_KIND, relation_kind),
         exact_text(field::SOURCE_ID, source),
         exact_text(field::TARGET_ID, target),
+        bytes(
+            field::RELATION_SOURCE_KIND,
+            composite_key([relation_kind, source]),
+        ),
     ];
+    if MEMBERSHIP_KINDS.contains(&relation_kind) {
+        fields.push(bytes(
+            field::RELATION_TARGET_KIND,
+            composite_key([relation_kind, target]),
+        ));
+    }
+    if relation_kind == "parent" || crate::contract::LINK_KINDS.contains(&relation_kind) {
+        fields.push(exact_text(field::GRAPH_SOURCE_ID, source));
+        fields.push(exact_text(field::GRAPH_TARGET_ID, target));
+    }
     if let Some(project) = project {
         fields.push(exact_text(field::PROJECT, project));
+        fields.push(bytes(
+            field::KIND_PROJECT,
+            composite_key(["relation", project]),
+        ));
     }
     Ok(ExtractedNode {
         key: node_key(&stable)?,
@@ -490,6 +1135,18 @@ fn relation(
     )
 }
 
+fn tagged_relation(
+    tag: &str,
+    kind: &str,
+    source: &str,
+    target: &str,
+    project: Option<&str>,
+) -> Result<ExtractedNode, Rejection> {
+    let mut node = relation(kind, source, target, project)?;
+    node.fields.push(exact_text(field::ENTITY_KEY, tag));
+    Ok(node)
+}
+
 fn register(view: &fabric::CollaborativeView, path: &str) -> String {
     view.registers
         .get(path)
@@ -522,84 +1179,485 @@ pub fn extract(
     extractor: &Extractor,
     body: &BodyKey,
 ) -> Result<BodyExtraction, Rejection> {
-    if extractor.schema != entity_schema_ref() || !sources().contains(&extractor.source) {
+    if extractor.schema != entity_schema_ref() || !migration_sources().contains(&extractor.source) {
         return Err(Rejection::ContractViolation);
     }
     let name = extractor.source.name.as_str();
-    if name == crate::v4::ISSUE_PLACEMENT_SCHEMA {
-        let bytes = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+    if name == crate::records::ISSUE_PLACEMENT_SCHEMA {
+        let bytes = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
         return Ok(finish(ctx, body, extract_issue_placement(body, &bytes)?));
     }
-    if name == crate::v4::ISSUE_ATTACHMENT_SCHEMA {
-        let bytes = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+    if name == crate::records::ISSUE_ATTACHMENT_SCHEMA {
+        let bytes = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
         return Ok(finish(ctx, body, extract_issue_attachment(body, &bytes)?));
     }
-    if name == crate::v4::ISSUE_CHECK_SCHEMA {
-        let bytes = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+    if name == crate::records::ISSUE_CHECK_SCHEMA {
+        let bytes = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
         return Ok(finish(ctx, body, extract_issue_check(body, &bytes)?));
     }
-    if name == crate::v4::ISSUE_REACTION_SCHEMA {
-        let bytes = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+    if name == crate::records::ISSUE_REACTION_SCHEMA {
+        let bytes = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
         return Ok(finish(ctx, body, extract_reaction(body, &bytes)?));
     }
-    if name == crate::v4::PROJECT_HIERARCHY_SCHEMA {
-        let bytes = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+    if name == crate::records::PROJECT_HIERARCHY_SCHEMA {
+        let bytes = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
         return Ok(finish(ctx, body, extract_hierarchy(body, &bytes)?));
     }
-    if name == crate::v4::ISSUE_RELATION_SCHEMA {
-        let bytes = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+    if name == crate::records::ISSUE_RELATION_SCHEMA {
+        let bytes = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
         return Ok(finish(ctx, body, extract_issue_relation(body, &bytes)?));
     }
-    if name == crate::v4::ENTITY_RELATION_SCHEMA {
-        let bytes = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
+    if name == crate::records::ENTITY_RELATION_SCHEMA {
+        let bytes = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
         return Ok(finish(ctx, body, extract_entity_relation(body, &bytes)?));
     }
-    let view = if crate::v4::PHYSICAL_SCHEMAS
+    let mut owned_view;
+    let guarded_view;
+    let view: &fabric::CollaborativeView = if crate::records::PHYSICAL_SCHEMAS
         .iter()
         .copied()
         .find(|schema| schema.name() == name)
-        .is_some_and(crate::v4::PhysicalSchema::immutable)
+        .is_some_and(crate::records::PhysicalSchema::immutable)
     {
-        let bytes = ctx.read_body(body).ok_or(Rejection::StateCorrupt)?;
-        let envelope = crate::v4::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        let bytes = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
+        let physical = crate::records::PHYSICAL_SCHEMAS
+            .iter()
+            .copied()
+            .find(|schema| schema.name() == name)
+            .ok_or(Rejection::ContractViolation)?;
+        if crate::records::immutable_record_key(physical, &bytes) != *body {
+            return Err(Rejection::StateCorrupt);
+        }
+        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
             .map_err(|_| Rejection::StateCorrupt)?;
-        let mut view = fabric::CollaborativeView::default();
-        view.registers.insert(
-            crate::v4::roots::IDENTITY.into(),
+        owned_view = fabric::CollaborativeView::default();
+        owned_view.registers.insert(
+            crate::records::roots::IDENTITY.into(),
             envelope
                 .identity
                 .encode_canonical()
                 .map_err(|_| Rejection::StateCorrupt)?,
         );
-        view.registers
-            .insert(crate::v4::roots::RECORD.into(), envelope.record);
-        view
+        owned_view
+            .registers
+            .insert(crate::records::roots::RECORD.into(), envelope.record);
+        &owned_view
     } else {
-        ctx.read_collaborative(body)
-            .map_err(|_| Rejection::StateCorrupt)?
+        guarded_view = ctx
+            .read_collaborative(body)?
+            .ok_or(Rejection::StateCorrupt)?;
+        &guarded_view
     };
     let nodes = match name {
-        contract::ISSUE_SCHEMA => extract_issue(body, &view)?,
-        contract::SPEC_SCHEMA => extract_spec_marker(body, &view)?,
-        contract::BASELINE_SCHEMA => extract_baseline_marker(body, &view)?,
-        crate::v4::SPACE_DIRECTORY_SCHEMA => extract_space(body, &view)?,
-        crate::v4::GOVERNANCE_REVISION_SCHEMA => extract_governance(body, &view)?,
-        crate::v4::PROJECT_META_SCHEMA => extract_project(body, &view)?,
-        crate::v4::WORKFLOW_REVISION_SCHEMA => extract_workflow(body, &view)?,
-        crate::v4::PROJECT_SCHEDULE_SCHEMA => extract_schedule(body, &view)?,
-        crate::v4::PROJECT_UPDATES_SCHEMA => extract_updates(body, &view)?,
-        crate::v4::SPACE_TRIAGE_SCHEMA => extract_triage(body, &view)?,
-        crate::v4::ISSUE_COMMENT_SCHEMA => extract_comment(body, &view)?,
-        crate::v4::ISSUE_ACTIVITY_SCHEMA => extract_activity(body, &view)?,
-        crate::v4::ISSUE_IDENTITY_SCHEMA => extract_issue_identity(body, &view)?,
-        crate::v4::ISSUE_META_SCHEMA => extract_issue_meta(body, &view)?,
-        crate::v4::INITIATIVE_SCHEMA => extract_initiative(body, &view)?,
-        crate::v4::TEAM_SCHEMA => extract_team(body, &view)?,
-        crate::v4::LABEL_SCHEMA => extract_label(body, &view)?,
-        crate::v4::REVISION_ALIAS_SCHEMA => extract_revision_alias(body, &view)?,
+        contract::ISSUE_SCHEMA => extract_issue(body, view)?,
+        contract::SPEC_SCHEMA => extract_spec_marker(body, view)?,
+        contract::BASELINE_SCHEMA => extract_baseline_marker(body, view)?,
+        crate::records::SPACE_DIRECTORY_SCHEMA => extract_space(body, view)?,
+        crate::records::SPACE_CONTENT_SCHEMA => extract_space_content(body, view)?,
+        crate::records::GOVERNANCE_REVISION_SCHEMA => extract_governance(body, view)?,
+        crate::records::GOVERNANCE_HEADS_SCHEMA => extract_governance_heads(body, view)?,
+        crate::records::PROJECT_META_SCHEMA => extract_project(body, view)?,
+        crate::records::PROJECT_CONTENT_SCHEMA => extract_project_content(body, view)?,
+        crate::records::WORKFLOW_REVISION_SCHEMA => extract_workflow(body, view)?,
+        crate::records::WORKFLOW_HEADS_SCHEMA => extract_workflow_heads(body, view)?,
+        crate::records::PROJECT_SCHEDULE_SCHEMA => extract_schedule(body, view)?,
+        crate::records::PROJECT_UPDATES_SCHEMA => extract_updates(body, view)?,
+        crate::records::SPACE_TRIAGE_SCHEMA => extract_triage(body, view)?,
+        crate::records::ISSUE_COMMENT_SCHEMA => extract_comment(body, view)?,
+        crate::records::ISSUE_ACTIVITY_SCHEMA => extract_activity(body, view)?,
+        crate::records::ISSUE_IDENTITY_SCHEMA => extract_issue_identity(body, view)?,
+        crate::records::ISSUE_META_SCHEMA => extract_issue_meta(body, view)?,
+        crate::records::ISSUE_TRANSITION_SCHEMA => extract_issue_transition(view)?,
+        crate::records::BOARD_BLOCK_SCHEMA => extract_board_block(body, view)?,
+        crate::records::BOARD_LANE_SCHEMA => extract_board_lane(body, view)?,
+        crate::records::INITIATIVE_SCHEMA => extract_initiative(body, view)?,
+        crate::records::INITIATIVE_CONTENT_SCHEMA => extract_initiative_content(body, view)?,
+        crate::records::TEAM_SCHEMA => extract_team(body, view)?,
+        crate::records::LABEL_SCHEMA => extract_label(body, view)?,
+        crate::records::REVISION_ALIAS_SCHEMA => extract_revision_alias(body, view)?,
+        crate::records::SPEC_REVISION_SCHEMA => extract_spec_revision(view)?,
+        crate::records::SPEC_HEADS_SCHEMA => extract_spec_heads(body, view)?,
+        crate::records::SPEC_OBSERVATION_SCHEMA => extract_spec_observation(view)?,
+        crate::records::BASELINE_REVISION_SCHEMA => extract_baseline_revision(view)?,
+        crate::records::BASELINE_HEADS_SCHEMA => extract_baseline_heads(body, view)?,
         _ => return Err(Rejection::ContractViolation),
     };
     Ok(finish(ctx, body, nodes))
+}
+
+fn extract_spec_revision(
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let raw = view
+        .registers
+        .get(crate::records::roots::RECORD)
+        .ok_or(Rejection::StateCorrupt)?;
+    let record = crate::records::SpecRevisionRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let revision = record.revision;
+    let revision_id = revision.revision.clone();
+    let mut nodes = vec![entity(
+        &revision_id,
+        revision.body.kind.as_str(),
+        vec![
+            analyzed_text(field::TITLE, &revision.body.title),
+            analyzed_text(field::TEXT, &revision.body.text),
+            exact_text(field::PROJECT, &revision.body.project),
+            exact_text(field::STATE, revision.body.state.as_str()),
+            exact_text(field::AUTHOR, &revision.body.author),
+            unsigned(field::CREATED_AT, revision.body.ts),
+            exact_text(field::REVISION, &revision_id),
+            exact_text(field::SOURCE_ID, &revision.body.spec),
+            exact_text(field::RELATION_KIND, "spec_revision"),
+        ],
+    )?];
+    nodes.push(relation(
+        "spec_revision",
+        &revision.body.spec,
+        &revision_id,
+        Some(&revision.body.project),
+    )?);
+    for predecessor in revision.predecessors {
+        nodes.push(relation(
+            "predecessor",
+            &revision_id,
+            &predecessor,
+            Some(&revision.body.project),
+        )?);
+    }
+    for link in revision.body.links {
+        let target = match &link.target {
+            crate::spec::Target::Spec { revision, .. }
+            | crate::spec::Target::Baseline { revision, .. } => revision.as_str(),
+            crate::spec::Target::Issue { issue } => issue.as_str(),
+        };
+        nodes.push(tagged_relation(
+            "spec_reference",
+            link.rel.as_str(),
+            &revision_id,
+            target,
+            Some(&revision.body.project),
+        )?);
+    }
+    if let Some(plan) = revision.body.plan {
+        for root in plan.roots {
+            nodes.push(relation(
+                "plan_root",
+                &revision_id,
+                &root,
+                Some(&revision.body.project),
+            )?);
+        }
+    }
+    Ok(nodes)
+}
+
+fn extract_spec_heads(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let spec = register(view, crate::records::roots::IDENTITY);
+    let parsed = crate::ids::SpecId::parse(&spec).ok_or(Rejection::StateCorrupt)?;
+    if crate::records::spec_heads_key(&parsed) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    let project = register(view, crate::records::roots::PROJECT);
+    let kind = register(view, crate::records::roots::KIND);
+    crate::ids::ProjectId::parse(&project).ok_or(Rejection::StateCorrupt)?;
+    let kind = crate::spec::Kind::parse(&kind).ok_or(Rejection::StateCorrupt)?;
+    let head_count = view
+        .sets
+        .get(crate::records::roots::HEADS)
+        .map_or(0, Vec::len);
+    let issued_count = view
+        .sets
+        .get(crate::records::roots::ISSUED_HEADS)
+        .map_or(0, Vec::len);
+    if head_count > crate::records::MAX_CONCURRENT_HEADS
+        || issued_count > crate::records::MAX_CONCURRENT_HEADS
+    {
+        return Err(Rejection::LimitExceeded);
+    }
+    let mut heads = view
+        .sets
+        .get(crate::records::roots::HEADS)
+        .into_iter()
+        .flatten()
+        .map(|value| String::from_utf8(value.clone()).map_err(|_| Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut issued = view
+        .sets
+        .get(crate::records::roots::ISSUED_HEADS)
+        .into_iter()
+        .flatten()
+        .map(|value| String::from_utf8(value.clone()).map_err(|_| Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    heads.sort();
+    heads.dedup();
+    issued.sort();
+    issued.dedup();
+    let mut nodes = vec![entity(
+        &spec,
+        "spec",
+        vec![
+            exact_text(field::PROJECT, &project),
+            exact_text(field::ENTITY_KEY, kind.as_str()),
+            exact_text(field::RELATION_KIND, "spec_document"),
+            bytes(
+                field::HEAD_REVISIONS,
+                serde_json::to_vec(&heads).map_err(|_| Rejection::StateCorrupt)?,
+            ),
+            bytes(
+                field::ISSUED_REVISIONS,
+                serde_json::to_vec(&issued).map_err(|_| Rejection::StateCorrupt)?,
+            ),
+            boolean(field::CONFLICTED, heads.len() > 1 || issued.len() > 1),
+        ],
+    )?];
+    for revision in view
+        .sets
+        .get(crate::records::roots::HEADS)
+        .into_iter()
+        .flatten()
+    {
+        let revision = String::from_utf8(revision.clone()).map_err(|_| Rejection::StateCorrupt)?;
+        crate::spec::decode_revision(&revision).ok_or(Rejection::StateCorrupt)?;
+        nodes.push(entity(
+            &format!("spec-head:{spec}:{revision}"),
+            "spec_head",
+            vec![
+                exact_text(field::PROJECT, &project),
+                exact_text(field::SOURCE_ID, &spec),
+                exact_text(field::TARGET_ID, &revision),
+                exact_text(field::REVISION, revision),
+            ],
+        )?);
+    }
+    for revision in view
+        .sets
+        .get(crate::records::roots::ISSUED_HEADS)
+        .into_iter()
+        .flatten()
+    {
+        let revision = String::from_utf8(revision.clone()).map_err(|_| Rejection::StateCorrupt)?;
+        crate::spec::decode_revision(&revision).ok_or(Rejection::StateCorrupt)?;
+        nodes.push(entity(
+            &format!("spec-issued:{spec}:{revision}"),
+            "spec_issued",
+            vec![
+                exact_text(field::PROJECT, &project),
+                exact_text(field::SOURCE_ID, &spec),
+                exact_text(field::TARGET_ID, &revision),
+                exact_text(field::REVISION, revision),
+            ],
+        )?);
+    }
+    Ok(nodes)
+}
+
+fn extract_baseline_revision(
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let raw = view
+        .registers
+        .get(crate::records::roots::RECORD)
+        .ok_or(Rejection::StateCorrupt)?;
+    let record = crate::records::BaselineRevisionRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let revision = record.revision;
+    let id = revision.revision.clone();
+    let mut nodes = vec![entity(
+        &id,
+        "baseline_revision",
+        vec![
+            analyzed_text(field::TITLE, &revision.body.name),
+            exact_text(field::PROJECT, &revision.body.project),
+            exact_text(field::STATE, revision.body.state.as_str()),
+            exact_text(field::AUTHOR, &revision.body.author),
+            unsigned(field::CREATED_AT, revision.body.ts),
+            exact_text(field::REVISION, &id),
+            exact_text(field::SOURCE_ID, &revision.body.baseline),
+            exact_text(field::RELATION_KIND, "baseline_revision"),
+        ],
+    )?];
+    nodes.push(relation(
+        "baseline_revision",
+        &revision.body.baseline,
+        &id,
+        Some(&revision.body.project),
+    )?);
+    for predecessor in revision.predecessors {
+        nodes.push(relation(
+            "predecessor",
+            &id,
+            &predecessor,
+            Some(&revision.body.project),
+        )?);
+    }
+    for member in revision.body.members {
+        nodes.push(relation(
+            "baseline_member",
+            &id,
+            &member.revision,
+            Some(&revision.body.project),
+        )?);
+    }
+    Ok(nodes)
+}
+
+fn extract_baseline_heads(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let baseline = register(view, crate::records::roots::IDENTITY);
+    let parsed = crate::ids::BaselineId::parse(&baseline).ok_or(Rejection::StateCorrupt)?;
+    if crate::records::baseline_heads_key(&parsed) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    let project = register(view, crate::records::roots::PROJECT);
+    crate::ids::ProjectId::parse(&project).ok_or(Rejection::StateCorrupt)?;
+    let head_count = view
+        .sets
+        .get(crate::records::roots::HEADS)
+        .map_or(0, Vec::len);
+    let issued_count = view
+        .sets
+        .get(crate::records::roots::ISSUED_HEADS)
+        .map_or(0, Vec::len);
+    if head_count > crate::records::MAX_CONCURRENT_HEADS
+        || issued_count > crate::records::MAX_CONCURRENT_HEADS
+    {
+        return Err(Rejection::LimitExceeded);
+    }
+    let mut heads = view
+        .sets
+        .get(crate::records::roots::HEADS)
+        .into_iter()
+        .flatten()
+        .map(|value| String::from_utf8(value.clone()).map_err(|_| Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut issued = view
+        .sets
+        .get(crate::records::roots::ISSUED_HEADS)
+        .into_iter()
+        .flatten()
+        .map(|value| String::from_utf8(value.clone()).map_err(|_| Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    heads.sort();
+    heads.dedup();
+    issued.sort();
+    issued.dedup();
+    let mut nodes = vec![entity(
+        &baseline,
+        "baseline",
+        vec![
+            exact_text(field::PROJECT, &project),
+            exact_text(field::RELATION_KIND, "baseline_document"),
+            bytes(
+                field::HEAD_REVISIONS,
+                serde_json::to_vec(&heads).map_err(|_| Rejection::StateCorrupt)?,
+            ),
+            bytes(
+                field::ISSUED_REVISIONS,
+                serde_json::to_vec(&issued).map_err(|_| Rejection::StateCorrupt)?,
+            ),
+            boolean(field::CONFLICTED, heads.len() > 1 || issued.len() > 1),
+        ],
+    )?];
+    for revision in view
+        .sets
+        .get(crate::records::roots::HEADS)
+        .into_iter()
+        .flatten()
+    {
+        let revision = String::from_utf8(revision.clone()).map_err(|_| Rejection::StateCorrupt)?;
+        crate::spec::decode_revision(&revision).ok_or(Rejection::StateCorrupt)?;
+        nodes.push(entity(
+            &format!("baseline-head:{baseline}:{revision}"),
+            "baseline_head",
+            vec![
+                exact_text(field::PROJECT, &project),
+                exact_text(field::SOURCE_ID, &baseline),
+                exact_text(field::TARGET_ID, &revision),
+                exact_text(field::REVISION, revision),
+            ],
+        )?);
+    }
+    for revision in view
+        .sets
+        .get(crate::records::roots::ISSUED_HEADS)
+        .into_iter()
+        .flatten()
+    {
+        let revision = String::from_utf8(revision.clone()).map_err(|_| Rejection::StateCorrupt)?;
+        crate::spec::decode_revision(&revision).ok_or(Rejection::StateCorrupt)?;
+        nodes.push(entity(
+            &format!("baseline-issued:{baseline}:{revision}"),
+            "baseline_issued",
+            vec![
+                exact_text(field::PROJECT, &project),
+                exact_text(field::SOURCE_ID, &baseline),
+                exact_text(field::TARGET_ID, &revision),
+                exact_text(field::REVISION, revision),
+            ],
+        )?);
+    }
+    Ok(nodes)
+}
+
+fn extract_spec_observation(
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let raw = view
+        .registers
+        .get(crate::records::roots::RECORD)
+        .ok_or(Rejection::StateCorrupt)?;
+    let record = crate::records::SpecObservationRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    match record {
+        crate::records::SpecObservationRecord::Assert {
+            project,
+            observation,
+        } => {
+            let target = match &observation.target {
+                crate::spec::Target::Spec { revision, .. }
+                | crate::spec::Target::Baseline { revision, .. } => revision.as_str(),
+                crate::spec::Target::Issue { issue } => issue.as_str(),
+            };
+            Ok(vec![entity(
+                &observation.observation,
+                "spec_observation_fact",
+                vec![
+                    exact_text(field::STATE, "assert"),
+                    exact_text(field::PROJECT, project),
+                    exact_text(field::SOURCE_ID, &observation.spec),
+                    exact_text(field::TARGET_ID, target),
+                    exact_text(field::RELATION_KIND, observation.rel.as_str()),
+                    exact_text(field::AUTHOR, observation.observer),
+                    analyzed_text(field::TEXT, observation.note),
+                    unsigned(field::CREATED_AT, observation.ts),
+                ],
+            )?])
+        }
+        crate::records::SpecObservationRecord::Retract {
+            project,
+            observation,
+            spec,
+            actor,
+            timestamp,
+        } => Ok(vec![entity(
+            &format!("observation-retraction:{observation}"),
+            "spec_observation_fact",
+            vec![
+                exact_text(field::STATE, "retract"),
+                exact_text(field::PROJECT, project),
+                exact_text(field::SOURCE_ID, spec),
+                exact_text(field::TARGET_ID, observation),
+                exact_text(field::AUTHOR, actor),
+                unsigned(field::CREATED_AT, timestamp),
+            ],
+        )?]),
+    }
 }
 
 fn extract_spec_marker(
@@ -777,23 +1835,20 @@ fn extract_baseline_marker(
 }
 
 fn extract_governance(
-    body: &BodyKey,
+    _body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let identity = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = crate::v4::RecordBodyIdentityRecord::decode_canonical(identity)
+    let identity = crate::records::RecordBodyIdentityRecord::decode_canonical(identity)
         .map_err(|_| Rejection::StateCorrupt)?;
-    if crate::v4::governance_revision_key(&identity.owner, &identity.record) != *body {
-        return Err(Rejection::StateCorrupt);
-    }
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let record = crate::v4::GovernanceRevisionRecord::decode_canonical(raw)
+    let record = crate::records::GovernanceRevisionRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     if record.role != identity.owner || record.revision.revision_id != identity.record {
         return Err(Rejection::StateCorrupt);
@@ -820,25 +1875,75 @@ fn extract_governance(
     Ok(nodes)
 }
 
-fn extract_workflow(
+fn revision_heads(view: &fabric::CollaborativeView) -> Result<Vec<String>, Rejection> {
+    let count = view
+        .sets
+        .get(crate::records::roots::HEADS)
+        .map_or(0, Vec::len);
+    if count > crate::records::MAX_CONCURRENT_HEADS {
+        return Err(Rejection::LimitExceeded);
+    }
+    let mut heads = view
+        .sets
+        .get(crate::records::roots::HEADS)
+        .into_iter()
+        .flatten()
+        .map(|value| String::from_utf8(value.clone()).map_err(|_| Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    if heads.iter().any(|head| head.is_empty() || head.len() > 256) {
+        return Err(Rejection::StateCorrupt);
+    }
+    heads.sort();
+    heads.dedup();
+    Ok(heads)
+}
+
+fn extract_governance_heads(
     body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let role = register(view, crate::records::roots::IDENTITY);
+    if role.is_empty() || crate::records::governance_heads_key(&role) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    let heads = revision_heads(view)?;
+    // The Space directory emits a `role_head` node under this same id carrying
+    // `STATE = "built_in"`, and initialising a tracker writes a governance
+    // revision for every built-in role — so this node lands on top of that one
+    // and is what a role lookup reads. Carrying the marker here is what keeps
+    // a built-in role recognisable as one; without it every built-in role
+    // reads back as custom the moment its heads are first written.
+    let mut fields = vec![
+        exact_text(field::ENTITY_KEY, role.clone()),
+        bytes(
+            field::HEAD_REVISIONS,
+            serde_json::to_vec(&heads).map_err(|_| Rejection::StateCorrupt)?,
+        ),
+        boolean(field::CONFLICTED, heads.len() != 1),
+        boolean(field::TOMBSTONE, false),
+    ];
+    if crate::roles::built_in(&role).is_some() {
+        fields.push(exact_text(field::STATE, "built_in"));
+    }
+    Ok(vec![entity(&format!("role:{role}"), "role_head", fields)?])
+}
+
+fn extract_workflow(
+    _body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let identity = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = crate::v4::RecordBodyIdentityRecord::decode_canonical(identity)
+    let identity = crate::records::RecordBodyIdentityRecord::decode_canonical(identity)
         .map_err(|_| Rejection::StateCorrupt)?;
     let project_id = ProjectId::parse(&identity.owner).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::workflow_revision_key(&project_id, &identity.record) != *body {
-        return Err(Rejection::StateCorrupt);
-    }
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let record = crate::v4::ProjectWorkflowRevisionRecord::decode_canonical(raw)
+    let record = crate::records::ProjectWorkflowRevisionRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     if record.project != identity.owner || record.revision.revision_id != identity.record {
         return Err(Rejection::StateCorrupt);
@@ -895,11 +2000,36 @@ fn extract_workflow(
     Ok(nodes)
 }
 
+fn extract_workflow_heads(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let project = register(view, crate::records::roots::IDENTITY);
+    let project_id = ProjectId::parse(&project).ok_or(Rejection::StateCorrupt)?;
+    if crate::records::workflow_heads_key(&project_id) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    let heads = revision_heads(view)?;
+    Ok(vec![entity(
+        &format!("workflow:{project}"),
+        "workflow_head",
+        vec![
+            exact_text(field::PROJECT, &project),
+            exact_text(field::SOURCE_ID, project),
+            bytes(
+                field::HEAD_REVISIONS,
+                serde_json::to_vec(&heads).map_err(|_| Rejection::StateCorrupt)?,
+            ),
+            boolean(field::CONFLICTED, heads.len() != 1),
+        ],
+    )?])
+}
+
 fn extract_issue(
     body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
-    let issue = register(view, crate::v4::roots::ISSUE_ID);
+    let issue = register(view, crate::records::roots::ISSUE_ID);
     if issue.is_empty() {
         // The offline migration may publish its bounded batches before the
         // final v4-only activation. Unmigrated content is deliberately absent
@@ -924,27 +2054,24 @@ fn extract_issue(
 }
 
 fn extract_issue_identity(
-    body: &BodyKey,
+    _body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let envelope_identity = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
     let envelope_identity =
-        crate::v4::RecordBodyIdentityRecord::decode_canonical(envelope_identity)
+        crate::records::RecordBodyIdentityRecord::decode_canonical(envelope_identity)
             .map_err(|_| Rejection::StateCorrupt)?;
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let record = crate::v4::IssueIdentityRecord::decode_canonical(raw)
+    let record = crate::records::IssueIdentityRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     let issue = crate::ids::DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::issue_identity_key(&issue) != *body
-        || envelope_identity.owner != record.issue
-        || envelope_identity.record != "identity"
-    {
+    if envelope_identity.owner != record.issue || envelope_identity.record != "identity" {
         return Err(Rejection::StateCorrupt);
     }
     Ok(vec![entity(
@@ -952,20 +2079,29 @@ fn extract_issue_identity(
         "issue_identity",
         vec![
             exact_text(field::SOURCE_ID, record.issue),
+            exact_text(field::PROJECT, &record.project),
+            bytes(
+                field::ALIAS_PROJECT_ORDINAL,
+                composite_key([record.project.as_str(), &record.alias.ordinal.to_string()]),
+            ),
             unsigned(field::ALIAS_ORDINAL, record.alias.ordinal),
             bytes(
                 field::ALIAS_DISAMBIGUATOR,
                 record.alias.disambiguator.to_vec(),
+            ),
+            exact_text(
+                field::ALIAS_COORDINATE,
+                format!("{}-{}", record.alias.ordinal, record.alias.suffix()),
             ),
         ],
     )?])
 }
 
 fn extract_issue_placement(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, Rejection> {
-    let record = crate::v4::IssuePlacementRecord::decode_canonical(raw)
+    let record = crate::records::IssuePlacementRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     let issue = crate::ids::DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::issue_placement_key(&issue) != *body {
+    if crate::records::issue_placement_key(&issue) != *body {
         return Err(Rejection::StateCorrupt);
     }
     Ok(vec![entity(
@@ -975,28 +2111,72 @@ fn extract_issue_placement(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNo
             exact_text(field::SOURCE_ID, &record.issue),
             exact_text(field::PROJECT, &record.placement.project),
             exact_text(field::STATE, &record.placement.workflow_state),
+            exact_text(field::BLOCK, &record.placement.block),
             exact_text(field::POSITION, &record.placement.position),
         ],
     )?])
+}
+
+fn extract_issue_transition(
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let raw = view
+        .registers
+        .get(crate::records::roots::RECORD)
+        .ok_or(Rejection::StateCorrupt)?;
+    let record = crate::records::IssueTransitionRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let transition = record
+        .transition_id()
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let transition_node = entity(
+        &transition,
+        "issue_transition",
+        vec![
+            exact_text(field::SOURCE_ID, record.issue.clone()),
+            exact_text(field::PROJECT, record.placement.project.clone()),
+            exact_text(field::STATE, record.placement.workflow_state.clone()),
+            exact_text(field::BLOCK, record.placement.block.clone()),
+            exact_text(field::POSITION, record.placement.position.clone()),
+            exact_text(field::AUTHOR, record.actor.clone()),
+            unsigned(field::CREATED_AT, record.timestamp),
+        ],
+    )?;
+    let mut nodes = vec![transition_node];
+    for predecessor in record.predecessors {
+        nodes.push(relation(
+            "transition_predecessor",
+            &transition,
+            &predecessor,
+            Some(&record.placement.project),
+        )?);
+    }
+    nodes.push(relation(
+        "issue_transition",
+        &record.issue,
+        &transition,
+        Some(&record.placement.project),
+    )?);
+    Ok(nodes)
 }
 
 fn extract_issue_meta(
     body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
-    let issue = register(view, crate::v4::roots::IDENTITY);
+    let issue = register(view, crate::records::roots::IDENTITY);
     let parsed = crate::ids::DocId::parse(&issue).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::issue_meta_key(&parsed) != *body {
+    if crate::records::issue_meta_key(&parsed) != *body {
         return Err(Rejection::StateCorrupt);
     }
-    let priority = register(view, crate::v4::roots::PRIORITY);
-    let title = register(view, crate::v4::roots::TITLE);
-    let created_by = register(view, crate::v4::roots::CREATED_BY);
+    let priority = register(view, crate::records::roots::PRIORITY);
+    let title = register(view, crate::records::roots::TITLE);
+    let created_by = register(view, crate::records::roots::CREATED_BY);
     let created_at =
-        optional_u64(view, crate::v4::roots::CREATED_AT).ok_or(Rejection::StateCorrupt)?;
-    let due_at = optional_u64(view, crate::v4::roots::DUE_AT);
-    let estimate = optional_u64(view, crate::v4::roots::ESTIMATE);
-    let record = crate::v4::IssueMetaRecord {
+        optional_u64(view, crate::records::roots::CREATED_AT).ok_or(Rejection::StateCorrupt)?;
+    let due_at = optional_u64(view, crate::records::roots::DUE_AT);
+    let estimate = optional_u64(view, crate::records::roots::ESTIMATE);
+    let record = crate::records::IssueMetaRecord {
         issue: issue.clone(),
         title: title.clone(),
         priority: priority.clone(),
@@ -1005,7 +2185,7 @@ fn extract_issue_meta(
         due_at,
         estimate: estimate.and_then(|value| value.try_into().ok()),
         tombstone: matches!(
-            register(view, crate::v4::roots::TOMBSTONE).as_str(),
+            register(view, crate::records::roots::TOMBSTONE).as_str(),
             "1" | "true"
         ),
     };
@@ -1026,14 +2206,205 @@ fn extract_issue_meta(
     if let Some(estimate) = estimate {
         fields.push(unsigned(field::ESTIMATE, estimate));
     }
-    Ok(vec![entity(&issue, "issue", fields)?])
+    let mut heads = view
+        .sets
+        .get(crate::records::roots::PLACEMENT_HEADS)
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            crate::records::IssueTransitionHead::decode_canonical(value)
+                .map_err(|_| Rejection::StateCorrupt)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if heads.len() > crate::records::MAX_CONCURRENT_HEADS {
+        return Err(Rejection::LimitExceeded);
+    }
+    heads.sort_by(|left, right| left.transition.cmp(&right.transition));
+    heads.dedup_by(|left, right| left.transition == right.transition);
+    if heads
+        .iter()
+        .any(|head| head.validate().is_err() || head.core.issue != issue)
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    let rank_overlay = view
+        .registers
+        .get(crate::records::roots::RANK_OVERLAY)
+        .filter(|bytes| !bytes.is_empty())
+        .map(|bytes| {
+            let overlay = crate::records::IssueRankOverlay::decode_canonical(bytes)
+                .map_err(|_| Rejection::StateCorrupt)?;
+            overlay.validate().map_err(|_| Rejection::StateCorrupt)?;
+            if overlay.issue != issue {
+                return Err(Rejection::StateCorrupt);
+            }
+            Ok(overlay)
+        })
+        .transpose()?;
+    let effective_placement = match heads.as_slice() {
+        [head] => {
+            let mut placement = head.core.placement.clone();
+            if let Some(overlay) = &rank_overlay {
+                if overlay.transition == head.transition
+                    && overlay.project == placement.project
+                    && overlay.workflow_state == placement.workflow_state
+                {
+                    placement.block.clone_from(&overlay.block);
+                    placement.position.clone_from(&overlay.position);
+                }
+            }
+            Some(placement)
+        }
+        _ => None,
+    };
+    fields.push(boolean(field::CONFLICTED, heads.len() > 1));
+    if let Some(placement) = &effective_placement {
+        fields.extend([
+            exact_text(field::PROJECT, &placement.project),
+            exact_text(field::STATE, &placement.workflow_state),
+            exact_text(field::BLOCK, &placement.block),
+            exact_text(field::POSITION, &placement.position),
+        ]);
+        if let [head] = heads.as_slice() {
+            fields.push(exact_text(field::PLACEMENT_TRANSITION, &head.transition));
+        }
+    }
+    let issue_node = entity(&issue, "issue", fields)?;
+    let mut nodes = vec![issue_node];
+    for head in &heads {
+        nodes.push(relation(
+            "transition_head",
+            &issue,
+            &head.transition,
+            Some(&head.core.placement.project),
+        )?);
+    }
+    Ok(nodes)
+}
+
+fn extract_board_block(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let mut heads = view
+        .sets
+        .get(crate::records::roots::BLOCK_HEADS)
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            crate::records::BoardBlockHead::decode_canonical(value)
+                .map_err(|_| Rejection::StateCorrupt)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    heads.sort_by(|left, right| left.revision.cmp(&right.revision));
+    heads.dedup_by(|left, right| left.revision == right.revision);
+    let first = heads.first().ok_or(Rejection::StateCorrupt)?;
+    if heads.iter().any(|head| {
+        head.validate().is_err()
+            || head.core.project != first.core.project
+            || head.core.workflow_state != first.core.workflow_state
+            || head.core.block != first.core.block
+    }) {
+        return Err(Rejection::StateCorrupt);
+    }
+    let project = ProjectId::parse(&first.core.project).ok_or(Rejection::StateCorrupt)?;
+    if crate::records::board_block_key(&project, &first.core.workflow_state, &first.core.block)
+        != *body
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    let conflicted = heads.len() != 1;
+    let mut fields = vec![
+        exact_text(field::PROJECT, &first.core.project),
+        exact_text(field::STATE, &first.core.workflow_state),
+        exact_text(field::BLOCK, &first.core.block),
+        exact_text(field::REVISION, &first.revision),
+        boolean(field::CONFLICTED, conflicted),
+    ];
+    let mut order = first.core.order.clone();
+    if !conflicted {
+        if let Some(raw) = view
+            .registers
+            .get(crate::records::roots::ORDER_OVERLAY)
+            .filter(|raw| !raw.is_empty())
+        {
+            let overlay = crate::records::BoardBlockOrderOverlay::decode_canonical(raw)
+                .map_err(|_| Rejection::StateCorrupt)?;
+            overlay.validate().map_err(|_| Rejection::StateCorrupt)?;
+            if overlay.block_revision == first.revision {
+                order = overlay.order;
+            }
+        }
+    }
+    // Even a conflicted block retains one deterministic index coordinate so
+    // ordered traversal encounters the conflict and refuses it. Omitting the
+    // posting would silently make the block (and its Issues) disappear.
+    fields.push(exact_text(field::POSITION, &order));
+    fields.push(bytes(
+        field::PROJECT_STATE_BLOCK_ORDER,
+        board_block_order_key(
+            &first.core.project,
+            &first.core.workflow_state,
+            &order,
+            &first.core.block,
+        ),
+    ));
+    fields.push(bytes(
+        field::PROJECT_STATE_BLOCK_ORDER_DESC,
+        board_block_order_desc_key(
+            &first.core.project,
+            &first.core.workflow_state,
+            &order,
+            &first.core.block,
+        ),
+    ));
+    Ok(vec![entity(&first.core.block, "board_block", fields)?])
+}
+
+fn extract_board_lane(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let mut heads = view
+        .sets
+        .get(crate::records::roots::TOPOLOGY_HEADS)
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            crate::records::BoardTopologyHead::decode_canonical(value)
+                .map_err(|_| Rejection::StateCorrupt)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    heads.sort_by(|left, right| left.transition.cmp(&right.transition));
+    heads.dedup_by(|left, right| left.transition == right.transition);
+    let first = heads.first().ok_or(Rejection::StateCorrupt)?;
+    if heads.iter().any(|head| {
+        head.validate().is_err()
+            || head.core.project != first.core.project
+            || head.core.workflow_state != first.core.workflow_state
+    }) {
+        return Err(Rejection::StateCorrupt);
+    }
+    let project = ProjectId::parse(&first.core.project).ok_or(Rejection::StateCorrupt)?;
+    if crate::records::board_lane_key(&project, &first.core.workflow_state) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(vec![entity(
+        &format!("lane:{}:{}", first.core.project, first.core.workflow_state),
+        "board_lane",
+        vec![
+            exact_text(field::PROJECT, &first.core.project),
+            exact_text(field::STATE, &first.core.workflow_state),
+            boolean(field::CONFLICTED, heads.len() != 1),
+        ],
+    )?])
 }
 
 fn extract_issue_attachment(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, Rejection> {
-    let record = crate::v4::IssueAttachmentRecord::decode_canonical(raw)
+    let record = crate::records::IssueAttachmentRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     let issue = crate::ids::DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::issue_attachment_key(&issue, &record.id) != *body {
+    if crate::records::issue_attachment_key(&issue, &record.id) != *body {
         return Err(Rejection::StateCorrupt);
     }
     Ok(vec![entity(
@@ -1051,10 +2422,10 @@ fn extract_issue_attachment(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedN
 }
 
 fn extract_issue_check(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, Rejection> {
-    let record =
-        crate::v4::IssueCheckRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::IssueCheckRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
     let issue = crate::ids::DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::issue_check_key(&issue, &record.run) != *body {
+    if crate::records::issue_check_key(&issue, &record.run) != *body {
         return Err(Rejection::StateCorrupt);
     }
     Ok(vec![entity(
@@ -1074,46 +2445,78 @@ fn extract_space(
     body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
-    let id = register(view, crate::v4::roots::IDENTITY);
+    let id = register(view, crate::records::roots::IDENTITY);
     let Some(space) = mechanics::ids::SpaceId::parse(&id) else {
         return Err(Rejection::StateCorrupt);
     };
-    if crate::v4::space_directory_key(&space) != *body {
+    if crate::records::space_directory_key(&space) != *body {
         return Err(Rejection::StateCorrupt);
     }
-    let record = crate::v4::SpaceDirectoryRecord {
-        name: register(view, crate::v4::roots::NAME),
-        description: text(view, crate::v4::roots::DESCRIPTION),
+    let record = crate::records::SpaceDirectoryRecord {
+        name: register(view, crate::records::roots::NAME),
+        description: String::new(),
     };
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
-    Ok(vec![entity(
+    let mut nodes = vec![entity(
         &id,
         "space",
+        vec![analyzed_text(field::TITLE, record.name)],
+    )?];
+    for role in crate::roles::BUILT_IN_ROLE_IDS {
+        let revision = crate::roles::built_in(role).ok_or(Rejection::StateCorrupt)?;
+        let heads = vec![data_encoding::HEXLOWER.encode(&revision.revision_id)];
+        nodes.push(entity(
+            &format!("role:{role}"),
+            "role_head",
+            vec![
+                exact_text(field::ENTITY_KEY, role),
+                exact_text(field::STATE, "built_in"),
+                bytes(
+                    field::HEAD_REVISIONS,
+                    serde_json::to_vec(&heads).map_err(|_| Rejection::StateCorrupt)?,
+                ),
+                boolean(field::CONFLICTED, false),
+                boolean(field::TOMBSTONE, false),
+            ],
+        )?);
+    }
+    Ok(nodes)
+}
+
+fn extract_space_content(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let id = register(view, crate::records::roots::IDENTITY);
+    let space = mechanics::ids::SpaceId::parse(&id).ok_or(Rejection::StateCorrupt)?;
+    if crate::records::space_content_key(&space) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(vec![entity(
+        &format!("space-content:{id}"),
+        "space_content",
         vec![
-            analyzed_text(field::TITLE, record.name),
-            analyzed_text(field::TEXT, record.description),
+            exact_text(field::SOURCE_ID, id),
+            analyzed_text(field::TEXT, text(view, crate::records::roots::DESCRIPTION)),
         ],
     )?])
 }
 
 fn extract_revision_alias(
-    body: &BodyKey,
+    _body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let identity = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = crate::v4::RecordBodyIdentityRecord::decode_canonical(identity)
+    let identity = crate::records::RecordBodyIdentityRecord::decode_canonical(identity)
         .map_err(|_| Rejection::StateCorrupt)?;
-    if crate::v4::revision_alias_key(&identity.owner, &identity.record) != *body {
-        return Err(Rejection::StateCorrupt);
-    }
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let alias = crate::v4::RevisionAliasRecord::decode_canonical(raw)
+    let alias = crate::records::RevisionAliasRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     if alias.spec != identity.owner || alias.legacy_revision != identity.record {
         return Err(Rejection::StateCorrupt);
@@ -1130,30 +2533,30 @@ fn extract_project(
     body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
-    let project = register(view, crate::v4::roots::IDENTITY);
+    let project = register(view, crate::records::roots::IDENTITY);
     let Some(project_id) = ProjectId::parse(&project) else {
         return Err(Rejection::StateCorrupt);
     };
-    if crate::v4::project_meta_key(&project_id) != *body {
+    if crate::records::project_meta_key(&project_id) != *body {
         return Err(Rejection::StateCorrupt);
     }
     let archived = matches!(
-        register(view, crate::v4::roots::ARCHIVED).as_str(),
+        register(view, crate::records::roots::ARCHIVED).as_str(),
         "1" | "true"
     );
-    let meta = crate::v4::ProjectMetaRecord {
+    let meta = crate::records::ProjectMetaRecord {
         project: project.clone(),
-        name: register(view, crate::v4::roots::NAME),
-        key: register(view, crate::v4::roots::KEY),
-        color: register(view, crate::v4::roots::COLOR),
-        description: text(view, crate::v4::roots::DESCRIPTION),
-        lead: register(view, crate::v4::roots::LEAD),
-        start_date: optional_u64(view, crate::v4::roots::START_DATE),
-        target_date: optional_u64(view, crate::v4::roots::TARGET_DATE),
+        name: register(view, crate::records::roots::NAME),
+        key: register(view, crate::records::roots::KEY),
+        color: register(view, crate::records::roots::COLOR),
+        description: String::new(),
+        lead: register(view, crate::records::roots::LEAD),
+        start_date: optional_u64(view, crate::records::roots::START_DATE),
+        target_date: optional_u64(view, crate::records::roots::TARGET_DATE),
         archived,
-        team: register(view, crate::v4::roots::TEAM),
+        team: register(view, crate::records::roots::TEAM),
         tombstone: matches!(
-            register(view, crate::v4::roots::TOMBSTONE).as_str(),
+            register(view, crate::records::roots::TOMBSTONE).as_str(),
             "1" | "true"
         ),
     };
@@ -1162,11 +2565,16 @@ fn extract_project(
         analyzed_text(field::TITLE, meta.name.clone()),
         exact_text(field::EXACT_NAME, meta.name.trim().to_ascii_lowercase()),
         exact_text(field::ENTITY_KEY, meta.key),
-        analyzed_text(field::TEXT, meta.description),
         exact_text(field::PROJECT, &project),
+        exact_text(field::HEALTH, meta.color),
+        exact_text(field::AUTHOR, meta.lead),
+        exact_text(field::SOURCE_ID, meta.team.clone()),
         boolean(field::ARCHIVED, meta.archived),
         boolean(field::TOMBSTONE, meta.tombstone),
     ];
+    if let Some(start) = meta.start_date {
+        fields.push(unsigned(field::CREATED_AT, start));
+    }
     if let Some(target) = meta.target_date {
         fields.push(unsigned(field::TARGET_DATE, target));
     }
@@ -1177,20 +2585,40 @@ fn extract_project(
     Ok(nodes)
 }
 
+fn extract_project_content(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let id = register(view, crate::records::roots::IDENTITY);
+    let project = ProjectId::parse(&id).ok_or(Rejection::StateCorrupt)?;
+    if crate::records::project_content_key(&project) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(vec![entity(
+        &format!("project-content:{id}"),
+        "project_content",
+        vec![
+            exact_text(field::PROJECT, id.clone()),
+            exact_text(field::SOURCE_ID, id),
+            analyzed_text(field::TEXT, text(view, crate::records::roots::DESCRIPTION)),
+        ],
+    )?])
+}
+
 fn extract_label(
     body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
-    let id = register(view, crate::v4::roots::IDENTITY);
+    let id = register(view, crate::records::roots::IDENTITY);
     let label = crate::ids::LabelId::parse(&id).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::label_key(&label) != *body {
+    if crate::records::label_key(&label) != *body {
         return Err(Rejection::StateCorrupt);
     }
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let record = crate::v4::LabelDirectoryEntry::decode_canonical(raw)
+    let record = crate::records::LabelDirectoryEntry::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     if record.label != id {
         return Err(Rejection::StateCorrupt);
@@ -1213,24 +2641,24 @@ fn extract_schedule(
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let identity = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = crate::v4::RecordBodyIdentityRecord::decode_canonical(identity)
+    let identity = crate::records::RecordBodyIdentityRecord::decode_canonical(identity)
         .map_err(|_| Rejection::StateCorrupt)?;
     let project_id = ProjectId::parse(&identity.owner).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::project_schedule_key(&project_id, &identity.record) != *body {
+    if crate::records::project_schedule_key(&project_id, &identity.record) != *body {
         return Err(Rejection::StateCorrupt);
     }
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let record =
-        crate::v4::ScheduleRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::ScheduleRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
     let project = identity.owner;
     let mut nodes = Vec::with_capacity(2);
     match record {
-        crate::v4::ScheduleRecord::Milestone {
+        crate::records::ScheduleRecord::Milestone {
             milestone,
             project: owner,
             name,
@@ -1243,19 +2671,22 @@ fn extract_schedule(
                 return Err(Rejection::StateCorrupt);
             }
             let mut fields = vec![
-                analyzed_text(field::TITLE, name),
+                analyzed_text(field::TITLE, name.clone()),
+                exact_text(field::EXACT_NAME, name.trim().to_ascii_lowercase()),
                 analyzed_text(field::TEXT, description),
                 exact_text(field::PROJECT, &project),
-                exact_text(field::POSITION, position),
                 boolean(field::TOMBSTONE, tombstone),
             ];
+            if !tombstone {
+                fields.push(exact_text(field::POSITION, position));
+            }
             if let Some(target) = target_date {
                 fields.push(unsigned(field::TARGET_DATE, target));
             }
             nodes.push(entity(&milestone, "milestone", fields)?);
             nodes.push(relation("project", &milestone, &project, Some(&project))?);
         }
-        crate::v4::ScheduleRecord::Cycle {
+        crate::records::ScheduleRecord::Cycle {
             cycle,
             project: owner,
             name,
@@ -1270,7 +2701,8 @@ fn extract_schedule(
                 &cycle,
                 "cycle",
                 vec![
-                    analyzed_text(field::TITLE, name),
+                    analyzed_text(field::TITLE, name.clone()),
+                    exact_text(field::EXACT_NAME, name.trim().to_ascii_lowercase()),
                     exact_text(field::PROJECT, &project),
                     unsigned(field::CREATED_AT, start),
                     unsigned(field::DUE_AT, end),
@@ -1284,13 +2716,13 @@ fn extract_schedule(
 }
 
 fn extract_hierarchy(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, Rejection> {
-    let record =
-        crate::v4::TopologyRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::TopologyRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
     let mut nodes = Vec::new();
     match record {
-        crate::v4::TopologyRecord::Parent(record) => {
+        crate::records::TopologyRecord::Parent(record) => {
             let project_id = ProjectId::parse(&record.project).ok_or(Rejection::StateCorrupt)?;
-            if crate::v4::project_hierarchy_key(&project_id, &record.child) != *body {
+            if crate::records::project_hierarchy_key(&project_id, &record.child) != *body {
                 return Err(Rejection::StateCorrupt);
             }
             if let Some(parent) = &record.parent {
@@ -1303,10 +2735,10 @@ fn extract_hierarchy(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, R
                 )?);
             }
         }
-        crate::v4::TopologyRecord::Link(record) => {
+        crate::records::TopologyRecord::Link(record) => {
             let project_id = ProjectId::parse(&record.project).ok_or(Rejection::StateCorrupt)?;
             let identity = data_encoding::HEXLOWER.encode(&record.relation_identity());
-            if crate::v4::project_hierarchy_key(&project_id, &identity) != *body {
+            if crate::records::project_hierarchy_key(&project_id, &identity) != *body {
                 return Err(Rejection::StateCorrupt);
             }
             if record.present {
@@ -1324,25 +2756,22 @@ fn extract_hierarchy(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, R
 }
 
 fn extract_updates(
-    body: &BodyKey,
+    _body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let identity_bytes = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = crate::v4::RecordBodyIdentityRecord::decode_canonical(identity_bytes)
+    let identity = crate::records::RecordBodyIdentityRecord::decode_canonical(identity_bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
     let project = identity.owner;
     let project_id = ProjectId::parse(&project).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::project_updates_key(&project_id, &identity.record) != *body {
-        return Err(Rejection::StateCorrupt);
-    }
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let record = crate::v4::ProjectUpdateRecord::decode_canonical(raw)
+    let record = crate::records::ProjectUpdateRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     if record.project != project || record.update != identity.record {
         return Err(Rejection::StateCorrupt);
@@ -1364,36 +2793,34 @@ fn extract_updates(
 }
 
 fn extract_triage(
-    body: &BodyKey,
+    _body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let identity_bytes = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = crate::v4::RecordBodyIdentityRecord::decode_canonical(identity_bytes)
+    let identity = crate::records::RecordBodyIdentityRecord::decode_canonical(identity_bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
     let space = identity.owner;
     let space = mechanics::ids::SpaceId::parse(&space).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::space_triage_key(&space, &identity.record) != *body {
-        return Err(Rejection::StateCorrupt);
-    }
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
     let record =
-        crate::v4::TriageRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
+        crate::records::TriageRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
     let mut nodes = Vec::new();
     match record {
-        crate::v4::TriageRecord::Submission(record) => {
+        crate::records::TriageRecord::Submission(record) => {
             if record.triage != identity.record {
                 return Err(Rejection::StateCorrupt);
             }
             nodes.push(entity(
                 &record.triage,
-                "triage",
+                "triage_fact",
                 vec![
+                    exact_text(field::STATE, "submission"),
                     analyzed_text(field::TITLE, record.title),
                     analyzed_text(field::TEXT, record.body),
                     exact_text(field::AUTHOR, record.submitted_by),
@@ -1401,21 +2828,22 @@ fn extract_triage(
                 ],
             )?);
         }
-        crate::v4::TriageRecord::Decision(record) => {
+        crate::records::TriageRecord::Decision(record) => {
             if record.decision != identity.record {
                 return Err(Rejection::StateCorrupt);
             }
             let outcome = match record.outcome {
-                crate::v4::TriageOutcome::Accepted => "accepted",
-                crate::v4::TriageOutcome::Declined => "declined",
-                crate::v4::TriageOutcome::Duplicate => "duplicate",
+                crate::records::TriageOutcome::Accepted => "accepted",
+                crate::records::TriageOutcome::Declined => "declined",
+                crate::records::TriageOutcome::Duplicate => "duplicate",
             };
             let id = format!("triage-decision:{}:{}", record.triage, record.decision);
             nodes.push(entity(
                 &id,
-                "triage_decision",
+                "triage_fact",
                 vec![
-                    exact_text(field::STATE, outcome),
+                    exact_text(field::STATE, "decision"),
+                    exact_text(field::HEALTH, outcome),
                     exact_text(field::AUTHOR, record.decided_by),
                     analyzed_text(field::TEXT, record.note),
                     unsigned(field::CREATED_AT, record.timestamp),
@@ -1429,7 +2857,7 @@ fn extract_triage(
                 nodes.push(relation("issue", &id, &issue, record.project.as_deref())?);
             }
         }
-        crate::v4::TriageRecord::Resolution(record) => {
+        crate::records::TriageRecord::Resolution(record) => {
             if record.identity() != identity.record {
                 return Err(Rejection::StateCorrupt);
             }
@@ -1437,8 +2865,9 @@ fn extract_triage(
             let decision = format!("triage-decision:{}:{}", record.triage, record.decision);
             nodes.push(entity(
                 &id,
-                "triage_resolution",
+                "triage_fact",
                 vec![
+                    exact_text(field::STATE, "resolution"),
                     exact_text(field::AUTHOR, record.resolved_by),
                     unsigned(field::CREATED_AT, record.timestamp),
                 ],
@@ -1451,27 +2880,24 @@ fn extract_triage(
 }
 
 fn extract_comment(
-    body: &BodyKey,
+    _body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let identity_bytes = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = crate::v4::RecordBodyIdentityRecord::decode_canonical(identity_bytes)
+    let identity = crate::records::RecordBodyIdentityRecord::decode_canonical(identity_bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
     let issue = crate::ids::DocId::parse(&identity.owner).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::issue_comment_key(&issue, &identity.record) != *body {
-        return Err(Rejection::StateCorrupt);
-    }
     let mut nodes = Vec::new();
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let record =
-        crate::v4::DiscussionRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
-    let crate::v4::DiscussionRecord::Comment(comment) = record else {
+    let record = crate::records::DiscussionRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let crate::records::DiscussionRecord::Comment(comment) = record else {
         return Err(Rejection::StateCorrupt);
     };
     let Some(id) = comment.id else {
@@ -1498,14 +2924,15 @@ fn extract_comment(
 }
 
 fn extract_reaction(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, Rejection> {
-    let crate::v4::DiscussionRecord::Reaction(reaction) =
-        crate::v4::DiscussionRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?
+    let crate::records::DiscussionRecord::Reaction(reaction) =
+        crate::records::DiscussionRecord::decode_canonical(raw)
+            .map_err(|_| Rejection::StateCorrupt)?
     else {
         return Err(Rejection::StateCorrupt);
     };
     let issue = crate::ids::DocId::parse(&reaction.issue).ok_or(Rejection::StateCorrupt)?;
     let identity = reaction.identity();
-    if crate::v4::issue_reaction_key(&issue, &identity) != *body {
+    if crate::records::issue_reaction_key(&issue, &identity) != *body {
         return Err(Rejection::StateCorrupt);
     }
     let id = format!("reaction:{identity}");
@@ -1526,52 +2953,72 @@ fn extract_reaction(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, Re
 }
 
 fn extract_activity(
-    body: &BodyKey,
+    _body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
     let identity_bytes = view
         .registers
-        .get(crate::v4::roots::IDENTITY)
+        .get(crate::records::roots::IDENTITY)
         .ok_or(Rejection::StateCorrupt)?;
-    let identity = crate::v4::RecordBodyIdentityRecord::decode_canonical(identity_bytes)
+    let identity = crate::records::RecordBodyIdentityRecord::decode_canonical(identity_bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
-    let issue = crate::ids::DocId::parse(&identity.owner).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::issue_activity_key(&issue, &identity.record) != *body {
-        return Err(Rejection::StateCorrupt);
-    }
+    crate::ids::DocId::parse(&identity.owner).ok_or(Rejection::StateCorrupt)?;
     let raw = view
         .registers
-        .get(crate::v4::roots::RECORD)
+        .get(crate::records::roots::RECORD)
         .ok_or(Rejection::StateCorrupt)?;
-    let record =
-        crate::v4::ActivityRecord::decode_canonical(raw).map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::ActivityRecord::decode_canonical(raw)
+        .map_err(|_| Rejection::StateCorrupt)?;
     if record.issue != identity.owner {
         return Err(Rejection::StateCorrupt);
     }
     let event = record.event;
+    let inbox_kind = event.inbox_kind().map(str::to_owned);
     let id = format!("activity:{}:{}", identity.owner, identity.record);
-    Ok(vec![
+    let mut nodes = vec![
         entity(
             &id,
             "activity",
             vec![
-                exact_text(field::STATE, event.k),
-                exact_text(field::AUTHOR, event.a),
-                analyzed_text(field::TEXT, event.x),
+                exact_text(field::STATE, event.k.as_str()),
+                exact_text(field::AUTHOR, event.a.as_str()),
+                analyzed_text(field::TEXT, event.x.as_str()),
                 unsigned(field::CREATED_AT, event.t),
                 exact_text(field::SOURCE_ID, &identity.owner),
             ],
         )?,
         relation("issue", &id, &identity.owner, None)?,
-    ])
+    ];
+    if let Some(inbox_kind) = inbox_kind {
+        let reverse_time = format!("{:020}", u64::MAX.saturating_sub(event.t));
+        for recipient in record.recipients {
+            let inbox_id = format!("inbox:{recipient}:{id}");
+            nodes.push(entity(
+                &inbox_id,
+                "inbox",
+                vec![
+                    exact_text(field::STATE, inbox_kind.as_str()),
+                    exact_text(field::AUTHOR, &event.a),
+                    exact_text(field::DEVICE, &event.d),
+                    unsigned(field::CREATED_AT, event.t),
+                    exact_text(field::SOURCE_ID, &identity.owner),
+                    bytes(
+                        field::INBOX_ORDER,
+                        composite_key([recipient.as_str(), reverse_time.as_str(), id.as_str()]),
+                    ),
+                ],
+            )?);
+        }
+    }
+    Ok(nodes)
 }
 
 fn extract_issue_relation(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, Rejection> {
-    let record = crate::v4::IssueRelationRecord::decode_canonical(raw)
+    let record = crate::records::IssueRelationRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     let identity = record.identity();
     let issue = crate::ids::DocId::parse(&record.issue).ok_or(Rejection::StateCorrupt)?;
-    if crate::v4::issue_relation_key(&issue, &identity) != *body {
+    if crate::records::issue_relation_key(&issue, &identity) != *body {
         return Err(Rejection::StateCorrupt);
     }
     if !record.present {
@@ -1597,30 +3044,30 @@ fn extract_initiative(
     body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
-    let id = register(view, crate::v4::roots::IDENTITY);
+    let id = register(view, crate::records::roots::IDENTITY);
     let Some(initiative) = crate::ids::InitiativeId::parse(&id) else {
         return Err(Rejection::StateCorrupt);
     };
-    if crate::v4::initiative_key(&initiative) != *body {
+    if crate::records::initiative_key(&initiative) != *body {
         return Err(Rejection::StateCorrupt);
     }
     let tombstone = matches!(
-        register(view, crate::v4::roots::TOMBSTONE).as_str(),
+        register(view, crate::records::roots::TOMBSTONE).as_str(),
         "1" | "true"
     );
-    let record = crate::v4::InitiativeRecord {
+    let record = crate::records::InitiativeRecord {
         initiative: id.clone(),
-        name: register(view, crate::v4::roots::NAME),
-        description: text(view, crate::v4::roots::DESCRIPTION),
-        owner: register(view, crate::v4::roots::OWNER),
-        health: register(view, crate::v4::roots::HEALTH),
-        target_date: optional_u64(view, crate::v4::roots::TARGET_DATE),
+        name: register(view, crate::records::roots::NAME),
+        description: String::new(),
+        owner: register(view, crate::records::roots::OWNER),
+        health: register(view, crate::records::roots::HEALTH),
+        target_date: optional_u64(view, crate::records::roots::TARGET_DATE),
         tombstone,
     };
     record.validate().map_err(|_| Rejection::StateCorrupt)?;
     let mut fields = vec![
-        analyzed_text(field::TITLE, record.name),
-        analyzed_text(field::TEXT, record.description),
+        analyzed_text(field::TITLE, record.name.clone()),
+        exact_text(field::EXACT_NAME, record.name.trim().to_ascii_lowercase()),
         exact_text(field::HEALTH, record.health),
         boolean(field::TOMBSTONE, record.tombstone),
     ];
@@ -1633,25 +3080,44 @@ fn extract_initiative(
     Ok(vec![entity(&id, "initiative", fields)?])
 }
 
+fn extract_initiative_content(
+    body: &BodyKey,
+    view: &fabric::CollaborativeView,
+) -> Result<Vec<ExtractedNode>, Rejection> {
+    let id = register(view, crate::records::roots::IDENTITY);
+    let initiative = crate::ids::InitiativeId::parse(&id).ok_or(Rejection::StateCorrupt)?;
+    if crate::records::initiative_content_key(&initiative) != *body {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(vec![entity(
+        &format!("initiative-content:{id}"),
+        "initiative_content",
+        vec![
+            exact_text(field::SOURCE_ID, id),
+            analyzed_text(field::TEXT, text(view, crate::records::roots::DESCRIPTION)),
+        ],
+    )?])
+}
+
 fn extract_team(
     body: &BodyKey,
     view: &fabric::CollaborativeView,
 ) -> Result<Vec<ExtractedNode>, Rejection> {
-    let id = register(view, crate::v4::roots::IDENTITY);
+    let id = register(view, crate::records::roots::IDENTITY);
     let Some(team) = crate::ids::TeamId::parse(&id) else {
         return Err(Rejection::StateCorrupt);
     };
-    if crate::v4::team_key(&team) != *body {
+    if crate::records::team_key(&team) != *body {
         return Err(Rejection::StateCorrupt);
     }
-    let record = crate::v4::TeamRecord {
+    let record = crate::records::TeamRecord {
         team: id.clone(),
-        name: register(view, crate::v4::roots::NAME),
-        key: register(view, crate::v4::roots::KEY),
-        icon: register(view, crate::v4::roots::ICON),
-        lead: register(view, crate::v4::roots::LEAD),
+        name: register(view, crate::records::roots::NAME),
+        key: register(view, crate::records::roots::KEY),
+        icon: register(view, crate::records::roots::ICON),
+        lead: register(view, crate::records::roots::LEAD),
         tombstone: matches!(
-            register(view, crate::v4::roots::TOMBSTONE).as_str(),
+            register(view, crate::records::roots::TOMBSTONE).as_str(),
             "1" | "true"
         ),
     };
@@ -1663,17 +3129,19 @@ fn extract_team(
             analyzed_text(field::TITLE, record.name.clone()),
             exact_text(field::EXACT_NAME, record.name.trim().to_ascii_lowercase()),
             exact_text(field::ENTITY_KEY, record.key),
+            exact_text(field::HEALTH, record.icon),
+            exact_text(field::AUTHOR, record.lead),
             boolean(field::TOMBSTONE, record.tombstone),
         ],
     )?])
 }
 
 fn extract_entity_relation(body: &BodyKey, raw: &[u8]) -> Result<Vec<ExtractedNode>, Rejection> {
-    let record = crate::v4::EntityRelationRecord::decode_canonical(raw)
+    let record = crate::records::EntityRelationRecord::decode_canonical(raw)
         .map_err(|_| Rejection::StateCorrupt)?;
     let identity = record.identity();
     if record.identity() != identity
-        || crate::v4::entity_relation_key(&record.owner, &identity) != *body
+        || crate::records::entity_relation_key(&record.owner, &identity) != *body
     {
         return Err(Rejection::StateCorrupt);
     }
@@ -1717,11 +3185,11 @@ mod tests {
         assert!(schema
             .sources
             .iter()
-            .any(|source| { source.name.as_str() == crate::v4::WORKFLOW_REVISION_SCHEMA }));
+            .any(|source| { source.name.as_str() == crate::records::WORKFLOW_REVISION_SCHEMA }));
         assert!(schema
             .sources
             .iter()
-            .any(|source| { source.name.as_str() == crate::v4::GOVERNANCE_REVISION_SCHEMA }));
+            .any(|source| { source.name.as_str() == crate::records::GOVERNANCE_REVISION_SCHEMA }));
     }
 
     #[test]
@@ -1742,47 +3210,144 @@ mod tests {
     }
 
     #[test]
+    fn activity_shape_admits_the_bounded_term_and_audience_maxima() {
+        let issue = crate::ids::DocId::parse(ISSUE).expect("issue id");
+        let mut recipients = (0..crate::contract::MAX_ISSUE_AUDIENCE)
+            .map(|index| {
+                crate::ids::ActorId::from_incept_hash(&format!("{index:064x}")).to_string()
+            })
+            .collect::<Vec<_>>();
+        recipients.sort();
+        let record = crate::records::ActivityRecord {
+            issue: ISSUE.into(),
+            event: crate::contract::IssueEvent {
+                k: "started".into(),
+                d: String::new(),
+                a: recipients[0].clone(),
+                t: 1,
+                c: Vec::new(),
+                x: (0..MAX_TERMS_PER_VALUE)
+                    .map(|index| format!("term{index}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                entry: String::new(),
+            },
+            recipients,
+        };
+        let identity = crate::records::RecordBodyIdentityRecord {
+            owner: ISSUE.into(),
+            record: "activity-shape-bound".into(),
+        };
+        let identity_bytes = identity.encode_canonical().expect("identity");
+        let record_bytes = record.encode_canonical().expect("activity");
+        let mut view = fabric::CollaborativeView::default();
+        view.registers.insert(
+            crate::records::roots::IDENTITY.into(),
+            identity_bytes.clone(),
+        );
+        view.registers
+            .insert(crate::records::roots::RECORD.into(), record_bytes.clone());
+        let body = crate::records::issue_activity_key(&issue, "activity-shape-bound");
+        let nodes = extract_activity(&body, &view).expect("extract bounded activity");
+        let extraction = BodyExtraction {
+            body,
+            stamp: Vec::new(),
+            nodes,
+        };
+        let source_bytes =
+            u64::try_from(identity_bytes.len() + record_bytes.len()).expect("bounded source size");
+        let shape = extraction_shape(&SourceRef {
+            name: crate::records::PhysicalSchema::IssueActivity
+                .declaration()
+                .id,
+            version: crate::records::SCHEMA_VERSION,
+        });
+        let postings = |node: &ExtractedNode| {
+            1u64.saturating_add(node.fields.iter().fold(0u64, |total, field| {
+                total
+                    .saturating_add(2)
+                    .saturating_add(u64::try_from(field.terms.len()).unwrap_or(u64::MAX))
+            }))
+            .saturating_add(u64::try_from(node.features.len()).unwrap_or(u64::MAX))
+            .saturating_add(node.edges.iter().fold(0u64, |total, edge| {
+                total.saturating_add(u64::try_from(edge.targets.len()).unwrap_or(u64::MAX))
+            }))
+        };
+        let source_kib = source_bytes.saturating_add(1023) / 1024;
+        let allowed_nodes = u64::from(shape.growth.base_nodes_per_body)
+            .saturating_add(source_kib.saturating_mul(u64::from(shape.growth.nodes_per_source_kib)))
+            .min(u64::from(shape.nodes_per_body));
+        let allowed_postings = shape
+            .growth
+            .base_postings_per_body
+            .saturating_add(source_kib.saturating_mul(shape.growth.postings_per_source_kib))
+            .min(shape.postings_per_body);
+
+        assert_eq!(
+            extraction.nodes.len(),
+            2 + crate::contract::MAX_ISSUE_AUDIENCE
+        );
+        assert_eq!(
+            extraction.nodes[0]
+                .fields
+                .iter()
+                .map(|field| field.terms.len())
+                .sum::<usize>(),
+            MAX_TERMS_PER_VALUE,
+        );
+        assert!(u64::try_from(extraction.nodes.len()).unwrap_or(u64::MAX) <= allowed_nodes);
+        assert!(extraction
+            .nodes
+            .iter()
+            .all(|node| postings(node) <= u64::from(shape.postings_per_node)));
+        assert!(extraction.nodes.iter().map(postings).sum::<u64>() <= allowed_postings);
+    }
+
+    #[test]
     fn issue_extraction_keeps_content_identity_meta_and_placement_independent() {
         let issue = crate::ids::DocId::parse(ISSUE).unwrap();
-        let identity = crate::v4::IssueIdentityRecord {
+        let identity = crate::records::IssueIdentityRecord {
             issue: ISSUE.into(),
-            alias: crate::v4::IssueAliasCoordinate::for_issue(7, &issue).unwrap(),
+            project: PROJECT.into(),
+            alias: crate::records::IssueAliasCoordinate::for_issue(7, &issue).unwrap(),
         };
-        let placement = crate::v4::IssuePlacementRecord {
+        let placement = crate::records::IssuePlacementRecord {
             issue: ISSUE.into(),
-            placement: crate::v4::BoardPlacement {
+            placement: crate::records::BoardPlacement {
                 project: PROJECT.into(),
                 workflow_state: "in_progress".into(),
+                block: crate::records::board_seed_block_id(PROJECT, "in_progress"),
                 position: "V".into(),
             },
         };
-        let envelope_identity = crate::v4::RecordBodyIdentityRecord {
+        let envelope_identity = crate::records::RecordBodyIdentityRecord {
             owner: ISSUE.into(),
             record: "identity".into(),
         };
         let mut content = fabric::CollaborativeView::default();
-        content
-            .registers
-            .insert(crate::v4::roots::ISSUE_ID.into(), ISSUE.as_bytes().to_vec());
+        content.registers.insert(
+            crate::records::roots::ISSUE_ID.into(),
+            ISSUE.as_bytes().to_vec(),
+        );
         content
             .texts
             .insert("description".into(), "Find every linked issue".into());
         let mut identity_view = fabric::CollaborativeView::default();
         identity_view.registers.insert(
-            crate::v4::roots::IDENTITY.into(),
+            crate::records::roots::IDENTITY.into(),
             envelope_identity.encode_canonical().unwrap(),
         );
         identity_view.registers.insert(
-            crate::v4::roots::RECORD.into(),
+            crate::records::roots::RECORD.into(),
             identity.encode_canonical().unwrap(),
         );
         let mut meta = fabric::CollaborativeView::default();
         for (path, value) in [
-            (crate::v4::roots::IDENTITY, ISSUE),
-            (crate::v4::roots::TITLE, "Fast lookup"),
-            (crate::v4::roots::PRIORITY, "none"),
-            (crate::v4::roots::CREATED_AT, "1"),
-            (crate::v4::roots::TOMBSTONE, "0"),
+            (crate::records::roots::IDENTITY, ISSUE),
+            (crate::records::roots::TITLE, "Fast lookup"),
+            (crate::records::roots::PRIORITY, "none"),
+            (crate::records::roots::CREATED_AT, "1"),
+            (crate::records::roots::TOMBSTONE, "0"),
         ] {
             meta.registers
                 .insert(path.into(), value.as_bytes().to_vec());
@@ -1790,13 +3355,14 @@ mod tests {
 
         let nodes = [
             extract_issue(&contract::issue_key(ISSUE), &content).unwrap(),
-            extract_issue_identity(&crate::v4::issue_identity_key(&issue), &identity_view).unwrap(),
+            extract_issue_identity(&crate::records::issue_identity_key(&issue), &identity_view)
+                .unwrap(),
             extract_issue_placement(
-                &crate::v4::issue_placement_key(&issue),
+                &crate::records::issue_placement_key(&issue),
                 &placement.encode_canonical().unwrap(),
             )
             .unwrap(),
-            extract_issue_meta(&crate::v4::issue_meta_key(&issue), &meta).unwrap(),
+            extract_issue_meta(&crate::records::issue_meta_key(&issue), &meta).unwrap(),
         ]
         .concat();
         assert_eq!(nodes.len(), 4);
@@ -1813,18 +3379,229 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_transition_heads_are_visible_and_inert_on_the_board() {
+        let issue = crate::ids::DocId::parse(ISSUE).unwrap();
+        let placement = |state: &str, position: &str| crate::records::BoardPlacement {
+            project: PROJECT.into(),
+            workflow_state: state.into(),
+            block: crate::records::board_seed_block_id(PROJECT, state),
+            position: position.into(),
+        };
+        let mut meta = fabric::CollaborativeView::default();
+        for (path, value) in [
+            (crate::records::roots::IDENTITY, ISSUE),
+            (crate::records::roots::TITLE, "Concurrent move"),
+            (crate::records::roots::PRIORITY, "none"),
+            (crate::records::roots::CREATED_AT, "1"),
+            (crate::records::roots::TOMBSTONE, "0"),
+        ] {
+            meta.registers
+                .insert(path.into(), value.as_bytes().to_vec());
+        }
+        let first = crate::records::IssueTransitionHead {
+            core: crate::records::IssueTransitionCore {
+                issue: ISSUE.into(),
+                predecessors: Vec::new(),
+                placement: placement("active", "F"),
+                actor: "act_0000000000000000000000000000000000000000000000000000000000000000"
+                    .into(),
+                timestamp: 1,
+            },
+            transition: String::new(),
+        };
+        let first = crate::records::IssueTransitionHead {
+            transition: first.core.transition_id().unwrap(),
+            ..first
+        };
+        meta.sets.insert(
+            crate::records::roots::PLACEMENT_HEADS.into(),
+            vec![first.encode_canonical().unwrap()],
+        );
+
+        let sole = extract_issue_meta(&crate::records::issue_meta_key(&issue), &meta).unwrap();
+        let sole_issue = sole
+            .iter()
+            .find(|node| node.key.node.as_bytes() == ISSUE.as_bytes())
+            .unwrap();
+        assert!(sole_issue.fields.iter().any(|field| {
+            field.reference == field_ref(field::PROJECT)
+                && field.value == Value::Text(PROJECT.into())
+        }));
+        assert!(sole_issue
+            .fields
+            .iter()
+            .any(|field| field.reference == field_ref(field::PROJECT_STATE_BLOCK_MEMBER)));
+
+        // Rank maintenance is non-semantic and fenced to the exact placement
+        // transition. The same final state results whether this old overlay
+        // arrives before or after the successor move: once the head changes,
+        // the overlay is inert and cannot pull the card back into its old
+        // block during a concurrent split.
+        let old_overlay = crate::records::IssueRankOverlay {
+            issue: ISSUE.into(),
+            transition: first.transition.clone(),
+            project: PROJECT.into(),
+            workflow_state: "active".into(),
+            block: crate::records::board_seed_block_id(PROJECT, "active"),
+            position: "Z".into(),
+            maintenance: "split-maintenance".into(),
+        };
+        meta.registers.insert(
+            crate::records::roots::RANK_OVERLAY.into(),
+            old_overlay.encode_canonical().unwrap(),
+        );
+        let maintained =
+            extract_issue_meta(&crate::records::issue_meta_key(&issue), &meta).unwrap();
+        let maintained_issue = maintained
+            .iter()
+            .find(|node| node.key.node.as_bytes() == ISSUE.as_bytes())
+            .unwrap();
+        assert!(maintained_issue.fields.iter().any(|field| {
+            field.reference == field_ref(field::POSITION) && field.value == Value::Text("Z".into())
+        }));
+
+        let mut split_placement = placement("active", "U");
+        split_placement.block = "a".repeat(64);
+        let successor = crate::records::IssueTransitionHead {
+            core: crate::records::IssueTransitionCore {
+                issue: ISSUE.into(),
+                predecessors: vec![first.transition.clone()],
+                placement: split_placement.clone(),
+                actor: "act_0000000000000000000000000000000000000000000000000000000000000000"
+                    .into(),
+                timestamp: 2,
+            },
+            transition: String::new(),
+        };
+        let successor = crate::records::IssueTransitionHead {
+            transition: successor.core.transition_id().unwrap(),
+            ..successor
+        };
+        meta.sets.insert(
+            crate::records::roots::PLACEMENT_HEADS.into(),
+            vec![successor.encode_canonical().unwrap()],
+        );
+        let moved = extract_issue_meta(&crate::records::issue_meta_key(&issue), &meta).unwrap();
+        let moved_issue = moved
+            .iter()
+            .find(|node| node.key.node.as_bytes() == ISSUE.as_bytes())
+            .unwrap();
+        assert!(moved_issue.fields.iter().any(|field| {
+            field.reference == field_ref(field::POSITION) && field.value == Value::Text("U".into())
+        }));
+        assert!(!moved_issue.fields.iter().any(|field| {
+            field.reference == field_ref(field::POSITION) && field.value == Value::Text("Z".into())
+        }));
+        assert!(moved_issue.fields.iter().any(|field| {
+            field.reference == field_ref(field::BLOCK)
+                && field.value == Value::Text(split_placement.block.clone().into())
+        }));
+
+        // Rebuild the same converged view in the opposite delivery order:
+        // successor transition first, stale split-maintenance overlay second.
+        // The overlay remains inert because it names the predecessor head.
+        let mut successor_then_maintenance = meta.clone();
+        successor_then_maintenance
+            .registers
+            .remove(crate::records::roots::RANK_OVERLAY);
+        successor_then_maintenance.sets.insert(
+            crate::records::roots::PLACEMENT_HEADS.into(),
+            vec![successor.encode_canonical().unwrap()],
+        );
+        successor_then_maintenance.registers.insert(
+            crate::records::roots::RANK_OVERLAY.into(),
+            old_overlay.encode_canonical().unwrap(),
+        );
+        let reverse = extract_issue_meta(
+            &crate::records::issue_meta_key(&issue),
+            &successor_then_maintenance,
+        )
+        .unwrap();
+        let reverse_issue = reverse
+            .iter()
+            .find(|node| node.key.node.as_bytes() == ISSUE.as_bytes())
+            .unwrap();
+        assert!(reverse_issue.fields.iter().any(|field| {
+            field.reference == field_ref(field::POSITION) && field.value == Value::Text("U".into())
+        }));
+        assert!(!reverse_issue.fields.iter().any(|field| {
+            field.reference == field_ref(field::POSITION) && field.value == Value::Text("Z".into())
+        }));
+        assert!(reverse_issue.fields.iter().any(|field| {
+            field.reference == field_ref(field::BLOCK)
+                && field.value == Value::Text(split_placement.block.clone().into())
+        }));
+
+        meta.registers.remove(crate::records::roots::RANK_OVERLAY);
+        meta.sets.insert(
+            crate::records::roots::PLACEMENT_HEADS.into(),
+            vec![first.encode_canonical().unwrap()],
+        );
+
+        let second = crate::records::IssueTransitionHead {
+            core: crate::records::IssueTransitionCore {
+                issue: ISSUE.into(),
+                predecessors: Vec::new(),
+                placement: placement("done", "U"),
+                actor: "act_0000000000000000000000000000000000000000000000000000000000000000"
+                    .into(),
+                timestamp: 2,
+            },
+            transition: String::new(),
+        };
+        let second = crate::records::IssueTransitionHead {
+            transition: second.core.transition_id().unwrap(),
+            ..second
+        };
+        meta.sets
+            .get_mut(crate::records::roots::PLACEMENT_HEADS)
+            .unwrap()
+            .push(second.encode_canonical().unwrap());
+        let conflicted =
+            extract_issue_meta(&crate::records::issue_meta_key(&issue), &meta).unwrap();
+        let issue_node = conflicted
+            .iter()
+            .find(|node| node.key.node.as_bytes() == ISSUE.as_bytes())
+            .unwrap();
+        assert!(issue_node.fields.iter().any(|field| {
+            field.reference == field_ref(field::CONFLICTED) && field.value == Value::Bool(true)
+        }));
+        assert!(!issue_node
+            .fields
+            .iter()
+            .any(|field| field.reference == field_ref(field::PROJECT)));
+        assert_eq!(conflicted.len(), 3, "issue plus two visible head facts");
+
+        // A peer cannot forge current board placement merely by pairing an
+        // authentic transition id with a different projection in IssueMeta.
+        let mut forged = first.clone();
+        forged.core.placement.workflow_state = "done".into();
+        meta.sets.insert(
+            crate::records::roots::PLACEMENT_HEADS.into(),
+            vec![serde_json::to_vec(&forged).unwrap()],
+        );
+        assert_eq!(
+            extract_issue_meta(&crate::records::issue_meta_key(&issue), &meta),
+            Err(Rejection::StateCorrupt)
+        );
+    }
+
+    #[test]
     fn hierarchy_extraction_emits_normalized_reverse_adjacency() {
-        let record = crate::v4::HierarchyRecord {
+        let record = crate::records::HierarchyRecord {
             project: PROJECT.into(),
             child: ISSUE.into(),
             parent: Some("iss_00000000000000000000000001".into()),
         };
         let project = ProjectId::parse(PROJECT).unwrap();
-        let raw = crate::v4::TopologyRecord::Parent(record)
+        let raw = crate::records::TopologyRecord::Parent(record)
             .encode_canonical()
             .unwrap();
-        let nodes =
-            extract_hierarchy(&crate::v4::project_hierarchy_key(&project, ISSUE), &raw).unwrap();
+        let nodes = extract_hierarchy(
+            &crate::records::project_hierarchy_key(&project, ISSUE),
+            &raw,
+        )
+        .unwrap();
         assert_eq!(nodes.len(), 1);
         let relation = nodes.first().unwrap();
         assert_eq!(relation.edges.len(), 2);

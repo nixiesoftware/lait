@@ -1,0 +1,51 @@
+[package]
+name = "correspondence"
+version = "0.7.8"
+edition = "2021"
+rust-version = "1.92"
+description = "The lait correspondence seam: reaching a person who shares no Space with you, with the carrier as a contractor behind it. The ONLY crate that may name a delivery protocol."
+license = "MIT OR Apache-2.0"
+# Not published, for the reason `comms` and `journal` give: these are lait's
+# internal boundaries rather than a library surface, and the description above is
+# an architecture invariant, not a contract for strangers to build on.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The roots. The seam speaks `ActorId`, `DeviceId` and an `Egress` witness, and
+# nothing else of lait's — so both identity and standing cross this boundary
+# already self-certifying.
+mechanics = { path = "../mechanics" }
+
+serde = { version = "1", features = ["derive"] }
+blake3 = "1"
+getrandom = "0.3"
+data-encoding = "2.6"
+postcard = { version = "1", features = ["use-std"] }
+serde_json = "1"
+
+# The wire format and its client half. This crate is the only one that may name a
+# delivery protocol, so the dependency belongs here and nowhere above it.
+lait-post = { path = "../post" }
+
+# `ureq` + rustls, matching the one other outbound client in the tree
+# (`src/update/feed.rs`): pure Rust, no reqwest, no native-tls, no OpenSSL.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+# For the arrival-poll loop (`watch::serve`): the timer, the stop channel, and the
+# select! that races them. No runtime is started here — the daemon owns that.
+tokio = { version = "1", default-features = false, features = ["time", "sync", "macros", "rt"] }
+
+[dev-dependencies]
+# The kinship lookup registry: proving a sender resolves a recipient by profile
+# alone, sharing no Space, then reaches them over the carrier. Dev-only.
+addressbook = { path = "../addressbook" }
+# For the invitation hop test: a real, self-authenticating `SignedCoordinates` to
+# carry and verify. Dev-only — the crate itself never names `runtime`, because an
+# invitation is opaque bytes to the carriage and self-authenticating to the reader.
+runtime = { path = "../runtime" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "test-util"] }
+axum = "0.8"
+tempfile = "3"

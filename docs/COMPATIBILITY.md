@@ -71,8 +71,8 @@ opening it is `Whoami` as a named agent.
 |---|---|---|---|
 | Store marker | `replica::marker::STORE_VERSION` | 1 | leading field |
 | Orbit generation pointer | `runtime::generation` | 1 | magic + canonical body + checksum |
-| Store manifest | `journal::STORE_FORMAT_VERSION` | 2 | leading field |
-| Replica store meta | `replica::STORE_META_FORMAT_VERSION` | 4 (one-time migration from 2) | leading field |
+| Store manifest | `journal::STORE_FORMAT_VERSION` | 4 | leading field |
+| Replica store meta | `replica::STORE_META_FORMAT_VERSION` | 6 (one-time migration from 2) | leading field |
 | Manifest root | `replica::manifest::MANIFEST_FORMAT_VERSION` | 2 | leading field + `lait/manifest/2` |
 | Content descriptor | `replica::content::CONTENT_FORMAT_VERSION` | 1 | leading field + `lait/content-id/1` |
 | Causal artifacts | `fabric::causal::CAUSAL_FORMAT_VERSION` | 1 | leading field |
@@ -233,13 +233,17 @@ prior-to-current recipe. The daemon releases its own placement for that Orbit
 first — the rebuild requires the Orbit to be vacant, and running it from a
 separate client was a store-lock race against whatever the daemon had open.
 
-Replica store meta 4 adds a persistent root for immutable causal
-read-generation material. Version 2 is an exact readable predecessor:
-activation projects its current committed state once, writes encrypted full
-checkpoints as the causal baseline without changing the Manifest or World
-facts, and writes version 4 metadata. Thereafter
-one commit writes one delta proportional to the Bodies it changed. Unknown or
-older store-meta formats still fail closed.
+Journal format 4 authenticates eager control objects and deferred causal
+payloads under separate roots, and Replica store meta 6 replaces rendered
+object maps with authenticated Body, generation, receipt, and ownership roots.
+A bounded prior reader recognizes the immediately preceding Journal/Replica
+representation only as a read-only migration source. It never rewrites an old
+whole-Body signed descriptor into a causal descriptor: those declarations have
+different signed meanings. After launcher update consent, the composition-owned
+migration job streams the prior committed facts into a fresh generation through
+authorized current transactions, verifies semantic Body and receipt evidence,
+and only then activates it. Unknown or older formats fail closed, and the normal
+current reader carries no predecessor branch.
 
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no
@@ -259,8 +263,10 @@ retain their semantic hashes and exact references while their immutable
 revisions move to revision-sized Bodies. Plans remain Spec revisions and store
 the full portable publication identity.
 
-The migration is one administrator-authored, crash-resumable protocol executed
-in bounded deterministic transactions. Its marker cannot claim completion
+The migration is one launcher-authorized, crash-resumable protocol executed in
+bounded deterministic transactions under an in-process capability bound to the
+exact source, migrator, and target implementations. It is not a public tracker
+intent and does not accept a caller-supplied actor. Its marker cannot claim completion
 until every aggregate Catalog, enrichment, schedule, hierarchy, update, triage,
 workflow, role, Spec, Baseline, and membership record has been materialized and
 audited. Only then may the v4-only implementation activate. Internal Spaces use
@@ -459,7 +465,7 @@ use is a slot held open for nothing.
 |---|---|---|---|
 | Local DTOs | `runtime::dto::DTO_PROTOCOL_VERSION` | 1 | loopback control plane and viewer |
 
-| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 14 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 14, so the mixed-version window is currently empty |
+| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 15 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 15, so the mixed-version window is currently empty |
 
 DTOs are a local contract between the engine and its own clients. They are
 versioned because a stale viewer bundle is a real situation, not because they

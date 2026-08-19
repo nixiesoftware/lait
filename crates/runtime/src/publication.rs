@@ -43,12 +43,39 @@ impl ExtractorSchemaDigest {
         }
         push_len(&mut material, extractors.len());
         for extractor in extractors {
+            extractor.shape.validate()?;
             push_name(&mut material, &extractor.schema.name);
             material.extend_from_slice(&extractor.schema.version.to_be_bytes());
             push_name(&mut material, &extractor.source.name);
             material.extend_from_slice(&extractor.source.version.to_be_bytes());
             material.extend_from_slice(&extractor.abi_version.to_be_bytes());
             material.extend_from_slice(&extractor.semantic_digest);
+            material.extend_from_slice(&extractor.shape.nodes_per_body.to_be_bytes());
+            material.extend_from_slice(&extractor.shape.postings_per_node.to_be_bytes());
+            material.extend_from_slice(&extractor.shape.postings_per_body.to_be_bytes());
+            material.extend_from_slice(&extractor.shape.variable_bytes_per_node.to_be_bytes());
+            material.extend_from_slice(&extractor.shape.variable_bytes_per_body.to_be_bytes());
+            material.extend_from_slice(&extractor.shape.transient_bytes_per_body.to_be_bytes());
+            material.extend_from_slice(&extractor.shape.growth.base_nodes_per_body.to_be_bytes());
+            material.extend_from_slice(&extractor.shape.growth.nodes_per_source_kib.to_be_bytes());
+            material
+                .extend_from_slice(&extractor.shape.growth.base_postings_per_body.to_be_bytes());
+            material
+                .extend_from_slice(&extractor.shape.growth.postings_per_source_kib.to_be_bytes());
+            material.extend_from_slice(
+                &extractor
+                    .shape
+                    .growth
+                    .base_variable_bytes_per_body
+                    .to_be_bytes(),
+            );
+            material.extend_from_slice(
+                &extractor
+                    .shape
+                    .growth
+                    .variable_bytes_per_source_byte
+                    .to_be_bytes(),
+            );
         }
         Ok(Self(blake3::derive_key(
             EXTRACTOR_SCHEMA_CONTEXT,
@@ -185,13 +212,14 @@ mod tests {
             source: schema.sources[0].clone(),
             abi_version: find::EXTRACTOR_ABI_VERSION,
             semantic_digest: [7; 32],
+            shape: find::ExtractionShape::new(1, 8, 8, 4 * 1024, 4 * 1024, 8 * 1024),
         }
     }
 
     #[test]
     fn extractor_identity_is_canonical_and_semantic() {
-        let a = schema("issues.issue", "issues.issue-body");
-        let b = schema("issues.project", "issues.project-body");
+        let a = schema("notes.note", "notes.note-body");
+        let b = schema("notes.project", "notes.project-body");
         let forward =
             ExtractorSchemaDigest::derive(&[a.clone(), b.clone()], &[extractor(&a), extractor(&b)])
                 .unwrap();
@@ -216,13 +244,44 @@ mod tests {
         assert_ne!(
             forward,
             ExtractorSchemaDigest::derive(
-                &[a.clone(), schema("issues.project", "issues.project-body")],
+                &[a.clone(), schema("notes.project", "notes.project-body")],
                 &[
                     changed_semantics,
-                    extractor(&schema("issues.project", "issues.project-body"))
+                    extractor(&schema("notes.project", "notes.project-body"))
                 ],
             )
             .unwrap()
+        );
+
+        let mut changed_shape = extractor(&a);
+        changed_shape.shape.postings_per_node =
+            changed_shape.shape.postings_per_node.saturating_add(1);
+        assert_ne!(
+            forward,
+            ExtractorSchemaDigest::derive(
+                &[a.clone(), schema("notes.project", "notes.project-body")],
+                &[
+                    changed_shape,
+                    extractor(&schema("notes.project", "notes.project-body"))
+                ],
+            )
+            .unwrap(),
+            "memory/output shape is corpus identity, not a local cache hint"
+        );
+
+        let mut changed_growth = extractor(&a);
+        changed_growth.shape.growth.variable_bytes_per_source_byte = 1;
+        assert_ne!(
+            forward,
+            ExtractorSchemaDigest::derive(
+                &[a.clone(), schema("notes.project", "notes.project-body")],
+                &[
+                    changed_growth,
+                    extractor(&schema("notes.project", "notes.project-body"))
+                ],
+            )
+            .unwrap(),
+            "enforceable source-size growth is committed corpus identity"
         );
     }
 

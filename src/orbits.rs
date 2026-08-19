@@ -21,7 +21,7 @@ mod router;
 
 pub use catalog::Catalog;
 pub(crate) use catalog::{ResolvedOrbit, StationIdentity};
-pub(crate) use router::ContentPlacement;
+pub(crate) use router::{BlockingFailure, ContentPlacement};
 pub use router::{Hosting, OrbitDoorbell, OrbitVacancy, Placement, Router, SlotVacancy};
 
 use std::path::{Path, PathBuf};

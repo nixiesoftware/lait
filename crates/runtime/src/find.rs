@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 /// Standalone canonical encoding version for [`Grant`].
 const GRANT_VERSION: u8 = 1;
 /// Standalone canonical encoding version for [`Query`].
-const QUERY_VERSION: u8 = 4;
+const QUERY_VERSION: u8 = 5;
 /// Canonical encoding version for one Runtime-issued [`Cursor`].
 const CURSOR_VERSION: u8 = 4;
 /// Canonical encoding version for one descriptor-embedded [`Schema`].
@@ -210,9 +210,159 @@ pub struct Extractor {
     pub source: SourceRef,
     pub abi_version: u16,
     pub semantic_digest: [u8; 32],
+    /// Enforceable upper shape of one source-Body extraction. Runtime commits
+    /// this declaration into corpus identity and uses it to reserve physical
+    /// build memory before invoking the World extractor.
+    pub shape: ExtractionShape,
 }
 
 pub const EXTRACTOR_ABI_VERSION: u16 = 1;
+
+/// Identity-bound upper bounds for one extractor invocation.
+///
+/// `postings_per_node` includes the schema row, ordered/exact/term rows,
+/// feature rows, and incoming edge-target rows. `variable_bytes_per_node`
+/// includes every extractor-owned variable byte retained by the row (node and
+/// target ids, values, terms, feature payloads, and reference names). The
+/// corresponding per-Body fields are independent aggregate ceilings: Runtime
+/// does not multiply a rare 1 MiB node maximum by every small relation node in
+/// a heterogeneous extraction.
+/// `transient_bytes_per_body` is the trusted implementation peak beyond the
+/// returned rows while decoding/projecting one Body; authority review treats
+/// exceeding it like any other implementation contract violation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ExtractionShape {
+    pub nodes_per_body: u32,
+    pub postings_per_node: u32,
+    pub postings_per_body: u64,
+    pub variable_bytes_per_node: u64,
+    pub variable_bytes_per_body: u64,
+    pub transient_bytes_per_body: u64,
+    pub growth: ExtractionGrowth,
+}
+
+/// Tight retained-output growth relative to the exact encoded source Body.
+///
+/// Hard per-node/per-Body maxima remain the safety ceiling. This affine rule
+/// lets admission price a million ordinary small records from their actual
+/// source bytes without pretending that each is the package's rare maximum
+/// (for example, a 1 MiB rich-text record with hundreds of tiny relation
+/// nodes). The same rule is enforced on extractor output, so it is identity
+/// material rather than an optimistic memory hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ExtractionGrowth {
+    pub base_nodes_per_body: u32,
+    pub nodes_per_source_kib: u32,
+    pub base_postings_per_body: u64,
+    pub postings_per_source_kib: u64,
+    pub base_variable_bytes_per_body: u64,
+    pub variable_bytes_per_source_byte: u64,
+}
+
+impl ExtractionShape {
+    pub const fn new(
+        nodes_per_body: u32,
+        postings_per_node: u32,
+        postings_per_body: u64,
+        variable_bytes_per_node: u64,
+        variable_bytes_per_body: u64,
+        transient_bytes_per_body: u64,
+    ) -> Self {
+        Self {
+            nodes_per_body,
+            postings_per_node,
+            postings_per_body,
+            variable_bytes_per_node,
+            variable_bytes_per_body,
+            transient_bytes_per_body,
+            growth: ExtractionGrowth {
+                base_nodes_per_body: nodes_per_body,
+                nodes_per_source_kib: 0,
+                base_postings_per_body: postings_per_body,
+                postings_per_source_kib: 0,
+                base_variable_bytes_per_body: variable_bytes_per_body,
+                variable_bytes_per_source_byte: 0,
+            },
+        }
+    }
+
+    pub const fn with_growth(mut self, growth: ExtractionGrowth) -> Self {
+        self.growth = growth;
+        self
+    }
+
+    pub fn validate(self) -> Result<(), Invalid> {
+        if self.nodes_per_body == 0
+            || self.postings_per_node == 0
+            || self.postings_per_body == 0
+            || self.growth.base_nodes_per_body > self.nodes_per_body
+            || self.growth.base_postings_per_body > self.postings_per_body
+            || self.growth.base_variable_bytes_per_body > self.variable_bytes_per_body
+        {
+            return Err(Invalid::InvalidOperand("extractor shape"));
+        }
+        Ok(())
+    }
+
+    /// Verify the observable retained output before it reaches Corpus. The
+    /// World-private transient peak is authority-reviewed rather than
+    /// introspectable, but every returned node/posting/byte is exact here.
+    pub(crate) fn admits(self, source_bytes: u64, extraction: &BodyExtraction) -> bool {
+        let allowed = self.allowed_for_source(source_bytes);
+        if u64::try_from(extraction.nodes.len()).unwrap_or(u64::MAX) > u64::from(allowed.nodes) {
+            return false;
+        }
+        let mut body_postings = 0u64;
+        let mut body_variable_bytes = 0u64;
+        for node in &extraction.nodes {
+            let postings = extracted_postings(node);
+            let variable_bytes = extracted_variable_bytes(node);
+            if postings > u64::from(self.postings_per_node)
+                || variable_bytes > self.variable_bytes_per_node
+            {
+                return false;
+            }
+            body_postings = body_postings.saturating_add(postings);
+            body_variable_bytes = body_variable_bytes.saturating_add(variable_bytes);
+            if body_postings > allowed.postings || body_variable_bytes > allowed.variable_bytes {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn allowed_for_source(self, source_bytes: u64) -> ExtractionAllowance {
+        let source_kib = source_bytes.saturating_add(1023) / 1024;
+        ExtractionAllowance {
+            nodes: u64::from(self.growth.base_nodes_per_body)
+                .saturating_add(
+                    source_kib.saturating_mul(u64::from(self.growth.nodes_per_source_kib)),
+                )
+                .min(u64::from(self.nodes_per_body))
+                .try_into()
+                .unwrap_or(self.nodes_per_body),
+            postings: self
+                .growth
+                .base_postings_per_body
+                .saturating_add(source_kib.saturating_mul(self.growth.postings_per_source_kib))
+                .min(self.postings_per_body),
+            variable_bytes: self
+                .growth
+                .base_variable_bytes_per_body
+                .saturating_add(
+                    source_bytes.saturating_mul(self.growth.variable_bytes_per_source_byte),
+                )
+                .min(self.variable_bytes_per_body),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExtractionAllowance {
+    pub nodes: u32,
+    pub postings: u64,
+    pub variable_bytes: u64,
+}
 
 /// One exact scalar emitted by a World extractor.
 ///
@@ -286,6 +436,56 @@ pub struct BodyExtraction {
     pub body: BodyKey,
     pub stamp: Vec<u8>,
     pub nodes: Vec<ExtractedNode>,
+}
+
+pub(crate) fn extracted_postings(node: &ExtractedNode) -> u64 {
+    let fields = node.fields.iter().fold(0u64, |total, field| {
+        total
+            .saturating_add(2)
+            .saturating_add(u64::try_from(field.terms.len()).unwrap_or(u64::MAX))
+    });
+    let features = u64::try_from(node.features.len()).unwrap_or(u64::MAX);
+    let targets = node.edges.iter().fold(0u64, |total, edge| {
+        total.saturating_add(u64::try_from(edge.targets.len()).unwrap_or(u64::MAX))
+    });
+    1u64.saturating_add(fields)
+        .saturating_add(features)
+        .saturating_add(targets)
+}
+
+fn extracted_variable_bytes(node: &ExtractedNode) -> u64 {
+    let mut bytes = u64::try_from(node.key.node.as_bytes().len()).unwrap_or(u64::MAX);
+    for field in &node.fields {
+        bytes = bytes
+            .saturating_add(
+                u64::try_from(field.reference.name.as_bytes().len()).unwrap_or(u64::MAX),
+            )
+            .saturating_add(match &field.value {
+                Value::Bytes(value) => u64::try_from(value.len()).unwrap_or(u64::MAX),
+                Value::Text(value) => u64::try_from(value.len()).unwrap_or(u64::MAX),
+                Value::Bool(_) | Value::Signed(_) | Value::Unsigned(_) => 0,
+            });
+        for term in &field.terms {
+            bytes = bytes.saturating_add(u64::try_from(term.len()).unwrap_or(u64::MAX));
+        }
+    }
+    for edge in &node.edges {
+        bytes = bytes.saturating_add(
+            u64::try_from(edge.reference.name.as_bytes().len()).unwrap_or(u64::MAX),
+        );
+        for target in &edge.targets {
+            bytes = bytes
+                .saturating_add(u64::try_from(target.node.as_bytes().len()).unwrap_or(u64::MAX));
+        }
+    }
+    for feature in &node.features {
+        bytes = bytes
+            .saturating_add(
+                u64::try_from(feature.reference.name.as_bytes().len()).unwrap_or(u64::MAX),
+            )
+            .saturating_add(u64::try_from(feature.value.len()).unwrap_or(u64::MAX));
+    }
+    bytes
 }
 
 /// A stable World-defined node identity.
@@ -517,6 +717,38 @@ pub struct Predicate {
     pub value: Atom,
 }
 
+/// One exact endpoint of an ordered Field interval.
+///
+/// Endpoints are values rather than predicates so the Corpus can seek and
+/// stop in the ordered posting stream. A Query with a lower-bound Seek and an
+/// upper-bound Keep is not equivalent: Keep runs after candidate production
+/// and therefore cannot terminate work at the upper boundary.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RangeEndpoint {
+    Inclusive(Atom),
+    Exclusive(Atom),
+}
+
+impl RangeEndpoint {
+    pub fn atom(&self) -> &Atom {
+        match self {
+            Self::Inclusive(atom) | Self::Exclusive(atom) => atom,
+        }
+    }
+
+    pub const fn is_inclusive(&self) -> bool {
+        matches!(self, Self::Inclusive(_))
+    }
+}
+
+/// A finite ordered interval over one declared Field.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FieldRange {
+    pub field: FieldRef,
+    pub lower: RangeEndpoint,
+    pub upper: RangeEndpoint,
+}
+
 /// Exact comparison operations interpreted against a declared Field type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Test {
@@ -540,6 +772,7 @@ pub enum Seek {
     Bodies(Vec<BodyKey>),
     Ids(Vec<NodeId>),
     Field(Predicate),
+    FieldRange(FieldRange),
     Term {
         field: FieldRef,
         text: String,
@@ -835,7 +1068,12 @@ impl Default for Policy {
                 candidates_per_branch: 10_000,
                 score_evaluations: 100_000,
                 projected_bytes: 8 * 1_024 * 1_024,
-                packed_tokens: 32_768,
+                // Product-declared schemas remain the authority on usable
+                // work. The Station default must not undercut an otherwise
+                // bounded 8 MiB projection page merely because its packed
+                // string values exceed a small interactive token budget;
+                // operators may still tighten this local ceiling.
+                packed_tokens: 8 * 1_024 * 1_024,
                 wall_millis: 10_000,
             },
         }
@@ -1051,10 +1289,12 @@ pub struct Step {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Query {
     pub schema: SchemaRef,
-    /// Exact historical interpretation to read. `None` selects the Session's
-    /// current publication. A root by itself is intentionally not accepted:
-    /// the same Body Manifest can have different meaning under another World
-    /// implementation or extractor contract.
+    /// Portable historical interpretation to read. `None` selects the
+    /// Session's current publication. A root by itself is intentionally not
+    /// accepted: the same Body Manifest can have different meaning under
+    /// another World implementation or extractor contract. A caller that must
+    /// reconcile one acknowledged Station-local materialization uses
+    /// `Session::find_at` and supplies its full `WorldPublicationId` separately.
     pub publication: Option<crate::publication::PublicationId>,
     pub mode: Mode,
     pub steps: Vec<Step>,
@@ -1606,9 +1846,11 @@ impl Op {
                 }
                 match seek {
                     Seek::Term { .. } | Seek::Feature { .. } => Ok(Flow::Ranked),
-                    Seek::Source | Seek::Bodies(_) | Seek::Ids(_) | Seek::Field(_) => {
-                        Ok(Flow::Nodes)
-                    }
+                    Seek::Source
+                    | Seek::Bodies(_)
+                    | Seek::Ids(_)
+                    | Seek::Field(_)
+                    | Seek::FieldRange(_) => Ok(Flow::Nodes),
                 }
             }
             Self::Keep(_) => match input {
@@ -1650,6 +1892,7 @@ impl Op {
             Self::Seek(seek) => match seek {
                 Seek::Source | Seek::Bodies(_) | Seek::Ids(_) => Ok(()),
                 Seek::Field(predicate) => granted(&predicate.field, &grant.fields, "field"),
+                Seek::FieldRange(range) => granted(&range.field, &grant.fields, "field"),
                 Seek::Term { field, .. } => granted(field, &grant.fields, "field"),
                 Seek::Feature { feature, .. } => granted(feature, &grant.features, "feature"),
             },
@@ -1702,6 +1945,7 @@ fn validate_seek(seek: &Seek, schema: &SchemaRef) -> Result<(), Invalid> {
             }
         }),
         Seek::Field(predicate) => validate_predicate(predicate, schema),
+        Seek::FieldRange(range) => validate_field_range(range, schema),
         Seek::Term { field, text, kind } => {
             require_schema(&field.schema, schema, "term field")?;
             if text.is_empty() || text.len() > MAX_OPERAND_BYTES {
@@ -1735,6 +1979,35 @@ fn validate_predicate(predicate: &Predicate, schema: &SchemaRef) -> Result<(), I
         return Err(Invalid::InvalidOperand("predicate value"));
     }
     Ok(())
+}
+
+fn validate_field_range(range: &FieldRange, schema: &SchemaRef) -> Result<(), Invalid> {
+    require_schema(&range.field.schema, schema, "field range")?;
+    let lower = range.lower.atom();
+    let upper = range.upper.atom();
+    if !lower.is_valid() || !upper.is_valid() || !same_atom_kind(lower, upper) {
+        return Err(Invalid::InvalidOperand("field range"));
+    }
+    match lower.cmp(upper) {
+        std::cmp::Ordering::Less => Ok(()),
+        std::cmp::Ordering::Equal if range.lower.is_inclusive() && range.upper.is_inclusive() => {
+            Ok(())
+        }
+        std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => {
+            Err(Invalid::InvalidOperand("field range"))
+        }
+    }
+}
+
+fn same_atom_kind(left: &Atom, right: &Atom) -> bool {
+    matches!(
+        (left, right),
+        (Atom::Bool(_), Atom::Bool(_))
+            | (Atom::Signed(_), Atom::Signed(_))
+            | (Atom::Unsigned(_), Atom::Unsigned(_))
+            | (Atom::Bytes(_), Atom::Bytes(_))
+            | (Atom::Text(_), Atom::Text(_))
+    )
 }
 
 fn require_schema(
@@ -2629,7 +2902,7 @@ mod tests {
         assert_eq!(
             bytes,
             vec![
-                4, 5, b'n', b'o', b't', b'e', b's', 1, 0, 0, 1, 1, 0, 0, 4, 5, b'n', b'o', b't',
+                5, 5, b'n', b'o', b't', b'e', b's', 1, 0, 0, 1, 1, 0, 0, 5, 5, b'n', b'o', b't',
                 b'e', b's', 1, 5, b't', b'i', b't', b'l', b'e', 1, b'q', 0, 1, 1, 1, 1, 1, 1, 1, 1,
                 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
             ]
@@ -2638,8 +2911,8 @@ mod tests {
         assert_eq!(
             query().digest().unwrap().as_bytes(),
             [
-                231, 150, 217, 33, 98, 111, 3, 139, 137, 206, 47, 196, 150, 194, 212, 147, 237,
-                252, 222, 178, 136, 62, 6, 103, 119, 83, 28, 254, 168, 102, 221, 165,
+                222, 5, 45, 21, 253, 112, 150, 142, 204, 115, 50, 218, 60, 138, 97, 24, 150, 20,
+                244, 185, 78, 238, 216, 208, 118, 32, 70, 17, 236, 90, 108, 15,
             ]
         );
     }
@@ -2853,8 +3126,8 @@ mod tests {
         assert_eq!(
             *blake3::hash(cursor.as_bytes()).as_bytes(),
             [
-                38, 154, 9, 98, 229, 57, 134, 58, 228, 125, 69, 227, 37, 197, 138, 119, 247, 7,
-                129, 238, 173, 35, 82, 29, 9, 14, 169, 235, 7, 131, 69, 206,
+                38, 103, 242, 4, 154, 54, 246, 38, 48, 76, 77, 238, 66, 152, 138, 2, 246, 155, 84,
+                23, 158, 131, 107, 12, 2, 38, 193, 52, 237, 195, 113, 180,
             ]
         );
         assert_eq!(Cursor::new(cursor.as_bytes().to_vec()).unwrap(), cursor);
@@ -3048,6 +3321,63 @@ mod tests {
             query().validate_within(&denied),
             Err(Invalid::NotGranted("mode"))
         );
+    }
+
+    #[test]
+    fn field_range_requires_canonical_same_kind_nonempty_endpoints() {
+        let notes = schema("notes", 1);
+        let range = |lower, upper| {
+            Op::Seek(Seek::FieldRange(FieldRange {
+                field: field(&notes, "title"),
+                lower,
+                upper,
+            }))
+        };
+
+        let mut valid = query();
+        valid.steps[0].op = range(
+            RangeEndpoint::Inclusive(Atom::Text("block/a".to_owned())),
+            RangeEndpoint::Exclusive(Atom::Text("block/b".to_owned())),
+        );
+        assert_eq!(valid.validate(), Ok(()));
+        assert_eq!(valid.validate_within(&grant()), Ok(()));
+
+        let mut reversed = valid.clone();
+        reversed.steps[0].op = range(
+            RangeEndpoint::Inclusive(Atom::Text("block/b".to_owned())),
+            RangeEndpoint::Exclusive(Atom::Text("block/a".to_owned())),
+        );
+        assert_eq!(
+            reversed.validate(),
+            Err(Invalid::InvalidOperand("field range"))
+        );
+
+        let mut mixed = valid.clone();
+        mixed.steps[0].op = range(
+            RangeEndpoint::Inclusive(Atom::Unsigned(1)),
+            RangeEndpoint::Exclusive(Atom::Text("2".to_owned())),
+        );
+        assert_eq!(
+            mixed.validate(),
+            Err(Invalid::InvalidOperand("field range"))
+        );
+
+        let mut empty = valid.clone();
+        empty.steps[0].op = range(
+            RangeEndpoint::Inclusive(Atom::Text("same".to_owned())),
+            RangeEndpoint::Exclusive(Atom::Text("same".to_owned())),
+        );
+        assert_eq!(
+            empty.validate(),
+            Err(Invalid::InvalidOperand("field range"))
+        );
+
+        let mut singleton = valid;
+        singleton.steps[0].op = range(
+            RangeEndpoint::Inclusive(Atom::Text("same".to_owned())),
+            RangeEndpoint::Inclusive(Atom::Text("same".to_owned())),
+        );
+        assert_eq!(singleton.validate(), Ok(()));
     }
 
     #[test]

@@ -8,9 +8,9 @@
 //! for its stated reason.
 
 use runtime::dto::{
-    CommittedEffectDto, ErrorDto, Invalid, ObservationCursorDto, ObservationDto, ProjectionDto,
-    PublicationIdDto, QueryRequestDto, SignedSubmitDto, SubmitRequestDto, WorldPublicationIdDto,
-    DTO_PROTOCOL_VERSION,
+    AffectedBodyDto, AffectedWorldPublicationDto, CommittedEffectDto, ErrorDto, Invalid,
+    ObservationCursorDto, ObservationDto, ProjectionDto, PublicationIdDto, QueryRequestDto,
+    SignedSubmitDto, SubmitRequestDto, WorldPublicationIdDto, DTO_PROTOCOL_VERSION,
 };
 
 fn publication() -> WorldPublicationIdDto {
@@ -59,18 +59,44 @@ fn the_schema_declares_draft_2020_12_and_strict_objects() {
     // Every DTO definition rejects unknown fields and lists required members —
     // the language-neutral mirror of deny_unknown_fields.
     let defs = bundle["$defs"].as_object().unwrap();
-    assert_eq!(defs.len(), 8);
+    let expected = [
+        "AffectedBodyDto",
+        "AffectedWorldPublicationDto",
+        "CommittedEffectDto",
+        "ErrorDto",
+        "ObservationCursorDto",
+        "ObservationDto",
+        "ProjectionDto",
+        "PublicationIdDto",
+        "QueryRequestDto",
+        "SignedSubmitDto",
+        "SubmitRequestDto",
+        "WorldPublicationIdDto",
+    ];
+    assert_eq!(
+        defs.keys().map(String::as_str).collect::<Vec<_>>(),
+        expected,
+        "the public DTO set changed without updating the contract gate"
+    );
     for (name, def) in defs {
         assert_eq!(
             def["additionalProperties"],
             serde_json::Value::Bool(false),
             "{name} must reject unknown fields"
         );
-        assert!(
+        let is_envelope = !matches!(
+            name.as_str(),
+            "AffectedBodyDto"
+                | "AffectedWorldPublicationDto"
+                | "PublicationIdDto"
+                | "WorldPublicationIdDto"
+        );
+        assert_eq!(
             def["required"]
                 .as_array()
                 .is_some_and(|r| r.iter().any(|f| f == "protocolVersion")),
-            "{name} must require protocolVersion"
+            is_envelope,
+            "only complete envelopes carry protocolVersion ({name})"
         );
     }
 }
@@ -156,7 +182,7 @@ fn identifier_patterns_agree_with_the_rust_parsers() {
     let schema = pattern("SchemaId");
     for (s, ok) in [
         ("note", true),
-        ("issues.catalog-v", true),
+        ("notes.catalog-v", true),
         ("_leading", false),
         ("", false),
         (&"a".repeat(64), false),
@@ -209,6 +235,7 @@ fn canonical_positive_examples_roundtrip_bidirectionally() {
     roundtrip!(
         CommittedEffectDto {
             protocol_version: DTO_PROTOCOL_VERSION,
+            operation_id_hex: "0c".repeat(16),
             effect_b64: "AA==".into(),
             frontier_root_hex: "ab".repeat(32),
             frontier_transaction_count: 3,
@@ -243,10 +270,16 @@ fn canonical_positive_examples_roundtrip_bidirectionally() {
             epoch: 4,
             sequence: 43,
             reset: false,
-            world: "com.example.notes".into(),
-            scope_body_ids_hex: vec!["0c".repeat(16)],
+            bodies: vec![AffectedBodyDto {
+                world: "com.example.notes".into(),
+                body_id_hex: "0c".repeat(16),
+            }],
             frontier_root_hex: "ef".repeat(32),
             frontier_transaction_count: 10,
+            publications: vec![AffectedWorldPublicationDto {
+                world: "com.example.notes".into(),
+                publication: publication(),
+            }],
         },
         ObservationDto
     );
@@ -305,7 +338,7 @@ fn a_signed_submit_dto_validates_every_spelled_coordinate() {
     );
     // unknown field
     assert!(matches!(
-        SignedSubmitDto::from_json(br#"{"protocolVersion":1,"surprise":true}"#),
+        SignedSubmitDto::from_json(br#"{"protocolVersion":2,"surprise":true}"#),
         Err(Invalid::Malformed)
     ));
 }
@@ -341,20 +374,20 @@ fn canonical_examples() -> serde_json::Value {
             "def": "SubmitRequestDto",
             "reason": "unknown field",
             "schemaExpressible": true,
-            "value": {"protocolVersion": 1, "world": "w.x", "schema": "s", "schemaVersion": 1,
+            "value": {"protocolVersion": 2, "world": "w.x", "schema": "s", "schemaVersion": 1,
                        "requestIdHex": "00000000000000000000000000000000", "payloadB64": "", "surprise": true},
         },
         {
             "def": "SubmitRequestDto",
             "reason": "missing required fields",
             "schemaExpressible": true,
-            "value": {"protocolVersion": 1, "world": "w.x"},
+            "value": {"protocolVersion": 2, "world": "w.x"},
         },
         {
             "def": "SignedSubmitDto",
             "reason": "space id fails its grammar (Rust parser; schema patterns live under `identifiers`)",
             "schemaExpressible": false,
-            "value": {"protocolVersion": 1, "spaceId": "ws_short", "world": "com.example.notes",
+            "value": {"protocolVersion": 2, "spaceId": "ws_short", "world": "com.example.notes",
                        "actorId": format!("act_{}", "a".repeat(64)), "deviceHex": "b".repeat(64),
                        "requestIdHex": "0a".repeat(16), "signedActionB64": ""},
         },
@@ -362,7 +395,7 @@ fn canonical_examples() -> serde_json::Value {
             "def": "SubmitRequestDto",
             "reason": "request id decodes to 17 bytes, not 16 (decoded length is Rust-side)",
             "schemaExpressible": false,
-            "value": {"protocolVersion": 1, "world": "w.x", "schema": "s", "schemaVersion": 1,
+            "value": {"protocolVersion": 2, "world": "w.x", "schema": "s", "schemaVersion": 1,
                        "requestIdHex": "0a".repeat(17), "payloadB64": ""},
         },
     ]);
@@ -391,13 +424,13 @@ fn canonical_negative_examples_are_each_rejected_for_their_stated_reason() {
     // unknown mandatory field
     assert!(matches!(
         SubmitRequestDto::from_json(
-            br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":1,"requestIdHex":"00000000000000000000000000000000","payloadB64":"","extra":1}"#
+            br#"{"protocolVersion":2,"world":"w.x","schema":"s","schemaVersion":1,"requestIdHex":"00000000000000000000000000000000","payloadB64":"","extra":1}"#
         ),
         Err(Invalid::Malformed)
     ));
     // missing mandatory field
     assert!(matches!(
-        SubmitRequestDto::from_json(br#"{"protocolVersion":1,"world":"w.x"}"#),
+        SubmitRequestDto::from_json(br#"{"protocolVersion":2,"world":"w.x"}"#),
         Err(Invalid::Malformed)
     ));
     // invalid identifier
@@ -430,15 +463,15 @@ fn canonical_negative_examples_are_each_rejected_for_their_stated_reason() {
     );
     // unsupported protocol version
     let mut bad = submit_example();
-    bad.protocol_version = 2;
+    bad.protocol_version = 1;
     assert_eq!(
         SubmitRequestDto::from_json(&bad.to_json()),
-        Err(Invalid::UnsupportedProtocol(2))
+        Err(Invalid::UnsupportedProtocol(1))
     );
     // numeric overflow: a schemaVersion beyond u32 is malformed JSON-side
     assert!(matches!(
         SubmitRequestDto::from_json(
-            br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":4294967296,"requestIdHex":"00000000000000000000000000000000","payloadB64":""}"#
+            br#"{"protocolVersion":2,"world":"w.x","schema":"s","schemaVersion":4294967296,"requestIdHex":"00000000000000000000000000000000","payloadB64":""}"#
         ),
         Err(Invalid::Malformed)
     ));

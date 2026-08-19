@@ -166,6 +166,93 @@ pub struct GeometryFacts {
     pub relations: Vec<GeometryRelationFact>,
 }
 
+// One direct posting page is deliberately smaller than the protocol ceiling:
+// it bounds transient row/field material while cursors make total selection
+// independent of project size. All values are also clamped by the Issues Find
+// declaration/Station admission ceilings; a Geometry request can lower them,
+// never raise them.
+const GEOMETRY_FACT_PAGE: u32 = 2_048;
+const FIND_POSTINGS_PER_PAGE_MAX: u64 = 100_000;
+const FIND_PROJECTED_BYTES_MAX: u64 = 8 * 1_024 * 1_024;
+const FIND_PACKED_TOKENS_MAX: u64 = 8 * 1_024 * 1_024;
+const FIND_WALL_MILLIS_MAX: u64 = 10_000;
+
+#[derive(Debug, Default)]
+struct FactMeter {
+    node_visits: u64,
+    edge_visits: u64,
+    working_bytes: u64,
+}
+
+impl FactMeter {
+    fn charge_find(
+        &mut self,
+        request: &GeometryRequest,
+        usage: runtime::find::Bound,
+    ) -> Result<(), UnavailableReason> {
+        // Find counts every posting row it admits (including the one-row
+        // cursor look-ahead) as a node visit. Use evaluator usage rather than
+        // returned-row count so hidden/gated/cursor work cannot escape the
+        // Geometry admission budget.
+        self.node_visits = self
+            .node_visits
+            .saturating_add(usage.nodes_visited.max(usage.postings_read));
+        let transient_peak = self.working_bytes.saturating_add(usage.projected_bytes);
+        if transient_peak > request.budget.working_bytes {
+            let peak = FactMeter {
+                node_visits: self.node_visits,
+                edge_visits: self.edge_visits,
+                working_bytes: transient_peak,
+            };
+            return Err(fact_budget_exceeded(request, 0, 0, &peak));
+        }
+        self.ensure(request, 0, 0)
+    }
+
+    fn visit_edge(
+        &mut self,
+        request: &GeometryRequest,
+        issues: usize,
+        relations: usize,
+    ) -> Result<(), UnavailableReason> {
+        self.edge_visits = self.edge_visits.saturating_add(1);
+        self.ensure(request, issues, relations)
+    }
+
+    fn retain(
+        &mut self,
+        request: &GeometryRequest,
+        bytes: u64,
+        issues: usize,
+        relations: usize,
+    ) -> Result<(), UnavailableReason> {
+        self.working_bytes = self.working_bytes.saturating_add(bytes);
+        self.ensure(request, issues, relations)
+    }
+
+    fn ensure(
+        &self,
+        request: &GeometryRequest,
+        issues: usize,
+        relations: usize,
+    ) -> Result<(), UnavailableReason> {
+        if self.node_visits > request.budget.node_visits
+            || self.edge_visits > request.budget.edge_visits
+            || self.working_bytes > request.budget.working_bytes
+        {
+            Err(fact_budget_exceeded(request, issues, relations, self))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn retained_strings(strings: &[&str], structural_bytes: u64) -> u64 {
+    strings.iter().fold(structural_bytes, |total, value| {
+        total.saturating_add(usize_u64(value.len()))
+    })
+}
+
 /// Build exact Geometry input from the shared publication in a bounded worker.
 ///
 /// The project posting selects placement, topology, and workflow facts without
@@ -192,36 +279,47 @@ pub fn facts_from_find(
     let mut predecessor_edges = Vec::<(String, String)>::new();
     let mut workflow_states = Vec::<(String, String, String)>::new();
     let mut raw_relations = Vec::<GeometryRelationFact>::new();
-    let mut row_visits = 0u64;
-    let mut working_bytes = 0u64;
+    let mut meter = FactMeter::default();
 
     let fields = geometry_fact_fields();
     visit_find_pages(
         find,
+        request,
         find_api::Seek::Field(find_api::Predicate {
             field: crate::find::field_ref(crate::find::field::PROJECT),
             test: find_api::Test::Equal,
             value: find_api::Atom::Text(request.project.clone()),
         }),
         fields,
-        |row| {
-            row_visits = row_visits.saturating_add(1);
-            if row_visits > request.budget.node_visits {
-                return Err(fact_budget_exceeded(
-                    request,
-                    placements.len(),
-                    raw_relations.len(),
-                    working_bytes,
-                ));
-            }
+        true,
+        &mut meter,
+        |row, meter| {
             let kind =
                 row_text(row, crate::find::field::KIND).ok_or(UnavailableReason::SourceCorrupt)?;
             match kind.as_str() {
-                "issue_placement" => {
-                    let issue = required_text(row, crate::find::field::SOURCE_ID)?;
+                // The issue row itself, because that is where a placement
+                // now lives: `extract_issue_meta` resolves the single
+                // transition head into project/state/block/position and posts
+                // them on the `issue` node. The `issue_placement` node this
+                // used to read is a migration source -- its schema answers
+                // `preferred() == false`, so its extractor is not even
+                // declared by the package this runs in and no such row has
+                // ever reached this match. That is why the graph compiled
+                // empty rather than wrong: every node fell through to `_`.
+                //
+                // An issue whose heads have not converged posts no project
+                // at all, so it does not reach this seek. Absent from one
+                // generation of the picture is the honest answer for an
+                // issue that has no single placement to draw.
+                "issue" => {
+                    let issue = required_text(row, crate::find::field::ID)?;
                     let state = required_text(row, crate::find::field::STATE)?;
-                    working_bytes = working_bytes
-                        .saturating_add(usize_u64(issue.len().saturating_add(state.len())));
+                    meter.retain(
+                        request,
+                        retained_strings(&[&issue, &state], 128),
+                        placements.len(),
+                        raw_relations.len(),
+                    )?;
                     if placements
                         .insert(issue, state.clone())
                         .is_some_and(|prior| prior != state)
@@ -232,45 +330,61 @@ pub fn facts_from_find(
                 "workflow_revision" => {
                     let id = required_text(row, crate::find::field::ID)?;
                     let revision = required_text(row, crate::find::field::REVISION)?;
+                    meter.retain(
+                        request,
+                        retained_strings(&[&id, &revision], 128),
+                        placements.len(),
+                        raw_relations.len(),
+                    )?;
                     if revision_node_ids.insert(id, revision.clone()).is_some() {
                         return Err(UnavailableReason::SourceCorrupt);
                     }
                     if !row_bool(row, crate::find::field::TOMBSTONE).unwrap_or(false) {
+                        meter.retain(
+                            request,
+                            retained_strings(&[&revision], 64),
+                            placements.len(),
+                            raw_relations.len(),
+                        )?;
                         live_revisions.insert(revision);
                     }
                 }
                 "workflow_state" => {
-                    workflow_states.push((
-                        required_text(row, crate::find::field::REVISION)?,
-                        required_text(row, crate::find::field::STATE)?,
-                        required_text(row, crate::find::field::STATE_CATEGORY)?,
-                    ));
+                    let revision = required_text(row, crate::find::field::REVISION)?;
+                    let state = required_text(row, crate::find::field::STATE)?;
+                    let category = required_text(row, crate::find::field::STATE_CATEGORY)?;
+                    meter.retain(
+                        request,
+                        retained_strings(&[&revision, &state, &category], 128),
+                        placements.len(),
+                        raw_relations.len(),
+                    )?;
+                    workflow_states.push((revision, state, category));
                 }
                 "relation" => {
+                    meter.visit_edge(request, placements.len(), raw_relations.len())?;
                     let relation = required_text(row, crate::find::field::RELATION_KIND)?;
                     let from = required_text(row, crate::find::field::SOURCE_ID)?;
                     let to = required_text(row, crate::find::field::TARGET_ID)?;
                     if relation == "predecessor" {
+                        meter.retain(
+                            request,
+                            retained_strings(&[&from, &to], 96),
+                            placements.len(),
+                            raw_relations.len(),
+                        )?;
                         predecessor_edges.push((from, to));
                     } else {
-                        working_bytes = working_bytes.saturating_add(usize_u64(
-                            relation
-                                .len()
-                                .saturating_add(from.len())
-                                .saturating_add(to.len()),
-                        ));
+                        meter.retain(
+                            request,
+                            retained_strings(&[&relation, &from, &to], 128),
+                            placements.len(),
+                            raw_relations.len(),
+                        )?;
                         raw_relations.push(GeometryRelationFact { from, relation, to });
                     }
                 }
                 _ => {}
-            }
-            if working_bytes > request.budget.working_bytes {
-                return Err(fact_budget_exceeded(
-                    request,
-                    placements.len(),
-                    raw_relations.len(),
-                    working_bytes,
-                ));
             }
             Ok(())
         },
@@ -282,6 +396,12 @@ pub fn facts_from_find(
             let predecessor = revision_node_ids
                 .get(&to)
                 .ok_or(UnavailableReason::SourceCorrupt)?;
+            meter.retain(
+                request,
+                retained_strings(&[predecessor], 64),
+                placements.len(),
+                raw_relations.len(),
+            )?;
             predecessor_revisions.insert(predecessor.clone());
         }
     }
@@ -289,6 +409,16 @@ pub fn facts_from_find(
         .difference(&predecessor_revisions)
         .cloned()
         .collect::<Vec<_>>();
+    meter.retain(
+        request,
+        heads.iter().fold(24u64, |bytes, head| {
+            bytes
+                .saturating_add(24)
+                .saturating_add(usize_u64(head.len()))
+        }),
+        placements.len(),
+        raw_relations.len(),
+    )?;
     let [head] = heads.as_slice() else {
         return Err(UnavailableReason::SourceCorrupt);
     };
@@ -297,6 +427,12 @@ pub fn facts_from_find(
         if &revision != head {
             continue;
         }
+        meter.retain(
+            request,
+            retained_strings(&[&state, &category], 96),
+            placements.len(),
+            raw_relations.len(),
+        )?;
         if !matches!(category.as_str(), "backlog" | "active" | "done")
             || categories
                 .insert(state, category.clone())
@@ -307,8 +443,24 @@ pub fn facts_from_find(
     }
 
     let issue_ids = placements.keys().cloned().collect::<Vec<_>>();
+    meter.retain(
+        request,
+        issue_ids.iter().fold(24u64, |bytes, id| {
+            bytes.saturating_add(24).saturating_add(usize_u64(id.len()))
+        }),
+        placements.len(),
+        raw_relations.len(),
+    )?;
     let mut metadata = BTreeMap::<String, (Option<i64>, bool)>::new();
     for ids in issue_ids.chunks(find_api::MAX_SEEK_IDS) {
+        meter.retain(
+            request,
+            ids.iter().fold(24u64, |bytes, id| {
+                bytes.saturating_add(40).saturating_add(usize_u64(id.len()))
+            }),
+            placements.len(),
+            raw_relations.len(),
+        )?;
         let ids = ids
             .iter()
             .map(|id| {
@@ -318,9 +470,12 @@ pub fn facts_from_find(
             .collect::<Result<Vec<_>, _>>()?;
         visit_find_pages(
             find,
+            request,
             find_api::Seek::Ids(ids),
             geometry_fact_fields(),
-            |row| {
+            false,
+            &mut meter,
+            |row, meter| {
                 if row_text(row, crate::find::field::KIND).as_deref() != Some("issue") {
                     return Err(UnavailableReason::SourceCorrupt);
                 }
@@ -330,6 +485,12 @@ pub fn facts_from_find(
                     .transpose()
                     .map_err(|_| UnavailableReason::SourceCorrupt)?;
                 let tombstone = row_bool(row, crate::find::field::TOMBSTONE).unwrap_or(false);
+                meter.retain(
+                    request,
+                    retained_strings(&[&id], 96),
+                    placements.len(),
+                    raw_relations.len(),
+                )?;
                 if metadata.insert(id, (due, tombstone)).is_some() {
                     return Err(UnavailableReason::SourceCorrupt);
                 }
@@ -349,6 +510,12 @@ pub fn facts_from_find(
         let category = categories
             .get(&state)
             .ok_or(UnavailableReason::SourceCorrupt)?;
+        meter.retain(
+            request,
+            retained_strings(&[&request.project], 80),
+            issues.len(),
+            raw_relations.len(),
+        )?;
         issues.push(GeometryIssueFact {
             id,
             project: request.project.clone(),
@@ -361,35 +528,36 @@ pub fn facts_from_find(
         .iter()
         .map(|issue| issue.id.as_str())
         .collect::<BTreeSet<_>>();
-    let mut relations = raw_relations
-        .into_iter()
-        .filter_map(|relation| {
-            if !selected.contains(relation.from.as_str())
-                || !selected.contains(relation.to.as_str())
-            {
-                return None;
-            }
-            if relation.relation == "parent" {
-                Some(GeometryRelationFact {
-                    from: relation.to,
-                    relation: "contains".into(),
-                    to: relation.from,
-                })
-            } else {
-                Some(relation)
-            }
-        })
-        .collect::<Vec<_>>();
+    meter.retain(
+        request,
+        usize_u64(selected.len()).saturating_mul(48),
+        issues.len(),
+        raw_relations.len(),
+    )?;
+    let mut relations = Vec::new();
+    for relation in raw_relations {
+        if !selected.contains(relation.from.as_str()) || !selected.contains(relation.to.as_str()) {
+            continue;
+        }
+        if relation.relation == "parent" {
+            meter.retain(
+                request,
+                usize_u64("contains".len()),
+                issues.len(),
+                relations.len(),
+            )?;
+            relations.push(GeometryRelationFact {
+                from: relation.to,
+                relation: "contains".into(),
+                to: relation.from,
+            });
+        } else {
+            relations.push(relation);
+        }
+    }
     relations.sort();
     relations.dedup();
-    if usize_u64(relations.len()) > request.budget.edge_visits {
-        return Err(fact_budget_exceeded(
-            request,
-            issues.len(),
-            relations.len(),
-            working_bytes,
-        ));
-    }
+    meter.ensure(request, issues.len(), relations.len())?;
     Ok(GeometryFacts {
         source: request.source,
         issues,
@@ -397,19 +565,57 @@ pub fn facts_from_find(
     })
 }
 
-fn geometry_find_bound() -> runtime::find::Bound {
-    runtime::find::Bound {
-        decoded_bodies: 1,
-        postings_read: 100_000,
-        edges_visited: 1,
-        nodes_visited: 100_000,
-        paths_retained: 1,
-        candidates_per_branch: 10_000,
-        score_evaluations: 1,
-        projected_bytes: 8 * 1_024 * 1_024,
-        packed_tokens: 32_768,
-        wall_millis: 10_000,
+fn geometry_find_bound(
+    request: &GeometryRequest,
+    meter: &FactMeter,
+    may_contain_edges: bool,
+) -> Result<(runtime::find::Bound, u32), UnavailableReason> {
+    // Reserve one evaluator visit for the cursor look-ahead. A zero remaining
+    // Geometry budget is a typed Geometry refusal rather than an invalid Find
+    // query (Find bounds deliberately cannot encode zero).
+    let available = request.budget.node_visits.saturating_sub(meter.node_visits);
+    let available_working = request
+        .budget
+        .working_bytes
+        .saturating_sub(meter.working_bytes);
+    let available_edges = request.budget.edge_visits.saturating_sub(meter.edge_visits);
+    if available <= 1 || available_working == 0 || (may_contain_edges && available_edges <= 1) {
+        return Err(fact_budget_exceeded(request, 0, 0, meter));
     }
+    // The project posting is mixed: until composite project+kind postings are
+    // part of the declared extractor contract, every row (including the
+    // cursor look-ahead) can conservatively be a relation. Clamp before the
+    // evaluator runs; row-by-row refusal after a 2,048-row projection would
+    // already have spent work the request did not admit. Metadata Id seeks are
+    // known issue-only and do not consume this edge allowance.
+    let page_allowance = available.saturating_sub(1).min(
+        may_contain_edges
+            .then_some(available_edges.saturating_sub(1))
+            .unwrap_or(u64::MAX),
+    );
+    let page_size = u32::try_from(page_allowance.min(u64::from(GEOMETRY_FACT_PAGE)))
+        .unwrap_or(GEOMETRY_FACT_PAGE)
+        .max(1);
+    let visits = available
+        .min(FIND_POSTINGS_PER_PAGE_MAX)
+        .max(u64::from(page_size));
+    let projected_bytes = available_working.min(FIND_PROJECTED_BYTES_MAX).max(1);
+    let packed_tokens = available_working.min(FIND_PACKED_TOKENS_MAX).max(1);
+    Ok((
+        runtime::find::Bound {
+            decoded_bodies: 1,
+            postings_read: visits,
+            edges_visited: 1,
+            nodes_visited: visits,
+            paths_retained: 1,
+            candidates_per_branch: u64::from(page_size),
+            score_evaluations: 1,
+            projected_bytes,
+            packed_tokens,
+            wall_millis: FIND_WALL_MILLIS_MAX,
+        },
+        page_size,
+    ))
 }
 
 fn geometry_fact_fields() -> Vec<runtime::find::FieldRef> {
@@ -435,15 +641,18 @@ fn geometry_fact_fields() -> Vec<runtime::find::FieldRef> {
 
 fn visit_find_pages<F>(
     find: &runtime::world::FindHandle,
+    request: &GeometryRequest,
     seek: runtime::find::Seek,
     fields: Vec<runtime::find::FieldRef>,
+    may_contain_edges: bool,
+    meter: &mut FactMeter,
     mut visit: F,
 ) -> Result<(), UnavailableReason>
 where
-    F: FnMut(&runtime::find::ResultRow) -> Result<(), UnavailableReason>,
+    F: FnMut(&runtime::find::ResultRow, &mut FactMeter) -> Result<(), UnavailableReason>,
 {
     use runtime::find as find_api;
-    let bound = geometry_find_bound();
+    let (bound, page_size) = geometry_find_bound(request, meter, may_contain_edges)?;
     let seek_id = find_api::StepId::new(1).ok_or(UnavailableReason::SourceCorrupt)?;
     let pack_id = find_api::StepId::new(2).ok_or(UnavailableReason::SourceCorrupt)?;
     let mut query = find_api::Query {
@@ -466,21 +675,29 @@ where
         ],
         output: pack_id,
         bound,
-        page_size: 2_048,
+        page_size,
         cursor: None,
     };
     loop {
-        let answer = find
-            .find(query.clone())
-            .map_err(|_| UnavailableReason::SourceUnavailable)?;
+        let (bound, page_size) = geometry_find_bound(request, meter, may_contain_edges)?;
+        query.bound = bound;
+        query.page_size = page_size;
+        for step in &mut query.steps {
+            step.bound = bound;
+        }
+        let answer = find.find(query.clone()).map_err(|failure| match failure {
+            runtime::find::Failure::PolicyExceeded => fact_budget_exceeded(request, 0, 0, meter),
+            _ => UnavailableReason::SourceUnavailable,
+        })?;
         if answer.coordinates().world_publication() != find.publication() {
             return Err(UnavailableReason::SourceMismatch {
                 requested: find.publication(),
                 actual: answer.coordinates().world_publication(),
             });
         }
+        meter.charge_find(request, answer.usage())?;
         for row in answer.rows() {
-            visit(row)?;
+            visit(row, meter)?;
         }
         let Some(cursor) = answer.next_cursor().cloned() else {
             return Ok(());
@@ -530,10 +747,12 @@ fn fact_budget_exceeded(
     request: &GeometryRequest,
     issues: usize,
     relations: usize,
-    working_bytes: u64,
+    meter: &FactMeter,
 ) -> UnavailableReason {
     let mut estimate = GeometryEstimate::conservative(request, issues, relations);
-    estimate.working_bytes = estimate.working_bytes.max(working_bytes);
+    estimate.node_visits = estimate.node_visits.max(meter.node_visits);
+    estimate.edge_visits = estimate.edge_visits.max(meter.edge_visits);
+    estimate.working_bytes = estimate.working_bytes.max(meter.working_bytes);
     UnavailableReason::BudgetExceeded {
         budget: request.budget,
         estimate,
@@ -616,6 +835,11 @@ pub enum UnavailableReason {
         required_bytes: u64,
         retained_bytes: u64,
     },
+    /// The Runtime that owns the exact source publication could not admit the
+    /// analytical worker/retained artifact inside its physical memory envelope.
+    MemoryCapacity {
+        required_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -634,6 +858,11 @@ pub struct GeometryArtifact {
     readiness: GeometryReadiness,
     #[serde(skip)]
     store: Option<Arc<CompactGeometry>>,
+    /// Runtime memory authority follows every clone of the ready artifact, not
+    /// merely its cache entry. Eviction releases capacity only after outstanding
+    /// page readers release their exact Arc as well.
+    #[serde(skip)]
+    _memory: Option<Arc<dyn GeometryMemoryLease>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,6 +887,7 @@ impl GeometryArtifact {
             estimate,
             readiness: GeometryReadiness::Pending,
             store: None,
+            _memory: None,
         }
     }
 
@@ -724,6 +954,7 @@ impl GeometryArtifact {
             estimate,
             readiness: GeometryReadiness::Unavailable { reason },
             store: None,
+            _memory: None,
         }
     }
 
@@ -737,11 +968,11 @@ impl GeometryArtifact {
 
 /// Bounded retention for immutable Geometry artifacts.
 ///
-/// The default admits at least one artifact built under the protocol's default
-/// 512 MiB working budget while bounding a product package to 32 exact
-/// publication/selection coordinates. Operators embedding Issues may choose a
-/// smaller cache; an artifact that cannot be retained is still returned to its
-/// initiating request and may be rebuilt after eviction.
+/// The default registry is shared process-wide so installed package versions
+/// cannot multiply worker pools or caches. Production artifact and working
+/// bytes are additionally admitted by the source Runtime's composition-owned
+/// memory governor; these limits bound only the shared product cache shape.
+/// Operators embedding Issues may choose a smaller isolated registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GeometryCacheLimits {
     pub entries: usize,
@@ -749,6 +980,44 @@ pub struct GeometryCacheLimits {
     pub workers: usize,
     pub queued_builds: usize,
 }
+
+/// Composition memory authority used by the shared Geometry executor. Runtime
+/// implements this for an exact deferred Find handle; tests/embedders may
+/// provide another bounded authority, but production never allocates against a
+/// package-local counter.
+pub trait GeometryMemory: Send + Sync {
+    fn reserve(&self, transient_bytes: u64) -> Result<Box<dyn GeometryMemoryReservation>, ()>;
+}
+
+pub trait GeometryMemoryReservation: Send {
+    fn retain(self: Box<Self>, retained_bytes: u64) -> Result<Box<dyn GeometryMemoryLease>, ()>;
+}
+
+pub trait GeometryMemoryLease: Send + Sync + std::fmt::Debug {}
+
+struct RuntimeGeometryMemoryReservation(runtime::world::AnalyticalMemoryReservation);
+
+impl GeometryMemory for runtime::world::FindHandle {
+    fn reserve(&self, transient_bytes: u64) -> Result<Box<dyn GeometryMemoryReservation>, ()> {
+        self.reserve_analysis(transient_bytes)
+            .map(|reservation| -> Box<dyn GeometryMemoryReservation> {
+                Box::new(RuntimeGeometryMemoryReservation(reservation))
+            })
+            .map_err(|_| ())
+    }
+}
+
+impl GeometryMemoryReservation for RuntimeGeometryMemoryReservation {
+    fn retain(self: Box<Self>, retained_bytes: u64) -> Result<Box<dyn GeometryMemoryLease>, ()> {
+        let Self(reservation) = *self;
+        reservation
+            .retain(retained_bytes)
+            .map(|lease| -> Box<dyn GeometryMemoryLease> { Box::new(lease) })
+            .map_err(|_| ())
+    }
+}
+
+impl GeometryMemoryLease for runtime::world::AnalyticalMemoryLease {}
 
 impl Default for GeometryCacheLimits {
     fn default() -> Self {
@@ -761,11 +1030,21 @@ impl Default for GeometryCacheLimits {
     }
 }
 
-#[derive(Debug)]
 struct CachedGeometry {
     artifact: Arc<GeometryArtifact>,
     retained_bytes: u64,
     last_used: u64,
+}
+
+impl std::fmt::Debug for CachedGeometry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CachedGeometry")
+            .field("artifact", &self.artifact)
+            .field("retained_bytes", &self.retained_bytes)
+            .field("last_used", &self.last_used)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -776,6 +1055,10 @@ struct GeometryRegistryState {
     /// global rebuild forever even when artifact retention is configured zero.
     terminal: BTreeMap<GeometryArtifactKey, CachedGeometry>,
     building: BTreeSet<GeometryArtifactKey>,
+    /// Fair admission: one queued/running global analysis per exact source
+    /// publication. A single busy Space/package cannot occupy every worker by
+    /// submitting many different selections at once.
+    active_sources: BTreeSet<WorldPublicationId>,
     retained_bytes: u64,
     clock: u64,
 }
@@ -795,7 +1078,7 @@ impl GeometryRegistryState {
 /// background builder; concurrent callers observe the same typed Pending and
 /// later reuse its ready Arc. Facts are supplied lazily so a page hit performs
 /// neither a corpus scan nor global graph compilation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GeometryRegistry {
     shared: Arc<GeometryRegistryShared>,
     executor: GeometryExecutor,
@@ -807,6 +1090,7 @@ struct GeometryRegistryShared {
     state: Mutex<GeometryRegistryState>,
 }
 
+#[derive(Clone)]
 struct GeometryExecutor {
     sender: std::sync::mpsc::SyncSender<Box<dyn FnOnce() + Send + 'static>>,
 }
@@ -818,15 +1102,14 @@ impl std::fmt::Debug for GeometryExecutor {
 }
 
 impl GeometryExecutor {
+    #[allow(clippy::expect_used)]
     fn new(workers: usize, queued_builds: usize) -> Self {
         let (sender, receiver) =
             std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send + 'static>>(queued_builds);
         let receiver = Arc::new(Mutex::new(receiver));
         for ordinal in 0..workers.max(1) {
             let receiver = receiver.clone();
-            // A failed spawn just means this slot is empty; queries then
-            // refuse with queue saturation rather than panic the World.
-            let _ = std::thread::Builder::new()
+            std::thread::Builder::new()
                 .name(format!("issues-geometry-{ordinal}"))
                 .spawn(move || loop {
                     let job = receiver
@@ -837,7 +1120,8 @@ impl GeometryExecutor {
                         Ok(job) => job(),
                         Err(_) => break,
                     }
-                });
+                })
+                .expect("spawn bounded Geometry worker");
         }
         Self { sender }
     }
@@ -845,7 +1129,10 @@ impl GeometryExecutor {
 
 impl Default for GeometryRegistry {
     fn default() -> Self {
-        Self::new(GeometryCacheLimits::default())
+        static PROCESS_REGISTRY: std::sync::OnceLock<GeometryRegistry> = std::sync::OnceLock::new();
+        PROCESS_REGISTRY
+            .get_or_init(|| Self::new(GeometryCacheLimits::default()))
+            .clone()
     }
 }
 
@@ -908,6 +1195,50 @@ impl GeometryRegistry {
     where
         F: FnOnce() -> Result<GeometryFacts, UnavailableReason> + Send + 'static,
     {
+        self.materialize_cached_inner(request, pending_estimate, None, facts)
+    }
+
+    /// Production form: analytical working/retained bytes are admitted by the
+    /// Runtime that owns `find`'s exact publication. Refusal happens before the
+    /// facts closure is queued or scans the Corpus.
+    pub fn materialize_cached_with_memory<F>(
+        &self,
+        request: &GeometryRequest,
+        pending_estimate: GeometryEstimate,
+        memory: &impl GeometryMemory,
+        facts: F,
+    ) -> Arc<GeometryArtifact>
+    where
+        F: FnOnce() -> Result<GeometryFacts, UnavailableReason> + Send + 'static,
+    {
+        if let Some(artifact) = self.get(&request.key()) {
+            return self.admit_budget(request, artifact);
+        }
+        let reservation = memory.reserve(request.budget.working_bytes);
+        match reservation {
+            Ok(reservation) => {
+                self.materialize_cached_inner(request, pending_estimate, Some(reservation), facts)
+            }
+            Err(_) => Arc::new(GeometryArtifact::unavailable(
+                request,
+                pending_estimate,
+                UnavailableReason::MemoryCapacity {
+                    required_bytes: request.budget.working_bytes,
+                },
+            )),
+        }
+    }
+
+    fn materialize_cached_inner<F>(
+        &self,
+        request: &GeometryRequest,
+        pending_estimate: GeometryEstimate,
+        memory: Option<Box<dyn GeometryMemoryReservation>>,
+        facts: F,
+    ) -> Arc<GeometryArtifact>
+    where
+        F: FnOnce() -> Result<GeometryFacts, UnavailableReason> + Send + 'static,
+    {
         let request = request.canonicalized();
         let key = request.key();
         {
@@ -926,7 +1257,18 @@ impl GeometryRegistry {
             if state.building.contains(&key) {
                 return Arc::new(GeometryArtifact::pending(&request, pending_estimate));
             }
+            if state.active_sources.contains(&request.source) {
+                return Arc::new(GeometryArtifact::unavailable(
+                    &request,
+                    pending_estimate,
+                    UnavailableReason::ExecutorSaturated {
+                        workers: usize_u32(self.shared.limits.workers.max(1)),
+                        queued_builds: usize_u32(self.shared.limits.queued_builds),
+                    },
+                ));
+            }
             state.building.insert(key);
+            state.active_sources.insert(request.source);
         }
 
         let shared = self.shared.clone();
@@ -953,16 +1295,18 @@ impl GeometryRegistry {
                         UnavailableReason::BuildFailed,
                     ))
                 });
-            GeometryRegistry::retain_shared(&shared, artifact);
+            GeometryRegistry::retain_shared(&shared, artifact, memory);
             let mut state = shared
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.building.remove(&key);
+            state.active_sources.remove(&worker_request.source);
         }));
         if schedule.is_err() {
             let mut state = self.lock();
             state.building.remove(&key);
+            state.active_sources.remove(&request.source);
             return Arc::new(GeometryArtifact::unavailable(
                 &request,
                 pending_estimate,
@@ -993,7 +1337,11 @@ impl GeometryRegistry {
         ))
     }
 
-    fn retain_shared(shared: &GeometryRegistryShared, artifact: Arc<GeometryArtifact>) {
+    fn retain_shared(
+        shared: &GeometryRegistryShared,
+        artifact: Arc<GeometryArtifact>,
+        memory: Option<Box<dyn GeometryMemoryReservation>>,
+    ) {
         let key = artifact.key();
         let retained_bytes = artifact.retained_bytes();
         let mut state = shared
@@ -1027,6 +1375,7 @@ impl GeometryRegistry {
                     },
                 },
                 store: None,
+                _memory: None,
             });
             state.terminal.insert(
                 key,
@@ -1039,6 +1388,48 @@ impl GeometryRegistry {
             Self::bound_terminal(&mut state);
             return;
         }
+        let memory = match memory {
+            Some(reservation) => match reservation.retain(retained_bytes) {
+                Ok(memory) => Some(memory),
+                Err(_) => {
+                    let terminal = Arc::new(GeometryArtifact {
+                        key,
+                        source: artifact.source(),
+                        estimate: artifact.estimate(),
+                        readiness: GeometryReadiness::Unavailable {
+                            reason: UnavailableReason::MemoryCapacity {
+                                required_bytes: retained_bytes,
+                            },
+                        },
+                        store: None,
+                        _memory: None,
+                    });
+                    state.terminal.insert(
+                        key,
+                        CachedGeometry {
+                            artifact: terminal,
+                            retained_bytes: 0,
+                            last_used,
+                        },
+                    );
+                    Self::bound_terminal(&mut state);
+                    return;
+                }
+            },
+            None => None,
+        };
+        let artifact = if let Some(memory) = memory {
+            Arc::new(GeometryArtifact {
+                key: artifact.key,
+                source: artifact.source,
+                estimate: artifact.estimate,
+                readiness: artifact.readiness.clone(),
+                store: artifact.store.clone(),
+                _memory: Some(Arc::from(memory)),
+            })
+        } else {
+            artifact
+        };
         state.retained_bytes = state.retained_bytes.saturating_add(retained_bytes);
         state.artifacts.insert(
             key,
@@ -1120,7 +1511,7 @@ impl RelationKind {
         }
     }
 
-    fn sort_key(self) -> u8 {
+    const fn order(self) -> u8 {
         match self {
             Self::Blocks => 0,
             Self::Duplicates => 1,
@@ -1580,12 +1971,11 @@ impl CompactGeometry {
                     .components
                     .get(usize::try_from(component.0).unwrap_or(usize::MAX))
                     .ok_or(AccessFailure::InvalidPage("component"))?;
-                let span = if matches!(request.section, GeometrySection::ComponentMembers(_)) {
-                    &compact.members
-                } else if matches!(request.section, GeometrySection::ComponentRoots(_)) {
-                    &compact.roots
-                } else {
-                    &compact.terminals
+                let span = match request.section {
+                    GeometrySection::ComponentMembers(_) => &compact.members,
+                    GeometrySection::ComponentRoots(_) => &compact.roots,
+                    GeometrySection::ComponentTerminals(_) => &compact.terminals,
+                    _ => return Err(AccessFailure::InvalidPage("component section")),
                 };
                 member_rows(self, &self.component_members, span, start, limit)
             }
@@ -1602,10 +1992,10 @@ impl CompactGeometry {
                     .residuals
                     .get(usize::try_from(residual.0).unwrap_or(usize::MAX))
                     .ok_or(AccessFailure::InvalidPage("residual"))?;
-                let span = if matches!(request.section, GeometrySection::ResidualRequires(_)) {
-                    &compact.requires
-                } else {
-                    &compact.at
+                let span = match request.section {
+                    GeometrySection::ResidualAt(_) => &compact.at,
+                    GeometrySection::ResidualRequires(_) => &compact.requires,
+                    _ => return Err(AccessFailure::InvalidPage("residual section")),
                 };
                 member_rows(self, &self.residual_members, span, start, limit)
             }
@@ -1701,6 +2091,7 @@ pub fn materialize(request: &GeometryRequest, facts: &GeometryFacts) -> Geometry
             estimate,
             readiness: GeometryReadiness::Ready,
             store: Some(Arc::new(store)),
+            _memory: None,
         },
         Err(reason) => GeometryArtifact::unavailable(&request, estimate, reason),
     }
@@ -1806,8 +2197,8 @@ fn prepare(
             })
         })
         .collect();
-    edges.sort_by_key(|edge| (edge.from, edge.relation.sort_key(), edge.to));
-    edges.dedup_by_key(|edge| (edge.from, edge.relation.sort_key(), edge.to));
+    edges.sort_by_key(|edge| (edge.from, edge.relation.order(), edge.to));
+    edges.dedup_by_key(|edge| (edge.from, edge.relation.order(), edge.to));
     let blocking_fanout = {
         let mut fanout = vec![0u64; dictionary.len()];
         for edge in &edges {
@@ -2561,6 +2952,74 @@ mod tests {
     use super::*;
     use runtime::publication::{ExtractorSchemaDigest, MaterializationId, PublicationId};
 
+    struct RefusingMemory;
+
+    impl GeometryMemory for RefusingMemory {
+        fn reserve(&self, _transient_bytes: u64) -> Result<Box<dyn GeometryMemoryReservation>, ()> {
+            Err(())
+        }
+    }
+
+    struct TrackingMemory {
+        live: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    struct TrackingReservation {
+        live: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[derive(Debug)]
+    struct TrackingLease {
+        live: Arc<std::sync::atomic::AtomicU64>,
+        bytes: u64,
+    }
+
+    impl Drop for TrackingLease {
+        fn drop(&mut self) {
+            self.live
+                .fetch_sub(self.bytes, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl GeometryMemoryLease for TrackingLease {}
+
+    impl GeometryMemoryReservation for TrackingReservation {
+        fn retain(
+            self: Box<Self>,
+            retained_bytes: u64,
+        ) -> Result<Box<dyn GeometryMemoryLease>, ()> {
+            self.live
+                .fetch_add(retained_bytes, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(TrackingLease {
+                live: self.live.clone(),
+                bytes: retained_bytes,
+            }))
+        }
+    }
+
+    impl GeometryMemory for TrackingMemory {
+        fn reserve(&self, _transient_bytes: u64) -> Result<Box<dyn GeometryMemoryReservation>, ()> {
+            Ok(Box::new(TrackingReservation {
+                live: self.live.clone(),
+            }))
+        }
+    }
+
+    fn usage_with_nodes(nodes: u64) -> runtime::find::Bound {
+        runtime::find::Bound {
+            decoded_bodies: 0,
+            postings_read: nodes,
+            edges_visited: 0,
+            nodes_visited: nodes,
+            paths_retained: 0,
+            candidates_per_branch: nodes,
+            score_evaluations: 0,
+            projected_bytes: 0,
+            packed_tokens: 0,
+            wall_millis: 0,
+        }
+    }
+
     fn source(root: u8, materialization: u64) -> WorldPublicationId {
         WorldPublicationId::new(
             PublicationId::new(
@@ -2587,6 +3046,184 @@ mod tests {
             relation: relation.into(),
             to: to.into(),
         }
+    }
+
+    #[test]
+    fn more_than_ten_thousand_fact_rows_are_metered_across_cursor_pages() {
+        let request = GeometryRequest::new(
+            source(1, 1),
+            "project",
+            Vec::new(),
+            GeometryBudget {
+                node_visits: 20_000,
+                edge_visits: 20_000,
+                reachability_visits: 1,
+                working_bytes: 64 * 1_024 * 1_024,
+            },
+        );
+        let (bound, page_size) =
+            geometry_find_bound(&request, &FactMeter::default(), true).expect("admitted page");
+        assert_eq!(page_size, GEOMETRY_FACT_PAGE);
+        assert_eq!(bound.candidates_per_branch, u64::from(page_size));
+        assert_eq!(bound.nodes_visited, request.budget.node_visits);
+
+        let mut meter = FactMeter::default();
+        // Five full pages plus their exact cursor look-ahead exceed the old
+        // 10k fixed candidate ceiling but remain one bounded cumulative load.
+        for _ in 0..5 {
+            meter
+                .charge_find(&request, usage_with_nodes(u64::from(page_size) + 1))
+                .expect("page remains in the declared Geometry budget");
+        }
+        assert!(meter.node_visits > 10_000);
+    }
+
+    #[test]
+    fn metadata_seek_rows_and_raw_edges_cannot_escape_fact_admission() {
+        let request = GeometryRequest::new(
+            source(1, 1),
+            "project",
+            Vec::new(),
+            GeometryBudget {
+                node_visits: 4,
+                edge_visits: 1,
+                reachability_visits: 1,
+                working_bytes: 1_024,
+            },
+        );
+        let mut meter = FactMeter::default();
+        meter
+            .charge_find(&request, usage_with_nodes(3))
+            .expect("placement page");
+        let metadata = meter
+            .charge_find(&request, usage_with_nodes(2))
+            .expect_err("metadata Id seek must count as visited rows");
+        assert!(matches!(
+            metadata,
+            UnavailableReason::BudgetExceeded { estimate, .. }
+                if estimate.node_visits == 5
+        ));
+
+        let mut edge_meter = FactMeter::default();
+        edge_meter
+            .visit_edge(&request, 0, 0)
+            .expect("first raw relation");
+        let second = edge_meter
+            .visit_edge(&request, 0, 0)
+            .expect_err("predecessor/relation rows are charged before filtering");
+        assert!(matches!(
+            second,
+            UnavailableReason::BudgetExceeded { estimate, .. }
+                if estimate.edge_visits >= 2
+        ));
+    }
+
+    #[test]
+    fn fact_find_bounds_are_lowered_by_the_geometry_request() {
+        let request = GeometryRequest::new(
+            source(1, 1),
+            "project",
+            Vec::new(),
+            GeometryBudget {
+                node_visits: 5,
+                edge_visits: 1,
+                reachability_visits: 1,
+                working_bytes: 7,
+            },
+        );
+        let (bound, page_size) =
+            geometry_find_bound(&request, &FactMeter::default(), false).expect("bounded query");
+        assert_eq!(page_size, 4, "one visit is reserved for cursor look-ahead");
+        assert_eq!(bound.nodes_visited, 5);
+        assert_eq!(bound.postings_read, 5);
+        assert_eq!(bound.projected_bytes, 7);
+        assert_eq!(bound.packed_tokens, 7);
+        assert_eq!(bound.candidates_per_branch, 4);
+    }
+
+    #[test]
+    fn later_find_pages_are_bounded_by_exact_remaining_admission() {
+        let request = GeometryRequest::new(
+            source(1, 1),
+            "project",
+            Vec::new(),
+            GeometryBudget {
+                node_visits: 3_000,
+                edge_visits: 1,
+                reachability_visits: 1,
+                working_bytes: 1_024 * 1_024,
+            },
+        );
+        let mut meter = FactMeter::default();
+        meter
+            .charge_find(&request, usage_with_nodes(2_049))
+            .expect("first page and look-ahead");
+        let (bound, page_size) =
+            geometry_find_bound(&request, &meter, false).expect("remaining page");
+        assert_eq!(bound.nodes_visited, 951);
+        assert_eq!(bound.postings_read, 951);
+        assert_eq!(page_size, 950);
+        meter
+            .charge_find(&request, usage_with_nodes(951))
+            .expect("evaluator cannot cross the request budget");
+        assert!(geometry_find_bound(&request, &meter, false).is_err());
+        assert_eq!(meter.node_visits, request.budget.node_visits);
+    }
+
+    #[test]
+    fn find_charges_postings_and_transient_projection_peak() {
+        let request = GeometryRequest::new(
+            source(1, 1),
+            "project",
+            Vec::new(),
+            GeometryBudget {
+                node_visits: 10,
+                edge_visits: 1,
+                reachability_visits: 1,
+                working_bytes: 100,
+            },
+        );
+        let mut meter = FactMeter::default();
+        meter
+            .retain(&request, 90, 0, 0)
+            .expect("retained fact buffers");
+        let mut usage = usage_with_nodes(1);
+        usage.postings_read = 3;
+        usage.projected_bytes = 11;
+        let failure = meter
+            .charge_find(&request, usage)
+            .expect_err("projection peak exceeds remaining worker memory");
+        assert_eq!(meter.node_visits, 3, "postings dominate node visits");
+        assert!(matches!(
+            failure,
+            UnavailableReason::BudgetExceeded { estimate, .. }
+                if estimate.working_bytes >= 101
+        ));
+    }
+
+    #[test]
+    fn mixed_project_page_refuses_before_find_when_edge_budget_cannot_cover_lookahead() {
+        let request = GeometryRequest::new(
+            source(1, 1),
+            "project",
+            Vec::new(),
+            GeometryBudget {
+                node_visits: 10_000,
+                edge_visits: 1,
+                reachability_visits: 1,
+                working_bytes: 1_024 * 1_024,
+            },
+        );
+        let meter = FactMeter::default();
+        let refusal = geometry_find_bound(&request, &meter, true)
+            .expect_err("mixed relation work must not enter the evaluator");
+        assert_eq!(meter.node_visits, 0);
+        assert_eq!(meter.edge_visits, 0);
+        assert!(matches!(refusal, UnavailableReason::BudgetExceeded { .. }));
+
+        let (metadata_bound, _) = geometry_find_bound(&request, &meter, false)
+            .expect("known issue-only metadata seek does not spend edge budget");
+        assert_eq!(metadata_bound.nodes_visited, request.budget.node_visits);
     }
 
     fn facts(source: WorldPublicationId, relations: Vec<GeometryRelationFact>) -> GeometryFacts {
@@ -2848,7 +3485,7 @@ mod tests {
     fn registry_reuses_exact_artifact_without_rebuilding_facts() {
         let source = source(1, 1);
         let request = request(source);
-        let registry = GeometryRegistry::default();
+        let registry = GeometryRegistry::new(GeometryCacheLimits::default());
         let hint = GeometryEstimate::conservative(&request, 4, 0);
         let pending =
             registry.materialize_cached(&request, hint, move || facts(source, Vec::new()));
@@ -2867,6 +3504,178 @@ mod tests {
     }
 
     #[test]
+    fn default_registries_share_one_process_cache_and_executor() {
+        let first = GeometryRegistry::default();
+        let second = GeometryRegistry::default();
+        assert!(Arc::ptr_eq(&first.shared, &second.shared));
+        assert_eq!(first.shared.limits.retained_bytes, 1_024 * 1_024 * 1_024);
+    }
+
+    #[test]
+    fn runtime_memory_refusal_happens_before_fact_projection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let registry = GeometryRegistry::new(GeometryCacheLimits::default());
+        let source = source(31, 1);
+        let request = request(source);
+        let projections = Arc::new(AtomicUsize::new(0));
+        let worker_projections = projections.clone();
+        let refused = registry.materialize_cached_with_memory(
+            &request,
+            GeometryEstimate::conservative(&request, 4, 0),
+            &RefusingMemory,
+            move || {
+                worker_projections.fetch_add(1, Ordering::SeqCst);
+                Ok(facts(source, Vec::new()))
+            },
+        );
+
+        assert!(matches!(
+            refused.readiness(),
+            GeometryReadiness::Unavailable {
+                reason: UnavailableReason::MemoryCapacity { .. }
+            }
+        ));
+        assert_eq!(projections.load(Ordering::SeqCst), 0);
+        assert!(registry.get(&request.key()).is_none());
+    }
+
+    #[test]
+    fn artifact_eviction_releases_runtime_memory_after_readers_drop() {
+        use std::sync::atomic::Ordering;
+
+        let registry = GeometryRegistry::new(GeometryCacheLimits {
+            entries: 1,
+            retained_bytes: u64::MAX,
+            workers: 1,
+            queued_builds: 1,
+        });
+        let live = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let memory = TrackingMemory { live: live.clone() };
+
+        let first_source = source(32, 1);
+        let first_request = request(first_source);
+        let first_pending = registry.materialize_cached_with_memory(
+            &first_request,
+            GeometryEstimate::conservative(&first_request, 4, 0),
+            &memory,
+            move || Ok(facts(first_source, Vec::new())),
+        );
+        assert!(matches!(
+            first_pending.readiness(),
+            GeometryReadiness::Pending
+        ));
+        let first = wait_artifact(&registry, &first_request);
+        let first_bytes = first.retained_bytes();
+        assert!(first_bytes > 0);
+        assert_eq!(live.load(Ordering::SeqCst), first_bytes);
+        drop(first_pending);
+        drop(first);
+
+        let second_source = source(33, 1);
+        let second_request = request(second_source);
+        let second_pending = registry.materialize_cached_with_memory(
+            &second_request,
+            GeometryEstimate::conservative(&second_request, 4, 0),
+            &memory,
+            move || Ok(facts(second_source, Vec::new())),
+        );
+        assert!(matches!(
+            second_pending.readiness(),
+            GeometryReadiness::Pending
+        ));
+        let second = wait_artifact(&registry, &second_request);
+        let second_bytes = second.retained_bytes();
+        assert!(second_bytes > 0);
+        assert!(registry.get(&first_request.key()).is_none());
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            second_bytes,
+            "evicted artifact releases its Runtime lease after the last reader"
+        );
+
+        drop(second_pending);
+        drop(second);
+        drop(registry);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn one_source_cannot_monopolize_both_shared_workers() {
+        let registry = GeometryRegistry::new(GeometryCacheLimits {
+            entries: 8,
+            retained_bytes: u64::MAX,
+            workers: 2,
+            queued_builds: 4,
+        });
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (first_started_tx, first_started_rx) = std::sync::mpsc::channel();
+        let first_source = source(21, 1);
+        let first = request(first_source);
+        let first_release = release.clone();
+        let pending = registry.materialize_cached(
+            &first,
+            GeometryEstimate::conservative(&first, 4, 0),
+            move || {
+                first_started_tx.send(()).expect("observe first worker");
+                let (released, wake) = &*first_release;
+                let mut released = released.lock().expect("release lock");
+                while !*released {
+                    released = wake.wait(released).expect("release wake");
+                }
+                facts(first_source, Vec::new())
+            },
+        );
+        assert!(matches!(pending.readiness(), GeometryReadiness::Pending));
+        first_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("first source started");
+
+        let same_source = GeometryRequest::new(
+            first_source,
+            "another-project",
+            Vec::new(),
+            GeometryBudget::default(),
+        );
+        let refused = registry.materialize_cached(
+            &same_source,
+            GeometryEstimate::conservative(&same_source, 4, 0),
+            || panic!("same source must not occupy the second worker"),
+        );
+        assert!(matches!(
+            refused.readiness(),
+            GeometryReadiness::Unavailable {
+                reason: UnavailableReason::ExecutorSaturated { .. }
+            }
+        ));
+
+        let (second_started_tx, second_started_rx) = std::sync::mpsc::channel();
+        let second_source = source(22, 1);
+        let second = request(second_source);
+        let second_pending = registry.materialize_cached(
+            &second,
+            GeometryEstimate::conservative(&second, 4, 0),
+            move || {
+                second_started_tx.send(()).expect("observe second worker");
+                facts(second_source, Vec::new())
+            },
+        );
+        assert!(matches!(
+            second_pending.readiness(),
+            GeometryReadiness::Pending
+        ));
+        second_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("another source gets the second worker");
+
+        let (released, wake) = &*release;
+        *released.lock().expect("release lock") = true;
+        wake.notify_all();
+        wait_artifact(&registry, &first);
+        wait_artifact(&registry, &second);
+    }
+
+    #[test]
     fn registry_single_flights_concurrent_exact_misses() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Barrier;
@@ -2874,7 +3683,7 @@ mod tests {
         let source = source(2, 7);
         let request = request(source);
         let graph = facts(source, vec![relation("a", "blocks", "b")]);
-        let registry = Arc::new(GeometryRegistry::default());
+        let registry = Arc::new(GeometryRegistry::new(GeometryCacheLimits::default()));
         let starts = Arc::new(Barrier::new(8));
         let builds = Arc::new(AtomicUsize::new(0));
         let handles = (0..8)

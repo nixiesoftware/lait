@@ -95,7 +95,7 @@ fn edit(r: &mut Replica, n: u16, key: &BodyKey) {
     r.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],

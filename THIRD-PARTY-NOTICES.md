@@ -1,6 +1,6 @@
 # Third-party notices
 
-lait is offered under `MIT OR Apache-2.0`. It is built from the crates below, each offered under its own terms. This file is generated from `Cargo.lock` by `ci/third-party-notices.sh` and CI fails when it stops matching — do not edit it by hand.
+lait is offered under `PolyForm-Noncommercial-1.0.0`. It is built from the crates below, each offered under its own terms. This file is generated from `Cargo.lock` by `ci/third-party-notices.sh` and CI fails when it stops matching — do not edit it by hand.
 
 Listed here is every crate reachable from this workspace through normal and build dependencies, on every target platform. Dev-dependencies are excluded: their code does not reach an artifact. The full text of each crate’s licence is distributed with that crate’s source at the version recorded below, and is reachable at the repository recorded beside it.
 
@@ -301,7 +301,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | gloo-timers | 0.3.0 | `MIT OR Apache-2.0` | <https://github.com/rustwasm/gloo/tree/master/crates/timers> |
 | goblin | 0.8.2 | `MIT` | <https://github.com/m4b/goblin> |
 | guillotiere | 0.7.0 | `MIT/Apache-2.0` | <https://github.com/nical/guillotiere> |
-| h2 | 0.4.14 | `MIT` | <https://github.com/hyperium/h2> |
+| h2 | 0.4.16 | `MIT` | <https://github.com/hyperium/h2> |
 | half | 2.7.1 | `MIT OR Apache-2.0` | <https://github.com/VoidStarKat/half-rs> |
 | hash32 | 0.2.1 | `MIT OR Apache-2.0` | <https://github.com/japaric/hash32> |
 | hash32 | 0.3.1 | `MIT OR Apache-2.0` | <https://github.com/japaric/hash32> |

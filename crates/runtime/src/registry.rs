@@ -321,11 +321,6 @@ impl Builder {
                 return Err(Refusal::ExecRegistrationMismatch(id));
             }
 
-            // Invalid limits (reserved shape; only the "max is expressible"
-            // check applies until S1 freezes the bounds).
-            // (No invalid limit is currently expressible; the branch stays for
-            // when S1 adds real bounds.)
-
             // Per-World schema validation.
             let mut seen_versions: std::collections::BTreeSet<(String, u32)> =
                 std::collections::BTreeSet::new();
@@ -370,6 +365,11 @@ impl Builder {
             // canonical rule rests on. Refused here rather than made
             // unrepresentable in the codec, because this is where a World's
             // declaration becomes this build's problem.
+            if hosted.descriptor.limits.max_payload_bytes == 0
+                || hosted.descriptor.limits.max_payload_bytes > crate::world::MAX_PAYLOAD_BYTES
+            {
+                return Err(Refusal::InvalidLimits(id.clone()));
+            }
             for (kind, count) in [
                 (Declaration::Scope, hosted.descriptor.scope_schemas.len()),
                 (Declaration::Signal, hosted.descriptor.signal_schemas.len()),
@@ -553,6 +553,7 @@ fn validate_find(world: &WorldId, descriptor: &Descriptor) -> Result<(), Refusal
         let coordinate = (extractor.schema.clone(), extractor.source.clone());
         if extractor.abi_version != crate::find::EXTRACTOR_ABI_VERSION
             || extractor.semantic_digest == [0; 32]
+            || extractor.shape.validate().is_err()
         {
             return Err(Refusal::InvalidFindDeclaration {
                 world: world.clone(),
@@ -580,6 +581,7 @@ fn validate_find(world: &WorldId, descriptor: &Descriptor) -> Result<(), Refusal
                 source: source.clone(),
                 abi_version: crate::find::EXTRACTOR_ABI_VERSION,
                 semantic_digest: [0; 32],
+                shape: crate::find::ExtractionShape::new(1, 1, 1, 0, 0, 0),
             },
         });
     }
@@ -601,6 +603,7 @@ mod tests {
     struct TestWorld {
         id: WorldId,
         schemas: Vec<Schema>,
+        limits: crate::world::Limits,
         scope_schemas: Vec<ScopeSchema>,
         signal_schemas: Vec<SignalSchema>,
         find_schemas: Vec<crate::find::Schema>,
@@ -616,7 +619,7 @@ mod tests {
                 id: self.id.clone(),
                 implementation_version: crate::world::Version(1),
                 schemas: self.schemas.clone(),
-                limits: crate::world::Limits::default(),
+                limits: self.limits,
                 scope_schemas: self.scope_schemas.clone(),
                 signal_schemas: self.signal_schemas.clone(),
                 find_schemas: if self.hide_find_in_descriptor {
@@ -676,10 +679,19 @@ mod tests {
     }
 
     fn test_world(id: &str, schemas: Vec<Schema>) -> Arc<dyn World> {
+        test_world_with_limits(id, schemas, crate::world::Limits::default())
+    }
+
+    fn test_world_with_limits(
+        id: &str,
+        schemas: Vec<Schema>,
+        limits: crate::world::Limits,
+    ) -> Arc<dyn World> {
         let wid = WorldId::parse(id).unwrap();
         Arc::new(TestWorld {
             id: wid,
             schemas,
+            limits,
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
             find_schemas: Vec::new(),
@@ -806,12 +818,14 @@ mod tests {
                     source,
                     abi_version: crate::find::EXTRACTOR_ABI_VERSION,
                     semantic_digest: [0x51; 32],
+                    shape: crate::find::ExtractionShape::new(1, 8, 8, 4 * 1024, 4 * 1024, 8 * 1024),
                 })
             })
             .collect();
         Arc::new(TestWorld {
             id: WorldId::parse("com.example.product").unwrap(),
             schemas: vec![schema("issue", 1, vec![])],
+            limits: crate::world::Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
             find_schemas: declarations,
@@ -829,6 +843,7 @@ mod tests {
         Arc::new(TestWorld {
             id: WorldId::parse("com.example.product").unwrap(),
             schemas: vec![schema("issue", 1, vec![])],
+            limits: crate::world::Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
             find_schemas: declarations,
@@ -845,10 +860,12 @@ mod tests {
             source: declaration.sources[0].clone(),
             abi_version: crate::find::EXTRACTOR_ABI_VERSION,
             semantic_digest: [0x52; 32],
+            shape: crate::find::ExtractionShape::new(1, 8, 8, 4 * 1024, 4 * 1024, 8 * 1024),
         };
         Arc::new(TestWorld {
             id: WorldId::parse("com.example.product").unwrap(),
             schemas: vec![schema("issue", 1, vec![])],
+            limits: crate::world::Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
             find_schemas: vec![declaration],
@@ -867,6 +884,21 @@ mod tests {
         let id = WorldId::parse("com.example.product").unwrap();
         assert!(registry.contains(&id));
         assert!(registry.world(&id).is_some());
+    }
+
+    #[test]
+    fn world_payload_limit_must_be_nonzero_and_tighten_runtime() {
+        for max_payload_bytes in [0, crate::world::MAX_PAYLOAD_BYTES.saturating_add(1)] {
+            let world = test_world_with_limits(
+                "com.example.product",
+                vec![schema("issue", 1, vec![])],
+                crate::world::Limits { max_payload_bytes },
+            );
+            assert_eq!(
+                Builder::new().register(world).build().unwrap_err(),
+                Refusal::InvalidLimits(WorldId::parse("com.example.product").unwrap())
+            );
+        }
     }
 
     #[test]
@@ -968,6 +1000,7 @@ mod tests {
             source: declaration.sources[0].clone(),
             abi_version: crate::find::EXTRACTOR_ABI_VERSION,
             semantic_digest: [0x55; 32],
+            shape: crate::find::ExtractionShape::new(1, 8, 8, 4 * 1024, 4 * 1024, 8 * 1024),
         };
         assert!(Builder::new()
             .register(find_world(
@@ -987,6 +1020,7 @@ mod tests {
                 world: WorldId::parse("com.example.product").unwrap(),
                 extractor: Extractor {
                     semantic_digest: [0; 32],
+                    shape: crate::find::ExtractionShape::new(1, 1, 1, 0, 0, 0),
                     ..extractor.clone()
                 },
             }
@@ -1000,6 +1034,7 @@ mod tests {
             source: extractor.source.clone(),
             abi_version: crate::find::EXTRACTOR_ABI_VERSION,
             semantic_digest: [0x53; 32],
+            shape: crate::find::ExtractionShape::new(1, 8, 8, 4 * 1024, 4 * 1024, 8 * 1024),
         };
         assert!(matches!(
             Builder::new()
@@ -1016,6 +1051,7 @@ mod tests {
             source: declaration.sources[0].clone(),
             abi_version: crate::find::EXTRACTOR_ABI_VERSION,
             semantic_digest: [0x54; 32],
+            shape: crate::find::ExtractionShape::new(1, 8, 8, 4 * 1024, 4 * 1024, 8 * 1024),
         };
         assert!(matches!(
             Builder::new()

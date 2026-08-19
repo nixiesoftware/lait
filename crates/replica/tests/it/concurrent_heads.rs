@@ -169,7 +169,7 @@ fn commit_register(
     r.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],
@@ -406,7 +406,7 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
     a.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],
@@ -592,7 +592,7 @@ fn an_honest_local_write_during_a_delta_pull_rejects_the_whole_root() {
     a.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],

@@ -5,7 +5,7 @@ edition = "2021"
 # MSRV: the workspace figure. See the root manifest for what drives it.
 rust-version = "1.92"
 description = "UI-neutral supervisor library for lait daemons"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [lints]
@@ -52,3 +52,9 @@ tracing-subscriber = { version = "0.3", features = [
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(unix)'.dependencies]
+# For the graceful half of stopping a head: SIGTERM to the head's own process
+# group, before SIGKILL. `std` offers no portable "ask nicely", and the group is
+# what reaches a World that spawned children of its own.
+libc = "0.2"

@@ -143,7 +143,10 @@ impl Endpoint {
 /// available on the shared control path. This is a decisive pre-v1 cutoff:
 /// silently falling back to a World-wide legacy query would violate both the
 /// query semantics and the latency contract.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 14;
+///
+/// v15: native World update consent/progress is daemon-owned and durable;
+/// Busy/Capacity are typed so a client never guesses whether retry is safe.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 15;
 
 /// Which build a daemon is, for deciding whether to reuse it or take over.
 ///
@@ -230,7 +233,7 @@ impl BuildFingerprint {
 /// than failing once. The minimum moves with the version rather than trailing
 /// it — a v10 daemon answers the book's verbs with "unknown variant" instead
 /// of a version complaint, which is a worse failure than being told to stop.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 14;
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 15;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -339,6 +342,97 @@ pub struct DisplayCoordinatorView {
     pub devices: Vec<DisplayDeviceView>,
     pub assignments: Vec<DisplayAssignmentView>,
     pub pending_pairings: Vec<DisplayPairingView>,
+    /// How exposed this coordinator's identifier key is — `None` from a daemon
+    /// that predates the custody split.
+    ///
+    /// Additive and optional, per `docs/COMPATIBILITY.md`: a required field
+    /// here makes an older daemon's reply undecodable, which presents as a
+    /// coordinator that never answers rather than as a version mismatch.
+    ///
+    /// `Option` rather than a defaulted value, because a default would have to
+    /// invent a measurement. An empty slot list means *this build reports no
+    /// unlock paths*, which is a fact worth a warning; a daemon that was never
+    /// asked has no such fact, and rendering the two the same way would raise
+    /// an alarm about a coordinator nobody has examined.
+    #[serde(default)]
+    pub identifier_custody: Option<DisplayIdentifierCustodyView>,
+}
+
+/// One rendered surface, for a member screen to present.
+///
+/// The receiver protocol's program snapshot commits an assignment, a revision,
+/// a freshness policy and opaque asset handles. None of that appears here,
+/// because every one of them exists to make bytes safe for a participant that
+/// is not in the Space. A member screen is, so what crosses is the rendered
+/// output and the product's own assessment of it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayPresentationView {
+    pub world: String,
+    pub surface: String,
+    /// `current`, `partial`, or `unavailable` — the product's assessment,
+    /// never collapsed into presence-or-absence of items.
+    pub assessment: String,
+    pub partial_reasons: Vec<String>,
+    /// `hold_last`, `loop`, `poll_at_end`, or `blank_at_end`.
+    pub cycle: String,
+    pub refresh_after_ms: Option<u32>,
+    pub items: Vec<DisplayPresentationItemView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayPresentationItemView {
+    pub id: String,
+    pub duration_ms: Option<u32>,
+    pub assessment: String,
+    pub spoken_summary: Option<String>,
+    pub scene: DisplayPresentationSceneView,
+}
+
+/// What one item draws.
+///
+/// `Unsupported` is a scene rather than an error, and it is what a live-media
+/// item becomes on this path: the live edge is coordinator machinery a member
+/// screen does not run. The receiver invariants say an unsupported output kind
+/// refuses visibly rather than reinterpreting itself, and that rule is not
+/// about receivers — it is about not drawing something other than what was
+/// asked for.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DisplayPresentationSceneView {
+    Frame {
+        /// `png`, `jpeg`, or `webp`.
+        media_type: String,
+        width: u32,
+        height: u32,
+        /// Standard base64. The control plane is JSON, and a byte array encoded
+        /// as a list of numbers costs roughly four times the transfer for the
+        /// same pixels.
+        bytes_base64: String,
+    },
+    Blank {
+        /// `source_unavailable`, `unsupported`, or `program_ended`.
+        reason: String,
+    },
+    Unsupported {
+        /// What the surface asked for that this screen does not draw.
+        output: String,
+    },
+}
+
+/// How exposed this coordinator's identifier key is to the loss of its machine.
+///
+/// Present on every status read rather than behind a settings page, because the
+/// moment an operator wants this fact is *after* the machine is gone, and by
+/// then it is unreadable. Losing the key does not merely inconvenience a
+/// restore: it invalidates every assignment-bound item and asset identifier
+/// this coordinator has issued, so receivers holding them stop resolving.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DisplayIdentifierCustodyView {
+    /// One entry per independent way in — `recovery-key`, `passphrase`,
+    /// `windows-dpapi`. Kinds, never material.
+    pub slots: Vec<String>,
+    /// Whether any path survives leaving this machine.
+    pub portable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -475,6 +569,38 @@ pub enum Request {
     },
     DisplayDeviceRevoke {
         device: String,
+    },
+    /// Add a passphrase as a second way into this coordinator's identifier key.
+    ///
+    /// The first slot is sealed to the daemon's own device, which survives an
+    /// operating-system profile but not the loss of the identity itself. A
+    /// passphrase is the one unlock path that depends on neither, which is what
+    /// makes it the honest second slot rather than a third copy of the first.
+    ///
+    /// The passphrase is never stored — it wraps the data-encryption key and is
+    /// forgotten. Losing it costs this path and nothing else.
+    DisplayIdentifierAdmitPassphrase {
+        passphrase: String,
+    },
+    /// Render one exact surface for a screen that is a **member of the Space**.
+    ///
+    /// Distinct from [`Request::DisplayAssignmentPut`] in what it does not do:
+    /// nothing is committed, no receiver is named, and no assignment exists
+    /// afterwards. A member holds the Space these bytes came from, so there is
+    /// no credential to bind them to and nothing to revoke later — losing
+    /// standing simply stops the Query.
+    DisplayPresent {
+        orbit: String,
+        world: String,
+        surface: String,
+        #[schemars(with = "serde_json::Value")]
+        input: serde_json::Value,
+        theme: DisplayThemeSetting,
+        /// The presenting window, in physical pixels.
+        width: u32,
+        height: u32,
+        scale_milli: u16,
+        locale: String,
     },
 
     // ---- membership and authorization ----
@@ -1039,6 +1165,15 @@ pub enum Request {
     /// executable (it renames rather than overwrites), so the swap lands and
     /// takes effect at the next restart.
     HostUpdate,
+    /// Durably enqueue a native World update before any bundle fetch or
+    /// lifecycle migration work begins.
+    HostWorldUpdate {
+        world: String,
+    },
+    /// Read the durable native World update operation and progress.
+    HostWorldUpdateStatus {
+        world: String,
+    },
     /// Stop this daemon once the reply is on the wire, so the next request
     /// starts a fresh one.
     ///
@@ -1537,6 +1672,8 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
+        | Request::DisplayPresent { .. }
+        | Request::DisplayIdentifierAdmitPassphrase { .. }
         | Request::SeedAdd { .. }
         | Request::SeedList
         | Request::SeedRemove { .. }
@@ -1575,6 +1712,8 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::HostOrbitRebuild { .. }
         | Request::HostInstallMcp { .. }
         | Request::HostUpdate
+        | Request::HostWorldUpdate { .. }
+        | Request::HostWorldUpdateStatus { .. }
         | Request::HostRestart
         | Request::HostContext => Lifecycle,
     }
@@ -1633,6 +1772,18 @@ pub fn representative_requests() -> Vec<Request> {
         },
         Request::DisplayAssignmentRevoke { assignment: s() },
         Request::DisplayDeviceRevoke { device: s() },
+        Request::DisplayIdentifierAdmitPassphrase { passphrase: s() },
+        Request::DisplayPresent {
+            orbit: s(),
+            world: s(),
+            surface: s(),
+            input: serde_json::Value::Null,
+            theme: DisplayThemeSetting::Dark,
+            width: 1920,
+            height: 1080,
+            scale_milli: 1000,
+            locale: "en".into(),
+        },
         Request::AssignmentList { actor: None },
         Request::AssignmentGrant {
             actor: s(),
@@ -1834,6 +1985,8 @@ pub fn representative_requests() -> Vec<Request> {
             world: None,
         },
         Request::HostUpdate,
+        Request::HostWorldUpdate { world: s() },
+        Request::HostWorldUpdateStatus { world: s() },
         Request::HostRestart,
         Request::HostContext,
     ]
@@ -1968,6 +2121,8 @@ pub enum Response {
     },
     /// Identity-scoped display coordination state for Astrolabe.
     Display(Box<DisplayCoordinatorView>),
+    /// One rendered surface for a member screen to present.
+    DisplayPresentation(Box<DisplayPresentationView>),
     /// A write echoes the resolved canonical handle.
     Ref {
         reff: String,
@@ -2262,6 +2417,12 @@ pub enum HostReply {
         #[serde(default)]
         standing: Option<crate::update::watch::Standing>,
     },
+    /// Durable native World update consent/progress.
+    WorldUpdate {
+        world: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job: Option<crate::update::consent::Job>,
+    },
     /// The daemon accepted the reply's own last instruction and is stopping.
     Restarting {
         /// The process that is going away, so an operator can confirm it did.
@@ -2369,6 +2530,11 @@ pub enum ErrorKind {
     /// your sponsor to grant write access") instead of an opaque blob, and so it
     /// is never confused with a transient/internal error. Exit `1` like `Error`.
     Denied,
+    /// The bounded owner is already processing another operation. Nothing was
+    /// queued; a caller may poll the durable status or retry later.
+    Busy,
+    /// The bounded execution or memory lane cannot admit this operation now.
+    Capacity,
 }
 
 impl Response {
@@ -2402,6 +2568,18 @@ impl Response {
             error_kind: ErrorKind::Denied,
         }
     }
+    pub fn busy(msg: impl Into<String>) -> Self {
+        Response::Error {
+            message: msg.into(),
+            error_kind: ErrorKind::Busy,
+        }
+    }
+    pub fn capacity(msg: impl Into<String>) -> Self {
+        Response::Error {
+            message: msg.into(),
+            error_kind: ErrorKind::Capacity,
+        }
+    }
 }
 
 /// The streamed frame: the repeated reply to [`Request::Subscribe`].
@@ -2422,6 +2600,12 @@ pub struct Doorbell {
     /// plane names are only meaningful inside that boundary.
     #[serde(default)]
     pub invalidations: Vec<RoutedInvalidation>,
+    /// Exact immutable read coordinates installed for each affected World,
+    /// sorted by World. A consumer may use a stable scalar text range only
+    /// while its projection carries the matching coordinate; otherwise this
+    /// frame is an invalidation and the consumer re-queries.
+    #[serde(default)]
+    pub publications: Vec<AffectedWorldPublication>,
     /// Bounded, value-free feedback from the same durable operation. Human and
     /// agent writes arrive here with the same authenticated actor/device and
     /// path/range vocabulary; state is still read from the publication.
@@ -2449,7 +2633,9 @@ pub struct Doorbell {
 
 /// The dirty-set vocabulary is World-opaque and defined by `runtime`, so the
 /// control plane can carry a World it does not understand. It only carries it.
-pub use runtime::world::{DirtyPlane, DirtyScope, RoutedInvalidation, ScopeRef};
+pub use runtime::world::{
+    AffectedWorldPublication, DirtyPlane, DirtyScope, RoutedInvalidation, ScopeRef,
+};
 
 /// A presence or transport log entry kept in the daemon's ring buffer.
 #[derive(Debug, Clone, Serialize, Deserialize)]

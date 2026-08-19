@@ -23,6 +23,8 @@ pub const MAX_PROTECTED_PLAINTEXT: usize = MAX_BODY_BYTES - BODY_ENVELOPE_OVERHE
 /// The declared mutation model tags.
 pub const MUTATION_ATOMIC: u8 = 1;
 pub const MUTATION_COLLABORATIVE: u8 = 2;
+/// Create-once atomic value whose Body id is derived from its canonical bytes.
+pub const MUTATION_IMMUTABLE_ATOMIC: u8 = 3;
 
 /// Why a protected payload failed. Commitment and AEAD failures share
 /// [`Invalid::InvalidProtectedBody`] deliberately — no oracle

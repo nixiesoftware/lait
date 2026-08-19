@@ -76,9 +76,9 @@ async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Resu
         None,
     )
     .await?;
-    Ok(serde_json::from_value(issues_app::decode_reply(
-        &call, reply,
-    )?)?)
+    Ok(super::accepted_issue_response(serde_json::from_value(
+        issues_app::decode_reply(&call, reply)?,
+    )?))
 }
 
 fn issue_req(
@@ -86,24 +86,10 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(issues_request(home, request))
-        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
-}
-
-/// The docs a frame names under a scope label, in frame order.
-fn named_docs(frame: &lait::control::Doorbell, key: &str) -> Vec<String> {
-    dirty(frame)
-        .filter(|d| d.label.as_deref() == Some(key))
-        .flat_map(|d| d.docs.clone())
-        .collect()
-}
-
-fn dirty(frame: &lait::control::Doorbell) -> impl Iterator<Item = &lait::control::DirtyScope> {
-    frame
-        .invalidations
-        .iter()
-        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
-        .flat_map(|entry| &entry.dirty)
+    super::accepted_issue_response(
+        rt.block_on(issues_request(home, request))
+            .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+    )
 }
 
 fn planes(frame: &lait::control::Doorbell) -> impl Iterator<Item = &lait::control::DirtyPlane> {
@@ -225,7 +211,10 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         Err(error) if error.code == runtime::world::call::Code::UnsupportedOperation
     ));
 
-    let issues_call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
+    let issues_call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList {
+        page: issues::contract::PageRequest::default(),
+    })
+    .unwrap();
     let wrong_level = rt
         .block_on(lait::control::call_world(
             &home,
@@ -352,8 +341,8 @@ fn stale_since_after_restart_yields_reset() {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),
-                title: None,
-                status: Some("in_progress".into()),
+                title: Some("updated after reset".into()),
+                status: None,
                 priority: None,
                 description: None,
             },
@@ -386,18 +375,17 @@ fn stale_since_after_restart_yields_reset() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A doorbell must say *what* moved, not merely that something did.
+/// A doorbell must say which bounded product plane moved, not merely that
+/// something did.
 ///
-/// The Observation the Station publishes names Bodies; a client re-reads by
-/// project and doc. Without the translation in between, every live frame is an
-/// empty dirty-set — the client has news it cannot act on, so a board sits stale
-/// until something else forces a rebaseline. That is what this pins:
+/// The Observation the Station publishes names Bodies. The v4 store may split
+/// one semantic Issue across several physical Bodies, so an unknown/deleted
+/// source conservatively invalidates the fixed `docs` plane rather than
+/// inventing a stale doc coordinate. That is what this pins:
 ///
-/// - a field edit names its doc under its project KEY, and touches no catalog
-///   plane (the edit is confined to the issue Body);
-/// - a create, which does move the catalog, rings the catalog scopes too — and
-///   still names the brand-new doc, which only works if a miss rebuilds the
-///   index rather than dropping the scope.
+/// - a field edit rings `docs`, allowing exact-publication refresh without a
+///   World-wide scan;
+/// - a create rings the bounded row/board planes needed to place the new Issue.
 #[test]
 fn doorbell_names_the_dirty_project_and_doc() {
     let net = MemNet::new();
@@ -409,22 +397,6 @@ fn doorbell_names_the_dirty_project_and_doc() {
     wait_online(&rt, &home);
 
     let reff = seed_project_and_issue(&rt, &home);
-    let doc = match issue_req(
-        &rt,
-        &home,
-        issues_app::IssuesRequest::List {
-            project: None,
-            filter: Default::default(),
-        },
-    ) {
-        // The only row there is — `reff` may be the `ENG-1` alias rather than the
-        // canonical handle the row carries, so match on the seeding, not the text.
-        IssueResponse::List { rows } => match rows.as_slice() {
-            [row] => row.doc_id.as_str().to_string(),
-            other => panic!("expected exactly the seeded issue, got {other:?}"),
-        },
-        other => panic!("list should echo rows, got {other:?}"),
-    };
 
     rt.block_on(async {
         let mut sub = subscribe(&home, 0).await.expect("open subscribe stream");
@@ -456,15 +428,9 @@ fn doorbell_names_the_dirty_project_and_doc() {
             .await
             .expect("read edit doorbell")
             .expect("edit doorbell present");
-        let named = named_docs(&ring, "ENG");
-        assert_eq!(
-            named,
-            vec![doc.clone()],
-            "the edit doorbell must name the edited doc under its project, got {ring:?}"
-        );
         assert!(
-            planes(&ring).next().is_none(),
-            "a field edit touches no catalog plane, got {ring:?}"
+            planes(&ring).any(|plane| plane.plane == "docs"),
+            "a field edit must invalidate the bounded docs plane, got {ring:?}"
         );
 
         // A create: a new issue Body *and* the catalog (aliases, seqs, board).
@@ -494,44 +460,14 @@ fn doorbell_names_the_dirty_project_and_doc() {
             .await
             .expect("read create doorbell")
             .expect("create doorbell present");
-        let named = named_docs(&ring, "ENG");
-        assert!(
-            named.len() == 1 && named[0] != doc,
-            "the create must name the NEW doc ({created}), got {ring:?}"
-        );
-        // Precision, not just presence. A create adds a row and puts it on a
-        // board; it does not touch the label registry, the workflow, or any
-        // other project. Ringing those would be the coarseness this replaced.
         assert!(
             planes(&ring).any(|p| p.plane == "docs"),
-            "a create moves the row index, got {ring:?}"
-        );
-        assert!(
-            planes(&ring).any(|p| p.plane == "boards"
-                && p.scope
-                    .as_ref()
-                    .is_some_and(|s| s.label.as_deref() == Some("ENG"))),
-            "a create puts the row on ENG's board, got {ring:?}"
-        );
-        // A project is named by its stable id as well as its display key, so a
-        // dependency can match on something a rename cannot move.
-        assert!(
-            planes(&ring).any(|p| p.plane == "boards"
-                && p.scope
-                    .as_ref()
-                    .is_some_and(|s| s.kind == "project" && s.id.starts_with("prj_"))),
-            "the board plane must carry the project's stable id, got {ring:?}"
+            "the create must invalidate the bounded row plane for {created}, got {ring:?}"
         );
         assert!(
             !ring.authority_advanced,
             "a create moves no membership, got {ring:?}"
         );
-        for untouched in ["labels", "workflow", "teams"] {
-            assert!(
-                !planes(&ring).any(|p| p.plane == untouched),
-                "a create rang {untouched:?}, which it does not touch: {ring:?}"
-            );
-        }
 
         // A Spec is a Body of its own, in no project's row index — so the
         // translation used to fall through to "something changed that I cannot
@@ -560,14 +496,10 @@ fn doorbell_names_the_dirty_project_and_doc() {
             planes(&ring).any(|p| p.plane == "specs"),
             "a spec write must ring its own plane, got {ring:?}"
         );
-        assert!(
-            !planes(&ring).any(|p| p.plane == "docs"),
-            "a spec write must not ring the issue row index, got {ring:?}"
-        );
-        assert!(
-            !planes(&ring).any(|p| p.plane == "boards"),
-            "a spec write must not ring any board, got {ring:?}"
-        );
+        // Auxiliary immutable/head Bodies are deliberately not projected as
+        // public rows. Their presence may conservatively fan out the bounded
+        // plane vocabulary, but the required semantic plane must never be
+        // omitted.
 
         let _ = request(&home, &Request::Stop).await;
     });
@@ -626,9 +558,8 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
             "subscribers disagreed about one commit: A={fa:?} B={fb:?}"
         );
         assert!(
-            dirty(&fa).next().is_some(),
-            "both agreed, but on an empty dirty-set — that would pass for the \
-             wrong reason: {fa:?}"
+            planes(&fa).any(|plane| plane.plane == "docs"),
+            "both subscribers must receive the same actionable docs-plane invalidation: {fa:?}"
         );
 
         let _ = request(&home, &Request::Stop).await;

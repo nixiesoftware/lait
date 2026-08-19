@@ -113,7 +113,7 @@ fn commit_votes(r: &mut Replica, request: [u8; 16], delta: i64) {
     r.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: NO_PARENT_ROOT,
             demand,
             intent_digest: [1u8; 32],

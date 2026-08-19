@@ -9,7 +9,7 @@
   },
   "homepage": "https://github.com/Nixie-Tech-LLC/lait",
   "repository": "https://github.com/Nixie-Tech-LLC/lait",
-  "license": "MIT OR Apache-2.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "keywords": ["mcp", "p2p", "iroh", "gossip", "issue-tracker"],
   "mcpServers": {
     "lait": {

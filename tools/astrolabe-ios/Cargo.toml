@@ -5,10 +5,11 @@ edition = "2021"
 # MSRV: the workspace figure. See the root manifest for what drives it.
 rust-version = "1.92"
 description = "The Swift bridge crate for the native iOS client"
-# RustDesk's license, by decision (2026-08-15). This crate and the iOS shell
-# above it are AGPL; the engine and the rest of the workspace keep their dual
-# MIT OR Apache-2.0 offer.
-license = "AGPL-3.0-only"
+# PolyForm Noncommercial, like the whole workspace (2026-08-18). The AGPL that
+# stood here was a policy choice, not inherited code — no RustDesk source was
+# ever vendored — and AGPL section 7 forbids the further restriction a
+# noncommercial engine imposes, so the two could not have coexisted.
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [lints]

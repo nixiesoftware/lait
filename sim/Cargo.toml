@@ -3,9 +3,16 @@
 # Its own package, outside the workspace, for the same reason `fuzz/` is: it
 # needs a build flag the rest of the workspace must never see. `cargo build`,
 # `cargo test` and the MSRV job at the repo root do not know this exists.
+# Declared a workspace root, not merely excluded from one. Exclusion only makes
+# cargo keep walking upward, so a checkout nested inside another workspace (a
+# git worktree under the repo, say) gets adopted by the OUTER root and refuses
+# to build. An empty table stops the walk here, wherever `sim` is checked out.
+[workspace]
+
 [package]
 name = "lait-sim"
 version = "0.0.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 edition = "2021"
 

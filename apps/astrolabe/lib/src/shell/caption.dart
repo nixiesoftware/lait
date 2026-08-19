@@ -29,14 +29,23 @@ library;
 import 'package:covalence/covalence.dart';
 import 'package:flutter/widgets.dart';
 
-/// One control's width. Windows' own caption metric, pinned: a person aims at
-/// the top-right corner with muscle memory built on every other window on the
-/// machine, and a cluster that is narrower than the system's is one they miss.
-const double kCaptionWidth = 46;
+/// One control's width.
+///
+/// This was 46 — Windows' own caption metric — on the argument that a person
+/// aims at the top-right corner with muscle memory built on every other window
+/// on the machine. That argument holds for the *corner*, which the close
+/// control still owns and still hits at any width: the corner is a point, and
+/// Fitts' law makes it free however wide the button around it is.
+///
+/// What 46 actually bought was 138 points of a 32-point-tall bar spent on three
+/// controls, in a client whose caption is a utility tier rather than a title
+/// bar. The system metric is sized for a 32-point-tall *system* caption with a
+/// title in it; ours carries a wordmark, a screen control and nothing else.
+const double kCaptionWidth = 36;
 
 /// The mark inside it — pinned like every other mark, because how big a close
 /// cross reads is a claim about the cross rather than about the bar around it.
-const double kCaptionMark = 10;
+const double kCaptionMark = 9;
 
 /// How wide the three of them are together.
 const double kCaptionSpan = kCaptionWidth * 3;

@@ -113,9 +113,12 @@ jobs:
         working-directory: apps/astrolabe
         run: flutter build windows --release
 
-      - name: Stage the notices beside the pair
+      - name: Stage the notices and the licence beside the pair
         shell: pwsh
-        run: Copy-Item THIRD-PARTY-NOTICES.md "apps\astrolabe\build\windows\x64\runner\Release\"
+        run: |
+          $stage = "apps\astrolabe\build\windows\x64\runner\Release\"
+          Copy-Item THIRD-PARTY-NOTICES.md $stage
+          Copy-Item LICENSE $stage
 
       - name: Assert the staged pair is the tagged release
         shell: pwsh
@@ -349,6 +352,16 @@ jobs:
       - name: Build the bundle (core + sidecar + interface, one tree)
         working-directory: apps/astrolabe
         run: flutter build linux --release
+
+      # Into the bundle, and before make-tree - the tree is packed from
+      # this directory and is what a self-update swaps into `current/`.
+      # Staged later (as the notices once were, by make-tarball alone) the
+      # tarball carries them and the first upgrade drops them. Windows and
+      # macOS already stage into their bundle; this is Linux catching up.
+      - name: Stage the notices and the licence beside the pair
+        run: |
+          cp THIRD-PARTY-NOTICES.md LICENSE \
+            apps/astrolabe/build/linux/x64/release/bundle/
 
       - name: Package and assert the staged pair
         env:

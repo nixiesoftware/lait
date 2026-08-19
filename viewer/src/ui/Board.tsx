@@ -65,6 +65,9 @@ export function Board({
   readOnly,
   filtered,
   onClearFilter,
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore = () => undefined,
 }: {
   board: BoardView;
   /** How the board is grouped. `status` = workflow columns (the default and the
@@ -94,6 +97,9 @@ export function Board({
   /** Reset that filter — offered on the empty state so a board emptied by a
    *  leftover filter (e.g. "My issues") is never a silent blank. */
   onClearFilter: () => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
 }) {
   // A board with rows in the space but none after filtering must say so, exactly
   // as the list does — an empty grid of columns reads as "no issues", when the
@@ -104,12 +110,15 @@ export function Board({
       <EmptyState
         kind="filtered-empty"
         title="No matching issues"
-        body="Every issue in this project is hidden by the current filter."
+        body={hasMore
+          ? "More publication-pinned matches are available."
+          : "Every issue in this project is hidden by the current filter."}
         action={
           <Button
-            onClick={onClearFilter}
-            icon={<FilterX className="size-icon-sm" />}
-            label="Clear filter"
+            onClick={hasMore ? onLoadMore : onClearFilter}
+            icon={hasMore ? undefined : <FilterX className="size-icon-sm" />}
+            label={hasMore ? (loadingMore ? "Loading…" : "Load more") : "Clear filter"}
+            isDisabled={loadingMore}
             variant="primary"
             size="sm"
           />
@@ -121,19 +130,32 @@ export function Board({
 
   if (display.group === "assignee" || display.group === "priority") {
     return (
-      <GroupedBoard
-        board={board}
-        display={display}
-        members={members}
-        labels={labels}
-        selection={selection}
-        optimistic={optimistic}
-        onSelect={onSelect}
-        onReassign={onReassign}
-        mutators={mutators}
-        onLoadChildren={onLoadChildren}
-        readOnly={readOnly}
-      />
+      <div className="flex min-h-0 flex-1 flex-col">
+        <GroupedBoard
+          board={board}
+          display={display}
+          members={members}
+          labels={labels}
+          selection={selection}
+          optimistic={optimistic}
+          onSelect={onSelect}
+          onReassign={onReassign}
+          mutators={mutators}
+          onLoadChildren={onLoadChildren}
+          readOnly={readOnly}
+        />
+        {hasMore && (
+          <div className="flex justify-center p-3">
+            <Button
+              label={loadingMore ? "Loading…" : "Load more"}
+              isDisabled={loadingMore}
+              onClick={onLoadMore}
+              variant="ghost"
+              size="sm"
+            />
+          </div>
+        )}
+      </div>
     );
   }
   /** The card in flight, and the column it left. */
@@ -267,6 +289,17 @@ export function Board({
               </span>
             </button>
           ))}
+        </aside>
+      )}
+      {hasMore && (
+        <aside className="flex w-32 shrink-0 items-start justify-center pt-8">
+          <Button
+            label={loadingMore ? "Loading…" : "Load more"}
+            isDisabled={loadingMore}
+            onClick={onLoadMore}
+            variant="ghost"
+            size="sm"
+          />
         </aside>
       )}
     </div>

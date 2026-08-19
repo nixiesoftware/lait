@@ -192,8 +192,77 @@ prefixed_id!(
 /// *for* an actor only while the actor's key-event log binds it. Use this for
 /// transport peers, signature authors, and `committedBy` stamps — never to
 /// answer "who did this".
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// # Equality is by key, not by spelling
+///
+/// `Eq`, `Ord` and `Hash` compare the ASCII-lowercase fold, so `AABB…` and
+/// `aabb…` are **one** `DeviceId`. That is not a convenience — it is the only
+/// way the type's two roles can agree.
+///
+/// A device id is simultaneously a *value* (32 bytes of ed25519 public key,
+/// compared by decoding) and a *name* (a `String`, compared by `Ord`). Every
+/// decoder here is `HEXLOWER_PERMISSIVE`, so both spellings are one key
+/// cryptographically; with derived `Eq` they were two members of a
+/// `BTreeSet<DeviceId>`. The two comparisons disagreed, and the disagreement was
+/// reachable: a bound device could author a binding for its own shouted
+/// spelling, and a later `RevokeDevice` naming the canonical id — the only
+/// spelling any surface displays, since every display path derives from key
+/// bytes — removed one member and left the other. **A revoked device kept its
+/// standing**, and `device_speaks_for` in `acl` still authorized its ops.
+/// CWE-178, with the remedy CWE-180 prescribes.
+///
+/// Folding here rather than rejecting non-canonical input is deliberate, and the
+/// reasoning is worth keeping. Rejection would have to happen at deserialization
+/// or at signature verification, and `as_str` is inside every signing payload
+/// (`sigdag::signing_payload`, `actor::consent_payload`) — so normalising a
+/// spelling would change the bytes a stored signature covers, a stored node
+/// would stop verifying, and `Authority::open` re-verifies every stored effect
+/// and answers `Failure::corrupt`. Unlike a checkpoint, which is downgraded to a
+/// cache miss precisely so a layout change cannot brick a store, an effect gets
+/// no such grace. So: fold, never rewrite. No signature moves, no hash moves, no
+/// serialized byte moves, and an honest history — every production constructor
+/// emits `HEXLOWER` — is bit-identical.
+///
+/// The wire is a different layer with a different answer: a boundary that
+/// *receives* an id should refuse a non-canonical spelling outright rather than
+/// accept a second name for one key (see `lait-post`'s `device_key`). Replay
+/// cannot, because it does not get to rewrite the past.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceId(String);
+
+impl PartialEq for DeviceId {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(&other.0)
+    }
+}
+
+impl Eq for DeviceId {}
+
+impl PartialOrd for DeviceId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DeviceId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .cmp(other.0.bytes().map(|b| b.to_ascii_lowercase()))
+    }
+}
+
+impl std::hash::Hash for DeviceId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Byte-wise so no allocation, terminated so a tuple key cannot be
+        // ambiguous. Only consistency with `eq` matters, not agreeing with
+        // `str`'s own hash.
+        for b in self.0.bytes() {
+            state.write_u8(b.to_ascii_lowercase());
+        }
+        state.write_u8(0xff);
+    }
+}
 
 impl DeviceId {
     /// Parse a 64-char lowercase-hex ed25519 public key.
@@ -318,6 +387,65 @@ impl fmt::Display for ActorId {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// Two spellings of one ed25519 key are one `DeviceId` — in a set, in a map,
+    /// and under every comparison a collection uses.
+    ///
+    /// The three traits are checked together on purpose. A `BTreeSet` dedupes by
+    /// `Ord` and a `HashMap` by `Hash` + `Eq`, so fixing `eq` alone would leave a
+    /// set that still held two members and a map that still had two entries — the
+    /// revocation bypass would survive in a different container.
+    #[test]
+    fn one_key_is_one_device_however_it_is_spelled() {
+        let canonical = DeviceId::from_key_bytes(&[0xab; 32]);
+        let shouted = DeviceId::from_key_string(canonical.as_str().to_ascii_uppercase());
+
+        // The premise: same key, different string. Without this the test proves
+        // nothing.
+        assert_eq!(canonical.key_bytes(), shouted.key_bytes());
+        assert_ne!(canonical.as_str(), shouted.as_str());
+
+        assert_eq!(canonical, shouted, "equality is by key, not by spelling");
+        assert_eq!(
+            canonical.cmp(&shouted),
+            std::cmp::Ordering::Equal,
+            "Ord must agree with Eq or a BTreeSet holds both"
+        );
+
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(canonical.clone());
+        assert!(
+            !set.insert(shouted.clone()),
+            "the second spelling is not new"
+        );
+        assert_eq!(set.len(), 1);
+        assert!(
+            set.remove(&shouted),
+            "removing either spelling removes the key"
+        );
+        assert!(set.is_empty(), "…and leaves nothing behind");
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(canonical.clone(), "first");
+        map.insert(shouted.clone(), "second");
+        assert_eq!(
+            map.len(),
+            1,
+            "Hash must agree with Eq or a HashMap holds both"
+        );
+        assert_eq!(map.get(&canonical), Some(&"second"));
+
+        // Serialization is untouched: the raw spelling round-trips, because
+        // `as_str` is inside signing payloads and normalising it would move bytes
+        // a stored signature covers.
+        let json = serde_json::to_string(&shouted).expect("serialize");
+        assert!(
+            json.contains("AB"),
+            "the stored spelling is preserved: {json}"
+        );
+        let back: DeviceId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.as_str(), shouted.as_str());
+    }
 
     /// A fully deterministic source: fixed clock, counter entropy.
     struct FakeSource {

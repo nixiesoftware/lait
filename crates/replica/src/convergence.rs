@@ -11,6 +11,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::frontier::ReplicaFrontier;
 
+/// Maximum distinct signed transactions represented by one Convergence
+/// outcome. Contact itself permits at most this many frames, and every Body
+/// transaction consumes at least one, so this is a protocol-derived bound
+/// rather than an observation-only truncation.
+pub const MAX_TRANSACTION_CHANGES: usize = 4_096;
+
+/// One signed transaction that changed material on this Station.
+///
+/// Body operation detail is intentionally absent: remote protected artifacts
+/// do not expose the original operation algebra. Attribution is still exact,
+/// and the Body list is the complete dirty scope for this transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionChange {
+    pub operation: [u8; 16],
+    pub actor: mechanics::ids::ActorId,
+    pub device: mechanics::ids::DeviceId,
+    pub bodies: Vec<crate::ids::BodyKey>,
+}
+
 /// How a single incoming transaction was classified during Convergence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IncorporationClass {
@@ -44,6 +63,11 @@ pub struct ConvergenceOutcome {
     /// The Body keys this pass changed (accepted or opaquely retained) — the
     /// Observation Bodies for remote convergence.
     pub bodies: Vec<crate::ids::BodyKey>,
+    /// Canonical transaction-id order, one record per signed transaction that
+    /// contributed a changed Body. Bounded by [`MAX_TRANSACTION_CHANGES`]; an
+    /// oversized direct incorporation is refused before engine application,
+    /// never silently collapsed into unattributed feedback.
+    pub changes: Vec<TransactionChange>,
 }
 
 impl ConvergenceOutcome {
@@ -58,6 +82,7 @@ impl ConvergenceOutcome {
             unsupported_retained: 0,
             retryable: 0,
             bodies: Vec::new(),
+            changes: Vec::new(),
         }
     }
 

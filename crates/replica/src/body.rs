@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 pub use crate::protected::{
     BodyKeySource, StaticBodyKeys, MAX_BODY_BYTES, MAX_PROTECTED_PLAINTEXT, MUTATION_ATOMIC,
-    MUTATION_COLLABORATIVE,
+    MUTATION_COLLABORATIVE, MUTATION_IMMUTABLE_ATOMIC,
 };
 pub use crate::replica::{BodyBinding, QuotaConfig, SupportedSchemas};
 pub use fabric::Material;
@@ -36,6 +36,58 @@ impl std::error::Error for Failure {}
 
 /// Domain separator for the ciphertext-only content commitment.
 pub const BODY_CONTENT_DOMAIN: &[u8] = b"lait/body-content/1";
+
+/// Domain separator for a create-once atomic Body's content-derived identity.
+///
+/// The schema coordinate is part of the preimage, so the same canonical bytes
+/// in two schemas are different objects. Length-prefixing makes the tuple
+/// encoding unambiguous and independently reproducible by every peer.
+pub const IMMUTABLE_BODY_ID_DOMAIN: &[u8] = b"lait/immutable-body-id/1";
+
+/// Derive the only valid address for a create-once atomic value.
+///
+/// Unlike an ordinary [`BodyId`], this id is not random. That is the
+/// convergence invariant for [`MutationModel::ImmutableAtomic`]: two different
+/// canonical values cannot compete for one address and therefore can never be
+/// reduced by arrival-order or last-writer-wins policy. Every live, recovery,
+/// and peer path recomputes this value before admitting the Body.
+pub fn immutable_body_id(
+    world: &WorldId,
+    schema: &SchemaId,
+    schema_version: u32,
+    encoding: &EncodingId,
+    canonical_value: &[u8],
+) -> BodyId {
+    fn field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+        hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(IMMUTABLE_BODY_ID_DOMAIN);
+    field(&mut hasher, world.as_bytes());
+    field(&mut hasher, schema.as_bytes());
+    hasher.update(&schema_version.to_be_bytes());
+    field(&mut hasher, encoding.as_bytes());
+    field(&mut hasher, canonical_value);
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    BodyId::from_bytes(id)
+}
+
+/// Construct the canonical key for a create-once atomic value.
+pub fn immutable_body_key(
+    world: &WorldId,
+    schema: &SchemaId,
+    schema_version: u32,
+    encoding: &EncodingId,
+    canonical_value: &[u8],
+) -> BodyKey {
+    BodyKey::new(
+        world.clone(),
+        immutable_body_id(world, schema, schema_version, encoding, canonical_value),
+    )
+}
 
 /// A commitment to a Body's protected payload: `BLAKE3(BODY_CONTENT_DOMAIN ||
 /// protected_payload)`. It commits to the **ciphertext**, never the plaintext,
@@ -67,6 +119,10 @@ pub enum MutationModel {
     /// The Body carries a single canonical value replaced atomically per
     /// transaction.
     Atomic,
+    /// A single canonical value whose Body address is derived from the schema
+    /// coordinate and value. It may be created or replayed identically, but it
+    /// can never be replaced or tombstoned under the same address.
+    ImmutableAtomic,
     /// The Body uses the versioned LAIT collaborative algebra.
     Collaborative(CollaborativeSchema),
 }
@@ -253,5 +309,31 @@ mod tests {
         let sb = postcard::to_stdvec(&schema).unwrap();
         let sback: Schema = postcard::from_bytes(&sb).unwrap();
         assert_eq!(schema, sback);
+    }
+
+    #[test]
+    fn immutable_body_identity_binds_coordinate_and_value() {
+        let world = WorldId::parse("com.example.product").unwrap();
+        let other_world = WorldId::parse("com.example.other").unwrap();
+        let schema = SchemaId::parse("comment").unwrap();
+        let encoding = EncodingId::parse("lait.comment.v1").unwrap();
+        let first = immutable_body_key(&world, &schema, 1, &encoding, b"canonical");
+        assert_eq!(
+            first,
+            immutable_body_key(&world, &schema, 1, &encoding, b"canonical"),
+            "identical canonical material has one stable address"
+        );
+        assert_ne!(
+            first,
+            immutable_body_key(&world, &schema, 1, &encoding, b"different")
+        );
+        assert_ne!(
+            first,
+            immutable_body_key(&other_world, &schema, 1, &encoding, b"canonical")
+        );
+        assert_ne!(
+            first,
+            immutable_body_key(&world, &schema, 2, &encoding, b"canonical")
+        );
     }
 }

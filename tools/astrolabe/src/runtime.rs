@@ -55,13 +55,25 @@ pub enum Action {
     /// when a surface has gone stale and they would rather not wait.
     Refresh,
     /// Hand a World's own head to the person's browser.
+    ///
+    /// Carries the mount as well as the path: the head is per World now, so
+    /// opening names which one rather than reaching for whichever is up.
     OpenWorld {
+        world: String,
         entry_path: String,
     },
     /// Fetch one World's newest bundle now.
     UpdateWorld {
         world: String,
     },
+    /// Become a screen. Pressing the control *is* the consent; nothing is
+    /// chosen yet and nothing needs to be.
+    EnterPresentation,
+    /// Point this screen at one exact surface.
+    PresentHere(Box<crate::model::PresentationSelection>),
+    /// Re-ask the current selection.
+    PresentRefresh,
+    LeavePresentation,
     StartDevice(String),
     StopDevice(String),
     RestartDevice(String),
@@ -114,6 +126,16 @@ pub enum Action {
     /// Start the browser head this client opens Worlds through.
     StartHead,
     StopHead(String),
+    SendMessage {
+        to: String,
+        body: String,
+    },
+    CollectMail,
+    BlockSender(String),
+    AcceptContact(String),
+    OpenConversation(String),
+    FocusConversation(String),
+    CloseConversation(String),
     SpaceFound {
         home: String,
         name: String,
@@ -187,6 +209,8 @@ pub enum Action {
     DisplayAssignmentPut(Box<DisplayAssignmentInput>),
     DisplayAssignmentRevoke(String),
     DisplayDeviceRevoke(String),
+    /// Add a passphrase as a second unlock path for the identifier key.
+    DisplayIdentifierAdmitPassphrase(String),
     Exit(ExitRequest),
 }
 
@@ -196,7 +220,7 @@ impl Action {
     pub fn key(&self) -> String {
         match self {
             Self::Refresh => "refresh".into(),
-            Self::OpenWorld { entry_path } => format!("open:{entry_path}"),
+            Self::OpenWorld { world, .. } => format!("open:{world}"),
             Self::UpdateWorld { world } => format!("world.update:{world}"),
             Self::StartDevice(id) => format!("device.start:{id}"),
             Self::StopDevice(id) => format!("device.stop:{id}"),
@@ -210,9 +234,20 @@ impl Action {
             Self::ReadEvents { .. } => "history.events".into(),
             Self::ReadTransitions { .. } => "history.connections".into(),
             Self::ReadSpace(at) => format!("space.read:{}", at.space),
+            Self::EnterPresentation => "present.enter".into(),
+            Self::PresentHere(_) => "present.choose".into(),
+            Self::PresentRefresh => "present.refresh".into(),
+            Self::LeavePresentation => "present.leave".into(),
             Self::Administer { at, operation } => format!("space:{}:{}", at.space, operation.key()),
             Self::StartHead => "head.start".into(),
             Self::StopHead(id) => format!("head.stop:{id}"),
+            Self::SendMessage { to, .. } => format!("correspondence.send:{to}"),
+            Self::CollectMail => "correspondence.collect".into(),
+            Self::BlockSender(person) => format!("correspondence.block:{person}"),
+            Self::AcceptContact(person) => format!("correspondence.accept:{person}"),
+            Self::OpenConversation(person) => format!("correspondence.open:{person}"),
+            Self::FocusConversation(person) => format!("correspondence.focus:{person}"),
+            Self::CloseConversation(person) => format!("correspondence.close:{person}"),
             Self::SpaceFound { home, .. } => format!("space.found:{home}"),
             Self::SpaceEnter { home, .. } => format!("space.enter:{home}"),
             Self::DeviceConsent { .. } => "device.consent".into(),
@@ -250,6 +285,7 @@ impl Action {
                 format!("display.assignment.revoke:{assignment}")
             }
             Self::DisplayDeviceRevoke(device) => format!("display.device.revoke:{device}"),
+            Self::DisplayIdentifierAdmitPassphrase(_) => "display.identifier.admit".into(),
             Self::Exit(_) => "exit".into(),
         }
     }
@@ -260,7 +296,7 @@ impl Action {
     pub fn what(&self) -> String {
         match self {
             Self::Refresh => "re-read this machine".into(),
-            Self::OpenWorld { entry_path } => format!("open {entry_path}"),
+            Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
             Self::StartDevice(id) => format!("start {id}"),
             Self::StopDevice(id) => format!("stop {id}"),
@@ -272,6 +308,10 @@ impl Action {
             } => format!("remove {id} and delete its data"),
             Self::RemoveDevice { id, .. } => format!("remove {id}"),
             Self::CreateDevice { id, .. } => format!("add device {id}"),
+            Self::EnterPresentation => "become a screen".into(),
+            Self::PresentHere(selection) => format!("present {}", selection.title),
+            Self::PresentRefresh => "refresh what this screen shows".into(),
+            Self::LeavePresentation => "leave Big Picture".into(),
             Self::RenameDevice { id, label } => format!("rename {id} to '{label}'"),
             Self::StopAllOwned => "stop everything this client owns".into(),
             Self::ReadLogs { device, .. } => format!("read {device}'s log"),
@@ -281,6 +321,13 @@ impl Action {
             Self::Administer { operation, .. } => operation.what(),
             Self::StartHead => "start a head".into(),
             Self::StopHead(id) => format!("stop head {id}"),
+            Self::SendMessage { to, .. } => format!("send a message to {to}"),
+            Self::CollectMail => "collect what is waiting".into(),
+            Self::BlockSender(person) => format!("block {person}"),
+            Self::AcceptContact(person) => format!("accept {person}"),
+            Self::OpenConversation(person) => format!("open a chat with {person}"),
+            Self::FocusConversation(person) => format!("focus the chat with {person}"),
+            Self::CloseConversation(person) => format!("close the chat with {person}"),
             Self::SpaceFound { name, .. } => format!("found the Space '{name}'"),
             Self::SpaceEnter { .. } => "enter a Space from an invite".into(),
             Self::DeviceConsent { .. } => "sign this machine's consent".into(),
@@ -316,6 +363,11 @@ impl Action {
                 format!("revoke display assignment {assignment}")
             }
             Self::DisplayDeviceRevoke(device) => format!("revoke display device {device}"),
+            // Deliberately says nothing about the passphrase itself: this
+            // string reaches a notice, a log line and a failure record.
+            Self::DisplayIdentifierAdmitPassphrase(_) => {
+                "add a passphrase to the identifier key".into()
+            }
             Self::Exit(ExitRequest::GoOffline) => "go offline and exit".into(),
             Self::Exit(ExitRequest::StayOnline) => "close and stay online".into(),
         }
@@ -335,7 +387,21 @@ pub enum Update {
     Heads(Vec<HeadFacts>),
     Context(Box<HostContext>),
     Display(Box<lait::control::DisplayCoordinatorView>),
+    /// What this machine's own screen is presenting, and what it last answered.
+    ///
+    /// Carries the selection as well as the render, because a presentation that
+    /// failed still has to say *what* it was trying to show — a fullscreen
+    /// surface reporting only "something went wrong" is the absence that does
+    /// not say which kind.
+    Presentation(Box<crate::model::Presentation>),
+    /// Big Picture is over. Distinct from an empty presentation, which is a
+    /// screen showing nothing rather than a client that is no longer a screen.
+    PresentationEnded,
     Book(crate::client::book::BookSnapshot),
+    /// This identity's mailbox and arrival standing, after a correspondence
+    /// action moved it. A whole snapshot, like [`Book`]: the model is pushed,
+    /// never mutated in place by a surface.
+    Correspondence(crate::model::Correspondence),
     /// What passive presence sampling measured this pass — including which
     /// Spaces answered at all, so absence keeps its kind.
     Presence(crate::client::presence::PresenceMap),
@@ -473,6 +539,68 @@ struct Worker {
     client: Client,
     updates: UnboundedSender<Update>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// What this machine's screen is currently told to show.
+    ///
+    /// Held here rather than read back from a surface: a refresh must ask for
+    /// the same thing the person chose, and a selection that round-tripped
+    /// through the interface is a second copy that can disagree with the first
+    /// exactly when a render is failing.
+    presenting: std::sync::Mutex<Option<crate::model::PresentationSelection>>,
+    /// Where the screen preference lives, so a machine that was a screen comes
+    /// back as one.
+    state_root: std::path::PathBuf,
+    /// This identity's correspondence backend — a real hosted-Post plane under
+    /// `LAIT_POST_URL`, else the opt-in front-end fixture under
+    /// `LAIT_CORRESPONDENCE_DEMO`. When neither is set, correspondence is not
+    /// connected to any carrier and every correspondence action refuses
+    /// honestly. Behind a `Mutex` because the `Worker` is shared across the
+    /// tasks that answer actions.
+    correspondence: Option<std::sync::Mutex<crate::client::correspondence::Correspondent>>,
+}
+
+/// Unix seconds, for the clocks the correspondence crate takes as arguments.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// Choose the correspondence backend: a real hosted-Post plane when one is
+/// named, else the fixture when opted in, else none (which refuses honestly).
+/// Post wins — real carriage beats a loopback one.
+fn build_correspondent(
+    post_url: Option<String>,
+    demo: bool,
+) -> Option<std::sync::Mutex<crate::client::correspondence::Correspondent>> {
+    use crate::client::correspondence::{Correspondent, DemoCarrier, PostBackend};
+    if let Some(base) = post_url {
+        return match PostBackend::found(launch_seeds(), base, now_secs()) {
+            Ok(backend) => Some(std::sync::Mutex::new(Correspondent::Post(backend))),
+            // Only too-few-seeds can fail founding, which cannot happen here;
+            // if it somehow does, leave correspondence unconnected rather than
+            // silently fall back to a fixture the person did not ask for.
+            Err(_) => None,
+        };
+    }
+    demo.then(|| std::sync::Mutex::new(Correspondent::Demo(DemoCarrier::new(now_secs()))))
+}
+
+/// Two per-launch device seeds for this identity's Post profile, derived from
+/// the wall clock so each launch founds a distinct self-profile — which keeps a
+/// persistent Post from crossing one run's mail into the next. The daemon
+/// supplies the identity's real, stable seeds in place of these.
+fn launch_seeds() -> Vec<[u8; 32]> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos())
+        .to_le_bytes();
+    let mk = |tag: u8| {
+        let mut seed = [0u8; 32];
+        seed[..16].copy_from_slice(&stamp);
+        seed[16] = tag;
+        seed
+    };
+    vec![mk(1), mk(2)]
 }
 
 async fn serve(
@@ -481,6 +609,11 @@ async fn serve(
     wake: Arc<dyn Fn() + Send + Sync>,
     mut actions: UnboundedReceiver<Action>,
 ) {
+    // Read before the supervisor starts, because the config is moved into it.
+    let state_root = config.state_root.clone();
+    let correspondence_demo = config.correspondence_demo;
+    let post_url = config.post_url.clone();
+    let remembered = crate::screen::load(&state_root);
     let (client, signals) = match Client::start(config).await {
         Ok(started) => started,
         Err(error) => {
@@ -517,7 +650,24 @@ async fn serve(
         client,
         updates,
         wake,
+        presenting: std::sync::Mutex::new(
+            remembered
+                .as_ref()
+                .filter(|held| held.presenting)
+                .and_then(|held| held.selection.clone())
+                .map(Into::into),
+        ),
+        state_root,
+        correspondence: build_correspondent(post_url, correspondence_demo),
     });
+
+    // A machine that was a screen comes back as one, before the first read.
+    // Ordering matters: coming up as the Library and *then* switching would
+    // show a person the client for a frame, which reads as a client that
+    // forgot and changed its mind.
+    if remembered.is_some_and(|held| held.presenting) {
+        worker.restore_presentation().await;
+    }
 
     // The first read happens *after* the stream exists, which `Client::start`
     // guarantees by handing both back together. Reading first would open a
@@ -576,8 +726,43 @@ impl Worker {
         send(&self.updates, self.wake.as_ref(), update);
     }
 
+    /// Mutate the correspondence fixture under its lock and push the fresh
+    /// snapshot. One place holds the lock, snapshots, and emits, so every
+    /// correspondence handler is one line and none forgets to push the view.
+    ///
+    /// With the fixture absent — the default, no `LAIT_CORRESPONDENCE_DEMO` —
+    /// correspondence is connected to no carrier, so this refuses honestly
+    /// rather than pretending an action landed.
+    fn correspond(
+        &self,
+        act: impl FnOnce(&mut crate::client::correspondence::Correspondent) -> ClientResult<()>,
+    ) -> ClientResult<()> {
+        let Some(fixture) = self.correspondence.as_ref() else {
+            return Err(ClientError::refused("correspondence is not connected yet"));
+        };
+        let snapshot = {
+            let mut correspondence = fixture
+                .lock()
+                .map_err(|_| ClientError::internal("the correspondence lock is poisoned"))?;
+            act(&mut correspondence)?;
+            correspondence.snapshot()
+        };
+        self.send(Update::Correspondence(snapshot));
+        Ok(())
+    }
+
     /// Re-read everything that is not delivered by the stream.
     async fn refresh(&self) {
+        // When the fixture is present, the chat shows its world as it stands,
+        // before anything that awaits: it depends on neither the supervisor nor
+        // a daemon, so the conversations are there the instant the window opens
+        // even while the identity is still attaching. Absent, there is nothing
+        // to show and no carrier to ask.
+        if let Some(fixture) = self.correspondence.as_ref() {
+            if let Ok(correspondence) = fixture.lock() {
+                self.send(Update::Correspondence(correspondence.snapshot()));
+            }
+        }
         self.send(Update::Snapshot(Box::new(
             self.client.supervisor().snapshot().await,
         )));
@@ -644,6 +829,53 @@ impl Worker {
         }
     }
 
+    fn set_presenting(&self, selection: Option<crate::model::PresentationSelection>) {
+        if let Ok(mut held) = self.presenting.lock() {
+            held.clone_from(&selection);
+        }
+        // A preference is not worth failing an action over: the person asked
+        // to present, and remembering it is the lesser half of that.
+        if let Err(error) = crate::screen::save(&self.state_root, selection.as_ref()) {
+            tracing::warn!(%error, "could not record this machine as a screen");
+        }
+    }
+
+    /// Come back as the screen this machine was.
+    ///
+    /// The mode is restored first and the render follows, so a person whose
+    /// selection no longer resolves lands on a screen saying why rather than on
+    /// a Library that silently dropped their choice.
+    async fn restore_presentation(&self) {
+        let held = self.presenting.lock().ok().and_then(|held| held.clone());
+        match held {
+            Some(selection) => self.render_presentation(selection).await,
+            None => self.send(Update::Presentation(Box::new(crate::model::Presentation {
+                selection: None,
+                rendered: None,
+                failure: None,
+            }))),
+        }
+    }
+
+    /// Ask the daemon for one render and publish whatever came back.
+    ///
+    /// A failure is published rather than raised, and *beside* whatever was
+    /// last drawn. A screen that has been showing a program for an hour should
+    /// not go dark because one re-ask timed out — but it must not pretend the
+    /// re-ask succeeded either, which is why both halves travel together.
+    async fn render_presentation(&self, selection: crate::model::PresentationSelection) {
+        let rendered = self.client.display_present(&selection).await;
+        let (view, failure) = match rendered {
+            Ok(view) => (Some(view), None),
+            Err(error) => (None, Some(format!("{error}"))),
+        };
+        self.send(Update::Presentation(Box::new(crate::model::Presentation {
+            selection: Some(selection),
+            rendered: view,
+            failure,
+        })));
+    }
+
     async fn carry_out(&self, action: Action) {
         let key = action.key();
         let what = action.what();
@@ -668,54 +900,18 @@ impl Worker {
             // The re-read itself is the effect, and `rereads` is what
             // carries it out. Nothing to say beyond that it happened.
             Action::Refresh => Ok(Outcome::Silent),
-            // The check both resolves the channel and stages what it finds,
-            // so this is the whole act. Blocking, and off the signal loop for
-            // the same reason every other network read here is: a World host
-            // that is slow must not hold a frame.
+            // Consent is one bounded durable daemon write. Fetch, staging and
+            // per-Space migration happen later on the daemon's admitted lane;
+            // the UI gets its operation coordinate before any of that work.
             Action::UpdateWorld { world } => {
-                let Some(identity) = client.identity_dir() else {
-                    return Err(ClientError::invalid(
-                        "no identity is bound, so there is no World to update".to_string(),
-                    ));
-                };
-                let world = world.clone();
-                let outcome = tokio::task::spawn_blocking(move || {
-                    let worlds = lait::serve::head::worlds_root(&identity);
-                    let channel = lait::update::feed::Channel::current();
-                    let found = lait::update::world::check(&world, &worlds, channel);
-                    if let Ok(found) = &found {
-                        // Record it the same way the daemon's own period does,
-                        // so the row this refreshes into agrees with the row a
-                        // later period would draw.
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |since| since.as_secs());
-                        lait::update::world::note(&worlds, &world, found, now);
-                    }
-                    found
-                })
-                .await
-                .map_err(|error| {
-                    ClientError::internal(format!("the world check panicked: {error}"))
-                })?
-                .map_err(|error| ClientError::internal(format!("{error:#}")))?;
-                Ok(Outcome::Said(match outcome {
-                    lait::update::world::Outcome::Staged { version } => {
-                        format!("updated to {version}")
-                    }
-                    lait::update::world::Outcome::Current { version } => {
-                        format!("already on {version}")
-                    }
-                    lait::update::world::Outcome::Unmet { version, why } => {
-                        format!("{version} needs {}", why.join(", "))
-                    }
-                    lait::update::world::Outcome::NothingPublished { version } => {
-                        format!("{version} carries nothing for this World")
-                    }
-                }))
+                let job = client.world_update(world).await?;
+                Ok(Outcome::Said(format!(
+                    "update accepted ({})",
+                    job.operation_hex()
+                )))
             }
-            Action::OpenWorld { entry_path } => {
-                let launch = client.open_world(entry_path).await?;
+            Action::OpenWorld { world, entry_path } => {
+                let launch = client.open_world(world, entry_path).await?;
                 // The browser is the person's, and this is the only place in
                 // the client that starts something it does not own. It happens
                 // last: a launch URL composed and never opened is recoverable,
@@ -829,12 +1025,90 @@ impl Worker {
                 Ok(Outcome::Said(said))
             }
             Action::StartHead => {
-                let head = client.head().await?;
+                // "Bring a head up", not "open that World" — so the mount is
+                // resolved here rather than left unspecified. This is the layer
+                // that knows which build this is, and the supervisor's key
+                // cannot be built without an answer: an `Option` here is how one
+                // World ended up with two heads.
+                let head = client.head(lait::composition::PRODUCT_WORLD_MOUNT).await?;
                 Ok(Outcome::Said(format!("a head is serving at {}", head.base)))
             }
             Action::StopHead(id) => {
-                client.stop_head(id).await?;
-                Ok(Outcome::Said(format!("head {id} stopped")))
+                // Say which success it was. "stopped" for a head that had already
+                // crashed is a true statement about the current state and a false
+                // one about what just happened, and the difference is the only way
+                // a person learns their World fell over by itself.
+                match client.stop_head(id).await? {
+                    crate::client::heads::Stopped::Stopped => {
+                        Ok(Outcome::Said(format!("head {id} stopped")))
+                    }
+                    // Named, because a forced stop means the head did not run its
+                    // ordered shutdown: a browser saw a reset and an in-flight
+                    // transfer was cut. Reporting it as an ordinary stop would hide
+                    // the only evidence that anything was lost.
+                    crate::client::heads::Stopped::Forced => Ok(Outcome::Said(format!(
+                        "head {id} did not stop when asked and was forced"
+                    ))),
+                    crate::client::heads::Stopped::WasAlreadyGone { status } => Ok(Outcome::Said(
+                        format!("head {id} had already exited ({status})"),
+                    )),
+                }
+            }
+            Action::SendMessage { to, body } => {
+                // The loopback carrier holds the real seam: compose, sign, seal,
+                // and deposit under an unforgeable egress witness. When the
+                // daemon hands the client a Space-hosted carrier this same call
+                // points at it — the surface never learns which is underneath.
+                let now = now_secs();
+                self.correspond(|correspondence| correspondence.send(to, body, now))?;
+                Ok(Outcome::Silent)
+            }
+            Action::CollectMail => {
+                let now = now_secs();
+                self.correspond(|correspondence| {
+                    correspondence.collect(now);
+                    Ok(())
+                })?;
+                Ok(Outcome::Silent)
+            }
+            Action::BlockSender(person) => {
+                let now = now_secs();
+                self.correspond(|correspondence| correspondence.block(person, now))?;
+                Ok(Outcome::Said(format!("blocked {person}")))
+            }
+            Action::AcceptContact(person) => {
+                let person = person.clone();
+                self.correspond(move |correspondence| {
+                    correspondence.accept(&person);
+                    Ok(())
+                })?;
+                Ok(Outcome::Said("added to contacts".into()))
+            }
+            // Opening, focusing and closing tabs are shared-model navigation:
+            // a click in one window moves the tab the chat window then draws.
+            Action::OpenConversation(person) => {
+                let person = person.clone();
+                self.correspond(move |correspondence| {
+                    correspondence.open(&person);
+                    Ok(())
+                })?;
+                Ok(Outcome::Silent)
+            }
+            Action::FocusConversation(person) => {
+                let person = person.clone();
+                self.correspond(move |correspondence| {
+                    correspondence.focus(&person);
+                    Ok(())
+                })?;
+                Ok(Outcome::Silent)
+            }
+            Action::CloseConversation(person) => {
+                let person = person.clone();
+                self.correspond(move |correspondence| {
+                    correspondence.close(&person);
+                    Ok(())
+                })?;
+                Ok(Outcome::Silent)
             }
             Action::SpaceFound { home, name, nick } => {
                 client.space_found(home, name, nick.clone()).await?;
@@ -943,6 +1217,53 @@ impl Worker {
                 client.display_device_revoke(device.clone()).await?;
                 Ok(Outcome::Said(format!("revoked display device {device}")))
             }
+            Action::DisplayIdentifierAdmitPassphrase(passphrase) => {
+                client
+                    .display_identifier_admit_passphrase(passphrase.clone())
+                    .await?;
+                Ok(Outcome::Said(
+                    "the identifier key now opens with a passphrase too".into(),
+                ))
+            }
+            Action::EnterPresentation => {
+                self.set_presenting(None);
+                // A screen with nothing on it yet, published so the surface
+                // has something to draw the moment the control is pressed.
+                self.send(Update::Presentation(Box::new(crate::model::Presentation {
+                    selection: None,
+                    rendered: None,
+                    failure: None,
+                })));
+                Ok(Outcome::Silent)
+            }
+            Action::PresentHere(selection) => {
+                self.set_presenting(Some((**selection).clone()));
+                self.render_presentation((**selection).clone()).await;
+                Ok(Outcome::Silent)
+            }
+            Action::PresentRefresh => {
+                let held = self.presenting.lock().ok().and_then(|held| held.clone());
+                // Refusing rather than guessing: a refresh with nothing
+                // selected is a surface asking for a screen that was already
+                // left, and drawing *something* would be worse than nothing.
+                if let Some(selection) = held {
+                    self.render_presentation(selection).await;
+                }
+                Ok(Outcome::Silent)
+            }
+            Action::LeavePresentation => {
+                if let Ok(mut held) = self.presenting.lock() {
+                    *held = None;
+                }
+                // Recorded rather than forgotten: leaving is a decision, and a
+                // cleared file says so where a deleted one would be
+                // indistinguishable from never having entered.
+                if let Err(error) = crate::screen::clear(&self.state_root) {
+                    tracing::warn!(%error, "could not record leaving Big Picture");
+                }
+                self.send(Update::PresentationEnded);
+                Ok(Outcome::Silent)
+            }
             Action::Exit(request) => {
                 let report = crate::lifecycle::exit(client.supervisor(), *request).await;
                 Ok(Outcome::Exited(Box::new(report)))
@@ -965,6 +1286,13 @@ impl Action {
                 | Self::ReadEvents { .. }
                 | Self::ReadTransitions { .. }
                 | Self::ReadSpace(_)
+                // Presenting reads a World and writes nothing, and it already
+                // publishes its own update. A full re-read behind every frame
+                // boundary would put a snapshot of the whole machine on the
+                // path of a screen refresh.
+                | Self::PresentHere(_)
+                | Self::PresentRefresh
+                | Self::LeavePresentation
         )
     }
 }
@@ -1108,11 +1436,13 @@ mod tests {
         );
         assert_ne!(
             Action::OpenWorld {
-                entry_path: "/issues".into(),
+                world: "issues".into(),
+                entry_path: "/".into(),
             }
             .key(),
             Action::OpenWorld {
-                entry_path: "/notes".into(),
+                world: "signage".into(),
+                entry_path: "/".into(),
             }
             .key()
         );

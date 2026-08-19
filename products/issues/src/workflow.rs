@@ -28,6 +28,12 @@ const WORKFLOW_REVISION_CONTEXT: &str = "lait.issues.workflow-revision.v1";
 pub const MAX_PROJECT_ID: usize = 64;
 pub const MAX_WORKFLOW_BODY: usize = 1024 * 1024;
 pub const MAX_PREDECESSORS: usize = 8;
+/// Workflow topology is product configuration, not tracker-scale data. Keep
+/// it explicitly bounded so one revision has an honest extractor shape.
+pub const MAX_STATES: usize = 512;
+pub const MAX_TRANSITIONS: usize = 4_096;
+pub const MAX_WORKFLOW_NAME_BYTES: usize = 256;
+pub const MAX_STATE_NAME_BYTES: usize = 256;
 
 /// A workflow state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -156,10 +162,10 @@ impl WorkflowBody {
         if self.project_id.is_empty() || self.project_id.len() > MAX_PROJECT_ID {
             return Err("invalid project id".into());
         }
-        if !super::contract::valid_name(&self.name) {
+        if !super::contract::valid_name(&self.name) || self.name.len() > MAX_WORKFLOW_NAME_BYTES {
             return Err("invalid workflow name".into());
         }
-        if self.states.is_empty() {
+        if self.states.is_empty() || self.states.len() > MAX_STATES {
             return Err("a workflow needs at least one state".into());
         }
         let mut state_ids: Vec<&str> = self.states.iter().map(|s| s.state_id.as_str()).collect();
@@ -177,6 +183,7 @@ impl WorkflowBody {
                         || matches!(byte, b'.' | b'_' | b'-')
                 })
                 || !super::contract::valid_name(&s.name)
+                || s.name.len() > MAX_STATE_NAME_BYTES
                 || s.color.len() > super::contract::MAX_PRESENTATION_TOKEN_BYTES
                 || !matches!(s.category.as_str(), "backlog" | "active" | "done")
             {
@@ -188,6 +195,9 @@ impl WorkflowBody {
             .iter()
             .map(|t| t.transition_id.as_str())
             .collect();
+        if self.transitions.len() > MAX_TRANSITIONS {
+            return Err("workflow has too many transitions".into());
+        }
         if !tids.windows(2).all(|w| w[0] < w[1]) {
             return Err("transitions must be sorted by unique transition_id".into());
         }

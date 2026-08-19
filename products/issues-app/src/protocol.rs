@@ -19,6 +19,15 @@ pub struct PublicationCoordinate {
 }
 
 impl PublicationCoordinate {
+    pub fn from_id(value: &runtime::publication::PublicationId) -> Self {
+        Self {
+            manifest_root: data_encoding::HEXLOWER.encode(&value.manifest_root),
+            implementation_digest: data_encoding::HEXLOWER.encode(&value.implementation_digest),
+            extractor_schema_digest: data_encoding::HEXLOWER
+                .encode(&value.extractor_schema_digest.digest()),
+        }
+    }
+
     pub fn parse(&self) -> Option<runtime::publication::PublicationId> {
         fn digest(value: &str) -> Option<[u8; 32]> {
             let bytes = data_encoding::HEXLOWER.decode(value.as_bytes()).ok()?;
@@ -30,6 +39,31 @@ impl PublicationCoordinate {
             runtime::publication::ExtractorSchemaDigest::from_digest(digest(
                 &self.extractor_schema_digest,
             )?),
+        ))
+    }
+}
+
+/// Exact Station-local read image used only for short-lived reconciliation.
+/// Unlike `PublicationCoordinate`, this must never be persisted in durable
+/// product state because materialization ids are local to one activation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorldPublicationCoordinate {
+    pub publication: PublicationCoordinate,
+    pub materialization: u64,
+}
+
+impl WorldPublicationCoordinate {
+    pub fn from_id(value: &runtime::publication::WorldPublicationId) -> Self {
+        Self {
+            publication: PublicationCoordinate::from_id(&value.publication),
+            materialization: value.materialization.get(),
+        }
+    }
+
+    pub fn parse(&self) -> Option<runtime::publication::WorldPublicationId> {
+        Some(runtime::publication::WorldPublicationId::new(
+            self.publication.parse()?,
+            runtime::publication::MaterializationId::from_u64(self.materialization)?,
         ))
     }
 }
@@ -85,6 +119,13 @@ pub enum ChangeProject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ChangeLabel {
+    Existing { label: String },
+    Created { operation: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ChangeOperation {
     ProjectCreate {
@@ -100,6 +141,139 @@ pub enum ChangeOperation {
         #[serde(default)]
         links: Vec<issues::spec::Link>,
     },
+    IssueCreate {
+        project: ChangeProject,
+        title: String,
+        #[serde(default)]
+        priority: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        assignees: Vec<String>,
+        #[serde(default)]
+        labels: Vec<ChangeLabel>,
+        #[serde(default)]
+        body: Option<String>,
+        #[serde(default)]
+        due: Option<u64>,
+        #[serde(default)]
+        estimate: Option<u32>,
+    },
+    IssueBoard {
+        issue: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        position: Option<ChangePosition>,
+    },
+    IssuePatch {
+        issue: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        priority: Option<String>,
+        #[serde(default)]
+        due: Option<u64>,
+        #[serde(default)]
+        clear_due: bool,
+        #[serde(default)]
+        estimate: Option<u32>,
+        #[serde(default)]
+        clear_estimate: bool,
+        #[serde(default)]
+        assignees: Option<Vec<String>>,
+        #[serde(default)]
+        labels: Option<Vec<ChangeLabel>>,
+    },
+    IssueWork {
+        issue: String,
+        action: ChangeWorkAction,
+    },
+    IssueTombstone {
+        issue: String,
+        on: bool,
+    },
+    IssueComment {
+        issue: String,
+        body: String,
+        #[serde(default)]
+        parent: Option<String>,
+    },
+    IssueCommentAt {
+        issue: String,
+        body: String,
+        field: String,
+        start: u64,
+        #[serde(default)]
+        end: Option<u64>,
+        #[serde(default)]
+        parent: Option<String>,
+        source: WorldPublicationCoordinate,
+    },
+    IssueReaction {
+        issue: String,
+        comment: String,
+        emoji: String,
+        on: bool,
+    },
+    IssueLink {
+        issue: String,
+        kind: String,
+        target: String,
+        on: bool,
+    },
+    IssueParent {
+        issue: String,
+        #[serde(default)]
+        parent: Option<String>,
+    },
+    IssueMove {
+        issue: String,
+        #[serde(default)]
+        project: Option<ChangeProject>,
+        #[serde(default)]
+        position: Option<ChangePosition>,
+    },
+    IssueMilestone {
+        issue: String,
+        #[serde(default)]
+        milestone: Option<String>,
+    },
+    LabelCreate {
+        name: String,
+        color: String,
+    },
+    LabelEdit {
+        label: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
+    },
+    LabelDelete {
+        label: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeWorkAction {
+    Start,
+    Done,
+    Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "at", rename_all = "snake_case")]
+pub enum ChangePosition {
+    Top,
+    Bottom,
+    Before { issue: String },
+    After { issue: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -107,6 +281,38 @@ pub struct ChangeEffect {
     pub operation: u16,
     pub kind: String,
     pub id: String,
+}
+
+/// The durable acknowledgement for one Issues operation.
+///
+/// `operation` is the signed Runtime action's persistent RequestId, not a
+/// browser- or adapter-local correlation token. `accepted` therefore begins
+/// only after Replica durability. The exact publication is the coordinate a
+/// live consumer must observe and refresh before advancing the same operation
+/// to `committed` in its rendered view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationReceipt {
+    pub operation: String,
+    pub phase: OperationPhase,
+    pub publication: runtime::publication::WorldPublicationId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationPhase {
+    Accepted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationReadiness {
+    Absent,
+    Ready,
+    Building,
+    Capacity,
+    ImplementationUnavailable,
+    GenerationUnavailable,
+    Unavailable,
 }
 
 /// Issues-owned application requests.
@@ -119,20 +325,33 @@ pub enum IssuesRequest {
     /// Atomically lower dependent project/Spec creation through one product
     /// planner and one Runtime publication.
     ChangeSet {
+        /// Optional caller-generated 128-bit idempotency coordinate. Browser
+        /// feedback supplies it so `sending` already names the exact signed
+        /// operation; server/agent adapters may omit it and receive the minted
+        /// durable id in the accepted envelope.
+        #[serde(default)]
+        operation: Option<String>,
+        /// Retry-stable authored time. Replaying an operation must replay this
+        /// value so the signed semantic intent stays byte-identical.
+        #[serde(default)]
+        timestamp: Option<u64>,
         operations: Vec<ChangeOperation>,
     },
-    /// Audit which current Blueprint records still depend on compatibility
-    /// readers instead of native relation, Plan, and generation structures.
-    StructureStatus,
-    /// Idempotently materialize current topology and Spec heads. Legacy issue
-    /// documents remain source-preserving, single-record upgrades because their
-    /// Markdown conversion belongs to the client adapter.
-    StructureMigrate,
+    /// Read one exact ChangeSet receipt without invoking or resubmitting it.
+    OperationStatus {
+        operation: String,
+        timestamp: u64,
+        operations: Vec<ChangeOperation>,
+    },
     /// Project the acting identity's inbox using the caller-local read
     /// watermark. Advancing that watermark remains a client-host facility.
     Inbox {
         #[serde(default)]
         watermark: u64,
+        #[serde(default)]
+        page: issues::contract::PageRequest,
+        #[serde(default)]
+        publication: Option<PublicationCoordinate>,
     },
     /// Resolve a pinned Issues role into generic Mechanics assignments. The
     /// client host commits the returned plan through root Space authority.
@@ -250,6 +469,8 @@ pub enum IssuesRequest {
         end: Option<u64>,
         #[serde(default)]
         reply_to: Option<String>,
+        /// Exact rendered source whose scalar coordinates are being named.
+        source: WorldPublicationCoordinate,
     },
     React {
         reff: String,
@@ -279,13 +500,6 @@ pub enum IssuesRequest {
         #[serde(default)]
         parent: Option<String>,
     },
-    IssueGraph {
-        reff: String,
-    },
-    /// A whole project's dependency graph in one reply — see `ProjectGraphView`.
-    ProjectGraph {
-        project: String,
-    },
     /// Deterministic Issue morphology for a Plan seed. `publication` selects
     /// one exact semantic corpus; absence means the authority-active current
     /// publication. `page` is bounded and artifact-pinned by its cursor.
@@ -312,7 +526,6 @@ pub enum IssuesRequest {
     Verify {
         reff: String,
         source: String,
-        #[serde(default)]
         build: String,
     },
     /// Accept one returned verification report into issue truth.
@@ -328,20 +541,64 @@ pub enum IssuesRequest {
     IssueView {
         reff: String,
     },
+    /// Bounded issue summary plus first pages of every enrichment section.
+    IssueDetail {
+        reff: String,
+        /// Exact World publication to render while reconciling a durable
+        /// operation. Omitted only for an ordinary current-view open.
+        #[serde(default)]
+        publication: Option<WorldPublicationCoordinate>,
+    },
     List {
         #[serde(default)]
         project: Option<String>,
         #[serde(default)]
         filter: Filter,
+        page: issues::contract::PageRequest,
     },
     Board {
         #[serde(default)]
         project: Option<String>,
         #[serde(default)]
         project_hint: Option<String>,
+        page: issues::contract::PageRequest,
     },
     History {
         reff: String,
+        #[serde(default)]
+        publication: Option<PublicationCoordinate>,
+        page: issues::contract::PageRequest,
+    },
+    IssueRelations {
+        reff: String,
+        direction: issues::dto::RelationDirection,
+        #[serde(default)]
+        publication: Option<PublicationCoordinate>,
+        page: issues::contract::PageRequest,
+    },
+    IssueComments {
+        reff: String,
+        #[serde(default)]
+        publication: Option<PublicationCoordinate>,
+        page: issues::contract::PageRequest,
+    },
+    IssueReactions {
+        reff: String,
+        #[serde(default)]
+        publication: Option<PublicationCoordinate>,
+        page: issues::contract::PageRequest,
+    },
+    IssueAttachments {
+        reff: String,
+        #[serde(default)]
+        publication: Option<PublicationCoordinate>,
+        page: issues::contract::PageRequest,
+    },
+    IssueChecks {
+        reff: String,
+        #[serde(default)]
+        publication: Option<PublicationCoordinate>,
+        page: issues::contract::PageRequest,
     },
     ProjectNew {
         name: String,
@@ -349,7 +606,9 @@ pub enum IssuesRequest {
         #[serde(default)]
         color: Option<String>,
     },
-    ProjectList,
+    ProjectList {
+        page: issues::contract::PageRequest,
+    },
     ProjectEdit {
         project: String,
         #[serde(default)]
@@ -379,6 +638,7 @@ pub enum IssuesRequest {
     },
     MilestoneList {
         project: String,
+        page: issues::contract::PageRequest,
     },
     MilestoneSet {
         project: String,
@@ -406,6 +666,7 @@ pub enum IssuesRequest {
     },
     CycleList {
         project: String,
+        page: issues::contract::PageRequest,
     },
     CycleSet {
         project: String,
@@ -425,7 +686,9 @@ pub enum IssuesRequest {
         #[serde(default)]
         cycle: Option<String>,
     },
-    InitiativeList,
+    InitiativeList {
+        page: issues::contract::PageRequest,
+    },
     InitiativeSet {
         #[serde(default)]
         initiative: Option<String>,
@@ -446,7 +709,9 @@ pub enum IssuesRequest {
         #[serde(default)]
         remove: bool,
     },
-    TeamList,
+    TeamList {
+        page: issues::contract::PageRequest,
+    },
     TeamSet {
         #[serde(default)]
         team: Option<String>,
@@ -465,7 +730,9 @@ pub enum IssuesRequest {
         #[serde(default)]
         remove: bool,
     },
-    TriageList,
+    TriageList {
+        page: issues::contract::PageRequest,
+    },
     TriageSubmit {
         title: String,
         #[serde(default)]
@@ -505,6 +772,7 @@ pub enum IssuesRequest {
     },
     ProjectUpdates {
         project: String,
+        page: issues::contract::PageRequest,
     },
     ProjectUpdatePost {
         project: String,
@@ -517,7 +785,15 @@ pub enum IssuesRequest {
         #[serde(default)]
         color: Option<String>,
     },
-    LabelList,
+    LabelList {
+        page: issues::contract::PageRequest,
+    },
+    /// Hydrate one label at an exact retained World publication. Used by the
+    /// shared operation registry before it retires label optimism.
+    LabelShow {
+        label: String,
+        publication: WorldPublicationCoordinate,
+    },
     LabelEdit {
         label: String,
         #[serde(default)]
@@ -535,12 +811,11 @@ pub enum IssuesRequest {
         description: String,
     },
     Activity {
-        /// Opaque resume token from a previous pull's `last`; absent for the
-        /// whole feed. Not a count — see `IssueQuery::Activity`.
-        #[serde(default)]
-        since: Option<String>,
+        page: issues::contract::PageRequest,
     },
-    RoleList,
+    RoleList {
+        page: issues::contract::PageRequest,
+    },
     RoleShow {
         role: String,
     },
@@ -585,16 +860,19 @@ pub enum IssuesRequest {
     SpecList {
         #[serde(default)]
         project: Option<String>,
+        page: issues::contract::PageRequest,
     },
     SpecShow {
         spec: String,
     },
     SpecHistory {
         spec: String,
+        page: issues::contract::PageRequest,
     },
     SpecReferences {
         #[serde(default)]
         project: Option<String>,
+        page: issues::contract::PageRequest,
     },
     SpecNew {
         project: String,
@@ -638,6 +916,7 @@ pub enum IssuesRequest {
     SpecObservations {
         #[serde(default)]
         project: Option<String>,
+        page: issues::contract::PageRequest,
     },
     SpecObserve {
         spec: String,
@@ -653,12 +932,14 @@ pub enum IssuesRequest {
     BaselineList {
         #[serde(default)]
         project: Option<String>,
+        page: issues::contract::PageRequest,
     },
     BaselineShow {
         baseline: String,
     },
     BaselineHistory {
         baseline: String,
+        page: issues::contract::PageRequest,
     },
     BaselineNew {
         project: String,
@@ -700,13 +981,27 @@ pub enum IssuesRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssuesResponse {
+    /// A product result paired with the durable Runtime receipt that produced
+    /// it. All write access paths use this same envelope; agents do not receive
+    /// a weaker or differently-shaped acknowledgement than the viewer.
+    Operation {
+        receipt: OperationReceipt,
+        response: Box<IssuesResponse>,
+    },
     ChangeSet {
+        results: Vec<ChangeEffect>,
+    },
+    OperationStatus {
+        operation: String,
+        readiness: OperationReadiness,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        publication: Option<runtime::publication::WorldPublicationId>,
+        #[serde(default)]
         results: Vec<ChangeEffect>,
     },
     Ok {
         message: Option<String>,
     },
-    Structure(Box<issues::contract::StructureReport>),
     Ref {
         reff: String,
     },
@@ -715,50 +1010,71 @@ pub enum IssuesResponse {
         run: String,
     },
     Issue(Box<issues::dto::IssueView>),
+    IssueDetail(Box<issues::contract::IssueDetailProjection>),
     List {
-        rows: Vec<issues::dto::Row>,
+        page: issues::contract::Page<issues::dto::Row>,
     },
-    Board(Box<issues::dto::BoardView>),
-    Graph(Box<issues::dto::GraphView>),
-    ProjectGraph(Box<issues::dto::ProjectGraphView>),
+    Board(Box<issues::dto::BoardPage>),
     Geometry(Box<issues::contract::GeometryProjection>),
     Activity {
-        events: Vec<issues::dto::ActivityEvent>,
-        /// The resume token for the next pull. A pull that returned nothing
-        /// hands back the token it was given, so a polling caller holds its
-        /// place instead of restarting the feed.
-        last: String,
+        page: issues::contract::Page<issues::dto::ActivityEvent>,
+    },
+    Relations {
+        page: issues::contract::Page<issues::dto::IssueRelationDto>,
+    },
+    Comments {
+        page: issues::contract::Page<issues::dto::CommentDto>,
+    },
+    Reactions {
+        page: issues::contract::Page<issues::records::ReactionRecord>,
+    },
+    Attachments {
+        page: issues::contract::Page<issues::dto::AttachmentMetaDto>,
+    },
+    Checks {
+        page: issues::contract::Page<issues::dto::CheckDto>,
     },
     Inbox {
-        entries: Vec<issues::dto::InboxEntry>,
-        unread: u64,
+        page: issues::contract::Page<issues::dto::InboxEntry>,
+        /// Rows newer than the caller-local watermark in this page. The
+        /// protocol does not mislabel this bounded value as a whole-inbox
+        /// total when continuation remains.
+        unread_on_page: u64,
     },
     AccessPlan {
         assignments: Vec<AccessAssignment>,
     },
     Projects {
-        projects: Vec<issues::dto::ProjectDto>,
+        page: issues::contract::Page<issues::dto::ProjectDto>,
     },
     Updates {
-        updates: Vec<issues::dto::ProjectUpdateDto>,
+        page: issues::contract::Page<issues::dto::ProjectUpdateDto>,
     },
     Labels {
-        labels: Vec<issues::dto::LabelDto>,
+        page: issues::contract::Page<issues::dto::LabelDto>,
+    },
+    Label {
+        publication: runtime::publication::WorldPublicationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<issues::dto::LabelDto>,
+    },
+    Roles {
+        page: issues::contract::Page<issues::contract::RoleProjection>,
     },
     Milestones {
-        milestones: Vec<issues::dto::MilestoneDto>,
+        page: issues::contract::Page<issues::dto::MilestoneDto>,
     },
     Cycles {
-        cycles: Vec<issues::dto::CycleDto>,
+        page: issues::contract::Page<issues::dto::CycleDto>,
     },
     Initiatives {
-        initiatives: Vec<issues::dto::InitiativeDto>,
+        page: issues::contract::Page<issues::dto::InitiativeDto>,
     },
     Teams {
-        teams: Vec<issues::dto::TeamDto>,
+        page: issues::contract::Page<issues::dto::TeamDto>,
     },
     TriageItems {
-        items: Vec<issues::dto::TriageDto>,
+        page: issues::contract::Page<issues::records::TriageRecord>,
     },
     Attachment {
         name: String,
@@ -785,16 +1101,16 @@ pub enum IssuesResponse {
         text: String,
     },
     SpecRevisions {
-        revisions: Vec<issues::spec::Revision>,
+        page: issues::contract::Page<issues::spec::Revision>,
     },
     SpecReferences {
-        references: Vec<issues::spec::SpecReference>,
+        page: issues::contract::Page<issues::spec::SpecReferenceFact>,
     },
     SpecObservations {
-        observations: Vec<issues::spec::Observation>,
+        page: issues::contract::Page<issues::records::SpecObservationRecord>,
     },
     BaselineRevisions {
-        revisions: Vec<issues::spec::BaselineRevision>,
+        page: issues::contract::Page<issues::spec::BaselineRevision>,
     },
     /// Named rather than flattened, unlike its Baseline and Packet neighbours.
     /// This enum is internally tagged on `kind` and a `SpecView` carries a
@@ -806,11 +1122,11 @@ pub enum IssuesResponse {
         spec: Box<issues::spec::SpecView>,
     },
     Specs {
-        specs: Vec<issues::spec::SpecView>,
+        page: issues::contract::Page<issues::spec::SpecSummary>,
     },
     Baseline(Box<issues::spec::BaselineView>),
     Baselines {
-        baselines: Vec<issues::spec::BaselineView>,
+        page: issues::contract::Page<issues::spec::BaselineSummary>,
     },
     Packet(Box<issues::spec::Packet>),
     Error {
@@ -829,6 +1145,10 @@ pub enum IssuesErrorKind {
     NotFound,
     Denied,
     Retry,
+    /// Durability may have succeeded but no terminal receipt can currently be
+    /// proven. A caller preserves optimism and reconciles by operation id; it
+    /// must not blindly replay as though nothing landed.
+    Indeterminate,
 }
 
 impl IssuesErrorKind {
@@ -843,7 +1163,9 @@ impl IssuesErrorKind {
         match self {
             Self::Invalid | Self::NotFound => world_interface::Failure::invalid(),
             Self::Denied => world_interface::Failure::refusal(),
-            Self::Error | Self::Retry => world_interface::Failure::operation(),
+            Self::Error | Self::Retry | Self::Indeterminate => {
+                world_interface::Failure::operation()
+            }
         }
     }
 }
@@ -860,6 +1182,7 @@ pub fn classify_failure(value: &Value) -> Option<(world_interface::Failure, Stri
         "not_found" => IssuesErrorKind::NotFound,
         "denied" => IssuesErrorKind::Denied,
         "retry" => IssuesErrorKind::Retry,
+        "indeterminate" => IssuesErrorKind::Indeterminate,
         _ => IssuesErrorKind::Error,
     };
     let message = value
@@ -905,33 +1228,44 @@ impl IssuesResponse {
             error_kind: IssuesErrorKind::Retry,
         }
     }
+
+    pub fn indeterminate(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            error_kind: IssuesErrorKind::Indeterminate,
+        }
+    }
 }
 
 impl IssuesRequest {
     pub fn access(&self) -> Access {
         use IssuesRequest::*;
         match self {
-            StructureStatus
-            | Inbox { .. }
+            Inbox { .. }
             | AccessPlan { .. }
-            | IssueGraph { .. }
-            | ProjectGraph { .. }
             | Geometry { .. }
             | IssueView { .. }
+            | IssueDetail { .. }
             | List { .. }
             | Board { .. }
             | History { .. }
-            | ProjectList
+            | IssueRelations { .. }
+            | IssueComments { .. }
+            | IssueReactions { .. }
+            | IssueAttachments { .. }
+            | IssueChecks { .. }
+            | ProjectList { .. }
             | ProjectUpdates { .. }
             | MilestoneList { .. }
             | CycleList { .. }
-            | InitiativeList
-            | TeamList
-            | TriageList
+            | InitiativeList { .. }
+            | TeamList { .. }
+            | TriageList { .. }
             | AttachmentGet { .. }
-            | LabelList
+            | LabelList { .. }
+            | LabelShow { .. }
             | Activity { .. }
-            | RoleList
+            | RoleList { .. }
             | RoleShow { .. }
             | WorkflowShow { .. }
             | WorkflowValidate { .. }
@@ -943,9 +1277,9 @@ impl IssuesRequest {
             | BaselineList { .. }
             | BaselineShow { .. }
             | BaselineHistory { .. }
-            | Packet { .. } => Access::Query,
+            | Packet { .. }
+            | OperationStatus { .. } => Access::Query,
             ChangeSet { .. }
-            | StructureMigrate
             | IssueNew { .. }
             | IssueEdit { .. }
             | IssueTextSplice { .. }

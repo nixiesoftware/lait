@@ -43,7 +43,8 @@ mod op;
 mod causal;
 pub use causal::{
     Anchor, AnchorResolution, Artifact, ArtifactRef, CausalRelation, CheckpointPolicy,
-    ImportStatus, Invalid, Material, OpHead, Version, CAUSAL_FORMAT_VERSION, MAX_HEADS,
+    ImportStatus, Invalid, Material, OpHead, Version, ARTIFACT_EPOCH_ID_LEN, CAUSAL_FORMAT_VERSION,
+    MAX_HEADS, MAX_MATERIAL_PLAINTEXT_BYTES,
 };
 pub use fabric::{
     commit, projection, BodyExport, BodySnapshot, CausalToken, CheckpointSeed, CollaborativeView,

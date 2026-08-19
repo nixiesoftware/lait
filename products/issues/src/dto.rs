@@ -333,6 +333,10 @@ pub struct ProjectDto {
     /// Owning team id (empty = none; GOV-7). Additive.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub team: String,
+    /// False on collection pages that intentionally omit the independently
+    /// stored large description and relation enrichment.
+    #[serde(default)]
+    pub enrichment_complete: bool,
 }
 
 /// One project milestone with its derived progress (SCOPE-1).
@@ -349,6 +353,8 @@ pub struct MilestoneDto {
     pub total: u32,
     /// Of those, issues in a Done-category state.
     pub done: u32,
+    #[serde(default)]
+    pub enrichment_complete: bool,
 }
 
 /// One cycle with its derived counts (BOARD-11).
@@ -362,6 +368,8 @@ pub struct CycleDto {
     pub end: u64,
     pub total: u32,
     pub done: u32,
+    #[serde(default)]
+    pub enrichment_complete: bool,
 }
 
 /// One initiative with its derived roll-up (SCOPE-8).
@@ -382,6 +390,8 @@ pub struct InitiativeDto {
     /// Live issues across the member projects.
     pub total: u32,
     pub done: u32,
+    #[serde(default)]
+    pub enrichment_complete: bool,
 }
 
 /// One team (GOV-7).
@@ -397,6 +407,8 @@ pub struct TeamDto {
     pub members: Vec<String>,
     /// KEYs of the projects this team owns.
     pub projects: Vec<String>,
+    #[serde(default)]
+    pub enrichment_complete: bool,
 }
 
 /// One triage-intake item (SCOPE-7).
@@ -484,6 +496,11 @@ pub struct Row {
     /// be computed per-viewer), so this projects them rather than making every
     /// graphical client open N issue docs to learn what the catalog already knows.
     pub assignees: Vec<ActorId>,
+    /// False when this bounded page deliberately projected only Issue scalar
+    /// facts. Enrichment lives in record-addressed relation pages and is never
+    /// represented by a fabricated empty set.
+    #[serde(default)]
+    pub enrichment_complete: bool,
     pub tombstone: bool,
     pub provisional: bool,
     /// Due date, unix seconds. Additive with absent-when-none serialization so
@@ -531,6 +548,34 @@ pub struct BoardView {
     pub schema_version: u32,
     pub project: ProjectDto,
     pub columns: Vec<BoardColumn>,
+}
+
+/// One bounded board continuation. Rows are ordered by
+/// `(workflow_state, rank, IssueId)` in the exact publication and clients group
+/// them through `workflow`; no project can force a whole-board response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardPage {
+    pub schema_version: u32,
+    pub project: ProjectDto,
+    pub workflow: Vec<WorkflowState>,
+    pub rows: crate::contract::Page<Row>,
+}
+
+/// One bounded issue-neighborhood fact. Incoming and outgoing pages have
+/// independent cursors, so an issue with hundreds of thousands of links never
+/// forces the opposite direction (or the target Issue Bodies) into memory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueRelationDto {
+    pub kind: String,
+    pub direction: RelationDirection,
+    pub row: Row,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationDirection {
+    Out,
+    In,
 }
 
 /// A comment projection.
@@ -706,6 +751,31 @@ pub struct IssueView {
     /// readers keep working.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corrupt_records: Vec<CorruptRecord>,
+    /// Continuation for `comments`, absent when this view carries the whole
+    /// discussion.
+    ///
+    /// A view that shows the first hundred of a hundred and fifty comments
+    /// and cannot say so is not a bounded answer, it is a wrong one: nothing
+    /// in the shape distinguishes "that is all of them" from "that is where
+    /// we stopped".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more_comments: Option<String>,
+    /// Whether every shown comment's reactions were read.
+    ///
+    /// Reactions are paged beside the comments rather than inside them, so a
+    /// comment whose reaction records fall past that page renders with an
+    /// empty list — indistinguishable from a comment nobody reacted to. This
+    /// says which it is, because "none" and "not read" are different facts
+    /// and only one of them is about the comment.
+    #[serde(default = "reactions_read")]
+    pub reactions_complete: bool,
+}
+
+/// A view built without paging reactions has read all of them: there were
+/// none to miss. The default therefore says complete, and only a producer
+/// that actually truncated says otherwise.
+fn reactions_read() -> bool {
+    true
 }
 
 /// One derived activity transition. `changes` is a list so one request, one
@@ -750,72 +820,6 @@ pub struct FieldChange {
     pub field: String,
     pub from: Option<String>,
     pub to: Option<String>,
-}
-
-/// One issue link projected for the graph view. `direction`
-/// is relative to the requested issue: `out` = it names the other, `in` = the
-/// other names it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinkDto {
-    /// `blocks` | `relates` | `duplicates`.
-    pub kind: String,
-    /// `out` | `in`.
-    pub direction: String,
-    pub row: Row,
-}
-
-/// An issue's graph neighborhood (reply to `IssueGraph`): sub-issue hierarchy,
-/// links, and the transitively-open blockers — all read from the catalog
-/// structure doc, no issue doc opened.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GraphView {
-    pub schema_version: u32,
-    pub reff: String,
-    pub doc_id: DocId,
-    pub parent: Option<Row>,
-    pub children: Vec<Row>,
-    pub links: Vec<LinkDto>,
-    /// Issues that transitively block this one and are still open.
-    pub blocked_by: Vec<Row>,
-}
-
-/// One structural edge between two issues of a project.
-///
-/// Doc ids, not refs. A ref is an alias and a rename moves it; the client joins
-/// these against rows it already holds, which carry `doc_id` for exactly this.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GraphEdgeDto {
-    pub from: String,
-    /// `blocks` | `relates` | `duplicates`.
-    pub kind: String,
-    pub to: String,
-}
-
-/// A project's whole structure in one reply (reply to `ProjectGraph`).
-///
-/// `IssueGraph` answers the same question one issue at a time, which is the
-/// right shape for a detail rail and the wrong one for a chart: drawing a
-/// project's *sequence* needs every edge at once, and asking per issue is N
-/// round trips for a graph the catalog already holds whole.
-///
-/// Scoped to one project and to live issues, because an edge with a
-/// tombstoned or foreign end cannot be drawn and shipping it would only make
-/// the client filter what the catalog already knows.
-///
-/// No transitive closure here, deliberately — unlike `GraphView::blocked_by`,
-/// which computes one because a single issue wants to know everything standing
-/// in its way. Given the direct edges the client can derive reachability itself,
-/// and a transitive edge set drawn as connectors is unreadable: it draws the
-/// shortcut across a chain as though it were a separate constraint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectGraphView {
-    pub schema_version: u32,
-    /// The project's id, echoed so a late reply can be matched to its request.
-    pub project: String,
-    /// Direct edges whose ends are both live issues of this project.
-    pub edges: Vec<GraphEdgeDto>,
-    /// `(child, parent)` for the sub-issue tree, same scoping as `edges`.
-    pub parents: Vec<(String, String)>,
 }
 
 /// A disambiguation candidate when a reference resolves to multiple issues.

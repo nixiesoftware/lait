@@ -41,11 +41,16 @@ export '../bridge/api.dart'
     show
         ActionRequest,
         ClientView,
+        ChatMessageRow,
+        ContactRow,
+        ConversationRow,
+        CorrespondenceFacts,
         DeviceRow,
         DiagnosisRow,
         DisplayAssignmentRow,
         DisplayFacts,
         DisplayHealthRow,
+        DisplayIdentifierCustodyRow,
         DisplayPairingRow,
         DisplayReceiverRow,
         DisplayStaleAction,
@@ -63,6 +68,14 @@ export '../bridge/api.dart'
         Missing,
         NoticeRow,
         OrbitRow,
+        PresentationChoice,
+        PresentationFacts,
+        PresentedItem,
+        PresentedProgram,
+        PresentedScene,
+        PresentedScene_Blank,
+        PresentedScene_Frame,
+        PresentedScene_Unsupported,
         SpaceRow,
         Staleness,
         Staleness_NeverLoaded,
@@ -258,7 +271,10 @@ class ClientScope extends InheritedNotifier<ValueListenable<api.ClientView>> {
 /// than seven controls that quietly stop disabling themselves.
 abstract final class ActionKeys {
   static const String refresh = 'refresh';
-  static String open(String entryPath) => 'open:$entryPath';
+  /// Keyed by World, matching `Action::key`. It was keyed by entry path, which
+  /// two Worlds could share — and which said nothing about which head an open
+  /// was for once heads became per-World.
+  static String open(String world) => 'open:$world';
   static String updateWorld(String world) => 'world.update:$world';
   static String startDevice(String id) => 'device.start:$id';
   static String stopDevice(String id) => 'device.stop:$id';
@@ -291,4 +307,15 @@ abstract final class ActionKeys {
       'display.assignment.revoke:$assignment';
   static String revokeDisplayDevice(String device) =>
       'display.device.revoke:$device';
+  static String sendMessage(String to) => 'correspondence.send:$to';
+  static const String collectMail = 'correspondence.collect';
+  static String blockSender(String person) => 'correspondence.block:$person';
+  static String acceptContact(String person) =>
+      'correspondence.accept:$person';
+  static String openConversation(String person) =>
+      'correspondence.open:$person';
+  static String focusConversation(String person) =>
+      'correspondence.focus:$person';
+  static String closeConversation(String person) =>
+      'correspondence.close:$person';
 }

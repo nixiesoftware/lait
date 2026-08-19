@@ -313,7 +313,7 @@ fn commit_declaring_body(node: &Node, seq: u8) {
             replica.commit_action(
                 &ctx,
                 &replica::transaction::CommitAuthorization {
-                    actor: "author",
+                    actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
                     parent_manifest_root: [0u8; 32],
                     demand: demand(),
                     intent_digest: [7u8; 32],

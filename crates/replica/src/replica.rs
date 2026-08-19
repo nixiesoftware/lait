@@ -33,7 +33,8 @@
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
 
 use fabric::{
     commit::Failure as EngineFailure, Artifact, ArtifactRef, BodyExport, CausalRelation,
@@ -83,7 +84,7 @@ impl crate::index::NodeSource for ReaderNodes<'_> {
 }
 
 /// The mutation-model tags shared with [`crate::protected`].
-pub use crate::protected::{MUTATION_ATOMIC, MUTATION_COLLABORATIVE};
+pub use crate::protected::{MUTATION_ATOMIC, MUTATION_COLLABORATIVE, MUTATION_IMMUTABLE_ATOMIC};
 
 /// Why a Replica commit failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +111,11 @@ pub enum Failure {
     /// A staged operation addressed a Body whose immutable schema binding
     /// disagrees with the declared binding. Nothing was committed.
     SchemaMismatch,
+    /// A create-once atomic Body was addressed by a non-canonical id, carried
+    /// different bytes under its established address, or was subjected to an
+    /// operation other than its one canonical replacement. Nothing was
+    /// committed or incorporated.
+    ImmutableConflict,
     /// Incoming material failed legitimacy validation (signature, signer
     /// authority, or payload binding). Nothing was incorporated.
     Illegitimate(Invalid),
@@ -139,6 +145,12 @@ pub enum Failure {
     /// A referenced parent Manifest is not locally reconstructable; retry once
     /// the exact material arrives. Never falls back to current state.
     ParentManifestUnavailable,
+    /// A prior pre-v1 store contains signed whole-Body heads which cannot be
+    /// translated into current causal descriptors without a real World actor,
+    /// authorization demand, and new signed transactions. The validated prior
+    /// source is intact; composition must run the semantic migration step into
+    /// a fresh target before activation.
+    NeedsSemanticMigration { bodies: u64 },
     /// The durable store failed integrity validation on open — never repaired
     /// heuristically; recreation guidance is the caller's.
     Integrity(Defect),
@@ -170,12 +182,20 @@ pub enum Failure {
     /// A request id was reused with a different payload hash. Nothing was
     /// committed; the original receipt is untouched.
     RequestIdConflict,
+    /// An immutable receipt-absence proof was minted at a different durable
+    /// commit point or for a different idempotency scope. The caller must
+    /// recheck through a fresh [`ReceiptReader`]; no mutation was prepared.
+    ReceiptCheckStale,
     /// The application effect exceeded [`crate::receipt::MAX_EFFECT_BYTES`].
     /// Nothing was committed.
     EffectTooLarge,
     /// The Space material quota (bytes or Body count) would be exceeded.
     /// Nothing was committed and no staging was retained.
     QuotaExceeded,
+    /// Another local or Contact mutation already owns the bounded preparation
+    /// lane. Callers must surface this promptly as Pending/Busy; they may not
+    /// wait invisibly behind size-proportional extraction or publication work.
+    MutationBusy,
     /// The unknown-World retention subquota would be exceeded. No eviction is
     /// performed, neither manifest nor frontier changes, and no staging
     /// objects are retained.
@@ -250,28 +270,79 @@ pub enum ActionOutcome {
 /// candidate transaction; a fresh request is represented by an RAII guard
 /// whose live Replica reads expose the candidate until it is finalized or
 /// dropped.
-pub enum PreparedActionOutcome<'a> {
-    Prepared(PreparedAction<'a>),
+pub enum PreparedActionOutcome {
+    Prepared(PreparedAction),
     Replayed(RequestReceipt),
 }
 
-impl PreparedActionOutcome<'_> {
+impl PreparedActionOutcome {
     /// The original receipt for a replay, or the candidate receipt for a fresh
     /// request.
-    pub fn receipt(&self) -> &RequestReceipt {
+    pub fn receipt(&self) -> Result<&RequestReceipt, Failure> {
         match self {
             Self::Prepared(prepared) => prepared.receipt(),
-            Self::Replayed(receipt) => receipt,
+            Self::Replayed(receipt) => Ok(receipt),
         }
     }
 }
 
-/// One locally prepared action. The guard exclusively borrows its Replica, so
-/// no other commit can interleave between candidate extraction and durable
-/// publication. Dropping it rolls the Fabric candidate back.
-pub struct PreparedAction<'a> {
-    replica: &'a mut Replica,
+/// One locally prepared action detached from the Replica metadata writer.
+///
+/// The owning Runtime retains one try-admitted mutation-lane permit while this
+/// value exists, but releases the Replica mutex before snapshot extraction and
+/// Corpus construction. The exact parent coordinate is compared again when
+/// finalizing. Dropping the value rolls the Fabric candidate back through its
+/// independent writer cell and releases the in-flight marker.
+pub struct PreparedAction {
+    fabric: Arc<Mutex<Engine>>,
+    in_flight: Arc<AtomicBool>,
+    rollback_poisoned: Arc<AtomicBool>,
+    parent_root: [u8; 32],
+    parent_frontier: ReplicaFrontier,
+    snapshot: PreparedSnapshotContext,
     state: Option<PreparedActionState>,
+}
+
+struct PreparedSnapshotContext {
+    durable: Option<journal::Reader>,
+    keys: Option<Arc<dyn BodyKeySource>>,
+    content_index_root: Option<IndexRef>,
+    declaration_counts: BTreeMap<[u8; 32], u64>,
+}
+
+struct PreparationClaim {
+    flag: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl PreparationClaim {
+    fn acquire(flag: &Arc<AtomicBool>) -> Result<Self, Failure> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Failure::MutationBusy)?;
+        Ok(Self {
+            flag: Arc::clone(flag),
+            armed: true,
+        })
+    }
+
+    fn transfer(mut self) -> Arc<AtomicBool> {
+        self.armed = false;
+        Arc::clone(&self.flag)
+    }
+}
+
+impl Drop for PreparationClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn lock_fabric(fabric: &Arc<Mutex<Engine>>) -> MutexGuard<'_, Engine> {
+    fabric
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 enum PreparedActionState {
@@ -313,7 +384,8 @@ pub struct BodyBinding {
     pub schema: SchemaId,
     pub schema_version: u32,
     pub encoding: EncodingId,
-    /// [`MUTATION_ATOMIC`] or [`MUTATION_COLLABORATIVE`].
+    /// [`MUTATION_ATOMIC`], [`MUTATION_IMMUTABLE_ATOMIC`], or
+    /// [`MUTATION_COLLABORATIVE`].
     pub mutation_model: u8,
 }
 
@@ -503,9 +575,12 @@ struct BodyHead {
     descriptor_hash: [u8; 32],
     /// Commitment to this head's signed transaction bytes.
     tx_commitment: [u8; 32],
-    /// Protected Fabric artifact objects in signed descriptor order (durable
-    /// stores only). The descriptor itself lives in `transaction`.
-    artifacts: Vec<Object>,
+    /// Protected Fabric artifact objects in signed descriptor order when this
+    /// head is one member of a concurrent set. `None` is the overwhelmingly
+    /// common singleton form: its exact closure is the record's authoritative
+    /// causal Material, avoiding a second copy of the checkpoint/tail refs.
+    /// `Some(empty)` is the distinct local-only/unsealed form.
+    artifacts: Option<Box<[ArtifactRef]>>,
     /// The signed transaction record object (durable stores only).
     transaction: Option<Object>,
     /// Total protected artifact bytes named by this head (quota ledger input).
@@ -527,7 +602,7 @@ struct BodyRecord {
     /// The constituent heads (never empty). One after any local commit;
     /// several while concurrent remote writes are held merged but not yet
     /// re-sealed by a local write.
-    heads: Vec<BodyHead>,
+    heads: smallvec::SmallVec<[BodyHead; 1]>,
     /// Whether the Body is interpreted by the local engine. `false` is the
     /// opaque branch: retained byte-identically, absent from reads.
     interpreted: bool,
@@ -537,7 +612,303 @@ struct BodyRecord {
     /// Ordinary edits extend this bounded descriptor by one delta reference.
     /// The one-time indexed-v2 baseline migration decodes its prior record
     /// shape explicitly and initializes this to `None`.
-    causal: Option<CausalMaterial>,
+    causal: Option<Arc<CausalMaterial>>,
+}
+
+/// Borrowed exact artifact closure for one Body head without materializing a
+/// temporary Vec. Singleton heads traverse their shared causal Material;
+/// concurrent heads traverse the explicit signed closure retained per head.
+struct BodyArtifactRefs<'a> {
+    first: Option<&'a ArtifactRef>,
+    rest: std::slice::Iter<'a, ArtifactRef>,
+}
+
+impl<'a> Iterator for BodyArtifactRefs<'a> {
+    type Item = &'a ArtifactRef;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.first.take().or_else(|| self.rest.next())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = usize::from(self.first.is_some()).saturating_add(self.rest.len());
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for BodyArtifactRefs<'_> {}
+
+/// The mutable Replica's publication-independent Body directory.
+///
+/// General-purpose `BTreeMap` nodes made each small record pay a separate
+/// pointer-rich tree allocation. Dense immutable leaves retain one Arc to each
+/// record and path-copy at most 256 cheap Arc handles for an edit; the record's
+/// head/material vectors are never deep-cloned by directory maintenance.
+#[derive(Debug, Clone, Default)]
+struct RecordDirectory {
+    entries: SnapshotDirectory<BodyKey, Arc<BodyRecord>>,
+    retained_bytes: u64,
+}
+
+type ReceiptRecord = (RequestReceipt, Option<Object>);
+
+/// Persistent idempotency receipts in bounded dense leaves.
+///
+/// A receipt is looked up by an arbitrary canonical scope byte string, but it
+/// is otherwise immutable. A general-purpose `BTreeMap` paid one tree node and
+/// allocator object per receipt and made a record-shaped World retain a second
+/// pointer-rich million-entry catalog beside its durable receipt index. Dense
+/// leaves preserve logarithmic lookup and path-copy only the touched leaf.
+#[derive(Debug, Clone, Default)]
+struct ReceiptDirectory {
+    entries: SnapshotDirectory<Vec<u8>, Arc<ReceiptRecord>>,
+    retained_bytes: u64,
+}
+
+impl ReceiptDirectory {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn get(&self, key: &[u8]) -> Option<&ReceiptRecord> {
+        self.entries.get(key).map(Arc::as_ref)
+    }
+
+    fn insert(&mut self, key: Vec<u8>, record: ReceiptRecord) -> Option<ReceiptRecord> {
+        let retained = receipt_record_retained_estimate(&key, &record.0);
+        let prior_retained = self
+            .entries
+            .get_key_value(key.as_slice())
+            .map(|(scope, prior)| receipt_record_retained_estimate(scope, &prior.0))
+            .unwrap_or(0);
+        let prior = self.entries.insert(key, Arc::new(record));
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_sub(prior_retained)
+            .saturating_add(retained);
+        prior.map(|prior| Arc::try_unwrap(prior).unwrap_or_else(|prior| (*prior).clone()))
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Option<ReceiptRecord> {
+        let prior_retained = self
+            .entries
+            .get_key_value(key)
+            .map(|(scope, prior)| receipt_record_retained_estimate(scope, &prior.0))?;
+        let prior = self.entries.remove(key)?;
+        self.retained_bytes = self.retained_bytes.saturating_sub(prior_retained);
+        Some(Arc::try_unwrap(prior).unwrap_or_else(|prior| (*prior).clone()))
+    }
+
+    fn values(&self) -> impl Iterator<Item = &ReceiptRecord> {
+        self.entries.iter().map(|(_, record)| record.as_ref())
+    }
+
+    const fn retained_bytes_estimate(&self) -> u64 {
+        self.retained_bytes
+    }
+}
+
+const HOT_RECEIPT_CACHE: usize = 256;
+const HOT_RECEIPT_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+struct ReceiptCache {
+    entries: ReceiptDirectory,
+    order: VecDeque<Vec<u8>>,
+}
+
+impl ReceiptCache {
+    fn get(&mut self, scope: &[u8]) -> Option<RequestReceipt> {
+        let receipt = self.entries.get(scope)?.0.clone();
+        if let Some(position) = self.order.iter().position(|held| held.as_slice() == scope) {
+            self.order.remove(position);
+        }
+        self.order.push_back(scope.to_vec());
+        Some(receipt)
+    }
+
+    fn insert(&mut self, scope: Vec<u8>, receipt: RequestReceipt, object: Object) {
+        if let Some(position) = self.order.iter().position(|held| held == &scope) {
+            self.order.remove(position);
+        }
+        self.entries.insert(scope.clone(), (receipt, Some(object)));
+        self.order.push_back(scope);
+        while self.order.len() > HOT_RECEIPT_CACHE
+            || self.retained_bytes_estimate() > HOT_RECEIPT_CACHE_BYTES
+        {
+            if let Some(expired) = self.order.pop_front() {
+                self.entries.remove(&expired);
+            }
+        }
+    }
+
+    fn retained_bytes_estimate(&self) -> u64 {
+        self.order.iter().fold(
+            self.entries.retained_bytes_estimate().saturating_add(
+                u64::try_from(self.order.capacity())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(
+                        u64::try_from(std::mem::size_of::<Vec<u8>>()).unwrap_or(u64::MAX),
+                    ),
+            ),
+            |total, scope| {
+                total
+                    .saturating_add(u64::try_from(scope.capacity()).unwrap_or(u64::MAX))
+                    .saturating_add(16)
+            },
+        )
+    }
+}
+
+fn receipt_record_retained_estimate(scope: &[u8], receipt: &RequestReceipt) -> u64 {
+    const ALLOCATION_HEADER: u64 = 16;
+    const DIRECTORY_AND_ALLOCATOR_SLACK: u64 = 96;
+    u64::try_from(
+        std::mem::size_of::<SnapshotDirectoryEntry<Vec<u8>, Arc<ReceiptRecord>>>()
+            .saturating_add(std::mem::size_of::<ReceiptRecord>()),
+    )
+    .unwrap_or(u64::MAX)
+    .saturating_add(u64::try_from(scope.len()).unwrap_or(u64::MAX))
+    .saturating_add(u64::try_from(receipt.effect.capacity()).unwrap_or(u64::MAX))
+    .saturating_add(
+        u64::try_from(receipt.bodies.capacity())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(std::mem::size_of::<BodyKey>()).unwrap_or(u64::MAX)),
+    )
+    .saturating_add(receipt.bodies.iter().fold(0u64, |bytes, body| {
+        bytes
+            .saturating_add(u64::try_from(body.world.as_bytes().len()).unwrap_or(u64::MAX))
+            .saturating_add(ALLOCATION_HEADER)
+    }))
+    .saturating_add(3 * ALLOCATION_HEADER)
+    .saturating_add(DIRECTORY_AND_ALLOCATOR_SLACK)
+}
+
+fn declared_body_retained_estimate(refs: &Vec<[u8; 32]>) -> u64 {
+    const ALLOCATION_HEADER: u64 = 16;
+    const BTREE_NODE_AND_ALLOCATOR_SLACK: u64 = 192;
+    u64::try_from(
+        std::mem::size_of::<BodyKey>().saturating_add(std::mem::size_of::<Vec<[u8; 32]>>()),
+    )
+    .unwrap_or(u64::MAX)
+    .saturating_add(ALLOCATION_HEADER)
+    .saturating_add(
+        u64::try_from(refs.capacity())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(32),
+    )
+    .saturating_add(BTREE_NODE_AND_ALLOCATOR_SLACK)
+}
+
+const fn declared_count_retained_estimate() -> u64 {
+    // Hash key + count plus a conservative BTree node/allocator share.
+    32 + 8 + 160
+}
+
+impl RecordDirectory {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn contains_key(&self, key: &BodyKey) -> bool {
+        self.entries.get(key).is_some()
+    }
+
+    fn get(&self, key: &BodyKey) -> Option<&BodyRecord> {
+        self.entries.get(key).map(Arc::as_ref)
+    }
+
+    fn insert(&mut self, key: BodyKey, record: BodyRecord) -> Option<BodyRecord> {
+        let retained = body_record_retained_estimate(&record);
+        let prior = self.entries.insert(key, Arc::new(record));
+        if let Some(prior) = &prior {
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_sub(body_record_retained_estimate(prior));
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(retained);
+        prior.map(|prior| Arc::try_unwrap(prior).unwrap_or_else(|prior| (*prior).clone()))
+    }
+
+    fn remove(&mut self, key: &BodyKey) -> Option<BodyRecord> {
+        let prior = self.entries.remove(key)?;
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_sub(body_record_retained_estimate(&prior));
+        Some(Arc::try_unwrap(prior).unwrap_or_else(|prior| (*prior).clone()))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&BodyKey, &BodyRecord)> {
+        self.entries
+            .iter()
+            .map(|(key, record)| (key, record.as_ref()))
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &BodyKey> {
+        self.entries.keys()
+    }
+
+    fn values(&self) -> impl Iterator<Item = &BodyRecord> {
+        self.iter().map(|(_, record)| record)
+    }
+
+    const fn retained_bytes_estimate(&self) -> u64 {
+        self.retained_bytes
+    }
+}
+
+fn body_record_retained_estimate(record: &BodyRecord) -> u64 {
+    const ALLOCATION_HEADER: u64 = 16;
+    const DIRECTORY_AND_ALLOCATOR_SLACK: u64 = 160;
+    let fixed = u64::try_from(
+        std::mem::size_of::<SnapshotDirectoryEntry<BodyKey, Arc<BodyRecord>>>()
+            .saturating_add(std::mem::size_of::<BodyRecord>()),
+    )
+    .unwrap_or(u64::MAX)
+    .saturating_add(ALLOCATION_HEADER)
+    .saturating_add(DIRECTORY_AND_ALLOCATOR_SLACK);
+    let heads = record
+        .heads
+        .spilled()
+        .then(|| {
+            ALLOCATION_HEADER.saturating_add(
+                u64::try_from(record.heads.capacity())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(
+                        u64::try_from(std::mem::size_of::<BodyHead>()).unwrap_or(u64::MAX),
+                    ),
+            )
+        })
+        .unwrap_or(0);
+    let head_artifacts = record.heads.iter().fold(0u64, |bytes, head| {
+        bytes.saturating_add(head.artifacts.as_ref().map_or(0, |artifacts| {
+            ALLOCATION_HEADER.saturating_add(
+                u64::try_from(artifacts.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(
+                        u64::try_from(std::mem::size_of::<ArtifactRef>()).unwrap_or(u64::MAX),
+                    ),
+            )
+        }))
+    });
+    let material = record.causal.as_ref().map_or(0, |material| {
+        ALLOCATION_HEADER
+            .saturating_add(
+                u64::try_from(std::mem::size_of::<CausalMaterial>()).unwrap_or(u64::MAX),
+            )
+            .saturating_add(ALLOCATION_HEADER)
+            .saturating_add(
+                u64::try_from(material.delta_tail.capacity())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(
+                        u64::try_from(std::mem::size_of::<ArtifactRef>()).unwrap_or(u64::MAX),
+                    ),
+            )
+    });
+    fixed
+        .saturating_add(heads)
+        .saturating_add(head_artifacts)
+        .saturating_add(material)
 }
 
 impl BodyRecord {
@@ -551,6 +922,81 @@ impl BodyRecord {
         self.heads
             .first_mut()
             .ok_or(Failure::Integrity(Defect::MissingMaterial))
+    }
+    fn artifacts<'a>(&'a self, head: &'a BodyHead) -> BodyArtifactRefs<'a> {
+        match &head.artifacts {
+            Some(artifacts) => BodyArtifactRefs {
+                first: None,
+                rest: artifacts.iter(),
+            },
+            None => self.causal.as_ref().map_or(
+                BodyArtifactRefs {
+                    first: None,
+                    rest: [].iter(),
+                },
+                |material| BodyArtifactRefs {
+                    first: Some(&material.checkpoint),
+                    rest: material.delta_tail.iter(),
+                },
+            ),
+        }
+    }
+    fn promote_singleton_closure(&mut self) -> Result<(), Failure> {
+        if self.heads.len() != 1
+            || self
+                .heads
+                .first()
+                .is_some_and(|head| head.artifacts.is_some())
+        {
+            return Ok(());
+        }
+        let material = self
+            .causal
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+        let artifacts = std::iter::once(material.checkpoint)
+            .chain(material.delta_tail.iter().copied())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        self.head_mut()?.artifacts = Some(artifacts);
+        Ok(())
+    }
+    /// Use the compact singleton sentinel only when the signed head closure is
+    /// exactly the record-wide causal closure. A receiver may reconstruct the
+    /// same Fabric state under its own sealing material, yielding different
+    /// protected object hashes; in that case the original signed descriptor
+    /// refs must remain explicit so restart and re-export still verify it.
+    fn compact_singleton_closure(&mut self) {
+        if self.heads.len() != 1 {
+            return;
+        }
+        let Some(material) = self.causal.as_ref() else {
+            return;
+        };
+        let Some(head) = self.heads.first() else {
+            return;
+        };
+        let Some(artifacts) = head.artifacts.as_deref() else {
+            return;
+        };
+        let causal_len = 1usize.saturating_add(material.delta_tail.len());
+        let matches = artifacts.len() == causal_len
+            && artifacts.first() == Some(&material.checkpoint)
+            && artifacts.get(1..) == Some(material.delta_tail.as_slice());
+        if matches {
+            if let Some(head) = self.heads.first_mut() {
+                head.artifacts = None;
+            }
+        }
+    }
+    fn replace_causal(&mut self, causal: Option<Arc<CausalMaterial>>) -> Result<(), Failure> {
+        // Freeze the old signed-head coordinate before replacing the derived
+        // record-wide material. The replacement may be a checkpoint or a
+        // locally re-sealed equivalent whose protected refs are different.
+        self.promote_singleton_closure()?;
+        self.causal = causal;
+        self.compact_singleton_closure();
+        Ok(())
     }
     /// Total protected artifact bytes across heads (quota ledger input).
     fn protected_total(&self) -> u64 {
@@ -587,10 +1033,19 @@ struct StoreMeta {
     content_index_root: Option<IndexRef>,
     /// Idempotency scope → the receipt object that answers a replay.
     receipt_index_root: Option<IndexRef>,
+    /// Exact durable receipt ledger. The root is enough for lookup but not for
+    /// quota admission: retaining the aggregate here keeps both open and a new
+    /// action O(1) in the lifetime receipt count.
+    receipt_count: u64,
+    receipt_material_bytes: u64,
     /// Generation id → immutable changed-Body delta object. The delta objects
     /// themselves are retained requirements; this index makes ancestry and
     /// exact historical reconstruction logarithmically addressable.
     generation_index_root: Option<IndexRef>,
+    /// Protected artifact digest -> canonical length/epoch + owner count.
+    /// The Journal's deferred membership delta is derived from zero/first
+    /// crossings in this authenticated index, never from an in-memory guess.
+    ownership_index_root: Option<IndexRef>,
     manifest_root: Option<Object>,
 }
 
@@ -612,13 +1067,13 @@ struct PriorIndexedStoreMeta {
 }
 
 /// The store meta's encoded generation.
-const STORE_META_FORMAT_VERSION: u8 = 4;
+const STORE_META_FORMAT_VERSION: u8 = 8;
 const READABLE_STORE_META_FORMAT_VERSION: u8 = 2;
 
-fn decode_store_meta(bytes: &[u8]) -> Result<StoreMeta, Failure> {
+fn decode_store_meta(bytes: &[u8]) -> Result<(StoreMeta, bool), Failure> {
     if let Ok(meta) = postcard::from_bytes::<StoreMeta>(bytes) {
         if meta.format_version == STORE_META_FORMAT_VERSION {
-            return Ok(meta);
+            return Ok((meta, true));
         }
     }
     let prior: PriorIndexedStoreMeta = postcard::from_bytes(bytes).map_err(|error| {
@@ -631,18 +1086,24 @@ fn decode_store_meta(bytes: &[u8]) -> Result<StoreMeta, Failure> {
     if prior.format_version != READABLE_STORE_META_FORMAT_VERSION {
         return Err(Failure::Integrity(Defect::Encoding));
     }
-    Ok(StoreMeta {
-        format_version: STORE_META_FORMAT_VERSION,
-        space: prior.space,
-        frontier: prior.frontier,
-        quota: prior.quota,
-        body_index_root: prior.body_index_root,
-        manifest_body_root: prior.manifest_body_root,
-        content_index_root: prior.content_index_root,
-        receipt_index_root: prior.receipt_index_root,
-        generation_index_root: None,
-        manifest_root: prior.manifest_root,
-    })
+    Ok((
+        StoreMeta {
+            format_version: STORE_META_FORMAT_VERSION,
+            space: prior.space,
+            frontier: prior.frontier,
+            quota: prior.quota,
+            body_index_root: prior.body_index_root,
+            manifest_body_root: prior.manifest_body_root,
+            content_index_root: prior.content_index_root,
+            receipt_index_root: prior.receipt_index_root,
+            receipt_count: prior.receipt_index_root.map_or(0, |root| root.count),
+            receipt_material_bytes: 0,
+            generation_index_root: None,
+            ownership_index_root: None,
+            manifest_root: prior.manifest_root,
+        },
+        false,
+    ))
 }
 
 type IndexRef = crate::index::ChildRef;
@@ -662,16 +1123,18 @@ struct IndexedReceipt {
     object: Object,
 }
 
-/// One Body replacement in a durable generation delta. `material: None` means
-/// absent or opaque at that generation; neither is readable by a World. The
-/// descriptor names protected causal artifacts rather than embedding a full
-/// plaintext Body export in every generation.
+/// One Body replacement in a durable generation delta. Presence and
+/// interpretability are explicit so typed readers never collapse an opaque
+/// retained Body into absence. The descriptor names protected causal
+/// artifacts rather than embedding a full plaintext Body export.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ArchivedBody {
     key: BodyKey,
+    present: bool,
+    interpreted: bool,
     binding: Option<BodyBinding>,
     stamp: Vec<u8>,
-    material: Option<CausalMaterial>,
+    material: Option<Arc<CausalMaterial>>,
 }
 
 /// The immutable material needed to replay one read generation from its
@@ -691,9 +1154,126 @@ struct GenerationDelta {
 struct IndexedGeneration {
     root: [u8; 32],
     object: Object,
+    footprint: GenerationFootprint,
 }
 
-const GENERATION_DELTA_FORMAT_VERSION: u8 = 2;
+/// Authenticated pre-inflation admission metadata for one exact durable
+/// generation. It is stored beside the generation root in the persistent
+/// index, so lookup is O(log generations + source schemas), reads no delta or
+/// Body object, and never prices historical work from mutable current state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationFootprint {
+    pub body_count: u64,
+    pub snapshot_retained_bytes: u64,
+    /// Number of immutable generation deltas from this root to its baseline.
+    pub reconstruction_depth: u32,
+    /// Sum of the authenticated canonical delta-object lengths in that chain.
+    pub reconstruction_delta_bytes: u64,
+    /// Conservative peak bytes needed while `read_generation` retains the
+    /// decoded chain and its selected-Body directory before installing the
+    /// final immutable snapshot.
+    pub reconstruction_transient_bytes: u64,
+    pub sources: Vec<GenerationSourceFootprint>,
+}
+
+/// Exact readable source aggregate used with an implementation's declared
+/// extractor shapes before historical reconstruction begins.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GenerationSourceFootprint {
+    pub world: WorldId,
+    pub schema: SchemaId,
+    pub version: u32,
+    pub body_count: u64,
+    pub payload_bytes: u64,
+}
+
+const MAX_GENERATION_SOURCES: usize = 4_096;
+const MAX_GENERATION_RECONSTRUCTION_DEPTH: u32 = 1_048_576;
+const GENERATION_DELTA_DECODE_MULTIPLIER: u64 = 4;
+const GENERATION_DELTA_FIXED_TRANSIENT_BYTES: u64 = 1_024;
+const GENERATION_CHANGED_BODY_TRANSIENT_BYTES: u64 = 1_024;
+
+impl GenerationFootprint {
+    fn validate(&self) -> Result<(), Failure> {
+        let readable_bodies = self.sources.iter().try_fold(0u64, |total, source| {
+            total
+                .checked_add(source.body_count)
+                .ok_or(Failure::Integrity(Defect::Encoding))
+        })?;
+        if self.sources.len() > MAX_GENERATION_SOURCES
+            || self
+                .sources
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left >= right))
+            || self.sources.iter().any(|source| source.body_count == 0)
+            || readable_bodies > self.body_count
+            || (self.body_count == 0) != (self.snapshot_retained_bytes == 0)
+            || self.reconstruction_depth > MAX_GENERATION_RECONSTRUCTION_DEPTH
+            || (self.reconstruction_depth == 0)
+                != (self.reconstruction_delta_bytes == 0
+                    && self.reconstruction_transient_bytes == 0)
+            || self.reconstruction_transient_bytes < self.reconstruction_delta_bytes
+        {
+            return Err(Failure::Integrity(Defect::Encoding));
+        }
+        Ok(())
+    }
+
+    fn record_generation_delta(
+        &mut self,
+        parent: Option<&Self>,
+        delta: &GenerationDelta,
+        encoded_len: u64,
+    ) -> Result<(), Failure> {
+        let parent_depth = parent.map_or(0, |parent| parent.reconstruction_depth);
+        let parent_delta_bytes = parent.map_or(0, |parent| parent.reconstruction_delta_bytes);
+        let parent_transient = parent.map_or(0, |parent| parent.reconstruction_transient_bytes);
+        self.reconstruction_depth = parent_depth
+            .checked_add(1)
+            .filter(|depth| *depth <= MAX_GENERATION_RECONSTRUCTION_DEPTH)
+            .ok_or(Failure::QuotaExceeded)?;
+        self.reconstruction_delta_bytes = parent_delta_bytes
+            .checked_add(encoded_len)
+            .ok_or(Failure::QuotaExceeded)?;
+
+        // `read_generation` keeps every decoded delta until it has selected
+        // the visible Body rows. Canonical bytes account for all variable
+        // strings/material vectors; the multiplier covers decoded capacities,
+        // while the per-delta and per-Body terms cover Vec/BTreeMap nodes,
+        // references, and allocator headers. The final ReadSnapshot is priced
+        // separately by `snapshot_retained_bytes`.
+        let changed = u64::try_from(delta.changed.len()).unwrap_or(u64::MAX);
+        let delta_transient = encoded_len
+            .checked_mul(GENERATION_DELTA_DECODE_MULTIPLIER)
+            .and_then(|bytes| bytes.checked_add(GENERATION_DELTA_FIXED_TRANSIENT_BYTES))
+            .and_then(|bytes| {
+                changed
+                    .checked_mul(GENERATION_CHANGED_BODY_TRANSIENT_BYTES)
+                    .and_then(|changed| bytes.checked_add(changed))
+            })
+            .ok_or(Failure::QuotaExceeded)?;
+        self.reconstruction_transient_bytes = parent_transient
+            .checked_add(delta_transient)
+            .ok_or(Failure::QuotaExceeded)?;
+        self.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IndexedOwnership {
+    object: Object,
+    class: OwnedObjectClass,
+    owners: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum OwnedObjectClass {
+    Eager,
+    DeferredArtifact { epoch: [u8; 16] },
+    DeferredReceipt,
+}
+
+const GENERATION_DELTA_FORMAT_VERSION: u8 = 3;
 
 #[cfg(test)]
 pub(crate) fn is_canonical_generation_delta(bytes: &[u8]) -> bool {
@@ -710,6 +1290,13 @@ fn generation_index_key(root: &[u8; 32]) -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
+fn ownership_index_key(hash: &[u8; 32]) -> [u8; 32] {
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"lait/replica/object-ownership/1");
+    digest.update(hash);
+    *digest.finalize().as_bytes()
+}
+
 /// The index key a receipt scope sits under.
 fn receipt_index_key(scope: &[u8]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -718,10 +1305,59 @@ fn receipt_index_key(scope: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+/// Receipt effects are capped at 1 MiB and a transaction can name at most
+/// 4,096 Bodies. Four MiB leaves generous canonical-coordinate overhead while
+/// preventing a hostile authenticated length from becoming an unbounded
+/// replay allocation.
+const MAX_RECEIPT_OBJECT_BYTES: u64 = 4 * 1024 * 1024;
+
+fn validate_receipt_for_storage(receipt: &RequestReceipt) -> Result<Vec<u8>, Failure> {
+    let bytes = receipt.encode();
+    if receipt.version != 2 {
+        return Err(Failure::Integrity(Defect::Encoding));
+    }
+    if receipt.effect.len() > crate::receipt::MAX_EFFECT_BYTES {
+        return Err(Failure::EffectTooLarge);
+    }
+    if receipt.bodies.len() > crate::transaction::MAX_DESCRIPTORS
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RECEIPT_OBJECT_BYTES
+    {
+        return Err(Failure::OpLimit);
+    }
+    if receipt
+        .bodies
+        .iter()
+        .any(|body| body.world != receipt.world)
+    {
+        return Err(Failure::Illegitimate(
+            "receipt Body lies outside its World".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn validate_receipt_material(scope: &[u8], bytes: &[u8]) -> Result<RequestReceipt, Failure> {
+    let receipt = RequestReceipt::decode_canonical(bytes)
+        .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+    if receipt.scope_key().as_slice() != scope
+        || receipt.bodies.len() > crate::transaction::MAX_DESCRIPTORS
+        || receipt
+            .bodies
+            .iter()
+            .any(|body| body.world != receipt.world)
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RECEIPT_OBJECT_BYTES
+    {
+        return Err(Failure::Integrity(Defect::Encoding));
+    }
+    Ok(receipt)
+}
+
 /// The Orbit's durable local materialization, over a Engine engine.
 struct PreparedCheckpoint {
-    base: CausalMaterial,
+    base: Arc<CausalMaterial>,
     receiver: mpsc::Receiver<Option<(ArtifactRef, Vec<u8>)>>,
+    #[cfg(test)]
+    _held_sender: Option<mpsc::SyncSender<Option<(ArtifactRef, Vec<u8>)>>>,
 }
 
 pub(crate) type CheckpointWork = Box<dyn FnOnce() + Send + 'static>;
@@ -806,7 +1442,10 @@ fn checkpoint_executor() -> &'static CheckpointExecutor {
 }
 
 pub struct Replica {
-    fabric: Engine,
+    /// Fabric's bounded mutation-hot writer set is independently synchronized
+    /// so an owned prepared action can build its immutable read projection
+    /// after releasing the much wider Replica metadata writer.
+    fabric: Arc<Mutex<Engine>>,
     frontier: ReplicaFrontier,
     durable: Option<Store>,
     /// When this Replica's durable material was last verified end to end, in
@@ -819,12 +1458,24 @@ pub struct Replica {
     /// drawn as "no peers", and harder to spot because it looks like data.
     verified_at_ms: Option<u64>,
     poisoned: bool,
+    /// Shared with detached preparations so an RAII rollback failure remains
+    /// fail-stop even though no `&mut Replica` is held at drop time.
+    rollback_poisoned: Arc<AtomicBool>,
+    /// Exactly one detached local/Contact candidate may exist. Contenders
+    /// refuse promptly instead of waiting behind extractor or Corpus work.
+    prepared_in_flight: Arc<AtomicBool>,
     keys: Option<Arc<dyn BodyKeySource>>,
     space: Option<SpaceId>,
     supported: SupportedSchemas,
     quota: QuotaConfig,
-    bodies: BTreeMap<BodyKey, BodyRecord>,
-    receipts: BTreeMap<Vec<u8>, (RequestReceipt, Option<Object>)>,
+    bodies: RecordDirectory,
+    receipts: ReceiptDirectory,
+    /// Durable receipts live in the authenticated index and are decoded only
+    /// when their exact scope is replayed. This cache is deliberately bounded;
+    /// non-durable replicas continue to use `receipts` as their complete store.
+    receipt_cache: Arc<Mutex<ReceiptCache>>,
+    receipt_count: u64,
+    receipt_material_bytes: u64,
     /// Roots of the durable catalogs, carried so a commit can apply a delta
     /// rather than rebuild.
     body_index_root: Option<IndexRef>,
@@ -838,6 +1489,9 @@ pub struct Replica {
     /// index makes a candidate read image update its content view from only the
     /// touched declarations instead of rescanning every Body in the Space.
     declared_content_counts: BTreeMap<[u8; 32], u64>,
+    /// O(1) physical upper estimate for the two declaration directories.
+    /// Updated only by `replace_declared_content`, the single mutation seam.
+    declared_content_retained_bytes: u64,
     /// Content committed but not yet declared by any Body, and the moment each
     /// hold lapses.
     ///
@@ -856,18 +1510,9 @@ pub struct Replica {
     pending_content: BTreeMap<[u8; 32], std::time::Instant>,
     receipt_index_root: Option<IndexRef>,
     generation_index_root: Option<IndexRef>,
+    generation_footprint: GenerationFootprint,
+    ownership_index_root: Option<IndexRef>,
     manifest_root_object: Option<Object>,
-    /// How many live Body-head references each signed transaction object has.
-    ///
-    /// A commit must tell the journal which objects stopped being required, and
-    /// "the ones this Body used to name" is the wrong answer: one signed
-    /// transaction record covers every Body in its batch, so dropping it when
-    /// one of them moves on would strand the others. Counting is the cheap
-    /// correct answer, and it stays O(changed) because only touched Bodies
-    /// adjust it. Protected artifacts are generation material: once published
-    /// they remain required for historical reads, so they are intentionally
-    /// never put through this live-head release map.
-    object_refs: BTreeMap<[u8; 32], u64>,
     /// Opaque retained material kept in memory for non-durable replicas (a
     /// durable store keeps it as objects; this map indexes the raw envelope
     /// bytes + transaction bytes for byte-identical forwarding either way).
@@ -882,12 +1527,296 @@ pub struct Replica {
     checkpoint_jobs: Mutex<BTreeMap<BodyKey, PreparedCheckpoint>>,
 }
 
+/// A dense Body identity meaningful only with the exact [`ReadSnapshot`] that
+/// issued it. Slot numbers persist across descendant publications: replacing
+/// a Body path-copies one slot page, while insertion allocates a free/tail
+/// slot without renumbering any existing Body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BodyIx(u32);
+
+impl BodyIx {
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Portable identity of one exact canonical Body image. Unlike a slot, this
+/// survives process-local BodyIx assignment and commits the Body address,
+/// immutable schema binding, publication stamp, signed causal closure/final
+/// Version, protected-key epochs, and authenticated plaintext-size hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BodyImageId([u8; 32]);
+
+impl BodyImageId {
+    pub const fn as_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Why a cold exact Body image could not be resolved. Resolution is fail
+/// closed: no partially imported image is cached or installed into Replica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyImageFailure {
+    MaterialUnavailable,
+    Io,
+    KeyUnavailable,
+    Opaque,
+    Capacity,
+    Corrupt,
+    ModelMismatch,
+    ImmutableConflict,
+}
+
+impl std::fmt::Display for BodyImageFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for BodyImageFailure {}
+
+/// Pre-resolution admission coordinates authenticated by the signed Material.
+/// `decoded_upper_bound` covers the retained plaintext plus the largest
+/// simultaneous artifact/Engine replacement working set; it is deliberately
+/// not just the final plaintext length. Runtime reserves both fields before
+/// reading/decrypting the first artifact and still validates actual retained
+/// bytes after resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyImageBounds {
+    pub protected_bytes: u64,
+    pub decoded_upper_bound: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyImagePresence {
+    Absent,
+    Opaque { image: BodyImageId },
+    Readable { body: BodyIx, image: BodyImageId },
+}
+
+#[derive(Debug, Clone)]
+enum SnapshotImage {
+    /// Non-durable/test Bodies remain shared Fabric images.
+    Resident(fabric::BodySnapshot),
+    /// Every interpreted durable Body retains only its signed causal closure.
+    /// Its binding decides whether exact resolution yields an Atomic value or
+    /// a canonical collaborative export with stable scaffold operation ids.
+    Cold(Arc<CausalMaterial>),
+    /// A not-yet-durable candidate is readable from the already-verified hot
+    /// image while Corpus validation runs. Runtime clears this cell after the
+    /// journal commit; subsequent reads take the same cold closure path.
+    Pending {
+        material: Arc<CausalMaterial>,
+        hot: Arc<Mutex<Option<Arc<fabric::BodySnapshot>>>>,
+    },
+    /// Legitimate retained material this publication cannot interpret. The
+    /// compact signed identity remains visible to typed readers; product facts
+    /// and schema indexes never admit it.
+    Opaque(Option<Arc<CausalMaterial>>),
+}
+
+impl SnapshotImage {
+    fn material(&self) -> Option<&Arc<CausalMaterial>> {
+        match self {
+            Self::Resident(_) | Self::Opaque(None) => None,
+            Self::Cold(material) | Self::Pending { material, .. } => Some(material),
+            Self::Opaque(Some(material)) => Some(material),
+        }
+    }
+
+    fn retained_bytes_estimate(&self) -> u64 {
+        match self {
+            Self::Resident(snapshot) => snapshot.retained_bytes(),
+            Self::Cold(material) => u64::try_from(material.encode().len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(32),
+            Self::Pending { material, hot } => u64::try_from(material.encode().len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(64)
+                .saturating_add(
+                    hot.lock()
+                        .ok()
+                        .and_then(|snapshot| {
+                            snapshot.as_ref().map(|snapshot| snapshot.retained_bytes())
+                        })
+                        .unwrap_or(0),
+                ),
+            Self::Opaque(material) => material
+                .as_ref()
+                .map(|material| {
+                    u64::try_from(material.encode().len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(32)
+                })
+                .unwrap_or(32),
+        }
+    }
+
+    fn is_readable(&self) -> bool {
+        !matches!(self, Self::Opaque(_))
+    }
+}
+
+/// Immutable object reader plus the exact epoch capabilities pinned by a
+/// publication. There is deliberately no payload cache here; Runtime owns the
+/// one governed singleflight/cache used by readers and extractors.
+#[derive(Debug)]
+struct BodyImageResolver {
+    /// Swapped exactly once for a prepared local publication: before durable
+    /// finalize it names the prior root (changed Bodies are resident); after
+    /// finalize it names the newly authoritative deferred root. The snapshot
+    /// and Corpus share this resolver Arc, so the O(1) root rebind reaches both
+    /// without rebuilding either immutable projection.
+    store: Mutex<journal::Reader>,
+    /// Persistent epoch capability dictionary. A next publication path-copies
+    /// only newly observed epochs; it never consults a mutable live key source
+    /// while resolving an exact historical image.
+    keys: imbl::OrdMap<[u8; 16], AuthorizedBodyKey>,
+}
+
+impl BodyImageResolver {
+    fn attach_durable_root(&self, store: journal::Reader) {
+        let mut held = self
+            .store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = store;
+    }
+
+    fn resolve(
+        &self,
+        key: &BodyKey,
+        binding: &BodyBinding,
+        material: &CausalMaterial,
+    ) -> Result<Arc<fabric::BodySnapshot>, BodyImageFailure> {
+        material.validate().map_err(|_| BodyImageFailure::Corrupt)?;
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| BodyImageFailure::MaterialUnavailable)?
+            .clone();
+        let mut engine = Engine::new();
+        for reference in std::iter::once(&material.checkpoint).chain(&material.delta_tail) {
+            let object = Object {
+                hash: reference.hash,
+                len: reference.len,
+            };
+            let envelope = store
+                .read_deferred_object_bounded(&object, reference.len)
+                .map_err(|failure| match failure {
+                    journal::Failure::Operation { .. } => BodyImageFailure::Io,
+                    journal::Failure::Integrity(journal::Defect::MissingObject) => {
+                        BodyImageFailure::MaterialUnavailable
+                    }
+                    _ => BodyImageFailure::Corrupt,
+                })?;
+            let epoch = mechanics::authorization::body_epoch_id(&envelope)
+                .ok_or(BodyImageFailure::Corrupt)?;
+            if epoch != reference.epoch {
+                return Err(BodyImageFailure::Corrupt);
+            }
+            let opening = self
+                .keys
+                .get(&epoch)
+                .ok_or(BodyImageFailure::KeyUnavailable)?;
+            let artifact =
+                open_artifact(opening, &envelope).map_err(|_| BodyImageFailure::Corrupt)?;
+            let status = engine
+                .import_artifact(&fabric_key(key), &artifact)
+                .map_err(|_| BodyImageFailure::Corrupt)?;
+            if status.pending {
+                return Err(BodyImageFailure::Corrupt);
+            }
+        }
+        let version = engine
+            .version(&fabric_key(key))
+            .map_err(|_| BodyImageFailure::Corrupt)?;
+        if version != material.version {
+            return Err(BodyImageFailure::Corrupt);
+        }
+        let snapshot = engine
+            .body_snapshot(&fabric_key(key))
+            .map_err(|_| BodyImageFailure::Corrupt)?
+            .ok_or(BodyImageFailure::Corrupt)?;
+        match binding.mutation_model {
+            MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC => {
+                let Some(value) = snapshot.read_shared() else {
+                    return Err(BodyImageFailure::ModelMismatch);
+                };
+                if u64::try_from(value.len()).unwrap_or(u64::MAX) != material.plaintext_size {
+                    return Err(BodyImageFailure::Corrupt);
+                }
+                if binding.mutation_model == MUTATION_IMMUTABLE_ATOMIC
+                    && !immutable_key_matches(
+                        key,
+                        &binding.schema,
+                        binding.schema_version,
+                        &binding.encoding,
+                        value.as_ref(),
+                    )
+                {
+                    return Err(BodyImageFailure::ImmutableConflict);
+                }
+            }
+            MUTATION_COLLABORATIVE => {
+                if snapshot.read_shared().is_some() {
+                    return Err(BodyImageFailure::ModelMismatch);
+                }
+                // The signed Material hint prices the causal artifact working
+                // set; a canonical scaffold snapshot can differ from the sum of a
+                // checkpoint and update tail. Validate the actual immutable
+                // export against the same conservative bound Runtime reserves.
+                let largest = std::iter::once(&material.checkpoint)
+                    .chain(&material.delta_tail)
+                    .map(|reference| reference.len)
+                    .max()
+                    .unwrap_or(0);
+                let decoded_bound = material
+                    .plaintext_size
+                    .max(largest)
+                    .saturating_mul(3)
+                    .saturating_add(64 * 1024);
+                if snapshot.retained_bytes() > decoded_bound {
+                    return Err(BodyImageFailure::Capacity);
+                }
+            }
+            _ => return Err(BodyImageFailure::ModelMismatch),
+        }
+        Ok(Arc::new(snapshot))
+    }
+}
+
+fn body_image_id(
+    key: &BodyKey,
+    binding: &BodyBinding,
+    stamp: &[u8; 32],
+    material: &CausalMaterial,
+) -> BodyImageId {
+    fn field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+        hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(bytes);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lait/body-image/1\0");
+    field(&mut hasher, key.world.as_bytes());
+    hasher.update(&key.body.as_bytes());
+    field(&mut hasher, binding.schema.as_bytes());
+    hasher.update(&binding.schema_version.to_be_bytes());
+    field(&mut hasher, binding.encoding.as_bytes());
+    hasher.update(&[binding.mutation_model]);
+    hasher.update(stamp);
+    field(&mut hasher, &material.encode());
+    BodyImageId(*hasher.finalize().as_bytes())
+}
+
 /// One interpreted Body in an immutable Replica generation.
 #[derive(Debug, Clone)]
 struct SnapshotBody {
     binding: BodyBinding,
-    stamp: Vec<u8>,
-    body: fabric::BodySnapshot,
+    stamp: [u8; 32],
+    image_id: BodyImageId,
+    plaintext_size: u64,
+    image: SnapshotImage,
 }
 
 /// Calibrated above the 1-record-per-Body release fixture after excluding the
@@ -895,18 +1824,367 @@ struct SnapshotBody {
 /// membership, binding, and leaf/spine slack.
 const SNAPSHOT_BODY_FIXED_ESTIMATE: u64 = 400;
 
-fn snapshot_body_retained_estimate(body: &SnapshotBody) -> u64 {
-    SNAPSHOT_BODY_FIXED_ESTIMATE
-        .saturating_add(u64::try_from(body.stamp.len()).unwrap_or(u64::MAX))
-        .saturating_add(body.body.retained_bytes())
+fn snapshot_stamp(stamp: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lait/read-snapshot/body-stamp/1\0");
+    hasher.update(stamp);
+    *hasher.finalize().as_bytes()
 }
 
-fn snapshot_directory_retained_estimate(
-    bodies: &SnapshotDirectory<Arc<BodyKey>, SnapshotBody>,
-) -> u64 {
+fn snapshot_body_retained_estimate(body: &SnapshotBody) -> u64 {
+    SNAPSHOT_BODY_FIXED_ESTIMATE
+        .saturating_add(32)
+        .saturating_add(body.image.retained_bytes_estimate())
+}
+
+impl SnapshotBody {
+    fn resident(
+        key: &BodyKey,
+        binding: BodyBinding,
+        stamp: [u8; 32],
+        body: fabric::BodySnapshot,
+    ) -> Self {
+        let plaintext_size = body.retained_bytes();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"lait/resident-body-image/1\0");
+        hasher.update(key.world.as_bytes());
+        hasher.update(&key.body.as_bytes());
+        hasher.update(&stamp);
+        hasher.update(&plaintext_size.to_be_bytes());
+        Self {
+            binding,
+            stamp,
+            image_id: BodyImageId(*hasher.finalize().as_bytes()),
+            plaintext_size,
+            image: SnapshotImage::Resident(body),
+        }
+    }
+
+    fn cold(
+        key: &BodyKey,
+        binding: BodyBinding,
+        stamp: [u8; 32],
+        material: Arc<CausalMaterial>,
+    ) -> Self {
+        Self {
+            image_id: body_image_id(key, &binding, &stamp, &material),
+            plaintext_size: material.plaintext_size,
+            binding,
+            stamp,
+            image: SnapshotImage::Cold(material),
+        }
+    }
+
+    fn pending(
+        key: &BodyKey,
+        binding: BodyBinding,
+        stamp: [u8; 32],
+        material: Arc<CausalMaterial>,
+        body: fabric::BodySnapshot,
+    ) -> Self {
+        Self {
+            image_id: body_image_id(key, &binding, &stamp, &material),
+            plaintext_size: material.plaintext_size,
+            binding,
+            stamp,
+            image: SnapshotImage::Pending {
+                material,
+                hot: Arc::new(Mutex::new(Some(Arc::new(body)))),
+            },
+        }
+    }
+
+    fn opaque(
+        key: &BodyKey,
+        binding: BodyBinding,
+        stamp: [u8; 32],
+        material: Option<Arc<CausalMaterial>>,
+    ) -> Self {
+        let plaintext_size = material
+            .as_ref()
+            .map(|material| material.plaintext_size)
+            .unwrap_or(0);
+        let image_id = material.as_ref().map_or_else(
+            || {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"lait/opaque-body-image/1\0");
+                hasher.update(key.world.as_bytes());
+                hasher.update(&key.body.as_bytes());
+                hasher.update(&stamp);
+                BodyImageId(*hasher.finalize().as_bytes())
+            },
+            |material| body_image_id(key, &binding, &stamp, material),
+        );
+        Self {
+            binding,
+            stamp,
+            image_id,
+            plaintext_size,
+            image: SnapshotImage::Opaque(material),
+        }
+    }
+}
+
+fn snapshot_directory_retained_estimate(bodies: &BodyDirectory) -> u64 {
     bodies.iter().fold(0u64, |total, (_, body)| {
         total.saturating_add(snapshot_body_retained_estimate(body))
     })
+}
+
+fn record_snapshot_retained_estimate(record: &BodyRecord) -> u64 {
+    SNAPSHOT_BODY_FIXED_ESTIMATE
+        .saturating_add(32)
+        .saturating_add(record.causal.as_ref().map_or(32, |material| {
+            u64::try_from(material.encode().len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(32)
+        }))
+}
+
+impl GenerationFootprint {
+    fn from_records(records: &RecordDirectory) -> Result<Self, Failure> {
+        let mut footprint = Self::default();
+        for (key, record) in records.iter() {
+            footprint.adjust_record(key, record, true)?;
+        }
+        footprint.validate()?;
+        Ok(footprint)
+    }
+
+    fn after_changes(
+        &self,
+        current: &RecordDirectory,
+        changed: &BTreeMap<BodyKey, Option<BodyRecord>>,
+    ) -> Result<Self, Failure> {
+        let mut next = self.clone();
+        for (key, replacement) in changed {
+            if let Some(prior) = current.get(key) {
+                next.adjust_record(key, prior, false)?;
+            }
+            if let Some(replacement) = replacement {
+                next.adjust_record(key, replacement, true)?;
+            }
+        }
+        next.validate()?;
+        Ok(next)
+    }
+
+    fn adjust_record(
+        &mut self,
+        key: &BodyKey,
+        record: &BodyRecord,
+        add: bool,
+    ) -> Result<(), Failure> {
+        let retained = record_snapshot_retained_estimate(record);
+        if add {
+            self.body_count = self
+                .body_count
+                .checked_add(1)
+                .ok_or(Failure::QuotaExceeded)?;
+            self.snapshot_retained_bytes = self
+                .snapshot_retained_bytes
+                .checked_add(retained)
+                .ok_or(Failure::QuotaExceeded)?;
+        } else {
+            self.body_count = self
+                .body_count
+                .checked_sub(1)
+                .ok_or(Failure::Integrity(Defect::Index))?;
+            self.snapshot_retained_bytes = self
+                .snapshot_retained_bytes
+                .checked_sub(retained)
+                .ok_or(Failure::Integrity(Defect::Index))?;
+        }
+        if !record.interpreted {
+            return Ok(());
+        }
+        let payload_bytes = record
+            .causal
+            .as_ref()
+            .map_or(0, |material| material.plaintext_size);
+        let probe = GenerationSourceFootprint {
+            world: key.world.clone(),
+            schema: record.binding.schema.clone(),
+            version: record.binding.schema_version,
+            body_count: 0,
+            payload_bytes: 0,
+        };
+        match self.sources.binary_search_by(|source| {
+            (&source.world, &source.schema, source.version).cmp(&(
+                &probe.world,
+                &probe.schema,
+                probe.version,
+            ))
+        }) {
+            Ok(index) => {
+                let source = self
+                    .sources
+                    .get_mut(index)
+                    .ok_or(Failure::Integrity(Defect::Index))?;
+                if add {
+                    source.body_count = source
+                        .body_count
+                        .checked_add(1)
+                        .ok_or(Failure::QuotaExceeded)?;
+                    source.payload_bytes = source
+                        .payload_bytes
+                        .checked_add(payload_bytes)
+                        .ok_or(Failure::QuotaExceeded)?;
+                } else {
+                    source.body_count = source
+                        .body_count
+                        .checked_sub(1)
+                        .ok_or(Failure::Integrity(Defect::Index))?;
+                    source.payload_bytes = source
+                        .payload_bytes
+                        .checked_sub(payload_bytes)
+                        .ok_or(Failure::Integrity(Defect::Index))?;
+                    if source.body_count == 0 {
+                        self.sources.remove(index);
+                    }
+                }
+            }
+            Err(index) if add => {
+                if self.sources.len() >= MAX_GENERATION_SOURCES {
+                    return Err(Failure::QuotaExceeded);
+                }
+                self.sources.insert(
+                    index,
+                    GenerationSourceFootprint {
+                        body_count: 1,
+                        payload_bytes,
+                        ..probe
+                    },
+                );
+            }
+            Err(_) => return Err(Failure::Integrity(Defect::Index)),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BodySlot {
+    key: Arc<BodyKey>,
+    value: SnapshotBody,
+}
+
+/// Publication-persistent Body slots plus one compact ordered lookup.
+///
+/// The key is allocated exactly once and shared by the lookup leaf and reverse
+/// slot. Schema membership stores only the four-byte slot. A lexical-front
+/// insertion therefore replaces one bounded lookup leaf and one slot-vector
+/// path; it never renumbers or rewrites the million existing rows.
+#[derive(Debug, Clone, Default)]
+struct BodyDirectory {
+    lookup: SnapshotDirectory<Arc<BodyKey>, BodyIx>,
+    slots: imbl::Vector<Option<BodySlot>>,
+    free: imbl::OrdSet<BodyIx>,
+}
+
+#[derive(Default)]
+struct BodyDirectoryBuilder {
+    lookup: SnapshotDirectoryBuilder<Arc<BodyKey>, BodyIx>,
+    slots: imbl::Vector<Option<BodySlot>>,
+}
+
+impl BodyDirectoryBuilder {
+    fn push(&mut self, key: Arc<BodyKey>, value: SnapshotBody) {
+        let Ok(raw_index) = u32::try_from(self.slots.len()) else {
+            return;
+        };
+        let index = BodyIx(raw_index);
+        self.lookup.push(key.clone(), index);
+        self.slots.push_back(Some(BodySlot { key, value }));
+    }
+
+    fn finish(self) -> BodyDirectory {
+        BodyDirectory {
+            lookup: self.lookup.finish(),
+            slots: self.slots,
+            free: imbl::OrdSet::new(),
+        }
+    }
+}
+
+impl BodyDirectory {
+    fn len(&self) -> usize {
+        self.lookup.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lookup.is_empty()
+    }
+
+    fn body_ix(&self, key: &BodyKey) -> Option<BodyIx> {
+        self.lookup.get(key).copied()
+    }
+
+    fn slot(&self, index: BodyIx) -> Option<&BodySlot> {
+        self.slots.get(usize::try_from(index.0).ok()?)?.as_ref()
+    }
+
+    fn get(&self, key: &BodyKey) -> Option<&SnapshotBody> {
+        self.slot(self.body_ix(key)?).map(|slot| &slot.value)
+    }
+
+    fn get_key_value(&self, key: &BodyKey) -> Option<(&Arc<BodyKey>, &SnapshotBody)> {
+        let slot = self.slot(self.body_ix(key)?)?;
+        Some((&slot.key, &slot.value))
+    }
+
+    fn insert(&mut self, key: Arc<BodyKey>, value: SnapshotBody) -> Option<SnapshotBody> {
+        if let Some(index) = self.body_ix(&key) {
+            let slot = self
+                .slots
+                .get_mut(usize::try_from(index.0).ok()?)?
+                .as_mut()?;
+            return Some(std::mem::replace(&mut slot.value, value));
+        }
+        let index = if let Some(index) = self.free.iter().next().copied() {
+            self.free.remove(&index);
+            let slot = self.slots.get_mut(usize::try_from(index.0).ok()?)?;
+            debug_assert!(slot.is_none());
+            *slot = Some(BodySlot {
+                key: key.clone(),
+                value,
+            });
+            index
+        } else {
+            let index = BodyIx(u32::try_from(self.slots.len()).ok()?);
+            self.slots.push_back(Some(BodySlot {
+                key: key.clone(),
+                value,
+            }));
+            index
+        };
+        debug_assert!(self.lookup.insert(key, index).is_none());
+        None
+    }
+
+    fn remove(&mut self, key: &BodyKey) -> Option<SnapshotBody> {
+        let index = self.lookup.remove(key)?;
+        let slot = self.slots.get_mut(usize::try_from(index.0).ok()?)?.take()?;
+        self.free.insert(index);
+        Some(slot.value)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&Arc<BodyKey>, &SnapshotBody)> {
+        self.lookup
+            .iter()
+            .filter_map(|(_, index)| self.slot(*index).map(|slot| (&slot.key, &slot.value)))
+    }
+
+    fn iter_with_ix(&self) -> impl Iterator<Item = (BodyIx, &Arc<BodyKey>, &SnapshotBody)> {
+        self.lookup.iter().filter_map(|(_, index)| {
+            self.slot(*index)
+                .map(|slot| (*index, &slot.key, &slot.value))
+        })
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &Arc<BodyKey>> {
+        self.iter().map(|(key, _)| key)
+    }
 }
 
 const SNAPSHOT_DIRECTORY_LEAF: usize = 256;
@@ -930,6 +2208,55 @@ struct SnapshotDirectory<K, V> {
     len: usize,
 }
 
+struct SnapshotDirectoryBuilder<K, V> {
+    leaves: imbl::Vector<Arc<[SnapshotDirectoryEntry<K, V>]>>,
+    current: Vec<SnapshotDirectoryEntry<K, V>>,
+    len: usize,
+}
+
+impl<K, V> Default for SnapshotDirectoryBuilder<K, V> {
+    fn default() -> Self {
+        Self {
+            leaves: imbl::Vector::new(),
+            current: Vec::with_capacity(SNAPSHOT_DIRECTORY_LEAF),
+            len: 0,
+        }
+    }
+}
+
+impl<K: Ord, V> SnapshotDirectoryBuilder<K, V> {
+    fn push(&mut self, key: K, value: V) {
+        let prior = self.current.last().map(|entry| &entry.key).or_else(|| {
+            self.leaves
+                .back()
+                .and_then(|leaf| leaf.last().map(|entry| &entry.key))
+        });
+        debug_assert!(prior.is_none_or(|prior| prior < &key));
+        self.current.push(SnapshotDirectoryEntry { key, value });
+        self.len = self.len.saturating_add(1);
+        if self.current.len() == SNAPSHOT_DIRECTORY_LEAF {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.current.is_empty() {
+            return;
+        }
+        self.leaves
+            .push_back(Arc::from(std::mem::take(&mut self.current)));
+        self.current = Vec::with_capacity(SNAPSHOT_DIRECTORY_LEAF);
+    }
+
+    fn finish(mut self) -> SnapshotDirectory<K, V> {
+        self.flush();
+        SnapshotDirectory {
+            leaves: self.leaves,
+            len: self.len,
+        }
+    }
+}
+
 impl<K, V> Default for SnapshotDirectory<K, V> {
     fn default() -> Self {
         Self {
@@ -940,28 +2267,6 @@ impl<K, V> Default for SnapshotDirectory<K, V> {
 }
 
 impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
-    fn from_entries(mut entries: Vec<(K, V)>) -> Self {
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        debug_assert!(entries.windows(2).all(|pair| match pair {
-            [left, right] => left.0 != right.0,
-            _ => true,
-        }));
-        let len = entries.len();
-        let leaves = entries
-            .chunks(SNAPSHOT_DIRECTORY_LEAF)
-            .map(|chunk| {
-                Arc::from(
-                    chunk
-                        .iter()
-                        .cloned()
-                        .map(|(key, value)| SnapshotDirectoryEntry { key, value })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect();
-        Self { leaves, len }
-    }
-
     fn len(&self) -> usize {
         self.len
     }
@@ -970,7 +2275,7 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         self.len == 0
     }
 
-    fn leaf_for<Q>(&self, key: &Q) -> usize
+    fn leaf_for<Q>(&self, key: &Q) -> Option<usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -978,20 +2283,16 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         let mut low = 0usize;
         let mut high = self.leaves.len();
         while low < high {
-            let mid = low.saturating_add(high.saturating_sub(low).saturating_div(2));
-            let Some(leaf) = self.leaves.get(mid) else {
-                break;
-            };
-            let Some(last) = leaf.last() else {
-                break;
-            };
+            let mid = low.saturating_add(high.saturating_sub(low) / 2);
+            let leaf = self.leaves.get(mid)?;
+            let last = leaf.last()?;
             if last.key.borrow() < key {
                 low = mid.saturating_add(1);
             } else {
                 high = mid;
             }
         }
-        low.min(self.leaves.len().saturating_sub(1))
+        Some(low.min(self.leaves.len().saturating_sub(1)))
     }
 
     fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
@@ -1002,7 +2303,7 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         if self.leaves.is_empty() {
             return None;
         }
-        let leaf = self.leaves.get(self.leaf_for(key))?;
+        let leaf = self.leaves.get(self.leaf_for(key)?)?;
         let position = leaf
             .binary_search_by(|entry| entry.key.borrow().cmp(key))
             .ok()?;
@@ -1025,17 +2326,11 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
             self.len = 1;
             return None;
         }
-        let leaf_index = self.leaf_for(&key);
-        let Some(existing) = self.leaves.get(leaf_index) else {
-            return None;
-        };
-        let mut leaf = existing.to_vec();
+        let leaf_index = self.leaf_for(&key)?;
+        let mut leaf = self.leaves.get(leaf_index)?.to_vec();
         match leaf.binary_search_by(|entry| entry.key.cmp(&key)) {
             Ok(position) => {
-                let Some(entry) = leaf.get_mut(position) else {
-                    return None;
-                };
-                let old = std::mem::replace(&mut entry.value, value);
+                let old = std::mem::replace(&mut leaf.get_mut(position)?.value, value);
                 self.leaves.set(leaf_index, Arc::from(leaf));
                 Some(old)
             }
@@ -1045,7 +2340,7 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
                 if leaf.len() <= SNAPSHOT_DIRECTORY_LEAF {
                     self.leaves.set(leaf_index, Arc::from(leaf));
                 } else {
-                    let right = leaf.split_off(leaf.len().saturating_div(2));
+                    let right = leaf.split_off(leaf.len() / 2);
                     self.leaves.set(leaf_index, Arc::from(leaf));
                     self.leaves
                         .insert(leaf_index.saturating_add(1), Arc::from(right));
@@ -1063,11 +2358,8 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         if self.leaves.is_empty() {
             return None;
         }
-        let leaf_index = self.leaf_for(key);
-        let Some(existing) = self.leaves.get(leaf_index) else {
-            return None;
-        };
-        let mut leaf = existing.to_vec();
+        let leaf_index = self.leaf_for(key)?;
+        let mut leaf = self.leaves.get(leaf_index)?.to_vec();
         let position = leaf
             .binary_search_by(|entry| entry.key.borrow().cmp(key))
             .ok()?;
@@ -1099,7 +2391,7 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
         if limit == 0 || self.leaves.is_empty() {
             return Vec::new();
         }
-        let mut leaf_index = after.map_or(0, |key| self.leaf_for(key));
+        let mut leaf_index = after.and_then(|key| self.leaf_for(key)).unwrap_or(0);
         let mut first = true;
         let mut page = Vec::with_capacity(limit);
         while leaf_index < self.leaves.len() && page.len() < limit {
@@ -1137,11 +2429,21 @@ impl<K: Clone + Ord, V: Clone> SnapshotDirectory<K, V> {
 pub struct ReadSnapshot {
     root: [u8; 32],
     frontier: ReplicaFrontier,
-    bodies: SnapshotDirectory<Arc<BodyKey>, SnapshotBody>,
+    /// Exact object/key closure for cold Atomic image inflation. Opening keys
+    /// are cloned capabilities pinned for this snapshot; key-source retirement
+    /// after publication cannot invalidate a cursor that already holds it.
+    resolver: Option<Arc<BodyImageResolver>>,
+    bodies: BodyDirectory,
     /// Exact schema membership, persistently shared across generations.
     /// Exec and World projections enter through this index rather than
     /// scanning the Space-wide Body map.
-    schema_bodies: imbl::OrdMap<(WorldId, SchemaId, u32), SnapshotDirectory<Arc<BodyKey>, ()>>,
+    schema_bodies:
+        imbl::OrdMap<(WorldId, SchemaId, u32), SnapshotDirectory<crate::body::BodyId, BodyIx>>,
+    /// Exact canonical payload bytes by readable source coordinate. This is
+    /// maintained with the same changed-Body delta as `schema_bodies`, so a
+    /// World build can be admitted from observed source size without scanning
+    /// or decoding every Body first.
+    schema_payload_bytes: imbl::OrdMap<(WorldId, SchemaId, u32), u64>,
     /// Content declarations by Body at this exact generation.
     ///
     /// Keeping this beside the persistent Body map is what lets the next
@@ -1178,16 +2480,182 @@ pub struct ReadGeneration {
     pub frontier: ReplicaFrontier,
 }
 
-type SchemaBodyIndex = imbl::OrdMap<(WorldId, SchemaId, u32), SnapshotDirectory<Arc<BodyKey>, ()>>;
+/// Immutable point reader for durable idempotency receipts.
+///
+/// The reader pins one journal commit point and performs one authenticated
+/// receipt-index path plus one bounded deferred-object read on a cold miss.
+/// It is owned and `Send + Sync`, so Runtime can place cold lookup on its
+/// blocking host lane without holding the Replica writer or reactor lock.
+#[derive(Clone)]
+pub struct ReceiptReader {
+    store: journal::Reader,
+    receipt_index_root: Option<IndexRef>,
+    cache: Arc<Mutex<ReceiptCache>>,
+    footprint: ReceiptFootprint,
+    sequence: u64,
+}
 
-fn insert_schema_body(index: &mut SchemaBodyIndex, key: Arc<BodyKey>, binding: &BodyBinding) {
+/// Result of one authenticated immutable receipt check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptCheck {
+    Replayed(RequestReceipt),
+    Absent(ReceiptAbsence),
+}
+
+/// Opaque proof that one exact idempotency scope was absent at a pinned
+/// journal commit point. Only Replica can inspect or mint its coordinates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptAbsence {
+    sequence: u64,
+    receipt_index_root: Option<IndexRef>,
+    scope: Vec<u8>,
+}
+
+/// Authenticated O(1) receipt-ledger admission metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiptFootprint {
+    pub count: u64,
+    pub material_bytes: u64,
+    pub cache_upper_bound: u64,
+    pub cold_lookup_transient_upper_bound: u64,
+}
+
+impl ReceiptReader {
+    /// The exact durable count/encoded-byte ledger plus conservative cache and
+    /// cold point-lookup memory bounds. This is read from authenticated
+    /// StoreMeta; it does not walk the receipt index.
+    pub const fn footprint(&self) -> ReceiptFootprint {
+        self.footprint
+    }
+
+    /// Authenticate replay/conflict/absence at this immutable commit point.
+    /// The absence proof lets the mutation path avoid repeating the cold index
+    /// read while still rejecting any intervening durable truth.
+    pub fn check_action(
+        &self,
+        space: &SpaceId,
+        world: &WorldId,
+        device: &mechanics::ids::DeviceId,
+        request: &[u8; 16],
+        payload_hash: &[u8; 32],
+    ) -> Result<ReceiptCheck, Failure> {
+        let scope = crate::receipt::scope_key(space, world, device, request);
+        match self.lookup_scope(&scope)? {
+            Some(receipt) if &receipt.payload_hash == payload_hash => {
+                Ok(ReceiptCheck::Replayed(receipt))
+            }
+            Some(_) => Err(Failure::RequestIdConflict),
+            None => Ok(ReceiptCheck::Absent(ReceiptAbsence {
+                sequence: self.sequence,
+                receipt_index_root: self.receipt_index_root,
+                scope,
+            })),
+        }
+    }
+
+    /// Look up one exact idempotency scope. Matching payload returns the
+    /// committed receipt; mismatching payload is a typed conflict; absence is
+    /// the only `Ok(None)` case.
+    pub fn lookup_action(
+        &self,
+        space: &SpaceId,
+        world: &WorldId,
+        device: &mechanics::ids::DeviceId,
+        request: &[u8; 16],
+        payload_hash: &[u8; 32],
+    ) -> Result<Option<RequestReceipt>, Failure> {
+        match self.check_action(space, world, device, request, payload_hash)? {
+            ReceiptCheck::Replayed(receipt) => Ok(Some(receipt)),
+            ReceiptCheck::Absent(_) => Ok(None),
+        }
+    }
+
+    fn lookup_scope(&self, scope: &[u8]) -> Result<Option<RequestReceipt>, Failure> {
+        if let Some(receipt) = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(scope)
+        {
+            return Ok(Some(receipt));
+        }
+        let value = crate::index::lookup(
+            &ReaderNodes(&self.store),
+            self.receipt_index_root,
+            &receipt_index_key(scope),
+        )
+        .map_err(|_| Failure::Integrity(Defect::Index))?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let indexed: IndexedReceipt =
+            postcard::from_bytes(&value).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+        if postcard::to_stdvec(&indexed).ok().as_deref() != Some(value.as_slice())
+            || indexed.scope.as_slice() != scope
+            || receipt_index_key(&indexed.scope) != receipt_index_key(scope)
+        {
+            return Err(Failure::Integrity(Defect::Index));
+        }
+        let bytes = self
+            .store
+            .read_deferred_object_bounded(&indexed.object, MAX_RECEIPT_OBJECT_BYTES)
+            .map_err(|failure| match failure {
+                journal::Failure::Integrity(defect) => Failure::Integrity(Defect::Store(defect)),
+                other => Failure::Durability(other),
+            })?;
+        let receipt = validate_receipt_material(scope, &bytes)?;
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(indexed.scope, receipt.clone(), indexed.object);
+        Ok(Some(receipt))
+    }
+}
+
+type SchemaBodyIndex =
+    imbl::OrdMap<(WorldId, SchemaId, u32), SnapshotDirectory<crate::body::BodyId, BodyIx>>;
+type SchemaPayloadIndex = imbl::OrdMap<(WorldId, SchemaId, u32), u64>;
+
+fn pin_body_image_resolver<'a>(
+    store: journal::Reader,
+    key_source: &Arc<dyn BodyKeySource>,
+    base: Option<&BodyImageResolver>,
+    materials: impl IntoIterator<Item = &'a CausalMaterial>,
+) -> Result<Arc<BodyImageResolver>, BodyImageFailure> {
+    let mut keys = base
+        .map(|resolver| resolver.keys.clone())
+        .unwrap_or_default();
+    for material in materials {
+        material.validate().map_err(|_| BodyImageFailure::Corrupt)?;
+        for reference in std::iter::once(&material.checkpoint).chain(&material.delta_tail) {
+            if keys.contains_key(&reference.epoch) {
+                continue;
+            }
+            let opening = key_source
+                .opening_key(&reference.epoch)
+                .ok_or(BodyImageFailure::KeyUnavailable)?;
+            keys.insert(reference.epoch, opening);
+        }
+    }
+    Ok(Arc::new(BodyImageResolver {
+        store: Mutex::new(store),
+        keys,
+    }))
+}
+
+fn insert_schema_body(
+    index: &mut SchemaBodyIndex,
+    body_ix: BodyIx,
+    key: &BodyKey,
+    binding: &BodyBinding,
+) {
     let coordinate = (
         key.world.clone(),
         binding.schema.clone(),
         binding.schema_version,
     );
     let mut keys = index.get(&coordinate).cloned().unwrap_or_default();
-    keys.insert(key, ());
+    keys.insert(key.body.clone(), body_ix);
     index.insert(coordinate, keys);
 }
 
@@ -1200,7 +2668,7 @@ fn remove_schema_body(index: &mut SchemaBodyIndex, key: &BodyKey, binding: &Body
     let Some(mut keys) = index.get(&coordinate).cloned() else {
         return;
     };
-    keys.remove(key);
+    keys.remove(&key.body);
     if keys.is_empty() {
         index.remove(&coordinate);
     } else {
@@ -1208,9 +2676,15 @@ fn remove_schema_body(index: &mut SchemaBodyIndex, key: &BodyKey, binding: &Body
     }
 }
 
-fn schema_body_index(bodies: &SnapshotDirectory<Arc<BodyKey>, SnapshotBody>) -> SchemaBodyIndex {
-    let mut grouped = BTreeMap::<(WorldId, SchemaId, u32), Vec<(Arc<BodyKey>, ())>>::new();
-    for (key, body) in bodies.iter() {
+fn schema_body_index(bodies: &BodyDirectory) -> SchemaBodyIndex {
+    let mut grouped = BTreeMap::<
+        (WorldId, SchemaId, u32),
+        SnapshotDirectoryBuilder<crate::body::BodyId, BodyIx>,
+    >::new();
+    for (body_ix, key, body) in bodies.iter_with_ix() {
+        if !body.image.is_readable() {
+            continue;
+        }
         grouped
             .entry((
                 key.world.clone(),
@@ -1218,12 +2692,57 @@ fn schema_body_index(bodies: &SnapshotDirectory<Arc<BodyKey>, SnapshotBody>) -> 
                 body.binding.schema_version,
             ))
             .or_default()
-            .push((key.clone(), ()));
+            .push(key.body.clone(), body_ix);
     }
     grouped
         .into_iter()
-        .map(|(coordinate, entries)| (coordinate, SnapshotDirectory::from_entries(entries)))
+        .map(|(coordinate, builder)| (coordinate, builder.finish()))
         .collect()
+}
+
+fn schema_payload_index(bodies: &BodyDirectory) -> SchemaPayloadIndex {
+    let mut bytes = SchemaPayloadIndex::new();
+    for (_, key, body) in bodies.iter_with_ix() {
+        if !body.image.is_readable() {
+            continue;
+        }
+        let coordinate = (
+            key.world.clone(),
+            body.binding.schema.clone(),
+            body.binding.schema_version,
+        );
+        let next = bytes
+            .get(&coordinate)
+            .copied()
+            .unwrap_or(0u64)
+            .saturating_add(body.plaintext_size);
+        bytes.insert(coordinate, next);
+    }
+    bytes
+}
+
+fn adjust_schema_payload(
+    index: &mut SchemaPayloadIndex,
+    key: &BodyKey,
+    body: &SnapshotBody,
+    add: bool,
+) {
+    let coordinate = (
+        key.world.clone(),
+        body.binding.schema.clone(),
+        body.binding.schema_version,
+    );
+    let current = index.get(&coordinate).copied().unwrap_or(0);
+    let next = if add {
+        current.saturating_add(body.plaintext_size)
+    } else {
+        current.saturating_sub(body.plaintext_size)
+    };
+    if next == 0 {
+        index.remove(&coordinate);
+    } else {
+        index.insert(coordinate, next);
+    }
 }
 
 impl ReadSnapshot {
@@ -1237,25 +2756,55 @@ impl ReadSnapshot {
     pub fn from_body_rows_for_test(
         rows: impl IntoIterator<Item = (BodyKey, BodyBinding, Vec<u8>, fabric::BodySnapshot)>,
     ) -> Self {
-        let mut entries = Vec::new();
+        let mut builder = BodyDirectoryBuilder::default();
         for (key, binding, stamp, body) in rows {
-            entries.push((
-                Arc::new(key),
-                SnapshotBody {
-                    binding,
-                    stamp,
-                    body,
-                },
-            ));
+            let stamp = snapshot_stamp(&stamp);
+            let snapshot = SnapshotBody::resident(&key, binding, stamp, body);
+            builder.push(Arc::new(key), snapshot);
         }
-        let bodies = SnapshotDirectory::from_entries(entries);
+        let bodies = builder.finish();
         let schema_bodies = schema_body_index(&bodies);
+        let schema_payload_bytes = schema_payload_index(&bodies);
         let retained_bytes_estimate = snapshot_directory_retained_estimate(&bodies);
         Self {
             root: [0u8; 32],
             frontier: ReplicaFrontier::EMPTY,
+            resolver: None,
             bodies,
             schema_bodies,
+            schema_payload_bytes,
+            declared_content: imbl::OrdMap::new(),
+            content: imbl::OrdMap::new(),
+            retained_bytes_estimate,
+        }
+    }
+
+    /// Construct the production cold-image directory shape for residency
+    /// fixtures. Unlike `from_body_rows_for_test`, no canonical Body payload is
+    /// retained: each row owns only the signed causal closure and authenticated
+    /// plaintext-size coordinate used by the real durable read path.
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    #[doc(hidden)]
+    pub fn from_cold_body_rows_for_test(
+        rows: impl IntoIterator<Item = (BodyKey, BodyBinding, Vec<u8>, CausalMaterial)>,
+    ) -> Self {
+        let mut builder = BodyDirectoryBuilder::default();
+        for (key, binding, stamp, material) in rows {
+            let stamp = snapshot_stamp(&stamp);
+            let snapshot = SnapshotBody::cold(&key, binding, stamp, Arc::new(material));
+            builder.push(Arc::new(key), snapshot);
+        }
+        let bodies = builder.finish();
+        let schema_bodies = schema_body_index(&bodies);
+        let schema_payload_bytes = schema_payload_index(&bodies);
+        let retained_bytes_estimate = snapshot_directory_retained_estimate(&bodies);
+        Self {
+            root: [0u8; 32],
+            frontier: ReplicaFrontier::EMPTY,
+            resolver: None,
+            bodies,
+            schema_bodies,
+            schema_payload_bytes,
             declared_content: imbl::OrdMap::new(),
             content: imbl::OrdMap::new(),
             retained_bytes_estimate,
@@ -1270,8 +2819,132 @@ impl ReadSnapshot {
         self.frontier
     }
 
+    pub fn body_image_id(&self, body: BodyIx) -> Option<BodyImageId> {
+        Some(self.bodies.slot(body)?.value.image_id)
+    }
+
+    pub fn body_image_plaintext_bytes(&self, body: BodyIx) -> Option<u64> {
+        Some(self.bodies.slot(body)?.value.plaintext_size)
+    }
+
+    pub fn body_image_bounds(&self, body: BodyIx) -> Option<BodyImageBounds> {
+        let body = &self.bodies.slot(body)?.value;
+        let material = body.image.material();
+        let protected_bytes = material.map_or(0, |material| {
+            std::iter::once(&material.checkpoint)
+                .chain(&material.delta_tail)
+                .fold(0u64, |bytes, reference| bytes.saturating_add(reference.len))
+        });
+        let largest_protected = material.map_or(0, |material| {
+            std::iter::once(&material.checkpoint)
+                .chain(&material.delta_tail)
+                .map(|reference| reference.len)
+                .max()
+                .unwrap_or(0)
+        });
+        // A fresh Engine can briefly hold the prior Atomic Arc, the opened
+        // artifact Vec, and its replacement Arc at once. Protected envelope
+        // bytes are priced separately above; this bound covers decoded
+        // working state and fixed Engine/import bookkeeping.
+        let decoded_upper_bound = if material.is_some() {
+            body.plaintext_size
+                .max(largest_protected)
+                .saturating_mul(3)
+                .saturating_add(64 * 1024)
+        } else {
+            body.plaintext_size
+        };
+        Some(BodyImageBounds {
+            protected_bytes,
+            decoded_upper_bound,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn body_image_artifacts_for_test(&self, body: BodyIx) -> Vec<[u8; 32]> {
+        self.bodies
+            .slot(body)
+            .and_then(|slot| slot.value.image.material())
+            .map(|material| {
+                std::iter::once(&material.checkpoint)
+                    .chain(&material.delta_tail)
+                    .map(|reference| reference.hash)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn body_presence(&self, key: &BodyKey) -> BodyImagePresence {
+        let Some(body) = self.bodies.body_ix(key) else {
+            return BodyImagePresence::Absent;
+        };
+        let Some(slot) = self.bodies.slot(body) else {
+            return BodyImagePresence::Absent;
+        };
+        if slot.value.image.is_readable() {
+            BodyImagePresence::Readable {
+                body,
+                image: slot.value.image_id,
+            }
+        } else {
+            BodyImagePresence::Opaque {
+                image: slot.value.image_id,
+            }
+        }
+    }
+
+    /// Resolve one exact Body slot without populating a cache. The returned
+    /// image has passed content-address, epoch, AEAD, canonical artifact,
+    /// final-Version, mutation-model, size-hint, and immutable-address checks.
+    pub fn resolve_body_image(
+        &self,
+        body: BodyIx,
+    ) -> Result<Arc<fabric::BodySnapshot>, BodyImageFailure> {
+        let slot = self
+            .bodies
+            .slot(body)
+            .ok_or(BodyImageFailure::MaterialUnavailable)?;
+        match &slot.value.image {
+            SnapshotImage::Resident(snapshot) => Ok(Arc::new(snapshot.clone())),
+            SnapshotImage::Pending { hot, material } => {
+                if let Some(snapshot) = hot
+                    .lock()
+                    .map_err(|_| BodyImageFailure::MaterialUnavailable)?
+                    .as_ref()
+                    .cloned()
+                {
+                    return Ok(snapshot);
+                }
+                self.resolver
+                    .as_ref()
+                    .ok_or(BodyImageFailure::MaterialUnavailable)?
+                    .resolve(&slot.key, &slot.value.binding, material)
+            }
+            SnapshotImage::Cold(material) => self
+                .resolver
+                .as_ref()
+                .ok_or(BodyImageFailure::MaterialUnavailable)?
+                .resolve(&slot.key, &slot.value.binding, material),
+            SnapshotImage::Opaque(_) => Err(BodyImageFailure::Opaque),
+        }
+    }
+
+    fn resolve_body_key(
+        &self,
+        key: &BodyKey,
+    ) -> Result<Arc<fabric::BodySnapshot>, BodyImageFailure> {
+        let body = self
+            .bodies
+            .body_ix(key)
+            .ok_or(BodyImageFailure::MaterialUnavailable)?;
+        self.resolve_body_image(body)
+    }
+
+    /// Lossy compatibility read. Exact callers must use `body_presence` and
+    /// `resolve_body_image`; only those APIs preserve absence versus opaque,
+    /// key-unavailable, corrupt, capacity, and unavailable-material outcomes.
     pub fn read(&self, key: &BodyKey) -> Option<Vec<u8>> {
-        self.bodies.get(key)?.body.read()
+        self.resolve_body_key(key).ok()?.read()
     }
 
     pub fn read_collaborative(
@@ -1281,18 +2954,59 @@ impl ReadSnapshot {
         let Some(body) = self.bodies.get(key) else {
             return Err(fabric::projection::Failure::NotCollaborative);
         };
-        body.body.read_collaborative()
+        match &body.image {
+            SnapshotImage::Resident(snapshot) => snapshot.read_collaborative(),
+            SnapshotImage::Cold(_) | SnapshotImage::Pending { .. } => self
+                .resolve_body_key(key)
+                .map_err(|_| fabric::projection::Failure::NotCollaborative)?
+                .read_collaborative(),
+            SnapshotImage::Opaque(_) => Err(fabric::projection::Failure::NotCollaborative),
+        }
     }
 
     pub fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
-        self.bodies.get(key)?.body.version().ok()
+        let body = self.bodies.get(key)?;
+        match &body.image {
+            SnapshotImage::Resident(snapshot) => snapshot.version().ok(),
+            SnapshotImage::Cold(material) | SnapshotImage::Pending { material, .. } => {
+                Some(material.version.clone())
+            }
+            SnapshotImage::Opaque(_) => None,
+        }
+    }
+
+    /// Mint an anchor from a caller-supplied, already-governed exact image.
+    /// This performs no object I/O and does not populate a cache; Runtime can
+    /// keep its cache pin while Replica alone derives the private Fabric key.
+    pub fn anchor_in_resolved_image(
+        key: &BodyKey,
+        image: &fabric::BodySnapshot,
+        path: &str,
+        position: u64,
+    ) -> Result<Option<fabric::Anchor>, fabric::projection::Failure> {
+        image.try_anchor(&fabric_key(key), path, position).map(Some)
+    }
+
+    /// Resolve an anchor from a caller-supplied governed exact image without
+    /// resolving material again or collapsing import/schema failures to drift.
+    pub fn resolve_anchor_in_resolved_image(
+        key: &BodyKey,
+        image: &fabric::BodySnapshot,
+        anchor: &fabric::Anchor,
+    ) -> Result<fabric::AnchorResolution, fabric::projection::Failure> {
+        image.try_resolve(&fabric_key(key), anchor)
     }
 
     pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
-        self.bodies
-            .get(key)?
-            .body
-            .anchor(&fabric_key(key), path, position)
+        let body = self.bodies.get(key)?;
+        match &body.image {
+            SnapshotImage::Resident(snapshot) => snapshot.anchor(&fabric_key(key), path, position),
+            SnapshotImage::Cold(_) | SnapshotImage::Pending { .. } => self
+                .resolve_body_key(key)
+                .ok()?
+                .anchor(&fabric_key(key), path, position),
+            SnapshotImage::Opaque(_) => None,
+        }
     }
 
     pub fn resolve_anchor(
@@ -1302,7 +3016,16 @@ impl ReadSnapshot {
     ) -> fabric::AnchorResolution {
         self.bodies
             .get(key)
-            .map(|body| body.body.resolve(&fabric_key(key), anchor))
+            .and_then(|body| match &body.image {
+                SnapshotImage::Resident(snapshot) => {
+                    Some(snapshot.resolve(&fabric_key(key), anchor))
+                }
+                SnapshotImage::Cold(_) | SnapshotImage::Pending { .. } => self
+                    .resolve_body_key(key)
+                    .ok()
+                    .map(|snapshot| snapshot.resolve(&fabric_key(key), anchor)),
+                SnapshotImage::Opaque(_) => None,
+            })
             .unwrap_or(fabric::AnchorResolution::Drifted)
     }
 
@@ -1311,17 +3034,138 @@ impl ReadSnapshot {
     }
 
     pub fn body_stamp(&self, key: &BodyKey) -> Option<Vec<u8>> {
-        self.bodies.get(key).map(|body| body.stamp.clone())
+        self.bodies.get(key).map(|body| body.stamp.to_vec())
+    }
+
+    /// Canonical payload bytes retained by one readable Body image.
+    pub fn body_payload_bytes(&self, key: &BodyKey) -> Option<u64> {
+        self.bodies.get(key).map(|body| body.plaintext_size)
+    }
+
+    /// Drop pre-durability hot fallbacks after the exact candidate is committed
+    /// and its Corpus has been validated. Physical cooling changes no semantic
+    /// publication coordinate; later reads resolve the same signed closure.
+    pub fn release_pending_body_images(&self, changed: &[BodyKey]) -> usize {
+        let mut released = 0usize;
+        for key in changed {
+            let Some(body) = self.bodies.get(key) else {
+                continue;
+            };
+            let SnapshotImage::Pending { hot, .. } = &body.image else {
+                continue;
+            };
+            if hot.lock().is_ok_and(|mut hot| hot.take().is_some()) {
+                released = released.saturating_add(1);
+            }
+        }
+        released
     }
 
     pub fn body_keys(&self) -> Vec<BodyKey> {
         self.bodies.keys().map(|key| key.as_ref().clone()).collect()
     }
 
+    /// Resolve one durable Body key to its stable slot in this publication.
+    pub fn body_ix(&self, key: &BodyKey) -> Option<BodyIx> {
+        self.bodies.body_ix(key)
+    }
+
+    /// Resolve a publication-local slot back to its durable Body key.
+    pub fn body_key(&self, body: BodyIx) -> Option<&BodyKey> {
+        self.bodies.slot(body).map(|slot| slot.key.as_ref())
+    }
+
     /// Number of readable Bodies in this immutable generation, without
     /// cloning their keys or walking schema membership.
     pub fn body_count(&self) -> u64 {
         u64::try_from(self.bodies.len()).unwrap_or(u64::MAX)
+    }
+
+    /// Number of readable Bodies at one exact World/schema/version coordinate.
+    ///
+    /// This reads compact schema-posting metadata and never walks the primary
+    /// Body directory. It is the admission-count seam used before invoking a
+    /// World extractor for a publication build.
+    pub fn body_count_with_schema_version(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        version: u32,
+    ) -> u64 {
+        self.schema_bodies
+            .get(&(world.clone(), schema.clone(), version))
+            .map(|bodies| u64::try_from(bodies.len()).unwrap_or(u64::MAX))
+            .unwrap_or(0)
+    }
+
+    /// Exact canonical readable payload bytes at one source coordinate.
+    pub fn body_payload_bytes_with_schema_version(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        version: u32,
+    ) -> u64 {
+        self.schema_payload_bytes
+            .get(&(world.clone(), schema.clone(), version))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Portable commitment to the exact readable source set used by a World
+    /// corpus.
+    ///
+    /// The digest is independent of publication-local BodyIx allocation. It
+    /// commits sorted source coordinates and, for every readable source Body,
+    /// its durable identity, immutable binding, and exact version stamp. A
+    /// local corpus image can therefore be reused across process activations
+    /// only when the portable PublicationId and this digest both match.
+    pub fn source_fingerprint(&self, world: &WorldId, sources: &[(SchemaId, u32)]) -> [u8; 32] {
+        fn field(hasher: &mut blake3::Hasher, value: &[u8]) {
+            hasher.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(value);
+        }
+
+        let mut sources = sources.to_vec();
+        sources.sort();
+        sources.dedup();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"lait/read-snapshot/source-fingerprint/1\0");
+        field(&mut hasher, world.as_bytes());
+        hasher.update(
+            &u64::try_from(sources.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for (schema, version) in sources {
+            field(&mut hasher, schema.as_bytes());
+            hasher.update(&version.to_be_bytes());
+            let members = self
+                .schema_bodies
+                .get(&(world.clone(), schema.clone(), version));
+            hasher.update(
+                &members
+                    .map(|members| u64::try_from(members.len()).unwrap_or(u64::MAX))
+                    .unwrap_or(0)
+                    .to_be_bytes(),
+            );
+            if let Some(members) = members {
+                for (_, body_ix) in members.iter() {
+                    let Some(slot) = self.bodies.slot(*body_ix) else {
+                        // A malformed in-memory directory cannot be produced
+                        // by constructors, but must not alias a valid digest.
+                        hasher.update(b"missing-body-slot");
+                        continue;
+                    };
+                    hasher.update(&slot.key.body.as_bytes());
+                    field(&mut hasher, slot.value.binding.schema.as_bytes());
+                    hasher.update(&slot.value.binding.schema_version.to_be_bytes());
+                    field(&mut hasher, slot.value.binding.encoding.as_bytes());
+                    hasher.update(&[slot.value.binding.mutation_model]);
+                    hasher.update(&slot.value.stamp);
+                }
+            }
+        }
+        *hasher.finalize().as_bytes()
     }
 
     /// Conservative retained-read-image bytes for O(1) cursor admission.
@@ -1338,7 +3182,11 @@ impl ReadSnapshot {
     ) -> Vec<BodyKey> {
         self.schema_bodies
             .get(&(world.clone(), schema.clone(), version))
-            .map(|keys| keys.keys().map(|key| key.as_ref().clone()).collect())
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|(_, body_ix)| self.body_key(*body_ix).cloned())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1350,7 +3198,10 @@ impl ReadSnapshot {
             .filter(|((candidate_world, candidate_schema, _), _)| {
                 candidate_world == world && candidate_schema == schema
             })
-            .flat_map(|(_, keys)| keys.keys().map(|key| key.as_ref().clone()))
+            .flat_map(|(_, keys)| {
+                keys.iter()
+                    .filter_map(|(_, body_ix)| self.body_key(*body_ix).cloned())
+            })
             .collect()
     }
 
@@ -1374,8 +3225,13 @@ impl ReadSnapshot {
             .filter(|((candidate_world, candidate_schema, _), _)| {
                 candidate_world == world && candidate_schema == schema
             })
-            .flat_map(|(_, keys)| keys.keys_page_after(after, limit))
-            .map(|key| key.as_ref().clone())
+            .flat_map(|(_, keys)| {
+                let after_body = after.map(|key| &key.body);
+                keys.keys_page_after(after_body, limit)
+                    .into_iter()
+                    .filter_map(|body_id| keys.get(&body_id).copied())
+                    .filter_map(|body_ix| self.body_key(body_ix).cloned())
+            })
             .collect::<Vec<_>>();
         candidates.sort();
         candidates.dedup();
@@ -1392,7 +3248,7 @@ impl ReadSnapshot {
 }
 
 impl GenerationReader {
-    fn generation_delta(&self, root: &[u8; 32]) -> Result<Option<GenerationDelta>, Failure> {
+    fn indexed_generation(&self, root: &[u8; 32]) -> Result<Option<IndexedGeneration>, Failure> {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
@@ -1408,9 +3264,56 @@ impl GenerationReader {
         let indexed: IndexedGeneration = postcard::from_bytes(&value).map_err(|error| {
             integrity_cause(Defect::Encoding, "decode durable generation index", error)
         })?;
-        if &indexed.root != root {
+        if &indexed.root != root
+            || indexed.object.len == 0
+            || indexed.footprint.reconstruction_depth == 0
+            || postcard::to_stdvec(&indexed).ok().as_deref() != Some(value.as_slice())
+        {
             return Err(Failure::Integrity(Defect::Encoding));
         }
+        indexed.footprint.validate()?;
+        Ok(Some(indexed))
+    }
+
+    /// Return authenticated admission metadata for one exact historical root.
+    ///
+    /// The lookup traverses only the persistent generation index. It does not
+    /// read the generation delta, open a causal artifact, or reconstruct a
+    /// Body, so callers can reserve the exact historical snapshot and
+    /// extractor envelope before starting size-proportional work.
+    pub fn generation_footprint(
+        &self,
+        root: &[u8; 32],
+    ) -> Result<Option<GenerationFootprint>, Failure> {
+        Ok(self
+            .indexed_generation(root)?
+            .map(|indexed| indexed.footprint))
+    }
+
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    #[doc(hidden)]
+    pub fn generation_delta_object_for_test(
+        &self,
+        root: &[u8; 32],
+    ) -> Result<Option<([u8; 32], u64)>, Failure> {
+        Ok(self
+            .indexed_generation(root)?
+            .map(|indexed| (indexed.object.hash, indexed.object.len)))
+    }
+
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    #[doc(hidden)]
+    pub fn generation_index_root_for_test(&self) -> Option<[u8; 32]> {
+        self.generation_index_root.map(|root| root.hash)
+    }
+
+    fn generation_delta(&self, root: &[u8; 32]) -> Result<Option<GenerationDelta>, Failure> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        let Some(indexed) = self.indexed_generation(root)? else {
+            return Ok(None);
+        };
         let bytes = store.read_object(&indexed.object).map_err(|error| {
             integrity_cause(Defect::Encoding, "read durable generation delta", error)
         })?;
@@ -1434,6 +3337,9 @@ impl GenerationReader {
         })?;
         let epoch = mechanics::authorization::body_epoch_id(&envelope)
             .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
+        if epoch != reference.epoch {
+            return Err(Failure::Integrity(Defect::CorruptMaterial));
+        }
         let opening = self
             .keys
             .as_ref()
@@ -1485,10 +3391,21 @@ impl GenerationReader {
         if self.current.root == *root {
             return Ok(Some((*self.current).clone()));
         }
+        let expected_depth = match self.indexed_generation(root)? {
+            Some(indexed) => indexed.footprint.reconstruction_depth,
+            None => return Ok(None),
+        };
         let mut cursor = *root;
         let mut seen = BTreeSet::new();
         let mut deltas = Vec::new();
         loop {
+            if deltas.len()
+                >= usize::try_from(expected_depth)
+                    .unwrap_or(usize::MAX)
+                    .min(usize::try_from(MAX_GENERATION_RECONSTRUCTION_DEPTH).unwrap_or(usize::MAX))
+            {
+                return Err(Failure::Integrity(Defect::Encoding));
+            }
             if !seen.insert(cursor) {
                 return Err(Failure::Integrity(Defect::Encoding));
             }
@@ -1502,30 +3419,65 @@ impl GenerationReader {
             };
             cursor = parent;
         }
+        if deltas.len() != usize::try_from(expected_depth).unwrap_or(usize::MAX) {
+            return Err(Failure::Integrity(Defect::Encoding));
+        }
         let frontier = deltas
             .first()
             .map(|delta| delta.frontier)
             .ok_or(Failure::Integrity(Defect::Encoding))?;
-        let mut bodies = SnapshotDirectory::default();
-        let mut resolved = BTreeSet::new();
+        // A hot Body may occur in many deltas between the target and its
+        // baseline. Only the first occurrence is visible at the requested
+        // generation. Selecting it before pinning keys avoids retaining or
+        // requiring superseded key epochs and causal closures.
+        let mut selected = BTreeMap::<BodyKey, &ArchivedBody>::new();
         for delta in &deltas {
             for archived in &delta.changed {
-                if !resolved.insert(archived.key.clone()) {
-                    continue;
-                }
-                if let (Some(binding), Some(material)) = (&archived.binding, &archived.material) {
-                    let body = self.body_from_causal_material(&archived.key, material)?;
-                    bodies.insert(
-                        Arc::new(archived.key.clone()),
-                        SnapshotBody {
-                            binding: binding.clone(),
-                            stamp: archived.stamp.clone(),
-                            body,
-                        },
-                    );
-                }
+                selected.entry(archived.key.clone()).or_insert(archived);
             }
         }
+        let cold_materials = selected.values().filter_map(|archived| {
+            archived
+                .present
+                .then_some(())
+                .filter(|_| archived.interpreted)
+                .and_then(|_| archived.binding.as_ref())
+                .and(archived.material.as_deref())
+        });
+        let resolver = match (&self.store, &self.keys) {
+            (Some(store), Some(keys)) => Some(
+                pin_body_image_resolver(store.clone(), keys, None, cold_materials)
+                    .map_err(|_| Failure::Integrity(Defect::MissingMaterial))?,
+            ),
+            _ => None,
+        };
+        let mut bodies = BodyDirectory::default();
+        for archived in selected.values() {
+            if !archived.present {
+                continue;
+            }
+            let binding = archived
+                .binding
+                .as_ref()
+                .ok_or(Failure::Integrity(Defect::Encoding))?;
+            let stamp = snapshot_stamp(&archived.stamp);
+            let body = if !archived.interpreted {
+                SnapshotBody::opaque(
+                    &archived.key,
+                    binding.clone(),
+                    stamp,
+                    archived.material.clone(),
+                )
+            } else {
+                let material = archived
+                    .material
+                    .as_ref()
+                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                SnapshotBody::cold(&archived.key, binding.clone(), stamp, material.clone())
+            };
+            bodies.insert(Arc::new(archived.key.clone()), body);
+        }
+        drop(selected);
         let mut content = imbl::OrdMap::new();
         for delta in deltas.into_iter().rev() {
             for descriptor in delta.descriptors {
@@ -1539,7 +3491,9 @@ impl GenerationReader {
         Ok(Some(ReadSnapshot {
             root: *root,
             frontier,
+            resolver,
             schema_bodies: schema_body_index(&bodies),
+            schema_payload_bytes: schema_payload_index(&bodies),
             bodies,
             declared_content: imbl::OrdMap::new(),
             content,
@@ -1565,6 +3519,52 @@ fn fabric_key(key: &BodyKey) -> Key {
     h.update(&[0x00]);
     h.update(&key.body.as_bytes());
     Key::from_bytes(h.finalize().as_bytes().to_vec())
+}
+
+fn immutable_key_matches(
+    key: &BodyKey,
+    schema: &SchemaId,
+    schema_version: u32,
+    encoding: &EncodingId,
+    canonical_value: &[u8],
+) -> bool {
+    crate::body::immutable_body_id(
+        &key.world,
+        schema,
+        schema_version,
+        encoding,
+        canonical_value,
+    ) == key.body
+}
+
+fn is_atomic_mutation(model: u8) -> bool {
+    matches!(model, MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC)
+}
+
+/// Prove that an interpreted immutable descriptor contains an atomic value at
+/// the one address that value is allowed to occupy. This is deliberately
+/// repeated at every trust transition (Contact, opaque upgrade, and reopen),
+/// rather than relying on the path that originally retained the bytes.
+fn validate_immutable_proof(
+    key: &BodyKey,
+    descriptor: &Descriptor,
+    proof: &Engine,
+) -> Result<(), Failure> {
+    if descriptor.mutation_model != MUTATION_IMMUTABLE_ATOMIC {
+        return Ok(());
+    }
+    let value = proof
+        .read(&fabric_key(key))
+        .ok_or(Failure::ImmutableConflict)?;
+    immutable_key_matches(
+        key,
+        &descriptor.schema,
+        descriptor.schema_version,
+        &descriptor.encoding,
+        &value,
+    )
+    .then_some(())
+    .ok_or(Failure::ImmutableConflict)
 }
 
 /// Advance the Replica frontier from a commit's causal evidence.
@@ -1690,55 +3690,108 @@ fn operations_digest(ops: &[(BodyKey, Op)]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-impl PreparedAction<'_> {
+impl PreparedAction {
+    #[cfg(test)]
+    pub(crate) fn context_cardinality_for_test(&self) -> (usize, usize) {
+        let changed = match self.state.as_ref().expect("prepared action retains state") {
+            PreparedActionState::Noop { .. } => 0,
+            PreparedActionState::Mutation { data, .. } => data.new_records.len(),
+        };
+        (changed, self.snapshot.declaration_counts.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn simulate_rollback_poison_for_test(&self) {
+        self.rollback_poisoned.store(true, Ordering::Release);
+    }
+
+    fn content_descriptor(&self, id: &[u8; 32]) -> Option<crate::content::ContentDescriptor> {
+        let store = self.snapshot.durable.as_ref()?;
+        let value = crate::index::lookup(
+            &ReaderNodes(store),
+            self.snapshot.content_index_root,
+            &crate::manifest::content_index_key(id),
+        )
+        .ok()??;
+        crate::content::ContentDescriptor::decode_canonical(&value).ok()
+    }
+
     /// The receipt that will become authoritative if this candidate is
     /// finalized.
-    #[allow(
-        clippy::expect_used,
-        reason = "PreparedAction keeps state until finalize or drop"
-    )]
-    pub fn receipt(&self) -> &RequestReceipt {
-        match self.state.as_ref().expect("prepared action retains state") {
-            PreparedActionState::Noop { receipt } => receipt,
-            PreparedActionState::Mutation { data, .. } => &data.receipt,
+    pub fn receipt(&self) -> Result<&RequestReceipt, Failure> {
+        match self
+            .state
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?
+        {
+            PreparedActionState::Noop { receipt } => Ok(receipt),
+            PreparedActionState::Mutation { data, .. } => Ok(&data.receipt),
         }
     }
 
     /// The exact read coordinate the durable finalize will publish.
-    #[allow(
-        clippy::expect_used,
-        reason = "PreparedAction keeps state until finalize or drop"
-    )]
-    pub fn candidate_root(&self) -> [u8; 32] {
-        match self.state.as_ref().expect("prepared action retains state") {
-            PreparedActionState::Noop { .. } => {
-                let root = self.replica.manifest_root();
-                if root == crate::transaction::NO_PARENT_ROOT {
-                    self.replica.frontier.root
-                } else {
-                    root
-                }
-            }
-            PreparedActionState::Mutation { data, .. } => data.candidate_root,
+    pub fn candidate_root(&self) -> Result<[u8; 32], Failure> {
+        match self
+            .state
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?
+        {
+            PreparedActionState::Noop { .. } => Ok(self.parent_root),
+            PreparedActionState::Mutation { data, .. } => Ok(data.candidate_root),
         }
+    }
+
+    /// Conservative additional read-image bytes before freezing this
+    /// candidate over `prior`.
+    ///
+    /// This walks only the prepared change set and its already-built causal
+    /// descriptors. It never exports or inflates a Body. The price covers the
+    /// cloned 256-entry Body/schema directory leaves, their persistent-vector
+    /// spines, descriptor paths, and a defensive bound over newly referenced
+    /// protected material. Unchanged snapshot pages remain shared.
+    pub fn candidate_snapshot_delta_bytes_estimate(
+        &self,
+        prior: &ReadSnapshot,
+    ) -> Result<u64, Failure> {
+        if prior.root != self.parent_root || prior.frontier != self.parent_frontier {
+            return Err(Failure::ParentManifestUnavailable);
+        }
+        let PreparedActionState::Mutation { data, .. } = self
+            .state
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?
+        else {
+            return Ok(0);
+        };
+        Ok(data.new_records.values().fold(0u64, |total, record| {
+            let material = record
+                .as_ref()
+                .filter(|record| record.interpreted)
+                .and_then(|record| record.causal.as_ref())
+                .map(|material| {
+                    std::iter::once(&material.checkpoint)
+                        .chain(&material.delta_tail)
+                        .fold(0u64, |bytes, artifact| bytes.saturating_add(artifact.len))
+                        .saturating_mul(2)
+                        .saturating_add(64 * 1024)
+                })
+                .unwrap_or(0);
+            total.saturating_add(128 * 1024).saturating_add(material)
+        }))
     }
 
     /// Freeze the prepared candidate by replacing only touched persistent-map
     /// paths. `prior` must be the Replica's current committed generation; a
     /// historical image is never silently advanced as though it were current.
     pub fn candidate_snapshot(&self, prior: &ReadSnapshot) -> Result<ReadSnapshot, Failure> {
-        let committed_root = {
-            let root = self.replica.manifest_root();
-            if root == crate::transaction::NO_PARENT_ROOT {
-                self.replica.frontier.root
-            } else {
-                root
-            }
-        };
-        if prior.root != committed_root || prior.frontier != self.replica.frontier {
+        if prior.root != self.parent_root || prior.frontier != self.parent_frontier {
             return Err(Failure::ParentManifestUnavailable);
         }
-        let Some(PreparedActionState::Mutation { data, .. }) = self.state.as_ref() else {
+        let PreparedActionState::Mutation { data, .. } = self
+            .state
+            .as_ref()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?
+        else {
             return Ok(prior.clone());
         };
         let PreparedMutation {
@@ -1749,39 +3802,96 @@ impl PreparedAction<'_> {
             ..
         } = data;
 
+        let resolver = match (&self.snapshot.durable, &self.snapshot.keys) {
+            (Some(store), Some(keys)) => {
+                let materials = new_records.values().filter_map(|record| {
+                    record
+                        .as_ref()
+                        .filter(|record| record.interpreted)
+                        .and_then(|record| record.causal.as_deref())
+                });
+                Some(
+                    pin_body_image_resolver(
+                        store.clone(),
+                        keys,
+                        prior.resolver.as_deref(),
+                        materials,
+                    )
+                    .map_err(|_| Failure::BodyKeyUnavailable)?,
+                )
+            }
+            _ => prior.resolver.clone(),
+        };
+
         let mut bodies = prior.bodies.clone();
         let mut schema_bodies = prior.schema_bodies.clone();
+        let mut schema_payload_bytes = prior.schema_payload_bytes.clone();
         let mut retained_bytes_estimate = prior.retained_bytes_estimate;
         for (key, record) in new_records {
             let shared_key = if let Some((held, prior_body)) = prior.bodies.get_key_value(key) {
                 retained_bytes_estimate = retained_bytes_estimate
                     .saturating_sub(snapshot_body_retained_estimate(prior_body));
-                remove_schema_body(&mut schema_bodies, key, &prior_body.binding);
+                if prior_body.image.is_readable() {
+                    remove_schema_body(&mut schema_bodies, key, &prior_body.binding);
+                    adjust_schema_payload(&mut schema_payload_bytes, key, prior_body, false);
+                }
                 held.clone()
             } else {
                 Arc::new(key.clone())
             };
-            let frozen = record.as_ref().filter(|record| record.interpreted).map(
-                |record| -> Result<SnapshotBody, Failure> {
-                    let body = self
-                        .replica
-                        .fabric
+            let frozen = record
+                .as_ref()
+                .map(|record| -> Result<SnapshotBody, Failure> {
+                    let stamp = snapshot_stamp(&record_stamp(record));
+                    if !record.interpreted {
+                        return Ok(SnapshotBody::opaque(
+                            key,
+                            record.binding.clone(),
+                            stamp,
+                            record.causal.clone(),
+                        ));
+                    }
+                    let body = lock_fabric(&self.fabric)
                         .body_snapshot(&fabric_key(key))
                         .map_err(Failure::Engine)?
                         .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-                    Ok(SnapshotBody {
-                        binding: record.binding.clone(),
-                        stamp: record_stamp(record),
-                        body,
-                    })
-                },
-            );
+                    if self.snapshot.durable.is_some() {
+                        let material = record
+                            .causal
+                            .clone()
+                            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                        Ok(SnapshotBody::pending(
+                            key,
+                            record.binding.clone(),
+                            stamp,
+                            material,
+                            body,
+                        ))
+                    } else {
+                        Ok(SnapshotBody::resident(
+                            key,
+                            record.binding.clone(),
+                            stamp,
+                            body,
+                        ))
+                    }
+                });
             match frozen.transpose()? {
                 Some(body) => {
                     retained_bytes_estimate = retained_bytes_estimate
                         .saturating_add(snapshot_body_retained_estimate(&body));
-                    insert_schema_body(&mut schema_bodies, shared_key.clone(), &body.binding);
+                    let binding = body.binding.clone();
+                    let readable = body.image.is_readable();
+                    if readable {
+                        adjust_schema_payload(&mut schema_payload_bytes, key, &body, true);
+                    }
                     bodies.insert(shared_key, body);
+                    if readable {
+                        let body_ix = bodies
+                            .body_ix(key)
+                            .ok_or(Failure::Integrity(Defect::Encoding))?;
+                        insert_schema_body(&mut schema_bodies, body_ix, key, &binding);
+                    }
                 }
                 None => {
                     bodies.remove(key);
@@ -1796,11 +3906,10 @@ impl PreparedAction<'_> {
         let mut content = prior.content.clone();
         let mut count_deltas: BTreeMap<[u8; 32], (u64, u64)> = BTreeMap::new();
         for (key, record) in new_records {
-            let old = self
-                .replica
+            let old = prior
                 .declared_content
                 .get(key)
-                .map(Vec::as_slice)
+                .map(|refs| refs.as_ref())
                 .unwrap_or_default();
             let next = if record.is_none() {
                 &[][..]
@@ -1823,8 +3932,8 @@ impl PreparedAction<'_> {
         }
         for (id, (removed, added)) in count_deltas {
             let current = self
-                .replica
-                .declared_content_counts
+                .snapshot
+                .declaration_counts
                 .get(&id)
                 .copied()
                 .unwrap_or(0);
@@ -1833,8 +3942,7 @@ impl PreparedAction<'_> {
                 content.remove(&id);
             } else if !content.contains_key(&id) {
                 let descriptor = self
-                    .replica
-                    .content_descriptor(&crate::content::ContentRef { content_id: id })
+                    .content_descriptor(&id)
                     .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
                 content.insert(id, descriptor);
             }
@@ -1843,8 +3951,10 @@ impl PreparedAction<'_> {
         Ok(ReadSnapshot {
             root: *candidate_root,
             frontier: *next_frontier,
+            resolver,
             bodies,
             schema_bodies,
+            schema_payload_bytes,
             declared_content,
             content,
             retained_bytes_estimate,
@@ -1854,51 +3964,170 @@ impl PreparedAction<'_> {
     /// Durably publish the prepared transaction, then accept its live Fabric
     /// state. The caller may install the already-built read image only after
     /// this succeeds.
-    pub fn finalize(mut self, ctx: &CommitContext<'_>) -> Result<RequestReceipt, Failure> {
-        let state = self.state.take().ok_or(Failure::Poisoned)?;
-        self.replica.finalize_prepared_action(ctx, state)
+    pub fn finalize(
+        mut self,
+        replica: &mut Replica,
+        ctx: &CommitContext<'_>,
+    ) -> Result<RequestReceipt, Failure> {
+        self.validate_parent(replica)?;
+        let state = self
+            .state
+            .take()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+        let result = replica.finalize_prepared_action(ctx, state);
+        self.in_flight.store(false, Ordering::Release);
+        result
+    }
+
+    /// Durably publish and bind the already-built candidate snapshot to the
+    /// new Journal root before releasing the exclusive Replica borrow.
+    /// Attachment is infallible because durable truth has advanced already.
+    pub fn finalize_attached(
+        mut self,
+        replica: &mut Replica,
+        ctx: &CommitContext<'_>,
+        snapshot: &ReadSnapshot,
+    ) -> Result<RequestReceipt, Failure> {
+        self.validate_parent(replica)?;
+        let state = self
+            .state
+            .take()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+        let changed: Vec<BodyKey> = match &state {
+            PreparedActionState::Mutation { data, .. } => {
+                data.new_records.keys().cloned().collect()
+            }
+            PreparedActionState::Noop { .. } => Vec::new(),
+        };
+        let receipt = match replica.finalize_prepared_action(ctx, state) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
+        replica.attach_durable_body_image_root(snapshot);
+        snapshot.release_pending_body_images(&changed);
+        self.in_flight.store(false, Ordering::Release);
+        Ok(receipt)
+    }
+
+    fn validate_parent(&self, replica: &Replica) -> Result<(), Failure> {
+        if self.rollback_poisoned.load(Ordering::Acquire) || replica.poisoned {
+            return Err(Failure::Poisoned);
+        }
+        if !Arc::ptr_eq(&self.in_flight, &replica.prepared_in_flight)
+            || !self.in_flight.load(Ordering::Acquire)
+        {
+            return Err(Failure::MutationBusy);
+        }
+        let root = replica.current_manifest_root();
+        if root != self.parent_root || replica.frontier != self.parent_frontier {
+            return Err(Failure::ParentManifestUnavailable);
+        }
+        Ok(())
     }
 }
 
-impl Drop for PreparedAction<'_> {
+impl Drop for PreparedAction {
     fn drop(&mut self) {
-        let Some(PreparedActionState::Mutation { fabric, .. }) = self.state.take() else {
-            return;
-        };
-        if self.replica.fabric.rollback(fabric).is_err() {
-            self.replica.poisoned = true;
-            tracing::error!("prepared Replica action could not be rolled back");
+        if let Some(PreparedActionState::Mutation { fabric, .. }) = self.state.take() {
+            if lock_fabric(&self.fabric).rollback(fabric).is_err() {
+                self.rollback_poisoned.store(true, Ordering::Release);
+                tracing::error!("prepared Replica action could not be rolled back");
+            }
         }
+        self.in_flight.store(false, Ordering::Release);
     }
 }
 
 impl Replica {
+    fn current_manifest_root(&self) -> [u8; 32] {
+        let root = self.manifest_root();
+        if root == crate::transaction::NO_PARENT_ROOT {
+            self.frontier.root
+        } else {
+            root
+        }
+    }
+
+    fn mutation_available(&self) -> Result<(), Failure> {
+        if self.poisoned || self.rollback_poisoned.load(Ordering::Acquire) {
+            return Err(Failure::Poisoned);
+        }
+        if self.prepared_in_flight.load(Ordering::Acquire) {
+            return Err(Failure::MutationBusy);
+        }
+        Ok(())
+    }
+
+    fn prepared_snapshot_context(
+        &self,
+        data: Option<&PreparedMutation>,
+    ) -> PreparedSnapshotContext {
+        let mut ids = BTreeSet::new();
+        if let Some(data) = data {
+            for key in data.new_records.keys() {
+                ids.extend(
+                    self.declared_content
+                        .get(key)
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                );
+                ids.extend(data.declared.get(key).into_iter().flatten().copied());
+            }
+        }
+        let declaration_counts = ids
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    self.declared_content_counts.get(&id).copied().unwrap_or(0),
+                )
+            })
+            .collect();
+        PreparedSnapshotContext {
+            durable: self.durable.as_ref().map(Store::reader),
+            keys: self.keys.clone(),
+            content_index_root: self.content_index_root,
+            declaration_counts,
+        }
+    }
+
     /// Build a Replica over a given Engine engine (no durability, no keys).
     fn from_engine(fabric: Engine) -> Self {
         Self {
-            fabric,
+            fabric: Arc::new(Mutex::new(fabric)),
             frontier: ReplicaFrontier::EMPTY,
             durable: None,
             // Nothing was read off a disk to build this, so nothing was
             // verified. `Replica::open` is the only thing that sets this.
             verified_at_ms: None,
             poisoned: false,
+            rollback_poisoned: Arc::new(AtomicBool::new(false)),
+            prepared_in_flight: Arc::new(AtomicBool::new(false)),
             keys: None,
             space: None,
             supported: SupportedSchemas::default(),
             quota: QuotaConfig::default(),
-            bodies: BTreeMap::new(),
+            bodies: RecordDirectory::default(),
             body_index_root: None,
             manifest_body_root: None,
             content_index_root: None,
             declared_content: BTreeMap::new(),
             declared_content_counts: BTreeMap::new(),
+            declared_content_retained_bytes: 0,
             pending_content: BTreeMap::new(),
             receipt_index_root: None,
             generation_index_root: None,
+            generation_footprint: GenerationFootprint::default(),
+            ownership_index_root: None,
             manifest_root_object: None,
-            object_refs: BTreeMap::new(),
-            receipts: BTreeMap::new(),
+            receipts: ReceiptDirectory::default(),
+            receipt_cache: Arc::new(Mutex::new(ReceiptCache::default())),
+            receipt_count: 0,
+            receipt_material_bytes: 0,
             raw_material: BTreeMap::new(),
             recent_head_artifacts: BTreeMap::new(),
             recent_head_order: VecDeque::new(),
@@ -1909,6 +4138,167 @@ impl Replica {
     /// Build a Engine-backed Replica with **no** durable store (tests/scratch).
     pub fn loro() -> Self {
         Self::from_engine(Engine::new())
+    }
+
+    /// Construct the production mutable record directory without inflating
+    /// any Body payload. Release-scale fixtures use this to retain the exact
+    /// `BodyKey -> BodyRecord -> BodyHead/CausalMaterial` shape alongside the
+    /// immutable publication and Corpus; it is deliberately unavailable to
+    /// ordinary callers.
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    #[allow(clippy::expect_used)]
+    pub fn from_cold_body_records_for_scale(
+        rows: impl IntoIterator<Item = (BodyKey, BodyBinding, fabric::Material)>,
+    ) -> Self {
+        let mut replica = Self::from_engine(Engine::new());
+        let mut frontier_hasher = blake3::Hasher::new();
+        frontier_hasher.update(b"lait/replica-scale/cold-records/1\0");
+        let mut count = 0u64;
+        for (key, binding, material) in rows {
+            let material = Arc::new(material);
+            let artifacts: smallvec::SmallVec<[ArtifactRef; 1]> =
+                std::iter::once(material.checkpoint)
+                    .chain(material.delta_tail.iter().copied())
+                    .collect();
+            let artifact_bytes = artifacts
+                .iter()
+                .fold(0u64, |bytes, reference| bytes.saturating_add(reference.len));
+            let mut tx_hasher = blake3::Hasher::new();
+            tx_hasher.update(b"lait/replica-scale/transaction/1\0");
+            tx_hasher.update(key.world.as_bytes());
+            tx_hasher.update(&key.body.as_bytes());
+            let tx = *tx_hasher.finalize().as_bytes();
+            frontier_hasher.update(&tx);
+            count = count.saturating_add(1);
+            replica.bodies.insert(
+                key,
+                BodyRecord {
+                    binding,
+                    chain: ReplicaFrontier::new(tx, 1),
+                    heads: smallvec::smallvec![BodyHead {
+                        tx,
+                        descriptor_hash: tx,
+                        tx_commitment: tx,
+                        artifacts: None,
+                        transaction: Some(Object { hash: tx, len: 512 }),
+                        artifact_bytes,
+                        tx_len: 512,
+                    }],
+                    interpreted: true,
+                    causal: Some(material),
+                },
+            );
+        }
+        replica.frontier = ReplicaFrontier::new(*frontier_hasher.finalize().as_bytes(), count);
+        replica.generation_footprint =
+            GenerationFootprint::from_records(&replica.bodies).expect("bounded scale records");
+        replica
+    }
+
+    /// Retain the ordinary durable metadata that accompanies the the record layout
+    /// record mix: approximately two record Bodies per attributed operation
+    /// and one content declaration per twenty Bodies. These are actual Replica
+    /// directories, not fixture-side padding, so release RSS includes the same
+    /// scope keys, receipt Bodies, content refs, and refcounts used in service.
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    pub fn add_notes_record_operational_metadata_for_scale(&mut self) {
+        const BODIES_PER_RECEIPT: usize = 2;
+        const BODIES_PER_CONTENT_DECLARATION: usize = 20;
+        let space = SpaceId::from_digest([0x91; 16]);
+        let device = mechanics::actor::device_from_seed(&[0x92; 32]);
+        let frontier = self.frontier;
+        let manifest_root = self.current_manifest_root();
+        let mut declarations = Vec::new();
+        for (ordinal, (key, record)) in self.bodies.iter().enumerate() {
+            if ordinal % BODIES_PER_RECEIPT == 0 {
+                let transaction = record.head().map(|head| head.tx).unwrap_or([0; 32]);
+                let receipt = RequestReceipt {
+                    version: 2,
+                    space: space.clone(),
+                    world: key.world.clone(),
+                    device: device.clone(),
+                    request: key.body.as_bytes(),
+                    payload_hash: transaction,
+                    effect: Vec::new(),
+                    bodies: vec![key.clone()],
+                    frontier,
+                    manifest_root,
+                    implementation_digest: [0x93; 32],
+                    extractor_schema_digest: [0x94; 32],
+                    transaction,
+                };
+                let bytes = receipt.encode();
+                self.receipt_count = self.receipt_count.saturating_add(1);
+                self.receipt_material_bytes = self
+                    .receipt_material_bytes
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                self.receipt_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        receipt.scope_key(),
+                        receipt,
+                        Object {
+                            hash: transaction,
+                            len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                        },
+                    );
+            }
+            if ordinal % BODIES_PER_CONTENT_DECLARATION == 0 {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"lait/replica-scale/content/1\0");
+                hasher.update(key.world.as_bytes());
+                hasher.update(&key.body.as_bytes());
+                declarations.push((key.clone(), *hasher.finalize().as_bytes()));
+            }
+        }
+        for (key, content) in declarations {
+            self.replace_declared_content(&key, vec![content]);
+        }
+    }
+
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    pub fn operational_metadata_counts_for_scale(&self) -> (usize, usize, usize) {
+        (
+            usize::try_from(self.receipt_count).unwrap_or(usize::MAX),
+            self.declared_content.len(),
+            self.declared_content_counts.len(),
+        )
+    }
+
+    /// Freeze the exact cold publication shape from the mutable scale record
+    /// directory while sharing every immutable causal descriptor Arc. The
+    /// normal `read_snapshot` chooses cold images from `durable.is_some()`;
+    /// this fixture-only seam models the state immediately after durable open
+    /// without manufacturing an on-disk million-object store.
+    #[cfg(any(test, feature = "scale-fixtures"))]
+    pub fn cold_read_snapshot_for_scale(&self) -> ReadSnapshot {
+        let mut builder = BodyDirectoryBuilder::default();
+        for (key, record) in self.bodies.iter() {
+            let Some(material) = record.causal.clone() else {
+                continue;
+            };
+            let body = SnapshotBody::cold(
+                key,
+                record.binding.clone(),
+                snapshot_stamp(&record_stamp(record)),
+                material,
+            );
+            builder.push(Arc::new(key.clone()), body);
+        }
+        let bodies = builder.finish();
+        let retained_bytes_estimate = snapshot_directory_retained_estimate(&bodies);
+        ReadSnapshot {
+            root: self.current_manifest_root(),
+            frontier: self.frontier,
+            resolver: None,
+            schema_bodies: schema_body_index(&bodies),
+            schema_payload_bytes: schema_payload_index(&bodies),
+            bodies,
+            declared_content: imbl::OrdMap::new(),
+            content: imbl::OrdMap::new(),
+            retained_bytes_estimate,
+        }
     }
 
     /// Attach a mechanics-owned key source (required to seal local commits and
@@ -1938,7 +4328,7 @@ impl Replica {
     /// The material-ledger usage: canonical material bytes (protected
     /// envelopes + distinct transaction records + receipts) and Body count.
     pub fn usage(&self) -> (u64, u64) {
-        let mut bytes: u64 = 0;
+        let mut bytes = self.receipt_material_bytes;
         let mut tx_seen: std::collections::BTreeMap<[u8; 32], u64> = BTreeMap::new();
         for record in self.bodies.values() {
             for head in &record.heads {
@@ -1949,8 +4339,11 @@ impl Replica {
         for len in tx_seen.values() {
             bytes = bytes.saturating_add(*len);
         }
-        for (receipt, _) in self.receipts.values() {
-            bytes = bytes.saturating_add(u64::try_from(receipt.encode().len()).unwrap_or(u64::MAX));
+        if self.durable.is_none() {
+            for (receipt, _) in self.receipts.values() {
+                bytes =
+                    bytes.saturating_add(u64::try_from(receipt.encode().len()).unwrap_or(u64::MAX));
+            }
         }
         (bytes, u64::try_from(self.bodies.len()).unwrap_or(u64::MAX))
     }
@@ -1959,7 +4352,7 @@ impl Replica {
     pub fn opaque_usage(&self, world: &WorldId) -> (u64, u64) {
         let mut bytes: u64 = 0;
         let mut count: u64 = 0;
-        for (key, record) in &self.bodies {
+        for (key, record) in self.bodies.iter() {
             if !record.interpreted && &key.world == world {
                 bytes = bytes.saturating_add(record.protected_total());
                 count = count.saturating_add(1);
@@ -1969,11 +4362,13 @@ impl Replica {
     }
 
     /// Open the durable Replica at a journaled store root: run crash recovery,
-    /// verify and load the canonical object graph (signed transactions, sealed
-    /// Body payloads, receipts, manifest), and import every Body whose key
-    /// epoch is locally held into the engine. A Body without local key
-    /// material is retained opaquely. Missing or corrupt objects fail
-    /// integrity validation without heuristic repair.
+    /// verify and load the canonical object graph (signed transactions,
+    /// protected artifact references, receipts, manifest), and import only
+    /// collaborative writer state. Every interpreted durable Body stays as a
+    /// compact causal closure until a governed exact reader or mutation
+    /// resolves one;
+    /// a Body without local key material is retained opaquely. Missing or
+    /// corrupt objects fail integrity validation without heuristic repair.
     pub fn open(
         root: impl Into<std::path::PathBuf>,
         keys: Arc<dyn BodyKeySource>,
@@ -1985,7 +4380,9 @@ impl Replica {
             }
             Err(e) => return Err(Failure::Durability(e)),
         };
-        let mut replica = Self::from_engine(Engine::new()).with_keys(keys.clone());
+        let mut engine = Engine::new();
+        engine.use_external_collaborative_images();
+        let mut replica = Self::from_engine(engine).with_keys(keys.clone());
         let Some(meta_bytes) = store
             .caller_meta()
             .map_err(|_| Failure::Integrity(Defect::Encoding))?
@@ -2001,7 +4398,7 @@ impl Replica {
             replica.verified_at_ms = Some(mechanics::wallclock::now_millis());
             return Ok(replica);
         };
-        let meta = decode_store_meta(&meta_bytes)?;
+        let (meta, receipt_ledger_complete) = decode_store_meta(&meta_bytes)?;
         replica.frontier = meta.frontier;
         replica.space = meta.space.clone();
         replica.quota = meta.quota.clamped();
@@ -2009,13 +4406,16 @@ impl Replica {
         replica.manifest_body_root = meta.manifest_body_root;
         replica.content_index_root = meta.content_index_root;
         replica.receipt_index_root = meta.receipt_index_root;
+        replica.receipt_count = meta.receipt_count;
+        replica.receipt_material_bytes = meta.receipt_material_bytes;
         replica.generation_index_root = meta.generation_index_root;
+        replica.ownership_index_root = meta.ownership_index_root;
         replica.manifest_root_object = meta.manifest_root;
 
-        // Stream the catalogs rather than decoding one giant vector. The engine
-        // still materialises every Body — Engine holds a document per Body — so
-        // opening remains proportional to the store. What changed is that the
-        // commit point no longer is.
+        // Stream the catalogs rather than decoding one giant vector. Body
+        // records retain only authenticated causal coordinates; protected
+        // payloads are neither decrypted nor installed into the writer during
+        // ordinary recovery, regardless of mutation model.
         let mut indexed_bodies: Vec<IndexedBody> = Vec::new();
         let mut decode_failure = false;
         crate::index::stream(&StoreNodes(&store), meta.body_index_root, &mut |entry| {
@@ -2032,29 +4432,62 @@ impl Replica {
             return Err(Failure::Integrity(Defect::Encoding));
         }
 
-        let mut indexed_receipts: Vec<IndexedReceipt> = Vec::new();
-        let mut decode_failure = false;
-        crate::index::stream(&StoreNodes(&store), meta.receipt_index_root, &mut |entry| {
-            if decode_failure {
-                return;
+        let mut prior_receipt_material = Vec::new();
+        if receipt_ledger_complete {
+            if meta.receipt_index_root.map_or(0, |root| root.count) != meta.receipt_count {
+                return Err(Failure::Integrity(Defect::Index));
             }
-            match postcard::from_bytes::<IndexedReceipt>(&entry.value) {
-                Ok(receipt) => indexed_receipts.push(receipt),
-                Err(_) => decode_failure = true,
+        } else {
+            // One-time v2 representation migration. Current stores carry the
+            // exact ledger in StoreMeta and never walk this index at open.
+            let mut receipt_bytes = 0u64;
+            let mut receipt_count = 0u64;
+            let mut receipt_failure = None;
+            crate::index::stream(&StoreNodes(&store), meta.receipt_index_root, &mut |entry| {
+                if receipt_failure.is_some() {
+                    return;
+                }
+                let result = (|| {
+                    let indexed: IndexedReceipt = postcard::from_bytes(&entry.value)
+                        .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                    if postcard::to_stdvec(&indexed).ok().as_deref() != Some(entry.value.as_slice())
+                        || receipt_index_key(&indexed.scope) != entry.key
+                    {
+                        return Err(Failure::Integrity(Defect::Index));
+                    }
+                    let bytes = store
+                        .read_required_object_bounded(&indexed.object, MAX_RECEIPT_OBJECT_BYTES)
+                        .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                    let receipt = RequestReceipt::decode_canonical(&bytes)
+                        .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                    if receipt.scope_key() != indexed.scope {
+                        return Err(Failure::Integrity(Defect::Index));
+                    }
+                    receipt_bytes = receipt_bytes
+                        .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                    receipt_count = receipt_count.saturating_add(1);
+                    prior_receipt_material.push((indexed.object, bytes));
+                    Ok(())
+                })();
+                if let Err(failure) = result {
+                    receipt_failure = Some(failure);
+                }
+            })
+            .map_err(|_| Failure::Integrity(Defect::Index))?;
+            if let Some(failure) = receipt_failure {
+                return Err(failure);
             }
-        })
-        .map_err(|_| Failure::Integrity(Defect::Index))?;
-        if decode_failure {
-            return Err(Failure::Integrity(Defect::Encoding));
+            replica.receipt_count = receipt_count;
+            replica.receipt_material_bytes = receipt_bytes;
         }
 
         for IndexedBody { key, mut record } in indexed_bodies {
             if record.heads.is_empty() {
                 return Err(Failure::Integrity(Defect::MissingMaterial));
             }
-            // Load and verify EVERY constituent head; a multi-writer Body's
-            // state is the engine merge of all of them, restored in order.
-            let mut loaded: Vec<(Descriptor, Vec<Vec<u8>>, Vec<u8>)> = Vec::new();
+            // Verify every constituent signed head while deferring all Body
+            // artifact I/O/decryption to the publication-pinned resolver.
+            let mut descriptors: Vec<Descriptor> = Vec::new();
             for head in &record.heads {
                 let Some(tx_ref) = head.transaction else {
                     return Err(Failure::Integrity(Defect::MissingMaterial));
@@ -2080,29 +4513,18 @@ impl Replica {
                 if descriptor_hash(&descriptor) != head.descriptor_hash
                     || descriptor.mutation_model != record.binding.mutation_model
                     || descriptor.resulting_frontier != record.chain
-                        && record.binding.mutation_model == MUTATION_ATOMIC
+                        && is_atomic_mutation(record.binding.mutation_model)
                 {
                     return Err(Failure::Integrity(Defect::CorruptMaterial));
                 }
-                let expected: Vec<Object> = descriptor
+                if !descriptor
                     .artifact_refs()
-                    .map(|reference| Object {
-                        hash: reference.hash,
-                        len: reference.len,
-                    })
-                    .collect();
-                if expected != head.artifacts {
+                    .copied()
+                    .eq(record.artifacts(head).copied())
+                {
                     return Err(Failure::Integrity(Defect::CorruptMaterial));
                 }
-                let mut artifacts = Vec::with_capacity(head.artifacts.len());
-                for reference in &head.artifacts {
-                    artifacts.push(
-                        store
-                            .read_object(reference)
-                            .map_err(|_| Failure::Integrity(Defect::Encoding))?,
-                    );
-                }
-                loaded.push((descriptor, artifacts, tx_bytes));
+                descriptors.push(descriptor);
             }
             // A Body retained opaquely stays opaque at reopen: interpreting it
             // later requires explicit revalidation through the incorporation
@@ -2111,78 +4533,41 @@ impl Replica {
             // away it degrades to opaque (retained, unread) rather than
             // failing the whole store.
             let mut degraded = !record.interpreted;
+            if record.interpreted
+                && descriptors.iter().any(|descriptor| {
+                    descriptor
+                        .artifact_refs()
+                        .any(|reference| keys.opening_key(&reference.epoch).is_none())
+                })
+            {
+                degraded = true;
+            }
             if record.interpreted {
-                for (descriptor, envelopes, _) in &loaded {
-                    let mut opened = Vec::with_capacity(envelopes.len());
-                    for envelope in envelopes {
-                        let epoch = mechanics::authorization::body_epoch_id(envelope)
-                            .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
-                        let Some(key_cap) = keys.opening_key(&epoch) else {
-                            degraded = true;
-                            break;
-                        };
-                        opened.push(
-                            open_artifact(&key_cap, envelope)
-                                .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?,
-                        );
-                    }
-                    if degraded {
+                let material = record
+                    .causal
+                    .as_deref()
+                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                material
+                    .validate()
+                    .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
+                for reference in std::iter::once(&material.checkpoint).chain(&material.delta_tail) {
+                    if keys.opening_key(&reference.epoch).is_none() {
+                        degraded = true;
                         break;
                     }
-                    let mut proof = Engine::new();
-                    for artifact in &opened {
-                        proof
-                            .import_artifact(&fabric_key(&key), artifact)
-                            .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
-                    }
-                    if proof
-                        .version(&fabric_key(&key))
-                        .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?
-                        != descriptor.material.version
-                    {
-                        return Err(Failure::Integrity(Defect::CorruptMaterial));
-                    }
-                    if descriptor.mutation_model == MUTATION_COLLABORATIVE
-                        || descriptor.resulting_frontier == record.chain
-                    {
-                        // `proof` has already imported and checked this exact
-                        // material. Hand its immutable image to the long-lived
-                        // Engine so the common one-head Body shares the Arc
-                        // export+Version instead of decoding every artifact a
-                        // second time during cold recovery. Concurrent heads
-                        // still enter Fabric's ordinary merge path.
-                        let verified = proof
-                            .body_snapshot(&fabric_key(&key))
-                            .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?
-                            .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-                        let status = replica
-                            .fabric
-                            .import_verified_snapshot(&fabric_key(&key), &verified)
-                            .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
-                        if status.pending {
-                            return Err(Failure::Integrity(Defect::CorruptMaterial));
-                        }
-                    }
                 }
+                // Exact model, canonical export size, final Version, and
+                // immutable addressing are verified on first governed resolve.
             }
             if degraded {
                 record.interpreted = false;
-                let entries: Vec<([u8; 32], Vec<u8>, Vec<u8>)> = record
-                    .heads
-                    .iter()
-                    .zip(loaded)
-                    .map(|(h, (_, artifacts, tx_bytes))| {
-                        encode_artifact_pack(&artifacts).map(|pack| (h.tx, pack, tx_bytes))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                replica.raw_material.insert(key.clone(), entries);
-            }
-            for hash in Self::record_object_refs(&record) {
-                let count = replica.object_refs.entry(hash).or_insert(0);
-                *count = count.saturating_add(1);
+                // Durable opaque forwarding/revalidation reads the exact
+                // signed refs on demand. Keeping packs here would eagerly read
+                // and duplicate every unavailable protected payload at open.
             }
             replica.bodies.insert(key, record);
         }
+        let mut recovered_footprint = GenerationFootprint::from_records(&replica.bodies)?;
         // Declarations live in the published catalog, so reopening recovers
         // them from the same place a peer would read them.
         let mut declared_failure = false;
@@ -2192,13 +4577,7 @@ impl Replica {
             }
             match crate::manifest::ManifestEntry::decode_canonical(&entry.value) {
                 Ok(published) if !published.content_refs.is_empty() => {
-                    for content in &published.content_refs {
-                        let count = replica.declared_content_counts.entry(*content).or_insert(0);
-                        *count = count.saturating_add(1);
-                    }
-                    replica
-                        .declared_content
-                        .insert(published.key, published.content_refs);
+                    replica.replace_declared_content(&published.key, published.content_refs);
                 }
                 Ok(_) => {}
                 Err(_) => declared_failure = true,
@@ -2209,79 +4588,93 @@ impl Replica {
             return Err(Failure::Integrity(Defect::Encoding));
         }
 
-        for IndexedReceipt { scope, object } in indexed_receipts {
-            let bytes = store
-                .read_object(&object)
-                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
-            let receipt = RequestReceipt::decode_canonical(&bytes)
-                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
-            let count = replica.object_refs.entry(object.hash).or_insert(0);
-            *count = count.saturating_add(1);
-            replica.receipts.insert(scope, (receipt, Some(object)));
-        }
-        if let Some(root) = meta.manifest_root {
-            let count = replica.object_refs.entry(root.hash).or_insert(0);
-            *count = count.saturating_add(1);
-        }
-        replica.durable = Some(store);
-        // A current-format interpreted record commits a complete causal
-        // closure. Verify every descriptor and protected artifact while the
-        // store is being placed, not on the first historical query. Records
-        // without one are accepted only on the pre-generation migration path;
-        // `persist_generation_baseline` fills them before open returns.
-        if replica.generation_index_root.is_some() {
-            for (key, record) in &replica.bodies {
-                if !record.interpreted {
-                    continue;
-                }
-                let material = record
-                    .causal
-                    .as_ref()
-                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
-                let _ = replica.body_from_causal_material(key, material)?;
+        if let (Some(generation_root), Some(manifest)) =
+            (replica.generation_index_root, replica.manifest_root_object)
+        {
+            let value = crate::index::lookup(
+                &StoreNodes(&store),
+                Some(generation_root),
+                &generation_index_key(&manifest.hash),
+            )
+            .map_err(|error| {
+                integrity_cause(Defect::Index, "look up current generation footprint", error)
+            })?
+            .ok_or(Failure::Integrity(Defect::Index))?;
+            let indexed: IndexedGeneration = postcard::from_bytes(&value).map_err(|error| {
+                integrity_cause(
+                    Defect::Encoding,
+                    "decode current generation footprint",
+                    error,
+                )
+            })?;
+            indexed.footprint.validate()?;
+            if indexed.root != manifest.hash
+                || indexed.object.len == 0
+                || indexed.footprint.reconstruction_depth == 0
+                || postcard::to_stdvec(&indexed).ok().as_deref() != Some(value.as_slice())
+                || indexed.footprint.body_count != recovered_footprint.body_count
+                || indexed.footprint.snapshot_retained_bytes
+                    != recovered_footprint.snapshot_retained_bytes
+            {
+                return Err(Failure::Integrity(Defect::Index));
             }
+            // Source aggregates describe readability at publication time.
+            // Missing opening keys may make the reopened writer's live image a
+            // strict subset; `recovered_footprint` is therefore the correct
+            // base for its next commit, while exact historical readers retain
+            // the authenticated published aggregate in this index entry.
+            recovered_footprint.reconstruction_depth = indexed.footprint.reconstruction_depth;
+            recovered_footprint.reconstruction_delta_bytes =
+                indexed.footprint.reconstruction_delta_bytes;
+            recovered_footprint.reconstruction_transient_bytes =
+                indexed.footprint.reconstruction_transient_bytes;
         }
-        // Everything above IS the verification pass, and this is the only
-        // place that can honestly stamp one. `Store::open` re-read every
-        // required object and re-derived its content address; this function
-        // then decoded and verified every signed transaction and opened every
-        // sealed envelope it holds a key for — with no heuristic repair, so
-        // arriving here means the store was whole at this instant. Nothing
-        // else in the system walks the whole store, so nothing else can move
-        // this forward: for a live Station it reads "when it was placed",
-        // which is the truth.
+        replica.generation_footprint = recovered_footprint;
+
+        replica.durable = Some(store);
+        // This stamp covers eager control/index/transaction verification and
+        // signed Body descriptors. Deferred payload failures remain typed per
+        // Body and never retroactively poison unrelated placement.
         replica.verified_at_ms = Some(mechanics::wallclock::now_millis());
         // A version-2 indexed store has no ancestry index. Establish its
         // current committed state as generation zero before returning it to a
         // writer. That makes the pre-commit coordinate a Spec revision records
         // immediately queryable, while changing no World fact or Manifest.
-        replica.persist_generation_baseline()?;
+        replica.persist_generation_baseline(&prior_receipt_material)?;
         Ok(replica)
     }
 
-    fn persist_generation_baseline(&mut self) -> Result<(), Failure> {
+    fn persist_generation_baseline(
+        &mut self,
+        prior_receipt_material: &[(Object, Vec<u8>)],
+    ) -> Result<(), Failure> {
         use crate::index::{self, IndexChange, NodeSink};
 
         if self.generation_index_root.is_some() || self.manifest_root_object.is_none() {
             return Ok(());
         }
         let root = self.manifest_root();
-        let mut records = self.bodies.clone();
+        let mut records = RecordDirectory::default();
         let mut added = Vec::new();
-        for (key, record) in &mut records {
+        for (key, held) in self.bodies.iter() {
+            let mut record = held.clone();
             if !record.interpreted {
-                record.causal = None;
+                record.replace_causal(None)?;
+                records.insert(key.clone(), record);
                 continue;
             }
-            let prior = self.bodies.get(key).and_then(|body| body.causal.as_ref());
-            let (material, artifacts) = self.next_causal_material(key, record, prior, &added)?;
-            record.causal = Some(material);
+            let prior = self.bodies.get(key).and_then(|body| body.causal.as_deref());
+            let (material, artifacts) = self.next_causal_material(key, &record, prior, &added)?;
+            record.replace_causal(Some(Arc::new(material)))?;
             added.extend(artifacts);
+            records.insert(key.clone(), record);
         }
         let changed = records
             .iter()
             .map(|(key, record)| ArchivedBody {
                 key: key.clone(),
+                present: true,
+                interpreted: record.interpreted,
                 binding: Some(record.binding.clone()),
                 stamp: record_stamp(record),
                 material: record.causal.clone(),
@@ -2301,9 +4694,16 @@ impl Replica {
             integrity_cause(Defect::Encoding, "encode generation baseline", error)
         })?;
         let delta_ref = object_ref(&delta_bytes);
+        let mut generation_footprint = GenerationFootprint::from_records(&records)?;
+        generation_footprint.record_generation_delta(
+            None,
+            &delta,
+            u64::try_from(delta_bytes.len()).unwrap_or(u64::MAX),
+        )?;
         let indexed = IndexedGeneration {
             root,
             object: delta_ref,
+            footprint: generation_footprint.clone(),
         };
         let indexed_bytes = postcard::to_stdvec(&indexed).map_err(|error| {
             integrity_cause(Defect::Encoding, "encode generation baseline index", error)
@@ -2349,6 +4749,51 @@ impl Replica {
             })?;
             (body_index_root, generation_index_root)
         };
+        let mut ownership_changes = BTreeMap::<[u8; 32], (Object, OwnedObjectClass, i64)>::new();
+        for record in records.values() {
+            Self::adjust_ownership(
+                &mut ownership_changes,
+                Self::record_owned_objects(record)?,
+                1,
+            )?;
+        }
+        for (object, bytes) in prior_receipt_material {
+            if object_ref(bytes) != *object {
+                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            }
+            added.push(bytes.clone());
+            let mut owned = BTreeMap::new();
+            Self::insert_owned(&mut owned, *object, OwnedObjectClass::DeferredReceipt)?;
+            Self::adjust_ownership(&mut ownership_changes, owned, 1)?;
+        }
+        if let Some(manifest) = self.manifest_root_object {
+            let mut owned = BTreeMap::new();
+            Self::insert_owned(&mut owned, manifest, OwnedObjectClass::Eager)?;
+            Self::adjust_ownership(&mut ownership_changes, owned, 1)?;
+        }
+        let mut generation_owned = BTreeMap::new();
+        Self::insert_owned(&mut generation_owned, delta_ref, OwnedObjectClass::Eager)?;
+        for archived in &delta.changed {
+            for (hash, owned) in Self::material_owned_objects(archived.material.as_deref())? {
+                match generation_owned.get(&hash) {
+                    Some(held) if held == &owned => {}
+                    Some(_) => return Err(Failure::Integrity(Defect::CorruptMaterial)),
+                    None => {
+                        generation_owned.insert(hash, owned);
+                    }
+                }
+            }
+        }
+        Self::adjust_ownership(&mut ownership_changes, generation_owned, 1)?;
+        let ownership_index_root = {
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+            let (root, eager_removed, deferred_removed) =
+                Self::apply_ownership_changes(store, None, ownership_changes, &mut sink)?;
+            if !eager_removed.is_empty() || !deferred_removed.is_empty() {
+                return Err(Failure::Integrity(Defect::Index));
+            }
+            root
+        };
         let meta = StoreMeta {
             format_version: STORE_META_FORMAT_VERSION,
             space: self.space.clone(),
@@ -2358,7 +4803,10 @@ impl Replica {
             manifest_body_root: self.manifest_body_root,
             content_index_root: self.content_index_root,
             receipt_index_root: self.receipt_index_root,
+            receipt_count: self.receipt_count,
+            receipt_material_bytes: self.receipt_material_bytes,
             generation_index_root,
+            ownership_index_root,
             manifest_root: self.manifest_root_object,
         };
         let meta_bytes = postcard::to_stdvec(&meta).map_err(|error| {
@@ -2376,14 +4824,36 @@ impl Replica {
             .chain(generation_index_root)
             .map(|root| (root.hash, root.count))
             .collect();
+        let lazy_roots: Vec<([u8; 32], u64)> = ownership_index_root
+            .into_iter()
+            .map(|root| (root.hash, root.count))
+            .collect();
         added.push(delta_bytes);
+        let deferred_hashes: BTreeSet<[u8; 32]> = records
+            .values()
+            .flat_map(|record| {
+                record.causal.iter().flat_map(|material| {
+                    std::iter::once(material.checkpoint.hash)
+                        .chain(material.delta_tail.iter().map(|artifact| artifact.hash))
+                })
+            })
+            .chain(prior_receipt_material.iter().map(|(object, _)| object.hash))
+            .collect();
+        let (deferred_added, added): (Vec<Vec<u8>>, Vec<Vec<u8>>) = added
+            .into_iter()
+            .partition(|bytes| deferred_hashes.contains(&object_ref(bytes).hash));
         let store = self.durable.as_mut().ok_or(Failure::Poisoned)?;
         store
-            .commit(
+            .commit_classified(
                 &added,
                 &[],
+                journal::Deferred {
+                    added: &deferred_added,
+                    removed: &[],
+                },
                 journal::Index {
                     roots: &roots,
+                    lazy_roots: &lazy_roots,
                     nodes: &sink.written,
                 },
                 meta_bytes,
@@ -2396,40 +4866,171 @@ impl Replica {
         self.bodies = records;
         self.body_index_root = body_index_root;
         self.generation_index_root = generation_index_root;
+        self.generation_footprint = generation_footprint;
+        self.ownership_index_root = ownership_index_root;
         Ok(())
     }
 
-    /// Every releasable object one Body record names. Artifact objects are
-    /// omitted because immutable read generations retain them beyond the live
-    /// head that first introduced them.
-    fn record_object_refs(record: &BodyRecord) -> Vec<[u8; 32]> {
-        let mut out = Vec::with_capacity(record.heads.len());
+    fn insert_owned(
+        out: &mut BTreeMap<[u8; 32], (Object, OwnedObjectClass)>,
+        object: Object,
+        class: OwnedObjectClass,
+    ) -> Result<(), Failure> {
+        match out.get(&object.hash) {
+            Some((held, held_class)) if held == &object && held_class == &class => Ok(()),
+            Some(_) => Err(Failure::Integrity(Defect::CorruptMaterial)),
+            None => {
+                out.insert(object.hash, (object, class));
+                Ok(())
+            }
+        }
+    }
+
+    /// One live Body record is one owner however often a closure repeats a
+    /// content address across peer-head and local causal coordinates.
+    fn record_owned_objects(
+        record: &BodyRecord,
+    ) -> Result<BTreeMap<[u8; 32], (Object, OwnedObjectClass)>, Failure> {
+        let mut out = BTreeMap::new();
         for head in &record.heads {
             if let Some(r) = head.transaction {
-                out.push(r.hash);
+                Self::insert_owned(&mut out, r, OwnedObjectClass::Eager)?;
+            }
+            for reference in record.artifacts(head) {
+                Self::insert_owned(
+                    &mut out,
+                    artifact_object(reference),
+                    OwnedObjectClass::DeferredArtifact {
+                        epoch: reference.epoch,
+                    },
+                )?;
             }
         }
-        out
-    }
-
-    fn retain_object(&mut self, hash: [u8; 32]) {
-        let count = self.object_refs.entry(hash).or_insert(0);
-        *count = count.saturating_add(1);
-    }
-
-    /// Drop one reference, reporting whether that was the last.
-    fn release_object(&mut self, hash: [u8; 32]) -> bool {
-        match self.object_refs.get_mut(&hash) {
-            Some(count) if *count > 1 => {
-                *count = count.saturating_sub(1);
-                false
+        if let Some(material) = &record.causal {
+            for reference in std::iter::once(&material.checkpoint).chain(&material.delta_tail) {
+                Self::insert_owned(
+                    &mut out,
+                    artifact_object(reference),
+                    OwnedObjectClass::DeferredArtifact {
+                        epoch: reference.epoch,
+                    },
+                )?;
             }
-            Some(_) => {
-                self.object_refs.remove(&hash);
-                true
-            }
-            None => false,
         }
+        Ok(out)
+    }
+
+    fn material_owned_objects(
+        material: Option<&CausalMaterial>,
+    ) -> Result<BTreeMap<[u8; 32], (Object, OwnedObjectClass)>, Failure> {
+        let mut out = BTreeMap::new();
+        if let Some(material) = material {
+            for reference in std::iter::once(&material.checkpoint).chain(&material.delta_tail) {
+                Self::insert_owned(
+                    &mut out,
+                    artifact_object(reference),
+                    OwnedObjectClass::DeferredArtifact {
+                        epoch: reference.epoch,
+                    },
+                )?;
+            }
+        }
+        Ok(out)
+    }
+
+    fn adjust_ownership(
+        changes: &mut BTreeMap<[u8; 32], (Object, OwnedObjectClass, i64)>,
+        objects: BTreeMap<[u8; 32], (Object, OwnedObjectClass)>,
+        amount: i64,
+    ) -> Result<(), Failure> {
+        for (hash, (object, class)) in objects {
+            match changes.get_mut(&hash) {
+                Some((held, held_class, delta)) if *held == object && *held_class == class => {
+                    *delta = delta
+                        .checked_add(amount)
+                        .ok_or(Failure::Integrity(Defect::Index))?;
+                }
+                Some(_) => return Err(Failure::Integrity(Defect::CorruptMaterial)),
+                None => {
+                    changes.insert(hash, (object, class, amount));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_ownership_changes(
+        store: &Store,
+        prior_root: Option<IndexRef>,
+        changes: BTreeMap<[u8; 32], (Object, OwnedObjectClass, i64)>,
+        sink: &mut crate::index::NodeSink,
+    ) -> Result<(Option<IndexRef>, Vec<[u8; 32]>, Vec<[u8; 32]>), Failure> {
+        let mut index_changes = Vec::with_capacity(changes.len());
+        let mut eager_removed = Vec::new();
+        let mut deferred_removed = Vec::new();
+        for (hash, (object, class, delta)) in changes {
+            if delta == 0 {
+                continue;
+            }
+            let prior =
+                crate::index::lookup(&StoreNodes(store), prior_root, &ownership_index_key(&hash))
+                    .map_err(|_| Failure::Integrity(Defect::Index))?
+                    .map(|bytes| {
+                        let indexed: IndexedOwnership = postcard::from_bytes(&bytes)
+                            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                        if indexed.object.hash != hash
+                            || indexed.owners == 0
+                            || postcard::to_stdvec(&indexed)
+                                .map_err(|_| Failure::Integrity(Defect::Encoding))?
+                                != bytes
+                        {
+                            return Err(Failure::Integrity(Defect::Index));
+                        }
+                        Ok(indexed)
+                    })
+                    .transpose()?;
+            if let Some(prior) = &prior {
+                if prior.object != object || prior.class != class {
+                    return Err(Failure::Integrity(Defect::CorruptMaterial));
+                }
+            }
+            let before = prior.as_ref().map_or(0, |entry| entry.owners);
+            let after = if delta > 0 {
+                before
+                    .checked_add(
+                        u64::try_from(delta).map_err(|_| Failure::Integrity(Defect::Index))?,
+                    )
+                    .ok_or(Failure::Integrity(Defect::Index))?
+            } else {
+                before
+                    .checked_sub(delta.unsigned_abs())
+                    .ok_or(Failure::Integrity(Defect::Index))?
+            };
+            let value = if after == 0 {
+                match class {
+                    OwnedObjectClass::Eager => eager_removed.push(hash),
+                    OwnedObjectClass::DeferredArtifact { .. }
+                    | OwnedObjectClass::DeferredReceipt => deferred_removed.push(hash),
+                }
+                None
+            } else {
+                Some(
+                    postcard::to_stdvec(&IndexedOwnership {
+                        object,
+                        class,
+                        owners: after,
+                    })
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?,
+                )
+            };
+            index_changes.push(crate::index::IndexChange {
+                key: ownership_index_key(&hash),
+                value,
+            });
+        }
+        let root = crate::index::apply(&StoreNodes(store), prior_root, index_changes, sink)
+            .map_err(|_| Failure::Integrity(Defect::Index))?;
+        Ok((root, eager_removed, deferred_removed))
     }
 
     /// What the signed manifest advertises for one Body, as distinct from the
@@ -2473,10 +5074,10 @@ impl Replica {
         if let Some(key) = keys.sealing_key() {
             return Ok(key);
         }
+        let head = record.head()?;
         let reference = record
-            .head()?
-            .artifacts
-            .first()
+            .artifacts(head)
+            .next()
             .copied()
             .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
         let pending = pending_objects
@@ -2490,7 +5091,7 @@ impl Replica {
                     .durable
                     .as_ref()
                     .ok_or(Failure::Poisoned)?
-                    .read_object(&reference)
+                    .read_object(&artifact_object(&reference))
                     .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
                 owned.as_slice()
             }
@@ -2516,6 +5117,7 @@ impl Replica {
             ArtifactRef {
                 hash: reference.hash,
                 len: reference.len,
+                epoch: *key.epoch_id(),
             },
             envelope,
         ))
@@ -2538,7 +5140,7 @@ impl Replica {
         // version exactly names Fabric's full state.
         if record.heads.len() != 1
             || !matches!(
-                self.fabric.version(&fabric_key(key)),
+                lock_fabric(&self.fabric).version(&fabric_key(key)),
                 Ok(version) if version == base.version
             )
         {
@@ -2562,12 +5164,13 @@ impl Replica {
         let Some(permit) = executor.try_reserve() else {
             return;
         };
-        let Ok(seed) = self.fabric.checkpoint_seed(&fabric_key(key)) else {
+        let Ok(seed) = lock_fabric(&self.fabric).checkpoint_seed(&fabric_key(key)) else {
             return;
         };
         let Ok(sealing_key) = self.artifact_sealing_key(record, &[]) else {
             return;
         };
+        let sealing_epoch = *sealing_key.epoch_id();
         let base = base.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let work: CheckpointWork = Box::new(move || {
@@ -2578,6 +5181,7 @@ impl Replica {
                     ArtifactRef {
                         hash: object.hash,
                         len: object.len,
+                        epoch: sealing_epoch,
                     },
                     envelope,
                 ))
@@ -2586,10 +5190,35 @@ impl Replica {
         });
         if permit.submit(work).is_ok() {
             if let Ok(mut jobs) = self.checkpoint_jobs.lock() {
-                jobs.entry(key.clone())
-                    .or_insert(PreparedCheckpoint { base, receiver });
+                jobs.entry(key.clone()).or_insert(PreparedCheckpoint {
+                    base,
+                    receiver,
+                    #[cfg(test)]
+                    _held_sender: None,
+                });
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stall_checkpoint_for_test(&self, key: &BodyKey) {
+        let base = self
+            .bodies
+            .get(key)
+            .and_then(|record| record.causal.clone())
+            .expect("collaborative test Body has causal material");
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.checkpoint_jobs
+            .lock()
+            .expect("checkpoint jobs")
+            .insert(
+                key.clone(),
+                PreparedCheckpoint {
+                    base,
+                    receiver,
+                    _held_sender: Some(sender),
+                },
+            );
     }
 
     fn take_ready_checkpoint(
@@ -2631,14 +5260,20 @@ impl Replica {
     ) -> Result<(CausalMaterial, Vec<Vec<u8>>), Failure> {
         let engine_key = fabric_key(key);
         let checkpoint = |this: &Self| -> Result<(CausalMaterial, Vec<Vec<u8>>), Failure> {
-            let artifact = this
-                .fabric
+            let artifact = lock_fabric(&this.fabric)
                 .export_checkpoint(&engine_key, &CausalVersion::empty())
                 .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
             let version = artifact
                 .result()
                 .cloned()
                 .unwrap_or_else(CausalVersion::empty);
+            let plaintext_size = match &artifact {
+                Artifact::Replace { bytes, .. }
+                | Artifact::Checkpoint { bytes, .. }
+                | Artifact::Archive { bytes, .. } => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                Artifact::Delta { bytes, .. } => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            }
+            .min(fabric::MAX_MATERIAL_PLAINTEXT_BYTES);
             let (checkpoint, envelope) =
                 this.protected_artifact(&artifact, record, pending_objects)?;
             let material = CausalMaterial {
@@ -2648,6 +5283,7 @@ impl Replica {
                 history_root: prior.and_then(|material| material.history_root),
                 history_count: prior.map_or(0, |material| material.history_count),
                 version,
+                plaintext_size,
             };
             material
                 .validate()
@@ -2664,8 +5300,7 @@ impl Replica {
         prior
             .validate()
             .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
-        let artifact = self
-            .fabric
+        let artifact = lock_fabric(&self.fabric)
             .export_delta(&engine_key, &prior.version)
             .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
         let result = artifact
@@ -2683,6 +5318,10 @@ impl Replica {
                 .ok_or(Failure::Integrity(Defect::CorruptMaterial))?
                 .to_vec();
             delta_tail.push(reference);
+            let plaintext_size = checkpoint
+                .len
+                .saturating_add(delta_tail.iter().map(|reference| reference.len).sum())
+                .min(fabric::MAX_MATERIAL_PLAINTEXT_BYTES);
             let material = CausalMaterial {
                 format_version: CAUSAL_FORMAT_VERSION,
                 checkpoint,
@@ -2690,6 +5329,7 @@ impl Replica {
                 history_root: prior.history_root,
                 history_count: prior.history_count,
                 version: result,
+                plaintext_size,
             };
             material
                 .validate()
@@ -2711,6 +5351,17 @@ impl Replica {
         let mut material = prior.clone();
         material.delta_tail.push(reference);
         material.version = result;
+        material.plaintext_size = material
+            .checkpoint
+            .len
+            .saturating_add(
+                material
+                    .delta_tail
+                    .iter()
+                    .map(|reference| reference.len)
+                    .sum(),
+            )
+            .min(fabric::MAX_MATERIAL_PLAINTEXT_BYTES);
         material
             .validate()
             .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
@@ -2740,6 +5391,7 @@ impl Replica {
         let mut sink = NodeSink::default();
         let mut removed: Vec<[u8; 32]> = Vec::new();
         let mut manifest_changes: Vec<IndexChange> = Vec::with_capacity(changed.len());
+        let mut ownership_changes = BTreeMap::<[u8; 32], (Object, OwnedObjectClass, i64)>::new();
 
         // Materialize only genuine Body-state changes. Declaration-only
         // publications carry a Body through this map as an indexing change,
@@ -2760,8 +5412,7 @@ impl Replica {
                 }
                 let prepared = record.causal.as_ref().is_some_and(|material| {
                     material.validate().is_ok()
-                        && self
-                            .fabric
+                        && lock_fabric(&self.fabric)
                             .version(&fabric_key(&key))
                             .is_ok_and(|version| version == material.version)
                         && (record.binding.mutation_model == MUTATION_COLLABORATIVE
@@ -2773,15 +5424,25 @@ impl Replica {
                 let (material, artifacts) = self.next_causal_material(
                     &key,
                     record,
-                    prior.and_then(|old| old.causal.as_ref()),
+                    prior.and_then(|old| old.causal.as_deref()),
                     &new_objects,
                 )?;
                 if let Some(Some(record)) = changed.get_mut(&key) {
-                    record.causal = Some(material);
+                    record.replace_causal(Some(Arc::new(material)))?;
                 }
                 new_objects.extend(artifacts);
             }
         }
+        for record in changed.values_mut().flatten() {
+            record.compact_singleton_closure();
+        }
+        let mut next_generation_footprint = ctx
+            .is_some()
+            .then(|| {
+                self.generation_footprint
+                    .after_changes(&self.bodies, changed)
+            })
+            .transpose()?;
 
         // 1. Body catalog: one index change per touched Body, plus a refcount
         //    pass that decides which objects genuinely stopped being needed.
@@ -2792,20 +5453,16 @@ impl Replica {
             let prior = self
                 .bodies
                 .get(key)
-                .map(Self::record_object_refs)
+                .map(Self::record_owned_objects)
+                .transpose()?
                 .unwrap_or_default();
             let now = record
                 .as_ref()
-                .map(Self::record_object_refs)
+                .map(Self::record_owned_objects)
+                .transpose()?
                 .unwrap_or_default();
-            for hash in &now {
-                self.retain_object(*hash);
-            }
-            for hash in prior {
-                if self.release_object(hash) && !now.contains(&hash) {
-                    removed.push(hash);
-                }
-            }
+            Self::adjust_ownership(&mut ownership_changes, prior, -1)?;
+            Self::adjust_ownership(&mut ownership_changes, now, 1)?;
             let value = match record {
                 None => None,
                 Some(record) => {
@@ -2875,11 +5532,23 @@ impl Replica {
 
         // 2. Receipt catalog.
         let mut receipt_index_root = self.receipt_index_root;
+        let mut next_receipt_count = self.receipt_count;
+        let mut next_receipt_material_bytes = self.receipt_material_bytes;
+        let mut new_receipt_object = None;
         if let Some(receipt) = new_receipt {
-            let bytes = receipt.encode();
+            let bytes = validate_receipt_for_storage(receipt)?;
+            next_receipt_count = next_receipt_count
+                .checked_add(1)
+                .ok_or(Failure::QuotaExceeded)?;
+            next_receipt_material_bytes = next_receipt_material_bytes
+                .checked_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                .ok_or(Failure::QuotaExceeded)?;
             let reference = object_ref(&bytes);
+            new_receipt_object = Some(reference);
             new_objects.push(bytes);
-            self.retain_object(reference.hash);
+            let mut owned = BTreeMap::new();
+            Self::insert_owned(&mut owned, reference, OwnedObjectClass::DeferredReceipt)?;
+            Self::adjust_ownership(&mut ownership_changes, owned, 1)?;
             let entry = IndexedReceipt {
                 scope: receipt.scope_key(),
                 object: reference,
@@ -2920,10 +5589,14 @@ impl Replica {
                 let bytes = root.encode();
                 let reference = object_ref(&bytes);
                 new_objects.push(bytes);
-                self.retain_object(reference.hash);
+                let mut next_root = BTreeMap::new();
+                Self::insert_owned(&mut next_root, reference, OwnedObjectClass::Eager)?;
+                Self::adjust_ownership(&mut ownership_changes, next_root, 1)?;
                 if let Some(prior) = self.manifest_root_object {
-                    if prior.hash != reference.hash && self.release_object(prior.hash) {
-                        removed.push(prior.hash);
+                    if prior.hash != reference.hash {
+                        let mut prior_root = BTreeMap::new();
+                        Self::insert_owned(&mut prior_root, prior, OwnedObjectClass::Eager)?;
+                        Self::adjust_ownership(&mut ownership_changes, prior_root, -1)?;
                     }
                 }
                 Some(reference)
@@ -2953,11 +5626,11 @@ impl Replica {
                         .map(|record| record.binding.clone())
                         .or_else(|| self.bodies.get(&key).map(|record| record.binding.clone()));
                     let stamp = next.map(record_stamp).unwrap_or_default();
-                    let material = next
-                        .filter(|record| record.interpreted)
-                        .and_then(|record| record.causal.clone());
+                    let material = next.and_then(|record| record.causal.clone());
                     archived.push(ArchivedBody {
                         key,
+                        present: next.is_some(),
+                        interpreted: next.is_some_and(|record| record.interpreted),
                         binding,
                         stamp,
                         material,
@@ -2975,11 +5648,39 @@ impl Replica {
                 let bytes = postcard::to_stdvec(&delta).map_err(|error| {
                     integrity_cause(Defect::Encoding, "encode committed generation delta", error)
                 })?;
+                let delta_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 let reference = object_ref(&bytes);
                 new_objects.push(bytes);
+                let mut generation_objects = BTreeMap::new();
+                Self::insert_owned(&mut generation_objects, reference, OwnedObjectClass::Eager)?;
+                for archived in &delta.changed {
+                    for (hash, owned) in Self::material_owned_objects(archived.material.as_deref())?
+                    {
+                        match generation_objects.get(&hash) {
+                            Some(held) if held == &owned => {}
+                            Some(_) => {
+                                return Err(Failure::Integrity(Defect::CorruptMaterial));
+                            }
+                            None => {
+                                generation_objects.insert(hash, owned);
+                            }
+                        }
+                    }
+                }
+                Self::adjust_ownership(&mut ownership_changes, generation_objects, 1)?;
+                let mut footprint = next_generation_footprint
+                    .clone()
+                    .ok_or(Failure::Integrity(Defect::Index))?;
+                footprint.record_generation_delta(
+                    parent_generation.map(|_| &self.generation_footprint),
+                    &delta,
+                    delta_len,
+                )?;
+                next_generation_footprint = Some(footprint.clone());
                 let indexed = IndexedGeneration {
                     root: root_object.hash,
                     object: reference,
+                    footprint,
                 };
                 let value = postcard::to_stdvec(&indexed).map_err(|error| {
                     integrity_cause(Defect::Encoding, "encode committed generation index", error)
@@ -3000,6 +5701,17 @@ impl Replica {
             }
         }
 
+        let (ownership_index_root, ownership_eager_removed, deferred_removed) = {
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+            Self::apply_ownership_changes(
+                store,
+                self.ownership_index_root,
+                ownership_changes,
+                &mut sink,
+            )?
+        };
+        removed.extend(ownership_eager_removed);
+
         let meta = StoreMeta {
             format_version: STORE_META_FORMAT_VERSION,
             space: self.space.clone(),
@@ -3009,7 +5721,10 @@ impl Replica {
             manifest_body_root,
             content_index_root,
             receipt_index_root,
+            receipt_count: next_receipt_count,
+            receipt_material_bytes: next_receipt_material_bytes,
             generation_index_root,
+            ownership_index_root,
             manifest_root: manifest_root_object,
         };
         let meta_bytes =
@@ -3023,6 +5738,26 @@ impl Replica {
         let mut added = new_objects;
         let mut seen = std::collections::BTreeSet::new();
         added.retain(|b| seen.insert(object_ref(b).hash));
+        let mut deferred_hashes: BTreeSet<[u8; 32]> = changed
+            .values()
+            .flatten()
+            .flat_map(|record| {
+                record
+                    .heads
+                    .iter()
+                    .flat_map(|head| record.artifacts(head).map(|artifact| artifact.hash))
+                    .chain(record.causal.iter().flat_map(|material| {
+                        std::iter::once(material.checkpoint.hash)
+                            .chain(material.delta_tail.iter().map(|artifact| artifact.hash))
+                    }))
+            })
+            .collect();
+        if let Some(reference) = new_receipt_object {
+            deferred_hashes.insert(reference.hash);
+        }
+        let (deferred_added, added): (Vec<Vec<u8>>, Vec<Vec<u8>>) = added
+            .into_iter()
+            .partition(|bytes| deferred_hashes.contains(&object_ref(bytes).hash));
         let mut index_nodes = sink.written;
         index_nodes.retain(|b| seen.insert(object_ref(b).hash));
         // An object written by this commit is not also collectable by it.
@@ -3038,13 +5773,27 @@ impl Replica {
             .chain(generation_index_root)
             .map(|root| (root.hash, root.count))
             .collect();
+        let lazy_roots: Vec<([u8; 32], u64)> = ownership_index_root
+            .into_iter()
+            .map(|root| (root.hash, root.count))
+            .collect();
 
         let store = self.durable.as_mut().ok_or(Failure::Poisoned)?;
         let caller_index = journal::Index {
             roots: &roots,
+            lazy_roots: &lazy_roots,
             nodes: &index_nodes,
         };
-        match store.commit(&added, &removed, caller_index, meta_bytes) {
+        match store.commit_classified(
+            &added,
+            &removed,
+            journal::Deferred {
+                added: &deferred_added,
+                removed: &deferred_removed,
+            },
+            caller_index,
+            meta_bytes,
+        ) {
             Ok(_) => {}
             Err(journal::Failure::OutcomeUnknown) => {
                 self.poisoned = true;
@@ -3059,7 +5808,13 @@ impl Replica {
         self.manifest_body_root = manifest_body_root;
         self.content_index_root = content_index_root;
         self.receipt_index_root = receipt_index_root;
+        self.receipt_count = next_receipt_count;
+        self.receipt_material_bytes = next_receipt_material_bytes;
         self.generation_index_root = generation_index_root;
+        if let Some(footprint) = next_generation_footprint {
+            self.generation_footprint = footprint;
+        }
+        self.ownership_index_root = ownership_index_root;
         self.manifest_root_object = manifest_root_object;
         Ok(())
     }
@@ -3074,9 +5829,7 @@ impl Replica {
         ctx: &CommitContext<'_>,
         descriptors: &[crate::content::ContentDescriptor],
     ) -> Result<Vec<crate::content::ContentRef>, Failure> {
-        if self.poisoned {
-            return Err(Failure::Poisoned);
-        }
+        self.mutation_available()?;
         let mut causal = Vec::with_capacity(descriptors.len().saturating_mul(32));
         for descriptor in descriptors {
             causal.extend_from_slice(descriptor.content_ref().as_bytes());
@@ -3139,9 +5892,7 @@ impl Replica {
         ctx: &CommitContext<'_>,
         declarations: BTreeMap<BodyKey, Vec<crate::content::ContentRef>>,
     ) -> Result<(), Failure> {
-        if self.poisoned {
-            return Err(Failure::Poisoned);
-        }
+        self.mutation_available()?;
         let mut declared: BTreeMap<BodyKey, Vec<[u8; 32]>> = BTreeMap::new();
         let mut changed: BTreeMap<BodyKey, Option<BodyRecord>> = BTreeMap::new();
         for (key, refs) in declarations {
@@ -3199,12 +5950,23 @@ impl Replica {
 
     /// A Body's causal position, in lait's own head-set terms.
     pub fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
-        self.fabric.version(&fabric_key(key)).ok()
+        lock_fabric(&self.fabric)
+            .version(&fabric_key(key))
+            .ok()
+            .or_else(|| {
+                self.bodies
+                    .get(key)
+                    .filter(|record| record.interpreted)
+                    .and_then(|record| record.causal.as_ref())
+                    .map(|material| material.version.clone())
+            })
     }
 
     /// Take an anchor at a position inside a collaborative value.
     pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
-        self.fabric.anchor(&fabric_key(key), path, position).ok()
+        lock_fabric(&self.fabric)
+            .anchor(&fabric_key(key), path, position)
+            .ok()
     }
 
     /// Resolve an anchor. Total, and never mutates the Body.
@@ -3213,7 +5975,7 @@ impl Replica {
         key: &BodyKey,
         anchor: &fabric::Anchor,
     ) -> fabric::AnchorResolution {
-        self.fabric.resolve(&fabric_key(key), anchor)
+        lock_fabric(&self.fabric).resolve(&fabric_key(key), anchor)
     }
 
     /// Drop a Body's declaration without republishing — what a tombstone does
@@ -3395,11 +6157,15 @@ impl Replica {
         let parent_generation = self
             .generation_index_root
             .and(self.manifest_root_object.map(|object| object.hash));
-        self.retain_object(root_ref.hash);
-        let mut removed = Vec::new();
+        let mut ownership_changes = BTreeMap::<[u8; 32], (Object, OwnedObjectClass, i64)>::new();
+        let mut root_owned = BTreeMap::new();
+        Self::insert_owned(&mut root_owned, root_ref, OwnedObjectClass::Eager)?;
+        Self::adjust_ownership(&mut ownership_changes, root_owned, 1)?;
         if let Some(prior) = self.manifest_root_object {
-            if prior.hash != root_ref.hash && self.release_object(prior.hash) {
-                removed.push(prior.hash);
+            if prior.hash != root_ref.hash {
+                let mut prior_owned = BTreeMap::new();
+                Self::insert_owned(&mut prior_owned, prior, OwnedObjectClass::Eager)?;
+                Self::adjust_ownership(&mut ownership_changes, prior_owned, -1)?;
             }
         }
 
@@ -3408,9 +6174,11 @@ impl Replica {
                 .iter()
                 .map(|(key, record)| ArchivedBody {
                     key: key.clone(),
+                    present: true,
+                    interpreted: record.interpreted,
                     binding: Some(record.binding.clone()),
                     stamp: record_stamp(record),
-                    material: record.interpreted.then(|| record.causal.clone()).flatten(),
+                    material: record.causal.clone(),
                 })
                 .collect()
         } else {
@@ -3436,9 +6204,30 @@ impl Replica {
             )
         })?;
         let delta_ref = object_ref(&delta_bytes);
+        let mut generation_owned = BTreeMap::new();
+        Self::insert_owned(&mut generation_owned, delta_ref, OwnedObjectClass::Eager)?;
+        for archived in &delta.changed {
+            for (hash, owned) in Self::material_owned_objects(archived.material.as_deref())? {
+                match generation_owned.get(&hash) {
+                    Some(held) if held == &owned => {}
+                    Some(_) => return Err(Failure::Integrity(Defect::CorruptMaterial)),
+                    None => {
+                        generation_owned.insert(hash, owned);
+                    }
+                }
+            }
+        }
+        Self::adjust_ownership(&mut ownership_changes, generation_owned, 1)?;
+        let mut generation_footprint = self.generation_footprint.clone();
+        generation_footprint.record_generation_delta(
+            parent_generation.map(|_| &self.generation_footprint),
+            &delta,
+            u64::try_from(delta_bytes.len()).unwrap_or(u64::MAX),
+        )?;
         let indexed = IndexedGeneration {
             root: root_ref.hash,
             object: delta_ref,
+            footprint: generation_footprint.clone(),
         };
         let indexed_bytes = postcard::to_stdvec(&indexed).map_err(|error| {
             integrity_cause(
@@ -3463,6 +6252,16 @@ impl Replica {
             })?
         };
 
+        let (ownership_index_root, removed, deferred_removed) = {
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+            Self::apply_ownership_changes(
+                store,
+                self.ownership_index_root,
+                ownership_changes,
+                &mut sink,
+            )?
+        };
+
         let meta = StoreMeta {
             format_version: STORE_META_FORMAT_VERSION,
             space: self.space.clone(),
@@ -3472,7 +6271,10 @@ impl Replica {
             manifest_body_root: self.manifest_body_root,
             content_index_root,
             receipt_index_root: self.receipt_index_root,
+            receipt_count: self.receipt_count,
+            receipt_material_bytes: self.receipt_material_bytes,
             generation_index_root,
+            ownership_index_root,
             manifest_root: Some(root_ref),
         };
         let meta_bytes =
@@ -3488,13 +6290,27 @@ impl Replica {
             .chain(generation_index_root)
             .map(|root| (root.hash, root.count))
             .collect();
+        let lazy_roots: Vec<([u8; 32], u64)> = ownership_index_root
+            .into_iter()
+            .map(|root| (root.hash, root.count))
+            .collect();
 
         let store = self.durable.as_mut().ok_or(Failure::Poisoned)?;
         let caller_index = journal::Index {
             roots: &roots,
+            lazy_roots: &lazy_roots,
             nodes: &index_nodes,
         };
-        match store.commit(&added, &removed, caller_index, meta_bytes) {
+        match store.commit_classified(
+            &added,
+            &removed,
+            journal::Deferred {
+                added: &[],
+                removed: &deferred_removed,
+            },
+            caller_index,
+            meta_bytes,
+        ) {
             Ok(_) => {}
             Err(journal::Failure::OutcomeUnknown) => {
                 self.poisoned = true;
@@ -3507,8 +6323,10 @@ impl Replica {
         }
         self.content_index_root = content_index_root;
         self.generation_index_root = generation_index_root;
+        self.ownership_index_root = ownership_index_root;
         self.manifest_root_object = Some(root_ref);
         self.frontier = frontier;
+        self.generation_footprint = generation_footprint;
 
         // Residency last, and releasing is all this does — the cache's own
         // sweep decides when the bytes actually go, under its own quota. A
@@ -3588,6 +6406,32 @@ impl Replica {
         u64::try_from(self.bodies.len()).unwrap_or(u64::MAX)
     }
 
+    /// Physical upper estimate for the mutable Body record directory retained
+    /// by this Replica, excluding immutable read generations and Corpora.
+    /// Maintained on record replacement/removal, so Station admission does not
+    /// scan the Space before a user action.
+    pub const fn mutable_body_records_retained_bytes_estimate(&self) -> u64 {
+        self.bodies.retained_bytes_estimate()
+    }
+
+    /// O(1) physical upper estimate for the long-lived mutable catalogs that
+    /// coexist with immutable read publications. Payload objects, read images,
+    /// and Corpora are deliberately excluded; receipt and declaration indexes
+    /// are included because a record-shaped World otherwise appears to fit
+    /// while a second million-entry metadata universe remains unpriced.
+    pub fn mutable_retained_bytes_estimate(&self) -> u64 {
+        self.bodies
+            .retained_bytes_estimate()
+            .saturating_add(self.receipts.retained_bytes_estimate())
+            .saturating_add(
+                self.receipt_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .retained_bytes_estimate(),
+            )
+            .saturating_add(self.declared_content_retained_bytes)
+    }
+
     /// When this Replica's durable material was last verified end to end, in
     /// milliseconds since the unix epoch.
     ///
@@ -3609,23 +6453,66 @@ impl Replica {
     fn freeze_body(&self, key: &BodyKey) -> Option<SnapshotBody> {
         let record = self.bodies.get(key)?;
         if !record.interpreted {
-            return None;
+            return Some(SnapshotBody::opaque(
+                key,
+                record.binding.clone(),
+                snapshot_stamp(&self.body_stamp(key)?),
+                record.causal.clone(),
+            ));
         }
-        let body = self.fabric.body_snapshot(&fabric_key(key)).ok().flatten()?;
-        Some(SnapshotBody {
-            binding: record.binding.clone(),
-            stamp: self.body_stamp(key)?,
+        let stamp = snapshot_stamp(&self.body_stamp(key)?);
+        if self.durable.is_some() {
+            return Some(SnapshotBody::cold(
+                key,
+                record.binding.clone(),
+                stamp,
+                record.causal.clone()?,
+            ));
+        }
+        let body = lock_fabric(&self.fabric)
+            .body_snapshot(&fabric_key(key))
+            .ok()
+            .flatten()?;
+        Some(SnapshotBody::resident(
+            key,
+            record.binding.clone(),
+            stamp,
             body,
-        })
+        ))
+    }
+
+    /// Durable Atomic state is a writer working set, not a second semantic
+    /// store. The signed closure in `BodyRecord` and publication resolver own
+    /// long-lived presence; after publication the Engine may release its Arc.
+    fn release_durable_atomic_writer_image(&mut self, key: &BodyKey) {
+        if self.durable.is_none()
+            || !self.bodies.get(key).is_some_and(|record| {
+                record.interpreted
+                    && matches!(
+                        record.binding.mutation_model,
+                        MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC
+                    )
+                    && record.causal.is_some()
+            })
+        {
+            return;
+        }
+        lock_fabric(&self.fabric).release_atomic_image(&fabric_key(key));
     }
 
     fn replace_declared_content(&mut self, key: &BodyKey, refs: Vec<[u8; 32]>) {
         if let Some(prior) = self.declared_content.remove(key) {
+            self.declared_content_retained_bytes = self
+                .declared_content_retained_bytes
+                .saturating_sub(declared_body_retained_estimate(&prior));
             for content in prior {
                 match self.declared_content_counts.get_mut(&content) {
                     Some(count) if *count > 1 => *count = count.saturating_sub(1),
                     Some(_) => {
                         self.declared_content_counts.remove(&content);
+                        self.declared_content_retained_bytes = self
+                            .declared_content_retained_bytes
+                            .saturating_sub(declared_count_retained_estimate());
                     }
                     None => {}
                 }
@@ -3635,22 +6522,45 @@ impl Replica {
             return;
         }
         for content in &refs {
-            let count = self.declared_content_counts.entry(*content).or_insert(0);
+            let count = self
+                .declared_content_counts
+                .entry(*content)
+                .or_insert_with(|| {
+                    self.declared_content_retained_bytes = self
+                        .declared_content_retained_bytes
+                        .saturating_add(declared_count_retained_estimate());
+                    0
+                });
             *count = count.saturating_add(1);
         }
+        self.declared_content_retained_bytes = self
+            .declared_content_retained_bytes
+            .saturating_add(declared_body_retained_estimate(&refs));
         self.declared_content.insert(key.clone(), refs);
     }
 
+    /// The content a reader through this snapshot can see.
+    ///
+    /// Declared content, and content still under a hold. The hold is the
+    /// window between committing bytes and a Body naming them, and a World
+    /// deciding whether to name them is the thing that happens inside it --
+    /// so a snapshot that showed only declared content could never answer
+    /// "does this exist" for the one content anybody is about to declare.
+    /// Every such pre-check refused, and what a person saw was that their
+    /// request was invalid.
+    ///
+    /// Bounded by the number of open holds, which a TTL keeps small, rather
+    /// than by everything ever committed.
     fn snapshot_content(&self) -> imbl::OrdMap<[u8; 32], crate::content::ContentDescriptor> {
         self.declared_content
             .values()
             .flatten()
+            .copied()
+            .chain(self.pending_content.keys().copied())
             .filter_map(|content_id| {
-                let reference = crate::content::ContentRef {
-                    content_id: *content_id,
-                };
+                let reference = crate::content::ContentRef { content_id };
                 self.content_descriptor(&reference)
-                    .map(|descriptor| (*content_id, descriptor))
+                    .map(|descriptor| (content_id, descriptor))
             })
             .collect()
     }
@@ -3659,13 +6569,13 @@ impl Replica {
     /// This full form is used at activation and after an incorporation whose
     /// changed set is not locally known.
     pub fn read_snapshot(&self) -> ReadSnapshot {
-        let mut entries = Vec::new();
+        let mut builder = BodyDirectoryBuilder::default();
         for key in self.bodies.keys() {
             if let Some(body) = self.freeze_body(key) {
-                entries.push((Arc::new(key.clone()), body));
+                builder.push(Arc::new(key.clone()), body);
             }
         }
-        let bodies = SnapshotDirectory::from_entries(entries);
+        let bodies = builder.finish();
         let manifest = self.manifest_root();
         let root = if manifest == crate::transaction::NO_PARENT_ROOT {
             self.frontier.root
@@ -3673,10 +6583,25 @@ impl Replica {
             manifest
         };
         let retained_bytes_estimate = snapshot_directory_retained_estimate(&bodies);
+        let resolver = match (&self.durable, &self.keys) {
+            (Some(store), Some(keys)) => pin_body_image_resolver(
+                store.reader(),
+                keys,
+                None,
+                bodies
+                    .iter()
+                    .filter(|(_, body)| body.image.is_readable())
+                    .filter_map(|(_, body)| body.image.material().map(Arc::as_ref)),
+            )
+            .ok(),
+            _ => None,
+        };
         ReadSnapshot {
             root,
             frontier: self.frontier,
+            resolver,
             schema_bodies: schema_body_index(&bodies),
+            schema_payload_bytes: schema_payload_index(&bodies),
             bodies,
             declared_content: self
                 .declared_content
@@ -3689,16 +6614,51 @@ impl Replica {
         }
     }
 
+    /// Rebind a prepared local snapshot to the Journal root made
+    /// authoritative by `PreparedAction::finalize`.
+    ///
+    /// Candidate construction happens before durability so its changed Atomic
+    /// images remain resident and its resolver initially pins the prior root.
+    /// Finalize then calls this O(1) seam before publication install. The
+    /// shared resolver Arc is also held by the already-built Corpus, avoiding
+    /// an O(all Bodies) image/pin rebuild after the commit point.
+    pub fn attach_durable_body_image_root(&self, snapshot: &ReadSnapshot) {
+        let Some(resolver) = &snapshot.resolver else {
+            return;
+        };
+        let Some(store) = self.durable.as_ref() else {
+            return;
+        };
+        resolver.attach_durable_root(store.reader());
+    }
+
     /// Publish the next read generation by replacing only touched Body paths.
     /// Persistent-map structural sharing makes this O(changed log N), rather
     /// than cloning the World or scanning every Issue after every edit.
     pub fn advance_read_snapshot(&self, prior: &ReadSnapshot, changed: &[BodyKey]) -> ReadSnapshot {
         let mut bodies = prior.bodies.clone();
         let mut schema_bodies = prior.schema_bodies.clone();
+        let mut schema_payload_bytes = prior.schema_payload_bytes.clone();
         let mut retained_bytes_estimate = prior.retained_bytes_estimate;
         let mut declared_content = prior.declared_content.clone();
         let mut content = prior.content.clone();
         let mut touched_content = BTreeSet::new();
+        let resolver = match (&self.durable, &self.keys) {
+            (Some(store), Some(keys)) => pin_body_image_resolver(
+                store.reader(),
+                keys,
+                prior.resolver.as_deref(),
+                changed.iter().filter_map(|key| {
+                    self.bodies
+                        .get(key)
+                        .filter(|record| record.interpreted)
+                        .and_then(|record| record.causal.as_deref())
+                }),
+            )
+            .ok()
+            .or_else(|| prior.resolver.clone()),
+            _ => prior.resolver.clone(),
+        };
         let mut unique: BTreeSet<&BodyKey> = BTreeSet::new();
         for key in changed {
             if !unique.insert(key) {
@@ -3707,7 +6667,10 @@ impl Replica {
             let shared_key = if let Some((held, prior_body)) = prior.bodies.get_key_value(key) {
                 retained_bytes_estimate = retained_bytes_estimate
                     .saturating_sub(snapshot_body_retained_estimate(prior_body));
-                remove_schema_body(&mut schema_bodies, key, &prior_body.binding);
+                if prior_body.image.is_readable() {
+                    remove_schema_body(&mut schema_bodies, key, &prior_body.binding);
+                    adjust_schema_payload(&mut schema_payload_bytes, key, prior_body, false);
+                }
                 held.clone()
             } else {
                 Arc::new(key.clone())
@@ -3716,8 +6679,17 @@ impl Replica {
                 Some(body) => {
                     retained_bytes_estimate = retained_bytes_estimate
                         .saturating_add(snapshot_body_retained_estimate(&body));
-                    insert_schema_body(&mut schema_bodies, shared_key.clone(), &body.binding);
+                    let binding = body.binding.clone();
+                    let readable = body.image.is_readable();
+                    if readable {
+                        adjust_schema_payload(&mut schema_payload_bytes, key, &body, true);
+                    }
                     bodies.insert(shared_key, body);
+                    if readable {
+                        if let Some(body_ix) = bodies.body_ix(key) {
+                            insert_schema_body(&mut schema_bodies, body_ix, key, &binding);
+                        }
+                    }
                 }
                 None => {
                     bodies.remove(key);
@@ -3768,8 +6740,10 @@ impl Replica {
         ReadSnapshot {
             root,
             frontier: self.frontier,
+            resolver,
             bodies,
             schema_bodies,
+            schema_payload_bytes,
             declared_content,
             content,
             retained_bytes_estimate,
@@ -3792,10 +6766,31 @@ impl Replica {
         ReadSnapshot {
             root,
             frontier: self.frontier,
+            resolver: prior.resolver.clone(),
             bodies: prior.bodies.clone(),
             schema_bodies: prior.schema_bodies.clone(),
+            schema_payload_bytes: prior.schema_payload_bytes.clone(),
             declared_content: prior.declared_content.clone(),
-            content: prior.content.clone(),
+            // Carry the prior image forward and add any content held since it
+            // was taken. This is the path a content ingest republishes
+            // through, so without it a just-written content is invisible to
+            // the very submit that was going to declare it. O(open holds),
+            // not O(content).
+            content: {
+                let mut content = prior.content.clone();
+                for content_id in self.pending_content.keys() {
+                    if content.contains_key(content_id) {
+                        continue;
+                    }
+                    let reference = crate::content::ContentRef {
+                        content_id: *content_id,
+                    };
+                    if let Some(descriptor) = self.content_descriptor(&reference) {
+                        content.insert(*content_id, descriptor);
+                    }
+                }
+                content
+            },
             retained_bytes_estimate: prior.retained_bytes_estimate,
         }
     }
@@ -3842,6 +6837,9 @@ impl Replica {
         })?;
         let epoch = mechanics::authorization::body_epoch_id(&envelope)
             .ok_or(Failure::Integrity(Defect::CorruptMaterial))?;
+        if epoch != reference.epoch {
+            return Err(Failure::Integrity(Defect::CorruptMaterial));
+        }
         let opening = self
             .keys
             .as_ref()
@@ -3898,6 +6896,28 @@ impl Replica {
         }
     }
 
+    /// Pin an immutable durable receipt reader at this commit point.
+    /// Returns `None` for scratch/non-durable Replicas, whose receipt directory
+    /// remains in memory and preserves the preexisting behavior.
+    pub fn receipt_reader(&self) -> Option<ReceiptReader> {
+        let store = self.durable.as_ref()?;
+        Some(ReceiptReader {
+            store: store.reader(),
+            receipt_index_root: self.receipt_index_root,
+            cache: Arc::clone(&self.receipt_cache),
+            sequence: store.manifest().map_or(0, |manifest| manifest.sequence),
+            footprint: ReceiptFootprint {
+                count: self.receipt_count,
+                material_bytes: self.receipt_material_bytes,
+                cache_upper_bound: HOT_RECEIPT_CACHE_BYTES,
+                cold_lookup_transient_upper_bound: MAX_RECEIPT_OBJECT_BYTES
+                    .saturating_mul(2)
+                    .saturating_add(u64::try_from(crate::index::MAX_NODE_BYTES).unwrap_or(u64::MAX))
+                    .saturating_add(1024 * 1024),
+            },
+        })
+    }
+
     /// Reconstruct an exact durable generation. The cold cost is proportional
     /// to the deltas on its ancestry; Runtime caches the resulting immutable
     /// snapshot, so every subsequent query is a normal shared read.
@@ -3915,6 +6935,11 @@ impl Replica {
         let mut seen = BTreeSet::new();
         let mut deltas = Vec::new();
         loop {
+            if deltas.len()
+                >= usize::try_from(MAX_GENERATION_RECONSTRUCTION_DEPTH).unwrap_or(usize::MAX)
+            {
+                return Err(Failure::Integrity(Defect::Encoding));
+            }
             if !seen.insert(cursor) {
                 return Err(Failure::Integrity(Defect::Encoding));
             }
@@ -3932,31 +6957,61 @@ impl Replica {
             .first()
             .map(|delta| delta.frontier)
             .ok_or(Failure::Integrity(Defect::Encoding))?;
-        let mut bodies = SnapshotDirectory::default();
-        // Each archived Material is a complete causal closure. Walking from
-        // the target toward its baseline, the first entry for a Body is the
-        // only one the requested generation can observe; reconstructing every
-        // superseded intermediate value would make a hot Body quadratic in
-        // its ancestry length.
-        let mut resolved = BTreeSet::new();
+        // Resolve the exact visible archive entry for each Body before key
+        // pinning. Superseded generations must not make a historical read
+        // depend on an otherwise unreachable retired epoch.
+        let mut selected = BTreeMap::<BodyKey, &ArchivedBody>::new();
         for delta in &deltas {
             for archived in &delta.changed {
-                if !resolved.insert(archived.key.clone()) {
-                    continue;
-                }
-                if let (Some(binding), Some(material)) = (&archived.binding, &archived.material) {
-                    let body = self.body_from_causal_material(&archived.key, material)?;
-                    bodies.insert(
-                        Arc::new(archived.key.clone()),
-                        SnapshotBody {
-                            binding: binding.clone(),
-                            stamp: archived.stamp.clone(),
-                            body,
-                        },
-                    );
-                }
+                selected.entry(archived.key.clone()).or_insert(archived);
             }
         }
+        let resolver = match (&self.durable, &self.keys) {
+            (Some(store), Some(keys)) => Some(
+                pin_body_image_resolver(
+                    store.reader(),
+                    keys,
+                    None,
+                    selected.values().filter_map(|archived| {
+                        archived
+                            .present
+                            .then_some(())
+                            .filter(|_| archived.interpreted)
+                            .and_then(|_| archived.binding.as_ref())
+                            .and(archived.material.as_deref())
+                    }),
+                )
+                .map_err(|_| Failure::Integrity(Defect::MissingMaterial))?,
+            ),
+            _ => None,
+        };
+        let mut bodies = BodyDirectory::default();
+        for archived in selected.values() {
+            if !archived.present {
+                continue;
+            }
+            let binding = archived
+                .binding
+                .as_ref()
+                .ok_or(Failure::Integrity(Defect::Encoding))?;
+            let stamp = snapshot_stamp(&archived.stamp);
+            let body = if !archived.interpreted {
+                SnapshotBody::opaque(
+                    &archived.key,
+                    binding.clone(),
+                    stamp,
+                    archived.material.clone(),
+                )
+            } else {
+                let material = archived
+                    .material
+                    .as_ref()
+                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                SnapshotBody::cold(&archived.key, binding.clone(), stamp, material.clone())
+            };
+            bodies.insert(Arc::new(archived.key.clone()), body);
+        }
+        drop(selected);
         let mut content = imbl::OrdMap::new();
         for delta in deltas.into_iter().rev() {
             for descriptor in delta.descriptors {
@@ -3970,7 +7025,9 @@ impl Replica {
         Ok(Some(ReadSnapshot {
             root: *root,
             frontier,
+            resolver,
             schema_bodies: schema_body_index(&bodies),
+            schema_payload_bytes: schema_payload_index(&bodies),
             bodies,
             // Historical snapshots are immutable and are never accepted as a
             // base for `advance_read_snapshot`; the root/frontier guard on the
@@ -4050,9 +7107,12 @@ impl Replica {
         payload_hash: &[u8; 32],
     ) -> Result<Option<RequestReceipt>, Failure> {
         let key = crate::receipt::scope_key(space, world, device, request);
-        match self.receipts.get(&key) {
+        if let Some(reader) = self.receipt_reader() {
+            return reader.lookup_action(space, world, device, request, payload_hash);
+        }
+        match self.receipts.get(&key).map(|held| &held.0) {
             None => Ok(None),
-            Some((r, _)) if &r.payload_hash == payload_hash => Ok(Some(r.clone())),
+            Some(receipt) if &receipt.payload_hash == payload_hash => Ok(Some(receipt.clone())),
             Some(_) => Err(Failure::RequestIdConflict),
         }
     }
@@ -4071,9 +7131,7 @@ impl Replica {
                 "a durable Replica commits only signed, attributed transactions".into(),
             ));
         }
-        if self.poisoned {
-            return Err(Failure::Poisoned);
-        }
+        self.mutation_available()?;
         let receipt = self.apply_ops(request_label, ops)?;
         // Track minimal body records so bindings/tombstones behave uniformly.
         self.update_records_unattributed(ops)?;
@@ -4083,12 +7141,13 @@ impl Replica {
 
     /// Prepare a request under its persistent-idempotency scope without
     /// publishing it. Identical replay returns the original receipt without
-    /// opening a candidate. A fresh request exclusively borrows this Replica
-    /// through [`PreparedAction`] until the caller validates and finalizes it,
-    /// or drops it to roll back.
+    /// opening a candidate. A fresh request returns an owned
+    /// [`PreparedAction`]; callers release the Replica writer while deriving
+    /// its immutable publication and later reacquire it for exact-parent
+    /// validation and durable finalize.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_action<'a>(
-        &'a mut self,
+    pub fn prepare_action(
+        &mut self,
         ctx: &CommitContext<'_>,
         auth: &CommitAuthorization<'_>,
         interpretation: crate::receipt::Interpretation,
@@ -4102,11 +7161,98 @@ impl Replica {
         ops: &[(BodyKey, Op)],
         bindings: &[(BodyKey, BodyBinding)],
         content_refs: &[(BodyKey, Vec<crate::content::ContentRef>)],
-    ) -> Result<PreparedActionOutcome<'a>, Failure> {
-        if self.poisoned {
-            return Err(Failure::Poisoned);
-        }
-        if let Some(receipt) =
+    ) -> Result<PreparedActionOutcome, Failure> {
+        self.prepare_action_inner(
+            ctx,
+            auth,
+            interpretation,
+            world,
+            device,
+            request,
+            payload_hash,
+            effect,
+            bodies,
+            request_label,
+            ops,
+            bindings,
+            content_refs,
+            None,
+        )
+    }
+
+    /// Prepare after an owned immutable reader proved this exact scope absent.
+    /// Validation is fixed-size and performs no journal/index/object I/O. A
+    /// different current sequence/root or scope is [`Failure::ReceiptCheckStale`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_action_checked(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        auth: &CommitAuthorization<'_>,
+        interpretation: crate::receipt::Interpretation,
+        world: &WorldId,
+        device: &mechanics::ids::DeviceId,
+        request: &[u8; 16],
+        payload_hash: &[u8; 32],
+        effect: Vec<u8>,
+        bodies: Vec<BodyKey>,
+        request_label: &str,
+        ops: &[(BodyKey, Op)],
+        bindings: &[(BodyKey, BodyBinding)],
+        content_refs: &[(BodyKey, Vec<crate::content::ContentRef>)],
+        absence: ReceiptAbsence,
+    ) -> Result<PreparedActionOutcome, Failure> {
+        self.prepare_action_inner(
+            ctx,
+            auth,
+            interpretation,
+            world,
+            device,
+            request,
+            payload_hash,
+            effect,
+            bodies,
+            request_label,
+            ops,
+            bindings,
+            content_refs,
+            Some(absence),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_action_inner(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        auth: &CommitAuthorization<'_>,
+        interpretation: crate::receipt::Interpretation,
+        world: &WorldId,
+        device: &mechanics::ids::DeviceId,
+        request: &[u8; 16],
+        payload_hash: &[u8; 32],
+        effect: Vec<u8>,
+        bodies: Vec<BodyKey>,
+        request_label: &str,
+        ops: &[(BodyKey, Op)],
+        bindings: &[(BodyKey, BodyBinding)],
+        content_refs: &[(BodyKey, Vec<crate::content::ContentRef>)],
+        absence: Option<ReceiptAbsence>,
+    ) -> Result<PreparedActionOutcome, Failure> {
+        self.mutation_available()?;
+        if let Some(absence) = absence {
+            let current_sequence = self
+                .durable
+                .as_ref()
+                .and_then(|store| store.manifest())
+                .map_or(0, |manifest| manifest.sequence);
+            let scope = crate::receipt::scope_key(ctx.space, world, device, request);
+            if self.durable.is_none()
+                || absence.sequence != current_sequence
+                || absence.receipt_index_root != self.receipt_index_root
+                || absence.scope != scope
+            {
+                return Err(Failure::ReceiptCheckStale);
+            }
+        } else if let Some(receipt) =
             self.lookup_action(ctx.space, world, device, request, payload_hash)?
         {
             return Ok(PreparedActionOutcome::Replayed(receipt));
@@ -4114,6 +7260,9 @@ impl Replica {
         if effect.len() > crate::receipt::MAX_EFFECT_BYTES {
             return Err(Failure::EffectTooLarge);
         }
+        let claim = PreparationClaim::acquire(&self.prepared_in_flight)?;
+        let parent_root = self.current_manifest_root();
+        let parent_frontier = self.frontier;
         // An idempotent no-op: no operations, nothing applied, the frontier
         // does not advance — but the receipt is still recorded durably so an
         // identical retry replays instead of re-running the World.
@@ -4133,8 +7282,23 @@ impl Replica {
                 extractor_schema_digest: interpretation.extractor_schema_digest,
                 transaction: [0u8; 32],
             };
+            let receipt_bytes = validate_receipt_for_storage(&receipt)?;
+            if self
+                .usage()
+                .0
+                .saturating_add(u64::try_from(receipt_bytes.len()).unwrap_or(u64::MAX))
+                > self.quota.max_space_bytes
+            {
+                return Err(Failure::QuotaExceeded);
+            }
+            let snapshot = self.prepared_snapshot_context(None);
             return Ok(PreparedActionOutcome::Prepared(PreparedAction {
-                replica: self,
+                fabric: Arc::clone(&self.fabric),
+                in_flight: claim.transfer(),
+                rollback_poisoned: Arc::clone(&self.rollback_poisoned),
+                parent_root,
+                parent_frontier,
+                snapshot,
                 state: Some(PreparedActionState::Noop { receipt }),
             }));
         }
@@ -4163,6 +7327,49 @@ impl Replica {
                     return Err(Failure::SchemaMismatch);
                 }
                 _ => {}
+            }
+        }
+        // Create-once atomic values carry their own convergence proof in the
+        // address. Validate it before opening a Fabric candidate, and prohibit
+        // every operation that could turn the Body into mutable state. A
+        // second transaction with byte-identical material is harmless; a
+        // different value cannot target the same Body key.
+        let mut immutable_values: BTreeMap<&BodyKey, &[u8]> = BTreeMap::new();
+        for (key, op) in ops {
+            let binding = bindings
+                .get(key)
+                .copied()
+                .or_else(|| self.bodies.get(key).map(|record| &record.binding))
+                .ok_or(Failure::SchemaMismatch)?;
+            if binding.mutation_model != MUTATION_IMMUTABLE_ATOMIC {
+                continue;
+            }
+            let Op::ReplaceAtomic { value } = op else {
+                return Err(Failure::ImmutableConflict);
+            };
+            if !immutable_key_matches(
+                key,
+                &binding.schema,
+                binding.schema_version,
+                &binding.encoding,
+                value,
+            ) {
+                return Err(Failure::ImmutableConflict);
+            }
+            if let Some(prior) = immutable_values.insert(key, value) {
+                if prior != value {
+                    return Err(Failure::ImmutableConflict);
+                }
+            }
+            if let Some(record) = self.bodies.get(key) {
+                // The canonical value is committed into the immutable Body
+                // address. Once both the existing binding and proposed value
+                // validate against that address, retaining/inflating a second
+                // plaintext copy merely to compare it is unnecessary. An
+                // opaque record remains ineligible until explicit revalidation.
+                if !record.interpreted {
+                    return Err(Failure::ImmutableConflict);
+                }
             }
         }
         // The World's content declaration, validated before anything applies.
@@ -4222,7 +7429,12 @@ impl Replica {
             let mut sealed: Vec<(BodyKey, Vec<u8>, CausalMaterial)> = Vec::new();
             let mut new_artifacts = Vec::new();
             for key in &touched {
-                match self.fabric.export_body(&fabric_key(key)) {
+                // Drop the Engine mutex guard before the arm calls
+                // `next_causal_material`, which resolves/export deltas through
+                // the same shared writer. A `match` scrutinee temporary lives
+                // through its arms and would otherwise self-deadlock.
+                let export = { lock_fabric(&self.fabric).export_body(&fabric_key(key)) };
+                match export {
                     None => {
                         new_records.insert(key.clone(), None);
                     }
@@ -4243,11 +7455,11 @@ impl Replica {
                         let mut record = BodyRecord {
                             binding,
                             chain: advance_chain(base, &chain_seed),
-                            heads: vec![BodyHead {
+                            heads: smallvec::smallvec![BodyHead {
                                 tx: [0u8; 32],
                                 descriptor_hash: [0u8; 32],
                                 tx_commitment: [0u8; 32],
-                                artifacts: Vec::new(),
+                                artifacts: Some(Vec::new().into_boxed_slice()),
                                 transaction: None,
                                 artifact_bytes: 0,
                                 tx_len: 0,
@@ -4259,12 +7471,13 @@ impl Replica {
                             interpreted: true,
                         };
                         if sealing.is_some() {
-                            let prior = self.bodies.get(key).and_then(|body| body.causal.as_ref());
+                            let prior =
+                                self.bodies.get(key).and_then(|body| body.causal.as_deref());
                             let (material, artifacts) =
                                 self.next_causal_material(key, &record, prior, &new_artifacts)?;
                             let pack = encode_artifact_pack(&artifacts)?;
                             new_artifacts.extend(artifacts);
-                            record.causal = Some(material.clone());
+                            record.causal = Some(Arc::new(material.clone()));
                             sealed.push((key.clone(), pack, material));
                         }
                         new_records.insert(key.clone(), Some(record));
@@ -4303,6 +7516,7 @@ impl Replica {
                         replica_frontier: next_frontier,
                         authority_frontier: ctx.authority_frontier.clone(),
                         actor: auth.actor,
+                        operation: *request,
                         intent_digest: auth.intent_digest,
                         operations_digest: operations_digest(ops),
                         demand: auth.demand.clone(),
@@ -4344,6 +7558,7 @@ impl Replica {
                     .map(Transaction::id)
                     .unwrap_or([0u8; 32]),
             };
+            let receipt_bytes = validate_receipt_for_storage(&receipt)?;
 
             if let Some(tx) = &transaction {
                 Self::populate_local_record_refs(
@@ -4372,15 +7587,23 @@ impl Replica {
                 projected =
                     projected.saturating_add(u64::try_from(tx.encode().len()).unwrap_or(u64::MAX));
                 projected = projected
-                    .saturating_add(u64::try_from(receipt.encode().len()).unwrap_or(u64::MAX));
+                    .saturating_add(u64::try_from(receipt_bytes.len()).unwrap_or(u64::MAX));
                 if projected > self.quota.max_space_bytes {
                     return Err(Failure::QuotaExceeded);
                 }
+            } else if self
+                .usage()
+                .0
+                .saturating_add(u64::try_from(receipt_bytes.len()).unwrap_or(u64::MAX))
+                > self.quota.max_space_bytes
+            {
+                return Err(Failure::QuotaExceeded);
             }
 
             let candidate_root =
                 self.preview_manifest_root(ctx, &new_records, &declared, next_frontier)?;
             receipt.manifest_root = candidate_root;
+            validate_receipt_for_storage(&receipt)?;
             Ok(PreparedMutation {
                 new_records,
                 sealed,
@@ -4396,12 +7619,20 @@ impl Replica {
         })();
 
         match assembled {
-            Ok(data) => Ok(PreparedActionOutcome::Prepared(PreparedAction {
-                replica: self,
-                state: Some(PreparedActionState::Mutation { fabric, data }),
-            })),
+            Ok(data) => {
+                let snapshot = self.prepared_snapshot_context(Some(&data));
+                Ok(PreparedActionOutcome::Prepared(PreparedAction {
+                    fabric: Arc::clone(&self.fabric),
+                    in_flight: claim.transfer(),
+                    rollback_poisoned: Arc::clone(&self.rollback_poisoned),
+                    parent_root,
+                    parent_frontier,
+                    snapshot,
+                    state: Some(PreparedActionState::Mutation { fabric, data }),
+                }))
+            }
             Err(error) => {
-                if self.fabric.rollback(fabric).is_err() {
+                if lock_fabric(&self.fabric).rollback(fabric).is_err() {
                     self.poisoned = true;
                     Err(Failure::OutcomeUnknown)
                 } else {
@@ -4446,7 +7677,7 @@ impl Replica {
         )? {
             PreparedActionOutcome::Replayed(receipt) => Ok(ActionOutcome::Replayed(receipt)),
             PreparedActionOutcome::Prepared(prepared) => {
-                prepared.finalize(ctx).map(ActionOutcome::Committed)
+                prepared.finalize(self, ctx).map(ActionOutcome::Committed)
             }
         }
     }
@@ -4467,6 +7698,7 @@ impl Replica {
         payloads: &[(BodyKey, Vec<u8>)],
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, Failure> {
+        self.mutation_available()?;
         // `export_material_excluding` is receiver-relative and may omit
         // content-addressed artifacts which this Replica declared through an
         // older retained head. Reconstruct each descriptor's complete signed
@@ -4634,7 +7866,15 @@ impl Replica {
         // Body payloads the peer needed to resend. Revisit every retained Body:
         // limiting this to the current bundle's units leaves already-held
         // material opaque forever after an authority-only admission pass.
-        let keys: Vec<BodyKey> = self.raw_material.keys().cloned().collect();
+        let keys: Vec<BodyKey> = if self.durable.is_some() {
+            self.bodies
+                .iter()
+                .filter(|(_, record)| !record.interpreted)
+                .map(|(key, _)| key.clone())
+                .collect()
+        } else {
+            self.raw_material.keys().cloned().collect()
+        };
         let mut upgraded_keys = Vec::new();
         let mut accepted = 0u32;
         for key in &keys {
@@ -4644,8 +7884,48 @@ impl Replica {
             if record.interpreted {
                 continue;
             }
-            let Some(retained) = self.raw_material.get(key).cloned() else {
-                continue;
+            let retained = if let Some(retained) = self.raw_material.get(key).cloned() {
+                retained
+            } else {
+                let Some(store) = self.durable.as_ref() else {
+                    continue;
+                };
+                let mut retained = Vec::with_capacity(record.heads.len());
+                for head in &record.heads {
+                    let transaction = head
+                        .transaction
+                        .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                    let transaction_bytes = store
+                        .read_object(&transaction)
+                        .map_err(|_| Failure::Integrity(Defect::MissingMaterial))?;
+                    let signed = Transaction::decode_canonical(&transaction_bytes)
+                        .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                    let descriptor = signed
+                        .core
+                        .descriptors
+                        .iter()
+                        .find(|descriptor| descriptor.key() == *key)
+                        .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                    let envelopes = record
+                        .artifacts(head)
+                        .map(|reference| {
+                            store
+                                .read_object(&artifact_object(reference))
+                                .map_err(|_| Failure::Integrity(Defect::MissingMaterial))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    retained.push((
+                        head.tx,
+                        encode_artifact_pack(&envelopes)?,
+                        transaction_bytes,
+                    ));
+                    // The signed descriptor and stored head must still name
+                    // the same exact closure before any protected byte opens.
+                    if descriptor_hash(descriptor) != head.descriptor_hash {
+                        return Err(Failure::Integrity(Defect::CorruptMaterial));
+                    }
+                }
+                retained
             };
             let Some((encoding, model)) = self.supported.lookup(
                 &key.world,
@@ -4716,6 +7996,7 @@ impl Replica {
                 {
                     return Err(Failure::Integrity(Defect::CorruptMaterial));
                 }
+                validate_immutable_proof(key, descriptor, &proof)?;
                 opened.push((*tx_id, descriptor.clone(), artifacts));
             }
             if opened.len() != retained.len() {
@@ -4726,7 +8007,7 @@ impl Replica {
             for (_, descriptor, _) in &opened {
                 chain = Some(match (descriptor.mutation_model, chain) {
                     (_, None) => descriptor.resulting_frontier,
-                    (MUTATION_ATOMIC, Some(current)) => {
+                    (MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC, Some(current)) => {
                         if chain_order(&descriptor.resulting_frontier, &current).is_gt() {
                             descriptor.resulting_frontier
                         } else {
@@ -4740,15 +8021,14 @@ impl Replica {
                 });
             }
             for (_, descriptor, artifacts) in &opened {
-                if descriptor.mutation_model == MUTATION_ATOMIC
+                if is_atomic_mutation(descriptor.mutation_model)
                     && Some(descriptor.resulting_frontier) != chain
                 {
                     continue;
                 }
                 let mut applied = false;
                 for artifact in artifacts {
-                    applied |= self
-                        .fabric
+                    applied |= lock_fabric(&self.fabric)
                         .import_artifact(&fabric_key(key), artifact)
                         .map_err(|_| {
                             Failure::Engine(EngineFailure::Invalid(fabric::commit::Invalid::Import))
@@ -4764,13 +8044,14 @@ impl Replica {
             if let Some(chain) = chain {
                 upgraded.chain = chain;
             }
-            upgraded.causal = if opened.len() == 1 {
+            let causal = if opened.len() == 1 {
                 opened
                     .first()
-                    .map(|(_, descriptor, _)| descriptor.material.clone())
+                    .map(|(_, descriptor, _)| Arc::new(descriptor.material.clone()))
             } else {
                 None
             };
+            upgraded.replace_causal(causal)?;
             if self.durable.is_some() {
                 let mut changed = BTreeMap::from([(key.clone(), Some(upgraded.clone()))]);
                 self.persist(
@@ -4810,6 +8091,9 @@ impl Replica {
     ) -> Result<ConvergenceOutcome, Failure> {
         if self.poisoned {
             return Err(Failure::Poisoned);
+        }
+        if units.len() > crate::convergence::MAX_TRANSACTION_CHANGES {
+            return Err(Failure::QuotaExceeded);
         }
         let previous = self.frontier;
         let mut outcome = ConvergenceOutcome::unchanged(previous);
@@ -5028,6 +8312,7 @@ impl Replica {
                         outcome.rejected = outcome.rejected.saturating_add(1);
                         continue;
                     }
+                    validate_immutable_proof(&key, descriptor, &proof)?;
                     // Material retained opaquely upgrades to interpreted the
                     // first time a supported schema AND its key epoch are both
                     // available — this IS the revalidation path.
@@ -5040,7 +8325,7 @@ impl Replica {
                             // Descends our current chain: apply.
                             (_, Some(chain)) if chain == descriptor.base_frontier => true,
                             // Concurrent atomic: the deterministic maximum wins.
-                            (MUTATION_ATOMIC, Some(chain)) => {
+                            (MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC, Some(chain)) => {
                                 chain_order(&descriptor.resulting_frontier, &chain)
                                     == std::cmp::Ordering::Greater
                             }
@@ -5060,12 +8345,14 @@ impl Replica {
                         || match (descriptor.mutation_model, current_chain) {
                             (_, None) => true,
                             (_, Some(chain)) if chain == descriptor.base_frontier => true,
-                            (MUTATION_ATOMIC, Some(_)) => true,
+                            (MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC, Some(_)) => true,
                             (MUTATION_COLLABORATIVE, Some(_)) => false,
                             _ => false,
                         };
                     let chain = match descriptor.mutation_model {
-                        MUTATION_ATOMIC => descriptor.resulting_frontier,
+                        MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC => {
+                            descriptor.resulting_frontier
+                        }
                         MUTATION_COLLABORATIVE => match current_chain {
                             None => descriptor.resulting_frontier,
                             Some(chain) => combine_chains(&chain, &descriptor.resulting_frontier),
@@ -5087,24 +8374,24 @@ impl Replica {
                                 mutation_model: *model,
                             },
                             chain,
-                            heads: vec![BodyHead {
+                            heads: smallvec::smallvec![BodyHead {
                                 tx: transaction.id(),
                                 descriptor_hash: descriptor_hash(descriptor),
                                 tx_commitment: staged_commitment,
-                                artifacts: descriptor
-                                    .artifact_refs()
-                                    .map(|reference| Object {
-                                        hash: reference.hash,
-                                        len: reference.len,
-                                    })
-                                    .collect(),
+                                artifacts: (!fast_forward).then(|| {
+                                    descriptor
+                                        .artifact_refs()
+                                        .copied()
+                                        .collect::<Vec<_>>()
+                                        .into_boxed_slice()
+                                }),
                                 transaction: None,
                                 artifact_bytes: descriptor
                                     .artifact_refs()
                                     .fold(0u64, |sum, reference| sum.saturating_add(reference.len)),
                                 tx_len: u64::try_from(transaction_bytes.len()).unwrap_or(u64::MAX),
                             }],
-                            causal: fast_forward.then(|| descriptor.material.clone()),
+                            causal: fast_forward.then(|| Arc::new(descriptor.material.clone())),
                             interpreted: true,
                         },
                         merge_append: !fast_forward,
@@ -5130,7 +8417,7 @@ impl Replica {
                         {
                             combine_chains(&current, &descriptor.resulting_frontier)
                         }
-                        (MUTATION_ATOMIC, Some(current))
+                        (MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC, Some(current))
                             if chain_order(&descriptor.resulting_frontier, &current).is_lt() =>
                         {
                             current
@@ -5152,24 +8439,24 @@ impl Replica {
                                 mutation_model: descriptor.mutation_model,
                             },
                             chain,
-                            heads: vec![BodyHead {
+                            heads: smallvec::smallvec![BodyHead {
                                 tx: transaction.id(),
                                 descriptor_hash: descriptor_hash(descriptor),
                                 tx_commitment: tx_commitment(&transaction_bytes),
-                                artifacts: descriptor
-                                    .artifact_refs()
-                                    .map(|reference| Object {
-                                        hash: reference.hash,
-                                        len: reference.len,
-                                    })
-                                    .collect(),
+                                artifacts: current_chain.is_some().then(|| {
+                                    descriptor
+                                        .artifact_refs()
+                                        .copied()
+                                        .collect::<Vec<_>>()
+                                        .into_boxed_slice()
+                                }),
                                 transaction: None,
                                 artifact_bytes: descriptor
                                     .artifact_refs()
                                     .fold(0u64, |sum, reference| sum.saturating_add(reference.len)),
                                 tx_len: u64::try_from(transaction_bytes.len()).unwrap_or(u64::MAX),
                             }],
-                            causal: Some(descriptor.material.clone()),
+                            causal: Some(Arc::new(descriptor.material.clone())),
                             interpreted: false,
                         },
                         // Opaque material is retained byte-identically per
@@ -5291,8 +8578,7 @@ impl Replica {
                     let mut applied = false;
                     let mut failed = false;
                     for artifact in artifacts {
-                        match self
-                            .fabric
+                        match lock_fabric(&self.fabric)
                             .import_artifact(&fabric_key(&change.key), artifact)
                         {
                             Ok(status) => applied |= status.applied,
@@ -5306,14 +8592,15 @@ impl Replica {
                         )));
                     }
                     if change.record.binding.mutation_model == MUTATION_COLLABORATIVE {
-                        let current =
-                            self.fabric.version(&fabric_key(&change.key)).map_err(|_| {
+                        let current = lock_fabric(&self.fabric)
+                            .version(&fabric_key(&change.key))
+                            .map_err(|_| {
                                 Failure::Engine(EngineFailure::Invalid(
                                     fabric::commit::Invalid::Import,
                                 ))
                             })?;
                         if !matches!(
-                            self.fabric.relation(
+                            lock_fabric(&self.fabric).relation(
                                 &fabric_key(&change.key),
                                 &current,
                                 &change.material.version,
@@ -5332,7 +8619,8 @@ impl Replica {
                     }
                     outcome.accepted = outcome.accepted.saturating_add(1);
                     let causal = unit_causal.entry(change.unit).or_default();
-                    for reference in &change.record.head()?.artifacts {
+                    let head = change.record.head()?;
+                    for reference in change.record.artifacts(head) {
                         causal.extend_from_slice(&reference.hash);
                     }
                     changed.push(AcceptedChange {
@@ -5372,6 +8660,36 @@ impl Replica {
             .extend(changed.iter().map(|change| change.key.clone()));
         outcome.bodies.sort();
         outcome.bodies.dedup();
+
+        // Preserve the bundle's canonical transaction-id order and the exact
+        // signed attribution for every transaction that contributed material.
+        // `units` is canonicalized by `validate_contact`'s BTreeMap; the direct
+        // incorporation surface supplies one unit. No union attribution is
+        // invented for a multi-actor bundle.
+        for unit in unit_causal.keys() {
+            let transaction = units
+                .get(*unit)
+                .map(|(transaction, _)| transaction)
+                .ok_or(Failure::Illegitimate(Invalid::IncompleteMaterial))?;
+            let mut bodies: Vec<BodyKey> = changed
+                .iter()
+                .filter(|change| change.unit == *unit)
+                .map(|change| change.key.clone())
+                .collect();
+            bodies.sort();
+            bodies.dedup();
+            if bodies.is_empty() {
+                continue;
+            }
+            let actor = mechanics::ids::ActorId::parse(&transaction.core.actor)
+                .ok_or(Failure::Illegitimate(Invalid::Encoding))?;
+            outcome.changes.push(crate::convergence::TransactionChange {
+                operation: transaction.core.operation,
+                actor,
+                device: mechanics::ids::DeviceId::from_key_bytes(&transaction.core.signer),
+                bodies,
+            });
+        }
 
         // Frontier: advance once per unit that contributed changes, in unit
         // order, from that unit's transaction id + engine causal evidence.
@@ -5414,6 +8732,12 @@ impl Replica {
                 .or_else(|| self.bodies.get(&change.key).cloned());
             let folded = match (base, change.merge_append) {
                 (Some(mut existing), true) => {
+                    // The singleton sentinel borrows the record-wide Material.
+                    // A concurrent join is about to replace that coordinate
+                    // with the merged-state Material, so freeze the old
+                    // author's exact signed closure into the overflow form
+                    // before adding the new head.
+                    existing.promote_singleton_closure()?;
                     if !existing.has_commitment(&staged_head.tx_commitment) {
                         existing.heads.push(staged_head);
                     }
@@ -5481,6 +8805,7 @@ impl Replica {
         outcome.current = next_frontier;
         for key in checkpoint_candidates {
             self.schedule_checkpoint_if_hot(&key);
+            self.release_durable_atomic_writer_image(&key);
         }
         Ok(outcome)
     }
@@ -5523,18 +8848,21 @@ impl Replica {
             let _ = decode_artifact_pack(descriptor, pack)?;
             if let Some(record) = new_records.get_mut(key) {
                 if let Some(head) = record.heads.iter_mut().find(|h| &h.tx == tx_id) {
-                    head.artifacts = descriptor
-                        .artifact_refs()
-                        .map(|reference| Object {
-                            hash: reference.hash,
-                            len: reference.len,
-                        })
-                        .collect();
+                    // Keep the signed closure explicit until `persist` has
+                    // finalized the record-wide causal Material. It may be a
+                    // locally re-sealed equivalent with different object
+                    // hashes; `persist` compacts only an exact match.
+                    head.artifacts = Some(
+                        descriptor
+                            .artifact_refs()
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
                     head.transaction = Some(object_ref(&tx_bytes));
                     head.tx_commitment = tx_commitment(&tx_bytes);
-                    head.artifact_bytes = head
-                        .artifacts
-                        .iter()
+                    head.artifact_bytes = descriptor
+                        .artifact_refs()
                         .fold(0u64, |sum, object| sum.saturating_add(object.len));
                     head.tx_len = u64::try_from(tx_bytes.len()).unwrap_or(u64::MAX);
                 }
@@ -5897,6 +9225,7 @@ impl Replica {
         bundle: crate::convergence::ValidatedContactBundle,
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, Failure> {
+        self.mutation_available()?;
         self.incorporate_units(
             ctx,
             &bundle.units,
@@ -6126,7 +9455,7 @@ impl Replica {
     /// only cost bandwidth or starve the claimant, never corrupt state.
     pub fn head_commitments(&self) -> Vec<(BodyKey, [u8; 32])> {
         let mut out = Vec::new();
-        for (key, record) in &self.bodies {
+        for (key, record) in self.bodies.iter() {
             // OPAQUE heads are deliberately NOT declared: upgrading retained
             // material to interpreted happens through the incorporation path
             // (re-receipt once the schema and key epoch are available), so a
@@ -6149,7 +9478,12 @@ impl Replica {
         let heads: Vec<([u8; 32], Vec<Object>)> = record
             .heads
             .iter()
-            .map(|head| (head.tx_commitment, head.artifacts.clone()))
+            .map(|head| {
+                (
+                    head.tx_commitment,
+                    record.artifacts(head).map(artifact_object).collect(),
+                )
+            })
             .collect();
         for (commitment, artifacts) in heads {
             let cache_key = (key.clone(), commitment);
@@ -6259,7 +9593,7 @@ impl Replica {
     ) -> Result<ExportedMaterial, Failure> {
         type Grouped = BTreeMap<[u8; 32], (Transaction, Vec<(BodyKey, Vec<u8>)>)>;
         let mut by_tx: Grouped = BTreeMap::new();
-        for (key, record) in &self.bodies {
+        for (key, record) in self.bodies.iter() {
             // A Body the manifest advertises MUST be fully exportable — every
             // constituent head, from the retained in-memory material or the
             // durable object store. A gap here would let this replica serve a
@@ -6279,11 +9613,12 @@ impl Replica {
                         let Some(tx_ref) = head.transaction else {
                             return Err(Failure::Integrity(Defect::MissingMaterial));
                         };
-                        let mut artifacts = Vec::with_capacity(head.artifacts.len());
-                        for reference in &head.artifacts {
+                        let refs = record.artifacts(head);
+                        let mut artifacts = Vec::with_capacity(refs.len());
+                        for reference in refs {
                             artifacts.push(
                                 store
-                                    .read_object(reference)
+                                    .read_object(&artifact_object(reference))
                                     .map_err(|_| Failure::Integrity(Defect::Encoding))?,
                             );
                         }
@@ -6346,13 +9681,63 @@ impl Replica {
         request_label: &str,
         ops: &[(BodyKey, Op)],
     ) -> Result<fabric::Prepared, Failure> {
+        // Durable collaborative Bodies are cold causal closures until touched.
+        // Inflate only the distinct existing collaborative writers this batch
+        // names; Fabric's 64-entry LRU keeps them hot and drops evicted exports
+        // because the Journal remains their authoritative cold image.
+        let mut needed = BTreeMap::<BodyKey, Arc<CausalMaterial>>::new();
+        for (key, _) in ops {
+            let Some(record) = self.bodies.get(key) else {
+                continue;
+            };
+            if !record.interpreted || record.binding.mutation_model != MUTATION_COLLABORATIVE {
+                continue;
+            }
+            // Scratch/non-durable Replicas have no cold object source. Their
+            // writer is authoritative and retained for the Replica lifetime;
+            // after a concurrent peer merge its version can legitimately be
+            // newer than any one signed head Material. Never try to "inflate"
+            // that exact hot merged state through a nonexistent Journal.
+            if self.durable.is_none()
+                && lock_fabric(&self.fabric)
+                    .body_snapshot(&fabric_key(key))
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                continue;
+            }
+            if matches!(
+                lock_fabric(&self.fabric).version(&fabric_key(key)),
+                Ok(version) if record.causal.as_ref().is_some_and(|material| material.version == version)
+            ) {
+                continue;
+            }
+            let material = record
+                .causal
+                .clone()
+                .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+            needed.entry(key.clone()).or_insert(material);
+        }
+        for (key, material) in needed {
+            let snapshot = self.body_from_causal_material(&key, &material)?;
+            if snapshot.read_shared().is_some()
+                || snapshot.version().ok() != Some(material.version.clone())
+            {
+                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            }
+            let status = lock_fabric(&self.fabric)
+                .import_verified_snapshot(&fabric_key(&key), &snapshot)
+                .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
+            if status.pending {
+                return Err(Failure::Integrity(Defect::CorruptMaterial));
+            }
+        }
         let mut fabric_ops = Vec::with_capacity(ops.len());
         for (key, op) in ops {
             fabric_ops.push(translate(fabric_key(key), op)?);
         }
-        match self
-            .fabric
-            .prepare(fabric::Transaction::new(request_label, fabric_ops))
+        match lock_fabric(&self.fabric).prepare(fabric::Transaction::new(request_label, fabric_ops))
         {
             Ok(prepared) => Ok(prepared),
             Err(EngineFailure::Unsupported) => Err(Failure::UnsupportedOp),
@@ -6380,7 +9765,7 @@ impl Replica {
         ops: &[(BodyKey, Op)],
     ) -> Result<fabric::Receipt, Failure> {
         let prepared = self.prepare_ops(request_label, ops)?;
-        Ok(self.fabric.finalize(prepared))
+        Ok(lock_fabric(&self.fabric).finalize(prepared))
     }
 
     /// Track records for an unattributed (non-durable) commit so bindings and
@@ -6395,7 +9780,7 @@ impl Replica {
         touched.sort();
         touched.dedup();
         for key in touched {
-            match self.fabric.export_body(&fabric_key(&key)) {
+            match lock_fabric(&self.fabric).export_body(&fabric_key(&key)) {
                 None => {
                     self.bodies.remove(&key);
                 }
@@ -6421,11 +9806,11 @@ impl Replica {
                             },
                         ),
                         chain: advance_chain(base, &seed),
-                        heads: vec![BodyHead {
+                        heads: smallvec::smallvec![BodyHead {
                             tx,
                             descriptor_hash: [0u8; 32],
                             tx_commitment: [0u8; 32],
-                            artifacts: Vec::new(),
+                            artifacts: Some(Vec::new().into_boxed_slice()),
                             transaction: None,
                             artifact_bytes: 0,
                             tx_len: 0,
@@ -6465,18 +9850,11 @@ impl Replica {
                 .and_then(Option::as_mut)
                 .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
             let head = record.head_mut()?;
-            head.artifacts = descriptor
-                .artifact_refs()
-                .map(|reference| Object {
-                    hash: reference.hash,
-                    len: reference.len,
-                })
-                .collect();
+            head.artifacts = None;
             head.transaction = durable.then_some(tx_ref);
             head.tx_commitment = commitment;
-            head.artifact_bytes = head
-                .artifacts
-                .iter()
+            head.artifact_bytes = descriptor
+                .artifact_refs()
                 .fold(0u64, |sum, object| sum.saturating_add(object.len));
             head.tx_len = u64::try_from(tx_bytes.len()).unwrap_or(u64::MAX);
             head.descriptor_hash = descriptor_hash(descriptor);
@@ -6540,31 +9918,31 @@ impl Replica {
         ctx: &CommitContext<'_>,
         state: PreparedActionState,
     ) -> Result<RequestReceipt, Failure> {
-        let PreparedActionState::Mutation { fabric, mut data } = state else {
-            let PreparedActionState::Noop { receipt } = state else {
-                return Err(Failure::Poisoned);
-            };
-            if self.durable.is_some() {
-                self.persist_receipt_only(&receipt)?;
-            } else {
-                self.receipts
-                    .insert(receipt.scope_key(), (receipt.clone(), None));
+        let (fabric, mut data) = match state {
+            PreparedActionState::Mutation { fabric, data } => (fabric, data),
+            PreparedActionState::Noop { receipt } => {
+                if self.durable.is_some() {
+                    self.persist_receipt_only(&receipt)?;
+                } else {
+                    self.receipts
+                        .insert(receipt.scope_key(), (receipt.clone(), None));
+                }
+                return Ok(receipt);
             }
-            return Ok(receipt);
         };
 
         if ctx.space != &data.manifest_space
             || ctx.authority_frontier != data.manifest_authority_frontier
             || ctx.signer.signer_key() != data.manifest_signer
         {
-            let _ = self.fabric.rollback(fabric);
+            let _ = lock_fabric(&self.fabric).rollback(fabric);
             return Err(Failure::Illegitimate(
                 "prepared action finalized with different publication authority".into(),
             ));
         }
         match &self.space {
             Some(space) if space != ctx.space => {
-                let _ = self.fabric.rollback(fabric);
+                let _ = lock_fabric(&self.fabric).rollback(fabric);
                 return Err(Failure::Illegitimate(
                     "commit addressed to a different Space".into(),
                 ));
@@ -6604,7 +9982,7 @@ impl Replica {
             Ok(())
         };
         if let Err(error) = persisted {
-            if self.fabric.rollback(fabric).is_err() {
+            if lock_fabric(&self.fabric).rollback(fabric).is_err() {
                 self.poisoned = true;
                 return Err(Failure::OutcomeUnknown);
             }
@@ -6637,9 +10015,10 @@ impl Replica {
             self.receipts
                 .insert(data.receipt.scope_key(), (data.receipt.clone(), None));
         }
-        let _ = self.fabric.finalize(fabric);
+        let _ = lock_fabric(&self.fabric).finalize(fabric);
         for key in checkpoint_candidates {
             self.schedule_checkpoint_if_hot(&key);
+            self.release_durable_atomic_writer_image(&key);
         }
 
         let actual_root = {
@@ -6708,10 +10087,11 @@ impl Replica {
             Vec::new(),
             frontier,
         )?;
-        self.receipts.insert(
-            receipt.scope_key(),
-            (receipt.clone(), Some(object_ref(&receipt.encode()))),
-        );
+        let bytes = receipt.encode();
+        self.receipt_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(receipt.scope_key(), receipt.clone(), object_ref(&bytes));
         Ok(())
     }
 
@@ -6771,18 +10151,78 @@ impl Replica {
         // Durable receipt refs become authoritative in memory.
         if let Some(receipt) = receipt {
             let bytes = &receipt.encode();
-            self.receipts.insert(
-                receipt.scope_key(),
-                (receipt.clone(), Some(object_ref(bytes))),
-            );
+            self.receipt_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(receipt.scope_key(), receipt.clone(), object_ref(bytes));
         }
         Ok(())
     }
 
-    /// Read the committed canonical bytes of an atomic Body, if present and
-    /// interpreted (an opaque Body reads as absent).
+    /// Lossy compatibility read of one Atomic Body.
+    ///
+    /// This may perform blocking protected-object I/O for a durable cold
+    /// image and intentionally collapses every typed resolver failure to
+    /// `None`. Exact Runtime paths use `ReadSnapshot::body_presence`, reserve
+    /// `body_image_bounds`, and call `resolve_body_image` outside station/core
+    /// locks instead.
     pub fn read(&self, key: &BodyKey) -> Option<Vec<u8>> {
-        self.fabric.read(&fabric_key(key))
+        if !self.prepared_in_flight.load(Ordering::Acquire) {
+            if let Some(bytes) = lock_fabric(&self.fabric).read(&fabric_key(key)) {
+                return Some(bytes);
+            }
+        }
+        let record = self.bodies.get(key)?;
+        if !record.interpreted {
+            return None;
+        }
+        if !matches!(
+            record.binding.mutation_model,
+            MUTATION_ATOMIC | MUTATION_IMMUTABLE_ATOMIC
+        ) {
+            return None;
+        }
+        let material = record.causal.as_deref()?;
+        let store = self.durable.as_ref()?;
+        let keys = self.keys.as_ref()?;
+        let resolver = pin_body_image_resolver(store.reader(), keys, None, [material]).ok()?;
+        resolver
+            .resolve(key, &record.binding, material)
+            .ok()?
+            .read()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn atomic_writer_image_loaded_for_test(&self, key: &BodyKey) -> bool {
+        lock_fabric(&self.fabric).read(&fabric_key(key)).is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn collaborative_writer_image_loaded_for_test(&self, key: &BodyKey) -> bool {
+        lock_fabric(&self.fabric)
+            .body_snapshot(&fabric_key(key))
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn writer_body_count_for_test(&self) -> u64 {
+        lock_fabric(&self.fabric).body_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advance_parent_for_test(&mut self) {
+        self.frontier = advance(self.frontier, b"intervening-authoritative-truth");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn collect_unreachable_for_test(&self) -> Result<(), Failure> {
+        self.durable
+            .as_ref()
+            .ok_or(Failure::Poisoned)?
+            .collect_unreachable()
+            .map_err(Failure::Durability)
     }
 
     /// Project the committed collaborative view of a Body. List elements carry
@@ -6796,7 +10236,37 @@ impl Replica {
         &self,
         key: &BodyKey,
     ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
-        self.fabric.read_collaborative(&fabric_key(key))
+        if !self.prepared_in_flight.load(Ordering::Acquire) {
+            if let Ok(view) = lock_fabric(&self.fabric).read_collaborative(&fabric_key(key)) {
+                return Ok(view);
+            }
+        }
+        let record = self
+            .bodies
+            .get(key)
+            .filter(|record| {
+                record.interpreted
+                    && record.binding.mutation_model == MUTATION_COLLABORATIVE
+                    && record.causal.is_some()
+            })
+            .ok_or(fabric::projection::Failure::NotCollaborative)?;
+        let material = record
+            .causal
+            .as_deref()
+            .ok_or(fabric::projection::Failure::NotCollaborative)?;
+        let store = self
+            .durable
+            .as_ref()
+            .ok_or(fabric::projection::Failure::NotCollaborative)?;
+        let keys = self
+            .keys
+            .as_ref()
+            .ok_or(fabric::projection::Failure::NotCollaborative)?;
+        pin_body_image_resolver(store.reader(), keys, None, [material])
+            .map_err(|_| fabric::projection::Failure::NotCollaborative)?
+            .resolve(key, &record.binding, material)
+            .map_err(|_| fabric::projection::Failure::NotCollaborative)?
+            .read_collaborative()
     }
 }
 
@@ -6817,6 +10287,13 @@ fn object_ref(bytes: &[u8]) -> Object {
     Object {
         hash: journal::object_content_hash(bytes),
         len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    }
+}
+
+fn artifact_object(reference: &ArtifactRef) -> Object {
+    Object {
+        hash: reference.hash,
+        len: reference.len,
     }
 }
 
@@ -6921,24 +10398,26 @@ fn decode_artifact_pack_inner(
             "artifact pack has trailing bytes".into(),
         ));
     }
-    let references: BTreeSet<([u8; 32], u64)> = descriptor
+    let references: BTreeSet<([u8; 32], u64, [u8; 16])> = descriptor
         .artifact_refs()
-        .map(|reference| (reference.hash, reference.len))
+        .map(|reference| (reference.hash, reference.len, reference.epoch))
         .collect();
     let mut delivered = BTreeMap::new();
     for artifact in artifacts {
-        if artifact.len() > MAX_BODY_BYTES
-            || artifact.len() < BODY_ENVELOPE_OVERHEAD
-            || mechanics::authorization::body_epoch_id(&artifact).is_none()
-        {
+        let Some(epoch) = mechanics::authorization::body_epoch_id(&artifact) else {
+            return Err(Failure::Illegitimate(
+                "artifact envelope has an invalid shape".into(),
+            ));
+        };
+        if artifact.len() > MAX_BODY_BYTES || artifact.len() < BODY_ENVELOPE_OVERHEAD {
             return Err(Failure::Illegitimate(
                 "artifact envelope has an invalid shape".into(),
             ));
         }
         let actual = object_ref(&artifact);
-        if !references.contains(&(actual.hash, actual.len))
+        if !references.contains(&(actual.hash, actual.len, epoch))
             || delivered
-                .insert((actual.hash, actual.len), artifact)
+                .insert((actual.hash, actual.len, epoch), artifact)
                 .is_some()
         {
             return Err(Failure::Illegitimate(
@@ -6948,7 +10427,7 @@ fn decode_artifact_pack_inner(
     }
     let mut ordered = Vec::with_capacity(delivered.len());
     for reference in descriptor.artifact_refs() {
-        match delivered.remove(&(reference.hash, reference.len)) {
+        match delivered.remove(&(reference.hash, reference.len, reference.epoch)) {
             Some(artifact) => ordered.push(artifact),
             None if require_complete => {
                 return Err(Failure::Illegitimate(
@@ -7232,10 +10711,204 @@ mod generation_format_tests {
             manifest_root: None,
         };
         let bytes = postcard::to_stdvec(&prior).expect("v2 meta");
-        let current = decode_store_meta(&bytes).expect("v2 remains readable");
+        let (current, receipt_ledger_complete) =
+            decode_store_meta(&bytes).expect("v2 remains readable");
+        assert!(!receipt_ledger_complete);
         assert_eq!(current.format_version, STORE_META_FORMAT_VERSION);
         assert_eq!(current.frontier, prior.frontier);
         assert_eq!(current.quota, prior.quota);
         assert!(current.generation_index_root.is_none());
+    }
+}
+
+#[cfg(test)]
+mod body_directory_tests {
+    use super::*;
+
+    fn key(number: u32) -> BodyKey {
+        let mut raw = [0u8; 16];
+        raw[12..].copy_from_slice(&number.to_be_bytes());
+        BodyKey::new(
+            WorldId::parse("dev.lait.scale").expect("world"),
+            crate::body::BodyId::from_bytes(raw),
+        )
+    }
+
+    fn value(number: u32) -> SnapshotBody {
+        let body_key = key(number);
+        let fabric_key = fabric_key(&body_key);
+        SnapshotBody::resident(
+            &body_key,
+            BodyBinding {
+                schema: SchemaId::parse("record").expect("schema"),
+                schema_version: 1,
+                encoding: EncodingId::parse("postcard").expect("encoding"),
+                mutation_model: MUTATION_ATOMIC,
+            },
+            snapshot_stamp(&number.to_be_bytes()),
+            fabric::BodySnapshot::from_export(
+                &fabric_key,
+                fabric::BodyExport::Atomic(number.to_be_bytes().to_vec()),
+            )
+            .expect("snapshot"),
+        )
+    }
+
+    #[test]
+    fn lexical_front_insert_preserves_slots_and_unchanged_directory_leaves() {
+        let mut builder = BodyDirectoryBuilder::default();
+        for number in 1..=1_024 {
+            builder.push(Arc::new(key(number)), value(number));
+        }
+        let prior = builder.finish();
+        let held_key = key(777);
+        let held_ix = prior.body_ix(&held_key).expect("held slot");
+        let prior_key = prior.slot(held_ix).expect("held row").key.clone();
+        let untouched = prior
+            .lookup
+            .leaves
+            .iter()
+            .skip(1)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut next = prior.clone();
+        next.insert(Arc::new(key(0)), value(0));
+
+        assert_eq!(next.body_ix(&held_key), Some(held_ix));
+        assert!(Arc::ptr_eq(
+            &prior_key,
+            &next.slot(held_ix).expect("stable row").key
+        ));
+        assert_eq!(
+            next.body_ix(&key(0)).map(BodyIx::as_u32),
+            Some(1_024),
+            "a lexical-front insert appends a stable slot instead of renumbering"
+        );
+        for leaf in untouched {
+            assert!(
+                next.lookup
+                    .leaves
+                    .iter()
+                    .any(|candidate| Arc::ptr_eq(candidate, &leaf)),
+                "an unaffected lookup leaf must be shared Arc-identically"
+            );
+        }
+    }
+
+    #[test]
+    fn source_fingerprint_is_slot_independent_and_stamp_sensitive() {
+        let binding = value(1).binding;
+        let snapshot =
+            ReadSnapshot::from_body_rows_for_test([1u32, 2, 3].into_iter().map(|number| {
+                let body_key = key(number);
+                let SnapshotImage::Resident(body) = value(number).image else {
+                    unreachable!("Body directory fixture is resident")
+                };
+                (
+                    body_key.clone(),
+                    binding.clone(),
+                    number.to_be_bytes().to_vec(),
+                    body,
+                )
+            }));
+        let mut different_slots = snapshot.clone();
+        different_slots.bodies.remove(&key(1));
+        different_slots.bodies.remove(&key(2));
+        different_slots.bodies.insert(Arc::new(key(2)), value(2));
+        different_slots.bodies.insert(Arc::new(key(1)), value(1));
+        different_slots.schema_bodies = schema_body_index(&different_slots.bodies);
+        let world = WorldId::parse("dev.lait.scale").expect("world");
+        let sources = [(SchemaId::parse("record").expect("schema"), 1)];
+        assert_eq!(
+            snapshot.body_payload_bytes_with_schema_version(&world, &sources[0].0, 1),
+            12
+        );
+        assert_eq!(
+            snapshot.source_fingerprint(&world, &sources),
+            different_slots.source_fingerprint(&world, &sources),
+            "construction/slot allocation order is not cache identity"
+        );
+
+        let mut changed = snapshot.clone();
+        let changed_ix = changed.bodies.body_ix(&key(2)).expect("changed slot");
+        changed
+            .bodies
+            .slots
+            .get_mut(changed_ix.as_u32() as usize)
+            .and_then(Option::as_mut)
+            .expect("changed row")
+            .value
+            .stamp = snapshot_stamp(&99u32.to_be_bytes());
+        assert_ne!(
+            snapshot.source_fingerprint(&world, &sources),
+            changed.source_fingerprint(&world, &sources),
+            "an exact source stamp change must miss the persisted corpus image"
+        );
+    }
+}
+
+#[cfg(test)]
+mod receipt_cache_tests {
+    use super::*;
+
+    fn receipt(ordinal: u16, effect_bytes: usize) -> RequestReceipt {
+        let mut request = [0u8; 16];
+        request[..2].copy_from_slice(&ordinal.to_be_bytes());
+        RequestReceipt {
+            version: 2,
+            space: SpaceId::from_digest([0x51; 16]),
+            world: WorldId::parse("dev.lait.receipts").expect("world"),
+            device: mechanics::actor::device_from_seed(&[0x52; 32]),
+            request,
+            payload_hash: [0x53; 32],
+            effect: vec![0x54; effect_bytes],
+            bodies: Vec::new(),
+            frontier: ReplicaFrontier::EMPTY,
+            manifest_root: [0x55; 32],
+            implementation_digest: [0x56; 32],
+            extractor_schema_digest: [0x57; 32],
+            transaction: [0x58; 32],
+        }
+    }
+
+    #[test]
+    fn hot_receipts_are_bounded_by_count_and_physical_bytes() {
+        let mut cache = ReceiptCache::default();
+        for ordinal in 0..300 {
+            let receipt = receipt(ordinal, 0);
+            let bytes = receipt.encode();
+            cache.insert(receipt.scope_key(), receipt, object_ref(&bytes));
+        }
+        assert_eq!(cache.order.len(), HOT_RECEIPT_CACHE);
+        assert!(cache.retained_bytes_estimate() <= HOT_RECEIPT_CACHE_BYTES);
+
+        let mut large = ReceiptCache::default();
+        for ordinal in 0..64 {
+            let receipt = receipt(ordinal, crate::receipt::MAX_EFFECT_BYTES);
+            let bytes = receipt.encode();
+            large.insert(receipt.scope_key(), receipt, object_ref(&bytes));
+        }
+        assert!(large.order.len() < 64);
+        assert!(large.retained_bytes_estimate() <= HOT_RECEIPT_CACHE_BYTES);
+    }
+
+    #[test]
+    fn singleton_body_record_layout_is_explicitly_bounded() {
+        eprintln!(
+            "replica-record-layout body_record={} body_head={} heads={} binding={} frontier={} material={} artifact_ref={} head_artifacts={} directory_entry={} snapshot_body={} snapshot_slot={}",
+            std::mem::size_of::<BodyRecord>(),
+            std::mem::size_of::<BodyHead>(),
+            std::mem::size_of::<smallvec::SmallVec<[BodyHead; 1]>>(),
+            std::mem::size_of::<BodyBinding>(),
+            std::mem::size_of::<ReplicaFrontier>(),
+            std::mem::size_of::<CausalMaterial>(),
+            std::mem::size_of::<ArtifactRef>(),
+            std::mem::size_of::<smallvec::SmallVec<[ArtifactRef; 1]>>(),
+            std::mem::size_of::<SnapshotDirectoryEntry<BodyKey, Arc<BodyRecord>>>(),
+            std::mem::size_of::<SnapshotBody>(),
+            std::mem::size_of::<BodySlot>(),
+        );
+        assert!(std::mem::size_of::<BodyRecord>() <= 512);
     }
 }

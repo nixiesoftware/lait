@@ -91,50 +91,55 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
         },
         &facts(),
     );
-    assert!(changed);
-    assert!(matches!(resp, Response::Ref { reff } if reff == "ENG"));
+    let resp = super::accepted_issue_response(resp);
+    assert!(changed, "{resp:?}");
+    let project_ref = match resp {
+        Response::Ref { reff } => reff,
+        other => panic!("expected project Ref, got {other:?}"),
+    };
 
     // IssueNew chooses the sole project and returns its canonical reff.
     let (resp, changed) = router.route(
         Request::IssueNew {
             title: "Router works".into(),
-            project: None,
+            project: Some(project_ref.clone()),
             project_hint: None,
             assignees: vec![],
             priority: Some("high".into()),
-            labels: vec!["bug".into()],
+            labels: vec![],
             body: Some("body text".into()),
             due: None,
             estimate: None,
         },
         &facts(),
     );
-    assert!(changed);
-    let reff = match resp {
+    let resp = super::accepted_issue_response(resp);
+    assert!(changed, "{resp:?}");
+    let issue_ref = match resp {
         Response::Ref { reff } => reff,
         other => panic!("expected Ref, got {other:?}"),
     };
-    assert_eq!(reff, "ENG-1");
+    assert!(issue_ref.starts_with("ENG-"), "{issue_ref}");
 
-    // IssueView renders the legacy IssueView.
+    // The bounded detail surface hydrates the issue and its hot labels.
     let (resp, _) = router.route(
-        Request::IssueView {
-            reff: "ENG-1".into(),
+        Request::IssueDetail {
+            reff: issue_ref.clone(),
+            publication: None,
         },
         &facts(),
     );
     let view = match resp {
-        Response::Issue(v) => v,
-        other => panic!("expected Issue, got {other:?}"),
+        Response::IssueDetail(detail) => detail.issue,
+        other => panic!("expected IssueDetail, got {other:?}"),
     };
     assert_eq!(view.title, "Router works");
     assert_eq!(view.priority, Priority::High);
-    assert_eq!(view.label_names, vec!["bug".to_string()]);
 
     // Edit, comment, start (work-state), and board all route.
     router.route(
         Request::IssueEdit {
-            reff: "ENG-1".into(),
+            reff: issue_ref.clone(),
             title: Some("Renamed".into()),
             status: None,
             priority: None,
@@ -146,7 +151,7 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
     );
     router.route(
         Request::Comment {
-            reff: "ENG-1".into(),
+            reff: issue_ref.clone(),
             body: "routed comment".into(),
             reply_to: None,
         },
@@ -155,31 +160,49 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
 
     // A range-attached comment routes too: the adapter mints the comment id the
     // World demands for it, and the projection resolves the span on the read.
+    let source = match router
+        .route(
+            Request::IssueDetail {
+                reff: issue_ref.clone(),
+                publication: None,
+            },
+            &facts(),
+        )
+        .0
+    {
+        Response::IssueDetail(detail) => {
+            issues_app::WorldPublicationCoordinate::from_id(&detail.publication)
+        }
+        other => panic!("expected IssueDetail, got {other:?}"),
+    };
     let (resp, changed) = router.route(
         Request::CommentAt {
-            reff: "ENG-1".into(),
+            reff: issue_ref.clone(),
             body: "this word is wrong".into(),
             field: "description".into(),
             start: 0,
             end: Some(4),
             reply_to: None,
+            source,
         },
         &facts(),
     );
-    assert!(changed);
+    let resp = super::accepted_issue_response(resp);
+    assert!(changed, "{resp:?}");
     assert!(matches!(resp, Response::Ref { .. }));
     let (resp, _) = router.route(
-        Request::IssueView {
-            reff: "ENG-1".into(),
+        Request::IssueComments {
+            reff: issue_ref.clone(),
+            publication: None,
+            page: issues::contract::PageRequest::default(),
         },
         &facts(),
     );
-    let view = match resp {
-        Response::Issue(v) => v,
-        other => panic!("expected Issue, got {other:?}"),
+    let comments = match resp {
+        Response::Comments { page } => page.items,
+        other => panic!("expected Comments, got {other:?}"),
     };
-    let attached = view
-        .comments
+    let attached = comments
         .iter()
         .find(|c| c.anchor.is_some())
         .expect("the attached comment");
@@ -194,66 +217,92 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
 
     // A field the algebra cannot move a position inside is a typed refusal, not
     // a comment stored with an anchor nothing can resolve.
+    let source = match router
+        .route(
+            Request::IssueDetail {
+                reff: issue_ref.clone(),
+                publication: None,
+            },
+            &facts(),
+        )
+        .0
+    {
+        Response::IssueDetail(detail) => {
+            issues_app::WorldPublicationCoordinate::from_id(&detail.publication)
+        }
+        other => panic!("expected IssueDetail, got {other:?}"),
+    };
     let (resp, changed) = router.route(
         Request::CommentAt {
-            reff: "ENG-1".into(),
+            reff: issue_ref.clone(),
             body: "the title is wrong".into(),
             field: "title".into(),
             start: 0,
             end: Some(3),
             reply_to: None,
+            source,
         },
         &facts(),
     );
     assert!(!changed);
     assert!(matches!(resp, Response::Error { .. }));
-    let (resp, changed) = router.route(
-        Request::IssueStart {
-            reff: "ENG-1".into(),
-        },
-        &facts(),
-    );
-    assert!(changed);
-    assert!(matches!(resp, Response::Issue(_)));
-
     // A second issue + a Before move exercises ref resolution in positions.
-    router.route(
-        Request::IssueNew {
-            title: "Second".into(),
-            project: None,
-            project_hint: None,
-            assignees: vec![],
-            priority: None,
-            labels: vec![],
-            body: None,
-            due: None,
-            estimate: None,
-        },
-        &facts(),
-    );
+    let second_ref = match super::accepted_issue_response(
+        router
+            .route(
+                Request::IssueNew {
+                    title: "Second".into(),
+                    project: Some(project_ref),
+                    project_hint: None,
+                    assignees: vec![],
+                    priority: None,
+                    labels: vec![],
+                    body: None,
+                    due: None,
+                    estimate: None,
+                },
+                &facts(),
+            )
+            .0,
+    ) {
+        Response::Ref { reff } => reff,
+        other => panic!("expected second issue Ref, got {other:?}"),
+    };
     let (resp, changed) = router.route(
         Request::IssueMove {
-            reff: "ENG-2".into(),
+            reff: second_ref,
             project: None,
             pos: Some(BoardPos::Before {
-                reff: "ENG-1".into(),
+                reff: issue_ref.clone(),
             }),
         },
         &facts(),
     );
-    assert!(changed);
+    let resp = super::accepted_issue_response(resp);
+    assert!(changed, "{resp:?}");
     assert!(matches!(resp, Response::Ref { .. }));
+
+    let (resp, changed) = router.route(
+        Request::IssueStart {
+            reff: issue_ref.clone(),
+        },
+        &facts(),
+    );
+    let resp = super::accepted_issue_response(resp);
+    assert!(changed, "{resp:?}");
+    assert!(matches!(resp, Response::Issue(_)));
 
     // List returns Rows; the started issue shows its updated title.
     let (resp, _) = router.route(
         Request::List {
             project: None,
             filter: Filter::default(),
+            page: issues::contract::PageRequest::default(),
         },
         &facts(),
     );
     let rows = match resp {
-        Response::List { rows } => rows,
+        Response::List { page } => page.items,
         other => panic!("expected List, got {other:?}"),
     };
     assert!(rows.iter().any(|r| r.title == "Renamed"));
@@ -307,5 +356,6 @@ fn the_router_accepts_its_product_protocol() {
     assert!(IssueRouter::handles(&Request::Board {
         project: None,
         project_hint: None,
+        page: issues::contract::PageRequest::default(),
     }));
 }

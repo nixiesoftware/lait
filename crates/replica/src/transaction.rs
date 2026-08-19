@@ -120,6 +120,9 @@ pub struct Core {
     pub authority_frontier: AuthorityFrontier,
     /// The acting principal (canonical ActorId text).
     pub actor: String,
+    /// The signed action's persistent idempotency coordinate. This is also the
+    /// durable feedback operation id on every receiving Station.
+    pub operation: [u8; 16],
     /// The signing device's raw key.
     pub signer: [u8; 32],
     /// Digest of the signed intent payload.
@@ -163,6 +166,8 @@ pub enum Error {
     UnsupportedSignatureAlgorithm(u8),
     NonCanonical,
     BadSpaceId,
+    /// The signed actor is not canonical `ActorId` text.
+    BadActorId,
     /// Empty or over the descriptor-count/size bound.
     BadDescriptorCount,
     /// Descriptors were not strictly BodyKey-sorted (unsorted or duplicated).
@@ -307,6 +312,7 @@ pub struct SignRequest<'a> {
     pub replica_frontier: ReplicaFrontier,
     pub authority_frontier: AuthorityFrontier,
     pub actor: &'a str,
+    pub operation: [u8; 16],
     pub intent_digest: [u8; 32],
     pub operations_digest: [u8; 32],
     pub demand: Vec<u8>,
@@ -331,8 +337,15 @@ impl Transaction {
         signer: &dyn Signer,
         authorize: impl FnOnce(&Core) -> Result<Vec<u8>, mechanics::authorization::Refusal>,
     ) -> Result<Self, mechanics::authorization::Refusal> {
+        if mechanics::ids::ActorId::parse(request.actor).is_none() {
+            return Err(mechanics::authorization::Refusal::Denied(
+                mechanics::authorization::DenialReason::Internal(
+                    "transaction actor is not a canonical ActorId",
+                ),
+            ));
+        }
         let core = Core {
-            version: 2,
+            version: 3,
             space: space_bytes(request.space).ok_or(mechanics::authorization::Refusal::Denied(
                 mechanics::authorization::DenialReason::Internal("space id is not valid bytes"),
             ))?,
@@ -340,6 +353,7 @@ impl Transaction {
             replica_frontier: request.replica_frontier,
             authority_frontier: request.authority_frontier,
             actor: request.actor.to_string(),
+            operation: request.operation,
             signer: signer.signer_key(),
             intent_digest: request.intent_digest,
             operations_digest: request.operations_digest,
@@ -397,8 +411,11 @@ impl Transaction {
             return Err(Error::NonCanonical);
         }
         let core = &self.core;
-        if core.version != 2 {
+        if core.version != 3 {
             return Err(Error::UnsupportedVersion(core.version));
+        }
+        if mechanics::ids::ActorId::parse(&core.actor).is_none() {
+            return Err(Error::BadActorId);
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
             return Err(Error::UnsupportedSignatureAlgorithm(
@@ -427,7 +444,9 @@ impl Transaction {
                 .map_err(|_| Error::BadMaterial)?;
             if !matches!(
                 descriptor.mutation_model,
-                crate::protected::MUTATION_ATOMIC | crate::protected::MUTATION_COLLABORATIVE
+                crate::protected::MUTATION_ATOMIC
+                    | crate::protected::MUTATION_COLLABORATIVE
+                    | crate::protected::MUTATION_IMMUTABLE_ATOMIC
             ) {
                 return Err(Error::BadMutationModel);
             }

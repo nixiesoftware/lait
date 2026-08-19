@@ -335,6 +335,12 @@ materialization, authority, actor, device, and query coordinates. Viewer, CLI,
 MCP, and controllers use this same request path. No adapter may bypass the
 evaluator with a private cache or reinterpret a root under current World code.
 
+Control v15 adds daemon-owned native World update consent and status. Enqueue
+durably records a stable operation before bundle download or per-Space
+lifecycle work; a bounded restart-resumable worker reports progress and typed
+Busy/Capacity refusal. Opening a Space or the resident channel watcher never
+implies consent.
+
 `Subscribe` carries Observation doorbells with Station epoch, sequence, reset
 semantics, and invalidations grouped by stable World id. Inside each World,
 item scopes carry `{kind,id,label,docs}` and structural planes carry

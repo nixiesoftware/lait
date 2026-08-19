@@ -37,10 +37,18 @@ impl Client {
     /// Idempotent by the supervisor's own key: asking twice for one identity
     /// finds the head that is already running. That matters because the
     /// alternative is a port and a run credential per click.
-    pub async fn head(&self) -> ClientResult<Head> {
+    /// `world` is the mount this head will serve, and it is what makes two
+    /// Worlds two heads.
+    ///
+    /// Mandatory, and it was an `Option` once. "Unspecified" is a question, and a
+    /// question cannot be a map key: one caller passing `None` and another
+    /// passing the same World by name produced two keys, so one World got two
+    /// heads and stopping either left the row saying Running. Whoever knows which
+    /// build this is resolves it; by the time it reaches here it is an answer.
+    pub async fn head(&self, world: &str) -> ClientResult<Head> {
         let facts = self
             .supervisor()
-            .start_identity_head(self.identity())
+            .start_identity_head(self.identity(), world)
             .await?;
         let url = facts.url.as_deref().ok_or_else(|| {
             ClientError::internal("the head came up without announcing an address")
@@ -53,7 +61,7 @@ impl Client {
     /// Returns what it launched rather than nothing: a surface that says *where*
     /// it sent the browser is the difference between "did that work" and a
     /// window that may or may not have appeared behind another one.
-    pub async fn open_world(&self, entry_path: &str) -> ClientResult<LaunchTicket> {
+    pub async fn open_world(&self, world: &str, entry_path: &str) -> ClientResult<LaunchTicket> {
         if !entry_path.starts_with('/') {
             // The declared entry path is a World's own statement about itself.
             // A relative one is a declaration this client cannot act on, and
@@ -68,7 +76,10 @@ impl Client {
         // choosing there is what attaches a daemon. A client that placed an
         // Orbit here would be pre-answering a question the person is about to
         // be asked.
-        let head = self.head().await?;
+        // This World's head, not whichever one happened to be up. That is the
+        // difference between opening Issues and opening "the head", and it is
+        // what lets stopping one say something true about one World.
+        let head = self.head(world).await?;
         let ticket = self.mint(&head).await?;
         Self::launch_url(&head.base, entry_path, &ticket.secret, ticket.expires_at_ms)
     }
@@ -138,7 +149,7 @@ mod tests {
 
         for entry in ["issues", ""] {
             let refused = client
-                .open_world(entry)
+                .open_world("issues", entry)
                 .await
                 .expect_err("a launch with nothing to land on was accepted");
             assert_eq!(

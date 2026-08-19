@@ -52,11 +52,13 @@ fn descriptor(body: [u8; 16], payload: &[u8]) -> Descriptor {
             checkpoint: fabric::ArtifactRef {
                 hash: journal::object_content_hash(payload),
                 len: payload.len() as u64,
+                epoch: [0u8; 16],
             },
             delta_tail: Vec::new(),
             history_root: None,
             history_count: 0,
             version: fabric::Version::empty(),
+            plaintext_size: payload.len() as u64,
         },
     }
 }
@@ -72,7 +74,8 @@ fn sign(descriptors: Vec<Descriptor>) -> Result<Transaction, mechanics::authoriz
             parent_manifest_root: NO_PARENT_ROOT,
             replica_frontier: ReplicaFrontier::new([1u8; 32], 1),
             authority_frontier: auth(),
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
+            operation: [6u8; 16],
             intent_digest: [4u8; 32],
             operations_digest: [5u8; 32],
             demand: demand(),
@@ -101,6 +104,7 @@ fn valid_transaction_verifies_and_roundtrips() {
     assert_eq!(tx, back);
     // The id is the full signed-envelope digest and is stable across decode.
     assert_eq!(tx.id(), back.id());
+    assert_eq!(back.core.operation, [6u8; 16]);
 }
 
 #[test]
@@ -122,8 +126,8 @@ fn opaque_artifact_reference_check_needs_no_key() {
 #[test]
 fn version_and_algorithm_rejection() {
     let mut tx = valid_tx();
-    tx.core.version = 3;
-    assert_eq!(tx.verify(), Err(Error::UnsupportedVersion(3)));
+    tx.core.version = 4;
+    assert_eq!(tx.verify(), Err(Error::UnsupportedVersion(4)));
     let mut tx = valid_tx();
     tx.signature_algorithm = 9;
     assert_eq!(tx.verify(), Err(Error::UnsupportedSignatureAlgorithm(9)));
