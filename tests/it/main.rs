@@ -36,6 +36,7 @@ mod launcher_safety;
 mod live_control;
 mod mcp_parity;
 mod mixed_root_guard;
+mod orbit_registry;
 mod orbital_admission;
 mod orbital_adoption;
 mod orbital_boundaries;

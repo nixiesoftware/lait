@@ -1659,7 +1659,6 @@ mod tests {
             origin: crate::orbits::Origin::Joined,
             host_nick: String::new(),
             last_opened: 0,
-            projects: vec![],
         };
         let directory = Catalog::with_entries(
             std::path::PathBuf::from("/identity-for-tests"),

@@ -318,7 +318,6 @@ function space(id: string, canonical: string, identity: SpaceRow["identity"]): S
     last_opened: 0,
     status: "up",
     identity,
-    projects: [],
   };
 }
 
