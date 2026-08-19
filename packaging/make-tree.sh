@@ -49,14 +49,32 @@ done
 # tree missing either half installs a client that cannot find its daemon —
 # the machine `sidecar::beside` and `update::custody_of` exist to prevent, and
 # the staging half refuses it too. Refused here so a release never carries it.
+#
+# The terms and the notices are required for the same reason, one layer up: the
+# tree produced here is what a self-update swaps into `current/`, so a file the
+# *installer* adds afterwards survives the install and not the first upgrade.
+# That is not hypothetical — Linux staged the notices only in make-tarball,
+# which writes to the tarball's own root, so its update tree carried none and
+# every Linux user lost them on their first self-update. Refusing here puts the
+# check in the script that makes the artifact, rather than in a test that reads
+# a CI workflow and cannot see a local or future invocation at all.
 case "$TARGET" in
-  *-windows-*) ENTRY="astrolabe.exe";            SIDECAR="lait.exe" ;;
-  *-apple-*)   ENTRY="Contents/MacOS/astrolabe"; SIDECAR="Contents/MacOS/lait" ;;
-  *)           ENTRY="astrolabe";                SIDECAR="lait" ;;
+  *-windows-*) ENTRY="astrolabe.exe";            SIDECAR="lait.exe"
+               DOCS="." ;;
+  *-apple-*)   ENTRY="Contents/MacOS/astrolabe"; SIDECAR="Contents/MacOS/lait"
+               DOCS="Contents/Resources" ;;
+  *)           ENTRY="astrolabe";                SIDECAR="lait"
+               DOCS="." ;;
 esac
 for required in "$ENTRY" "$SIDECAR"; do
   [ -f "$STAGE/$required" ] || {
     echo "make-tree: $STAGE is missing $required — a tree without both halves of the pair" >&2
+    exit 1
+  }
+done
+for required in "$DOCS/LICENSE" "$DOCS/THIRD-PARTY-NOTICES.md"; do
+  [ -f "$STAGE/$required" ] || {
+    echo "make-tree: $STAGE is missing $required — a tree that drops the terms on the first self-update" >&2
     exit 1
   }
 done

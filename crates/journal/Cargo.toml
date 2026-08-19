@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.92"
 description = "Semantics-free crash-safe object/manifest journal: immutable content-addressed objects, atomic manifest swap, fsync/directory-sync discipline, fault injection, and recovery. Knows nothing about Bodies, authority, or any product."
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [features]
