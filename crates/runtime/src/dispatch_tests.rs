@@ -1900,6 +1900,13 @@ fn station_find_policy_can_only_tighten_a_query() {
     assert!(session.find(find_query(1)).unwrap().rows().is_empty());
 }
 
+/// How long a phase waits for its own worker to reach the gated callback.
+///
+/// It has to be at least `submit_when_admitted`'s retry budget: a worker that
+/// is legitimately still retrying a transient `Busy` has not failed, and a
+/// shorter wait here just reports the slower machine as a broken test.
+const ENTERED: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[test]
 fn historical_find_uses_the_exact_installed_implementation_after_activation_moves() {
     struct SwitchingAuthority {
@@ -2148,6 +2155,8 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
     // immutable publication while the one Replica mutation lane serializes
     // the candidate.
     *released.lock().unwrap() = false;
+    // Only a token from THIS phase may answer the wait below.
+    while started_rx.try_recv().is_ok() {}
     let before_candidate = station.frontier();
     let submit_session = current_session.clone();
     let submit = std::thread::spawn(move || {
@@ -2162,7 +2171,7 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
         )
     });
     started_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(ENTERED)
         .expect("local candidate extractor entered");
     let mut current_query = find_query(10);
     if let crate::find::Op::Seek(crate::find::Seek::Term { text, .. }) =
@@ -2224,6 +2233,13 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
     // prompt `Busy` rather than waiting invisibly behind this callback.
     let (submit_released, submit_wake) = &*submit_block;
     *submit_released.lock().unwrap() = false;
+    // The previous phase's admitted submit ran this same callback with the
+    // gate open and left its entry token here. Drain it: otherwise the wait
+    // below is answered by that phase, this thread proceeds while the worker
+    // is not yet admitted, and its own competing submit wins the lane, enters
+    // the gate, and parks on a Condvar only this thread -- now blocked -- was
+    // ever going to release. It waits for itself.
+    while submit_started_rx.try_recv().is_ok() {}
     let before_callback = station.frontier();
     let callback_session = current_session.clone();
     let callback_submit = std::thread::spawn(move || {
@@ -2238,7 +2254,7 @@ fn historical_find_uses_the_exact_installed_implementation_after_activation_move
         )
     });
     submit_started_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(ENTERED)
         .expect("World submit callback entered");
     let mut callback_query = find_query(10);
     if let crate::find::Op::Seek(crate::find::Seek::Term { text, .. }) =
