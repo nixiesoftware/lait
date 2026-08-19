@@ -3529,10 +3529,21 @@ fn baseline_summary_row(
     })
 }
 
+/// The Spec revision a row names, or `None` when the row is not one.
+///
+/// `extract_spec_revision` emits two nodes from one record: the revision
+/// itself, and a relation from the Spec to it so the graph can be walked.
+/// Both carry the Spec as their source and both are tagged `spec_revision`,
+/// so a seek on those two coordinates matches each revision twice. Only the
+/// revision node carries [`crate::find::field::REVISION`], and a row without
+/// one is not a revision -- it is the edge pointing at it.
 fn spec_revision_page_row(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
-) -> Result<crate::spec::Revision, Rejection> {
+) -> Result<Option<crate::spec::Revision>, Rejection> {
+    if result_text(row, crate::find::field::REVISION).is_none() {
+        return Ok(None);
+    }
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
     let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
@@ -3545,13 +3556,18 @@ fn spec_revision_page_row(
     {
         return Err(Rejection::StateCorrupt);
     }
-    Ok(record.revision)
+    Ok(Some(record.revision))
 }
 
+/// The Baseline revision a row names, or `None` when the row is the relation
+/// beside it. Same twin-node shape as `spec_revision_page_row`.
 fn baseline_revision_page_row(
     ctx: &Context<'_>,
     row: &runtime::find::ResultRow,
-) -> Result<crate::spec::BaselineRevision, Rejection> {
+) -> Result<Option<crate::spec::BaselineRevision>, Rejection> {
+    if result_text(row, crate::find::field::REVISION).is_none() {
+        return Ok(None);
+    }
     let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
     let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
         .map_err(|_| Rejection::StateCorrupt)?;
@@ -3564,7 +3580,7 @@ fn baseline_revision_page_row(
     {
         return Err(Rejection::StateCorrupt);
     }
-    Ok(record.revision)
+    Ok(Some(record.revision))
 }
 
 fn triage_page_row(
@@ -3631,10 +3647,25 @@ fn spec_observation_page_row(
         .map_err(|_| Rejection::StateCorrupt)?;
     let record = crate::records::SpecObservationRecord::decode_canonical(&envelope.record)
         .map_err(|_| Rejection::StateCorrupt)?;
-    Ok(match record {
-        crate::records::SpecObservationRecord::Assert { observation, .. } => Some(observation),
-        crate::records::SpecObservationRecord::Retract { .. } => None,
-    })
+    let crate::records::SpecObservationRecord::Assert { observation, .. } = record else {
+        return Ok(None);
+    };
+    // A retracted observation is not one. The retraction posts its own node
+    // beside the assertion rather than erasing it -- the assertion is an
+    // immutable record and stays readable as history -- so the page has to
+    // ask, exactly as `spec_observation_state` asks for a single one.
+    if unique_find_row(
+        ctx,
+        crate::find::field::ID,
+        &format!("observation-retraction:{}", observation.observation),
+        "spec_observation_fact",
+        None,
+    )?
+    .is_some()
+    {
+        return Ok(None);
+    }
+    Ok(Some(observation))
 }
 
 fn issue_page_row(row: &runtime::find::ResultRow) -> Result<crate::dto::Row, Rejection> {
@@ -12045,7 +12076,10 @@ impl World for IssuesWorld {
                     .rows()
                     .iter()
                     .map(|row| spec_revision_page_row(ctx, row))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items))
                         .expect("spec history page json"),
@@ -12141,7 +12175,10 @@ impl World for IssuesWorld {
                     .rows()
                     .iter()
                     .map(|row| baseline_revision_page_row(ctx, row))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 Ok(projection(
                     serde_json::to_vec(&page_from_answer(&answer, items))
                         .expect("baseline history page json"),
