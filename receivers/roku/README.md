@@ -10,7 +10,9 @@ unassigned/offline/stale/revoked/refusal states.
 There is no activation-code shortcut, demo playlist, catalog, browser, generic
 RPC, or externally supplied media URL. Every displayed image comes from an
 opaque assignment/revision-bound asset route and remains hidden until Roku's
-decoder reports the authenticated dimensions.
+decoder reports the authenticated dimensions. Eligible live assignments use
+the coordinator's authenticated HLS-v3 MPEG-TS edge through Roku's native video
+stack; the receiver still cannot select a source URL.
 
 ## Build, sideload, and publish
 
