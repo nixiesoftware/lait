@@ -23,6 +23,10 @@ uses HMAC-SHA-256. Each image is bounded during transfer, checked for media type
 length, SHA-256, and decoded dimensions, then becomes eligible in one atomic
 staging swap. Relative item timing uses the monotonic clock.
 
+For an eligible live assignment, the receiver exchanges the authenticated
+program grant for a bounded CMAF ticket and feeds only that coordinator-owned
+stream to MSE. The assignment, not the television, selects the media source.
+
 ## Native recovery states
 
 Receiver-owned chrome distinguishes transport offline, source partial or
