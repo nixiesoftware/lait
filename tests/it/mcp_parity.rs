@@ -252,6 +252,8 @@ fn response_dtos_round_trip() {
             checks: vec![],
             provisional: false,
             corrupt_records: vec![],
+            more_comments: None,
+            reactions_complete: true,
         })),
         Response::Activity {
             page: issues::contract::Page {
@@ -549,6 +551,8 @@ fn issue_response_status_field_survives_the_kind_tag() {
         checks: vec![],
         provisional: false,
         corrupt_records: vec![],
+        more_comments: None,
+        reactions_complete: true,
     }));
     let json = serde_json::to_string(&resp).unwrap();
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();

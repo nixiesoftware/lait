@@ -81,13 +81,22 @@ fn the_implementation_id_is_pinned_and_moving_it_is_deliberate() {
     // two changes ship together and no Space ever ran the intermediate
     // surface.
     //
+    // Then twice more, still inside this release. `alias_project_ordinal`,
+    // because a human reference is a project AND a number and the number is
+    // only unique within the project -- the ordinal alone answered with one
+    // row per project once ordinals became small enough for a person to
+    // read. And `kind_project_state_live`, which a roll-up counts directly:
+    // the coordinate beside it counts tombstoned rows too, so excluding them
+    // had meant resolving every member, which is what put a ceiling on
+    // collections that never needed one.
+    //
     // Spaces on the previous implementation take the ordinary World-upgrade
     // path, exactly as they did then. What must NOT happen is this constant
     // being refreshed to whatever the build now prints: that turns the pin
     // into a mirror and the gate stops meaning anything.
     assert_eq!(
         id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        "e8f143511129ff928509dc79dbe56eb5ad1ffbaaddd6e3974664783ca56faa28",
+        "f342ffcb0cc4b1fe8cc272c1f8de1830b56b15395af96b6d819818026faa1199",
         "the Issues implementation id moved — see COMPATIBILITY.md before updating this"
     );
 }

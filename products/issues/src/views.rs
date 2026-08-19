@@ -1290,6 +1290,11 @@ pub fn issue_view(
             .collect(),
         provisional: false,
         corrupt_records: issue.check_corrupt_records.clone(),
+        // This builder is handed a fully materialised Issue, so what it
+        // shows is what there is: no page was cut and no reaction was left
+        // unread.
+        more_comments: None,
+        reactions_complete: true,
     }
 }
 

@@ -749,6 +749,31 @@ pub struct IssueView {
     /// readers keep working.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corrupt_records: Vec<CorruptRecord>,
+    /// Continuation for `comments`, absent when this view carries the whole
+    /// discussion.
+    ///
+    /// A view that shows the first hundred of a hundred and fifty comments
+    /// and cannot say so is not a bounded answer, it is a wrong one: nothing
+    /// in the shape distinguishes "that is all of them" from "that is where
+    /// we stopped".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more_comments: Option<String>,
+    /// Whether every shown comment's reactions were read.
+    ///
+    /// Reactions are paged beside the comments rather than inside them, so a
+    /// comment whose reaction records fall past that page renders with an
+    /// empty list — indistinguishable from a comment nobody reacted to. This
+    /// says which it is, because "none" and "not read" are different facts
+    /// and only one of them is about the comment.
+    #[serde(default = "reactions_read")]
+    pub reactions_complete: bool,
+}
+
+/// A view built without paging reactions has read all of them: there were
+/// none to miss. The default therefore says complete, and only a producer
+/// that actually truncated says otherwise.
+fn reactions_read() -> bool {
+    true
 }
 
 /// One derived activity transition. `changes` is a list so one request, one

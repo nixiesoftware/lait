@@ -1526,6 +1526,7 @@ pub(crate) fn issue_coordinate(
     let doc = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
     let identity = records::IssueIdentityRecord {
         issue: doc.as_str().into(),
+        project: project.into(),
         alias: records::IssueAliasCoordinate::for_issue(ordinal, &doc)
             .map_err(|_| Rejection::StateCorrupt)?,
     };
@@ -2266,7 +2267,7 @@ pub(crate) fn write_issue_coordinate(
     tombstone: bool,
 ) -> Result<(), Rejection> {
     let (_, placement) = issue_coordinate(doc, project, workflow_state, position, ordinal)?;
-    write_issue_identity(ctx, batch, doc, ordinal)?;
+    write_issue_identity(ctx, batch, doc, project, ordinal)?;
     let issue = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
     let placement_key = records::issue_placement_key(&issue);
     batch.atomic_value(
@@ -2299,11 +2300,13 @@ pub(crate) fn write_issue_identity(
     ctx: &Context<'_>,
     batch: &mut Batch,
     doc: &str,
+    project: &str,
     ordinal: u64,
 ) -> Result<(), Rejection> {
     let issue = DocId::parse(doc).ok_or(Rejection::StateCorrupt)?;
     let identity = records::IssueIdentityRecord {
         issue: doc.into(),
+        project: project.into(),
         alias: records::IssueAliasCoordinate::for_issue(ordinal, &issue)
             .map_err(|_| Rejection::StateCorrupt)?,
     };
@@ -5172,6 +5175,30 @@ fn migration_project_from_path(
         .ok_or(Rejection::StateCorrupt)
 }
 
+/// Which project a legacy Issue sat in, read from the board that held it.
+///
+/// The identity record now names its project, because the number in a
+/// reference is counted within one. The legacy Catalog does not store that
+/// per Issue -- it stores the boards, and an Issue is on exactly one.
+fn migration_project_of_doc(
+    view: &fabric::CollaborativeView,
+    doc: &str,
+) -> Result<String, Rejection> {
+    for (path, entries) in view.lists.iter() {
+        if !path.starts_with("board/") {
+            continue;
+        }
+        let holds = entries
+            .iter()
+            .filter_map(|entry| std::str::from_utf8(&entry.value).ok())
+            .any(|entry| entry == doc || entry.split(':').any(|part| part == doc));
+        if holds {
+            return migration_project_from_path(view, path);
+        }
+    }
+    Err(Rejection::StateCorrupt)
+}
+
 /// Stage one Catalog-owned coordinate after every frozen Issue base has been
 /// copied. The only placement mutation is an exact-transition-fenced rank
 /// overlay; workflow intent remains the authenticated Issue transition.
@@ -5192,8 +5219,10 @@ pub(crate) fn migration_coordinate_window(
             .and_then(|raw| std::str::from_utf8(raw).ok())
             .and_then(|raw| raw.parse::<u64>().ok())
             .ok_or(Rejection::StateCorrupt)?;
+        let project = migration_project_of_doc(view, doc)?;
         let expected = records::IssueIdentityRecord {
             issue: doc.into(),
+            project: project.clone(),
             alias: records::IssueAliasCoordinate::for_issue(ordinal, &issue)
                 .map_err(|_| Rejection::StateCorrupt)?,
         };
@@ -5203,7 +5232,7 @@ pub(crate) fn migration_coordinate_window(
             None => {}
         }
         let mut batch = Batch::default();
-        write_issue_identity(ctx, &mut batch, doc, ordinal)?;
+        write_issue_identity(ctx, &mut batch, doc, &project, ordinal)?;
         return Ok(batch);
     }
     if let Some(doc) = subitem.strip_prefix("15:tombstone:") {

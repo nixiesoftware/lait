@@ -3,7 +3,7 @@ name = "lait-feed"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.92"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 description = "Publish-side tool for the lait release feed: keygen, manifest, pointer, verify"
 # The publish half of the update seam (SUB-13). The consume half lives in the
 # root crate's `src/update/`; the two share the envelope and payload shapes by

@@ -3,8 +3,9 @@
 This packaged TV web application is a production Astrolabe Display receiver.
 It enrolls through the two-sided confirmation ceremony, stores receiver state
 in Tizen KeyManager, authenticates every assigned-program and asset request,
-stages bounded verified frames, and continues an eligible program from
-monotonic time while delivery is offline.
+stages bounded verified frames, consumes eligible assignment-bound CMAF streams
+through MSE, and continues an eligible frame program from monotonic time while
+delivery is offline.
 
 It targets Tizen 5.5 or newer and communicates only with
 `https://nixiesoftware.com`. The manifest intentionally does **not** request the

@@ -17,6 +17,8 @@
   source truth, and delivery staleness.
 - Every assigned image is verified by type, exact encoded length, SHA-256, and
   decoded dimensions before display. Staging is app-memory-only and bounded.
+- Eligible live assignments use only the assignment-bound CMAF ticket and MSE
+  stream issued by the coordinator; the package exposes no generic media URL.
 - Network loss uses bounded retry. Verified content follows the assignment's
   stale action; no content is silently skipped or replaced.
 - Revocation blanks on the next authenticated response; already observed or

@@ -2356,12 +2356,23 @@ pub struct IssueAliasCoordinate {
 #[serde(deny_unknown_fields)]
 pub struct IssueIdentityRecord {
     pub issue: String,
+    /// The project the ordinal was counted within.
+    ///
+    /// A number that means "the fourth Issue in ENG" is only a reference when
+    /// something says which project counted it. Without it the coordinate has
+    /// to be searched for across every project at once, and since the number
+    /// is now small and dense, every project has a first Issue and a second
+    /// one -- so that search returns a row per project rather than a row.
+    pub project: String,
     pub alias: IssueAliasCoordinate,
 }
 
 impl CanonicalRecord for IssueIdentityRecord {
     fn validate(&self) -> Result<(), Invalid> {
         let issue = DocId::parse(&self.issue).ok_or(Invalid::Field("issue_identity"))?;
+        if ProjectId::parse(&self.project).is_none() {
+            return Err(Invalid::Field("issue_identity_project"));
+        }
         let expected = IssueAliasCoordinate::for_issue(self.alias.ordinal, &issue)?;
         if self.alias != expected {
             return Err(Invalid::Field("alias_binding"));
@@ -2371,9 +2382,6 @@ impl CanonicalRecord for IssueIdentityRecord {
 }
 
 impl IssueAliasCoordinate {
-    /// Ordinal space for a derived alias. See `deterministic_for_issue`.
-    pub const MAX_DERIVED_ORDINAL: u64 = 999_999;
-
     pub fn for_issue(ordinal: u64, issue: &DocId) -> Result<Self, Invalid> {
         if ordinal == 0 {
             return Err(Invalid::Field("alias"));
@@ -2388,24 +2396,19 @@ impl IssueAliasCoordinate {
         })
     }
 
-    /// Allocate without a shared counter.  The ordinal is a stable display
-    /// hint derived from the Issue id; the independent 128-bit disambiguator
-    /// remains the collision-proof identity component.
+    /// Allocate without a shared counter.
     ///
-    /// A display hint has to be small enough to be one. Six digits is a
-    /// reference a person can read out loud, remember across a room, and type
-    /// without checking -- which is the entire job of a human alias, and the
-    /// reason a tracker has one at all.
+    /// The ordinal is derived from the Issue id and the disambiguator is an
+    /// independent 128 bits of the same, so the pair is collision-proof
+    /// without anybody agreeing on a number. That is what makes an Issue
+    /// nameable the moment it exists, on a device that has spoken to nobody.
     ///
-    /// Small means ordinals repeat, and the arithmetic that matters is not
-    /// "will any two issues collide" but "how many issues are affected when
-    /// they do". Expected share is issues-per-project over the ordinal space:
-    /// roughly one in a thousand at a thousand issues, one in a hundred at ten
-    /// thousand. Those issues, and only those, are ever shown the long form.
-    ///
-    /// Collisions are never resolved by making the reference longer for
-    /// everybody. They are resolved where the ambiguity is actually observed,
-    /// which is at lookup -- see `resolve_entity`.
+    /// This coordinate is the DURABLE one and is deliberately not small. It
+    /// is what a reference resolves against and what survives being written
+    /// down; shortening it to fit a person's eye trades an unambiguous
+    /// identity for a prettier one, and the identity is the part that has to
+    /// keep working. What a person reads is a separate question, answered
+    /// somewhere that can afford to be wrong and re-derived.
     pub fn deterministic_for_issue(issue: &DocId) -> Self {
         let digest = blake3::derive_key(
             "lait.issues.alias-coordinate.ordinal.v1",
@@ -2413,8 +2416,9 @@ impl IssueAliasCoordinate {
         );
         let mut ordinal_bytes = [0u8; 8];
         ordinal_bytes.copy_from_slice(&digest[..8]);
-        let ordinal = u64::from_be_bytes(ordinal_bytes) % Self::MAX_DERIVED_ORDINAL;
-        Self::for_issue(ordinal.saturating_add(1), issue).expect("nonzero deterministic ordinal")
+        let ordinal =
+            u64::from_be_bytes(ordinal_bytes) & u64::try_from(i64::MAX).unwrap_or(u64::MAX);
+        Self::for_issue(ordinal.max(1), issue).expect("nonzero deterministic ordinal")
     }
 
     pub fn suffix(self) -> String {
@@ -3010,6 +3014,7 @@ mod tests {
         assert_eq!(a.render("OPS").unwrap(), format!("OPS-12-{}", a.suffix()));
         assert!(IssueIdentityRecord {
             issue: ISSUE.into(),
+            project: PROJECT.into(),
             alias: a,
         }
         .validate()
@@ -3017,6 +3022,7 @@ mod tests {
         assert_eq!(
             IssueIdentityRecord {
                 issue: ISSUE.into(),
+                project: PROJECT.into(),
                 alias: b,
             }
             .validate(),
