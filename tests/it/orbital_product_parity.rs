@@ -615,7 +615,7 @@ fn verification_is_performed_locally_to_a_returned_outcome() {
         )
         .unwrap();
     let source = data_encoding::HEXLOWER.encode(source_ref.as_bytes());
-    let build = issues::contract::verify_build([0; 32]);
+    let build = issues::contract::verify_build(driver.session.implementation());
     let build_hex = data_encoding::HEXLOWER.encode(&build.id.as_bytes());
     let request = RequestId::from_bytes([0x62; 16]);
     let run = runtime::exec::derive_run_id(
@@ -714,9 +714,14 @@ fn verification_is_performed_locally_to_a_returned_outcome() {
             },
         ))
         .unwrap();
-    let view: IssueView = driver.query(&IssueQuery::View { doc, me: None });
-    assert_eq!(view.checks[0].state, "accepted");
-    assert_eq!(view.checks[0].verdict.as_deref(), Some("pass"));
+    let detail: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
+        doc,
+        me: None,
+        pages: contract::IssueDetailPages::default(),
+    });
+    assert_eq!(detail.checks.items.len(), 1);
+    assert_eq!(detail.checks.items[0].state, "accepted");
+    assert_eq!(detail.checks.items[0].verdict.as_deref(), Some("pass"));
 }
 
 #[test]
