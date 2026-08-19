@@ -507,6 +507,42 @@ impl World for ExecAtomicWorld {
     }
 
     fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        if let Some(rest) = intent.payload.strip_prefix(b"accept:") {
+            if rest.len() != 32 {
+                return Err(Rejection::InvalidRequest);
+            }
+            let mut run = [0u8; 16];
+            run.copy_from_slice(&rest[..16]);
+            let mut attempt = [0u8; 16];
+            attempt.copy_from_slice(&rest[16..]);
+            return Ok(Effect {
+                content_refs: Vec::new(),
+                exec: vec![crate::exec::Cmd::Accept {
+                    run: crate::exec::RunId::from_bytes(run),
+                    attempt: crate::exec::AttemptId::from_bytes(attempt),
+                }],
+                operations: vec![(
+                    self.product_body(),
+                    Op::ReplaceAtomic {
+                        value: intent.payload.clone(),
+                    },
+                )],
+                bodies: vec![self.product_body()],
+                effect: b"accepted-check".to_vec(),
+                declarations: Vec::new(),
+                demand: exec_demand("request.write"),
+            });
+        }
+        let source = if let Some(rest) = intent.payload.strip_prefix(b"repeat:") {
+            if rest.len() != 16 {
+                return Err(Rejection::InvalidRequest);
+            }
+            let mut id = [0u8; 16];
+            id.copy_from_slice(rest);
+            Some(crate::exec::RunId::from_bytes(id))
+        } else {
+            None
+        };
         let spec = if intent.payload == b"invalid-spec" {
             exec_schema("agent.missing")
         } else {
@@ -523,7 +559,7 @@ impl World for ExecAtomicWorld {
                     content_bytes: 0,
                 },
                 parent: None,
-                source: None,
+                source,
                 service: None,
                 resources: Vec::new(),
                 limits: exec_limits(),
@@ -5733,4 +5769,307 @@ fn perform_pacing_is_an_activation_option_not_a_constant() {
         .steps
         .iter()
         .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+}
+
+// ===== Retention: composition tests for the disposal forks ===============
+//
+// Deletion is a Runtime-authored tombstone of the reserved Run Body, riding
+// the same signed transaction path as every other Runtime effect — Temporal
+// archives to an operator's blob store before deleting rows; here product
+// truth is deliberately self-describing (the mixed-fleet argument) and the
+// replicated tombstone is the disposal record. Eligibility is a reachability
+// projection, never a guessed timer: unresolved Runs and Runs cited as
+// another Run's parent or source are not collectible, and the operator
+// window is activation memory — a restart forgets elapsed grace and starts
+// counting again, which only ever delays disposal.
+
+fn retention_station(
+    window: Option<std::time::Duration>,
+) -> (crate::lifecycle::Station, WorldId, crate::exec::Build) {
+    let build = exec_signed_build(&WorldId::parse("com.example.exec-atomic").unwrap());
+    let world = Arc::new(ExecAtomicWorld::with_build(build.id));
+    let world_id = world.id();
+    let registry = Builder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: world.descriptor(),
+            inner: world,
+        }))
+        .build()
+        .unwrap();
+    let rt = crate::lifecycle::Runtime::open(
+        temp_root(),
+        registry,
+        Arc::new(SeedAuthority),
+        test_keys(),
+    );
+    let station = rt
+        .create()
+        .unwrap()
+        .open(Activation {
+            exec: crate::lifecycle::ExecPacing {
+                retention_window: window,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    (station, world_id, build)
+}
+
+fn accept_run(
+    session: &crate::session::Session,
+    identity: &crate::world::LocalIdentity,
+    seed: u8,
+    run: crate::exec::RunId,
+    attempt: crate::exec::AttemptId,
+) {
+    let mut payload = b"accept:".to_vec();
+    payload.extend_from_slice(&run.as_bytes());
+    payload.extend_from_slice(&attempt.as_bytes());
+    session
+        .submit(
+            identity
+                .sign_action(
+                    session,
+                    crate::action::RequestId::from_bytes([seed; 16]),
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+}
+
+fn returned_attempt(
+    session: &crate::session::Session,
+    world_id: &WorldId,
+    run: crate::exec::RunId,
+    op: u8,
+) -> crate::exec::AttemptId {
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [op; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    state
+        .attempts
+        .iter()
+        .find(|attempt| !attempt.returned.is_empty())
+        .expect("a returned Attempt")
+        .attempt
+}
+
+#[test]
+fn an_unresolved_run_is_never_collected() {
+    let (station, world_id, build) = retention_station(Some(std::time::Duration::ZERO));
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    submit_as(
+        &session,
+        &identity,
+        Intent {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: b"linger".to_vec(),
+        },
+    )
+    .unwrap();
+    let package = echo_package(&build);
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    // Returned but never accepted: the Run is unresolved and untouchable
+    // even under a zero window.
+    let collected = session.sweep_resolved_runs().unwrap();
+    assert!(collected.is_empty(), "an unresolved Run is not collectible");
+}
+
+#[test]
+fn an_accepted_run_collects_after_the_window_and_product_truth_survives() {
+    let (station, world_id, build) = retention_station(Some(std::time::Duration::ZERO));
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xA1; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"collect me".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let package = echo_package(&build);
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    let attempt = returned_attempt(&session, &world_id, run, 0xA2);
+    accept_run(&session, &identity, 0xA3, run, attempt);
+
+    let collected = session.sweep_resolved_runs().unwrap();
+    assert_eq!(collected, vec![run], "the resolved, uncited Run collects");
+    // The Run Body is gone…
+    assert!(matches!(
+        session.work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0xA4; 16],
+        ),
+        Err(crate::exec::WorkRefusal::NotFound(_))
+    ));
+    // …and the World's own record — the mixed-fleet self-description — is
+    // exactly as durable as it was.
+    let projection = session
+        .query(Query {
+            schema: SchemaId::parse("agent.request").unwrap(),
+            schema_version: 1,
+            payload: Vec::new(),
+            publication: None,
+        })
+        .unwrap();
+    assert!(
+        !projection.bytes.is_empty(),
+        "product truth survives disposal"
+    );
+}
+
+#[test]
+fn a_cited_run_outlives_its_citer_and_collects_only_after_it() {
+    let (station, world_id, build) = retention_station(Some(std::time::Duration::ZERO));
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let package = echo_package(&build);
+
+    // Run A completes and is accepted.
+    let first = crate::action::RequestId::from_bytes([0xB1; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    first,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"the original".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let original = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        first.as_bytes(),
+        0,
+    );
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    let attempt = returned_attempt(&session, &world_id, original, 0xB2);
+    accept_run(&session, &identity, 0xB3, original, attempt);
+
+    // Run B repeats A, recording it as source — a durable citation.
+    let mut payload = b"repeat:".to_vec();
+    payload.extend_from_slice(&original.as_bytes());
+    let second = crate::action::RequestId::from_bytes([0xB4; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    second,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let repeat = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        second.as_bytes(),
+        0,
+    );
+
+    // While B exists — even unresolved — A is cited and untouchable.
+    assert!(session.sweep_resolved_runs().unwrap().is_empty());
+
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    let repeat_attempt = returned_attempt(&session, &world_id, repeat, 0xB5);
+    accept_run(&session, &identity, 0xB6, repeat, repeat_attempt);
+
+    // Both resolved: the citer collects first, its subject only after the
+    // citation is gone — reachability, not a timer.
+    assert_eq!(session.sweep_resolved_runs().unwrap(), vec![repeat]);
+    assert_eq!(session.sweep_resolved_runs().unwrap(), vec![original]);
+}
+
+#[test]
+fn retention_disabled_is_the_default_and_collects_nothing() {
+    let (station, world_id, build) = retention_station(None);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xC1; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"keep forever".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let package = echo_package(&build);
+    session
+        .perform(&package, |_| panic!("no output content"))
+        .unwrap();
+    let attempt = returned_attempt(&session, &world_id, run, 0xC2);
+    accept_run(&session, &identity, 0xC3, run, attempt);
+    assert!(session.sweep_resolved_runs().unwrap().is_empty());
 }

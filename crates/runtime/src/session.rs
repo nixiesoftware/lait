@@ -2074,6 +2074,10 @@ struct ExecGate {
     /// The last Run this Station's drain served, per World: the next pass
     /// starts after it, so one busy Run cannot monopolize the sorted scan.
     cursor: std::collections::BTreeMap<WorldId, crate::exec::RunId>,
+    /// When this activation first saw each Run resolved and uncited: the
+    /// retention window counts from here. Activation memory — a restart
+    /// forgets elapsed grace, which only ever delays disposal.
+    resolved_seen: std::collections::BTreeMap<crate::exec::RunId, std::time::Instant>,
     pacing: crate::lifecycle::ExecPacing,
 }
 
@@ -2159,6 +2163,7 @@ impl StationCore {
                 inflight: std::collections::BTreeSet::new(),
                 busy: false,
                 cursor: std::collections::BTreeMap::new(),
+                resolved_seen: std::collections::BTreeMap::new(),
                 pacing: crate::lifecycle::ExecPacing::default(),
             }),
             exec_tick: tokio::sync::watch::Sender::new(0),
@@ -8528,6 +8533,135 @@ impl Session {
             &content,
             "exec.test.saved",
         )
+    }
+
+    /// Dispose of resolved, uncited Runs whose retention grace has elapsed.
+    ///
+    /// Deletion is a Runtime-authored tombstone of the reserved Run Body,
+    /// committed through the same signed transaction path as every other
+    /// Runtime effect and replicated as ordinary truth — remote incorporation
+    /// of a tombstone is as inert as of a `Started`. Eligibility is a
+    /// reachability projection over committed truth: a Run still unresolved,
+    /// or cited as another existing Run's parent or source, is untouchable.
+    /// The operator window on top is counted in activation memory from when
+    /// this activation first saw the Run collectible.
+    ///
+    /// Product truth is expected to survive disposal by design: the adopter
+    /// contract keeps World records self-describing precisely so a node that
+    /// cannot consult a Run Body — including one whose Body is gone — still
+    /// draws its product state.
+    pub fn sweep_resolved_runs(&self) -> Result<Vec<crate::exec::RunId>, Failure> {
+        self.ensure_live()?;
+        let Some(window) = self.core.exec_pacing().retention_window else {
+            return Ok(Vec::new());
+        };
+        let reader = {
+            let inner = self.core.lock();
+            if inner.closed {
+                return Err(Failure::Interrupted);
+            }
+            SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone())
+        };
+        use crate::exec::ReservedBodyReader as _;
+        let run_schema =
+            SchemaId::parse(crate::exec::RUN_BODY_SCHEMA).ok_or(Rejection::ContractViolation)?;
+        let mut keys = Vec::new();
+        let mut after = None;
+        const RETENTION_PAGE: usize = 1_024;
+        loop {
+            let page = reader.body_keys_page_with_schema(
+                &self.world_id,
+                &run_schema,
+                after.as_ref(),
+                RETENTION_PAGE,
+            );
+            keys.extend(page.iter().cloned());
+            after = page.last().cloned();
+            if page.len() < RETENTION_PAGE {
+                break;
+            }
+        }
+        let mut existing = std::collections::BTreeSet::new();
+        let mut cited = std::collections::BTreeSet::new();
+        let mut resolved = Vec::new();
+        for key in &keys {
+            let id = crate::exec::RunId::from_bytes(key.body.as_bytes());
+            let Some((run, _, _)) = crate::exec::read_committed_run(&reader, &self.world_id, id)
+                .map_err(read_failure)?
+            else {
+                continue;
+            };
+            existing.insert(run.id);
+            if let Some(parent) = run.started.parent {
+                cited.insert(parent);
+            }
+            if let Some(source) = run.started.source {
+                cited.insert(source);
+            }
+            if !run.is_unresolved() {
+                resolved.push(run);
+            }
+        }
+        let now = std::time::Instant::now();
+        let due: Vec<crate::exec::Run> = {
+            let mut gate = self.core.exec.lock_recovering();
+            gate.resolved_seen.retain(|id, _| existing.contains(id));
+            resolved
+                .into_iter()
+                .filter(|run| !cited.contains(&run.id))
+                .filter(|run| {
+                    let seen = *gate.resolved_seen.entry(run.id).or_insert(now);
+                    now.duration_since(seen) >= window
+                })
+                .collect()
+        };
+        let mut collected = Vec::new();
+        for run in due {
+            let Some(spec) = self.world.exec_specs().iter().find(|spec| {
+                spec.name == run.started.spec.name && spec.version == run.started.spec.version
+            }) else {
+                // A Run whose Spec this implementation no longer declares has
+                // no demand to authorize its disposal under; it lingers and
+                // says so rather than being deleted with borrowed authority.
+                tracing::debug!(run = ?run.id, "retention skipped a Run with no declared Spec");
+                continue;
+            };
+            let key = BodyKey {
+                world: self.world_id.clone(),
+                body: BodyId::from_bytes(run.id.as_bytes()),
+            };
+            let mut runtime = RuntimeEffect::default();
+            runtime.operations.push((key.clone(), Op::Tombstone));
+            runtime.bindings.push((key.clone(), run_binding()?));
+            runtime.bodies.push(key);
+            runtime.demands.push(spec.access.control.clone());
+            let principal = self.fresh_principal().map_err(Failure::from)?;
+            let ambient = {
+                let inner = self.core.lock();
+                if inner.closed {
+                    return Err(Failure::Interrupted);
+                }
+                self.ambient(&principal, inner.snapshot.root())
+                    .map_err(ambient_failure)?
+            };
+            let operation = crate::action::RequestId::mint().as_bytes();
+            let digest = *blake3::hash(&run.id.as_bytes()).as_bytes();
+            self.commit_runtime_effect(
+                &principal,
+                &ambient,
+                operation,
+                digest,
+                "exec.retire",
+                runtime,
+            )?;
+            self.core
+                .exec
+                .lock_recovering()
+                .resolved_seen
+                .remove(&run.id);
+            collected.push(run.id);
+        }
+        Ok(collected)
     }
 
     /// Admit one generic bounded Find request against a pinned read generation.

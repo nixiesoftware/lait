@@ -228,6 +228,13 @@ pub struct ExecPacing {
     /// The idle beat between drain passes; a fresh commit still wakes the
     /// drain immediately through the exec tick.
     pub drain_interval: Duration,
+    /// How long a resolved, uncited Run is kept before its reserved Body is
+    /// tombstoned. `None` — the default — keeps everything forever: disposal
+    /// of signed history is something an operator turns on, never something
+    /// a default does. Eligibility is a reachability projection; this window
+    /// is only the grace on top of it, counted in activation memory, so a
+    /// restart forgets elapsed grace and can only ever delay disposal.
+    pub retention_window: Option<Duration>,
 }
 
 impl Default for ExecPacing {
@@ -235,6 +242,7 @@ impl Default for ExecPacing {
         Self {
             actions_per_pass: 16,
             drain_interval: Duration::from_millis(50),
+            retention_window: None,
         }
     }
 }
