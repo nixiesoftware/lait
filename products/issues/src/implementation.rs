@@ -4968,6 +4968,40 @@ fn team_project_keys(ctx: &Context<'_>, team: &str) -> Result<Vec<String>, Rejec
     Ok(keys)
 }
 
+/// The number the next Issue in this project answers to.
+///
+/// A person says "ENG-4", not "ENG-4611686018427387904-a1b2...". The number
+/// has to be small and it has to go up, and neither is a property a hash can
+/// have -- so it is counted rather than derived.
+///
+/// Counted, not held in a register: the count of Issues already in the
+/// project is one bounded posting count, and reading it contends with
+/// nothing. Two devices creating offline can therefore both take the same
+/// number, and that is the trade this makes deliberately. The number is a
+/// LABEL, not the identity: the alias coordinate pairs it with an
+/// independent 128-bit disambiguator derived from the Issue id, so two
+/// Issues wearing "ENG-4" remain distinct records, resolve distinctly by
+/// their full form, and never overwrite one another. What a collision costs
+/// is that the short form is ambiguous for those two until somebody says
+/// which -- not that anything is lost.
+fn next_project_ordinal(ctx: &Context<'_>, project: &str) -> Result<u64, Rejection> {
+    let counted = find_kind_page(
+        ctx,
+        "issue",
+        Some(project),
+        &contract::PageRequest {
+            limit: 1,
+            cursor: None,
+        },
+        Vec::new(),
+        Vec::new(),
+    )?;
+    // An absent total is the runtime declining to answer, and a number
+    // guessed from nothing would collide with every Issue already here.
+    let held = counted.matched_total().ok_or(Rejection::LimitExceeded)?;
+    Ok(held.saturating_add(1))
+}
+
 fn apply_project_workflow(
     ctx: &Context<'_>,
     catalog: &mut CatalogState,
@@ -7135,10 +7169,7 @@ fn stage_issue_create(
             ctx, doc, project, "label", label, true,
         )?);
     }
-    let ordinal = crate::records::IssueAliasCoordinate::deterministic_for_issue(
-        &DocId::parse(doc).expect("validated Issue id"),
-    )
-    .ordinal;
+    let ordinal = next_project_ordinal(ctx, project)?;
     let placement_plan =
         crate::record_store::board_placement(ctx, project, &status, doc, Some(&Pos::Top))?;
     let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
@@ -8825,12 +8856,10 @@ impl World for IssuesWorld {
                         ctx, &doc, &project, "label", label, true,
                     )?);
                 }
-                // Alias allocation is Issue-id-derived: creation never
-                // contends on the Space Catalog or a per-project counter.
-                let ordinal = crate::records::IssueAliasCoordinate::deterministic_for_issue(
-                    &DocId::parse(&doc).expect("validated Issue id"),
-                )
-                .ordinal;
+                // The number a person reads, counted from what the project
+                // already holds. Creation still contends on nothing: this is
+                // a posting count, not a register anybody has to agree on.
+                let ordinal = next_project_ordinal(ctx, &project)?;
                 let placement_plan = crate::record_store::board_placement(
                     ctx,
                     &project,
@@ -11243,11 +11272,7 @@ impl World for IssuesWorld {
                                 },
                             );
                         }
-                        let ordinal =
-                            crate::records::IssueAliasCoordinate::deterministic_for_issue(
-                                &DocId::parse(&doc).expect("validated Issue id"),
-                            )
-                            .ordinal;
+                        let ordinal = next_project_ordinal(ctx, &project)?;
                         let placement_plan = crate::record_store::board_placement(
                             ctx,
                             &project,

@@ -346,17 +346,10 @@ fn seed_space(driver: &mut Driver) -> (String, String, String) {
     // An alias ordinal is derived from the Issue id rather than counted, so
     // the reference this Issue answers to is a property of `doc` -- not a
     // literal a test can know in advance.
-    let alias = short_alias(&doc);
+    // The first Issue in ENG is ENG-1. That is the point of the number: it
+    // is counted, so a test can know it, and so can a person.
+    let alias = "ENG-1".to_string();
     (project, doc, alias)
-}
-
-/// The reference a person is shown for `doc`, in project ENG.
-fn short_alias(doc: &str) -> String {
-    issues::records::IssueAliasCoordinate::deterministic_for_issue(
-        &DocId::parse(doc).expect("minted Issue id"),
-    )
-    .render_short("ENG")
-    .expect("rendered alias")
 }
 
 fn create_board_issue(driver: &mut Driver, project: &str, title: String) -> String {
@@ -876,10 +869,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             ts,
         })
         .unwrap();
-    assert_eq!(
-        driver.resolve(&short_alias(&doc2)).as_deref(),
-        Some(doc2.as_str())
-    );
+    assert_eq!(driver.resolve("ENG-2").as_deref(), Some(doc2.as_str()));
 
     // List: priority desc (high first), then DocId asc.
     let rows: contract::Page<Row> = driver.query(&IssueQuery::List {
@@ -1165,10 +1155,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     });
     assert_eq!(detail.issue.title, "First issue");
     assert_eq!(detail.comments.items.len(), 1);
-    assert_eq!(
-        driver.resolve(&short_alias(&doc2)).as_deref(),
-        Some(doc2.as_str())
-    );
+    assert_eq!(driver.resolve("ENG-2").as_deref(), Some(doc2.as_str()));
     let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1399,10 +1386,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         me: None,
     });
     assert_eq!(view.title, "First issue");
-    assert_eq!(
-        driver_b.resolve(&short_alias(&doc)).as_deref(),
-        Some(doc.as_str())
-    );
+    assert_eq!(driver_b.resolve("ENG-1").as_deref(), Some(doc.as_str()));
 
     // B comments; A contacts back; the comment converges with stable
     // identity (no duplication on re-contact).
