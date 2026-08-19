@@ -103,20 +103,22 @@ impl IssuesCallHandler {
         // inside the same microsecond and gets the same answer, so what looked
         // like four attempts was one attempt made four times. Wait a little
         // between them, growing, so the condition has a chance to clear.
+        let deadline = std::time::Instant::now() + RETRY_DEADLINE;
         let mut waited = RETRY_BACKOFF;
         let mut response = router.route(request.clone(), &facts).0;
-        for _ in 0..RETRY_ATTEMPTS {
-            if !matches!(
-                &response,
-                Response::Error {
-                    error_kind: crate::IssuesErrorKind::Retry,
-                    ..
-                }
-            ) {
-                return response;
+        while matches!(
+            &response,
+            Response::Error {
+                error_kind: crate::IssuesErrorKind::Retry,
+                ..
             }
-            std::thread::sleep(waited);
-            waited = waited.saturating_mul(2);
+        ) {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            std::thread::sleep(waited.min(deadline - now));
+            waited = waited.saturating_mul(2).min(RETRY_BACKOFF_CAP);
             response = router.route(request.clone(), &facts).0;
         }
         // Hand back the refusal that actually happened. This used to answer
@@ -127,12 +129,20 @@ impl IssuesCallHandler {
     }
 }
 
-/// How many further attempts a retryable refusal earns, and the first pause
-/// between them. Doubling from 4ms gives roughly 60ms across four waits --
-/// long enough for a mutation lane to hand over, short enough that nobody
-/// waits on a request that is never going to succeed.
-const RETRY_ATTEMPTS: usize = 4;
+/// How long a retryable refusal is waited out, and how the waiting grows.
+///
+/// The thing usually holding the mutation lane is convergence incorporating a
+/// peer's work, and on a loaded machine that can hold it for far longer than
+/// a handful of milliseconds. A budget counted in ATTEMPTS gets shorter
+/// exactly when the machine is slower, which is backwards; this is counted in
+/// time, so a busy node is waited out rather than reported as a failure the
+/// caller has to understand.
+///
+/// Bounded, because a request that cannot be admitted should eventually say
+/// so rather than hang.
+const RETRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(4);
+const RETRY_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl Handler for IssuesCallHandler {
     fn access(&self, call: &Call) -> Result<Access, Failure> {
