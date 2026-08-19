@@ -46,7 +46,7 @@ pub use engine::{Action, BookEngine};
 pub use error::Error;
 pub use ids::{CardId, PathHash};
 pub use mapping::BODY_KEY;
-pub use registry::{Registry, RegistryError};
+pub use registry::Registry;
 pub use store::Store;
 pub use types::{
     Author, Book, Card, Coverage, DerivedObservation, Evidence, Field, GroupLink, Handle,

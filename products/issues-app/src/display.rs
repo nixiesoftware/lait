@@ -131,6 +131,9 @@ fn prepare(request: &DisplayRequest) -> Result<ClientInvocation, Failure> {
     let call = crate::encode_call(&crate::IssuesRequest::Board {
         project: Some(input.project),
         project_hint: None,
+        // A wall draws what fits on it; the page bound is the wall's, not
+        // the board's.
+        page: issues::contract::PageRequest::default(),
     })
     .map_err(|error| Failure::new(error.to_string()))?;
     // Query, and stated here as well as classified by the runtime. A board is a
@@ -167,24 +170,42 @@ fn render(value: Value, request: &DisplayRequest) -> Result<DisplayProjection, F
         return Err(Failure::new("Issues did not answer with a board"));
     };
 
+    // The board arrives as one ordered page of rows plus the workflow it is
+    // read against, rather than pre-grouped columns: grouping is presentation
+    // and the wire does not pay for it. This surface draws columns, so it
+    // groups here, in the workflow's own order.
+    let columns: Vec<issues::dto::BoardColumn> = board
+        .workflow
+        .iter()
+        .map(|state| issues::dto::BoardColumn {
+            state: state.clone(),
+            rows: board
+                .rows
+                .items
+                .iter()
+                .filter(|row| row.status == state.id)
+                .cloned()
+                .collect(),
+        })
+        .collect();
+
     let palette = Palette::for_theme(request.theme);
     let mut reasons = BTreeSet::new();
     // A provisional row is a row whose catalog entry is not yet settled.
     // It is drawn, and it makes the whole projection Partial — a wall
     // that showed provisional work as settled would be the more
     // confident and less true answer.
-    if board
-        .columns
+    if columns
         .iter()
         .any(|column| column.rows.iter().any(|row| row.provisional))
     {
         reasons.insert(DisplayPartialReason::ProvisionalData);
     }
 
-    let chunks: Vec<&[issues::dto::BoardColumn]> = if board.columns.is_empty() {
+    let chunks: Vec<&[issues::dto::BoardColumn]> = if columns.is_empty() {
         Vec::new()
     } else {
-        board.columns.chunks(COLUMNS_PER_FRAME).collect()
+        columns.chunks(COLUMNS_PER_FRAME).collect()
     };
 
     let items = if chunks.is_empty() {

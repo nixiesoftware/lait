@@ -19,7 +19,7 @@
 //! [`ReachPlane::send`] resolves and seals; [`ReachPlane::collect`] fetches and
 //! opens. Everything a surface shows is downstream of these four.
 
-use addressbook::{Registry, RegistryError};
+use addressbook::{registry, Registry};
 use correspondence::{Carrier, Content, Letter, Mailbox, Missed, Refused};
 use mechanics::actor::{
     self, consent_sign, device_from_seed, sign_event, ActorOp, ConsentCtx, SignedEvent,
@@ -43,15 +43,15 @@ pub enum ReachError {
     /// not know how to reach them yet".
     NotReachable,
     /// The kinship layer refused.
-    Kinship(RegistryError),
+    Kinship(registry::Failure),
     /// The carrier refused.
     Carrier(Refused),
     /// A letter could not be sealed.
     Seal(Refused),
 }
 
-impl From<RegistryError> for ReachError {
-    fn from(error: RegistryError) -> Self {
+impl From<registry::Failure> for ReachError {
+    fn from(error: registry::Failure) -> Self {
         Self::Kinship(error)
     }
 }
@@ -94,12 +94,12 @@ impl ReachPlane {
             return Err(ReachError::TooFewDevices);
         }
         let genesis = DeviceLink::seal(&seeds[0], &seeds[1], [7u8; 16], 1)
-            .map_err(|e| ReachError::Kinship(RegistryError::Kinship(e)))?;
+            .map_err(|e| ReachError::Kinship(registry::Failure::Kinship(e)))?;
         let mut registry = Registry::new();
         let profile = registry.found(genesis.clone())?;
         for (index, seed) in seeds.iter().enumerate().skip(2) {
             let link = DeviceLink::seal(&seeds[0], seed, [7u8; 16], 1 + index as u64)
-                .map_err(|e| ReachError::Kinship(RegistryError::Kinship(e)))?;
+                .map_err(|e| ReachError::Kinship(registry::Failure::Kinship(e)))?;
             registry.extend(&profile, Entry::Link(link))?;
         }
 

@@ -31,8 +31,12 @@ use mechanics::kinship::{
 use serde::{Deserialize, Serialize};
 
 /// Why a registry operation did not apply.
+///
+/// Named for what it is and qualified by where it lives: callers say
+/// `registry::Failure`, so the module supplies the noun the type does not
+/// have to repeat.
 #[derive(Debug)]
-pub enum RegistryError {
+pub enum Failure {
     /// The operation named a profile this registry does not hold. Not an error
     /// about the profile — an error about *this* registry's knowledge of it.
     NotHeld,
@@ -47,7 +51,7 @@ pub enum RegistryError {
     Codec,
 }
 
-impl std::fmt::Display for RegistryError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotHeld => f.write_str("no such profile is held"),
@@ -60,9 +64,9 @@ impl std::fmt::Display for RegistryError {
     }
 }
 
-impl std::error::Error for RegistryError {}
+impl std::error::Error for Failure {}
 
-impl From<Refusal> for RegistryError {
+impl From<Refusal> for Failure {
     fn from(refusal: Refusal) -> Self {
         Self::Kinship(refusal)
     }
@@ -99,7 +103,7 @@ impl Registry {
     /// assignable and founding the same genesis twice is idempotent: the same
     /// id, and an existing authored log is left untouched (re-founding must not
     /// discard entries appended since).
-    pub fn found(&mut self, genesis: DeviceLink) -> Result<ProfileId, RegistryError> {
+    pub fn found(&mut self, genesis: DeviceLink) -> Result<ProfileId, Failure> {
         let log = KinshipLog::found(genesis)?;
         let profile = log.profile().clone();
         match self.holdings.get(&profile) {
@@ -118,13 +122,13 @@ impl Registry {
     /// entries never arrive this way — they come as a verified projection
     /// through [`Registry::absorb`] — so `extend` refuses a profile that is not
     /// held as authored rather than silently mutating a correspondent's view.
-    pub fn extend(&mut self, profile: &ProfileId, entry: Entry) -> Result<(), RegistryError> {
+    pub fn extend(&mut self, profile: &ProfileId, entry: Entry) -> Result<(), Failure> {
         match self.holdings.get_mut(profile) {
             Some(Holding::Authored(log)) => {
                 log.append(entry)?;
                 Ok(())
             }
-            _ => Err(RegistryError::NotHeld),
+            _ => Err(Failure::NotHeld),
         }
     }
 
@@ -150,16 +154,16 @@ impl Registry {
         projection: Projection,
         genesis: &DeviceLink,
         reader: &Standing,
-    ) -> Result<ProfileId, RegistryError> {
+    ) -> Result<ProfileId, Failure> {
         // Anchor first: the head signer must be a genesis root of *this* profile.
         genesis.verify()?;
-        let bytes = postcard::to_stdvec(genesis).map_err(|_| RegistryError::Codec)?;
+        let bytes = postcard::to_stdvec(genesis).map_err(|_| Failure::Codec)?;
         if ProfileId::from_genesis(&bytes) != projection.profile {
-            return Err(RegistryError::Unanchored);
+            return Err(Failure::Unanchored);
         }
-        let head = projection.head.as_ref().ok_or(RegistryError::Unanchored)?;
+        let head = projection.head.as_ref().ok_or(Failure::Unanchored)?;
         if !genesis.devices.contains(&head.by) {
-            return Err(RegistryError::Unanchored);
+            return Err(Failure::Unanchored);
         }
 
         projection.verify(reader)?;
@@ -202,10 +206,10 @@ impl Registry {
         seed: &[u8; 32],
         epoch: u64,
         nonce: [u8; 16],
-    ) -> Result<usize, RegistryError> {
+    ) -> Result<usize, Failure> {
         let devices = match self.holdings.get(profile) {
             Some(Holding::Authored(log)) => log.devices(),
-            _ => return Err(RegistryError::NotHeld),
+            _ => return Err(Failure::NotHeld),
         };
         let mut avowed = 0usize;
         for (index, device) in devices.into_iter().enumerate() {
@@ -236,10 +240,10 @@ impl Registry {
         seed: &[u8; 32],
         epoch: u64,
         reader: &Standing,
-    ) -> Result<Projection, RegistryError> {
+    ) -> Result<Projection, Failure> {
         match self.holdings.get(profile) {
             Some(Holding::Authored(log)) => Ok(log.project(seed, epoch, reader)?),
-            _ => Err(RegistryError::NotHeld),
+            _ => Err(Failure::NotHeld),
         }
     }
 
@@ -280,13 +284,13 @@ impl Registry {
 
     /// Serialize for durable storage. The caller owns where the bytes land; the
     /// registry owns their shape.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, RegistryError> {
-        postcard::to_stdvec(self).map_err(|_| RegistryError::Codec)
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Failure> {
+        postcard::to_stdvec(self).map_err(|_| Failure::Codec)
     }
 
     /// Reconstruct from durable storage.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
-        postcard::from_bytes(bytes).map_err(|_| RegistryError::Codec)
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Failure> {
+        postcard::from_bytes(bytes).map_err(|_| Failure::Codec)
     }
 }
 
@@ -430,7 +434,7 @@ mod tests {
         let third = DeviceLink::seal(&A, &C, [8u8; 16], 2).expect("seal");
         assert!(matches!(
             empty.extend(&profile, Entry::Link(third)),
-            Err(RegistryError::NotHeld)
+            Err(Failure::NotHeld)
         ));
     }
 
@@ -662,7 +666,7 @@ mod tests {
         let mut bob = Registry::new();
         assert!(matches!(
             bob.absorb(projection, &link, &bob_standing()),
-            Err(RegistryError::Unanchored)
+            Err(Failure::Unanchored)
         ));
         assert!(
             !bob.holds(&profile),
@@ -692,7 +696,7 @@ mod tests {
         let mut bob = Registry::new();
         assert!(matches!(
             bob.absorb(projection, &mallory_link, &bob_standing()),
-            Err(RegistryError::Unanchored)
+            Err(Failure::Unanchored)
         ));
     }
 

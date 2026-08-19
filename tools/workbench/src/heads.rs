@@ -751,9 +751,23 @@ mod tests {
         };
         assert_eq!(head.refresh(), HeadState::Running);
         assert!(head.facts().state.usable());
-        // `sleep` does not handle SIGTERM specially, so the default disposition
-        // terminates it — which is exactly the ordinary case: asked, and it went.
-        assert_eq!(head.stop().expect("stop"), Stopped::Stopped);
+        // On Unix, `sleep` does not handle SIGTERM specially, so the default
+        // disposition terminates it — exactly the ordinary case: asked, and it
+        // went.
+        //
+        // On Windows there is no ask to make. `request_stop` answers `false`
+        // there and the ladder goes straight to force by design, rather than
+        // waiting out a budget for a message nobody sent. So the healthy stop
+        // of a healthy process reports `Forced`, and that is the honest
+        // answer rather than a defect: what the platform lacks is the rung,
+        // not the shutdown. Asserting `Stopped` here would demand behaviour
+        // the code deliberately does not have.
+        let expected = if cfg!(unix) {
+            Stopped::Stopped
+        } else {
+            Stopped::Forced
+        };
+        assert_eq!(head.stop().expect("stop"), expected);
     }
 
     /// A head that ignores the ask is forced, and says it was forced.

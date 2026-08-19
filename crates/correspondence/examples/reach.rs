@@ -7,7 +7,7 @@
 //! handshake is legible. Alice and Bob share no Space; the only thing that lets
 //! Bob reach Alice is a profile she chose to make reachable.
 
-use addressbook::{Registry, RegistryError};
+use addressbook::{registry, Registry};
 use correspondence::{Carrier, Content, Letter, Mailbox, MemCarrier, Missed};
 use mechanics::actor::{
     self, consent_sign, device_from_seed, sign_event, ActorOp, ConsentCtx, SignedEvent,
@@ -99,7 +99,7 @@ fn main() {
     let mut victim = Registry::new();
     let mallory_genesis = DeviceLink::seal(&MALLORY, &BOB, [1u8; 16], 1).expect("link");
     match victim.absorb(projection.clone(), &mallory_genesis, &bob_standing) {
-        Err(RegistryError::Unanchored) => {
+        Err(registry::Failure::Unanchored) => {
             println!(
                 "     refused: Unanchored — the genesis must hash to the very profile it claims."
             );
