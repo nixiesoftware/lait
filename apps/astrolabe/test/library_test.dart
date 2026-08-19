@@ -51,6 +51,7 @@ LibraryRow _row({
   String? tagline,
   int? version,
   List<WorldPersonRow>? people,
+  WorldUpdateRow? update,
 }) =>
     LibraryRow(
       key: mount,
@@ -60,16 +61,22 @@ LibraryRow _row({
       version: version,
       tagline: tagline,
       people: people,
+      update: update,
     );
 
 /// The one head an identity serves its Worlds through. `orbit` stays null —
 /// that is what marks it as the identity-wide browser head the Library reads
 /// "running" from.
+/// A head serving one World, which is what a head is now. Naming the mount is
+/// not fixture decoration: it is the fact the Library derives running from, and
+/// a head without one is deliberately matched by no row.
 const HeadRow _identityHead = HeadRow(
-  id: 'identity:default',
+  id: 'identity:default:issues',
   kind: 'browser',
+  world: 'issues',
   origin: 'http://127.0.0.1:52713/',
   owned: true,
+  state: 'running',
 );
 
 /// A real 1×1 PNG. `Image.memory` runs its bytes through the actual decoder,
@@ -218,7 +225,7 @@ void main() {
     expect(asked, hasLength(1));
     expect(
       asked.single,
-      const ActionRequest.open(entryPath: '/'),
+      const ActionRequest.open(world: 'issues', entryPath: '/'),
       reason: 'opening asked for somewhere other than the declared entry',
     );
   });
@@ -300,7 +307,7 @@ void main() {
     await tester.pump();
     expect(
       asked.single,
-      const ActionRequest.open(entryPath: '/notes'),
+      const ActionRequest.open(world: 'notes', entryPath: '/notes'),
       reason: 'Open followed the page rather than the selection',
     );
   });
@@ -394,7 +401,7 @@ void main() {
       tester,
       _view(
         library: [_row()],
-        inFlight: const ['open:/'],
+        inFlight: const ['open:issues'],
       ),
     );
 
@@ -411,6 +418,83 @@ void main() {
     expect(
         tester.widget<Progress>(find.byType(Progress)).size, ProgressSize.lg);
     expect(asked, isEmpty);
+  });
+
+
+  testWidgets('a head that exited reads Stopped, not Running', (tester) async {
+    // The lie this closes: an exited head *stays* listed so a person can see the
+    // thing they opened died, and the Library derived Running from the row being
+    // there. So a crashed World painted "Running — up and ready to view", with a
+    // tooltip offering to take them to it.
+    //
+    // The supervisor polls and answers; this asserts the answer is what the badge
+    // reads, rather than the fact that a row exists.
+    await _pump(
+      tester,
+      _view(
+        library: [_row(opensAt: '/issues')],
+        heads: const [
+          HeadRow(
+            id: 'identity:default:issues',
+            kind: 'browser',
+            world: 'issues',
+            origin: 'http://127.0.0.1:52713/',
+            owned: true,
+            state: 'exited',
+            stateDetail: 'exit status: 1',
+          ),
+        ],
+      ),
+    );
+
+    // The observable is which control the row offers, because that is what a
+    // person acts on. STOP is offered only against a head that is up; a crashed
+    // World must offer to LAUNCH a new one instead of to stop a dead one or to
+    // "Go to" an address nothing is serving.
+    expect(
+      find.text('STOP'),
+      findsNothing,
+      reason: 'a head that exited is not something to stop',
+    );
+    expect(
+      find.text('LAUNCH'),
+      findsOneWidget,
+      reason: 'a crashed World must offer to start again, not to be visited',
+    );
+  });
+
+  testWidgets('a head nobody could poll reads Unknown rather than either',
+      (tester) async {
+    // Third state, and it outranks Stopped on purpose: a head nobody could poll
+    // may still be serving, so calling it Stopped would be the same confident
+    // guess pointed the other way.
+    await _pump(
+      tester,
+      _view(
+        library: [_row(opensAt: '/issues')],
+        heads: const [
+          HeadRow(
+            id: 'identity:default:issues',
+            kind: 'browser',
+            world: 'issues',
+            origin: 'http://127.0.0.1:52713/',
+            owned: true,
+            state: 'unknown',
+            stateDetail: 'poll head process: No child processes',
+          ),
+        ],
+      ),
+    );
+
+    // Unknown is not running, so the row must not offer a handoff to it. It is
+    // also not proof of death, which is why the copy in `_lifecycleCopy` says the
+    // head could not be checked rather than that it stopped.
+    expect(
+      find.text('STOP'),
+      findsNothing,
+      reason: 'a head nobody could poll must not be presented as running',
+    );
+    expect(find.text('LAUNCH'), findsOneWidget);
   });
 
   testWidgets('a serving head is one solid split control — STOP, then Go to',
@@ -510,8 +594,8 @@ void main() {
     expect(
       asked,
       const [
-        ActionRequest.stopHead(id: 'identity:default'),
-        ActionRequest.open(entryPath: '/issues'),
+        ActionRequest.stopHead(id: 'identity:default:issues'),
+        ActionRequest.open(world: 'issues', entryPath: '/issues'),
       ],
       reason: 'a segment asked for something other than its own act',
     );
@@ -528,10 +612,12 @@ void main() {
         library: [_row(opensAt: '/issues')],
         heads: const [
           HeadRow(
-            id: 'identity:external',
+            id: 'identity:external:issues',
             kind: 'browser',
+            world: 'issues',
             origin: 'http://127.0.0.1:7717/',
             owned: false,
+  state: 'running',
           ),
         ],
       ),
@@ -552,7 +638,7 @@ void main() {
 
     await tester.tap(handoff);
     await tester.pump();
-    expect(asked, const [ActionRequest.open(entryPath: '/issues')]);
+    expect(asked, const [ActionRequest.open(world: 'issues', entryPath: '/issues')]);
   });
 
   testWidgets('an in-flight stop is visibly stopping, with no second press',
@@ -562,7 +648,7 @@ void main() {
       _view(
         library: [_row(opensAt: '/issues')],
         heads: const [_identityHead],
-        inFlight: const ['head.stop:identity:default'],
+        inFlight: const ['head.stop:identity:default:issues'],
       ),
     );
 
@@ -580,7 +666,7 @@ void main() {
       tester,
       _view(
         library: [_row()],
-        inFlight: const ['open:/'],
+        inFlight: const ['open:issues'],
       ),
     );
 
@@ -795,5 +881,198 @@ void main() {
     expect(find.text('AGENT BINDING'), findsNothing);
     expect(find.text('Write binding'), findsNothing);
     expect(asked, isEmpty);
+  });
+
+/// The Library's one measured fact, and the four ways of not knowing it.
+///
+/// The install list is compiled in and cannot go stale. What a World's own
+/// channel holds is measured and can — so this is the one place the surface
+/// draws something a daemon supplied, and every uncertainty has to fall back
+/// to the row that was drawn before any of it existed.
+  testWidgets('a World the channel is ahead of offers UPDATE, not LAUNCH',
+      (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            update: const WorldUpdateRow(
+              serving: '0.9.0',
+              available: '0.9.1',
+              behind: true,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(
+      find.text('LAUNCH'),
+      findsNothing,
+      reason: 'the launch control must be replaced, not accompanied — two '
+          'controls is a choice nobody asked for',
+    );
+
+    await tester.tap(find.text('UPDATE'));
+    await tester.pump();
+
+    // Same silhouette as LAUNCH, different coat and mark. The size assertions
+    // are the ones that keep the band from moving when a World goes behind.
+    expect(tester.widget<Text>(find.text('UPDATE')).style?.fontSize, 20);
+    expect(tester.widget<Icon>(find.byIcon(AppIcons.refresh)).size, 20);
+    final slab = tester.widget<Lit>(
+      find.ancestor(of: find.text('UPDATE'), matching: find.byType(Lit)),
+    );
+    expect(slab.baseColor, kUpdateSlabFill);
+    expect(
+      slab.baseColor,
+      isNot(kLaunchSlabFill),
+      reason: 'the colour that starts a World is wearing the act that '
+          'replaces one',
+    );
+    expect(tester.widget<Text>(find.text('UPDATE')).style?.color, kUpdateSlabInk);
+
+    expect(asked, hasLength(1));
+    expect(
+      asked.single,
+      const ActionRequest.updateWorld(world: 'issues'),
+      reason: 'the update asked for a World other than the row it is on',
+    );
+  });
+
+  testWidgets('a World with nothing newer keeps LAUNCH', (tester) async {
+    await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            update: const WorldUpdateRow(
+              serving: '0.9.0',
+              available: '0.9.0',
+              behind: false,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(find.text('LAUNCH'), findsOneWidget);
+    expect(find.text('UPDATE'), findsNothing);
+  });
+
+  testWidgets('a World nothing has ever checked keeps LAUNCH', (tester) async {
+    await _pump(tester, _view(library: [_row()]));
+
+    expect(
+      find.text('UPDATE'),
+      findsNothing,
+      reason: 'absence of a check is not an update waiting — a row nothing '
+          'has measured must draw what it drew before any of this existed',
+    );
+    expect(find.text('LAUNCH'), findsOneWidget);
+  });
+
+  testWidgets('a bundle this build cannot run is never offered as an update',
+      (tester) async {
+    await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            update: const WorldUpdateRow(
+              serving: '0.9.0',
+              available: '1.0.0',
+              behind: false,
+              unmet: ['lait.control >=14, <15'],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    expect(
+      find.text('UPDATE'),
+      findsNothing,
+      reason: 'pressing this would be refused on arrival, which teaches a '
+          'person to distrust the control',
+    );
+    expect(find.text('LAUNCH'), findsOneWidget);
+  });
+
+  testWidgets('an update in flight disables the control and says so',
+      (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [
+          _row(
+            update: const WorldUpdateRow(
+              serving: '0.9.0',
+              available: '0.9.1',
+              behind: true,
+            ),
+          ),
+        ],
+        inFlight: [ActionKeys.updateWorld('issues')],
+      ),
+    );
+
+    expect(find.text('UPDATING'), findsOneWidget);
+    expect(find.text('UPDATE'), findsNothing);
+    expect(
+      asked,
+      isEmpty,
+      reason: 'a control whose action is already in flight must not queue a '
+          'second one',
+    );
+  });
+
+  testWidgets('one World running leaves the other alone', (tester) async {
+    // The bug this closed: the head was per-identity and served every World, so
+    // "running" was the head's own liveness applied to every row. Opening
+    // Issues put Signage into RUNNING, and the STOP it drew there stopped the
+    // head Issues was reading.
+    final asked = await _pump(
+      tester,
+      _view(
+        library: [
+          _row(mount: 'issues', name: 'Issues', opensAt: '/'),
+          _row(mount: 'signage', name: 'Signage', opensAt: '/'),
+        ],
+        heads: const [_identityHead],
+      ),
+    );
+
+    // Issues is the World with a head, and it is the only one offering to stop
+    // anything. A STOP on the other row would be a control that reaches across
+    // Worlds — which is the part that was not merely a wrong label.
+    expect(find.text('STOP'), findsOneWidget);
+    expect(asked, isEmpty);
+  });
+
+  testWidgets('a head that names no World is claimed by no row',
+      (tester) async {
+    // A head from before the pin answers for everything, so nothing definite
+    // can be said about it. Matched by no row rather than by every row: an
+    // indefinite fact drawn as a definite one is the defect, not the absence.
+    await _pump(
+      tester,
+      _view(
+        library: [_row(mount: 'issues', name: 'Issues', opensAt: '/')],
+        heads: const [
+          HeadRow(
+            id: 'identity:default',
+            kind: 'browser',
+            origin: 'http://127.0.0.1:52713/',
+            owned: true,
+  state: 'running',
+          ),
+        ],
+      ),
+    );
+
+    // Not running, so the row offers to launch rather than to stop.
+    expect(find.text('STOP'), findsNothing);
+    expect(find.text('LAUNCH'), findsOneWidget);
   });
 }

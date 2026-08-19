@@ -80,6 +80,7 @@ impl World for Empty {
             schema_version: 1,
             bytes: Vec::new(),
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }

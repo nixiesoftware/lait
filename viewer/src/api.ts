@@ -12,7 +12,14 @@
  * origin guard.
  */
 
-import type { HostRequest, Response, SpaceRequest, SpacesReply, WorldRequest } from "./types";
+import type {
+  HostRequest,
+  IssuesWireResponse,
+  Response,
+  SpaceRequest,
+  SpacesReply,
+  WorldRequest,
+} from "./types";
 
 /** A refusal from the engine, carrying its own words. */
 export class LaitError extends Error {
@@ -103,11 +110,16 @@ export async function rpc<R extends Response = Response>(
   request: WorldRequest,
   opts: { confirm?: boolean; signal?: AbortSignal } = {},
 ): Promise<R> {
-  return send(
+  const response = await send<IssuesWireResponse>(
     `/api/spaces/${encodeURIComponent(space)}/worlds/issues/rpc`,
     request,
     opts,
   );
+  if (response.kind !== "operation") return response as R;
+  // Keep existing product result narrowing ergonomic while retaining the
+  // durable operation receipt. MCP and other direct package consumers see the
+  // same envelope on the wire; this is presentation, not a second protocol.
+  return { ...response.response, receipt: response.receipt } as R;
 }
 
 /**
@@ -135,7 +147,7 @@ export async function spaceRpc<R extends Response = Response>(
   return send(`/api/spaces/${encodeURIComponent(space)}/rpc`, request, opts);
 }
 
-async function send<R extends Response = Response>(
+async function send<R = Response>(
   endpoint: string,
   request: WorldRequest | SpaceRequest | HostRequest,
   opts: { confirm?: boolean; signal?: AbortSignal },

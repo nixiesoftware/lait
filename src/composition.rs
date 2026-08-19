@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use crate::orbital::{
     BootstrapContext, FounderGrant, InitialScope, Invalidation, ObservationProjector,
-    StatusProjection, WorldLifecycle, WorldPackage, WorldPackages,
+    ReviewedImplementation, StatusProjection, WorldLifecycle, WorldPackage, WorldPackages,
+    WorldUpgradeAssessment, WorldUpgradeContext, WorldUpgradeProgress,
 };
 use runtime::poison::LockRecovering;
 use world_interface::WorldClientRegistry;
@@ -47,6 +48,25 @@ pub fn package() -> WorldPackage {
         .with_exec(exec)
         .with_projector(projector)
         .with_lifecycle(Arc::new(IssuesLifecycle))
+}
+
+/// The exact historical Issues package used only while the composition-owned
+/// lifecycle worker advances a consented store. It is installed for exact
+/// Session resolution but is never selected for a new Space.
+#[allow(clippy::expect_used)]
+fn issues_migrator_package() -> WorldPackage {
+    let world = IssuesWorld::migrator();
+    let implementation = IssuesWorld::migrator_implementation_descriptor()
+        .id()
+        .expect("canonical Issues migrator implementation descriptor");
+    let control = Arc::new(issues_app::IssuesCallHandler);
+    let projector = Arc::new(IssuesProjector::default());
+    let exec = runtime::exec::Package::new().with_spec(issues::contract::verify_spec());
+    WorldPackage::new(Arc::new(world), implementation)
+        .with_control(control)
+        .with_exec(exec)
+        .with_projector(projector)
+        .historical()
 }
 
 /// The Signage World's host-side semantic package. The shell only sees the
@@ -119,6 +139,7 @@ impl ObservationProjector for SignageProjector {
                 schema: signage::contract::program_schema(),
                 schema_version: signage::contract::PROGRAM_SCHEMA_VERSION,
                 payload: serde_json::to_vec(&signage::SignageQuery::Programs).ok()?,
+                publication: None,
             })
             .ok()?;
         let signage::SignageProjection::Programs { programs } =
@@ -236,12 +257,95 @@ impl WorldLifecycle for IssuesLifecycle {
             initial_project,
         )
     }
+
+    fn assess_upgrade(
+        &self,
+        active: Option<ReviewedImplementation>,
+        preferred: ReviewedImplementation,
+    ) -> anyhow::Result<WorldUpgradeAssessment> {
+        use issues_app::lifecycle::{ImplementationCoordinate, UpgradeAssessment};
+        let coordinate = |value: ReviewedImplementation| ImplementationCoordinate {
+            id: value.id,
+            version: value.version,
+        };
+        let reviewed = |value: ImplementationCoordinate| ReviewedImplementation {
+            id: value.id,
+            version: value.version,
+        };
+        Ok(
+            match issues_app::lifecycle::assess_upgrade(
+                active.map(coordinate),
+                coordinate(preferred),
+            ) {
+                UpgradeAssessment::Current => WorldUpgradeAssessment::Current,
+                UpgradeAssessment::Direct => WorldUpgradeAssessment::Direct,
+                UpgradeAssessment::ConsentRequired { migrator } => {
+                    WorldUpgradeAssessment::ConsentRequired {
+                        migrator: reviewed(migrator),
+                    }
+                }
+                UpgradeAssessment::InProgress { migrator } => WorldUpgradeAssessment::InProgress {
+                    migrator: reviewed(migrator),
+                },
+                UpgradeAssessment::Unsupported { reason } => {
+                    WorldUpgradeAssessment::Unsupported { reason }
+                }
+            },
+        )
+    }
+
+    fn verification_migrator(
+        &self,
+        _preferred: ReviewedImplementation,
+    ) -> Option<ReviewedImplementation> {
+        let migrator = issues_app::lifecycle::migrator_implementation();
+        Some(ReviewedImplementation {
+            id: migrator.id,
+            version: migrator.version,
+        })
+    }
+
+    fn upgrade_step(
+        &self,
+        context: WorldUpgradeContext<'_>,
+    ) -> anyhow::Result<WorldUpgradeProgress> {
+        use issues_app::lifecycle::{ImplementationCoordinate, UpgradeProgress};
+        let coordinate = |value: ReviewedImplementation| ImplementationCoordinate {
+            id: value.id,
+            version: value.version,
+        };
+        let progress =
+            issues_app::lifecycle::upgrade_step(issues_app::lifecycle::UpgradeContext {
+                space: context.space,
+                session: context.session,
+                identity: context.identity,
+                device: context.device,
+                active: coordinate(context.active),
+                migrator: coordinate(context.migrator),
+                preferred: coordinate(context.preferred),
+                source: context.source,
+                record: context.record,
+            })?;
+        Ok(match progress {
+            UpgradeProgress::Pending {
+                completed,
+                remaining,
+                record,
+            } => WorldUpgradeProgress::Pending {
+                completed,
+                remaining,
+                record,
+            },
+            UpgradeProgress::Verified { record } => WorldUpgradeProgress::Verified { record },
+        })
+    }
 }
 
 /// Every product World this build bundles, for the host side.
 pub fn bundled_packages() -> WorldPackages {
     WorldPackages::new()
         .with_package(package())
+        .with_package(issues_migrator_package())
         .with_package(signage_package())
 }
 
@@ -263,7 +367,123 @@ pub fn bundled_client_packages() -> WorldClientRegistry {
         .unwrap_or_default()
 }
 
+/// The mount of the World a head serves when nothing pinned one.
+///
+/// The *mount*, not the World id: a head is pinned by the name a person types
+/// and a URL carries. `PRODUCT_WORLD` beside it is the id, and the two are
+/// deliberately different strings for different jobs.
+pub const PRODUCT_WORLD_MOUNT: &str = issues_app::MOUNT;
+
 /// The reviewed IssuesWorld implementation id shipped by this build.
 pub fn implementation_id() -> [u8; 32] {
     issues_app::lifecycle::implementation_id()
+}
+
+/// This build's own declaration for one of its Worlds, as a publisher would
+/// write it — plus the artwork files that go beside it in the bundle.
+///
+/// The same shape a fetched World ships in `world.json`, constructed from the
+/// consts a compiled-in World declares. One type, two sources: a World this
+/// build hosts and a World fetched from a feed must be the same thing to
+/// everything downstream, or the compiled-in one quietly becomes the only
+/// first-class kind.
+///
+/// `None` when this build does not host the World asked for.
+pub fn world_declaration(
+    world: &str,
+    version: &str,
+) -> Option<(
+    world_interface::manifest::WorldManifest,
+    Vec<(String, &'static [u8])>,
+)> {
+    let registry = bundled_client_packages();
+    let id = replica::body::WorldId::parse(world)?;
+    let package = registry.package_for_world(&id)?;
+    let display = package.display();
+
+    let mut art: Vec<(String, &'static [u8])> = Vec::new();
+    let mut named = |kind: &str, bytes: Option<&'static [u8]>| {
+        let bytes = bytes?;
+        let path = format!("art/{kind}.png");
+        art.push((path.clone(), bytes));
+        Some(path)
+    };
+    let mark = named("mark", display.mark());
+    let hero = named("hero", display.hero());
+
+    // What this World actually depends on, named: the control plane its head
+    // reaches the host through, and its own shapes. Not a fingerprint of the
+    // whole build — a range over the two facts that would break it.
+    let mut requires = vec![world_interface::manifest::Requirement {
+        name: crate::update::facts::CONTROL.to_string(),
+        range: format!(
+            ">={}, <{}",
+            crate::control::CONTROL_PROTOCOL_VERSION,
+            crate::control::CONTROL_PROTOCOL_VERSION + 1
+        ),
+    }];
+    if let Some((_, _, schema)) = bundled_world_surfaces()
+        .into_iter()
+        .find(|(named, _, _)| named == world)
+    {
+        requires.push(world_interface::manifest::Requirement {
+            name: format!("lait.world.{world}.schema"),
+            range: format!("={schema}"),
+        });
+    }
+
+    // A World that draws nothing in a browser declares no launch entry, which
+    // is the honest statement rather than an omission.
+    let launch = display
+        .entry_path()
+        .map(|path| world_interface::manifest::Launch {
+            id: "app".to_string(),
+            present: world_interface::manifest::Present::Primary,
+            when: None,
+            target: world_interface::manifest::Target::Web {
+                path: path.to_string(),
+            },
+        })
+        .into_iter()
+        .collect();
+
+    Some((
+        world_interface::manifest::WorldManifest {
+            format: world_interface::manifest::FORMAT,
+            id: world.to_string(),
+            version: version.to_string(),
+            name: Some(display.name().to_string()),
+            mark,
+            hero,
+            accent: display.accent(),
+            requires,
+            launch,
+        },
+        art,
+    ))
+}
+
+/// Every World this build hosts: its id, the reviewed implementation it runs,
+/// and the DTO schema version its web head decodes.
+///
+/// One more thing only a composition root can answer, and it exists so the
+/// runtime version (`update::runtime`) can fingerprint what a World's web head
+/// could break against *without any other file naming a product* — the
+/// invariant `tests/it/product_independence.rs` enforces, which is what caught
+/// the first version of this: `update::runtime` reached for
+/// `issues::dto::SCHEMA_VERSION` directly and made itself the second file in
+/// `src/**` that knows a product's name.
+pub fn bundled_world_surfaces() -> Vec<(String, [u8; 32], u32)> {
+    vec![
+        (
+            PRODUCT_WORLD.to_string(),
+            implementation_id(),
+            issues::dto::SCHEMA_VERSION,
+        ),
+        (
+            signage::contract::world_id().as_str().to_string(),
+            signage_app::implementation_id(),
+            signage::contract::PROGRAM_SCHEMA_VERSION,
+        ),
+    ]
 }

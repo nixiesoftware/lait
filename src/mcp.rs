@@ -116,6 +116,14 @@ pub struct WaitArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FindArgs {
+    /// A Runtime `find::Query`: a typed operator DAG over the pinned World's
+    /// declared schema. Publication may be omitted for the current read image.
+    #[schemars(with = "serde_json::Value")]
+    pub query: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConnectArgs {
     /// A base32 space ticket from a coworker's `invite_ticket`.
     pub ticket: String,
@@ -489,6 +497,24 @@ impl LaitMcp {
     )]
     async fn sync(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::Sync).await
+    }
+
+    #[tool(
+        description = "Run one typed bounded query over the pinned World's immutable shared \
+                       corpus. The answer is stamped with manifest, implementation, extractor, \
+                       materialization, actor, device and authority coordinates. Use exact/term/\
+                       id seeks for deep lookup; use a Body seek to resolve every item named by \
+                       one live change in a single call."
+    )]
+    async fn find(&self, Parameters(a): Parameters<FindArgs>) -> Result<CallToolResult, McpError> {
+        let query = serde_json::from_value(a.query).map_err(|error| {
+            McpError::invalid_request(format!("invalid Runtime Find query: {error}"), None)
+        })?;
+        self.run(Request::Find {
+            world: self.world_id.clone(),
+            query,
+        })
+        .await
     }
 }
 

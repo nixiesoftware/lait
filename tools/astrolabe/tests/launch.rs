@@ -341,13 +341,45 @@ async fn seed_signage_program(client: &Client, store: &Path) -> (String, String)
     (orbit.space.clone(), program.id)
 }
 
+/// The store path as the daemon spelled it when it registered the Orbit.
+///
+/// The same resolution `client/display.rs` performs for a real caller: ask the
+/// host for its Orbits and take the registered path, rather than assuming this
+/// process and the daemon spell one directory the same way.
+async fn registered_store(client: &Client, space: &str) -> String {
+    let context = client
+        .host_context()
+        .await
+        .expect("read the registered Orbits");
+    context
+        .orbits
+        .iter()
+        .find(|orbit| orbit.space == space)
+        .map(|orbit| orbit.path.clone())
+        .expect("the Space has a registered local Orbit")
+}
+
 async fn write_signage_program(
     client: &Client,
     store: &Path,
     space: &str,
     program: signage::SignageProgram,
 ) {
-    let space = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    let space_id = mechanics::ids::SpaceId::parse(space).expect("founded Space id");
+    // Address the Orbit by the path the *daemon* registered, never by the one
+    // this test happens to hold. The Orbit id is derived from the path as
+    // spelled — `normalize` settles separators, trailing slashes and Windows
+    // case and deliberately resolves nothing — so two spellings of one
+    // directory are two Orbits, and the host answers `InvalidCall`. A tempdir
+    // reaches the daemon canonicalised, and neither spelling is recoverable
+    // from the other: macOS adds `/private`, and Windows `canonicalize`
+    // returns a `\\?\` UNC path the daemon never used. Production has this
+    // right (`client/display.rs` resolves through `host_context`); the test
+    // was the half that guessed, which is why it passed only where tempdirs
+    // are already canonical.
+    let store = registered_store(client, space).await;
+    let store = std::path::Path::new(&store);
+    let space = space_id;
     let call = signage_app::encode_call(&signage_app::SignageRequest::ProgramPut {
         program: program.clone(),
     })
@@ -504,6 +536,29 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
             "no lait binary beside the test binary, so the launch seam was not exercised.              Build it first: `cargo build -p lait`, or run the suite that does              (`cargo nextest run --workspace`)."
         );
     };
+
+    // This test drives a real receiver through pairing, so it needs the display
+    // coordinator — and the coordinator binds a fixed `0.0.0.0:7443`, which makes
+    // it a machine-wide singleton. A daemon that loses that race now degrades to
+    // serving without display coordination rather than refusing to start, which
+    // is right for the product and leaves this test with nothing to pair against.
+    //
+    // Said here, before ten seconds of polling. Without it the failure is
+    // "reference receiver did not open a pairing within ten seconds" — a symptom
+    // that names neither the port nor the process holding it, which is the class
+    // of message this suite exists to stop shipping.
+    if let Err(error) = std::net::TcpListener::bind((
+        std::net::Ipv4Addr::UNSPECIFIED,
+        lait::display::DEFAULT_DISPLAY_PORT,
+    )) {
+        panic!(
+            "this test needs the display coordinator, which binds 0.0.0.0:{port}, and \
+             something else on this machine holds it ({error}). A running `lait` daemon is \
+             the usual holder — stop it, or run this test where none is running. Setting \
+             LAIT_DISPLAY=off does not help: it removes the coordinator this test drives.",
+            port = lait::display::DEFAULT_DISPLAY_PORT,
+        );
+    }
 
     let managed = tempfile::tempdir().expect("a managed root");
     let identity = tempfile::tempdir().expect("an identity home");
@@ -891,7 +946,10 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
         (client, signals)
     };
 
-    let head = client.head().await.expect("a head for this identity");
+    let head = client
+        .head("issues")
+        .await
+        .expect("a head for this identity");
     assert!(
         head.base.starts_with("http://127.0.0.1:"),
         "a head came up somewhere other than loopback: {}",
@@ -924,13 +982,59 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
 
     // Asking twice finds the head that is already up. The alternative is a port
     // and a run credential per click.
-    let again = client.head().await.expect("the same head");
+    let again = client.head("issues").await.expect("the same head");
     assert_eq!(again, head, "a second Open started a second head");
-    assert_eq!(
-        client.heads().len(),
-        1,
-        "one identity acquired more than one head"
+
+    // A different World is a different head, which is the whole point: one
+    // process per World is what makes stopping one a statement about that
+    // World rather than about whatever else shared it.
+    let signage = client
+        .head("signage")
+        .await
+        .expect("a head for the other World");
+    assert_ne!(
+        signage.base, head.base,
+        "two Worlds were served by one head"
     );
+
+    // Two Worlds, two heads — and *exactly* two. The assertion this replaces
+    // said `len() == 1`, "one identity acquired more than one head", written when
+    // one head served everything. It was left standing directly under the block
+    // above that starts a second head, so it could not pass; the display-pairing
+    // wait earlier in this test failed first and hid it. Per-World heads reached
+    // CI unproven against a real binary because of it.
+    //
+    // The count is what matters, not just that the bases differ: the defect this
+    // is guarding is a *third* head, which is what `Option<&str>` produced when
+    // one caller named a World and another did not.
+    let heads = client.heads();
+    assert_eq!(
+        heads.len(),
+        2,
+        "two Worlds is two heads, and no more: {:?}",
+        heads.iter().map(|h| (&h.world, &h.url)).collect::<Vec<_>>()
+    );
+    let mut served: Vec<Option<String>> = heads.iter().map(|h| h.world.clone()).collect();
+    served.sort();
+    assert_eq!(
+        served,
+        vec![Some("issues".to_owned()), Some("signage".to_owned())],
+        "each head names the World it actually announced"
+    );
+
+    // Asking again for either World finds the head that is already up, rather
+    // than spending a third port. This is the property the key exists for, and
+    // it is checked *after* both are running because that is when a key
+    // collision would show.
+    assert_eq!(
+        client.head("issues").await.expect("the issues head").base,
+        head.base
+    );
+    assert_eq!(
+        client.head("signage").await.expect("the signage head").base,
+        signage.base
+    );
+    assert_eq!(client.heads().len(), 2, "asking again started nothing new");
 
     let minted = client.mint(&head).await.expect("a launch credential");
     assert!(!minted.secret.is_empty());
@@ -983,4 +1087,371 @@ async fn a_head_comes_up_and_mints_a_credential_worth_exactly_one_use() {
     client.shutdown().await;
     drop(signals);
     stop_daemon(identity.path()).await;
+}
+
+// ---------------------------------------------------------------------------
+// The staged-swap chain (CLIENT-65).
+//
+// The seam: a signed feed names a tree artifact, `lait::update::tree` stages
+// it beside the live tree, and the `astrolabe-stub` launcher — a real
+// process, spawned here — proves it and swaps it in by rename before
+// starting the client. Every part is unit-tested where it lives; this is the
+// composition, which is the thing this file exists to assert. The "client"
+// the trees carry is `chain-probe`, a reference binary that announces the
+// version of the tree it actually ran from, so the assertions below are
+// about *which* tree launched, never merely that something did.
+
+/// The stub binary beside the test binary, or a panic — like `sidecar()`,
+/// and unlike the reference receiver: the stub is the thing under test, and
+/// reporting `ok` without it would be a guard trusted while guarding
+/// nothing.
+fn stub_binary() -> PathBuf {
+    built_binary("astrolabe-stub").unwrap_or_else(|| {
+        panic!(
+            "no astrolabe-stub binary beside the test binary, so the staged-swap seam was not \
+             exercised; build the workspace bins (cargo build -p astrolabe-stub) first"
+        )
+    })
+}
+
+/// The reference entry binary the fabricated trees carry.
+fn probe_binary() -> PathBuf {
+    built_binary("chain-probe").unwrap_or_else(|| {
+        panic!(
+            "no chain-probe binary beside the test binary, so the staged-swap seam was not \
+             exercised; build the workspace bins (cargo build -p astrolabe-stub) first"
+        )
+    })
+}
+
+/// The tree's entry name on this platform — the same convention
+/// `lait::update::tree` records and the stub launches.
+fn tree_entry_name() -> &'static str {
+    if cfg!(windows) {
+        "astrolabe.exe"
+    } else {
+        "astrolabe"
+    }
+}
+
+/// The sidecar name the pair contract requires beside the entry.
+fn tree_sidecar_name() -> &'static str {
+    if cfg!(windows) {
+        "lait.exe"
+    } else {
+        "lait"
+    }
+}
+
+/// A target triple whose platform half matches this host, so the staged
+/// entry name and the launched entry name agree.
+fn tree_target() -> &'static str {
+    if cfg!(windows) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    }
+}
+
+/// Seal a payload into the feed's envelope: base64 payload bytes, detached
+/// ed25519 over exactly those bytes. The shape `feed::open_envelope`
+/// verifies; sealed here with `mechanics` directly because the feed's own
+/// test sealer is crate-private — which is right, and this duplication is
+/// itself covered by the resolve call below refusing anything misshapen.
+fn seal_feed_object(payload: &serde_json::Value, seed: &[u8; 32]) -> Vec<u8> {
+    let bytes = serde_json::to_vec(payload).expect("a payload encodes");
+    let signature = mechanics::actor::sign_detached(seed, &bytes);
+    serde_json::json!({
+        "payload": data_encoding::BASE64.encode(&bytes),
+        "signature": data_encoding::BASE64.encode(&signature),
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// A tree artifact as the feed publishes them: gzip'd tar, one root
+/// directory, entry executable at the root.
+fn tree_artifact(version: &str, entry_bytes: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let root = format!("astrolabe-{version}");
+        let mut file = |path: &str, contents: &[u8], mode: u32| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(mode);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{root}/{path}"), contents)
+                .expect("a tree entry appends");
+        };
+        file(tree_entry_name(), entry_bytes, 0o755);
+        // The sidecar half of the pair. Not a real lait — the stager's
+        // contract is that the tree carries one at its root, which is what
+        // makes sidecar::beside and custody_of agree after a swap, and that
+        // shape is what this fixture has to honour.
+        file(tree_sidecar_name(), b"the sidecar half of the pair", 0o755);
+        file("version.txt", version.as_bytes(), 0o644);
+        file("data/asset.bin", b"an asset the tree carries", 0o644);
+        builder
+            .into_inner()
+            .expect("the tar seals")
+            .finish()
+            .expect("the gzip seals");
+    }
+    bytes
+}
+
+/// Seal a whole feed — pointer and manifest — naming one tree artifact, and
+/// resolve it with the matching key, exactly as an installed machine would.
+fn resolve_sealed_tree_release(
+    version: &str,
+    archive: &[u8],
+) -> (
+    std::collections::HashMap<String, Vec<u8>>,
+    lait::update::feed::Resolved,
+) {
+    let seed = [41u8; 32];
+    let pubkey_hex = mechanics::actor::device_from_seed(&seed)
+        .as_str()
+        .to_string();
+    let decoded = data_encoding::HEXLOWER
+        .decode(pubkey_hex.as_bytes())
+        .expect("a device id is lowercase hex of the public key");
+    let pubkey: [u8; 32] = decoded.try_into().expect("a feed key is exactly 32 bytes");
+
+    let url = format!("https://feed.example/releases/{version}/astrolabe-tree.tar.gz");
+    let manifest = serde_json::json!({
+        "version": version,
+        "bundles": { lait::update::tree::TREE_BUNDLE: version },
+        "artifacts": { lait::update::tree::TREE_BUNDLE: { tree_target(): {
+            "url": url,
+            "blake3": blake3_hex(archive),
+            "size": archive.len(),
+        }}},
+    });
+    let pointer = serde_json::json!({
+        "kind": "release",
+        "version": version,
+        "manifest": "https://feed.example/releases/manifest.json",
+    });
+
+    let mut objects = std::collections::HashMap::new();
+    objects.insert(
+        "https://feed.example/channels/test".to_string(),
+        seal_feed_object(&pointer, &seed),
+    );
+    objects.insert(
+        "https://feed.example/releases/manifest.json".to_string(),
+        seal_feed_object(&manifest, &seed),
+    );
+    objects.insert(url, archive.to_vec());
+
+    let resolved = lait::update::feed::resolve_with(
+        |asked| {
+            objects.get(asked).cloned().ok_or_else(|| {
+                lait::update::feed::Failure::Unreachable(format!("no object at {asked}"))
+            })
+        },
+        lait::update::feed::Channel::Test,
+        "https://feed.example",
+        &[pubkey],
+        None,
+    )
+    .expect("the sealed feed resolves against its own key");
+    (objects, resolved)
+}
+
+/// blake3 as the feed manifests spell it: lowercase hex.
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+/// Run the stub as a real process against `root`, with the probe announcing
+/// into `root`, and wait for it to exit.
+///
+/// The stub holds its claim for the lifetime of the client it starts, so
+/// waiting on the stub waits on the whole tree of processes — which is also
+/// what keeps the next phase from racing a still-exiting client over the
+/// directory it is about to rename.
+fn run_stub(root: &Path) {
+    let status = Command::new(root.join(if cfg!(windows) {
+        "astrolabe-stub.exe"
+    } else {
+        "astrolabe-stub"
+    }))
+    .env("CHAIN_PROBE_ANNOUNCE", root)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status()
+    .expect("the stub spawns");
+    assert!(
+        status.success(),
+        "the stub exited with a failure, and the stub must launch even when it refuses to apply"
+    );
+}
+
+/// Wait for the probe's announcement and hand back the version it saw.
+fn wait_for_announcement(root: &Path) -> String {
+    let path = root.join("launched.txt");
+    for _ in 0..150 {
+        if let Ok(version) = std::fs::read_to_string(&path) {
+            std::fs::remove_file(&path).expect("the announcement is consumed");
+            return version;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("no tree announced itself within the budget");
+}
+
+/// The chain, end to end: signed pointer → manifest → verified tree
+/// artifact → staged tree → a real stub process swaps by rename → the
+/// launched entry announces the *new* tree — with the deferred, tampered,
+/// and rollback arms asserted on the same install root.
+#[test]
+fn a_staged_release_is_applied_by_the_stub_and_the_previous_tree_survives() {
+    let stub = stub_binary();
+    let probe = probe_binary();
+    let probe_bytes = std::fs::read(&probe).expect("the probe binary's bytes");
+
+    let scratch = tempfile::tempdir().expect("an install root");
+    let root = scratch.path();
+    std::fs::copy(
+        &stub,
+        root.join(stub.file_name().expect("the stub has a name")),
+    )
+    .expect("the stub lands in the install root");
+
+    // The live tree, version 0.0.1 — the install as the person has it.
+    let current = root.join("current");
+    std::fs::create_dir(&current).expect("the live tree");
+    std::fs::copy(&probe, current.join(tree_entry_name())).expect("the live entry");
+    std::fs::write(current.join("version.txt"), "0.0.1").expect("the live version");
+
+    // Release 0.0.2, sealed into a feed and staged exactly as a daemon
+    // would: resolve against the pinned key, verify, extract, record.
+    let archive = tree_artifact("0.0.2", &probe_bytes);
+    let (objects, resolved) = resolve_sealed_tree_release("0.0.2", &archive);
+    let staged = lait::update::tree::stage_tree_with(
+        |asked, _limit| {
+            objects.get(asked).cloned().ok_or_else(|| {
+                lait::update::feed::Failure::Unreachable(format!("no object at {asked}"))
+            })
+        },
+        &resolved,
+        tree_target(),
+        root,
+    )
+    .expect("the 0.0.2 tree stages");
+    assert_eq!(
+        staged.version, "0.0.2",
+        "the stage carries the release version"
+    );
+
+    // Recorded before anything moves, so the path-stability assertion after
+    // the swap compares against what the person actually had.
+    let entry_before_swap = current.join(tree_entry_name());
+
+    // A live client holds the installation: the apply defers, is said, and
+    // the person still gets their client — the old one.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("instance.lock"))
+        .expect("the instance lock file");
+    fs2::FileExt::try_lock_exclusive(&lock).expect("the test plays the live client");
+    run_stub(root);
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.1",
+        "an apply ran under a live client, or the wrong tree launched"
+    );
+    assert!(
+        root.join("staged.manifest.json").is_file(),
+        "a deferred stage was consumed"
+    );
+    fs2::FileExt::unlock(&lock).expect("the live client exits");
+
+    // The lock is free: this launch applies, and the new tree is what runs.
+    run_stub(root);
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.2",
+        "the staged release did not become the running client"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("version.txt")).expect("the live version"),
+        "0.0.2",
+        "the live tree is not the staged release"
+    );
+    assert!(
+        !root.join("staged.manifest.json").exists(),
+        "a consumed stage manifest was left behind"
+    );
+    // The pair, after the swap: astrolabe and lait as flat siblings, which
+    // is what sidecar::beside and custody_of both mean by "beside". A swap
+    // that delivered a tree without it would install a client that cannot
+    // find its daemon.
+    assert!(
+        current.join(tree_sidecar_name()).is_file(),
+        "the swapped-in tree does not carry its sidecar beside the entry"
+    );
+    // The entry's path is the same string it was before the update. This is
+    // the half of the macOS identity rule a test can hold: TCC grants key on
+    // signing identity, bundle id and *path*, so a layout that versioned the
+    // live directory — Squirrel's `app-1.0.0/`, the obvious alternative to
+    // this one — would silently drop every permission the person had granted
+    // on the first update. The stable `current/` name is what prevents it,
+    // and an assertion is what keeps it stable.
+    assert_eq!(
+        current.join(tree_entry_name()),
+        entry_before_swap,
+        "the update moved the client's path, which is how macOS loses TCC grants"
+    );
+
+    // The previous tree is kept, and kept *bootable*: it runs and announces
+    // itself, which is what makes it a rollback target rather than a copy.
+    let previous_entry = root.join("previous").join(tree_entry_name());
+    let status = Command::new(&previous_entry)
+        .env("CHAIN_PROBE_ANNOUNCE", root)
+        .status()
+        .expect("the previous tree's entry spawns");
+    assert!(status.success(), "the previous tree is not bootable");
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.1",
+        "the kept previous tree is not the prior release"
+    );
+
+    // A tampered stage: release 0.0.3 stages cleanly, then a byte changes on
+    // disk. The stub must refuse by name and leave the live tree untouched.
+    let archive = tree_artifact("0.0.3", &probe_bytes);
+    let (objects, resolved) = resolve_sealed_tree_release("0.0.3", &archive);
+    lait::update::tree::stage_tree_with(
+        |asked, _limit| {
+            objects.get(asked).cloned().ok_or_else(|| {
+                lait::update::feed::Failure::Unreachable(format!("no object at {asked}"))
+            })
+        },
+        &resolved,
+        tree_target(),
+        root,
+    )
+    .expect("the 0.0.3 tree stages");
+    std::fs::write(root.join("staged").join("version.txt"), "0.0.3-tampered").expect("the tamper");
+    run_stub(root);
+    assert_eq!(
+        wait_for_announcement(root).trim(),
+        "0.0.2",
+        "a tampered stage was applied, or the launch did not survive the refusal"
+    );
+    let log = std::fs::read_to_string(root.join("stub.log")).expect("the stub said its refusals");
+    assert!(
+        log.contains("verification failed"),
+        "the tamper refusal must name verification, not fail vaguely: {log}"
+    );
 }

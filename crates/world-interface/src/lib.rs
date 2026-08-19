@@ -32,6 +32,7 @@
 
 pub mod destination;
 pub mod display;
+pub mod manifest;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -161,19 +162,36 @@ pub struct LocalInvocation {
     pub input: Value,
 }
 
+/// Shape one admitted Runtime Find answer for a product-owned client surface.
+///
+/// Runtime owns evaluation and the exact answer type. The product owns the
+/// names, cursor spelling, and row envelope it publishes to an agent or human.
+/// Keeping this as an in-process function pointer avoids teaching the host any
+/// product vocabulary while still refusing adapters that reinterpret raw JSON.
+pub type FindResponsePresenter = fn(runtime::find::Answer) -> Result<Value, Failure>;
+
 /// The target selected by a parsed product invocation.
 #[derive(Debug, Clone)]
 pub enum ClientInvocationKind {
     World(Call),
+    /// One product-owned convenience query compiled to Runtime's common Find
+    /// algebra. The host still supplies actor, device, authority and Station
+    /// coordinates; a package can select fields but cannot bypass admission.
+    Find {
+        query: runtime::find::Query,
+        presenter: Option<FindResponsePresenter>,
+    },
     Local(LocalInvocation),
 }
 
 /// A parsed product invocation with package-owned policy metadata.
 ///
-/// `Local` operations may compose World calls with working-tree, filesystem,
-/// caller-local state, or generic Space-authority facilities. The shell
-/// enforces the declared whole-operation access and confirmation policy, then
-/// routes execution back through the package without interpreting its name.
+/// `Find` operations let a package compile friendly product filters to the
+/// common Runtime query algebra. `Local` operations may compose World calls
+/// with working-tree, filesystem, caller-local state, or generic
+/// Space-authority facilities. The shell enforces the declared whole-operation
+/// access and confirmation policy, then routes execution without interpreting
+/// product vocabulary.
 #[derive(Debug, Clone)]
 pub struct ClientInvocation {
     world: WorldId,
@@ -207,6 +225,40 @@ impl ClientInvocation {
                 operation: operation.into(),
                 input,
             }),
+        }
+    }
+
+    /// Construct a read-only package invocation over Runtime Find.
+    pub fn find(world: WorldId, query: runtime::find::Query) -> Self {
+        Self {
+            world,
+            access: ClientAccess::Query,
+            confirmation_question: None,
+            kind: ClientInvocationKind::Find {
+                query,
+                presenter: None,
+            },
+        }
+    }
+
+    /// Construct a read-only Find invocation with product-owned presentation.
+    ///
+    /// The host still evaluates the same admitted query and raw root Find
+    /// remains available through [`Self::find`]. Only the successful answer's
+    /// outer client representation changes.
+    pub fn find_presented(
+        world: WorldId,
+        query: runtime::find::Query,
+        presenter: FindResponsePresenter,
+    ) -> Self {
+        Self {
+            world,
+            access: ClientAccess::Query,
+            confirmation_question: None,
+            kind: ClientInvocationKind::Find {
+                query,
+                presenter: Some(presenter),
+            },
         }
     }
 
@@ -401,6 +453,20 @@ impl PresentationResolution {
 pub trait ClientHost: Send + Sync {
     fn local_root(&self) -> &Path;
     fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply>;
+    /// Evaluate a package-compiled query through the host's authenticated
+    /// Runtime Find path. Hosts that are intentionally limited to legacy World
+    /// projections may retain the typed refusal; native heads override this.
+    fn call_find<'a>(
+        &'a self,
+        _world: WorldId,
+        _query: runtime::find::Query,
+    ) -> ClientFuture<'a, Value> {
+        Box::pin(async {
+            Err(Failure::new(
+                "this client host does not expose Runtime Find",
+            ))
+        })
+    }
     /// Inspect or request product-neutral durable Run lifecycle transitions.
     ///
     /// The DTO is owned by Runtime Exec. Packages remain responsible for the
@@ -822,34 +888,40 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// finding them here means finding them at the build that ships the World —
 /// which is the only place a person who can fix the image is still looking.
 fn validate_artwork(world: &WorldId, kind: &str, bytes: &[u8]) -> Result<(), Failure> {
+    artwork_bounds(kind, bytes).map_err(|why| Failure::new(format!("World '{world}' {why}")))
+}
+
+/// The bounds every artwork is held to, wherever it came from.
+///
+/// A compiled-in World meets these at the build that ships it; a World fetched
+/// from a feed meets them when its bundle is staged. One function, because two
+/// tiers of World with two standards for their own artwork is how a fetched
+/// World comes to draw a row a compiled-in one could not.
+pub fn artwork_bounds(kind: &str, bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() {
-        return Err(Failure::new(format!(
-            "World '{world}' declares an empty {kind}"
-        )));
+        return Err(format!("declares an empty {kind}"));
     }
     if bytes.len() > MAX_ARTWORK_BYTES {
-        return Err(Failure::new(format!(
-            "World '{world}' declares a {kind} of {} bytes; an artwork stops at {MAX_ARTWORK_BYTES}",
+        return Err(format!(
+            "declares a {kind} of {} bytes; an artwork stops at {MAX_ARTWORK_BYTES}",
             bytes.len()
-        )));
+        ));
     }
     let Some((width, height)) = png_dimensions(bytes) else {
-        return Err(Failure::new(format!(
-            "World '{world}' declares a {kind} that is not a PNG"
-        )));
+        return Err(format!("declares a {kind} that is not a PNG"));
     };
     // Square, because every surface that draws one draws it in a square: a
     // 3:1 banner in a mark's plate is either stretched or cropped, and which
     // of the two happens would be the client deciding what the World meant.
     if width != height {
-        return Err(Failure::new(format!(
-            "World '{world}' declares a {width}×{height} {kind}; an artwork is square"
-        )));
+        return Err(format!(
+            "declares a {width}×{height} {kind}; an artwork is square"
+        ));
     }
     if width > MAX_ARTWORK_SIDE {
-        return Err(Failure::new(format!(
-            "World '{world}' declares a {kind} {width} wide; an artwork stops at {MAX_ARTWORK_SIDE}"
-        )));
+        return Err(format!(
+            "declares a {kind} {width} wide; an artwork stops at {MAX_ARTWORK_SIDE}"
+        ));
     }
     Ok(())
 }
@@ -1243,6 +1315,18 @@ impl WorldClientPackage {
                     Ok(decorate(host, &call, decoded.clone())
                         .await
                         .unwrap_or(decoded))
+                }
+                ClientInvocationKind::Find { query, presenter } => {
+                    let value = host.call_find(self.world.clone(), query).await?;
+                    let Some(present) = presenter else {
+                        return Ok(value);
+                    };
+                    let answer = serde_json::from_value(value).map_err(|error| {
+                        Failure::new(format!(
+                            "host returned an invalid Runtime Find answer: {error}"
+                        ))
+                    })?;
+                    present(answer)
                 }
                 ClientInvocationKind::Local(local) => {
                     let handler = self.local_handler.ok_or_else(|| {
@@ -1710,7 +1794,7 @@ mod tests {
         assert!(clean.check().is_ok());
     }
 
-    /// Both kinds classify themselves, so a head's own policy never has to
+    /// Every kind classifies itself, so a head's own policy never has to
     /// choose between guessing and refusing everything it cannot see into.
     #[test]
     fn every_invocation_declares_an_access_class() {

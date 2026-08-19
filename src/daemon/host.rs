@@ -684,7 +684,7 @@ impl Listener {
                 Flow::Next(reader, write_half)
             }
             (ControlRoute::Daemon, request) => {
-                let response = match self.display.handle_control(&request) {
+                let response = match self.display.handle_control(&request).await {
                     Some(response) => response,
                     None => crate::orbits::bootstrap::dispatch(&self.router, request)
                         .await
@@ -970,10 +970,11 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    fn new(router: Arc<Router>, home: &Path) -> Result<Self> {
+    fn new(router: Arc<Router>, home: &Path, device_seed: &[u8; 32]) -> Result<Self> {
         let display = Arc::new(crate::display::DisplayRuntime::open(
             &home.join("display"),
             router.clone(),
+            device_seed,
         )?);
         Ok(Self {
             endpoint: Arc::new(Endpoint::new(router.clone(), display.clone())),
@@ -987,6 +988,15 @@ impl Daemon {
     }
 
     async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
+        // Staging runs beside whatever else this daemon serves, including in
+        // the reduced modes below: an embedded or display-less daemon is
+        // still the resident updater for its installation. It is spawned
+        // rather than selected on because it never completes on its own and
+        // never fails the daemon — the worst a check can do is leave the
+        // standing unchanged.
+        let staging = self.spawn_staging();
+        let world_upgrades = self.spawn_world_upgrades();
+
         // Display coordination is withheld from a daemon that does not own
         // the machine's posture: a guest in somebody's process (see
         // [`embed_in_host_process`]) and a daemon told `LAIT_DISPLAY=off`
@@ -994,14 +1004,51 @@ impl Daemon {
         // display control-plane requests still answer (status reads state,
         // not the listener); only the LAN-facing HTTPS service is absent.
         if embedded() || !display_hosting() {
-            return self.endpoint.clone().serve(home).await;
+            let served = self.endpoint.clone().serve(home).await;
+            Self::join_staging(staging).await;
+            Self::join_world_upgrades(world_upgrades).await;
+            return served;
         }
+        // Take the port before committing to it, so "another daemon already holds
+        // it" is separable from "our service broke". The port is fixed and bound
+        // on `0.0.0.0`, which makes the coordinator a machine-wide singleton — so
+        // on any machine that already runs a daemon, this is the *ordinary* case
+        // rather than an exceptional one.
+        //
+        // It used to be fatal to the whole daemon, which meant a second identity
+        // could not come up at all and a supervisor could not start a head for
+        // it. The concern underneath that was right — never advertise an origin
+        // receivers cannot reach — but the remedy was one size too large: the
+        // answer to "cannot host displays" is to not host them and say so, not to
+        // refuse to be a daemon.
+        let display_listener = match crate::display::bind_display(&self.display.tls).await {
+            // Kept, not dropped. Dropping it made this a guess rather than a
+            // reservation: the port could be taken between here and the serving
+            // bind, and that failure arrives on a path where the degradation below
+            // does not run — so the daemon died on exactly the race this handles.
+            Ok(listener) => listener,
+            Err(error) if crate::display::is_port_taken(&error) => {
+                tracing::warn!(
+                    %error,
+                    "another daemon on this machine holds the display port; \
+                     serving without display coordination"
+                );
+                let served = self.endpoint.clone().serve(home).await;
+                Self::join_staging(staging).await;
+                return served;
+            }
+            Err(error) => {
+                Self::join_staging(staging).await;
+                return Err(error).context("serve daemon display HTTPS");
+            }
+        };
         let display = self.display.clone();
         let display_stop = self.endpoint.subscribe_stop();
         let endpoint = self.endpoint.clone();
-        let mut display_service = Box::pin(async move { display.serve(display_stop).await });
+        let mut display_service =
+            Box::pin(async move { display.serve_on(display_listener, display_stop).await });
         let mut control_service = Box::pin(async move { endpoint.serve(home).await });
-        tokio::select! {
+        let outcome = tokio::select! {
             endpoint_result = &mut control_service => {
                 self.endpoint.begin_stop();
                 if let Err(error) = display_service.await {
@@ -1022,8 +1069,307 @@ impl Daemon {
                     Err(error) => Err(error).context("serve daemon display HTTPS"),
                 }
             }
+        };
+        Self::join_staging(staging).await;
+        Self::join_world_upgrades(world_upgrades).await;
+        outcome
+    }
+
+    /// Start the continuous staging watcher, when this daemon runs inside a
+    /// stub-managed installation.
+    ///
+    /// `None` everywhere else — a developer's build tree and a standalone
+    /// `lait` have nowhere to stage to, and inventing a root would drop a
+    /// client tree beside somebody's `target/`. The watcher stops with the
+    /// endpoint, on the same signal every other service here uses.
+    fn spawn_staging(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let root = crate::update::watch::install_root()?;
+        let identity = self.router.catalog().identity().to_path_buf();
+        let stop = self.endpoint.subscribe_stop();
+        Some(tokio::spawn(crate::update::watch::serve(
+            identity, root, stop,
+        )))
+    }
+
+    /// Resume consented World updates independently of any client connection.
+    /// One turn performs at most one fetch or one bounded product migration
+    /// step, so progress never monopolizes the host reactor or a Station.
+    fn spawn_world_upgrades(&self) -> tokio::task::JoinHandle<()> {
+        let router = self.router.clone();
+        let worlds = crate::serve::head::worlds_root(router.catalog().identity());
+        let stop = self.endpoint.subscribe_stop();
+        tokio::spawn(serve_world_upgrades(router, worlds, stop))
+    }
+
+    /// Wait for the staging watcher to notice the stop signal, bounded so a
+    /// check in flight can never hold a shutdown open.
+    async fn join_staging(staging: Option<tokio::task::JoinHandle<()>>) {
+        let Some(staging) = staging else {
+            return;
+        };
+        match tokio::time::timeout(Duration::from_secs(5), staging).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the staging watcher ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the staging watcher did not finish in time; leaving it to the process exit"
+            ),
         }
     }
+
+    async fn join_world_upgrades(upgrades: tokio::task::JoinHandle<()>) {
+        match tokio::time::timeout(Duration::from_secs(5), upgrades).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "the World upgrade worker ended abnormally"),
+            Err(_) => tracing::debug!(
+                "the World upgrade worker did not finish in time; leaving it to process exit"
+            ),
+        }
+    }
+}
+
+async fn serve_world_upgrades(
+    router: Arc<Router>,
+    worlds: PathBuf,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                if let Err(error) = advance_one_world_upgrade(router.clone(), worlds.clone()).await {
+                    tracing::warn!(%error, "could not advance a consented World update");
+                }
+            }
+        }
+    }
+}
+
+async fn advance_one_world_upgrade(router: Arc<Router>, worlds: PathBuf) -> Result<()> {
+    let world_ids: Vec<_> = router.lifecycle_world_ids().cloned().collect();
+    for world in world_ids {
+        let world_name = world.as_str().to_owned();
+        let worlds_for_read = worlds.clone();
+        let job = match router
+            .run_blocking(move || crate::update::consent::load(&worlds_for_read, &world_name))
+            .await
+        {
+            Ok(Some(job)) if !job.terminal() => job,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::warn!(world = %world, %error, "cannot read World update consent");
+                continue;
+            }
+        };
+        return advance_world_upgrade_job(router, worlds, world, job).await;
+    }
+    Ok(())
+}
+
+async fn advance_world_upgrade_job(
+    router: Arc<Router>,
+    worlds: PathBuf,
+    world: replica::body::WorldId,
+    mut job: crate::update::consent::Job,
+) -> Result<()> {
+    use crate::update::consent::Phase;
+
+    if job.staged_version.is_none() {
+        let worlds_for_fetch = worlds.clone();
+        let world_name = world.as_str().to_owned();
+        let operation = job.operation;
+        job = router
+            .run_blocking(move || {
+                let Some(mut current) =
+                    crate::update::consent::load(&worlds_for_fetch, &world_name)?
+                else {
+                    anyhow::bail!("World update consent disappeared")
+                };
+                if current.operation != operation || current.terminal() {
+                    return Ok(current);
+                }
+                current.phase = Phase::Fetching;
+                current.message = None;
+                current.updated_at = mechanics::wallclock::now_secs();
+                crate::update::consent::save(&worlds_for_fetch, &current)?;
+                let outcome = crate::update::world::check(
+                    &world_name,
+                    &worlds_for_fetch,
+                    crate::update::feed::Channel::current(),
+                );
+                match outcome {
+                    Ok(outcome) => {
+                        crate::update::world::note(
+                            &worlds_for_fetch,
+                            &world_name,
+                            &outcome,
+                            mechanics::wallclock::now_secs(),
+                        );
+                        match outcome {
+                            crate::update::world::Outcome::Staged { version }
+                            | crate::update::world::Outcome::Current { version } => {
+                                current.staged_version = Some(version);
+                                current.phase = Phase::Migrating;
+                            }
+                            crate::update::world::Outcome::Unmet { version, why } => {
+                                current.phase = Phase::Refused;
+                                current.message =
+                                    Some(format!("{version} requires {}", why.join(", ")));
+                            }
+                            crate::update::world::Outcome::NothingPublished { version } => {
+                                current.phase = Phase::Refused;
+                                current.message = Some(format!(
+                                    "release {version} carries no bundle for this World"
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            world = %world_name,
+                            %error,
+                            "World bundle verification will retry"
+                        );
+                        current.phase = Phase::Waiting;
+                        current.message = Some("Waiting to retry World bundle verification".into());
+                    }
+                }
+                current.updated_at = mechanics::wallclock::now_secs();
+                crate::update::consent::save(&worlds_for_fetch, &current)?;
+                Ok(current)
+            })
+            .await?;
+        return Ok(());
+    }
+
+    let bindings = router.visible_orbit_ids_blocking().await?;
+    job.total_spaces = u64::try_from(bindings.len()).unwrap_or(u64::MAX);
+    let had_stale_orbit = job
+        .current_orbit
+        .as_ref()
+        .is_some_and(|current| !bindings.contains(current));
+    let orbit = reconcile_upgrade_orbit(&mut job, &bindings);
+    if had_stale_orbit {
+        tracing::debug!(
+            world = %world,
+            "reconciling a lifecycle cursor whose Space is no longer bound"
+        );
+    }
+    let Some(orbit) = orbit else {
+        job.phase = Phase::Verified;
+        job.message = Some("bundle staged and every visible Space verified".into());
+        job.updated_at = mechanics::wallclock::now_secs();
+        let worlds_for_save = worlds.clone();
+        router
+            .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+            .await?;
+        return Ok(());
+    };
+    if job.current_orbit.is_none() {
+        job.current_orbit = Some(orbit.clone());
+        job.phase = Phase::Migrating;
+        job.message = None;
+        job.updated_at = mechanics::wallclock::now_secs();
+        let worlds_for_save = worlds.clone();
+        let staged = job.clone();
+        router
+            .run_blocking(move || crate::update::consent::save(&worlds_for_save, &staged))
+            .await?;
+    }
+
+    let step = match router
+        .advance_world_upgrade(&orbit, world.clone(), job.operation)
+        .await
+    {
+        Ok(step) => step,
+        Err(error) => {
+            tracing::warn!(
+                world = %world,
+                orbit = %orbit,
+                %error,
+                "Space lifecycle step will retry"
+            );
+            job.phase = Phase::Waiting;
+            job.message = Some("Waiting to retry the bounded Space lifecycle step".into());
+            job.updated_at = mechanics::wallclock::now_secs();
+            let worlds_for_save = worlds.clone();
+            router
+                .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+                .await?;
+            return Ok(());
+        }
+    };
+    match step {
+        crate::orbital::WorldUpgradeStep::Pending {
+            completed,
+            remaining,
+        } => {
+            job.phase = Phase::Migrating;
+            job.completed_records = completed;
+            job.remaining_records = remaining;
+            job.message = Some(format!("Space {orbit} migration is in progress"));
+        }
+        crate::orbital::WorldUpgradeStep::Building => {
+            job.phase = Phase::Waiting;
+            job.message = Some(format!(
+                "Space {orbit} frozen migration source is rebuilding"
+            ));
+        }
+        crate::orbital::WorldUpgradeStep::Capacity => {
+            job.phase = Phase::Waiting;
+            job.message = Some(format!(
+                "Space {orbit} frozen migration source awaits read capacity"
+            ));
+        }
+        crate::orbital::WorldUpgradeStep::Current
+        | crate::orbital::WorldUpgradeStep::Unbound
+        | crate::orbital::WorldUpgradeStep::Verified => {
+            job.after_orbit = Some(orbit);
+            job.current_orbit = None;
+            job.completed_spaces = job.completed_spaces.saturating_add(1);
+            job.completed_records = 0;
+            job.remaining_records = None;
+            job.phase = Phase::Migrating;
+            job.message = None;
+        }
+        crate::orbital::WorldUpgradeStep::Unsupported { reason } => {
+            job.phase = Phase::Refused;
+            job.message = Some(reason);
+        }
+    }
+    job.updated_at = mechanics::wallclock::now_secs();
+    let worlds_for_save = worlds;
+    router
+        .run_blocking(move || crate::update::consent::save(&worlds_for_save, &job))
+        .await?;
+    Ok(())
+}
+
+/// Reconcile a persisted cursor with the current exact set of World-bound
+/// Spaces. A removed/unbound Space is ordinary restart drift, not a semantic
+/// migration refusal; resume at the next canonical binding.
+fn reconcile_upgrade_orbit(
+    job: &mut crate::update::consent::Job,
+    bindings: &[String],
+) -> Option<String> {
+    if job
+        .current_orbit
+        .as_ref()
+        .is_some_and(|current| !bindings.contains(current))
+    {
+        job.current_orbit = None;
+    }
+    job.current_orbit.clone().or_else(|| {
+        bindings
+            .iter()
+            .find(|orbit| job.after_orbit.as_ref().is_none_or(|after| *orbit > after))
+            .cloned()
+    })
 }
 
 /// Joinable ownership of the process endpoint and its process-wide lock.
@@ -1047,9 +1393,13 @@ impl Stop {
 }
 
 impl Runner {
-    pub(crate) fn start(home: PathBuf, router: Arc<Router>) -> Result<Self> {
+    /// `device_seed` is this identity's own seed, threaded through as a value
+    /// rather than re-read here: the daemon is the identity singleton, and a
+    /// second read is a second chance to disagree about which identity is
+    /// running.
+    pub(crate) fn start(home: PathBuf, router: Arc<Router>, device_seed: [u8; 32]) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
-        let daemon = Arc::new(Daemon::new(router, &home)?);
+        let daemon = Arc::new(Daemon::new(router, &home, &device_seed)?);
         Ok(Self {
             home,
             daemon,
@@ -1095,7 +1445,7 @@ pub async fn run_lait_daemon(
     // boot, deliberately — never as a side effect of a later write (the
     // address book's author path is load-only by design).
     std::fs::create_dir_all(&identity)?;
-    crate::config::load_or_create_identity(&identity)?;
+    let device_seed = crate::config::load_or_create_identity(&identity)?;
     let config_root = crate::config::config_root()?;
     let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&config_root);
@@ -1104,7 +1454,7 @@ pub async fn run_lait_daemon(
         Catalog::new(identity, agents_base, self_contained),
         packages,
     ));
-    let runner = Runner::start(home, router)?;
+    let runner = Runner::start(home, router, device_seed)?;
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -1468,6 +1818,7 @@ pub(crate) fn runner_with_factory(
             factory,
             crate::world::packages(),
         )),
+        [0x5a; 32],
     )
 }
 
@@ -1484,6 +1835,31 @@ mod tests {
     use comms::Transport;
 
     static HOME_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn restart_drift_skips_an_unbound_space_and_keeps_operation_progress() {
+        let root = tempfile::tempdir().expect("temp root");
+        let mut job = crate::update::consent::enqueue(
+            root.path(),
+            "lait.test.lifecycle",
+            mechanics::wallclock::now_secs(),
+        )
+        .expect("consent");
+        let operation = job.operation;
+        job.phase = crate::update::consent::Phase::Waiting;
+        job.after_orbit = Some("space-a".into());
+        job.current_orbit = Some("space-b".into());
+        job.completed_records = 256;
+
+        let next = reconcile_upgrade_orbit(
+            &mut job,
+            &["space-a".into(), "space-c".into(), "space-d".into()],
+        );
+        assert_eq!(next.as_deref(), Some("space-c"));
+        assert_eq!(job.current_orbit, None);
+        assert_eq!(job.operation, operation);
+        assert_eq!(job.completed_records, 256);
+    }
 
     struct MemFactory(MemNet);
 
@@ -1602,7 +1978,10 @@ mod tests {
                 .unwrap(),
             Response::Worlds { .. }
         ));
-        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
+        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList {
+            page: issues::contract::PageRequest::default(),
+        })
+        .unwrap();
         let world_route = ControlRoute::World {
             address: resolved.address,
             world: call.world().as_str().to_string(),

@@ -88,6 +88,10 @@ class _BookPageState extends State<BookPage> {
   String _query = '';
   bool _searching = false;
 
+  /// Whether the Incoming panel — the unknown senders behind the CONTACTS
+  /// band's badge — is showing in place of the known list.
+  bool _showingIncoming = false;
+
   /// The card whose profile subsurface is open, or null for the list. Held as
   /// an id, never a row: the row is re-read from the book every frame, so a
   /// profile can never show a card the book no longer holds.
@@ -137,6 +141,17 @@ class _BookPageState extends State<BookPage> {
     final client = ClientScope.of(context);
     final view = ClientScope.watch(context);
     final book = view.book;
+    // The people this identity can hold a conversation with. Clicking one opens
+    // a chat — the address book is the way in, never a separate inbox. Known
+    // (added) contacts are the list; unknown strangers sit behind the CONTACTS
+    // band's badge, revealed only when asked for.
+    final messageContacts = view.correspondence?.contacts ?? const [];
+    final knownContacts =
+        messageContacts.where((contact) => contact.added).toList();
+    final unknownContacts =
+        messageContacts.where((contact) => !contact.added).toList();
+    // Never strand on an empty Incoming panel if the last stranger cleared.
+    final showingIncoming = _showingIncoming && unknownContacts.isNotEmpty;
     final rereading = view.inFlight.contains(ActionKeys.refresh);
     bool busy(String key) => view.inFlight.contains(key);
     final mine = book?.cards.where((card) => card.selfClaim).toList() ?? const [];
@@ -182,14 +197,83 @@ class _BookPageState extends State<BookPage> {
         // gutter; the list is a client frame whose strip owns the window
         // edges, so its sections carry the gutter themselves.
         child: book == null
-            ? Padding(
-                padding: pageMargin(t),
-                child: const Empty(
-                  said: 'The book has not been read.',
-                  next:
-                      'Press F5 to ask the daemon. Nothing is created on your behalf.',
-                ),
-              )
+            ? (messageContacts.isEmpty
+                ? Padding(
+                    padding: pageMargin(t),
+                    child: const Empty(
+                      said: 'The book has not been read.',
+                      next:
+                          'Press F5 to ask the daemon. Nothing is created on your behalf.',
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // The same CONTACTS band, standalone: the label and the
+                      // incoming door, so the known/unknown split holds even
+                      // with no daemon-backed book behind it.
+                      Container(
+                        padding: t.padding.symmetric(h: Space.xl3, v: Space.xs),
+                        decoration: BoxDecoration(
+                          color: context.surface.l100,
+                          border: t.stroke.edge(
+                            top: context.border.l500,
+                            bottom: context.border.l500,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                'CONTACTS',
+                                style: context.factLabelStyle.copyWith(
+                                  color: context.text.l900,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            if (unknownContacts.isNotEmpty)
+                              _IncomingButton(
+                                count: unknownContacts.length,
+                                active: showingIncoming,
+                                onTap: () => setState(
+                                  () => _showingIncoming = !showingIncoming,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      Expanded(
+                        child: ListView(
+                          padding: t.padding.fromLTRB(
+                            Space.xl3,
+                            Space.lg,
+                            Space.xl3,
+                            Space.xl3,
+                          ),
+                          children: showingIncoming
+                              ? [
+                                  for (final contact in unknownContacts) ...[
+                                    _MessageContactRow(
+                                      contact: contact,
+                                      incoming: true,
+                                    ),
+                                    t.gap.y(Space.lg),
+                                  ],
+                                ]
+                              : [
+                                  if (knownContacts.isEmpty)
+                                    Text(
+                                      'No conversations.',
+                                      style: context.labelStyle,
+                                    )
+                                  else
+                                    _MessagesSection(contacts: knownContacts),
+                                ],
+                        ),
+                      ),
+                    ],
+                  ))
             : profiled != null
                 ? Padding(
                     padding: pageMargin(t),
@@ -292,11 +376,44 @@ class _BookPageState extends State<BookPage> {
                                 size: ButtonSize.iconSm,
                                 tooltip: 'Search cards (Ctrl+F)',
                               ),
+                              // The door to the unknown: strangers who wrote
+                              // first, badged with their count, to the right of
+                              // search. Absent when nobody is waiting.
+                              if (unknownContacts.isNotEmpty) ...[
+                                t.gap.x(Space.xxs),
+                                _IncomingButton(
+                                  count: unknownContacts.length,
+                                  active: showingIncoming,
+                                  onTap: () => setState(
+                                    () => _showingIncoming = !showingIncoming,
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                   ),
                   Expanded(
-                    child: shown.isEmpty
+                    child: showingIncoming
+                        // The Incoming panel: strangers the band's badge counts,
+                        // shown only when its button is lit — never in the list.
+                        ? ListView(
+                            padding: t.padding.fromLTRB(
+                              Space.xl3,
+                              Space.lg,
+                              Space.xl3,
+                              Space.xl3,
+                            ),
+                            children: [
+                              for (final contact in unknownContacts) ...[
+                                _MessageContactRow(
+                                  contact: contact,
+                                  incoming: true,
+                                ),
+                                t.gap.y(Space.lg),
+                              ],
+                            ],
+                          )
+                        : (shown.isEmpty && knownContacts.isEmpty)
                         ? Padding(
                             padding: pageMargin(t),
                             child: Empty(
@@ -319,6 +436,12 @@ class _BookPageState extends State<BookPage> {
                               Space.xl3,
                             ),
                             children: [
+                              if (knownContacts.isNotEmpty) ...[
+                                _MessagesSection(contacts: knownContacts),
+                                t.gap.y(Space.lg),
+                                const Separator(),
+                                t.gap.y(Space.lg),
+                              ],
                               if (contacts.isNotEmpty) ...[
                                 // The count sits on the present section
                                 // alone: how many are around is the number
@@ -1117,6 +1240,216 @@ class _SuggestionBand extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The way into a conversation. One row per person this identity can message;
+/// a click opens (or focuses) their tab in the chat window and raises it. The
+/// address book is the entry — there is no separate inbox.
+/// The known people one can message — friends and their agents — under a
+/// "Messages" head, each the canonical tile. The unknown are not here; they are
+/// behind the CONTACTS band's incoming button. A tap opens the chat.
+class _MessagesSection extends StatelessWidget {
+  const _MessagesSection({required this.contacts});
+
+  final List<ContactRow> contacts;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _SectionHead(label: 'Messages'),
+        t.gap.y(Space.md),
+        for (final contact in contacts) ...[
+          _MessageContactRow(contact: contact),
+          t.gap.y(Space.lg),
+        ],
+      ],
+    );
+  }
+}
+
+/// The door to the unknown, in the CONTACTS band beside search: a personAdd
+/// button with a count badge, the way Steam badges incoming requests.
+///
+/// The glyph fills on hover and stays filled while the Incoming panel is open —
+/// a filled square behind the mark, since the icon set carries no filled
+/// personAdd of its own. Both states read as "engaged".
+class _IncomingButton extends StatefulWidget {
+  const _IncomingButton({
+    required this.count,
+    required this.active,
+    required this.onTap,
+  });
+
+  final int count;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  State<_IncomingButton> createState() => _IncomingButtonState();
+}
+
+class _IncomingButtonState extends State<_IncomingButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final filled = _hovered || widget.active;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Semantics(
+          button: true,
+          label: 'Incoming from unknown senders (${widget.count})',
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            onEnter: (_) => setState(() => _hovered = true),
+            onExit: (_) => setState(() => _hovered = false),
+            child: GestureDetector(
+              onTap: widget.onTap,
+              behavior: HitTestBehavior.opaque,
+              child: Tooltip(
+                message: widget.active ? 'Back to contacts' : 'Incoming',
+                child: SizedBox.square(
+                  dimension: 28,
+                  child: Center(
+                    child: Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                        color: filled ? t.brand.l800 : null,
+                        borderRadius: t.radius.all(Space.xs),
+                      ),
+                      child: Icon(
+                        AppIcons.personAdd,
+                        size: t.font.md,
+                        color: filled ? context.surface.l50 : context.text.l900,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          right: -2,
+          top: -2,
+          child: Container(
+            padding: t.padding.symmetric(h: Space.xxs),
+            constraints: const BoxConstraints(minWidth: 16),
+            decoration: BoxDecoration(
+              color: t.status.error.l800,
+              borderRadius: t.radius.all(Space.md),
+            ),
+            child: Text(
+              '${widget.count}',
+              textAlign: TextAlign.center,
+              style: context.factLabelStyle.copyWith(color: t.surface.l50),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A person one can message, drawn with the same canonical tile as every other
+/// row in the book: the AI mark for an agent, a note for whose agent it is, and
+/// an unread badge. A single tap opens (or focuses) their chat — the address
+/// book is the way in, so the contact row *is* the entry.
+class _MessageContactRow extends StatelessWidget {
+  const _MessageContactRow({required this.contact, this.incoming = false});
+
+  final ContactRow contact;
+
+  /// An unknown sender in the Incoming panel: carries accept/dismiss, the way
+  /// Steam offers ✓/✗ on a friend request. A known contact carries neither.
+  final bool incoming;
+
+  @override
+  Widget build(BuildContext context) {
+    final client = ClientScope.of(context);
+    return Semantics(
+      button: true,
+      label: 'Open chat with ${contact.name}',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          client.dispatch(ActionRequest.openConversation(person: contact.id));
+          summonCorrespondence();
+        },
+        child: PersonTile(
+          name: contact.name,
+          picture: null,
+          presence: null,
+          agent: contact.isAgent,
+          // A contact's agent says whose it is, in the note the canonical tile
+          // draws when presence was not measured.
+          note: contact.parentName == null
+              ? null
+              : "${contact.parentName!}'s agent",
+          trailing: incoming
+              ? _RequestActions(person: contact.id, name: contact.name)
+              : (contact.unread > 0
+                  ? Badge(
+                      label: '${contact.unread}',
+                      variant: BadgeVariant.solid,
+                    )
+                  : null),
+        ),
+      ),
+    );
+  }
+}
+
+/// Accept moves an unknown sender into the address book; dismiss blocks them at
+/// the carrier. The two acts on a request, ✓ and ✗, flush at the row's end.
+class _RequestActions extends StatelessWidget {
+  const _RequestActions({required this.person, required this.name});
+
+  final String person;
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final client = ClientScope.of(context);
+    final view = ClientScope.watch(context);
+    final accepting = view.inFlight.contains(ActionKeys.acceptContact(person));
+    final dismissing = view.inFlight.contains(ActionKeys.blockSender(person));
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Button(
+          onPressed: accepting
+              ? null
+              : () =>
+                  client.dispatch(ActionRequest.acceptContact(person: person)),
+          icon: AppIcons.check,
+          semanticLabel: 'Accept $name',
+          variant: ButtonVariant.ghost,
+          size: ButtonSize.iconSm,
+          tooltip: 'Accept',
+        ),
+        t.gap.x(Space.xxs),
+        Button(
+          onPressed: dismissing
+              ? null
+              : () =>
+                  client.dispatch(ActionRequest.blockSender(person: person)),
+          icon: AppIcons.close,
+          semanticLabel: 'Dismiss $name',
+          variant: ButtonVariant.destructiveGhost,
+          size: ButtonSize.iconSm,
+          tooltip: 'Dismiss',
+        ),
+      ],
     );
   }
 }

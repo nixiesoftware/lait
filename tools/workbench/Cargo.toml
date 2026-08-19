@@ -52,3 +52,9 @@ tracing-subscriber = { version = "0.3", features = [
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(unix)'.dependencies]
+# For the graceful half of stopping a head: SIGTERM to the head's own process
+# group, before SIGKILL. `std` offers no portable "ask nicely", and the group is
+# what reaches a World that spawned children of its own.
+libc = "0.2"

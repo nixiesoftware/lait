@@ -324,11 +324,13 @@ fn corrupt_objects_fail_open_as_integrity() {
             .commit_batch(&[Effect::Actor(fx.founder_incept.clone()).encode()], &[])
             .unwrap();
     }
-    // Open once so the store sweeps what earlier commits superseded. Objects
-    // are content-addressed and immutable, so a superseded one lingers until a
-    // sweep collects it — corrupting garbage proves nothing, and the claim
-    // worth making is about the objects the exposed state actually names.
-    drop(Authority::open(&dir).unwrap());
+    // Open is intentionally independent of payload-directory size. Run the
+    // detached collector explicitly so earlier superseded objects are gone:
+    // corrupting garbage proves nothing, and the claim worth making is about
+    // the objects the exposed state actually names.
+    let ledger = Authority::open(&dir).unwrap();
+    ledger.collect_unreachable_for_test().unwrap();
+    drop(ledger);
 
     // Corrupt every stored object in turn; each corruption must fail open.
     let objects: Vec<PathBuf> = std::fs::read_dir(dir.join("objects"))

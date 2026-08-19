@@ -67,6 +67,10 @@ pub struct ClientView {
     /// The daemon-owned, self-hosted display coordinator. `None` until its
     /// first authoritative read lands.
     pub display: Option<DisplayFacts>,
+    /// This machine as a screen. `Some` *is* Big Picture — whether or not it
+    /// has drawn anything yet — so a surface reads presence here rather than
+    /// keeping a mode flag of its own that could disagree.
+    pub presentation: Option<PresentationFacts>,
     pub heads: Vec<HeadRow>,
     pub devices: Vec<DeviceRow>,
     pub storage: Vec<StorageRow>,
@@ -78,6 +82,9 @@ pub struct ClientView {
     /// `None` until the book has been read once. Empty cards is a book
     /// that answered and holds nothing, not an unread book.
     pub book: Option<BookFacts>,
+    /// This identity's correspondence — the mailbox and the arrival standing.
+    /// `None` until read once, distinct from a mailbox that answered empty.
+    pub correspondence: Option<CorrespondenceFacts>,
     pub notices: Vec<NoticeRow>,
     pub failures: Vec<FailureRow>,
     /// The keys of actions asked for and not yet answered. A control whose key
@@ -139,6 +146,36 @@ pub struct LibraryRow {
     /// reachable in. `None` until the book has been read — which is not the
     /// same as a World nobody in the book is addressed near.
     pub people: Option<Vec<WorldPersonRow>>,
+    /// What this machine last learned about the World's own channel. `None`
+    /// when nothing has ever been checked — which is not "up to date", and
+    /// draws exactly what this row drew before any of it existed.
+    pub update: Option<WorldUpdateRow>,
+}
+
+/// A World's channel, as this machine last found it.
+///
+/// Separate from the row's compiled-in fields because the two are different
+/// kinds of fact: the list is the install list and cannot go stale, this is
+/// measured and can. Keeping them apart is what stops the Library becoming a
+/// surface that probes to draw itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldUpdateRow {
+    /// The bundle version serving now. `None` is the embedded floor.
+    pub serving: Option<String>,
+    /// The version the channel named when it was last asked.
+    pub available: Option<String>,
+    /// The channel holds a bundle this machine is not serving and this build
+    /// can run. The only state that turns `Open` into `Update`.
+    pub behind: bool,
+    /// A newer bundle exists that this build cannot run, each unmet
+    /// requirement named. Shown, never offered — pressing an update that
+    /// would be refused on arrival teaches a person to distrust the control.
+    pub unmet: Option<Vec<String>>,
+    /// Durable native consent/progress, independent of channel standing.
+    pub operation: Option<String>,
+    pub phase: Option<String>,
+    pub progress: Option<String>,
+    pub message: Option<String>,
 }
 
 /// The artwork one World ships, as PNG bytes compiled into this build.
@@ -203,6 +240,92 @@ pub struct DisplayFacts {
     pub devices: Vec<DisplayReceiverRow>,
     pub assignments: Vec<DisplayAssignmentRow>,
     pub pending_pairings: Vec<DisplayPairingRow>,
+    /// `None` from a daemon that predates the custody split — not reported, as
+    /// distinct from reported-as-none.
+    pub identifier_custody: Option<DisplayIdentifierCustodyRow>,
+}
+
+/// This machine as a screen. Present exactly when Big Picture is on.
+///
+/// Being a screen and showing something are separate facts, so `chosen` is
+/// optional: a screen entered and not yet pointed at anything is a real state
+/// with its own surface, not a half-built one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentationFacts {
+    pub chosen: Option<PresentationChoice>,
+    /// The last verified render, kept across a failed re-ask so a screen goes
+    /// stale rather than dark.
+    pub program: Option<PresentedProgram>,
+    /// Why the last attempt did not answer. Travels *beside* `program`, never
+    /// instead of it — "stale, and here is why" and "nothing to show" are
+    /// different things to tell somebody standing in front of a screen.
+    pub failure: Option<String>,
+}
+
+/// What a screen was pointed at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentationChoice {
+    pub orbit: String,
+    pub world: String,
+    pub surface: String,
+    /// What to call this on screen while it is loading or refusing.
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentedProgram {
+    /// `current`, `partial`, or `unavailable`.
+    pub assessment: String,
+    pub partial_reasons: Vec<String>,
+    /// `hold_last`, `loop`, `poll_at_end`, or `blank_at_end`.
+    pub cycle: String,
+    pub refresh_after_ms: Option<u32>,
+    pub items: Vec<PresentedItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentedItem {
+    pub id: String,
+    pub duration_ms: Option<u32>,
+    pub assessment: String,
+    pub spoken_summary: Option<String>,
+    pub scene: PresentedScene,
+}
+
+/// What one item draws.
+///
+/// `Unsupported` is a scene rather than an omission: a program that quietly
+/// dropped what this screen cannot draw would be a shorter program nobody
+/// authored.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PresentedScene {
+    Frame {
+        /// `png`, `jpeg`, or `webp`.
+        media_type: String,
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+    },
+    Blank {
+        /// `source_unavailable`, `unsupported`, or `program_ended`.
+        reason: String,
+    },
+    Unsupported {
+        output: String,
+    },
+}
+
+/// How many ways back into this coordinator's identifier key exist, and whether
+/// any survives the machine.
+///
+/// Carried on the ordinary status projection rather than a settings page: the
+/// moment an operator wants this is after the machine is gone, and a fact only
+/// reachable from the lost machine is not a fact they have.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayIdentifierCustodyRow {
+    /// Kinds of unlock path, never material.
+    pub slots: Vec<String>,
+    pub portable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,11 +419,36 @@ pub struct HeadRow {
     /// The Orbit it is bound to. `None` is a browser head serving every Orbit
     /// its identity has.
     pub orbit: Option<String>,
+    /// The one World this head serves.
+    ///
+    /// `None` is a head from before the pin, which answers for every mounted
+    /// World. It matches no row deliberately: a surface cannot say a definite
+    /// thing about it, and saying an indefinite thing is the defect this field
+    /// closes.
+    pub world: Option<String>,
     /// The address, *without* the run credential its URL carries. A front page
     /// has no use for a credential — `Open` mints a single-use ticket of its
     /// own, which is what that ceremony is for.
     pub origin: Option<String>,
     pub owned: bool,
+    /// What the supervisor can say about this head *now*.
+    ///
+    /// `running`, `exited` or `unknown`. Carried because without it a surface has
+    /// only row *presence* to go on, and presence is not liveness: exited heads stay
+    /// listed so a person can see the thing they opened died, so a surface counting
+    /// rows paints a crashed head as Running. `HeadState` was added underneath and
+    /// stopped here, one hop short of the only place the lie was visible.
+    ///
+    /// A string like `DeviceRow::state`, not the enum: this crosses a generated
+    /// bridge, and a new variant should widen a match on the far side rather than
+    /// break the binding.
+    pub state: String,
+    /// Why the state could not be established, when it could not.
+    ///
+    /// `Some` only for `unknown`, exactly as `DeviceRow::degraded` carries only a
+    /// real degradation. A surface that can say *why* it cannot tell is the whole
+    /// difference between a third state and a shrug.
+    pub state_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -434,6 +582,72 @@ pub struct BookFacts {
     pub suggestions: Vec<SuggestionRow>,
 }
 
+/// A person's correspondence, drawn as conversations rather than an inbox.
+///
+/// `None` on `ClientView` until it has been read once — the same
+/// loading-versus-empty distinction the book keeps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrespondenceFacts {
+    /// This identity's own device id on the plane — the address a correspondent
+    /// writes to. `None` until the plane is known.
+    pub my_device: Option<String>,
+    /// The people this identity can reach. A person folds all their devices into
+    /// one contact, and a click on one opens a chat.
+    pub contacts: Vec<ContactRow>,
+    /// One transcript per person, mixing sent and received.
+    pub conversations: Vec<ConversationRow>,
+    /// Which conversations are open as tabs, in tab order. Shared state, so a
+    /// click in the address book opens the tab the chat window draws.
+    pub open_tabs: Vec<String>,
+    /// The focused tab, if any.
+    pub active_tab: Option<String>,
+}
+
+/// One person one can message, with each device that is them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContactRow {
+    pub id: String,
+    pub name: String,
+    pub devices: Vec<String>,
+    /// In the book (a friend) vs an unadded stranger who wrote first. Parts the
+    /// normal contact list from the incoming section.
+    pub added: bool,
+    /// An agent rather than a person — wears the AI mark.
+    pub is_agent: bool,
+    /// If this is a contact's agent, whose, and their name for the label.
+    pub parent_id: Option<String>,
+    pub parent_name: Option<String>,
+    /// Unread received messages — the badge. Zero once opened.
+    pub unread: u32,
+}
+
+/// One conversation: who it is with, and every message either way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationRow {
+    pub peer_id: String,
+    pub peer_name: String,
+    pub messages: Vec<ChatMessageRow>,
+}
+
+/// One message in a conversation. The chat draws a custom component per `kind`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatMessageRow {
+    /// True if this identity sent it — which side of the chat it is drawn on.
+    pub mine: bool,
+    /// `message` (text) or `invitation`. The chat draws each with its own
+    /// component: one is read, the other acted on.
+    pub kind: String,
+    /// The text, for a message. `None` for an invitation.
+    pub body: Option<String>,
+    /// When it was written, unix seconds.
+    pub sent_at: u64,
+    /// The proven signer's device, for a received message.
+    pub from_device: String,
+    /// Whether the carrier's word matched the proof. `false` is not wrong but is
+    /// worth surfacing rather than hiding.
+    pub provenance_agrees: bool,
+}
+
 /// One staged suggestion from a card-exchange file. Review is the only way
 /// into the book, so this carries exactly what the person must judge.
 #[derive(Debug, Clone, PartialEq)]
@@ -504,8 +718,20 @@ pub enum ActionRequest {
     /// Read this machine again.
     Refresh,
     /// Hand a World to the person's browser.
+    ///
+    /// Names the mount as well as the path: a head serves one World, so opening
+    /// says which rather than reaching for whichever head is up.
     Open {
+        world: String,
         entry_path: String,
+    },
+    /// Fetch this World's newest bundle now rather than at the next period.
+    ///
+    /// The daemon stages on a period measured in hours; a World is published
+    /// in seconds. This is the control that closes that gap, and it is the
+    /// whole reason a Library row ever draws an update affordance.
+    UpdateWorld {
+        world: String,
     },
     StartDevice {
         id: String,
@@ -537,6 +763,35 @@ pub enum ActionRequest {
     StartHead,
     StopHead {
         id: String,
+    },
+    /// Send a message to a person, over the configured carrier.
+    SendMessage {
+        to: String,
+        body: String,
+    },
+    /// Ask the carrier for anything waiting, and file it into conversations.
+    CollectMail,
+    /// Block a person at the carrier, so no device of theirs lands again. Also
+    /// how an incoming stranger is dismissed.
+    BlockSender {
+        person: String,
+    },
+    /// Accept an unknown correspondent into the address book.
+    AcceptContact {
+        person: String,
+    },
+    /// Open a conversation as a tab, and focus it. What a click in the address
+    /// book asks for.
+    OpenConversation {
+        person: String,
+    },
+    /// Focus an already-open conversation tab.
+    FocusConversation {
+        person: String,
+    },
+    /// Close a conversation tab.
+    CloseConversation {
+        person: String,
     },
     /// Forget an Orbit. The store is left alone; this is registry-only.
     ForgetOrbit {
@@ -632,13 +887,46 @@ pub enum ActionRequest {
     DisplayDeviceRevoke {
         device: String,
     },
+    /// Add a passphrase as a second way into the coordinator's identifier key.
+    ///
+    /// The first slot is sealed to this daemon's device, which survives an
+    /// operating-system profile but not the loss of the identity. A passphrase
+    /// depends on neither, which is what makes it a second way in rather than a
+    /// second copy of the first.
+    DisplayIdentifierAdmitPassphrase {
+        passphrase: String,
+    },
+    /// Make this machine a screen.
+    ///
+    /// Pressing the control is the whole of the consent — there is no dialog
+    /// in front of it, because being asked *what to show* before you are a
+    /// screen is the wrong order. Nothing is enrolled and nothing is
+    /// committed: this client is already a member of the Space it will draw,
+    /// so there is no stranger to issue a credential to. Leaving is
+    /// [`ActionRequest::LeavePresentation`].
+    EnterPresentation,
+    /// Point this screen at one exact surface. Dispatched from inside the
+    /// mode, never as a precondition for entering it.
+    PresentHere {
+        orbit: String,
+        world: String,
+        surface: String,
+        input: String,
+        title: String,
+    },
+    /// Ask the current selection again. What a refresh boundary and a manual
+    /// nudge both do.
+    PresentRefresh,
+    /// Stop being a screen.
+    LeavePresentation,
 }
 
 impl ActionRequest {
     fn into_action(self) -> Result<Action, String> {
         Ok(match self {
             Self::Refresh => Action::Refresh,
-            Self::Open { entry_path } => Action::OpenWorld { entry_path },
+            Self::UpdateWorld { world } => Action::UpdateWorld { world },
+            Self::Open { world, entry_path } => Action::OpenWorld { world, entry_path },
             Self::StartDevice { id } => Action::StartDevice(id),
             Self::StopDevice { id } => Action::StopDevice(id),
             Self::RestartDevice { id } => Action::RestartDevice(id),
@@ -648,6 +936,13 @@ impl ActionRequest {
             Self::ReadSpace { orbit } => Action::ReadSpace(space_ref(orbit)),
             Self::StartHead => Action::StartHead,
             Self::StopHead { id } => Action::StopHead(id),
+            Self::SendMessage { to, body } => Action::SendMessage { to, body },
+            Self::CollectMail => Action::CollectMail,
+            Self::BlockSender { person } => Action::BlockSender(person),
+            Self::AcceptContact { person } => Action::AcceptContact(person),
+            Self::OpenConversation { person } => Action::OpenConversation(person),
+            Self::FocusConversation { person } => Action::FocusConversation(person),
+            Self::CloseConversation { person } => Action::CloseConversation(person),
             Self::ForgetOrbit { space } => Action::OrbitForget { space },
             Self::BookPut { card, name, note } => Action::BookPut { card, name, note },
             Self::BookDelete { card } => Action::BookDelete { card },
@@ -741,6 +1036,25 @@ impl ActionRequest {
                 Action::DisplayAssignmentRevoke(assignment)
             }
             Self::DisplayDeviceRevoke { device } => Action::DisplayDeviceRevoke(device),
+            Self::DisplayIdentifierAdmitPassphrase { passphrase } => {
+                Action::DisplayIdentifierAdmitPassphrase(passphrase)
+            }
+            Self::EnterPresentation => Action::EnterPresentation,
+            Self::PresentHere {
+                orbit,
+                world,
+                surface,
+                input,
+                title,
+            } => Action::PresentHere(Box::new(crate::model::PresentationSelection {
+                orbit,
+                world,
+                surface,
+                input,
+                title,
+            })),
+            Self::PresentRefresh => Action::PresentRefresh,
+            Self::LeavePresentation => Action::LeavePresentation,
         })
     }
 }
@@ -840,14 +1154,28 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
 
     let (woken, wakeups) = channel();
     let wake = woken.clone();
-    let runtime = Runtime::start(
-        Config::new(state_root.clone(), sidecar.clone()),
-        move || {
-            // A failed send means the pump is gone, which happens only on the
-            // way out. Nothing to report and nobody to report it to.
-            let _ = wake.send(());
-        },
-    )
+    let mut config = Config::new(state_root.clone(), sidecar.clone());
+    // A standalone launch, set by the environment: come up without the identity
+    // daemon rather than waiting on one. `env_flag` so `1`, `true`, `on` and
+    // `yes` all read the same, and an empty or absent value stays off.
+    config.skip_sidecar = env_flag("LAIT_SKIP_SIDECAR");
+    // Opt in to the in-process correspondence fixture — off by default, so
+    // correspondence refuses honestly until a real carrier exists.
+    config.correspondence_demo = env_flag("LAIT_CORRESPONDENCE_DEMO");
+    // Carry real correspondence over a hosted Post when one is named. Takes
+    // precedence over the fixture: real carriage beats a loopback one. A bare
+    // `LAIT_POST_URL=1` is not a URL, so the truthy-but-not-a-URL spellings the
+    // fixture flag accepts are ignored here.
+    config.post_url = std::env::var("LAIT_POST_URL").ok().and_then(|value| {
+        let value = value.trim();
+        (value.starts_with("http://") || value.starts_with("https://"))
+            .then(|| value.trim_end_matches('/').to_owned())
+    });
+    let runtime = Runtime::start(config, move || {
+        // A failed send means the pump is gone, which happens only on the
+        // way out. Nothing to report and nobody to report it to.
+        let _ = wake.send(());
+    })
     .map_err(|error| error.to_string())?;
 
     let _ = CORE.set(Mutex::new(Core {
@@ -876,6 +1204,46 @@ pub fn start(state_root: Option<String>, sidecar: Option<String>) -> Result<(), 
         })
         .map_err(|error| format!("start the projection pump: {error}"))?;
     Ok(())
+}
+
+/// Whether an environment variable reads as set. `1`, `true`, `on`, `yes`
+/// (any case) are on; absent, empty, and everything else are off.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        )
+    })
+}
+
+#[cfg(test)]
+mod env_flag_tests {
+    use super::env_flag;
+
+    /// The flag reads the truthy spellings and nothing else. A unique variable
+    /// name per case keeps these independent of one another and of any other
+    /// test touching the environment.
+    #[test]
+    fn env_flag_reads_the_truthy_spellings_only() {
+        for (raw, want) in [
+            ("1", true),
+            ("TRUE", true),
+            ("On", true),
+            (" yes ", true),
+            ("0", false),
+            ("off", false),
+            ("", false),
+            ("nope", false),
+        ] {
+            let name = format!("LAIT_TEST_ENV_FLAG_{}", raw.trim().to_ascii_uppercase());
+            // SAFETY: a test-only variable this test owns; no other test reads it.
+            unsafe { std::env::set_var(&name, raw) };
+            assert_eq!(env_flag(&name), want, "{raw:?} should read as {want}");
+            unsafe { std::env::remove_var(&name) };
+        }
+        assert!(!env_flag("LAIT_TEST_ENV_FLAG_DEFINITELY_ABSENT"));
+    }
 }
 
 fn attach_to(core: &Mutex<Core>, state_root: &Path, sidecar: &Path) -> Result<(), String> {
@@ -1044,12 +1412,14 @@ fn empty() -> ClientView {
         library: None,
         host: None,
         display: None,
+        presentation: None,
         heads: Vec::new(),
         devices: Vec::new(),
         storage: Vec::new(),
         orbits: Vec::new(),
         space: None,
         book: None,
+        correspondence: None,
         notices: Vec::new(),
         failures: Vec::new(),
         in_flight: Vec::new(),
@@ -1089,6 +1459,18 @@ fn project(app: &App) -> ClientView {
                     tagline: entry.tagline.clone(),
                     accent: entry.accent,
                     people: world_people(app.book(), app.presence(), &entry.world),
+                    update: app
+                        .world_standing(&entry.world)
+                        .map(|standing| WorldUpdateRow {
+                            serving: standing.serving.clone(),
+                            available: standing.available.clone(),
+                            behind: standing.behind,
+                            unmet: standing.unmet.clone(),
+                            operation: standing.operation.clone(),
+                            phase: standing.phase.clone(),
+                            progress: standing.progress.clone(),
+                            message: standing.message.clone(),
+                        }),
                 })
                 .collect()
         }),
@@ -1189,6 +1571,69 @@ fn project(app: &App) -> ClientView {
                     expires_at_unix_ms: pairing.expires_at_unix_ms,
                 })
                 .collect(),
+            identifier_custody: display.identifier_custody.as_ref().map(|custody| {
+                DisplayIdentifierCustodyRow {
+                    slots: custody.slots.clone(),
+                    portable: custody.portable,
+                }
+            }),
+        }),
+        presentation: app.presentation().map(|presenting| PresentationFacts {
+            chosen: presenting
+                .selection
+                .as_ref()
+                .map(|selection| PresentationChoice {
+                    orbit: selection.orbit.clone(),
+                    world: selection.world.clone(),
+                    surface: selection.surface.clone(),
+                    title: selection.title.clone(),
+                }),
+            failure: presenting.failure.clone(),
+            program: presenting.rendered.as_ref().map(|view| PresentedProgram {
+                assessment: view.assessment.clone(),
+                partial_reasons: view.partial_reasons.clone(),
+                cycle: view.cycle.clone(),
+                refresh_after_ms: view.refresh_after_ms,
+                items: view
+                    .items
+                    .iter()
+                    .map(|item| PresentedItem {
+                        id: item.id.clone(),
+                        duration_ms: item.duration_ms,
+                        assessment: item.assessment.clone(),
+                        spoken_summary: item.spoken_summary.clone(),
+                        scene: match &item.scene {
+                            lait::control::DisplayPresentationSceneView::Frame {
+                                media_type,
+                                width,
+                                height,
+                                bytes_base64,
+                            } => PresentedScene::Frame {
+                                media_type: media_type.clone(),
+                                width: *width,
+                                height: *height,
+                                // Decoded once here rather than in Dart: the
+                                // interface receives a whole view on every
+                                // pump, and base64 is the transport's problem
+                                // rather than the screen's.
+                                bytes: data_encoding::BASE64
+                                    .decode(bytes_base64.as_bytes())
+                                    .unwrap_or_default(),
+                            },
+                            lait::control::DisplayPresentationSceneView::Blank { reason } => {
+                                PresentedScene::Blank {
+                                    reason: reason.clone(),
+                                }
+                            }
+                            lait::control::DisplayPresentationSceneView::Unsupported { output } => {
+                                PresentedScene::Unsupported {
+                                    output: output.clone(),
+                                }
+                            }
+                        },
+                    })
+                    .collect(),
+            }),
         }),
         heads: app
             .heads()
@@ -1197,11 +1642,22 @@ fn project(app: &App) -> ClientView {
                 id: head.id.clone(),
                 kind: format!("{:?}", head.kind).to_lowercase(),
                 orbit: head.orbit.clone(),
+                world: head.world.clone(),
                 origin: head
                     .url
                     .as_deref()
                     .map(|url| url.split('?').next().unwrap_or(url).to_owned()),
                 owned: matches!(head.ownership, lait_workbench::Ownership::Owned),
+                state: match &head.state {
+                    lait_workbench::HeadState::Running => "running".to_owned(),
+                    lait_workbench::HeadState::Exited { .. } => "exited".to_owned(),
+                    lait_workbench::HeadState::Unknown { .. } => "unknown".to_owned(),
+                },
+                state_detail: match &head.state {
+                    lait_workbench::HeadState::Running => None,
+                    lait_workbench::HeadState::Exited { status } => Some(status.clone()),
+                    lait_workbench::HeadState::Unknown { why } => Some(why.clone()),
+                },
             })
             .collect(),
         devices: app
@@ -1326,6 +1782,45 @@ fn project(app: &App) -> ClientView {
                     handles: s.handles.clone(),
                 })
                 .collect(),
+        }),
+        correspondence: app.correspondence().map(|corr| CorrespondenceFacts {
+            my_device: corr.my_device.clone(),
+            contacts: corr
+                .contacts
+                .iter()
+                .map(|contact| ContactRow {
+                    id: contact.id.clone(),
+                    name: contact.name.clone(),
+                    devices: contact.devices.clone(),
+                    added: contact.added,
+                    is_agent: contact.is_agent,
+                    parent_id: contact.parent_id.clone(),
+                    parent_name: contact.parent_name.clone(),
+                    unread: contact.unread,
+                })
+                .collect(),
+            conversations: corr
+                .conversations
+                .iter()
+                .map(|conversation| ConversationRow {
+                    peer_id: conversation.peer_id.clone(),
+                    peer_name: conversation.peer_name.clone(),
+                    messages: conversation
+                        .messages
+                        .iter()
+                        .map(|message| ChatMessageRow {
+                            mine: message.mine,
+                            kind: message.kind.clone(),
+                            body: message.body.clone(),
+                            sent_at: message.sent_at,
+                            from_device: message.from_device.clone(),
+                            provenance_agrees: message.provenance_agrees,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            open_tabs: corr.open_tabs.clone(),
+            active_tab: corr.active_tab.clone(),
         }),
         notices: app
             .notices()

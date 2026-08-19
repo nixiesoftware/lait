@@ -42,6 +42,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::Live { .. }
         | Request::LiveSubscribe { .. }
         | Request::AssignmentList { .. }
+        | Request::Find { .. }
         // Host-plane reads: node-local settings and orientation. They sign
         // nothing and change nothing, so they carry the same weight through a
         // browser as through a terminal. A settings read still names a store
@@ -49,6 +50,7 @@ pub fn is_read(req: &Request) -> bool {
         // beside it — being a read is not a licence to name a directory.
         | Request::HostConfigList { .. }
         | Request::HostConfigGet { .. }
+        | Request::HostWorldUpdateStatus { .. }
         | Request::HostContext
         | Request::Hello { .. }
         | Request::BookList
@@ -59,12 +61,20 @@ pub fn is_read(req: &Request) -> bool {
 
         Request::Work { request, .. } if !request.is_command() => true,
 
+        // Rendering a surface for this machine's own screen commits nothing:
+        // no assignment, no receiver, no stored bytes. Its invocation is
+        // classified `Query` at the client boundary *and* independently by the
+        // trusted runtime before World code runs, which is a stronger guarantee
+        // than this allowlist could make on its own.
+        Request::DisplayPresent { .. } => true,
+
         Request::AgentAdd { .. }
         | Request::DisplayPairingApprove { .. }
         | Request::DisplayPairingReject { .. }
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
+        | Request::DisplayIdentifierAdmitPassphrase { .. }
         | Request::AgentProvision { .. }
         | Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
@@ -133,6 +143,7 @@ pub fn is_read(req: &Request) -> bool {
         // binary, and stopping the daemon that swap has to outlive…
         | Request::HostInstallMcp { .. }
         | Request::HostUpdate
+        | Request::HostWorldUpdate { .. }
         | Request::HostRestart
         // …and node control.
         | Request::ConfigReload
@@ -223,6 +234,8 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::HostOrbitRebuild { .. }
         | Request::HostInstallMcp { .. }
         | Request::HostUpdate
+        | Request::HostWorldUpdate { .. }
+        | Request::HostWorldUpdateStatus { .. }
         // …and the restart that makes an update take effect. Admitting it here
         // and not `Stop` is the whole distinction: this one names the daemon
         // *under* the server, which survives to stand a fresh one up.
@@ -254,6 +267,8 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::DisplayAssignmentPut { .. }
         | Request::DisplayAssignmentRevoke { .. }
         | Request::DisplayDeviceRevoke { .. }
+        | Request::DisplayPresent { .. }
+        | Request::DisplayIdentifierAdmitPassphrase { .. }
         | Request::MemberRemove { .. }
         | Request::MemberSetRole { .. }
         | Request::Members
@@ -282,6 +297,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
         | Request::Work { .. }
+        | Request::Find { .. }
         | Request::Subscribe { .. }
         | Request::Status
         // Orbit-routed, not host-routed, for the same reason `WorldsActive` is:

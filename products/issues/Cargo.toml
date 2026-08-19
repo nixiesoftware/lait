@@ -21,3 +21,5 @@ schemars = "1"
 postcard = { version = "1", features = ["use-std"] }
 data-encoding = "2.6"
 blake3 = "1"
+unicode-normalization = "=0.1.25"
+unicode-segmentation = "=1.13.3"

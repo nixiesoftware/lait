@@ -6,7 +6,7 @@
       "schemaExpressible": true,
       "value": {
         "payloadB64": "",
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "requestIdHex": "00000000000000000000000000000000",
         "schema": "s",
         "schemaVersion": 1,
@@ -19,7 +19,7 @@
       "reason": "missing required fields",
       "schemaExpressible": true,
       "value": {
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "world": "w.x"
       }
     },
@@ -30,7 +30,7 @@
       "value": {
         "actorId": "act_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "deviceHex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "requestIdHex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
         "signedActionB64": "",
         "spaceId": "ws_short",
@@ -43,7 +43,7 @@
       "schemaExpressible": false,
       "value": {
         "payloadB64": "",
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "requestIdHex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
         "schema": "s",
         "schemaVersion": 1,
@@ -56,7 +56,7 @@
       "def": "SubmitRequestDto",
       "value": {
         "payloadB64": "aGVsbG8=",
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "requestIdHex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
         "schema": "note",
         "schemaVersion": 1,
@@ -68,7 +68,7 @@
       "value": {
         "actorId": "act_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "deviceHex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "requestIdHex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
         "signedActionB64": "c2lnbmVk",
         "spaceId": "ws_00000000000000000000000000",
@@ -80,7 +80,7 @@
       "value": {
         "code": "denied",
         "message": "the demand was not satisfied at the pinned frontier",
-        "protocolVersion": 1
+        "protocolVersion": 2
       }
     }
   ]

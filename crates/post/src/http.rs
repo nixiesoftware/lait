@@ -15,7 +15,10 @@ use axum::{Json, Router};
 use mechanics::ids::DeviceId;
 use serde::Deserialize;
 
-use crate::{Challenge, Deposited, FsStore, Post, Refusal, SignedAck, SignedDeposit, SignedFetch};
+use crate::{
+    Challenge, Deposited, FsStore, Post, Refusal, SignedAck, SignedBlock, SignedDeposit,
+    SignedFetch,
+};
 
 /// The Post, shared across handlers.
 pub type Shared = Arc<Mutex<Post<FsStore>>>;
@@ -35,6 +38,7 @@ pub fn router(shared: Shared) -> Router {
         .route("/deposit", post(deposit))
         .route("/fetch", post(fetch))
         .route("/acknowledge", post(acknowledge))
+        .route("/block", post(block))
         .with_state(shared)
 }
 
@@ -48,6 +52,11 @@ fn refused(refusal: Refusal) -> (StatusCode, Json<Refusal>) {
         Refusal::UnknownChallenge | Refusal::ChallengeExpired => StatusCode::CONFLICT,
         Refusal::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         Refusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        // 429 rather than 503: the remedy is to ask again later, and the caller
+        // should not be able to tell a mailbox that is full from a sender that is
+        // going too fast. One status for one remedy, which is the whole reason
+        // this arm is coarse.
+        Refusal::AtCapacity => StatusCode::TOO_MANY_REQUESTS,
     };
     (status, Json(refusal))
 }
@@ -68,6 +77,11 @@ async fn challenge(
     State(shared): State<Shared>,
     Query(query): Query<DeviceQuery>,
 ) -> Result<Json<Challenge>, (StatusCode, Json<Refusal>)> {
+    // Verbatim on purpose. `from_key_string` validates nothing, and that is what
+    // is wanted here: the query string reaches `Post::challenge`'s canonicality
+    // check exactly as it was spelled. Parsing here would *normalise* it — which
+    // would silently accept a second spelling of one device and hand back a
+    // challenge answerable under an id the store never saw.
     let device = DeviceId::from_key_string(query.device);
     held(&shared)
         .challenge(&device, now())
@@ -102,5 +116,17 @@ async fn acknowledge(
     held(&shared)
         .acknowledge(&request, now())
         .map(|dropped| Json(serde_json::json!({ "dropped": dropped })))
+        .map_err(refused)
+}
+
+async fn block(
+    State(shared): State<Shared>,
+    Json(request): Json<SignedBlock>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<Refusal>)> {
+    held(&shared)
+        .block(&request, now())
+        // An empty object rather than nothing: a body a client can decode is a
+        // reply it can tell apart from a truncated one.
+        .map(|()| Json(serde_json::json!({ "blocked": true })))
         .map_err(refused)
 }

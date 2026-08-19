@@ -450,7 +450,31 @@ where
         base.trim_end_matches('/'),
         channel.as_str()
     );
-    let payload = open_envelope(&fetch(&pointer_url)?, pubkeys)?;
+    resolve_pointer_with(fetch, &pointer_url, channel, pubkeys, seen)
+}
+
+/// [`resolve_with`] against a pointer at an explicit URL.
+///
+/// The product's channels sit at `channels/<channel>`; a World's sit one level
+/// in, at `channels/worlds/<world>/<channel>`, because a World ships on its own
+/// cadence and its pointer is its own mutable object. Every rule below is the
+/// same either way — the signature, the one-hop relocation, the freshness
+/// ratchet, and the stable-never-prerelease refusal — which is the whole
+/// reason the World feed reuses this layout instead of inventing a second one.
+///
+/// `channel` is still passed because the prerelease rule is a property of the
+/// channel a node follows, not of the URL it was found at.
+pub fn resolve_pointer_with<F>(
+    fetch: F,
+    pointer_url: &str,
+    channel: Channel,
+    pubkeys: &[[u8; 32]],
+    seen: Option<u64>,
+) -> Result<Resolved, Failure>
+where
+    F: Fn(&str) -> Result<Vec<u8>, Failure>,
+{
+    let payload = open_envelope(&fetch(pointer_url)?, pubkeys)?;
     let pointer: PointerPayload = serde_json::from_slice(&payload)
         .map_err(|e| Failure::Invalid(format!("pointer payload: {e}")))?;
 

@@ -144,6 +144,7 @@ impl SignageCallHandler {
             schema: signage::contract::program_schema(),
             schema_version: signage::contract::PROGRAM_SCHEMA_VERSION,
             payload,
+            publication: None,
         });
         let projection = answer
             .map_err(|error| error.to_string())

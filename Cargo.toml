@@ -6,6 +6,7 @@ members = [
     "crates/fabric",
     "crates/addressbook",
     "crates/comms",
+    "crates/correspondence",
     "crates/post",
     "crates/relay",
     "crates/replica",
@@ -21,6 +22,7 @@ members = [
     "tools/astrolabe",
     "tools/astrolabe-ios",
     "tools/feed",
+    "tools/stub",
 ]
 # Two packages live in this repository but are NOT members, each because it
 # needs a build setting the rest of the workspace must never see.
@@ -46,7 +48,7 @@ resolver = "2"
 
 [package]
 name = "lait"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 # MSRV: driven by typst 0.15.1 (via products/issues-app), which requires rustc
 # 1.92. iroh 1.0.0-rc.1 held the floor at 1.91 before that; it is no longer the
@@ -153,7 +155,7 @@ tokio = { version = "1", features = ["full"] }
 n0-future = "0.3"
 
 # serialization: serde_json for state/control protocol, postcard for wire messages
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 postcard = { version = "1", features = ["use-std"] }
 serde-byte-array = "0.1"
@@ -248,6 +250,12 @@ zip = { version = "6", default-features = false, features = ["deflate"] }
 # `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (inherit exactly the
 # three handles we name — `daemon_spawn`), which std only exposes as an unstable
 # feature. Already present transitively (iroh/tokio); declared directly for those.
+# The staged-swap primitives. The stub owns them because the stub must stay
+# free of the engine; the engine using them is the other direction and is what
+# lets macOS — which has no stub — apply from the daemon.
+[target.'cfg(target_os = "macos")'.dependencies]
+astrolabe-stub = { path = "tools/stub" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -292,6 +300,7 @@ libc = "0.2"
 libc = "0.2"
 
 [dev-dependencies]
+tempfile = "3"
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
 replica = { path = "crates/replica", features = ["fault-injection"] }
 issues-app = { package = "lait-issues-app", path = "products/issues-app", features = ["fault-injection"] }
@@ -356,6 +365,64 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.frost-rerandomized]
+opt-level = 3
+
+# The convergence scaffold itself. Fabric wraps Loro, and every incoming
+# payload is replayed through it: classification proves the material yields the
+# version its descriptor claims, and application imports it for real. That is
+# CRDT work per artifact per incorporation, and unoptimized it is the single
+# largest cost in the convergence simulation — the same argument as the
+# curve25519/FROST boundaries below, which the measured nextest budgets already
+# assume are built optimized.
+[profile.dev.package.loro]
+opt-level = 3
+
+[profile.dev.package.loro-internal]
+opt-level = 3
+
+[profile.dev.package.loro-common]
+opt-level = 3
+
+[profile.dev.package.loro-delta]
+opt-level = 3
+
+[profile.dev.package.loro-rle]
+opt-level = 3
+
+[profile.dev.package.loro-kv-store]
+opt-level = 3
+
+[profile.dev.package.loro-thunderdome]
+opt-level = 3
+
+[profile.dev.package.loro_fractional_index]
+opt-level = 3
+
+[profile.dev.package.generic-btree]
+opt-level = 3
+
+[profile.dev.package.im]
+opt-level = 3
+
+# Body/content protection is on the convergence hot path now: every incoming
+# artifact is opened before it can be classified, so ChaCha20-Poly1305 runs
+# once per artifact per incorporation rather than once per Space ceremony.
+# Unoptimized it dominates the incorporate phase and pushes the convergence
+# simulation past the per-push timeout budget; these are the same reasons the
+# curve25519/FROST boundaries above are named.
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+
+[profile.dev.package.chacha20]
+opt-level = 3
+
+[profile.dev.package.poly1305]
+opt-level = 3
+
+[profile.dev.package.universal-hash]
+opt-level = 3
+
+[profile.dev.package.aead]
 opt-level = 3
 
 [profile.dev.package.image]

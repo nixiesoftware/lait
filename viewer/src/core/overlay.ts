@@ -4,9 +4,9 @@ import type { BoardView, Priority, Row } from "../types";
  * The optimistic overlay — a local prediction, keyed by `(doc_id, field)`.
  *
  * Ported from the TUI's, and the word that carries the whole design is
- * **correlation-free**: there are no request ids, no pending queue, no rollback
- * log, no version vectors. A prediction is one cell, and it dies when *any* server
- * news arrives for its doc.
+ * **operation-correlated**: every prediction names the signed RequestId that
+ * produced it. A later edit to another field (or even the same field) therefore
+ * cannot be erased by an unrelated receipt/doorbell.
  *
  * The doorbell is the spine. It says "doc D is dirty" and carries no state, so the
  * client re-reads the authoritative projection and drops every guess about D. The
@@ -33,6 +33,8 @@ export type Field =
   | "priority"
   | "assignees"
   | "labels"
+  | "project"
+  | "milestone"
   | "due"
   | "estimate";
 
@@ -46,6 +48,7 @@ export type PredictionValue = string | readonly string[] | number | null;
 
 interface Prediction {
   value: PredictionValue;
+  operation: string;
   /** ms epoch — the TTL axis. */
   at: number;
 }
@@ -56,9 +59,15 @@ export const PREDICTION_TTL_MS = 10_000;
 export class Overlay {
   private byDoc = new Map<string, Map<Field, Prediction>>();
 
-  set(doc: string, field: Field, value: PredictionValue, now: number = Date.now()): void {
+  set(
+    doc: string,
+    field: Field,
+    value: PredictionValue,
+    operation: string,
+    now: number = Date.now(),
+  ): void {
     const fields = this.byDoc.get(doc) ?? new Map<Field, Prediction>();
-    fields.set(field, { value, at: now });
+    fields.set(field, { value, operation, at: now });
     this.byDoc.set(doc, fields);
   }
 
@@ -96,6 +105,20 @@ export class Overlay {
   /** Drop every guess about this doc. The doorbell's whole job. */
   clearDoc(doc: string): boolean {
     return this.byDoc.delete(doc);
+  }
+
+  /** Clear only predictions still owned by this exact durable operation. */
+  clearOperation(doc: string, operation: string): boolean {
+    const fields = this.byDoc.get(doc);
+    if (!fields) return false;
+    let changed = false;
+    for (const [field, prediction] of fields) {
+      if (prediction.operation !== operation) continue;
+      fields.delete(field);
+      changed = true;
+    }
+    if (fields.size === 0) this.byDoc.delete(doc);
+    return changed;
   }
 
   clear(): void {
@@ -137,6 +160,8 @@ export function overlayRow(row: Row, overlay: Overlay): Row {
     priority: pick<Priority>("priority", row.priority),
     assignees: pick<string[]>("assignees", row.assignees),
     label_names: pick<string[]>("labels", row.label_names ?? []),
+    project_id: pick("project", row.project_id),
+    milestone: pick<string | null>("milestone", row.milestone ?? null),
     due_date: pick("due", row.due_date ?? null),
     estimate: pick("estimate", row.estimate ?? null),
   };

@@ -61,12 +61,12 @@ import {
   type LiveState,
 } from "../live";
 import type { BrowserTextPreview } from "../socket";
-import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
 import { boundedTail } from "../core/performance";
 import {
   type AttachmentMetaDto,
+  type CheckDto,
   type GraphView,
   type LinkDto,
   type Priority,
@@ -134,7 +134,7 @@ export function IssueDetail({
   onOpenField,
   onError,
   onDelete,
-  onPredict,
+  onWork,
   onNavigate,
   onOpenSpec,
   onClose,
@@ -159,7 +159,11 @@ export function IssueDetail({
   onError: (m: string) => void;
   onDelete: (reff: string) => void;
   /** Predict `(doc, field)` locally, then send. The doorbell retires the guess. */
-  onPredict: (doc: string, field: PredictField, value: string, send: () => Promise<unknown>) => Promise<boolean>;
+  onWork: (
+    doc: string,
+    action: "start" | "done" | "stop",
+    predictedStatus: string | null,
+  ) => Promise<boolean>;
   /** Select another issue — following a graph edge (parent, sub-issue, blocker). */
   onNavigate: (reff: string) => void;
   /** Open a Spec named by the effective brief, on its own surface. */
@@ -174,7 +178,7 @@ export function IssueDetail({
   const live = useLiveTable(spaceId, issue?.doc_id ?? null);
   const publishAwareness = useLiveAwareness(issue?.doc_id ?? "");
   const liveMutation = useLiveMutation();
-  const events = detail.history.data ?? [];
+  const events = detail.history.data?.items ?? [];
   const graph = detail.graph.data ?? null;
   const milestones = detail.milestones.data ?? [];
   const [draft, setDraft] = useState(() => loadDraft(canonicalSpaceId, reff, "title"));
@@ -182,6 +186,7 @@ export function IssueDetail({
   const [commentPending, setCommentPending] = useState(false);
   const [commentError, setCommentError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [loadingPage, setLoadingPage] = useState<string | null>(null);
   /** A label name the picker wants to mint — opens the colour step. */
   const [newLabel, setNewLabel] = useState<string | null>(null);
   /** The relation composer, and the inline sub-issue composer (`null` = closed).
@@ -250,6 +255,18 @@ export function IssueDetail({
     }
   }, [onError]);
 
+  const loadPage = useCallback(async (section: string, load: () => Promise<void>) => {
+    if (loadingPage !== null) return;
+    setLoadingPage(section);
+    try {
+      await load();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingPage(null);
+    }
+  }, [loadingPage, onError]);
+
   const upgradeDocument = useCallback(async () => {
     if (!issue || (issue.document_schema ?? 0) > 0 || pendingAction !== null) return;
     setPendingAction("document");
@@ -290,11 +307,7 @@ export function IssueDetail({
     const previousCategory = state?.category ?? "backlog";
     setPendingAction(action);
     try {
-      const accepted = target
-        ? await onPredict(issue.doc_id, "status", target.id, () =>
-          rpc(spaceId, { cmd: `issue_${action}`, reff }),
-        )
-        : await rpc(spaceId, { cmd: `issue_${action}`, reff }).then(() => true);
+      const accepted = await onWork(issue.doc_id, action, target?.id ?? null);
       if (!accepted) return;
       if (recordUndo) {
         setUndoWork({
@@ -332,7 +345,7 @@ export function IssueDetail({
     setCommentPending(true);
     setCommentError(null);
     try {
-      await rpc(spaceId, { cmd: "comment", reff, body });
+      await projectStore.commentIssue(spaceId, reff, body);
       setComment("");
       clearDraft(canonicalSpaceId, reff, "comment");
       commentRef.current?.focus();
@@ -347,8 +360,7 @@ export function IssueDetail({
     if (pendingAction) return;
     setPendingAction("duplicate");
     try {
-      const result = await rpc(spaceId, {
-        cmd: "issue_new",
+      const created = await projectStore.createIssue(spaceId, {
         title: `${issue.title} (copy)`,
         project: issue.project_id,
         body: issue.description
@@ -359,10 +371,10 @@ export function IssueDetail({
         priority: issue.priority,
         labels: issue.label_names,
         assignees: issue.assignees,
-        due: issue.due_date != null ? dueToInput(issue.due_date) : null,
+        due: issue.due_date ?? null,
         estimate: issue.estimate ?? null,
       });
-      if (result.kind === "ref") onNavigate(result.reff);
+      onNavigate(created);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -414,7 +426,7 @@ export function IssueDetail({
           onMove={() => onOpenField("project")}
           onUpgradeDocument={() => void upgradeDocument()}
           onStop={() => void runWorkAction("stop")}
-          onRestore={() => void send(() => rpc(spaceId, { cmd: "issue_restore", reff: issue.reff }))}
+          onRestore={() => void send(() => projectStore.tombstoneIssue(spaceId, issue.reff, false))}
           onDelete={() => onDelete(issue.reff)}
         />
         <IconButton
@@ -845,7 +857,7 @@ export function IssueDetail({
                 // `issue_move` carries project *and* position; sending only the
                 // project leaves `pos` null, which the daemon reads as "don't
                 // reorder" rather than "move to top".
-                void send(() => rpc(spaceId, { cmd: "issue_move", reff, project: id }));
+                void send(() => projectStore.moveIssue(spaceId, reff, id));
               }}
             />
           </RailRow>
@@ -889,11 +901,7 @@ export function IssueDetail({
                 ]}
                 onPick={(id) =>
                   void send(() =>
-                    rpc(spaceId, {
-                      cmd: "issue_milestone",
-                      reff,
-                      milestone: id === "none" ? null : id,
-                    }),
+                    projectStore.setIssueMilestone(spaceId, reff, id === "none" ? null : id)
                   )
                 }
               />
@@ -1005,8 +1013,18 @@ export function IssueDetail({
           spaceId={spaceId}
           reff={issue.reff}
           attachments={issue.attachments ?? []}
+          hasMore={!!issue.enrichment?.attachments}
+          loading={loadingPage === "attachments"}
+          onLoadMore={() => void loadPage("attachments", () => projectStore.loadMoreIssueAttachments(spaceId, reff))}
           readOnly={locked}
           onError={onError}
+        />
+
+        <Checks
+          checks={issue.checks ?? []}
+          hasMore={!!issue.enrichment?.checks}
+          loading={loadingPage === "checks"}
+          onLoadMore={() => void loadPage("checks", () => projectStore.loadMoreIssueChecks(spaceId, reff))}
         />
 
         {graph && (
@@ -1024,6 +1042,10 @@ export function IssueDetail({
             setAdding={setRelating}
             subDraft={subDraft}
             setSubDraft={setSubDraft}
+            loadingDirection={loadingPage === "relations-out" ? "out" : loadingPage === "relations-in" ? "in" : null}
+            hasMoreOutgoing={!!graph.next_outgoing}
+            hasMoreIncoming={!!graph.next_incoming}
+            onLoadMore={(direction) => void loadPage(`relations-${direction}`, () => projectStore.loadMoreIssueRelations(spaceId, reff, direction))}
           />
         )}
 
@@ -1031,6 +1053,15 @@ export function IssueDetail({
           key={reff}
           events={events}
           comments={issue.comments}
+          hasMoreConversation={!!issue.enrichment?.comments || !!issue.enrichment?.reactions}
+          loadingConversation={loadingPage === "conversation"}
+          onLoadMoreConversation={() => void loadPage("conversation", async () => {
+            await projectStore.loadMoreIssueReactions(spaceId, reff);
+            await projectStore.loadMoreIssueComments(spaceId, reff);
+          })}
+          hasMoreHistory={!!detail.history.data?.next_cursor}
+          loadingHistory={loadingPage === "history"}
+          onLoadMoreHistory={() => void loadPage("history", () => projectStore.loadMoreIssueHistory(spaceId, reff))}
           description={issue.description}
           memberOf={memberOf}
           states={states}
@@ -1038,10 +1069,10 @@ export function IssueDetail({
           readOnly={locked}
           meKey={members.find((m) => m.me)?.key ?? null}
           onReact={(comment, emoji, on) =>
-            void send(() => rpc(spaceId, { cmd: "react", reff, comment, emoji, on }))
+            void send(() => projectStore.reactIssue(spaceId, reff, comment, emoji, on))
           }
           onReply={(replyTo, body) =>
-            void send(() => rpc(spaceId, { cmd: "comment", reff, body, reply_to: replyTo }))
+            void send(() => projectStore.commentIssue(spaceId, reff, body, replyTo))
           }
           onCopyLink={(commentId) => {
             const url = new URL(window.location.href);
@@ -1052,13 +1083,12 @@ export function IssueDetail({
           onCreateFromComment={(body) =>
             void (async () => {
               const title = body.split("\n")[0]!.slice(0, 80).trim() || "Follow-up";
-              const r = await rpc(spaceId, {
-                cmd: "issue_new",
+              const created = await projectStore.createIssue(spaceId, {
                 title,
                 project: issue.project_id,
                 body,
               });
-              if (r.kind === "ref") onNavigate(r.reff);
+              onNavigate(created);
             })()
           }
         />
@@ -1141,13 +1171,7 @@ export function IssueDetail({
           onCancel={() => setNewLabel(null)}
           onCreate={(labelName, color) => {
             setNewLabel(null);
-            // Two requests, in order: register the label with its colour, then
-            // attach it. `label add` on an existing name only attaches, so the
-            // colour set here is the one that sticks.
-            void send(async () => {
-              await rpc(spaceId, { cmd: "label_new", name: labelName, color });
-              await rpc(spaceId, { cmd: "label", reff, add: [labelName] });
-            });
+            void send(() => projectStore.createAndAttachLabel(spaceId, reff, labelName, color));
           }}
         />
       )}
@@ -1185,7 +1209,8 @@ function SpecPacket({
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [binding, setBinding] = useState(false);
-  const baselines = useProjectBaselines(spaceId, projectId).data ?? [];
+  const baselines = (useProjectBaselines(spaceId, projectId).data ?? [])
+    .flatMap((summary) => summary.view ? [summary.view] : []);
 
   useEffect(() => {
     let alive = true;
@@ -1666,12 +1691,18 @@ function Attachments({
   spaceId,
   reff,
   attachments,
+  hasMore,
+  loading,
+  onLoadMore,
   readOnly,
   onError,
 }: {
   spaceId: string;
   reff: string;
   attachments: AttachmentMetaDto[];
+  hasMore: boolean;
+  loading: boolean;
+  onLoadMore: () => void;
   readOnly: boolean;
   onError: (m: string) => void;
 }) {
@@ -1825,9 +1856,58 @@ function Attachments({
             </li>
           ))}
         </ul>
+        {hasMore && (
+          <Button
+            className="mt-2 self-start"
+            label={loading ? "Loading…" : "Load more attachments"}
+            isDisabled={loading}
+            onClick={onLoadMore}
+            variant="ghost"
+            size="sm"
+          />
+        )}
         </Disclosure>
       )}
     </>
+  );
+}
+
+function Checks({
+  checks,
+  hasMore,
+  loading,
+  onLoadMore,
+}: {
+  checks: CheckDto[];
+  hasMore: boolean;
+  loading: boolean;
+  onLoadMore: () => void;
+}) {
+  if (checks.length === 0 && !hasMore) return null;
+  return (
+    <Disclosure title="Checks" count={checks.length}>
+      <ul className="flex flex-col gap-1">
+        {checks.map((check) => (
+          <li
+            key={check.run}
+            className="border-line rounded-control flex items-center gap-2 border px-2 py-1 text-sm"
+          >
+            <span className="text-ink min-w-0 flex-1 truncate">{check.build || check.spec}</span>
+            <span className="text-mute shrink-0 text-xs">{check.state}</span>
+          </li>
+        ))}
+      </ul>
+      {hasMore && (
+        <Button
+          className="mt-2 self-start"
+          label={loading ? "Loading…" : "Load more checks"}
+          isDisabled={loading}
+          onClick={onLoadMore}
+          variant="ghost"
+          size="sm"
+        />
+      )}
+    </Disclosure>
   );
 }
 
@@ -1890,10 +1970,9 @@ type RelationKind = (typeof RELATION_KINDS)[number]["id"];
  * in place (an `issue_new` and then an `issue_parent` — two commits, two
  * activity rows, which is the honest record of what happened).
  *
- * `blocked_by` is the daemon's transitive computation (issues that block this one
- * and are still open), not just direct `blocks` edges — so it's shown as its own
- * warning line and offers no remove: cutting an edge two hops away from here
- * would be action at a distance. The direct edge is removable in its own group.
+ * `blocked_by` is the direct incoming `blocks` page. Transitive blocker closure
+ * belongs to the separately materialized Geometry artifact; this neighborhood
+ * never hides a global graph traversal inside a detail request.
  */
 function Relations({
   graph,
@@ -1909,6 +1988,10 @@ function Relations({
   setAdding,
   subDraft,
   setSubDraft,
+  loadingDirection,
+  hasMoreOutgoing,
+  hasMoreIncoming,
+  onLoadMore,
 }: {
   graph: GraphView;
   spaceId: string;
@@ -1931,29 +2014,51 @@ function Relations({
   setAdding: (open: boolean) => void;
   subDraft: string | null;
   setSubDraft: (draft: string | null) => void;
+  loadingDirection: "out" | "in" | null;
+  hasMoreOutgoing: boolean;
+  hasMoreIncoming: boolean;
+  onLoadMore: (direction: "out" | "in") => void;
 }) {
+  const projectStore = useProjectViewerStore();
   const [kind, setKind] = useState<RelationKind>("blocks");
-  /** Every live issue in the space, fetched when the picker first opens. */
+  /** The publication-pinned candidate pages loaded into the picker so far. */
   const [candidates, setCandidates] = useState<Row[] | null>(null);
+  const [candidateCursor, setCandidateCursor] = useState<string | null>(null);
+  const [candidateLoading, setCandidateLoading] = useState(false);
+
+  const loadCandidates = useCallback(async (cursor: string | null, append: boolean) => {
+    setCandidateLoading(true);
+    try {
+      // `all: true` on purpose: a duplicate's canonical is often already Done.
+      // Tombstoned rows stay out — linking to a deleted issue is a dead edge.
+      const result = await rpc(spaceId, {
+        cmd: "list",
+        project: null,
+        filter: { all: true },
+        page: { limit: 100, cursor },
+      });
+      if (result.kind !== "list") return;
+      const incoming = result.page.items.filter((row) => !row.tombstone && row.reff !== reff);
+      setCandidates((current) => {
+        if (!append || current === null) return incoming;
+        const byDoc = new Map(current.map((row) => [row.doc_id, row]));
+        for (const row of incoming) byDoc.set(row.doc_id, row);
+        return [...byDoc.values()];
+      });
+      // The opaque cursor carries the exact publication and query digest. A
+      // later page can therefore never silently continue against newer state.
+      setCandidateCursor(result.page.next_cursor ?? null);
+    } catch {
+      if (!append) setCandidates([]);
+    } finally {
+      setCandidateLoading(false);
+    }
+  }, [reff, spaceId]);
 
   useEffect(() => {
     if (!adding || candidates !== null) return;
-    let alive = true;
-    // `all: true` on purpose: a duplicate's canonical is often already Done.
-    // Tombstoned rows stay out — linking to a deleted issue is a dead edge.
-    void rpc(spaceId, { cmd: "list", project: null, filter: { all: true } })
-      .then((r) => {
-        if (alive && r.kind === "list") {
-          setCandidates(r.rows.filter((x) => !x.tombstone && x.reff !== reff));
-        }
-      })
-      .catch(() => {
-        if (alive) setCandidates([]);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [adding, candidates, spaceId, reff]);
+    void loadCandidates(null, false);
+  }, [adding, candidates, loadCandidates]);
 
   const relate = (target: string) => {
     setAdding(false);
@@ -1961,13 +2066,13 @@ function Relations({
       switch (kind) {
         case "blocked-by":
           // Same edge, other end: `target` blocks this issue.
-          return rpc(spaceId, { cmd: "issue_link", reff: target, kind: "blocks", target: reff });
+          return projectStore.linkIssue(spaceId, target, "blocks", reff, true);
         case "parent":
-          return rpc(spaceId, { cmd: "issue_parent", reff, parent: target });
+          return projectStore.parentIssue(spaceId, reff, target);
         case "sub-issue":
-          return rpc(spaceId, { cmd: "issue_parent", reff: target, parent: reff });
+          return projectStore.parentIssue(spaceId, target, reff);
         default:
-          return rpc(spaceId, { cmd: "issue_link", reff, kind, target });
+          return projectStore.linkIssue(spaceId, reff, kind, target, true);
       }
     });
   };
@@ -1989,17 +2094,14 @@ function Relations({
       // `direction` says which end this issue is; the unlink must name the same
       // ordered pair the link did or `blocks`/`duplicates` would miss the edge.
       l.direction === "out"
-        ? rpc(spaceId, { cmd: "issue_unlink", reff, kind: l.kind, target: l.row.reff })
-        : rpc(spaceId, { cmd: "issue_unlink", reff: l.row.reff, kind: l.kind, target: reff }),
+        ? projectStore.linkIssue(spaceId, reff, l.kind, l.row.reff, false)
+        : projectStore.linkIssue(spaceId, l.row.reff, l.kind, reff, false),
     );
 
   const createSub = (title: string) => {
     setSubDraft("");
     void send(async () => {
-      const r = await rpc(spaceId, { cmd: "issue_new", title, project: projectId });
-      if (r.kind === "ref") {
-        await rpc(spaceId, { cmd: "issue_parent", reff: r.reff, parent: reff });
-      }
+      await projectStore.createIssue(spaceId, { title, project: projectId, parent: reff });
     });
   };
 
@@ -2025,7 +2127,7 @@ function Relations({
     graph.children.length === 0 &&
     graph.blocked_by.length === 0 &&
     graph.links.length === 0;
-  if (empty && readOnly) return null;
+  if (empty && readOnly && !hasMoreOutgoing && !hasMoreIncoming) return null;
 
   const removable = !readOnly;
 
@@ -2056,7 +2158,7 @@ function Relations({
       { list: dupes, kind: "Duplicate of" },
     ].flatMap(({ list, kind }) =>
       list
-        // An inbound `blocks` edge and a transitive `blocked_by` entry are the
+        // An inbound `blocks` edge and the direct `blocked_by` entry are the
         // same fact from two directions, and the graph reports both — so the
         // blocker was listed twice, once as "Blocked by" and once as
         // "Blocks ←". The warning row is the one worth keeping.
@@ -2086,7 +2188,7 @@ function Relations({
 
   return (
     <section className="flex flex-col">
-      {(graph.children.length > 0 || subDraft !== null) && (
+      {(graph.children.length > 0 || subDraft !== null || hasMoreIncoming) && (
         <Disclosure
           title="Sub-issues"
           // The ring and its tally, the same mark a board card carries — one
@@ -2132,7 +2234,7 @@ function Relations({
                 ? {
                     onRemove: () =>
                       confirmRemove(`Detach ${r.key_alias ?? r.reff} from this issue?`, () =>
-                        rpc(spaceId, { cmd: "issue_parent", reff: r.reff, parent: null }),
+                        projectStore.parentIssue(spaceId, r.reff, null),
                       ),
                   }
                 : {})}
@@ -2158,10 +2260,20 @@ function Relations({
               aria-label="New sub-issue title"
             />
           )}
+          {hasMoreIncoming && (
+            <Button
+              className="mt-1 self-start"
+              label={loadingDirection === "in" ? "Loading…" : "Load more incoming relations"}
+              isDisabled={loadingDirection !== null}
+              onClick={() => onLoadMore("in")}
+              variant="ghost"
+              size="sm"
+            />
+          )}
         </Disclosure>
       )}
 
-      {(links.length > 0 || adding) && (
+      {(links.length > 0 || adding || hasMoreOutgoing) && (
         <Disclosure
           title="Links"
           count={links.length}
@@ -2211,6 +2323,15 @@ function Relations({
                 options={(candidates ?? []).map(issueOption)}
                 onPick={relate}
               />
+              {candidateCursor && (
+                <Button
+                  label={candidateLoading ? "Loading…" : "Load more"}
+                  isDisabled={candidateLoading}
+                  onClick={() => void loadCandidates(candidateCursor, true)}
+                  variant="ghost"
+                  size="sm"
+                />
+              )}
               <IconButton
                 label="Cancel"
                 onClick={() => setAdding(false)}
@@ -2220,6 +2341,16 @@ function Relations({
                 icon={<X className="size-icon-sm" />}
               />
             </div>
+          )}
+          {hasMoreOutgoing && (
+            <Button
+              className="mt-1 self-start"
+              label={loadingDirection === "out" ? "Loading…" : "Load more outgoing relations"}
+              isDisabled={loadingDirection !== null}
+              onClick={() => onLoadMore("out")}
+              variant="ghost"
+              size="sm"
+            />
           )}
         </Disclosure>
       )}
@@ -2355,6 +2486,12 @@ type Entry =
 function Timeline({
   events,
   comments,
+  hasMoreConversation,
+  loadingConversation,
+  onLoadMoreConversation,
+  hasMoreHistory,
+  loadingHistory,
+  onLoadMoreHistory,
   memberOf,
   states,
   graph,
@@ -2368,6 +2505,12 @@ function Timeline({
 }: {
   events: ActivityEvent[];
   comments: CommentDto[];
+  hasMoreConversation: boolean;
+  loadingConversation: boolean;
+  onLoadMoreConversation: () => void;
+  hasMoreHistory: boolean;
+  loadingHistory: boolean;
+  onLoadMoreHistory: () => void;
   /** The description as it stands, so an anchored comment can quote the words
    *  it is attached to. Passed down rather than re-fetched: it is the same text
    *  the engine resolved the anchor against on this read. */
@@ -2540,6 +2683,26 @@ function Timeline({
             {...(entry.repeat ? { repeat: entry.repeat } : {})}
           />
         ),
+      )}
+      {hasMoreConversation && (
+        <Button
+          className="self-start"
+          label={loadingConversation ? "Loading…" : "Load more conversation"}
+          isDisabled={loadingConversation}
+          onClick={onLoadMoreConversation}
+          variant="ghost"
+          size="sm"
+        />
+      )}
+      {hasMoreHistory && (
+        <Button
+          className="self-start"
+          label={loadingHistory ? "Loading…" : "Load more activity"}
+          isDisabled={loadingHistory}
+          onClick={onLoadMoreHistory}
+          variant="ghost"
+          size="sm"
+        />
       )}
     </section>
   );

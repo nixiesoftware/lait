@@ -287,22 +287,42 @@ jobs:
       # has exactly one `it` binary, so "all the unit tests, plus lait's
       # integration binary" is a structural statement rather than a roster that
       # can rot.
+      # The bins come first because the tests that spawn them deliberately
+      # panic — not skip — when they are not beside the test binary. That rule
+      # covers the `--lib` run below as well as the launch seam further down:
+      # `astrolabe-stub`'s macOS bundle measurement spawns `sleeper`, and it
+      # lives in the LIB, so `--lib` runs it while `--lib` also declines to
+      # build any `[[bin]]`. The build used to sit between the two, which is
+      # why that measurement passed on Linux (where it is cfg'd out) and
+      # panicked on macOS the first release it existed for.
+      #
+      # `sleeper` is named here for the same reason it is built at all: a copy
+      # of /bin/sleep is not a valid subject, so there is no fallback the test
+      # could quietly take instead.
+      - name: Build the binaries the seam tests spawn
+        run: cargo build --locked --all-features -p lait -p astrolabe-stub --bin lait --bin astrolabe-stub --bin chain-probe --bin sleeper
+
       - name: Test (OS seam — unit tests, every crate)
         run: cargo nextest run --workspace --locked --all-features --profile pr-platform --lib
 
       - name: Test (OS seam — daemon, control channel, single-instance lock)
         run: cargo nextest run -p lait --locked --all-features --profile pr-platform --test it
 
+      # The client-to-process seam, on the OSes where it historically broke.
+      # `[profile.pr-platform]` has named astrolabe::launch and
+      # astrolabe::packaging since the tiering landed, but the two target
+      # restrictions above never COMPILED them here — the filter decides what
+      # runs, the flags decide what builds, and the seam quietly ran on Linux
+      # only again (found and recorded on CLIENT-65).
+      - name: Test (OS seam — client launch chain, staged swap, packaging)
+        run: cargo nextest run -p astrolabe --locked --all-features --profile pr-platform --test launch --test packaging
+
       - name: Portability guard (no unix-only APIs in control/lock path)
         shell: bash
         run: bash ci/portability-guard.sh
 
-      # The smoke needs the real binary, which the seam build above does not
-      # produce (it builds test targets, not the bin). One link, and it is the
-      # link that matters most on this OS.
-      - name: Build the binary
-        run: cargo build --locked --all-features --bin lait
-
+      # The smoke reuses the real binary built for the launch seam above —
+      # one link, and it is the link that matters most on this OS.
       - name: Smoke run (P0 tracker flow)
         shell: bash
         run: bash ci/smoke-p0.sh "${{ matrix.os }}"

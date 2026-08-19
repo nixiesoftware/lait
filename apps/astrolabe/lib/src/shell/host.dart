@@ -16,6 +16,8 @@ const bookWindowArgument = 'astrolabe.book';
 const bookWindowKey = 'address-book';
 const displaysWindowArgument = 'astrolabe.displays';
 const displaysWindowKey = 'displays';
+const correspondenceWindowArgument = 'astrolabe.correspondence';
+const correspondenceWindowKey = 'correspondence';
 
 /// One typed request for an owned top-level window.
 ///
@@ -37,6 +39,10 @@ class OwnedWindowRoute {
       : key = displaysWindowKey,
         arguments = displaysWindowArgument;
 
+  const OwnedWindowRoute.correspondence()
+      : key = correspondenceWindowKey,
+        arguments = correspondenceWindowArgument;
+
   final String key;
   final String arguments;
 
@@ -51,6 +57,10 @@ bool isDisplaysWindow(String arguments) =>
     arguments == displaysWindowArgument ||
     arguments.split(RegExp(r'[\s,]')).contains(displaysWindowArgument);
 
+bool isCorrespondenceWindow(String arguments) =>
+    arguments == correspondenceWindowArgument ||
+    arguments.split(RegExp(r'[\s,]')).contains(correspondenceWindowArgument);
+
 /// A sub-engine created by `desktop_multi_window` receives
 /// `["multi_window", windowId, windowArgument]` on `main`, *before*
 /// [WindowController.fromCurrentEngine] can answer. Routing must
@@ -59,6 +69,8 @@ bool isDisplaysWindow(String arguments) =>
 bool isBookEngine(List<String> argv) => argv.contains(bookWindowArgument);
 bool isDisplaysEngine(List<String> argv) =>
     argv.contains(displaysWindowArgument);
+bool isCorrespondenceEngine(List<String> argv) =>
+    argv.contains(correspondenceWindowArgument);
 
 bool isSubEngine(List<String> argv) =>
     argv.isNotEmpty && argv.first == 'multi_window';
@@ -83,6 +95,10 @@ Future<void> summonBook() =>
 /// Open display coordination, or focus it if it is already open.
 Future<void> summonDisplays() =>
     summonOwnedWindow(const OwnedWindowRoute.displays());
+
+/// Open the correspondence desk, or focus it if it is already open.
+Future<void> summonCorrespondence() =>
+    summonOwnedWindow(const OwnedWindowRoute.correspondence());
 
 /// Open an owned window, or restore and focus the matching instance.
 ///

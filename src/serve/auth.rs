@@ -140,19 +140,52 @@ fn lock_recovering<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, 
     }
 }
 
-/// The loopback origins we answer to, rendered for a given port.
+/// The named form a World is also reachable at: `<mount>.localhost:<port>`.
 ///
-/// A browser sends whichever spelling appears in the URL bar, so all three
-/// spellings of "this machine" are legitimate; anything else is not us. Note
-/// that this is an *allowlist*: the failure mode of a missing entry is a refused
-/// request the user can see, whereas the failure mode of a permissive match is
-/// silent and remote.
-fn loopback_authorities(port: u16) -> [String; 3] {
-    [
+/// `.localhost` is reserved by RFC 6761 and resolvers map anything under it to
+/// loopback, so a person can reach a World by its own name instead of an address
+/// — `issues.localhost:7717` rather than `127.0.0.1:7717`. It needs no hosts
+/// file, no DNS, and no certificate.
+///
+/// **Exact names, never a wildcard.** A wildcard would admit any label, and the
+/// value of this allowlist is that it enumerates. Admitting only the mounts this
+/// head actually serves keeps the enumeration true.
+///
+/// Why adding it does not weaken the rebinding guard: an attacker's page still
+/// fails the `Origin` check, because its origin is its own domain and not one of
+/// ours. What the guard exists to stop is a name *the attacker controls* being
+/// pointed at loopback — and `.localhost` is precisely the name nobody can point
+/// anywhere, which is what makes it safe to name here and a public domain not.
+///
+/// Two caveats worth carrying: Safari does not resolve `*.localhost` (WebKit
+/// 160504), so this is an addition to the address forms rather than a replacement
+/// for them; and a resolver that ignores RFC 6761 could in principle answer for
+/// it, which is why the token still gates every request.
+fn named_authority(mount: &str, port: u16) -> Option<String> {
+    // The same grammar a mount is already held to. A mount with a dot or a colon
+    // would be a different host or a port smuggled into the allowlist.
+    let usable = !mount.is_empty()
+        && mount.len() <= 32
+        && mount
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    usable.then(|| format!("{mount}.localhost:{port}"))
+}
+
+/// The loopback authorities we answer to, rendered for a given port and World.
+///
+/// A browser sends whichever spelling appears in the URL bar, so every spelling
+/// of "this machine" is legitimate; anything else is not us. Note that this is an
+/// *allowlist*: the failure mode of a missing entry is a refused request the user
+/// can see, whereas the failure mode of a permissive match is silent and remote.
+fn loopback_authorities(port: u16, mount: Option<&str>) -> Vec<String> {
+    let mut out = vec![
         format!("127.0.0.1:{port}"),
         format!("localhost:{port}"),
         format!("[::1]:{port}"),
-    ]
+    ];
+    out.extend(mount.and_then(|mount| named_authority(mount, port)));
+    out
 }
 
 /// Why a request was refused. Carries a human reason because these land in the
@@ -186,15 +219,33 @@ impl Refusal {
 /// The per-run loopback credential and origin policy.
 pub struct Guard {
     token: String,
-    authorities: [String; 3],
+    authorities: Vec<String>,
 }
 
 impl Guard {
+    /// A guard for a head that serves no named World.
     pub fn new(token: String, port: u16) -> Self {
         Self {
             token,
-            authorities: loopback_authorities(port),
+            authorities: loopback_authorities(port, None),
         }
+    }
+
+    /// A guard that also answers to `<mount>.localhost:<port>`.
+    ///
+    /// Separate constructor rather than an `Option` on the common one, so every
+    /// callsite that gains the named form says so — this widens an allowlist, and
+    /// widening one silently is how it stops meaning anything.
+    pub fn for_world(token: String, port: u16, mount: &str) -> Self {
+        Self {
+            token,
+            authorities: loopback_authorities(port, Some(mount)),
+        }
+    }
+
+    /// Every authority this guard answers to, for a caller that has to render one.
+    pub fn authorities(&self) -> &[String] {
+        &self.authorities
     }
 
     pub fn token(&self) -> &str {
@@ -313,6 +364,86 @@ mod tests {
 
     fn guard() -> Guard {
         Guard::new("s3cret-token".into(), PORT)
+    }
+
+    /// A World is reachable by its own name, and only by its own name.
+    #[test]
+    fn a_world_answers_to_its_mount_and_not_to_another_worlds() {
+        let g = Guard::for_world("s3cret-token".into(), PORT, "issues");
+
+        assert!(
+            g.check_origin(Some("issues.localhost:7717"), None).is_ok(),
+            "a World must answer at its own name"
+        );
+        assert!(
+            g.check_origin(
+                Some("issues.localhost:7717"),
+                Some("http://issues.localhost:7717")
+            )
+            .is_ok(),
+            "…and same-origin from that name"
+        );
+
+        // The address forms stay. This is an addition, not a replacement: Safari
+        // does not resolve `*.localhost`, so a head that answered only to the
+        // named form would be unreachable from the default browser on macOS.
+        for host in ["127.0.0.1:7717", "localhost:7717", "[::1]:7717"] {
+            assert!(
+                g.check_origin(Some(host), None).is_ok(),
+                "{host} still works"
+            );
+        }
+
+        // Exact, not wildcard — which is the whole value of an allowlist.
+        for foreign in [
+            "signage.localhost:7717",
+            "issues.localhost:7718",
+            "issues.localhost.evil.com:7717",
+            "evil.issues.localhost:7717",
+            "issues.local:7717",
+            "issues:7717",
+        ] {
+            assert_eq!(
+                g.check_origin(Some(foreign), None),
+                Err(Refusal::ForeignHost),
+                "{foreign} is not this head"
+            );
+        }
+
+        // The rebinding case the named form must not open: a page on the
+        // attacker's own domain, reaching the World's name. The Host passes
+        // because it is ours; the Origin is what refuses.
+        assert_eq!(
+            g.check_origin(Some("issues.localhost:7717"), Some("http://evil.example")),
+            Err(Refusal::ForeignOrigin),
+            "a cross-origin caller is refused even when it names us correctly"
+        );
+    }
+
+    /// A mount that could be a host or a port is not admitted to the allowlist.
+    #[test]
+    fn a_mount_that_is_not_a_label_contributes_no_authority() {
+        for hostile in [
+            "",
+            "ev.il",
+            "a:8080",
+            "UPPER",
+            "under_score",
+            &"x".repeat(33),
+        ] {
+            let g = Guard::for_world("t".into(), PORT, hostile);
+            assert_eq!(
+                g.authorities().len(),
+                3,
+                "{hostile:?} must not widen the allowlist"
+            );
+        }
+        assert_eq!(
+            Guard::for_world("t".into(), PORT, "issues")
+                .authorities()
+                .len(),
+            4
+        );
     }
 
     #[test]

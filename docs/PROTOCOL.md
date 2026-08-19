@@ -152,13 +152,25 @@ The transfer carries bounded frame families for:
 3. requested canonical Manifest index nodes, Body and content alike — one node
    family, addressed by content, so which index a node belongs to is decided by
    the signed root that reaches it and not by the frame that carried it;
-4. requested protected Body chunks and completion commitments;
+4. requested protected Fabric artifacts and bounded completion commitments;
 5. transcript completion, acknowledgment, or typed abort.
 
-Each frame binds its Contact id. Records, sets, nodes, chunks, payloads, and the
-transcript use distinct domain-separated commitments. Chunk assembly rejects
-conflicting duplicates, overlap, gaps, empty illegal chunks, overflow, and a
-final commitment mismatch. An abort discards staged transfer material.
+Each frame binds its Contact id. Records, sets, nodes, artifacts, payloads, and
+the transcript use distinct domain-separated commitments. A signed transaction
+descriptor commits the Body's Fabric `Material` and complete content-addressed
+`ArtifactRef` closure. Artifact packs use a bounded framing table, reject a
+hostile length before allocation, and may deliver causal deltas out of order;
+duplicate bytes are idempotent, conflicting bytes or an incomplete dependency
+closure reject. Publication additionally verifies the declared final causal
+version. An abort discards staged transfer material.
+
+The signed descriptor always commits the complete closure. A delivery pack may
+omit an artifact only when the receiver declared a prior Body head and the
+sender can prove the artifact is already in that head's closure. The receiver
+reconstructs the strict pack from delivered artifacts plus its local
+content-addressed store, then performs the same complete-closure validation.
+An unknown or evicted prior-head proof falls back to sending the full closure;
+cache state can cost bandwidth but cannot change meaning or acceptance.
 
 `TransferAck` proves framing receipt only. It is not evidence that Mechanics or
 Replica accepted the data.
@@ -303,8 +315,10 @@ to Space authority; inbox supplies a local watermark to an Issues query and
 advances it only after success. Root control never receives role, project, or
 product-response vocabulary.
 
-Product calls then reach the named World's registered handler, WorldHost, and
-docked Session.
+Product World calls then reach the named World's registered handler, WorldHost,
+and docked Session. A package-compiled Find invocation skips the semantic World
+handler but reaches that same authenticated Session and its one evaluator; this
+is an adapter distinction, not a second data path.
 Membership, devices, custody, and ceremonies reach Mechanics. Neighbor and
 Contact operations reach Station. Lifecycle operations reach Runtime/Orbit/
 Station. Clients never open Replica or Engine directly.
@@ -313,14 +327,36 @@ JSON responses are strict versioned DTOs rather than serialized internal
 objects. Unknown fields reject where the schema says strict; decoded lengths and
 identifier grammars remain enforced after JSON decoding.
 
+Control v14 adds product-neutral Runtime `Find`. A request names the World and
+carries the canonical typed query DAG; the Session selects or validates its
+exact publication, evaluates gates for the authenticated actor/device, and
+returns an answer stamped with Manifest, implementation, extractor,
+materialization, authority, actor, device, and query coordinates. Viewer, CLI,
+MCP, and controllers use this same request path. No adapter may bypass the
+evaluator with a private cache or reinterpret a root under current World code.
+
+Control v15 adds daemon-owned native World update consent and status. Enqueue
+durably records a stable operation before bundle download or per-Space
+lifecycle work; a bounded restart-resumable worker reports progress and typed
+Busy/Capacity refusal. Opening a Space or the resident channel watcher never
+implies consent.
+
 `Subscribe` carries Observation doorbells with Station epoch, sequence, reset
 semantics, and invalidations grouped by stable World id. Inside each World,
 item scopes carry `{kind,id,label,docs}` and structural planes carry
 `{plane,scope?}`. The host never interprets those strings, and two Worlds that
 choose the same word cannot invalidate each other's clients. Frames may be
-coalesced. They are not state deltas; clients re-query after notification or
-reset. This is the v9 control shape; v8's Issues-specific doorbell fields are
-not accepted because decoding them as empty would silently leave clients stale.
+coalesced. A frame may also carry authenticated operation/actor/device
+attribution and bounded value-free Body/path/text-range changes. Those changes
+carry canonical Fabric start/end anchors plus scalar offsets at the exact
+candidate publication when Runtime can prove a local text splice. Concurrent
+or unprovable remote edits degrade to `Dirty`. The ranges support immediate
+cursor movement, highlighting, and a single `Seek::Bodies` refresh, but they
+are not state deltas: values still come from the exact published corpus.
+Overflow becomes an explicit dirty Body; reset, dirty, or expired coordinates
+require a broader re-query. The World-scoped invalidation portion is the v9
+shape; v8's Issues-specific doorbell fields are not accepted because decoding
+them as empty would silently leave clients stale.
 
 `LiveSubscribe` is the v8 standing projection for ephemeral presence, cursor,
 typing, and text-preview rows. Its first line is a complete Live snapshot;

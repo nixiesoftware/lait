@@ -41,6 +41,14 @@ use std::path::{Path, PathBuf};
 /// missing any of these: a release that quietly dropped a platform would strand
 /// that platform's installed base on the previous version with no error
 /// anywhere.
+/// The targets a release tree is built for. Fewer than lait's own matrix:
+/// a tree carries the Flutter client, which ships where the client ships.
+const TREE_TARGETS: &[&str] = &[
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+];
+
 const LAIT_TARGETS: &[(&str, &str)] = &[
     ("x86_64-pc-windows-msvc", "zip"),
     ("aarch64-apple-darwin", "tar.gz"),
@@ -97,8 +105,9 @@ fn run() -> Result<()> {
         Some("manifest") => manifest(&args[1..]),
         Some("pointer") => pointer(&args[1..]),
         Some("verify") => verify(&args[1..]),
+        Some("world") => world(&args[1..]),
         _ => bail!(
-            "usage: lait-feed <keygen|manifest|pointer|verify> ...\n\
+            "usage: lait-feed <keygen|manifest|pointer|verify|world> ...\n\
              see the module doc in tools/feed/src/main.rs"
         ),
     }
@@ -300,8 +309,41 @@ fn manifest(args: &[String]) -> Result<()> {
                 dir.display()
             );
         }
-        bundles.insert("astrolabe".to_string(), astrolabe_version);
+        bundles.insert("astrolabe".to_string(), astrolabe_version.clone());
         artifacts.insert("astrolabe".to_string(), astrolabe);
+
+        // The trees an updater consumes, keyed by target triple. The
+        // installers above are what a person runs once; these are what every
+        // machine already running swaps in. A release carrying the first
+        // without the second can be installed and never updated from, which
+        // is the state this feed spent a month in.
+        let mut trees = BTreeMap::new();
+        for target in TREE_TARGETS {
+            let name = format!("astrolabe-tree-{astrolabe_version}-{target}.tar.gz");
+            let path = dir.join(&name);
+            if !path.is_file() {
+                eprintln!("lait-feed: NOTE — no {name}; publishing without a {target} tree");
+                continue;
+            }
+            let (digest, size) = hash_file(&path)?;
+            trees.insert(
+                (*target).to_string(),
+                Artifact {
+                    url: format!("{base}/releases/{version}/{name}"),
+                    blake3: digest,
+                    size,
+                },
+            );
+        }
+        if trees.is_empty() {
+            bail!(
+                "--astrolabe {astrolabe_version} given but {} holds no release tree — \
+                 a release nobody can update to is worse than no release",
+                dir.display()
+            );
+        }
+        bundles.insert("astrolabe-tree".to_string(), astrolabe_version);
+        artifacts.insert("astrolabe-tree".to_string(), trees);
     }
 
     let manifest = Manifest {
@@ -399,4 +441,534 @@ fn verify(args: &[String]) -> Result<()> {
     let payload = open(&text, &pubkey)?;
     println!("{}", String::from_utf8_lossy(&payload));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The one-act World publish (SUB-23).
+//
+// A World's web head ships on its own cadence, so it gets its own release
+// stream: `releases/worlds/<world>/<version>/` for the immutable half and
+// `channels/worlds/<world>/<channel>` for the one mutable object. The layout
+// is the product feed's, one level in, so every rule that already holds for a
+// release holds here — pointer last, immutable releases, promotion is pointer
+// motion — without a second contract to keep in step.
+//
+// **Compatibility is declared inside the bundle, not encoded in where it is
+// filed.** An earlier cut keyed `artifacts[<world>][<runtime>]` by a
+// fingerprint of the host, so an incompatible bundle was not found. That
+// invalidated every published bundle whenever any unrelated host fact moved.
+// A World now states named requirements in its own `world.json` — which rides
+// inside the payload, under the artifact digest, under the feed signature —
+// and the client decides after proving the bytes. One artifact per release,
+// filed under `any`.
+
+/// Publish a World's web head in one act, or promote one that is already
+/// published.
+///
+/// Ordinary form: pack the bundle, seal a manifest for it, seal the channel
+/// pointer that names it. Promotion (`--promote`) omits `--bundle` and seals
+/// only a pointer at a version already on the host — the one-file rewrite that
+/// makes a test release stable with no rebuild.
+///
+/// Nothing is uploaded here. Sealing is separable from publishing on purpose:
+/// every refusal below happens before a byte reaches the host, and the upload
+/// order that makes a feed safe (artifacts, then manifest, then the pointer
+/// last) belongs to `ci/publish-world.sh`.
+fn world(args: &[String]) -> Result<()> {
+    let world = required(args, "--world")?;
+    if world.is_empty()
+        || !world.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')
+        })
+    {
+        bail!("--world must be a reverse-domain id in lowercase ascii, got {world}");
+    }
+    let version = required(args, "--version")?;
+    let version_v =
+        semver::Version::parse(&version).with_context(|| format!("--version {version}"))?;
+    let channel = required(args, "--channel")?;
+    if channel != "stable" && channel != "test" {
+        bail!("--channel must be stable or test, got {channel}");
+    }
+    // The same rule the product pointer enforces, for the same reason: a
+    // stable follower must never be handed a prerelease.
+    if channel == "stable" && !version_v.pre.is_empty() {
+        bail!("the stable pointer never names a prerelease ({version})");
+    }
+    let base = required(args, "--base-url")?;
+    let base = base.trim_end_matches('/');
+    let seed = read_seed(&required(args, "--seed")?)?;
+    let out = PathBuf::from(required(args, "--out")?);
+    fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
+
+    let release_prefix = format!("releases/worlds/{world}/{version}");
+    let manifest_url = format!("{base}/{release_prefix}/manifest.json");
+    let manifest_path = out.join("manifest.json");
+    let pointer_path = out.join("pointer");
+
+    if arg(args, "--promote").is_none() {
+        let bundle = PathBuf::from(required(args, "--bundle")?);
+        if !bundle.is_dir() {
+            bail!("--bundle {} is not a directory", bundle.display());
+        }
+        // `--declare` writes the declaration this build would ship for one of
+        // its own Worlds, from the consts the composition root already holds:
+        // name, artwork, accent, entry path, and the facts its head depends
+        // on. A third-party World writes its own `world.json` and does not
+        // pass this; the file that results is the same shape either way,
+        // which is the point — a compiled-in World must not quietly be the
+        // only first-class kind.
+        if arg(args, "--declare").is_some() {
+            let Some((declaration, art)) = lait::composition::world_declaration(&world, &version)
+            else {
+                bail!("this build hosts no {world}, so it cannot declare one");
+            };
+            for (path, bytes) in art {
+                let at = bundle.join(&path);
+                if let Some(parent) = at.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create {}", parent.display()))?;
+                }
+                fs::write(&at, bytes).with_context(|| format!("write {}", at.display()))?;
+            }
+            let encoded =
+                serde_json::to_vec_pretty(&declaration).context("encode the World declaration")?;
+            fs::write(bundle.join("world.json"), encoded)
+                .with_context(|| format!("write {}/world.json", bundle.display()))?;
+            println!("declared {world} {version} into {}", bundle.display());
+        }
+        // The declaration is what makes a directory of files a World, and it
+        // is checked here rather than discovered by a machine that already
+        // downloaded it. A publisher learns at publish time.
+        let declared = fs::read(bundle.join("world.json")).with_context(|| {
+            format!(
+                "--bundle {} carries no world.json at its root — a World must declare what it is \
+                 and how to reach it",
+                bundle.display()
+            )
+        })?;
+        let declaration = world_interface::manifest::WorldManifest::parse(&declared)
+            .map_err(|error| anyhow!("{error}"))?;
+        if declaration.id != world {
+            bail!(
+                "publishing {world} but the bundle declares itself {} — a World may not answer \
+                 for another",
+                declaration.id
+            );
+        }
+        if declaration.version != version {
+            bail!(
+                "publishing {version} but the bundle declares {} — the declaration is what a \
+                 client believes",
+                declaration.version
+            );
+        }
+        let name = format!("world-{world}-{version}.tar.gz");
+        let archive = out.join(&name);
+        pack_world(&bundle, &archive, &format!("world-{world}-{version}"))?;
+        let (digest, size) = hash_file(&archive)?;
+
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            "any".to_string(),
+            Artifact {
+                url: format!("{base}/{release_prefix}/{name}"),
+                blake3: digest,
+                size,
+            },
+        );
+        let mut bundles = BTreeMap::new();
+        bundles.insert(world.clone(), version.clone());
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(world.clone(), targets);
+
+        let manifest = Manifest {
+            version: version.clone(),
+            min_supported: None,
+            bundles,
+            artifacts,
+        };
+        fs::write(&manifest_path, seal(&manifest, &seed)?)
+            .with_context(|| format!("write {}", manifest_path.display()))?;
+        let requires = if declaration.requires.is_empty() {
+            "no host requirements".to_string()
+        } else {
+            declaration
+                .requires
+                .iter()
+                .map(|r| format!("{} {}", r.name, r.range))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!(
+            "packed {} ({size} bytes) and sealed its manifest — {requires}",
+            archive.display()
+        );
+    } else if !manifest_path.is_file() {
+        bail!(
+            "--promote needs the sealed manifest of the release being promoted at {}; \
+             fetch it from {manifest_url} first",
+            manifest_path.display()
+        );
+    }
+
+    // The pointer is sealed against the manifest it names, opened with the
+    // key that is about to sign it — the same last gate the product pointer
+    // takes, so a promotion cannot name a release this key never sealed.
+    let pubkey = pubkey_of_seed(&seed)?;
+    let sealed = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    let payload = open(&sealed, &pubkey).context("World manifest envelope")?;
+    let manifest: serde_json::Value = serde_json::from_slice(&payload)?;
+    if manifest["version"].as_str() != Some(version.as_str()) {
+        bail!(
+            "pointer names {version} but the manifest says {}",
+            manifest["version"]
+        );
+    }
+    if manifest["bundles"][&world].as_str() != Some(version.as_str()) {
+        bail!("the manifest carries no {world} bundle at {version}");
+    }
+
+    let published_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the unix epoch")?
+        .as_secs();
+    let pointer = PointerPayload::Release {
+        version: version.clone(),
+        manifest: manifest_url,
+        published_at,
+    };
+    fs::write(&pointer_path, seal(&pointer, &seed)?)
+        .with_context(|| format!("write {}", pointer_path.display()))?;
+
+    println!(
+        "pointer sealed to {} (published_at {published_at})",
+        pointer_path.display()
+    );
+    println!("upload, in this order — the pointer LAST:");
+    println!("  {release_prefix}/world-{world}-{version}.tar.gz");
+    println!("  {release_prefix}/manifest.json");
+    println!("  channels/worlds/{world}/{channel}");
+    Ok(())
+}
+
+/// Pack a built web head into the artifact shape a client extracts: gzip'd
+/// tar with one root directory, every path beneath it.
+///
+/// Deterministic on purpose — sorted entries, zeroed mtimes and ownership,
+/// and a root directory named by the caller rather than inferred from the
+/// output path — so republishing an unchanged bundle produces an unchanged
+/// digest, and a digest that moved means the content moved. Deriving the root
+/// from the file name was the first version of this, and it made two writes of
+/// one bundle differ; the test below is what said so.
+fn pack_world(bundle: &Path, archive: &Path, root: &str) -> Result<()> {
+    let mut paths = Vec::new();
+    collect(bundle, bundle, &mut paths)?;
+    if paths.is_empty() {
+        bail!("--bundle {} holds no files", bundle.display());
+    }
+    paths.sort();
+
+    let file =
+        fs::File::create(archive).with_context(|| format!("create {}", archive.display()))?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::best());
+    let mut builder = tar::Builder::new(encoder);
+    for relative in &paths {
+        let source = bundle.join(relative);
+        let contents = fs::read(&source).with_context(|| format!("read {}", source.display()))?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, format!("{root}/{relative}"), &contents[..])
+            .with_context(|| format!("append {relative}"))?;
+    }
+    builder
+        .into_inner()
+        .context("seal the world tar")?
+        .finish()
+        .context("seal the world gzip")?;
+    Ok(())
+}
+
+/// Every file under `dir`, as `/`-separated paths relative to `base`.
+fn collect(base: &Path, dir: &Path, into: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect(base, &path, into)?;
+        } else {
+            let relative = path
+                .strip_prefix(base)
+                .expect("a walked path is under its base");
+            into.push(
+                relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded(dir: &Path) -> String {
+        let seed = dir.join("seed");
+        keygen(&["--out".into(), seed.display().to_string()]).expect("a seed is minted");
+        seed.display().to_string()
+    }
+
+    fn bundle(dir: &Path) -> String {
+        bundle_declaring(dir, "com.lait.issues", "0.1.0")
+    }
+
+    fn bundle_declaring(dir: &Path, id: &str, version: &str) -> String {
+        let bundle = dir.join("bundle");
+        fs::create_dir_all(bundle.join("assets")).expect("a bundle tree");
+        fs::write(bundle.join("index.html"), b"<html>head</html>").expect("an entry document");
+        fs::write(bundle.join("assets/app.css"), b"body{}").expect("an asset");
+        let declaration = serde_json::json!({
+            "format": 1,
+            "id": id,
+            "mount": "issues",
+            "version": version,
+            "requires": [{ "name": "lait.control", "range": ">=13, <14" }],
+            "launch": [{ "id": "app", "present": "primary",
+                         "target": { "type": "web", "path": "/" } }],
+        });
+        fs::write(bundle.join("world.json"), declaration.to_string()).expect("a declaration");
+        bundle.display().to_string()
+    }
+
+    fn publish(dir: &Path, args: &[&str]) -> Result<()> {
+        let owned: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+        world(&owned)
+    }
+
+    /// Republishing an unchanged bundle must produce an unchanged digest, or
+    /// a digest that moved stops meaning the content moved — and every
+    /// verification downstream is comparing noise.
+    #[test]
+    fn packing_the_same_bundle_twice_produces_the_same_bytes() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let source = bundle(dir.path());
+        let first = dir.path().join("first.tar.gz");
+        let second = dir.path().join("second.tar.gz");
+        pack_world(Path::new(&source), &first, "world-com.lait.issues-0.1.0")
+            .expect("the first pack");
+        pack_world(Path::new(&source), &second, "world-com.lait.issues-0.1.0")
+            .expect("the second pack");
+        assert_eq!(
+            hash_file(&first).expect("first digest").0,
+            hash_file(&second).expect("second digest").0,
+            "packing is not deterministic, so a republish looks like a content change"
+        );
+    }
+
+    #[test]
+    fn a_world_publish_seals_a_manifest_naming_one_artifact_for_the_release() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let source = bundle(dir.path());
+        let out = dir.path().join("out");
+        publish(
+            dir.path(),
+            &[
+                "--world",
+                "com.lait.issues",
+                "--version",
+                "0.1.0",
+                "--runtime",
+                "rt-abc",
+                "--bundle",
+                &source,
+                "--channel",
+                "test",
+                "--base-url",
+                "https://feed.example",
+                "--seed",
+                &seed,
+                "--out",
+                &out.display().to_string(),
+            ],
+        )
+        .expect("the World publishes");
+
+        let sealed = fs::read_to_string(out.join("manifest.json")).expect("the sealed manifest");
+        let pubkey = pubkey_of_seed(&read_seed(&seed).expect("the seed")).expect("its public key");
+        let payload = open(&sealed, &pubkey).expect("the manifest opens under its own key");
+        let manifest: serde_json::Value = serde_json::from_slice(&payload).expect("it parses");
+        assert_eq!(manifest["bundles"]["com.lait.issues"], "0.1.0");
+        // One artifact per release. What a bundle runs against is stated in
+        // its own declaration, inside the payload and under the digest —
+        // never encoded in where the artifact is filed.
+        assert!(
+            manifest["artifacts"]["com.lait.issues"]["any"]["size"]
+                .as_u64()
+                .is_some_and(|size| size > 0),
+            "the manifest does not name one artifact for the release: {manifest}"
+        );
+    }
+
+    #[test]
+    fn a_stable_channel_never_takes_a_prerelease() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let source = bundle_declaring(dir.path(), "com.lait.issues", "0.2.0-test.1");
+        let error = publish(
+            dir.path(),
+            &[
+                "--world",
+                "com.lait.issues",
+                "--version",
+                "0.2.0-test.1",
+                "--runtime",
+                "rt-abc",
+                "--bundle",
+                &source,
+                "--channel",
+                "stable",
+                "--base-url",
+                "https://feed.example",
+                "--seed",
+                &seed,
+                "--out",
+                &dir.path().join("out").display().to_string(),
+            ],
+        )
+        .expect_err("a prerelease on stable must refuse")
+        .to_string();
+        assert!(error.contains("never names a prerelease"), "{error}");
+    }
+
+    #[test]
+    fn a_world_id_that_is_not_a_reverse_domain_is_refused() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let error = publish(
+            dir.path(),
+            &[
+                "--world",
+                "Com Lait Issues",
+                "--version",
+                "0.1.0",
+                "--channel",
+                "test",
+                "--base-url",
+                "https://feed.example",
+                "--seed",
+                &seed,
+                "--out",
+                &dir.path().join("out").display().to_string(),
+            ],
+        )
+        .expect_err("a malformed World id must refuse")
+        .to_string();
+        assert!(error.contains("reverse-domain id"), "{error}");
+    }
+
+    /// A directory of files is not a World until it says what it is. Caught
+    /// at publish time, where a publisher can fix it, rather than by a machine
+    /// that already downloaded it.
+    #[test]
+    fn a_bundle_with_no_declaration_is_refused_at_publish_time() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let bare = dir.path().join("bare");
+        fs::create_dir_all(&bare).expect("a bundle tree");
+        fs::write(bare.join("index.html"), b"<html/>").expect("an entry document");
+        let error = publish(
+            dir.path(),
+            &[
+                "--world",
+                "com.lait.issues",
+                "--version",
+                "0.1.0",
+                "--bundle",
+                &bare.display().to_string(),
+                "--channel",
+                "test",
+                "--base-url",
+                "https://feed.example",
+                "--seed",
+                &seed,
+                "--out",
+                &dir.path().join("out").display().to_string(),
+            ],
+        )
+        .expect_err("an undeclared bundle must refuse")
+        .to_string();
+        assert!(error.contains("world.json"), "{error}");
+    }
+
+    #[test]
+    fn a_bundle_that_declares_another_world_or_version_is_refused() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let source = bundle_declaring(dir.path(), "com.someone.else", "0.1.0");
+        let error = publish(
+            dir.path(),
+            &[
+                "--world",
+                "com.lait.issues",
+                "--version",
+                "0.1.0",
+                "--bundle",
+                &source,
+                "--channel",
+                "test",
+                "--base-url",
+                "https://feed.example",
+                "--seed",
+                &seed,
+                "--out",
+                &dir.path().join("out").display().to_string(),
+            ],
+        )
+        .expect_err("a mismatched declaration must refuse")
+        .to_string();
+        assert!(error.contains("may not answer for another"), "{error}");
+    }
+
+    /// Promotion may only ever name a release this key sealed. Without the
+    /// manifest on hand there is nothing to prove that against, and sealing a
+    /// pointer anyway would let a promotion name bytes nobody published.
+    #[test]
+    fn promoting_without_the_sealed_manifest_is_refused_rather_than_guessed() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let seed = seeded(dir.path());
+        let error = publish(
+            dir.path(),
+            &[
+                "--world",
+                "com.lait.issues",
+                "--version",
+                "0.1.0",
+                "--channel",
+                "stable",
+                "--promote",
+                "yes",
+                "--base-url",
+                "https://feed.example",
+                "--seed",
+                &seed,
+                "--out",
+                &dir.path().join("out").display().to_string(),
+            ],
+        )
+        .expect_err("a promotion with no manifest must refuse")
+        .to_string();
+        assert!(error.contains("needs the sealed manifest"), "{error}");
+    }
 }

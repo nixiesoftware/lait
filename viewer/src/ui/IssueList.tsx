@@ -75,6 +75,9 @@ export function IssueList({
   mutators,
   readOnly,
   filtered,
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore = () => undefined,
 }: {
   groups: RowGroup[];
   /** The trash — tombstoned rows from `list all:true`, rendered as their own
@@ -101,6 +104,10 @@ export function IssueList({
   mutators: IssueMutators;
   readOnly: boolean;
   filtered: boolean;
+  /** A publication-pinned continuation exists beyond the rows rendered here. */
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
 }) {
   const visible = (g: RowGroup) => g.rows.filter((r) => !r.tombstone);
   const stateById = useMemo(
@@ -218,6 +225,17 @@ export function IssueList({
               ))}
             </ul>
           </section>
+        )}
+        {hasMore && (
+          <div className="flex justify-center p-3">
+            <Button
+              label={loadingMore ? "Loading…" : "Load more"}
+              isDisabled={loadingMore}
+              onClick={onLoadMore}
+              variant="ghost"
+              size="sm"
+            />
+          </div>
         )}
         {total === 0 && (
           <ApplicationState

@@ -118,9 +118,14 @@ impl ScriptedAnchors {
 }
 
 impl AnchorSource for ScriptedAnchors {
-    fn anchor_in_body(&self, _key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
+    fn anchor_in_body(
+        &self,
+        _key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Result<Option<fabric::Anchor>, crate::world::BodyReadFailure> {
         self.mints.fetch_add(1, Ordering::SeqCst);
-        Some(fabric::Anchor {
+        Ok(Some(fabric::Anchor {
             format_version: 1,
             body: [3u8; 32],
             path: path.into(),
@@ -128,7 +133,7 @@ impl AnchorSource for ScriptedAnchors {
             offset: position,
             after: false,
             taken_at: version(),
-        })
+        }))
     }
 
     /// Answers the anchor's own offset when told to resolve, so a caller that
@@ -136,14 +141,18 @@ impl AnchorSource for ScriptedAnchors {
     /// of this ignored its argument entirely, which made
     /// `a_selection_resolves_both_ends` unable to tell the focus anchor from the
     /// near anchor resolved twice.
-    fn resolve_anchor(&self, _key: &BodyKey, anchor: &fabric::Anchor) -> fabric::AnchorResolution {
+    fn resolve_anchor(
+        &self,
+        _key: &BodyKey,
+        anchor: &fabric::Anchor,
+    ) -> Result<fabric::AnchorResolution, crate::world::BodyReadFailure> {
         self.resolves.fetch_add(1, Ordering::SeqCst);
-        match *self.answer.lock().unwrap() {
+        Ok(match *self.answer.lock().unwrap() {
             fabric::AnchorResolution::Resolved(_) => {
                 fabric::AnchorResolution::Resolved(anchor.offset)
             }
             drifted => drifted,
-        }
+        })
     }
 }
 
@@ -176,9 +185,9 @@ fn a_caret_is_resolved_on_every_read_and_never_cached_in_a_slot() {
 
 #[test]
 fn a_drifted_anchor_renders_as_drifted_and_is_not_a_position() {
-    // `AnchorResolution` is total, so this is never an error — and `Drifted`
-    // must not collapse into a number a renderer would draw. The material the
-    // position was attached to is gone; there is no honest offset to show.
+    // `Drifted` is an exact answer and must not collapse into a number a
+    // renderer would draw. Image/key/capacity failure is distinct and tested
+    // below as `Unresolved`.
     let anchors = Arc::new(ScriptedAnchors::new(fabric::AnchorResolution::Drifted));
     let handle = LiveHandle::new(Some(anchors));
     let now = Instant::now();
@@ -186,6 +195,50 @@ fn a_drifted_anchor_renders_as_drifted_and_is_not_a_position() {
 
     let view = handle.view(None, now);
     assert_eq!(view.entries[0].caret, Some(CaretState::Drifted));
+}
+
+#[test]
+fn governed_body_failure_is_unresolved_never_fake_drift() {
+    struct RefusingAnchors;
+
+    impl AnchorSource for RefusingAnchors {
+        fn anchor_in_body(
+            &self,
+            key: &BodyKey,
+            _path: &str,
+            _position: u64,
+        ) -> Result<Option<fabric::Anchor>, crate::world::BodyReadFailure> {
+            Err(crate::world::BodyReadFailure::Capacity(
+                crate::world::BodyReadCoordinate::new(key.clone(), Some([0x84; 32])),
+            ))
+        }
+
+        fn resolve_anchor(
+            &self,
+            key: &BodyKey,
+            _anchor: &fabric::Anchor,
+        ) -> Result<fabric::AnchorResolution, crate::world::BodyReadFailure> {
+            Err(crate::world::BodyReadFailure::KeyUnavailable(
+                crate::world::BodyReadCoordinate::new(key.clone(), Some([0x85; 32])),
+            ))
+        }
+    }
+
+    let handle = LiveHandle::new(Some(Arc::new(RefusingAnchors)));
+    let now = Instant::now();
+    handle.record(&station(1), &caret_item(caret_scope(1), 1, 12), now);
+    assert_eq!(
+        handle.view(None, now).entries[0].caret,
+        Some(CaretState::Unresolved),
+        "key/capacity failure is not positional drift",
+    );
+    assert!(
+        matches!(
+            handle.anchor("com.example.board", [1; 16], "text", 12),
+            Err(crate::world::BodyReadFailure::Capacity(_))
+        ),
+        "a refused image remains typed and cannot mint a fake anchor"
+    );
 }
 
 #[test]
@@ -496,14 +549,21 @@ fn minting_an_anchor_needs_a_world_id_that_parses() {
     // answer to one that is not is "there is no anchor to send".
     let anchors = Arc::new(ScriptedAnchors::new(fabric::AnchorResolution::Resolved(1)));
     let handle = LiveHandle::new(Some(anchors));
-    assert!(handle.anchor(WORLD, [1u8; 16], "text", 4).is_some());
+    assert!(handle
+        .anchor(WORLD, [1u8; 16], "text", 4)
+        .expect("anchor projection")
+        .is_some());
     assert!(handle
         .anchor("not-a-world-id", [1u8; 16], "text", 4)
+        .expect("invalid target is not a Body read")
         .is_none());
 
     // And with no Replica behind it there is nothing to mint from.
     let bare = LiveHandle::new(None);
-    assert!(bare.anchor(WORLD, [1u8; 16], "text", 4).is_none());
+    assert!(matches!(
+        bare.anchor(WORLD, [1u8; 16], "text", 4),
+        Err(crate::world::BodyReadFailure::CapabilityUnavailable)
+    ));
 }
 
 #[test]
@@ -513,7 +573,10 @@ fn a_minted_anchor_is_what_a_payload_carries() {
     // an offset still has no path to a caret.
     let anchors = Arc::new(ScriptedAnchors::new(fabric::AnchorResolution::Resolved(4)));
     let handle = LiveHandle::new(Some(anchors));
-    let encoded = handle.anchor(WORLD, [1u8; 16], "text", 4).expect("minted");
+    let encoded = handle
+        .anchor(WORLD, [1u8; 16], "text", 4)
+        .expect("anchor projection")
+        .expect("minted");
 
     let item = TransientItem {
         connection_epoch: [1u8; 16],

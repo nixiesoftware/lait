@@ -38,6 +38,13 @@ const MEMBER_A_SEED: [u8; 32] = [222u8; 32];
 const MEMBER_B_SEED: [u8; 32] = [223u8; 32];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+static BEACON_TEST_LANE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn beacon_test_lane() -> std::sync::MutexGuard<'static, ()> {
+    BEACON_TEST_LANE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 struct MemFactory(MemNet);
 
@@ -84,9 +91,9 @@ async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Resu
         None,
     )
     .await?;
-    Ok(serde_json::from_value(issues_app::decode_reply(
-        &call, reply,
-    )?)?)
+    Ok(super::accepted_issue_response(serde_json::from_value(
+        issues_app::decode_reply(&call, reply)?,
+    )?))
 }
 
 fn issue_req(
@@ -94,8 +101,26 @@ fn issue_req(
     home: &Path,
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
-    rt.block_on(issues_request(home, request))
-        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+    let started = Instant::now();
+    loop {
+        let response = super::accepted_issue_response(
+            rt.block_on(issues_request(home, request.clone()))
+                .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}"))),
+        );
+        if !matches!(
+            response,
+            IssueResponse::Error {
+                error_kind: issues_app::IssuesErrorKind::Retry,
+                ..
+            }
+        ) || started.elapsed() >= Duration::from_secs(10)
+        {
+            return response;
+        }
+        // Retry is emitted before durable action admission, so replay is safe.
+        // Outcome-unknown and every semantic refusal remain terminal here.
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -140,7 +165,10 @@ fn admit(client: &tokio::runtime::Runtime, home: &Path, seed: &[u8; 32], founder
         client,
         founder_home,
         Request::Invite {
-            role: None,
+            // These convergence exits require each surviving member to author
+            // after the founder is gone. Pin that authority in the fixture;
+            // an unstated role is intentionally allowed to become view-only.
+            role: Some("contributor".into()),
             reusable: false,
             ttl_hours: Some(24),
         },
@@ -159,16 +187,29 @@ fn drive_admission(client: &tokio::runtime::Runtime, joiner_home: &Path, founder
                 ticket: founder_device.to_string(),
             },
         );
-        match req(client, joiner_home, Request::Status) {
-            Response::Status(info) if info.membership == "member" => Some(()),
+        match req(client, joiner_home, Request::Whoami) {
+            Response::Whoami(identity)
+                if identity.member
+                    && identity.can_write
+                    && identity
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == "space.contributor") =>
+            {
+                Some(())
+            }
             _ => None,
         }
     });
-    assert!(admitted.is_some(), "the joiner was never admitted");
+    assert!(
+        admitted.is_some(),
+        "the joiner never received its contributor standing"
+    );
 }
 
 #[test]
 fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
+    let _test_lane = beacon_test_lane();
     let net = MemNet::new();
     let founder_home = temp_home("f");
     lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
@@ -215,10 +256,10 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
             body: Some("arrived without a re-join".into()),
         },
     );
-    assert!(
-        matches!(&resp, IssueResponse::Ref { reff } if reff == "BCN-1"),
-        "{resp:?}"
-    );
+    let IssueResponse::Ref { reff: issue_ref } = resp else {
+        panic!("issue creation did not return its stable reference: {resp:?}");
+    };
+    assert!(issue_ref.starts_with("BCN-"), "{issue_ref}");
 
     let started = Instant::now();
     let converged = poll_until(Duration::from_secs(10), || {
@@ -226,7 +267,7 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
             &client,
             &member_home,
             issues_app::IssuesRequest::IssueView {
-                reff: "BCN-1".into(),
+                reff: issue_ref.clone(),
             },
         ) {
             IssueResponse::Issue(v) if v.title == "Ambient news" => Some(()),
@@ -244,25 +285,34 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
     );
 
     // And the reverse direction, still hands off.
-    issue_req(
+    let comment = issue_req(
         &client,
         &member_home,
         issues_app::IssuesRequest::Comment {
             reply_to: None,
-            reff: "BCN-1".into(),
+            reff: issue_ref.clone(),
             body: "heard you ambiently".into(),
         },
+    );
+    assert!(
+        !matches!(comment, IssueResponse::Error { .. }),
+        "the admitted contributor could not author the reverse write: {comment:?}"
     );
     let back = poll_until(Duration::from_secs(10), || {
         match issue_req(
             &client,
             &founder_home,
-            issues_app::IssuesRequest::IssueView {
-                reff: "BCN-1".into(),
+            issues_app::IssuesRequest::IssueComments {
+                reff: issue_ref.clone(),
+                publication: None,
+                page: issues::contract::PageRequest::default(),
             },
         ) {
-            IssueResponse::Issue(v)
-                if v.comments.iter().any(|c| c.body == "heard you ambiently") =>
+            IssueResponse::Comments { page }
+                if page
+                    .items
+                    .iter()
+                    .any(|comment| comment.body == "heard you ambiently") =>
             {
                 Some(())
             }
@@ -329,6 +379,7 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
 /// every board on screen untouched until something else forces a rebaseline.
 #[test]
 fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
+    let _test_lane = beacon_test_lane();
     let net = MemNet::new();
     let founder_home = temp_home("ring-f");
     lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
@@ -352,7 +403,7 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
             color: None,
         },
     );
-    issue_req(
+    let issue_ref = match issue_req(
         &client,
         &founder_home,
         issues_app::IssuesRequest::IssueNew {
@@ -366,7 +417,10 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
             labels: vec![],
             body: None,
         },
-    );
+    ) {
+        IssueResponse::Ref { reff } => reff,
+        response => panic!("issue creation did not return its stable reference: {response:?}"),
+    };
     // Wait for the issue itself to land, so the frame under test is the *edit*
     // rather than the arrival of a doc the member had never seen.
     let doc = poll_until(Duration::from_secs(15), || {
@@ -376,9 +430,12 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
             issues_app::IssuesRequest::List {
                 project: None,
                 filter: Default::default(),
+                page: issues::contract::PageRequest::default(),
             },
         ) {
-            IssueResponse::List { rows } => rows.first().map(|r| r.doc_id.as_str().to_string()),
+            IssueResponse::List { page } => {
+                page.items.first().map(|r| r.doc_id.as_str().to_string())
+            }
             _ => None,
         }
     })
@@ -402,7 +459,7 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
             issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
-                reff: "BCN-1".into(),
+                reff: issue_ref,
                 title: Some("after".into()),
                 status: None,
                 priority: None,
@@ -428,7 +485,7 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
                         .iter()
                         .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
                         .flat_map(|entry| &entry.dirty)
-                        .any(|d| d.label.as_deref() == Some("BCN") && d.docs.contains(&doc));
+                        .any(|d| d.docs.contains(&doc));
                     if named {
                         break Some(frame);
                     }
@@ -438,8 +495,8 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
         };
         assert!(
             named.is_some(),
-            "the member converged but no doorbell named {doc} under BCN — a watching \
-             client has no way to know the board moved"
+            "the member converged but no doorbell named {doc} — a watching client has \
+             no exact document coordinate to refresh"
         );
 
         let _ = request(&member_home, &Request::Stop).await;
@@ -466,6 +523,7 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
 /// watching A is told.
 #[test]
 fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
+    let _test_lane = beacon_test_lane();
     let net = MemNet::new();
     let founder_home = temp_home("acl-f");
     lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "ACL Space").unwrap();
@@ -563,6 +621,7 @@ fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
 
 #[test]
 fn surviving_members_converge_after_the_approach_station_dies() {
+    let _test_lane = beacon_test_lane();
     let net = MemNet::new();
     let founder_home = temp_home("hub");
     lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Dead Hub Space").unwrap();
@@ -597,13 +656,13 @@ fn surviving_members_converge_after_the_approach_station_dies() {
         "A never learned B's admission over the plane"
     );
 
-    // ---- Exit criterion 2: kill the hub; survivors keep converging. ----
-    let _ = req(&client, &founder_home, Request::Stop);
-    let _ = founder_handle.join();
-
-    let resp = issue_req(
+    // Project creation is a registry-authority action, not ordinary project
+    // work. Create the shared container while the founder is still online,
+    // then prove both survivors have it before killing the approach station.
+    // The post-failure write below remains authored by B.
+    let project = issue_req(
         &client,
-        &b_home,
+        &founder_home,
         issues_app::IssuesRequest::ProjectNew {
             name: "Orphaned".into(),
             key: "orp".into(),
@@ -611,35 +670,104 @@ fn surviving_members_converge_after_the_approach_station_dies() {
         },
     );
     assert!(
-        matches!(&resp, IssueResponse::Ref { reff } if reff == "ORP"),
-        "{resp:?}"
+        matches!(&project, IssueResponse::Ref { reff } if reff == "ORP"),
+        "{project:?}"
     );
-    let resp = issue_req(
-        &client,
-        &b_home,
-        issues_app::IssuesRequest::IssueNew {
-            due: None,
-            estimate: None,
-            title: "The hub is gone".into(),
-            project: Some("orp".into()),
-            project_hint: None,
-            assignees: vec![],
-            priority: None,
-            labels: vec![],
-            body: None,
-        },
-    );
+    let mut survivor_project = None;
+    for home in [&a_home, &b_home] {
+        let sees_project = poll_until(Duration::from_secs(15), || {
+            match issue_req(
+                &client,
+                home,
+                issues_app::IssuesRequest::ProjectList {
+                    page: issues::contract::PageRequest::default(),
+                },
+            ) {
+                IssueResponse::Projects { page } => page
+                    .items
+                    .into_iter()
+                    .find(|project| project.key == "ORP")
+                    .map(|project| project.id.to_string()),
+                _ => None,
+            }
+        });
+        assert!(
+            sees_project.is_some(),
+            "{} never received the founder-created project",
+            home.display()
+        );
+        if home == &b_home {
+            survivor_project = sees_project;
+        }
+    }
+    let survivor_project = survivor_project.expect("B's canonical project coordinate");
+
+    // ---- Exit criterion 2: kill the hub; survivors keep converging. ----
+    let _ = req(&client, &founder_home, Request::Stop);
+    let _ = founder_handle.join();
+
+    // The durable authority membership does not change when a transport goes
+    // away, but the presence publication does. Do not measure an application
+    // submit across that known transition: wait until B reports the founder
+    // offline while A remains reachable, then author against the settled
+    // survivor ring.
+    let a_device = mechanics::actor::device_from_seed(&MEMBER_A_SEED).to_string();
+    let survivor_ring = poll_until(Duration::from_secs(30), || {
+        let Response::Who { peers } = req(&client, &b_home, Request::Who) else {
+            return None;
+        };
+        let founder_offline = peers
+            .iter()
+            .any(|peer| peer.id == founder_device && !peer.online);
+        let a_online = peers.iter().any(|peer| peer.id == a_device && peer.online);
+        (founder_offline && a_online).then_some(())
+    });
     assert!(
-        matches!(&resp, IssueResponse::Ref { reff } if reff == "ORP-1"),
-        "{resp:?}"
+        survivor_ring.is_some(),
+        "B never observed the settled survivor ring after founder shutdown"
     );
+
+    // Founder loss advances authority/liveness publications before the two
+    // surviving peers settle on their new ring. Retry only the typed pre-
+    // durable refusal; every other response remains terminal and visible.
+    let write = issues_app::IssuesRequest::IssueNew {
+        due: None,
+        estimate: None,
+        title: "The hub is gone".into(),
+        // Avoid a registry alias lookup racing the authority transition under
+        // test; B already learned this canonical coordinate above.
+        project: Some(survivor_project),
+        project_hint: None,
+        assignees: vec![],
+        priority: None,
+        labels: vec![],
+        body: None,
+    };
+    let started = Instant::now();
+    let resp = loop {
+        let response = issue_req(&client, &b_home, write.clone());
+        if !matches!(
+            response,
+            IssueResponse::Error {
+                error_kind: issues_app::IssuesErrorKind::Retry,
+                ..
+            }
+        ) || started.elapsed() >= Duration::from_secs(25)
+        {
+            break response;
+        }
+    };
+    let IssueResponse::Ref { reff: issue_ref } = resp else {
+        panic!("issue creation did not return its stable reference: {resp:?}");
+    };
+    assert!(issue_ref.starts_with("ORP-"), "{issue_ref}");
 
     let survived = poll_until(Duration::from_secs(15), || {
         match issue_req(
             &client,
             &a_home,
             issues_app::IssuesRequest::IssueView {
-                reff: "ORP-1".into(),
+                reff: issue_ref.clone(),
             },
         ) {
             IssueResponse::Issue(v) if v.title == "The hub is gone" => Some(()),

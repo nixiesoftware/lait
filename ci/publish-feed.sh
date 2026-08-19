@@ -61,6 +61,7 @@ if [ -n "$FROM_RELEASE" ]; then
   mkdir -p "$ARTIFACTS"
   gh release download "$FROM_RELEASE" -D "$ARTIFACTS" \
     -p 'lait-*.zip' -p 'lait-*.tar.gz' -p 'astrolabe-*-setup.exe' \
+    -p 'astrolabe-tree-*.tar.gz' \
     -p 'astrolabe-*.dmg' -p 'astrolabe-*.tar.gz'
   # The installers name their own bundle version; read it off an asset rather
   # than assuming — an absent installer publishes a lait-only release, loudly.
@@ -137,6 +138,14 @@ if [ -n "$ASTROLABE" ]; then
                    "$ARTIFACTS/astrolabe-$ASTROLABE-x86_64-unknown-linux-gnu.tar.gz"; do
     [ -f "$installer" ] && gcloud storage cp --cache-control="$IMMUTABLE" \
       "$installer" "$BUCKET/releases/$VERSION/"
+  done
+  # The trees an updater consumes. The installers above are what a person
+  # runs once; these are what every machine already running swaps in, and a
+  # release that carries the first without the second can be installed but
+  # never updated from.
+  for tree in "$ARTIFACTS"/astrolabe-tree-"$ASTROLABE"-*.tar.gz; do
+    [ -f "$tree" ] && gcloud storage cp --cache-control="$IMMUTABLE" \
+      "$tree" "$BUCKET/releases/$VERSION/"
   done
 fi
 gcloud storage cp --cache-control="$IMMUTABLE" \

@@ -708,18 +708,46 @@ impl CatalogState {
         self.seqs.keys().cloned().collect()
     }
 
-    pub fn workflow_state(&self, id: &str) -> Option<&WorkflowState> {
-        self.workflow.iter().find(|w| w.id == id)
+    /// Resolve a state from the project's sole workflow revision head.
+    ///
+    /// The Space-wide `workflow` vector is a v3 migration source only.  It is
+    /// deliberately not a fallback here: doing so would let two collaborators
+    /// observe different transition and completion semantics for the same
+    /// project while a workflow revision is absent or conflicted.
+    pub fn workflow_state(
+        &self,
+        project: &str,
+        id: &str,
+    ) -> Result<Option<&crate::workflow::WorkflowState>, Failure> {
+        Ok(self
+            .resolved_workflow(project)?
+            .body
+            .states
+            .iter()
+            .find(|state| state.state_id == id))
     }
 
-    pub fn first_state_in(&self, category: StatusCategory) -> Option<&WorkflowState> {
-        self.workflow.iter().find(|w| w.category == category)
+    pub fn first_state_in(
+        &self,
+        project: &str,
+        category: StatusCategory,
+    ) -> Result<Option<&crate::workflow::WorkflowState>, Failure> {
+        Ok(self
+            .resolved_workflow(project)?
+            .body
+            .states
+            .iter()
+            .find(|state| StatusCategory::parse(&state.category) == Some(category)))
     }
 
-    pub fn status_category(&self, status: &str) -> StatusCategory {
-        self.workflow_state(status)
-            .map(|w| w.category)
-            .unwrap_or(StatusCategory::Backlog)
+    pub fn status_category(
+        &self,
+        project: &str,
+        status: &str,
+    ) -> Result<Option<StatusCategory>, Failure> {
+        Ok(self
+            .workflow_state(project, status)?
+            .and_then(|state| StatusCategory::parse(&state.category)))
     }
 }
 
@@ -864,7 +892,7 @@ impl IssueState {
         let comments = read_comments(view);
         let (events, events_recorded) = read_events(view);
         let reactions = read_reactions(view);
-        Self {
+        let mut state = Self {
             project: reg_str(view, "projectid").unwrap_or_default(),
             title: reg_str(view, "title").unwrap_or_default(),
             status: reg_str(view, "status").unwrap_or_else(|| DEFAULT_STATUS.to_string()),
@@ -893,7 +921,16 @@ impl IssueState {
             check_corrupt_records,
             events,
             events_recorded,
+        };
+        if let Some(raw) = view.registers.get(crate::records::roots::BOARD_PLACEMENT) {
+            if let Ok(placement) =
+                <crate::records::BoardPlacement as crate::records::CanonicalRecord>::decode_canonical(raw)
+            {
+                state.project = placement.project;
+                state.status = placement.workflow_state;
+            }
         }
+        state
     }
 }
 
@@ -1052,7 +1089,7 @@ pub fn canonical_for(aliases: &DerivedAliases, doc: &str) -> String {
     })
 }
 
-fn assignee_summary(assignees: &[ActorId], me: Option<&ActorId>) -> String {
+pub(crate) fn assignee_summary(assignees: &[ActorId], me: Option<&ActorId>) -> String {
     let mine = me.is_some_and(|m| assignees.contains(m));
     match (assignees.len(), mine) {
         (0, _) => String::new(),
@@ -1111,6 +1148,7 @@ pub fn project_row(
         priority,
         assignee_summary: assignee_summary(&assignees, me),
         assignees,
+        enrichment_complete: true,
         tombstone: catalog.tombstones.contains(doc),
         provisional: issue.is_none(),
         due_date,
@@ -1252,6 +1290,11 @@ pub fn issue_view(
             .collect(),
         provisional: false,
         corrupt_records: issue.check_corrupt_records.clone(),
+        // This builder is handed a fully materialised Issue, so what it
+        // shows is what there is: no page was cut and no reaction was left
+        // unread.
+        more_comments: None,
+        reactions_complete: true,
     }
 }
 
@@ -1287,6 +1330,7 @@ pub fn project_dto(id: &str, meta: &ProjectMeta) -> Option<ProjectDto> {
         target_date: meta.target_date,
         archived: meta.archived,
         team: meta.team.clone(),
+        enrichment_complete: true,
     })
 }
 
@@ -1305,9 +1349,14 @@ pub fn board_view(
     project_id: &str,
     issues: &BTreeMap<String, std::sync::Arc<IssueState>>,
     me: Option<&ActorId>,
-) -> Option<BoardView> {
-    let meta = catalog.projects.get(project_id)?;
-    let project = project_dto(project_id, meta)?;
+) -> Result<Option<BoardView>, Failure> {
+    let Some(meta) = catalog.projects.get(project_id) else {
+        return Ok(None);
+    };
+    let Some(project) = project_dto(project_id, meta) else {
+        return Ok(None);
+    };
+    let workflow = &catalog.resolved_workflow(project_id)?.body;
     // Live members of this project.
     let members: Vec<&String> = issues
         .iter()
@@ -1329,9 +1378,12 @@ pub fn board_view(
         }
         let entry = child_progress.entry(parent.as_str()).or_insert((0, 0));
         entry.1 += 1;
-        let done = issues
-            .get(child)
-            .is_some_and(|i| catalog.status_category(&i.status) == StatusCategory::Done);
+        let done = issues.get(child).is_some_and(|i| {
+            workflow.states.iter().any(|state| {
+                state.state_id == i.status
+                    && StatusCategory::parse(&state.category) == Some(StatusCategory::Done)
+            })
+        });
         if done {
             entry.0 += 1;
         }
@@ -1352,10 +1404,10 @@ pub fn board_view(
         row
     };
     let mut columns = Vec::new();
-    for state in &catalog.workflow {
+    for state in &workflow.states {
         let mut rows: Vec<Row> = Vec::new();
-        let in_state = |doc: &str| issues.get(doc).is_some_and(|i| i.status == state.id);
-        if state.category == StatusCategory::Done {
+        let in_state = |doc: &str| issues.get(doc).is_some_and(|i| i.status == state.state_id);
+        if StatusCategory::parse(&state.category) == Some(StatusCategory::Done) {
             let mut done: Vec<&&String> = members.iter().filter(|d| in_state(d)).collect();
             done.sort_by(|a, b| {
                 let ia = issues.get(**a).map(|i| i.created_at).unwrap_or(0);
@@ -1381,16 +1433,24 @@ pub fn board_view(
                 rows.push(row_of(doc));
             }
         }
+        let Some(category) = StatusCategory::parse(&state.category) else {
+            return Ok(None);
+        };
         columns.push(BoardColumn {
-            state: state.clone(),
+            state: WorkflowState {
+                id: state.state_id.clone(),
+                name: state.name.clone(),
+                category,
+                color: state.color.clone(),
+            },
             rows,
         });
     }
-    Some(BoardView {
+    Ok(Some(BoardView {
         schema_version: VIEW_SCHEMA_VERSION,
         project,
         columns,
-    })
+    }))
 }
 
 pub fn default_workflow_states() -> Vec<WorkflowState> {
@@ -1437,6 +1497,18 @@ impl CatalogState {
         }
     }
 
+    pub fn resolved_workflow(
+        &self,
+        project: &str,
+    ) -> Result<&crate::workflow::WorkflowRevision, Failure> {
+        let heads = self.workflow_heads(project);
+        match heads.as_slice() {
+            [revision] if !revision.body.tombstone => Ok(revision),
+            [] | [_] => Err(Failure::Missing),
+            _ => Err(Failure::Conflicted),
+        }
+    }
+
     /// The custom-role revision heads for a role id.
     pub fn role_heads(&self, role: &str) -> Vec<&StoredRoleRevision> {
         self.role_revisions
@@ -1457,6 +1529,17 @@ impl CatalogState {
             _ => None,
         }
     }
+}
+
+/// Why a workflow could not be resolved for an issue.
+///
+/// Named for what it is to its owner rather than carrying the owner in its
+/// name: callers outside this module say `views::Failure`, which reads the
+/// same way `world::Failure` and `session::Failure` do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    Missing,
+    Conflicted,
 }
 
 #[cfg(test)]

@@ -301,7 +301,7 @@ Listed here is every crate reachable from this workspace through normal and buil
 | gloo-timers | 0.3.0 | `MIT OR Apache-2.0` | <https://github.com/rustwasm/gloo/tree/master/crates/timers> |
 | goblin | 0.8.2 | `MIT` | <https://github.com/m4b/goblin> |
 | guillotiere | 0.7.0 | `MIT/Apache-2.0` | <https://github.com/nical/guillotiere> |
-| h2 | 0.4.14 | `MIT` | <https://github.com/hyperium/h2> |
+| h2 | 0.4.16 | `MIT` | <https://github.com/hyperium/h2> |
 | half | 2.7.1 | `MIT OR Apache-2.0` | <https://github.com/VoidStarKat/half-rs> |
 | hash32 | 0.2.1 | `MIT OR Apache-2.0` | <https://github.com/japaric/hash32> |
 | hash32 | 0.3.1 | `MIT OR Apache-2.0` | <https://github.com/japaric/hash32> |

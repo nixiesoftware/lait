@@ -18,6 +18,7 @@ import '../surfaces/library.dart';
 import 'host.dart';
 import 'lighting.dart';
 import 'menu.dart';
+import 'present.dart';
 import 'record.dart';
 import 'type.dart';
 import 'window.dart';
@@ -40,6 +41,16 @@ class AstrolabeShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Big Picture replaces the window rather than filling it. The client's own
+    // chrome is exactly what a screen must not have, so the frame, the caption
+    // and the operational bar are all absent here — not hidden behind it.
+    final presenting = ClientScope.watch(context).presentation;
+    if (presenting != null) {
+      return LightingWorkbench(
+        child: BigPictureSurface(presentation: presenting),
+      );
+    }
+
     // The lighting workbench wraps the whole window: its scene is the one
     // every lit surface reads, and in debug builds its panel floats over
     // the corner so the rules can be tuned against the real controls.
@@ -87,6 +98,11 @@ class AstrolabeShell extends StatelessWidget {
                 // to its left already says.
                 captionBuilder: (context, constraints) =>
                     const SizedBox.shrink(),
+                // The one control that changes what this window *is* rather
+                // than what it shows, in the utility position Steam puts the
+                // same control in: appended to the window's own, never inside
+                // them.
+                captionTrailing: const _PresentHere(),
                 body: const Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -108,6 +124,104 @@ class AstrolabeShell extends StatelessWidget {
 
 class _Reread extends Intent {
   const _Reread();
+}
+
+/// Enter Big Picture.
+///
+/// Pressing it enters, full stop. No dialog stands in front of it asking what
+/// to show, because that is the wrong order: a person presses this to *become*
+/// a screen, and choosing is what they do once they are one. The press is the
+/// consent.
+///
+/// It therefore does not refuse for want of something to show. A screen with
+/// nothing on it is a real state that can say so at ten feet, which is more use
+/// than a disabled control explaining itself in a tooltip nobody is standing
+/// close enough to read.
+class _PresentHere extends StatelessWidget {
+  const _PresentHere();
+
+  @override
+  Widget build(BuildContext context) {
+    final view = ClientScope.watch(context);
+    return Button(
+      onPressed: view.loading
+          ? null
+          : () => ClientScope.of(context)
+              .dispatch(const ActionRequest.enterPresentation()),
+      semanticLabel: 'Present on this screen',
+      tooltip: view.loading
+          ? 'Still reading this machine.'
+          : 'Make this machine a screen.',
+      variant: ButtonVariant.ghost,
+      size: ButtonSize.sm,
+      minTapTarget: kUtilityBarHeight,
+      style: const Style([$Pad.symmetric(h: Space.sm)]),
+      child: _ScreenMark(colour: context.text.l800),
+    );
+  }
+}
+
+/// A screen, painted rather than typed.
+///
+/// The mark matters more than it looks. The obvious glyph is the four arrows
+/// that mean *make this window fill the display* — and that is now what the
+/// caption's own maximise control does, one cluster to the right. Two controls
+/// wearing the same idea and doing different things is the defect the caption
+/// file already refuses in the other direction ("a caption offering maximise
+/// over a window that refuses it").
+///
+/// A monitor says the other thing: not *bigger*, but *a screen* — this machine
+/// showing a World rather than launching one. Painted for the reason the
+/// caption marks are: two rectangles are fewer moving parts than a font
+/// fallback chain, and they stay crisp at any scale factor.
+class _ScreenMark extends StatelessWidget {
+  const _ScreenMark({required this.colour});
+
+  final Color colour;
+
+  @override
+  Widget build(BuildContext context) => CustomPaint(
+        size: const Size(14, 12),
+        painter: _ScreenMarkPainter(colour),
+      );
+}
+
+class _ScreenMarkPainter extends CustomPainter {
+  const _ScreenMarkPainter(this.colour);
+
+  final Color colour;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = Paint()
+      ..color = colour
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.25
+      ..strokeCap = StrokeCap.square;
+
+    // The panel, leaving room beneath for the stand — without it this is a
+    // rounded rectangle, which is every other icon in the bar.
+    final panel = Rect.fromLTWH(0.5, 0.5, size.width - 1, size.height - 4);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(panel, const Radius.circular(1.5)),
+      stroke,
+    );
+    // The stand: one upright and one foot.
+    final centre = size.width / 2;
+    canvas.drawLine(
+      Offset(centre, panel.bottom),
+      Offset(centre, size.height - 1.5),
+      stroke,
+    );
+    canvas.drawLine(
+      Offset(centre - 3, size.height - 1),
+      Offset(centre + 3, size.height - 1),
+      stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_ScreenMarkPainter old) => old.colour != colour;
 }
 
 class _SettingsMenu extends StatelessWidget {

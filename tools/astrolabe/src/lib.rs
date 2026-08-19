@@ -44,6 +44,7 @@ pub mod link;
 pub mod model;
 pub mod notify;
 pub mod runtime;
+pub mod screen;
 pub mod sidecar;
 pub mod single_instance;
 pub mod tray;

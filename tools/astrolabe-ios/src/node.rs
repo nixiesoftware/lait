@@ -259,7 +259,24 @@ fn start_head(rt: &tokio::runtime::Runtime, selection: Selection) -> anyhow::Res
         let shutdown = async move {
             let _ = stopped.await;
         };
-        if let Err(error) = serve::run_until(0, false, selection, announce, shutdown).await {
+        // Named rather than left to the sole-World fallback. This crate links
+        // the whole workspace, so "the only World" stopped being true the
+        // moment a second one shipped — and the fallback answers that with a
+        // refusal, which for an embedded node is a head that never comes up.
+        //
+        // One World at a time is the deliberate mobile shape, and pinning it to
+        // this one is safe *only while nothing on the phone can ask for
+        // another*: the shell already lists every bundled World, and opening
+        // them is CLIENT-58, still unbuilt. When that lands, this constant
+        // becomes a shell that offers a World its head refuses.
+        //
+        // The seam is here rather than a rebuild: `resume_head` already mints a
+        // fresh port and token on every foreground, and the shell is built to
+        // re-authenticate against a new announcement. Serving a different World
+        // is that same transition with a different pin — still one head, still
+        // one at a time.
+        let world = Some(lait::composition::PRODUCT_WORLD_MOUNT.to_owned());
+        if let Err(error) = serve::run_until(0, false, selection, world, announce, shutdown).await {
             tracing::error!(%error, "in-process head exited");
         }
     });

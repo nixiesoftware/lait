@@ -49,6 +49,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   ClientView dco_decode_box_autoadd_client_view(dynamic raw);
 
   @protected
+  CorrespondenceFacts dco_decode_box_autoadd_correspondence_facts(dynamic raw);
+
+  @protected
   DiagnosisRow dco_decode_box_autoadd_diagnosis_row(dynamic raw);
 
   @protected
@@ -56,6 +59,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayHealthRow dco_decode_box_autoadd_display_health_row(dynamic raw);
+
+  @protected
+  DisplayIdentifierCustodyRow
+      dco_decode_box_autoadd_display_identifier_custody_row(dynamic raw);
 
   @protected
   DisplaySyncMode dco_decode_box_autoadd_display_sync_mode(dynamic raw);
@@ -73,6 +80,15 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   PresenceView dco_decode_box_autoadd_presence_view(dynamic raw);
 
   @protected
+  PresentationChoice dco_decode_box_autoadd_presentation_choice(dynamic raw);
+
+  @protected
+  PresentationFacts dco_decode_box_autoadd_presentation_facts(dynamic raw);
+
+  @protected
+  PresentedProgram dco_decode_box_autoadd_presented_program(dynamic raw);
+
+  @protected
   SpaceRow dco_decode_box_autoadd_space_row(dynamic raw);
 
   @protected
@@ -85,10 +101,25 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   BigInt dco_decode_box_autoadd_u_64(dynamic raw);
 
   @protected
+  WorldUpdateRow dco_decode_box_autoadd_world_update_row(dynamic raw);
+
+  @protected
   CardRow dco_decode_card_row(dynamic raw);
 
   @protected
+  ChatMessageRow dco_decode_chat_message_row(dynamic raw);
+
+  @protected
   ClientView dco_decode_client_view(dynamic raw);
+
+  @protected
+  ContactRow dco_decode_contact_row(dynamic raw);
+
+  @protected
+  ConversationRow dco_decode_conversation_row(dynamic raw);
+
+  @protected
+  CorrespondenceFacts dco_decode_correspondence_facts(dynamic raw);
 
   @protected
   DeviceRow dco_decode_device_row(dynamic raw);
@@ -104,6 +135,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayHealthRow dco_decode_display_health_row(dynamic raw);
+
+  @protected
+  DisplayIdentifierCustodyRow dco_decode_display_identifier_custody_row(
+      dynamic raw);
 
   @protected
   DisplayPairingRow dco_decode_display_pairing_row(dynamic raw);
@@ -151,6 +186,15 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<CardRow> dco_decode_list_card_row(dynamic raw);
 
   @protected
+  List<ChatMessageRow> dco_decode_list_chat_message_row(dynamic raw);
+
+  @protected
+  List<ContactRow> dco_decode_list_contact_row(dynamic raw);
+
+  @protected
+  List<ConversationRow> dco_decode_list_conversation_row(dynamic raw);
+
+  @protected
   List<DeviceRow> dco_decode_list_device_row(dynamic raw);
 
   @protected
@@ -188,6 +232,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<OrbitRow> dco_decode_list_orbit_row(dynamic raw);
 
   @protected
+  List<PresentedItem> dco_decode_list_presented_item(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -218,6 +265,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   BookFacts? dco_decode_opt_box_autoadd_book_facts(dynamic raw);
 
   @protected
+  CorrespondenceFacts? dco_decode_opt_box_autoadd_correspondence_facts(
+      dynamic raw);
+
+  @protected
   DiagnosisRow? dco_decode_opt_box_autoadd_diagnosis_row(dynamic raw);
 
   @protected
@@ -225,6 +276,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayHealthRow? dco_decode_opt_box_autoadd_display_health_row(dynamic raw);
+
+  @protected
+  DisplayIdentifierCustodyRow?
+      dco_decode_opt_box_autoadd_display_identifier_custody_row(dynamic raw);
 
   @protected
   DisplaySyncMode? dco_decode_opt_box_autoadd_display_sync_mode(dynamic raw);
@@ -242,6 +297,16 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   PresenceView? dco_decode_opt_box_autoadd_presence_view(dynamic raw);
 
   @protected
+  PresentationChoice? dco_decode_opt_box_autoadd_presentation_choice(
+      dynamic raw);
+
+  @protected
+  PresentationFacts? dco_decode_opt_box_autoadd_presentation_facts(dynamic raw);
+
+  @protected
+  PresentedProgram? dco_decode_opt_box_autoadd_presented_program(dynamic raw);
+
+  @protected
   SpaceRow? dco_decode_opt_box_autoadd_space_row(dynamic raw);
 
   @protected
@@ -252,6 +317,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
+
+  @protected
+  WorldUpdateRow? dco_decode_opt_box_autoadd_world_update_row(dynamic raw);
 
   @protected
   List<String>? dco_decode_opt_list_String(dynamic raw);
@@ -270,6 +338,21 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresenceView dco_decode_presence_view(dynamic raw);
+
+  @protected
+  PresentationChoice dco_decode_presentation_choice(dynamic raw);
+
+  @protected
+  PresentationFacts dco_decode_presentation_facts(dynamic raw);
+
+  @protected
+  PresentedItem dco_decode_presented_item(dynamic raw);
+
+  @protected
+  PresentedProgram dco_decode_presented_program(dynamic raw);
+
+  @protected
+  PresentedScene dco_decode_presented_scene(dynamic raw);
 
   @protected
   SpaceRow dco_decode_space_row(dynamic raw);
@@ -305,6 +388,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   WorldPersonRow dco_decode_world_person_row(dynamic raw);
 
   @protected
+  WorldUpdateRow dco_decode_world_update_row(dynamic raw);
+
+  @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
@@ -334,6 +420,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   ClientView sse_decode_box_autoadd_client_view(SseDeserializer deserializer);
 
   @protected
+  CorrespondenceFacts sse_decode_box_autoadd_correspondence_facts(
+      SseDeserializer deserializer);
+
+  @protected
   DiagnosisRow sse_decode_box_autoadd_diagnosis_row(
       SseDeserializer deserializer);
 
@@ -344,6 +434,11 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   DisplayHealthRow sse_decode_box_autoadd_display_health_row(
       SseDeserializer deserializer);
+
+  @protected
+  DisplayIdentifierCustodyRow
+      sse_decode_box_autoadd_display_identifier_custody_row(
+          SseDeserializer deserializer);
 
   @protected
   DisplaySyncMode sse_decode_box_autoadd_display_sync_mode(
@@ -364,6 +459,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  PresentationChoice sse_decode_box_autoadd_presentation_choice(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentationFacts sse_decode_box_autoadd_presentation_facts(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentedProgram sse_decode_box_autoadd_presented_program(
+      SseDeserializer deserializer);
+
+  @protected
   SpaceRow sse_decode_box_autoadd_space_row(SseDeserializer deserializer);
 
   @protected
@@ -376,10 +483,27 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
+  WorldUpdateRow sse_decode_box_autoadd_world_update_row(
+      SseDeserializer deserializer);
+
+  @protected
   CardRow sse_decode_card_row(SseDeserializer deserializer);
 
   @protected
+  ChatMessageRow sse_decode_chat_message_row(SseDeserializer deserializer);
+
+  @protected
   ClientView sse_decode_client_view(SseDeserializer deserializer);
+
+  @protected
+  ContactRow sse_decode_contact_row(SseDeserializer deserializer);
+
+  @protected
+  ConversationRow sse_decode_conversation_row(SseDeserializer deserializer);
+
+  @protected
+  CorrespondenceFacts sse_decode_correspondence_facts(
+      SseDeserializer deserializer);
 
   @protected
   DeviceRow sse_decode_device_row(SseDeserializer deserializer);
@@ -396,6 +520,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   DisplayHealthRow sse_decode_display_health_row(SseDeserializer deserializer);
+
+  @protected
+  DisplayIdentifierCustodyRow sse_decode_display_identifier_custody_row(
+      SseDeserializer deserializer);
 
   @protected
   DisplayPairingRow sse_decode_display_pairing_row(
@@ -447,6 +575,17 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<CardRow> sse_decode_list_card_row(SseDeserializer deserializer);
 
   @protected
+  List<ChatMessageRow> sse_decode_list_chat_message_row(
+      SseDeserializer deserializer);
+
+  @protected
+  List<ContactRow> sse_decode_list_contact_row(SseDeserializer deserializer);
+
+  @protected
+  List<ConversationRow> sse_decode_list_conversation_row(
+      SseDeserializer deserializer);
+
+  @protected
   List<DeviceRow> sse_decode_list_device_row(SseDeserializer deserializer);
 
   @protected
@@ -487,6 +626,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   List<OrbitRow> sse_decode_list_orbit_row(SseDeserializer deserializer);
 
   @protected
+  List<PresentedItem> sse_decode_list_presented_item(
+      SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -520,6 +663,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  CorrespondenceFacts? sse_decode_opt_box_autoadd_correspondence_facts(
+      SseDeserializer deserializer);
+
+  @protected
   DiagnosisRow? sse_decode_opt_box_autoadd_diagnosis_row(
       SseDeserializer deserializer);
 
@@ -530,6 +677,11 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   DisplayHealthRow? sse_decode_opt_box_autoadd_display_health_row(
       SseDeserializer deserializer);
+
+  @protected
+  DisplayIdentifierCustodyRow?
+      sse_decode_opt_box_autoadd_display_identifier_custody_row(
+          SseDeserializer deserializer);
 
   @protected
   DisplaySyncMode? sse_decode_opt_box_autoadd_display_sync_mode(
@@ -551,6 +703,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       SseDeserializer deserializer);
 
   @protected
+  PresentationChoice? sse_decode_opt_box_autoadd_presentation_choice(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentationFacts? sse_decode_opt_box_autoadd_presentation_facts(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentedProgram? sse_decode_opt_box_autoadd_presented_program(
+      SseDeserializer deserializer);
+
+  @protected
   SpaceRow? sse_decode_opt_box_autoadd_space_row(SseDeserializer deserializer);
 
   @protected
@@ -561,6 +725,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
+
+  @protected
+  WorldUpdateRow? sse_decode_opt_box_autoadd_world_update_row(
+      SseDeserializer deserializer);
 
   @protected
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
@@ -581,6 +749,22 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   PresenceView sse_decode_presence_view(SseDeserializer deserializer);
+
+  @protected
+  PresentationChoice sse_decode_presentation_choice(
+      SseDeserializer deserializer);
+
+  @protected
+  PresentationFacts sse_decode_presentation_facts(SseDeserializer deserializer);
+
+  @protected
+  PresentedItem sse_decode_presented_item(SseDeserializer deserializer);
+
+  @protected
+  PresentedProgram sse_decode_presented_program(SseDeserializer deserializer);
+
+  @protected
+  PresentedScene sse_decode_presented_scene(SseDeserializer deserializer);
 
   @protected
   SpaceRow sse_decode_space_row(SseDeserializer deserializer);
@@ -616,6 +800,9 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   WorldPersonRow sse_decode_world_person_row(SseDeserializer deserializer);
 
   @protected
+  WorldUpdateRow sse_decode_world_update_row(SseDeserializer deserializer);
+
+  @protected
   void sse_encode_AnyhowException(
       AnyhowException self, SseSerializer serializer);
 
@@ -648,6 +835,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       ClientView self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_correspondence_facts(
+      CorrespondenceFacts self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_diagnosis_row(
       DiagnosisRow self, SseSerializer serializer);
 
@@ -658,6 +849,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_box_autoadd_display_health_row(
       DisplayHealthRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_display_identifier_custody_row(
+      DisplayIdentifierCustodyRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_display_sync_mode(
@@ -679,6 +874,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       PresenceView self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_presentation_choice(
+      PresentationChoice self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_presentation_facts(
+      PresentationFacts self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_presented_program(
+      PresentedProgram self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_space_row(
       SpaceRow self, SseSerializer serializer);
 
@@ -693,10 +900,29 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_world_update_row(
+      WorldUpdateRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_card_row(CardRow self, SseSerializer serializer);
 
   @protected
+  void sse_encode_chat_message_row(
+      ChatMessageRow self, SseSerializer serializer);
+
+  @protected
   void sse_encode_client_view(ClientView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_contact_row(ContactRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_conversation_row(
+      ConversationRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_correspondence_facts(
+      CorrespondenceFacts self, SseSerializer serializer);
 
   @protected
   void sse_encode_device_row(DeviceRow self, SseSerializer serializer);
@@ -714,6 +940,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_display_health_row(
       DisplayHealthRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_display_identifier_custody_row(
+      DisplayIdentifierCustodyRow self, SseSerializer serializer);
 
   @protected
   void sse_encode_display_pairing_row(
@@ -766,6 +996,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_list_card_row(List<CardRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_chat_message_row(
+      List<ChatMessageRow> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_contact_row(
+      List<ContactRow> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_conversation_row(
+      List<ConversationRow> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_device_row(
       List<DeviceRow> self, SseSerializer serializer);
 
@@ -811,6 +1053,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   void sse_encode_list_orbit_row(List<OrbitRow> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_presented_item(
+      List<PresentedItem> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
       Uint8List self, SseSerializer serializer);
 
@@ -846,6 +1092,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       BookFacts? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_correspondence_facts(
+      CorrespondenceFacts? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_diagnosis_row(
       DiagnosisRow? self, SseSerializer serializer);
 
@@ -856,6 +1106,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_opt_box_autoadd_display_health_row(
       DisplayHealthRow? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_display_identifier_custody_row(
+      DisplayIdentifierCustodyRow? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_display_sync_mode(
@@ -878,6 +1132,18 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
       PresenceView? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_presentation_choice(
+      PresentationChoice? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_presentation_facts(
+      PresentationFacts? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_presented_program(
+      PresentedProgram? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_space_row(
       SpaceRow? self, SseSerializer serializer);
 
@@ -890,6 +1156,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_world_update_row(
+      WorldUpdateRow? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
@@ -911,6 +1181,25 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
 
   @protected
   void sse_encode_presence_view(PresenceView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presentation_choice(
+      PresentationChoice self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presentation_facts(
+      PresentationFacts self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presented_item(PresentedItem self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presented_program(
+      PresentedProgram self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presented_scene(
+      PresentedScene self, SseSerializer serializer);
 
   @protected
   void sse_encode_space_row(SpaceRow self, SseSerializer serializer);
@@ -945,6 +1234,10 @@ abstract class CoreApiImplPlatform extends BaseApiImpl<CoreWire> {
   @protected
   void sse_encode_world_person_row(
       WorldPersonRow self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_world_update_row(
+      WorldUpdateRow self, SseSerializer serializer);
 }
 
 // Section: wire_class

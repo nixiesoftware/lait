@@ -28,7 +28,7 @@
  * decoder for shapes that already have one, and the two would drift.
  */
 
-import type { Response, WorldRequest } from "./types";
+import type { IssuesWireResponse, Response, WorldRequest } from "./types";
 
 /** Matches `SOCKET_PROTOCOL_VERSION` in `src/serve/socket.rs`. */
 export const socketProtocolVersion = 2;
@@ -362,7 +362,12 @@ export function openSocket(onEvent: (event: SocketEvent) => void): Socket {
         const request = pending.get(event.requestId);
         if (!request) return;
         pending.delete(event.requestId);
-        if (event.ok) request.resolve(event.response);
+        if (event.ok) {
+          const response = event.response as IssuesWireResponse;
+          request.resolve(response.kind === "operation"
+            ? { ...response.response, receipt: response.receipt }
+            : response);
+        }
         else {
           const response = event.response as { message?: unknown };
           request.reject(new Error(String(response.message ?? `editor request failed (${event.status})`)));

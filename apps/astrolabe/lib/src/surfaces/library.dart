@@ -47,6 +47,13 @@ final Color kLaunchSlabInk = TokenEscape.rawColor(0xFFFFFFFF);
 final Color kStopSlabFill = TokenEscape.rawColor(0xFFFFFFFF);
 final Color kStopSlabInk = TokenEscape.rawColor(0xFF10151A);
 
+/// The update coat, under the same rule as the other two, and blue for the
+/// reason green is green: the colour that *starts* a World must never sit
+/// under the control that replaces one. A person reaching for LAUNCH out of
+/// habit should miss, not open something older than they asked for.
+final Color kUpdateSlabFill = TokenEscape.rawColor(0xFF3B82F6);
+final Color kUpdateSlabInk = TokenEscape.rawColor(0xFFFFFFFF);
+
 /// The corner every action slab is cut with — small enough to read as a
 /// square-ish button, large enough to not look like a rendering accident.
 const SizeStep kSlabCorner = Space.xs;
@@ -191,7 +198,8 @@ class _Rail extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final running = rows
-        .where((row) => _opening(view, row) || _serving(view).isNotEmpty)
+        .where((row) =>
+            _opening(view, row) || _servingWorld(view, row.worldMount).isNotEmpty)
         .toList();
     final ready = rows
         .where((row) => !running.contains(row) && row.opensAt != null)
@@ -507,18 +515,32 @@ class _ActionPanel extends StatelessWidget {
     final view = ClientScope.watch(context);
     final entryPath = showing.opensAt;
     final opening = _opening(view, showing);
+    final updating =
+        view.inFlight.contains(ActionKeys.updateWorld(showing.worldMount));
     final lifecycle = _lifecycleCopy(view, showing);
-    // The head is per-identity and serves every installed World, so "running"
-    // is the head's own liveness: an owned browser head reporting an address.
-    final heads = _serving(view);
-    final running = !opening && heads.isNotEmpty;
-    final activeOrigin = heads.isEmpty ? null : heads.first.origin;
+    // This World's own head. One process per World, so running is a fact about
+    // this row rather than about whichever head happened to come up first.
+    final heads = _servingWorld(view, showing.worldMount);
+    // A *live* head, not merely a listed one. This was `heads.isNotEmpty`, which is
+    // the same presence-for-liveness mistake `_lifecycle` had: an exited head stays
+    // listed, so a crashed World offered "Go to" and handed over an origin nothing
+    // was serving.
+    final live = heads.where((head) => head.state == 'running').toList();
+    final running = !opening && live.isNotEmpty;
+    // The origin of a head that is actually up. `heads.first` could name the dead
+    // one, which is the worst version of this — an address a person is invited to
+    // follow, to nothing.
+    final activeOrigin = live.isEmpty ? null : live.first.origin;
     // Stopping is offered against an *owned* head and nothing else. A head
     // this client did not start belongs to whoever ran it, and ownership is
     // the boundary the supervisor enforces — a control that pretended
     // otherwise would be a button whose refusal is the only way to learn it
     // was never ours.
-    final stoppable = _stoppable(view);
+    final stoppable = _stoppable(view, showing.worldMount);
+    // Note `_stoppable` deliberately still matches a *listed* owned head rather
+    // than only a live one: stopping a head that has exited is how its entry is
+    // cleared, and the supervisor answers that case distinctly ("had already
+    // exited") rather than pretending it stopped something.
     final stopping =
         stoppable != null && view.inFlight.contains(ActionKeys.stopHead(stoppable.id));
 
@@ -547,12 +569,21 @@ class _ActionPanel extends StatelessWidget {
                 onOpen: entryPath == null || opening
                     ? null
                     : () => client.dispatch(
-                          ActionRequest.open(entryPath: entryPath),
+                          ActionRequest.open(
+                            world: showing.worldMount,
+                            entryPath: entryPath,
+                          ),
                         ),
                 onStop: stoppable == null || stopping
                     ? null
                     : () => client.dispatch(
                           ActionRequest.stopHead(id: stoppable.id),
+                        ),
+                updating: updating,
+                onUpdate: updating
+                    ? null
+                    : () => client.dispatch(
+                          ActionRequest.updateWorld(world: showing.worldMount),
                         ),
               ),
             ),
@@ -592,6 +623,8 @@ class _WorldAction extends StatelessWidget {
     required this.lifecycle,
     required this.onOpen,
     required this.onStop,
+    required this.onUpdate,
+    required this.updating,
   });
 
   final LibraryRow showing;
@@ -606,6 +639,8 @@ class _WorldAction extends StatelessWidget {
   }) lifecycle;
   final VoidCallback? onOpen;
   final VoidCallback? onStop;
+  final VoidCallback? onUpdate;
+  final bool updating;
 
   @override
   Widget build(BuildContext context) {
@@ -620,6 +655,23 @@ class _WorldAction extends StatelessWidget {
     }
 
     if (opening) return const _PendingSlab(label: 'LAUNCHING');
+
+    if (updating) return const _PendingSlab(label: 'UPDATING');
+
+    // The one state that replaces LAUNCH outright. Only when the channel is
+    // *known* to hold a bundle this build can run — `behind` answers false for
+    // every uncertainty, including a World nothing has ever checked, so a row
+    // with no standing draws exactly what it drew before any of this existed.
+    final update = showing.update;
+    if (update != null && update.behind && onUpdate != null) {
+      return _UpdateControl(
+        onUpdate: onUpdate!,
+        tooltip: update.available == null
+            ? 'Fetch the newest bundle for this World'
+            : 'Update to ${update.available} — this device is serving '
+                '${update.serving ?? 'the built-in version'}',
+      );
+    }
 
     if (onOpen != null) {
       return _LaunchControl(
@@ -699,6 +751,73 @@ class _LaunchControlState extends State<_LaunchControl> {
                 t.gap.x(Space.sm),
                 Text(
                   'LAUNCH',
+                  style: context.bodyStyle.copyWith(
+                    color: ink,
+                    fontSize: _worldActionGlyphSize,
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The update control — the launch slab's shape in its own coat.
+///
+/// Deliberately the same silhouette: this occupies the position LAUNCH would
+/// have, and a control that changed size would move the whole band when a
+/// World happened to be behind. What changes is the colour and the mark, which
+/// is what a person reads before they read a word.
+class _UpdateControl extends StatefulWidget {
+  const _UpdateControl({required this.onUpdate, required this.tooltip});
+
+  final VoidCallback onUpdate;
+  final String tooltip;
+
+  @override
+  State<_UpdateControl> createState() => _UpdateControlState();
+}
+
+class _UpdateControlState extends State<_UpdateControl> {
+  double _hover = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final fill = kUpdateSlabFill;
+    final ink = kUpdateSlabInk;
+    final scene = LightTheme.maybeOf(context) ?? kAstrolabeScene;
+    return Semantics(
+      button: true,
+      label: 'Update World',
+      child: Tooltip(
+        message: widget.tooltip,
+        child: Lit(
+          scene: scene,
+          baseColor: Color.lerp(fill, ink, _hover * 0.12)!,
+          curvature: 0.12,
+          elevation: 3,
+          borderRadius: t.radius.all(kSlabCorner),
+          onTap: widget.onUpdate,
+          onHoverChange: (value) => setState(() => _hover = value),
+          child: Container(
+            height: 40,
+            padding: t.padding.symmetric(h: Space.xl3),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  AppIcons.refresh,
+                  size: _worldActionGlyphSize,
+                  color: ink,
+                ),
+                t.gap.x(Space.sm),
+                Text(
+                  'UPDATE',
                   style: context.bodyStyle.copyWith(
                     color: ink,
                     fontSize: _worldActionGlyphSize,
@@ -1157,8 +1276,19 @@ class _InfoPanel extends StatelessWidget {
 /// Orbit, because one identity head serves every installed World. What they
 /// answer is the head's own liveness, which is what "running" means on a
 /// World row: the destination is up and `Open` is a handoff, not a start.
-List<HeadRow> _serving(ClientView view) =>
-    view.heads.where((head) => head.orbit == null).toList();
+/// The heads serving one World.
+///
+/// Keyed by mount, because a head serves one World. It used to answer "every
+/// browser head", which made "is this World running" a question about a shared
+/// process — so opening Issues put Signage into RUNNING, and STOP on either row
+/// stopped the one head both were reading.
+///
+/// A head that announced no World predates the pin and answers for everything;
+/// it is deliberately matched by nothing here rather than by everything, since
+/// a definite statement cannot be made about it.
+List<HeadRow> _servingWorld(ClientView view, String mount) => view.heads
+    .where((head) => head.orbit == null && head.world == mount)
+    .toList();
 
 /// The serving head this client may stop, or `None` when there is none it
 /// owns.
@@ -1168,14 +1298,14 @@ List<HeadRow> _serving(ClientView view) =>
 /// the head itself rather than a bool is what lets the caller name the one it
 /// is stopping — `head.stop:<id>` is per-head, so a second head's stop does
 /// not disable this one's control.
-HeadRow? _stoppable(ClientView view) {
-  for (final head in _serving(view)) {
+HeadRow? _stoppable(ClientView view, String mount) {
+  for (final head in _servingWorld(view, mount)) {
     if (head.owned) return head;
   }
   return null;
 }
 
-enum _Lifecycle { opening, running, ready, unavailable }
+enum _Lifecycle { opening, running, stopped, unknown, ready, unavailable }
 
 ({
   String label,
@@ -1196,6 +1326,19 @@ enum _Lifecycle { opening, running, ready, unavailable }
         description: 'This World\'s head is up and ready to view.',
         variant: BadgeVariant.success,
         dot: BadgeDotTone.success,
+      ),
+    _Lifecycle.stopped => (
+        label: 'Stopped',
+        description: 'This World\'s head exited. Launch starts a new one.',
+        variant: BadgeVariant.outline,
+        dot: BadgeDotTone.neutral,
+      ),
+    _Lifecycle.unknown => (
+        label: 'Unknown',
+        description: 'This World\'s head could not be checked, so whether it is '
+            'running is not known.',
+        variant: BadgeVariant.muted,
+        dot: BadgeDotTone.warning,
       ),
     _Lifecycle.ready => (
         label: 'Ready',
@@ -1218,13 +1361,28 @@ _Lifecycle _lifecycle(ClientView view, LibraryRow row) {
   // honest state is still Running.
   if (_opening(view, row)) return _Lifecycle.opening;
   if (row.opensAt == null) return _Lifecycle.unavailable;
-  if (_serving(view).isNotEmpty) return _Lifecycle.running;
-  return _Lifecycle.ready;
+
+  // Read from the head's own state, never from the fact that a row exists.
+  //
+  // Presence is not liveness, and treating it as liveness was the defect: an
+  // exited head *stays* listed so a person can see that the thing they opened
+  // died, so counting rows painted a crashed World as Running — with a tooltip
+  // offering to take them to it. The supervisor has polled and answered; this is
+  // where the answer has to be believed.
+  final heads = _servingWorld(view, row.worldMount);
+  if (heads.isEmpty) return _Lifecycle.ready;
+  if (heads.any((head) => head.state == 'running')) return _Lifecycle.running;
+  // Not running, and not nothing. `unknown` outranks `exited` because a head
+  // nobody could poll may still be serving, and saying "Stopped" about one would
+  // be the same confident guess in the other direction.
+  if (heads.any((head) => head.state == 'unknown')) return _Lifecycle.unknown;
+  return _Lifecycle.stopped;
 }
 
 bool _opening(ClientView view, LibraryRow row) {
-  final path = row.opensAt;
-  return path != null && view.inFlight.contains(ActionKeys.open(path));
+  // Keyed by World, so one row's open never disables another's control.
+  return row.opensAt != null &&
+      view.inFlight.contains(ActionKeys.open(row.worldMount));
 }
 
 String _openTooltip(LibraryRow row, {required bool running}) {
@@ -1233,6 +1391,9 @@ String _openTooltip(LibraryRow row, {required bool running}) {
   }
   return running
       ? 'Take me to the running World'
+      // Covers Stopped and Unknown as well as Ready: in all three, pressing this
+      // starts a head rather than reaching one, and promising a handoff to a World
+      // that exited is the lie the state field was added to end.
       : 'Start this World and hand it to my browser';
 }
 

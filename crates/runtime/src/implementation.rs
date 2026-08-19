@@ -451,7 +451,8 @@ pub fn canonical_schema_bytes(schema: &Schema) -> Vec<u8> {
     out.extend_from_slice(enc);
     out.push(match schema.mutation {
         MutationModel::Atomic => 0,
-        MutationModel::Collaborative(_) => 1,
+        MutationModel::ImmutableAtomic => 1,
+        MutationModel::Collaborative(_) => 2,
     });
     let mut predecessors = schema.readable_predecessors.clone();
     predecessors.sort_unstable();
