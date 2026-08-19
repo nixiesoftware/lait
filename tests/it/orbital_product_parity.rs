@@ -527,11 +527,14 @@ fn verification_binds_the_issue_and_started_run_in_one_effect() {
         .submit(driver.signed_at(bad_request, &bad))
         .is_err());
     assert_eq!(station.frontier(), before_bad);
-    let unchanged: IssueView = driver.query(&IssueQuery::View {
+    // Checks are their own page; `View` is the bounded summary, so asserting
+    // emptiness on it would pass whether or not a check had landed.
+    let unchanged: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
         doc: doc.clone(),
         me: None,
+        pages: contract::IssueDetailPages::default(),
     });
-    assert!(unchanged.checks.is_empty());
+    assert!(unchanged.checks.items.is_empty());
 
     let request = RequestId::from_bytes([0x55; 16]);
     let run = runtime::exec::derive_run_id(
@@ -569,9 +572,13 @@ fn verification_binds_the_issue_and_started_run_in_one_effect() {
     );
     assert!(committed.bodies.contains(&run_body));
 
-    let view: IssueView = driver.query(&IssueQuery::View { doc, me: None });
-    assert_eq!(view.checks.len(), 1);
-    let check = &view.checks[0];
+    let detail: contract::IssueDetailProjection = driver.query(&IssueQuery::Detail {
+        doc,
+        me: None,
+        pages: contract::IssueDetailPages::default(),
+    });
+    assert_eq!(detail.checks.items.len(), 1);
+    let check = &detail.checks.items[0];
     assert_eq!(check.run, run_text);
     assert_eq!(check.spec, contract::VERIFY_SPEC);
     assert_eq!(check.version, contract::VERIFY_SPEC_VERSION);

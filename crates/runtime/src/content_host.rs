@@ -253,6 +253,28 @@ impl ContentHost {
         }
         let ingested = ingest.finish()?;
 
+        // The hold is taken BEFORE the descriptor is committed, because the
+        // commit is what republishes the read snapshot and the hold is what
+        // puts this content on it. Taking it afterwards left the just-written
+        // content invisible to every reader through that snapshot -- including
+        // the World submit that was about to declare it, which then refused
+        // its own source as though the caller had invented it.
+        //
+        // A hold on content whose commit then fails resolves to no descriptor
+        // and so appears nowhere; it lapses on its own like any other.
+        //
+        // `into_std` at the crate boundary: Replica has no tokio dependency
+        // and should not grow one for a deadline type. The conversion is
+        // free and, importantly, does not lose the simulation — the VALUE
+        // still comes from tokio's clock, so a paused test moves this hold's
+        // expiry along with everything else. Only the type is std here.
+        let _ = self.core.with_replica_control(|replica| {
+            replica.hold_content(
+                &ingested.content_ref,
+                (tokio::time::Instant::now() + PENDING_DECLARATION_TTL).into_std(),
+            );
+            Ok(())
+        });
         let committed = self.core.with_replica_metadata(|replica| {
             replica.commit_content(ctx, std::slice::from_ref(&ingested.descriptor))
         });
@@ -276,23 +298,11 @@ impl ContentHost {
         // hands over to the content-scoped one — those bytes are safe from here.
         let _ = self.cache.release_operation(&operation);
 
-        // The descriptor is not. Nothing declares this content yet, so by the
-        // reachability rule it is already garbage, and it stays garbage until a
-        // Body names it — which is a person choosing an issue, not a machine
-        // finishing a write. The hold is what buys that window, and it lapses
-        // on its own so an upload nobody ever attaches is still collectable.
-        let _ = self.core.with_replica_control(|replica| {
-            // `into_std` at the crate boundary: Replica has no tokio dependency
-            // and should not grow one for a deadline type. The conversion is
-            // free and, importantly, does not lose the simulation — the VALUE
-            // still comes from tokio's clock, so a paused test moves this hold's
-            // expiry along with everything else. Only the type is std here.
-            replica.hold_content(
-                &ingested.content_ref,
-                (tokio::time::Instant::now() + PENDING_DECLARATION_TTL).into_std(),
-            );
-            Ok(())
-        });
+        // Nothing declares this content yet, so by the reachability rule it is
+        // already garbage, and it stays garbage until a Body names it — which
+        // is a person choosing an issue, not a machine finishing a write. The
+        // hold taken above is what buys that window, and it lapses on its own
+        // so an upload nobody ever attaches is still collectable.
         Ok(ingested.content_ref)
     }
 

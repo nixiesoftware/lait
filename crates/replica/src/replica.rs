@@ -6539,16 +6539,28 @@ impl Replica {
         self.declared_content.insert(key.clone(), refs);
     }
 
+    /// The content a reader through this snapshot can see.
+    ///
+    /// Declared content, and content still under a hold. The hold is the
+    /// window between committing bytes and a Body naming them, and a World
+    /// deciding whether to name them is the thing that happens inside it --
+    /// so a snapshot that showed only declared content could never answer
+    /// "does this exist" for the one content anybody is about to declare.
+    /// Every such pre-check refused, and what a person saw was that their
+    /// request was invalid.
+    ///
+    /// Bounded by the number of open holds, which a TTL keeps small, rather
+    /// than by everything ever committed.
     fn snapshot_content(&self) -> imbl::OrdMap<[u8; 32], crate::content::ContentDescriptor> {
         self.declared_content
             .values()
             .flatten()
+            .copied()
+            .chain(self.pending_content.keys().copied())
             .filter_map(|content_id| {
-                let reference = crate::content::ContentRef {
-                    content_id: *content_id,
-                };
+                let reference = crate::content::ContentRef { content_id };
                 self.content_descriptor(&reference)
-                    .map(|descriptor| (*content_id, descriptor))
+                    .map(|descriptor| (content_id, descriptor))
             })
             .collect()
     }
@@ -6759,7 +6771,26 @@ impl Replica {
             schema_bodies: prior.schema_bodies.clone(),
             schema_payload_bytes: prior.schema_payload_bytes.clone(),
             declared_content: prior.declared_content.clone(),
-            content: prior.content.clone(),
+            // Carry the prior image forward and add any content held since it
+            // was taken. This is the path a content ingest republishes
+            // through, so without it a just-written content is invisible to
+            // the very submit that was going to declare it. O(open holds),
+            // not O(content).
+            content: {
+                let mut content = prior.content.clone();
+                for content_id in self.pending_content.keys() {
+                    if content.contains_key(content_id) {
+                        continue;
+                    }
+                    let reference = crate::content::ContentRef {
+                        content_id: *content_id,
+                    };
+                    if let Some(descriptor) = self.content_descriptor(&reference) {
+                        content.insert(*content_id, descriptor);
+                    }
+                }
+                content
+            },
             retained_bytes_estimate: prior.retained_bytes_estimate,
         }
     }

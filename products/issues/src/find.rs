@@ -607,10 +607,18 @@ fn extraction_shape(source: &SourceRef) -> ExtractionShape {
     if *name == schema_id(crate::records::ISSUE_PLACEMENT_SCHEMA) {
         return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
     }
-    if *name == schema_id(crate::records::ISSUE_IDENTITY_SCHEMA)
-        || *name == schema_id(crate::records::ISSUE_CHECK_SCHEMA)
-    {
+    if *name == schema_id(crate::records::ISSUE_IDENTITY_SCHEMA) {
         return ExtractionShape::new(1, 20, 20, 4 * KIB, 4 * KIB, 32 * KIB);
+    }
+    if *name == schema_id(crate::records::ISSUE_CHECK_SCHEMA) {
+        // Five declared coordinates, plus the id and kind every entity
+        // carries, plus the four ordered coordinates `entity` derives for a
+        // node that has both a source and a creation time: eleven fields,
+        // twenty-three postings with the node itself. It shared the identity
+        // record's twenty, which nothing caught because a verification could
+        // not be started at all -- the content it names was invisible to the
+        // submit that names it, so this Body was never written.
+        return ExtractionShape::new(1, 24, 24, 4 * KIB, 4 * KIB, 32 * KIB);
     }
     if *name == schema_id(crate::records::ISSUE_REACTION_SCHEMA) {
         return ExtractionShape::new(2, 20, 40, 4 * KIB, 8 * KIB, 32 * KIB);
