@@ -4422,3 +4422,580 @@ fn observation_cursor_starts_at_a_reset_boundary() {
     let first = stream.try_next().unwrap().unwrap();
     assert!(first.reset);
 }
+
+// ===== The bounded Find client inside an Attempt (scenarios 19 and 20) =====
+
+fn query_exec_demand(capability: &str) -> Vec<u8> {
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("com.example.exec-query", capability),
+        mechanics::authorization::Resource::root("com.example.exec-query"),
+    )
+    .encode_canonical()
+    .unwrap()
+}
+
+fn note_grant(bound_value: u64) -> crate::find::Grant {
+    let schema = crate::find::SchemaRef {
+        name: SchemaId::parse("note").unwrap(),
+        version: 1,
+    };
+    crate::find::Grant {
+        schemas: vec![schema.clone()],
+        ops: crate::find::OpSet::SEEK,
+        fields: vec![crate::find::FieldRef {
+            schema,
+            name: SchemaId::parse("text").unwrap(),
+        }],
+        edges: Vec::new(),
+        gates: Vec::new(),
+        modes: crate::find::ModeSet::EXACT,
+        features: Vec::new(),
+        bound: find_bound(bound_value),
+    }
+}
+
+fn note_query(text: &str, bound_value: u64) -> crate::find::Query {
+    let mut query = find_query(bound_value);
+    let crate::find::Op::Seek(crate::find::Seek::Term { text: term, .. }) = &mut query.steps[0].op
+    else {
+        panic!("find_query seeds a term seek");
+    };
+    *term = text.to_owned();
+    query
+}
+
+fn query_spec(name: &str, grant_bound: u64) -> crate::exec::Spec {
+    let payload = |name| crate::exec::PayloadSpec {
+        schema: exec_schema(name),
+        max_inline_bytes: 1_024,
+        max_content_refs: 0,
+        max_content_bytes: 0,
+        read: query_exec_demand("payload.read"),
+        max_additional_input_bytes: 0,
+    };
+    crate::exec::Spec {
+        name: SchemaId::parse(name).unwrap(),
+        version: 1,
+        access: crate::exec::Access {
+            start: query_exec_demand("run.start"),
+            offer: query_exec_demand("run.offer"),
+            control: query_exec_demand("run.control"),
+            accept: query_exec_demand("run.accept"),
+        },
+        input: payload("agent.input"),
+        output: payload("agent.output"),
+        mode: crate::exec::Mode::Unary,
+        resume: crate::exec::Resume::Restart,
+        effects: crate::exec::Effects::Pure,
+        accept: crate::exec::AcceptRule::World,
+        queries: vec![note_grant(grant_bound)],
+        service: None,
+        links: Vec::new(),
+        limits: exec_limits(),
+    }
+}
+
+/// Declared grant ceilings for the query worlds: the parent Spec may compose
+/// up to 60 units of work per query, the child only 20 — narrower on purpose,
+/// so ambient parent privilege is distinguishable from the child's own.
+const PARENT_GRANT_BOUND: u64 = 60;
+const CHILD_GRANT_BOUND: u64 = 20;
+/// The parent Attempt's whole wall budget: admits one 60-unit query, refuses
+/// the second.
+const PARENT_ATTEMPT_WALL: u64 = 100;
+
+struct QueryExecWorld {
+    id: WorldId,
+    schemas: Vec<Schema>,
+    find_schemas: Vec<crate::find::Schema>,
+    find_extractors: Vec<crate::find::Extractor>,
+    specs: Vec<crate::exec::Spec>,
+    build: crate::exec::BuildId,
+    child_build: crate::exec::BuildId,
+}
+
+impl QueryExecWorld {
+    fn new(build: crate::exec::BuildId, child_build: crate::exec::BuildId) -> Self {
+        let find_schema = note_find_schema();
+        let find_extractor = crate::find::Extractor {
+            schema: find_schema.reference.clone(),
+            source: crate::find::SourceRef {
+                name: SchemaId::parse("note").unwrap(),
+                version: 1,
+            },
+            abi_version: crate::find::EXTRACTOR_ABI_VERSION,
+            semantic_digest: [0x35; 32],
+            shape: crate::find::ExtractionShape::new(1, 8, 8, 4 * 1024, 4 * 1024, 8 * 1024),
+        };
+        Self {
+            id: WorldId::parse("com.example.exec-query").unwrap(),
+            schemas: vec![
+                Schema {
+                    id: SchemaId::parse("note").unwrap(),
+                    version: 1,
+                    encoding: EncodingId::parse("text.utf8").unwrap(),
+                    mutation: MutationModel::Atomic,
+                    readable_predecessors: Vec::new(),
+                },
+                Schema {
+                    id: SchemaId::parse("marker").unwrap(),
+                    version: 1,
+                    encoding: EncodingId::parse("bytes").unwrap(),
+                    mutation: MutationModel::Atomic,
+                    readable_predecessors: Vec::new(),
+                },
+            ],
+            find_schemas: vec![find_schema],
+            find_extractors: vec![find_extractor],
+            specs: vec![
+                query_spec("agent.search", PARENT_GRANT_BOUND),
+                query_spec("agent.child", CHILD_GRANT_BOUND),
+            ],
+            build,
+            child_build,
+        }
+    }
+
+    fn note_body(&self) -> BodyKey {
+        BodyKey::new(self.id.clone(), BodyId::from_bytes([0x41; 16]))
+    }
+
+    fn marker_body(&self) -> BodyKey {
+        BodyKey::new(self.id.clone(), BodyId::from_bytes([0x42; 16]))
+    }
+}
+
+impl World for QueryExecWorld {
+    fn id(&self) -> WorldId {
+        self.id.clone()
+    }
+
+    fn schemas(&self) -> &[Schema] {
+        &self.schemas
+    }
+
+    fn find_schemas(&self) -> &[crate::find::Schema] {
+        &self.find_schemas
+    }
+
+    fn find_extractors(&self) -> &[crate::find::Extractor] {
+        &self.find_extractors
+    }
+
+    fn extract(
+        &self,
+        ctx: &crate::world::ExtractionContext<'_>,
+        extractor: &crate::find::Extractor,
+        body: &BodyKey,
+    ) -> Result<crate::find::BodyExtraction, Rejection> {
+        if extractor != &self.find_extractors[0] {
+            return Err(Rejection::ContractViolation);
+        }
+        let value = ctx.read_body(body)?.ok_or(Rejection::StateCorrupt)?;
+        let text = std::str::from_utf8(&value).map_err(|_| Rejection::StateCorrupt)?;
+        let schema = self.find_schemas[0].reference.clone();
+        let field = self.find_schemas[0].fields[0].reference.clone();
+        let terms = text
+            .split_whitespace()
+            .map(|term| Arc::<[u8]>::from(term.to_lowercase().into_bytes()))
+            .collect();
+        Ok(crate::find::BodyExtraction {
+            body: body.clone(),
+            stamp: ctx.body_stamp(body).unwrap_or_default(),
+            nodes: vec![crate::find::ExtractedNode {
+                key: crate::find::NodeKey {
+                    schema,
+                    node: crate::find::NodeId::new(body.body.as_bytes().to_vec())
+                        .map_err(|_| Rejection::ContractViolation)?,
+                },
+                gate: None,
+                fields: vec![crate::find::ExtractedField {
+                    reference: field,
+                    value: crate::find::Value::text(text),
+                    gate: None,
+                    terms,
+                }],
+                edges: Vec::new(),
+                features: Vec::new(),
+            }],
+        })
+    }
+
+    fn exec_specs(&self) -> &[crate::exec::Spec] {
+        &self.specs
+    }
+
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        if let Some(text) = intent.payload.strip_prefix(b"note:") {
+            return Ok(Effect {
+                content_refs: Vec::new(),
+                exec: Vec::new(),
+                operations: vec![(
+                    self.note_body(),
+                    Op::ReplaceAtomic {
+                        value: text.to_vec(),
+                    },
+                )],
+                bodies: vec![self.note_body()],
+                effect: b"noted".to_vec(),
+                declarations: Vec::new(),
+                demand: query_exec_demand("note.write"),
+            });
+        }
+        let declared = note_grant(PARENT_GRANT_BOUND);
+        let start = crate::exec::Start {
+            spec: exec_schema("agent.search"),
+            build: self.build,
+            input: crate::exec::Input {
+                inline: intent.payload.clone(),
+                content: Vec::new(),
+                content_bytes: 0,
+            },
+            parent: None,
+            source: None,
+            service: None,
+            resources: Vec::new(),
+            limits: crate::exec::Limits {
+                attempts: 3,
+                events: 16,
+                checkpoints: 0,
+                child_runs: 1,
+                progress_bytes: 4_096,
+                checkpoint_bytes: 0,
+                wall_millis: PARENT_ATTEMPT_WALL,
+            },
+            queries: vec![crate::exec::QueryGrant {
+                parent: declared.digest().unwrap(),
+                grant: declared,
+            }],
+        };
+        Ok(Effect {
+            content_refs: Vec::new(),
+            exec: vec![crate::exec::Cmd::Start(start)],
+            operations: vec![(
+                self.marker_body(),
+                Op::ReplaceAtomic {
+                    value: intent.payload.clone(),
+                },
+            )],
+            bodies: vec![self.marker_body()],
+            effect: b"searching".to_vec(),
+            declarations: Vec::new(),
+            demand: query_exec_demand("search.write"),
+        })
+    }
+
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Err(Rejection::InvalidRequest)
+    }
+}
+
+fn wide_query_publication() -> crate::publication::PublicationId {
+    crate::publication::PublicationId::new(
+        [0x77; 32],
+        [0x78; 32],
+        crate::publication::ExtractorSchemaDigest::from_digest([0x79; 32]),
+    )
+}
+
+struct SearchHandler {
+    binding: crate::exec::HandlerBinding,
+    child_build: crate::exec::BuildId,
+}
+
+impl crate::exec::Handler for SearchHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        // An admitted query answers over the corpus pinned at the Run's
+        // parent Manifest root.
+        let answer = context.query(note_query("alpha", PARENT_GRANT_BOUND))?;
+        assert_eq!(answer.rows().len(), 1, "the committed note is findable");
+
+        // Naming another historical interpretation is root widening.
+        let mut widened = note_query("alpha", PARENT_GRANT_BOUND);
+        widened.publication = Some(wide_query_publication());
+        assert!(matches!(
+            context.query(widened),
+            Err(crate::exec::Failure::QueryRefused(
+                crate::find::Invalid::Widening("publication")
+            ))
+        ));
+
+        // A field outside the instantiated Grant refuses before evaluation.
+        let mut ungranted = note_query("alpha", PARENT_GRANT_BOUND);
+        let crate::find::Op::Seek(crate::find::Seek::Term { field, .. }) =
+            &mut ungranted.steps[0].op
+        else {
+            panic!("note_query seeds a term seek");
+        };
+        field.name = SchemaId::parse("missing").unwrap();
+        assert!(matches!(
+            context.query(ungranted),
+            Err(crate::exec::Failure::QueryRefused(_))
+        ));
+
+        // A work bound above the Grant's ceiling refuses before evaluation.
+        assert!(matches!(
+            context.query(note_query("alpha", PARENT_GRANT_BOUND + 30)),
+            Err(crate::exec::Failure::QueryRefused(_))
+        ));
+
+        // The declared work of admitted queries charges the Attempt's wall
+        // budget: a second 60 would exceed 100.
+        assert!(matches!(
+            context.query(note_query("beta", PARENT_GRANT_BOUND)),
+            Err(crate::exec::Failure::QueryBudget)
+        ));
+
+        // The child Run instantiates the CHILD Spec's own declared Grant —
+        // or, when asked to misbehave, the parent's, which must refuse
+        // downstream because the child's declaration never contained it.
+        let misbehave = context.input_inline() == b"bad-child";
+        let declared = if misbehave {
+            note_grant(PARENT_GRANT_BOUND)
+        } else {
+            note_grant(CHILD_GRANT_BOUND)
+        };
+        let child = crate::exec::Start {
+            spec: exec_schema("agent.child"),
+            build: self.child_build,
+            input: crate::exec::Input {
+                inline: b"child".to_vec(),
+                content: Vec::new(),
+                content_bytes: 0,
+            },
+            parent: Some(context.run()),
+            source: None,
+            service: None,
+            resources: Vec::new(),
+            limits: crate::exec::Limits {
+                attempts: 3,
+                events: 16,
+                checkpoints: 0,
+                child_runs: 0,
+                progress_bytes: 4_096,
+                checkpoint_bytes: 0,
+                wall_millis: 50,
+            },
+            queries: vec![crate::exec::QueryGrant {
+                parent: declared.digest().unwrap(),
+                grant: declared,
+            }],
+        };
+        context.start_child(child)?;
+        Ok(crate::exec::Candidate {
+            output: exec_schema("agent.output"),
+            inline: b"searched".to_vec(),
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: crate::exec::TerminalClass::Succeeded,
+            usage: Vec::new(),
+            evidence: Vec::new(),
+        })
+    }
+}
+
+struct ChildProbeHandler {
+    binding: crate::exec::HandlerBinding,
+}
+
+impl crate::exec::Handler for ChildProbeHandler {
+    fn binding(&self) -> &crate::exec::HandlerBinding {
+        &self.binding
+    }
+
+    fn handle(
+        &self,
+        context: &mut crate::exec::Context<'_>,
+    ) -> Result<crate::exec::Candidate, crate::exec::Failure> {
+        // The child's own independently authorized Grant admits its work…
+        let answer = context.query(note_query("alpha", CHILD_GRANT_BOUND))?;
+        assert_eq!(answer.rows().len(), 1);
+        // …and the parent's wider instantiation was never inherited.
+        assert!(matches!(
+            context.query(note_query("alpha", PARENT_GRANT_BOUND)),
+            Err(crate::exec::Failure::QueryRefused(_))
+        ));
+        Ok(crate::exec::Candidate {
+            output: exec_schema("agent.output"),
+            inline: b"probed".to_vec(),
+            content: Vec::new(),
+            content_bytes: 0,
+            terminal: crate::exec::TerminalClass::Succeeded,
+            usage: Vec::new(),
+            evidence: Vec::new(),
+        })
+    }
+}
+
+fn query_exec_build(world: &WorldId, spec: &crate::exec::Spec, seed: u8) -> crate::exec::Build {
+    let signer_seed = [seed; 32];
+    crate::exec::Build {
+        id: crate::exec::BuildId::from_bytes([0; 32]),
+        world: world.clone(),
+        world_build: [0; 32],
+        spec: crate::exec::SchemaRef {
+            name: spec.name.clone(),
+            version: spec.version,
+        },
+        handler: replica::content::ContentRef {
+            content_id: [seed.wrapping_add(1); 32],
+        },
+        dependencies: None,
+        environment: [seed.wrapping_add(2); 32],
+        config: Vec::new(),
+        checkpoint: None,
+        replay_commands: None,
+        compatible_from: Vec::new(),
+        publisher: ActorId::from_incept_hash(&"a".repeat(64)),
+        signature: crate::exec::Signature {
+            signer: mechanics::actor::device_from_seed(&signer_seed),
+            algorithm: 1,
+            bytes: [0; 64],
+        },
+    }
+    .sign(&signer_seed)
+    .unwrap()
+}
+
+fn query_perform_fixture(
+    payload: &[u8],
+) -> (
+    crate::lifecycle::Station,
+    crate::session::Session,
+    crate::exec::Package,
+    crate::exec::RunId,
+) {
+    let world_id = WorldId::parse("com.example.exec-query").unwrap();
+    let parent_build = query_exec_build(
+        &world_id,
+        &query_spec("agent.search", PARENT_GRANT_BOUND),
+        0x71,
+    );
+    let child_build = query_exec_build(
+        &world_id,
+        &query_spec("agent.child", CHILD_GRANT_BOUND),
+        0x81,
+    );
+    let world = Arc::new(QueryExecWorld::new(parent_build.id, child_build.id));
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+
+    // The note commits first so the Run's parent Manifest root already
+    // carries it: the Attempt's queries read the interpretation the Grants
+    // were instantiated against, never a co-committed or later state.
+    let note_request = crate::action::RequestId::from_bytes([0x66; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    note_request,
+                    Intent {
+                        schema: SchemaId::parse("note").unwrap(),
+                        schema_version: 1,
+                        payload: b"note:alpha beta".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+
+    let search_request = crate::action::RequestId::from_bytes([0x67; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    search_request,
+                    Intent {
+                        schema: SchemaId::parse("note").unwrap(),
+                        schema_version: 1,
+                        payload: payload.to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        search_request.as_bytes(),
+        0,
+    );
+
+    let package = crate::exec::Package::new()
+        .with_spec(query_spec("agent.search", PARENT_GRANT_BOUND))
+        .with_spec(query_spec("agent.child", CHILD_GRANT_BOUND))
+        .with_build(parent_build.clone())
+        .with_build(child_build.clone())
+        .with_handler(Arc::new(SearchHandler {
+            binding: crate::exec::HandlerBinding {
+                spec: parent_build.spec.clone(),
+                build: parent_build.id,
+                artifact: parent_build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+            child_build: child_build.id,
+        }))
+        .with_handler(Arc::new(ChildProbeHandler {
+            binding: crate::exec::HandlerBinding {
+                spec: child_build.spec.clone(),
+                build: child_build.id,
+                artifact: child_build.handler,
+                role: None,
+                links: Vec::new(),
+            },
+        }));
+    (station, session, package, run)
+}
+
+#[test]
+fn attempt_query_is_grant_bounded_root_pinned_and_budget_charged() {
+    let (_station, session, package, run) = query_perform_fixture(b"search");
+    let report = session
+        .perform(&package, |_| {
+            panic!("these handlers stage no output content");
+        })
+        .unwrap();
+    // The parent Attempt returned: every in-handler admission assertion held.
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+    // The child Run was admitted and returned under its own narrower Grant.
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned != run
+    )));
+}
+
+#[test]
+fn a_child_grant_outside_its_own_spec_declaration_is_refused() {
+    let (_station, session, package, run) = query_perform_fixture(b"bad-child");
+    let report = session
+        .perform(&package, |_| {
+            panic!("these handlers stage no output content");
+        })
+        .unwrap();
+    // The parent handler tried to lend its own wider Grant to the child.
+    // The child Spec's declaration never contained it, so the completion is
+    // refused and the Attempt fails — no child Run exists to perform.
+    assert!(report.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Failed { run: failed, .. } if *failed == run
+    )));
+    assert!(!report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+}

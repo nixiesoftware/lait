@@ -3473,6 +3473,34 @@ struct RuntimeEffect {
     demands: Vec<Vec<u8>>,
 }
 
+/// The host's bounded Find delegate for one dispatched Attempt.
+///
+/// It pins every query to the publication the Run started against and then
+/// delegates to the same admission and evaluator as ordinary
+/// [`Session::find`] — the Session's own policy and gates still apply and
+/// can only narrow further. Grant and budget admission happened in
+/// `exec::Context::query` before this is reached.
+struct AttemptFindDelegate<'a> {
+    session: &'a Session,
+    pinned: crate::publication::PublicationId,
+}
+
+impl crate::exec::FindDelegate for AttemptFindDelegate<'_> {
+    fn find(
+        &self,
+        mut query: crate::find::Query,
+    ) -> Result<crate::find::Answer, crate::find::Failure> {
+        if query
+            .publication
+            .is_some_and(|requested| requested != self.pinned)
+        {
+            return Err(crate::find::Invalid::InvalidQuery("publication").into());
+        }
+        query.publication = Some(self.pinned);
+        self.session.find(query)
+    }
+}
+
 fn read_failure(failure: crate::exec::ReadFailure) -> Failure {
     match failure {
         crate::exec::ReadFailure::Invalid(invalid) => Failure::Rejected(exec_invalid(invalid)),
@@ -7923,10 +7951,31 @@ impl Session {
             }
             SnapshotReader::interactive(inner.snapshot.clone(), self.core.body_images.clone())
         };
+        // The Attempt's bounded Find client evaluates at the Run's parent
+        // Manifest root, never at "latest": the interpretation the Grants
+        // were instantiated against is the one the handler reads.
+        let (run_state, _, _) = crate::exec::read_committed_run(&reader, &self.world_id, run)
+            .map_err(read_failure)?
+            .ok_or(Rejection::ContractViolation)?;
+        let delegate = AttemptFindDelegate {
+            session: self,
+            pinned: crate::publication::PublicationId::new(
+                run_state.started.parent_manifest_root,
+                self.implementation,
+                self.extractor_schema_digest,
+            ),
+        };
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let dispatcher = crate::exec::Dispatcher::new(package, crate::exec::InProcess::new());
         let mut completion = dispatcher
-            .invoke(&reader, &self.world_id, run, attempt, &cancel)
+            .invoke(
+                &reader,
+                &self.world_id,
+                run,
+                attempt,
+                &cancel,
+                Some(&delegate),
+            )
             .map_err(|failure| match failure {
                 crate::exec::DispatchFailure::Backend(crate::exec::Failure::Cancelled) => {
                     Failure::Rejected(Rejection::InvalidRequest)

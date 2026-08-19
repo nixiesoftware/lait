@@ -1407,6 +1407,18 @@ impl Candidate {
     }
 }
 
+/// One bounded read delegated to the ordinary Runtime Find evaluator.
+///
+/// The dispatching host implements this over the Session that admitted the
+/// Attempt; the handler never holds the Session. Every query reaches the
+/// delegate already proven inside one instantiated Grant and within the
+/// Attempt's declared wall budget, and the delegate pins evaluation to the
+/// Run's parent Manifest root — a handler cannot select another
+/// interpretation, and "latest" never enters a Run.
+pub trait FindDelegate {
+    fn find(&self, query: crate::find::Query) -> Result<crate::find::Answer, crate::find::Failure>;
+}
+
 /// A bounded, authenticated view of one admitted local Attempt.
 ///
 /// There is intentionally no World, Replica, Engine, Mechanics, device-key,
@@ -1423,6 +1435,12 @@ pub struct Context<'a> {
     checkpoints: Vec<CheckpointRef>,
     children: Vec<Start>,
     output_blobs: Vec<Vec<u8>>,
+    find: Option<&'a dyn FindDelegate>,
+    /// Declared query work already admitted, in wall milliseconds. Charged
+    /// from each admitted query's own bound before evaluation, so the sum a
+    /// handler can ask for never exceeds the Attempt's wall budget even
+    /// though the first backend's enforcement is advisory.
+    query_wall_charged: u64,
 }
 
 impl std::fmt::Debug for Context<'_> {
@@ -1465,7 +1483,61 @@ impl<'a> Context<'a> {
             checkpoints: Vec::new(),
             children: Vec::new(),
             output_blobs: Vec::new(),
+            find: None,
+            query_wall_charged: 0,
         })
+    }
+
+    /// Attach the host's bounded Find delegate. Without one, every
+    /// [`Context::query`] refuses as unavailable rather than pretending an
+    /// empty corpus answered.
+    pub(crate) fn with_find(mut self, delegate: &'a dyn FindDelegate) -> Self {
+        self.find = Some(delegate);
+        self
+    }
+
+    /// Run one bounded Find query inside this Attempt.
+    ///
+    /// Admission is fail-closed and happens before any evaluator work: the
+    /// whole query must sit inside one Grant instantiated at `Started` (a
+    /// widened op set, field, edge, gate, feature, mode, or bound rejects);
+    /// the query may not name its own historical interpretation — the
+    /// delegate pins the Run's parent Manifest root; and the query's declared
+    /// wall ceiling is charged against the Attempt's remaining wall budget
+    /// so the admitted total can never exceed it. A child Run receives none
+    /// of these Grants: its own `Started` carries its own independently
+    /// authorized set.
+    pub fn query(&mut self, query: crate::find::Query) -> Result<crate::find::Answer, Failure> {
+        let Some(delegate) = self.find else {
+            return Err(Failure::QueryUnavailable);
+        };
+        if query.publication.is_some() {
+            return Err(Failure::QueryRefused(crate::find::Invalid::Widening(
+                "publication",
+            )));
+        }
+        let mut admission = Err(Failure::QueryRefused(crate::find::Invalid::NotGranted(
+            "no instantiated grant",
+        )));
+        for granted in &self.start.queries {
+            match query.validate_within(&granted.grant) {
+                Ok(()) => {
+                    admission = Ok(());
+                    break;
+                }
+                Err(refusal) => admission = Err(Failure::QueryRefused(refusal)),
+            }
+        }
+        admission?;
+        let charged = self
+            .query_wall_charged
+            .checked_add(query.bound.wall_millis)
+            .ok_or(Failure::QueryBudget)?;
+        if charged > self.attempt.limits.wall_millis {
+            return Err(Failure::QueryBudget);
+        }
+        self.query_wall_charged = charged;
+        delegate.find(query).map_err(|_| Failure::Handler)
     }
 
     pub fn world(&self) -> &WorldId {
@@ -1541,9 +1613,12 @@ impl<'a> Context<'a> {
         Ok(())
     }
 
-    /// Stage one independently bounded child Run. Query Grants are withheld
-    /// until the bounded Attempt Find client lands, so a parent cannot lend
-    /// ambient query privilege through this early sink.
+    /// Stage one independently bounded child Run.
+    ///
+    /// A child's query Grants are not inherited privilege: they are validated
+    /// against the child's own Spec at lowering and admitted under the child
+    /// Start's own demand, so a parent can only propose what the child's
+    /// declaration already permits — never lend its own instantiated set.
     pub fn start_child(&mut self, child: Start) -> Result<(), Failure> {
         let staged = u32::try_from(self.children.len()).map_err(|_| Failure::ChildLimit)?;
         if staged >= self.attempt.limits.child_runs {
@@ -1551,7 +1626,6 @@ impl<'a> Context<'a> {
         }
         child.validate().map_err(|_| Failure::InvalidChild)?;
         if child.parent != Some(self.run.id)
-            || !child.queries.is_empty()
             || child.limits.events > self.attempt.limits.events
             || child.limits.checkpoints > self.attempt.limits.checkpoints
             || child.limits.child_runs > self.attempt.limits.child_runs
@@ -1699,6 +1773,17 @@ pub enum Failure {
     CheckpointLimit,
     InvalidChild,
     ChildLimit,
+    /// This Attempt was dispatched without a Find delegate, so the handler
+    /// has no query access at all. Distinct from a refused query: nothing
+    /// could have been asked.
+    QueryUnavailable,
+    /// The query escaped every instantiated Grant, named its own historical
+    /// interpretation, or was malformed. Admission fails before any
+    /// evaluator work.
+    QueryRefused(crate::find::Invalid),
+    /// Admitting this query's declared work ceiling would exceed the
+    /// Attempt's remaining wall budget.
+    QueryBudget,
 }
 
 impl std::fmt::Display for Failure {
@@ -1918,6 +2003,7 @@ impl<'a> Dispatcher<'a> {
         run: RunId,
         attempt: AttemptId,
         cancel_asked: &AtomicBool,
+        find: Option<&dyn FindDelegate>,
     ) -> Result<Completion, DispatchFailure> {
         let unresolved = self.observe(snapshot, world)?;
         let unresolved = unresolved
@@ -1955,6 +2041,9 @@ impl<'a> Dispatcher<'a> {
             cancel_asked,
         )
         .map_err(DispatchFailure::Backend)?;
+        if let Some(delegate) = find {
+            context = context.with_find(delegate);
+        }
         let completion = self
             .backend
             .invoke(&selection, &mut context)
@@ -5546,6 +5635,7 @@ mod tests {
                 run(0x90),
                 attempt(0x91),
                 &cancel,
+                None,
             ),
             Err(DispatchFailure::Run(run(0x90)))
         );
@@ -5560,6 +5650,7 @@ mod tests {
                 root,
                 attempt(0x91),
                 &cancel,
+                None,
             ),
             Err(DispatchFailure::Attempt(attempt(0x91)))
         );
@@ -5573,7 +5664,14 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].run.id, run);
         let completion = dispatcher
-            .invoke(&committed.read_snapshot(), &world, run, attempt, &cancel)
+            .invoke(
+                &committed.read_snapshot(),
+                &world,
+                run,
+                attempt,
+                &cancel,
+                None,
+            )
             .unwrap();
         assert_eq!(completion.candidate().inline, [1, 2, 3]);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
