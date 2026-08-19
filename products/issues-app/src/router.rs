@@ -97,8 +97,15 @@ impl IssuesCallHandler {
             default_project: None,
             now: mechanics::wallclock::now_secs(),
         };
-        for _ in 0..=3 {
-            let response = router.route(request.clone(), &facts).0;
+        // Retryable refusals are transient by definition -- the mutation lane
+        // is taken, the read capacity is momentarily full, the authority moved
+        // under the signature. Retrying them INSTANTLY asks the same question
+        // inside the same microsecond and gets the same answer, so what looked
+        // like four attempts was one attempt made four times. Wait a little
+        // between them, growing, so the condition has a chance to clear.
+        let mut waited = RETRY_BACKOFF;
+        let mut response = router.route(request.clone(), &facts).0;
+        for _ in 0..RETRY_ATTEMPTS {
             if !matches!(
                 &response,
                 Response::Error {
@@ -108,10 +115,24 @@ impl IssuesCallHandler {
             ) {
                 return response;
             }
+            std::thread::sleep(waited);
+            waited = waited.saturating_mul(2);
+            response = router.route(request.clone(), &facts).0;
         }
-        Response::retry("membership changed repeatedly — retry the request")
+        // Hand back the refusal that actually happened. This used to answer
+        // "membership changed repeatedly" for every exhausted retry, which
+        // named one cause out of several and was usually the wrong one: a
+        // busy node reported a governance change nobody had made.
+        response
     }
 }
+
+/// How many further attempts a retryable refusal earns, and the first pause
+/// between them. Doubling from 4ms gives roughly 60ms across four waits --
+/// long enough for a mutation lane to hand over, short enough that nobody
+/// waits on a request that is never going to succeed.
+const RETRY_ATTEMPTS: usize = 4;
+const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(4);
 
 impl Handler for IssuesCallHandler {
     fn access(&self, call: &Call) -> Result<Access, Failure> {
