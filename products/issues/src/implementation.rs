@@ -2605,7 +2605,8 @@ fn find_issue_rows_by_ids(
         wall_millis: 5_000,
     };
     let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
-    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
     let mut fields = [
         crate::find::field::ID,
         crate::find::field::KIND,
@@ -2614,6 +2615,7 @@ fn find_issue_rows_by_ids(
         crate::find::field::STATE,
         crate::find::field::PRIORITY,
         crate::find::field::TOMBSTONE,
+        crate::find::field::CONFLICTED,
         crate::find::field::DUE_AT,
         crate::find::field::ESTIMATE,
     ]
@@ -2644,9 +2646,35 @@ fn find_issue_rows_by_ids(
                     )),
                     bound,
                 },
+                // An Issue whose transition heads have not converged has no
+                // single placement, so `extract_issue_meta` posts no project
+                // and no state for it -- only that it is conflicted. A `Row`
+                // has nowhere to put that: building one demanded a state and
+                // answered `StateCorrupt` when there was none, so a single
+                // unconverged Issue failed every read that passed through
+                // here -- a label-filtered list, a milestone's progress, an
+                // Issue's own links.
+                //
+                // It is excluded here rather than refused, which is also what
+                // the unfiltered list does with the same predicate. That
+                // keeps the two spellings of one question agreeing: asking
+                // for a label no longer returns rows that asking for
+                // everything leaves out.
+                find_api::Step {
+                    id: keep,
+                    input: vec![seek],
+                    op: find_api::Op::Keep(find_api::Keep {
+                        predicates: vec![find_api::Predicate {
+                            field: crate::find::field_ref(crate::find::field::CONFLICTED),
+                            test: find_api::Test::Equal,
+                            value: find_api::Atom::Bool(false),
+                        }],
+                    }),
+                    bound,
+                },
                 find_api::Step {
                     id: pack,
-                    input: vec![seek],
+                    input: vec![keep],
                     op: find_api::Op::Pack(find_api::Pack { fields }),
                     bound,
                 },
