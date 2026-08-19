@@ -1130,7 +1130,6 @@ mod tests {
             origin: crate::orbits::Origin::Founded,
             host_nick: String::new(),
             last_opened: 0,
-            projects: vec![],
         };
         let router = Router::new(
             crate::orbits::Catalog::with_entries(
@@ -1222,7 +1221,6 @@ mod tests {
                     origin: crate::orbits::Origin::Founded,
                     host_nick: String::new(),
                     last_opened: 0,
-                    projects: vec![],
                 }],
             ),
             crate::world::packages(),

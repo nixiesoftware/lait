@@ -340,7 +340,6 @@ fn the_mcp_head_in_an_empty_dir_refuses_to_create_a_decoy_store() {
         origin: Origin::Joined,
         host_nick: "alice".into(),
         last_opened: 42,
-        projects: vec![],
     };
     std::fs::write(
         cfg.join("spaces.json"),
@@ -458,7 +457,6 @@ fn the_mcp_head_binds_the_sole_registered_orbit_when_the_directory_names_none() 
         origin: Origin::Founded,
         host_nick: String::new(),
         last_opened: 42,
-        projects: vec![],
     };
     std::fs::write(
         cfg.join("spaces.json"),
@@ -549,7 +547,6 @@ fn the_mcp_head_refuses_to_guess_among_several_registered_orbits() {
             origin: Origin::Founded,
             host_nick: String::new(),
             last_opened: 42,
-            projects: vec![],
         },
         Entry {
             space: "ws_01JMANYORBITSSECONDXXX".into(),
@@ -558,7 +555,6 @@ fn the_mcp_head_refuses_to_guess_among_several_registered_orbits() {
             origin: Origin::Joined,
             host_nick: "alice".into(),
             last_opened: 41,
-            projects: vec![],
         },
     ];
     std::fs::write(

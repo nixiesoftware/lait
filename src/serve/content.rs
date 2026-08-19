@@ -764,7 +764,6 @@ mod end_to_end {
             origin: crate::orbits::Origin::default(),
             host_nick: String::new(),
             last_opened: 0,
-            projects: Vec::new(),
         };
         let app = Arc::new(App {
             world: crate::composition::PRODUCT_WORLD_MOUNT.to_owned(),

@@ -1907,7 +1907,6 @@ mod tests {
                 origin: Origin::Founded,
                 host_nick: String::new(),
                 last_opened: 1,
-                projects: Vec::new(),
             }],
         );
         let resolved = directory.resolve(id.as_str()).unwrap();

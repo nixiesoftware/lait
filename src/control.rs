@@ -2863,7 +2863,16 @@ pub struct StatusInfo {
     pub nick: String,
     /// The space display name (synced catalog value; empty on a joiner
     /// whose catalog hasn't arrived yet).
+    ///
+    /// Read it only together with [`Self::name_unavailable`] — empty means
+    /// "this space has no name" and is a different fact from "nobody could ask".
     pub name: String,
+    /// Whether [`Self::name`] is UNAVAILABLE rather than empty. `true` means the
+    /// World is not docked, so no name was read — never render it as a name,
+    /// and never substitute a remembered one. Additive, so pre-existing clients
+    /// decode the status unchanged.
+    #[serde(default)]
+    pub name_unavailable: bool,
     /// The space overview description (synced catalog value; empty when unset).
     /// Additive so pre-SCOPE-2 clients decode the status unchanged.
     #[serde(default)]

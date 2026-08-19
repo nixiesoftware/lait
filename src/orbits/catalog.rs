@@ -287,7 +287,6 @@ mod tests {
             origin: orbits::Origin::Founded,
             host_nick: String::new(),
             last_opened: 0,
-            projects: Vec::new(),
         }
     }
 
