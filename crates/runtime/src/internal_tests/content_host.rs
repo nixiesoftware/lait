@@ -15,7 +15,7 @@ use replica::content::ContentRef;
 use replica::content::Residency;
 use replica::content::CHUNK_PLAINTEXT_LEN;
 use runtime::content_host::{
-    ContentAction, ContentHost, ContentKeys, ContentPolicy, Failure, MAX_RANGE_BYTES,
+    Acquisition, ContentAction, ContentHost, ContentKeys, ContentPolicy, Failure, MAX_RANGE_BYTES,
 };
 
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -375,7 +375,14 @@ fn a_provider_serves_a_chunk_and_a_receiver_installs_it_verified() {
         .and_then(|_| {
             receiver
                 .host
-                .install_chunk(&policy, &content, [9u8; 16], &proof, &ciphertext)
+                .install_chunk(
+                    &policy,
+                    &content,
+                    [9u8; 16],
+                    Acquisition::Keep,
+                    &proof,
+                    &ciphertext,
+                )
                 .err()
                 .map(Err)
                 .unwrap_or(Ok(()))
@@ -390,7 +397,14 @@ fn a_provider_serves_a_chunk_and_a_receiver_installs_it_verified() {
     tampered[0] ^= 0xFF;
     assert!(sender
         .host
-        .install_chunk(&policy, &content, [9u8; 16], &proof, &tampered)
+        .install_chunk(
+            &policy,
+            &content,
+            [9u8; 16],
+            Acquisition::Keep,
+            &proof,
+            &tampered
+        )
         .is_err());
 
     let _ = receiver.dir;
@@ -673,7 +687,14 @@ fn installing_one_staged_chunk_leaves_the_rest_of_the_transfer_alone() {
 
     receiver
         .host
-        .install_staged_chunk(&policy, &content, operation, 1, &proofs[1])
+        .install_staged_chunk(
+            &policy,
+            &content,
+            operation,
+            Acquisition::Keep,
+            1,
+            &proofs[1],
+        )
         .expect("install the middle chunk");
 
     assert_eq!(
@@ -686,6 +707,73 @@ fn installing_one_staged_chunk_leaves_the_rest_of_the_transfer_alone() {
         "the other chunks are still staged"
     );
     assert!(receiver.host.cache().staged_bytes() < staged_before);
+}
+
+#[test]
+fn a_streamed_chunk_is_reclaimable_when_its_operation_ends_and_a_kept_one_is_not() {
+    // The difference between "I want this file" and "I am watching this now".
+    // A kept chunk outlives the transfer that fetched it, because the content's
+    // own hold is what survives; a streamed one is the operation's to release,
+    // which is what lets a playhead move without the cache growing behind it.
+    let sender = fixture("intent-sender");
+    let receiver = fixture("intent-receiver");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a: ContentAction<'_>| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::transaction::SeedSigner(&WRITER_SEED);
+
+    let content = sender
+        .host
+        .ingest(
+            &policy,
+            [1u8; 16],
+            &mut std::io::Cursor::new(filler(5, CHUNK_PLAINTEXT_LEN as usize + 128)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+    let descriptor = sender.host.descriptor_of(&policy, &content).unwrap();
+    assert_eq!(descriptor.chunk_count, 2);
+    receiver
+        .core
+        .with_replica_metadata(|replica| {
+            replica.commit_content(
+                &commit_ctx(&signer, &space),
+                std::slice::from_ref(&descriptor),
+            )
+        })
+        .expect("the receiver commits the descriptor it learned");
+
+    let operation = [11u8; 16];
+    for (index, intent) in [(0u32, Acquisition::Keep), (1, Acquisition::Stream)] {
+        let (bytes, proof) = sender.host.chunk(&policy, &content, index).unwrap();
+        receiver
+            .host
+            .install_chunk(&policy, &content, operation, intent, &proof, &bytes)
+            .expect("install");
+    }
+    let kept = replica::content::chunk_slot(&descriptor, 0);
+    let streamed = replica::content::chunk_slot(&descriptor, 1);
+    assert!(receiver.host.cache().is_held(&kept).unwrap());
+    assert!(
+        receiver.host.cache().is_held(&streamed).unwrap(),
+        "while the operation runs, both are held"
+    );
+
+    receiver.host.cache().release_operation(&operation).unwrap();
+
+    assert!(
+        !receiver.host.cache().evict(&kept).unwrap(),
+        "the content's hold keeps what was kept"
+    );
+    assert!(
+        receiver.host.cache().evict(&streamed).unwrap(),
+        "and nothing holds what was only being watched"
+    );
+    assert_eq!(
+        receiver.host.resident_indices(&policy, &content).unwrap(),
+        vec![0]
+    );
 }
 
 #[test]

@@ -226,7 +226,7 @@ impl Lease {
         }
     }
 
-    fn tag_name(&self) -> String {
+    pub(crate) fn tag_name(&self) -> String {
         format!(
             "{}.{}.{}",
             self.kind.prefix(),
@@ -495,6 +495,30 @@ impl Residency {
     /// sixteen bytes is a different kind of promise and survives.
     pub fn release_operation(&self, operation: &[u8; 16]) -> Result<u64, Failure> {
         self.release_holder(LeaseKind::Operation, operation)
+    }
+
+    /// Release one holder's hold on one entry.
+    ///
+    /// The symmetric partner of `hold_*`, which a sliding window needs: a
+    /// reader letting go of what it has passed must not let go of what it has
+    /// not reached. Pins cannot express it — they are per entry, so one reader
+    /// unpinning would unpin another's chunk.
+    pub fn release_operation_entry(
+        &self,
+        operation: [u8; 16],
+        entry: [u8; 32],
+    ) -> Result<(), Failure> {
+        let path = self
+            .root
+            .join(TAGS_DIR)
+            .join(Lease::operation(operation, entry).tag_name());
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(Operation::Remove, e).into()),
+        }
+        let _ = sync_dir(&self.root.join(TAGS_DIR));
+        Ok(())
     }
 
     /// Release every hold one content's nonce took, which is what forgetting a

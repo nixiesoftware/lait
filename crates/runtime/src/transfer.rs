@@ -325,8 +325,9 @@ impl TransferHandle {
     pub fn succeed(mut self, now: Instant) {
         self.registry
             .advance(&self.operation, TransferState::Available, now);
-        // The ingest-scoped hold goes; the content-scoped one stays, which is
-        // what keeps the bytes after the transfer that fetched them is gone.
+        // The transfer-scoped hold goes. Under `Acquisition::Keep` the
+        // content-scoped one stays and keeps the bytes; under `Stream` there is
+        // none, and whoever is reading holds its own.
         let _ = self.cache.release_operation(&self.operation);
         let _ = self.cache.discard_staged(&self.operation);
         self.armed = false;

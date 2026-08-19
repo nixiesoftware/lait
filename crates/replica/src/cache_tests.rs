@@ -473,3 +473,46 @@ fn a_dead_operations_lease_is_released_and_a_content_hold_is_not() {
     cache.release_content(&[9u8; 16]).unwrap();
     assert!(!cache.is_held(&entry).unwrap());
 }
+
+#[test]
+fn releasing_one_entry_leaves_the_same_holder_s_other_entries_and_other_holders_alone() {
+    // What a sliding window needs: let go of what has been passed without
+    // letting go of what has not been reached, and without letting go of what
+    // another reader is on. Pins cannot express it — they are keyed per entry,
+    // so one reader unpinning would unpin the other's chunk.
+    let cache = Residency::open(temp_root("release-one"), 1 << 20).unwrap();
+
+    let behind = [1u8; 32];
+    let ahead = [2u8; 32];
+    for entry in [behind, ahead] {
+        cache.install(&entry, b"bytes", b"sidecar").unwrap();
+    }
+    let reader = [7u8; 16];
+    let other = [8u8; 16];
+    cache.hold_operation(reader, behind).unwrap();
+    cache.hold_operation(reader, ahead).unwrap();
+    cache.hold_operation(other, behind).unwrap();
+
+    cache.release_operation_entry(reader, behind).unwrap();
+
+    assert!(
+        cache.is_held(&behind).unwrap(),
+        "the other reader is still on it"
+    );
+    assert!(
+        cache.is_held(&ahead).unwrap(),
+        "and this reader has not reached this one yet"
+    );
+
+    cache.release_operation_entry(other, behind).unwrap();
+    assert!(
+        !cache.is_held(&behind).unwrap(),
+        "nobody is on it once the last holder moves"
+    );
+    assert!(cache.is_held(&ahead).unwrap());
+
+    // Idempotent: a reader that lets go twice is not an error, and does not
+    // reach past its own hold.
+    cache.release_operation_entry(reader, behind).unwrap();
+    assert!(cache.is_held(&ahead).unwrap());
+}

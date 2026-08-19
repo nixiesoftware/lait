@@ -161,6 +161,15 @@ impl<'a> ContentAction<'a> {
     }
 }
 
+/// Why these bytes are being acquired, which decides how long they are held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acquisition {
+    /// "I want this file." Held until nothing declares the content.
+    Keep,
+    /// "I am watching this now." Held for the operation only.
+    Stream,
+}
+
 /// Who is asking, and what the host should check them against.
 ///
 /// Runtime supplies this; a World never constructs one, which is what stops a
@@ -594,6 +603,7 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
         operation: [u8; 16],
+        intent: Acquisition,
         part: u32,
         proof: &ChunkProof,
     ) -> Result<(), Failure> {
@@ -613,7 +623,7 @@ impl ContentHost {
             .read_staged(&operation, part)
             .map_err(|_| Failure::NotResident)?;
 
-        match self.install_chunk(policy, content, operation, proof, &staged) {
+        match self.install_chunk(policy, content, operation, intent, proof, &staged) {
             Ok(()) => {
                 self.cache
                     .discard_staged_part(&operation, part)
@@ -667,6 +677,7 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
         operation: [u8; 16],
+        intent: Acquisition,
         proof: &ChunkProof,
         ciphertext: &[u8],
     ) -> Result<(), Failure> {
@@ -680,11 +691,17 @@ impl ContentHost {
         self.cache
             .install(&entry, ciphertext, &sidecar)
             .map_err(|_| Failure::Storage(Storage::Cache))?;
-        // Both holds, as ingest takes them: the transfer's, and the content's.
+        // The transfer's hold always. The content's is what outlives the
+        // transfer, so only a caller that means to keep the bytes takes it —
+        // a chunk behind a playhead has to become reclaimable.
         self.cache
             .hold_operation(operation, entry)
-            .and_then(|()| self.cache.hold_content(descriptor.content_nonce, entry))
             .map_err(|_| Failure::Storage(Storage::Cache))?;
+        if intent == Acquisition::Keep {
+            self.cache
+                .hold_content(descriptor.content_nonce, entry)
+                .map_err(|_| Failure::Storage(Storage::Cache))?;
+        }
         Ok(())
     }
 

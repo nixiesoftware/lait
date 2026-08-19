@@ -20,7 +20,7 @@ use mechanics::{ids::SpaceId, station::Key};
 use replica::content::ContentRef;
 use replica::content::Residency;
 use runtime::admission::PlanePolicy;
-use runtime::content_host::{ContentAction, ContentHost, ContentKeys, ContentPolicy};
+use runtime::content_host::{Acquisition, ContentAction, ContentHost, ContentKeys, ContentPolicy};
 use runtime::fetch::{connect_provider, Failure, Fetcher};
 use runtime::lifecycle::CancelToken;
 use runtime::plane::freight::FreightService;
@@ -451,9 +451,22 @@ async fn mirror(seeker: &Node, holder: &Node, content: &ContentRef, session: u8)
     .await
     .expect("admitted");
     fetcher(seeker)
-        .fetch(content, [session; 16], std::slice::from_ref(&provider))
+        .fetch(
+            content,
+            [session; 16],
+            std::slice::from_ref(&provider),
+            &anyone,
+        )
         .await
         .expect("the mirror acquires it");
+}
+
+/// The fetcher's authorization, chosen at the call site because it has to be.
+///
+/// This suite is about moving bytes; Mechanics standing has its own tests. A
+/// caller with an actor behind it passes that actor's predicate instead.
+fn anyone(_: ContentAction<'_>) -> Result<(), Vec<u8>> {
+    Ok(())
 }
 
 fn fetcher(node: &Node) -> Fetcher {
@@ -502,7 +515,12 @@ async fn a_descriptor_that_arrived_without_bytes_fetches_only_what_is_missing() 
 
     let fetch = fetcher(&seeker);
     fetch
-        .fetch(&content, [1u8; 16], std::slice::from_ref(&provider))
+        .fetch(
+            &content,
+            [1u8; 16],
+            std::slice::from_ref(&provider),
+            &anyone,
+        )
         .await
         .expect("the fetch completes");
 
@@ -521,7 +539,7 @@ async fn a_descriptor_that_arrived_without_bytes_fetches_only_what_is_missing() 
 
     // The second open is local: nothing is missing, so nothing is asked for.
     fetch
-        .fetch(&content, [2u8; 16], &[])
+        .fetch(&content, [2u8; 16], &[], &anyone)
         .await
         .expect("a complete content needs no provider at all");
 }
@@ -557,7 +575,12 @@ async fn an_interrupted_transfer_resumes_and_installs_only_after_verification() 
     .await
     .expect("admitted");
     fetch
-        .fetch(&content, [1u8; 16], std::slice::from_ref(&provider))
+        .fetch(
+            &content,
+            [1u8; 16],
+            std::slice::from_ref(&provider),
+            &anyone,
+        )
         .await
         .expect("first pass");
     let after_first = seeker.host.resident_indices(&policy, &content).unwrap();
@@ -587,7 +610,12 @@ async fn an_interrupted_transfer_resumes_and_installs_only_after_verification() 
     let outcome = match dead {
         Ok(provider) => {
             fetch
-                .fetch(&content, [3u8; 16], std::slice::from_ref(&provider))
+                .fetch(
+                    &content,
+                    [3u8; 16],
+                    std::slice::from_ref(&provider),
+                    &anyone,
+                )
                 .await
         }
         Err(_) => Err(Failure::NoProvider),
@@ -613,7 +641,12 @@ async fn an_interrupted_transfer_resumes_and_installs_only_after_verification() 
     .await
     .expect("admitted");
     fetch
-        .fetch(&content, [4u8; 16], std::slice::from_ref(&provider))
+        .fetch(
+            &content,
+            [4u8; 16],
+            std::slice::from_ref(&provider),
+            &anyone,
+        )
         .await
         .expect("second pass completes");
     assert_eq!(
@@ -694,7 +727,7 @@ async fn two_providers_serve_disjoint_chunks_and_a_liar_is_discarded() {
 
     let fetch = fetcher(&seeker);
     fetch
-        .fetch(&content, [5u8; 16], &providers)
+        .fetch(&content, [5u8; 16], &providers, &anyone)
         .await
         .expect("the union completes it");
     assert_eq!(
@@ -734,7 +767,12 @@ async fn a_fetch_that_would_cross_the_quota_is_refused_before_anything_is_staged
     .expect("admitted");
     assert_eq!(
         fetch
-            .fetch(&content, [6u8; 16], std::slice::from_ref(&provider))
+            .fetch(
+                &content,
+                [6u8; 16],
+                std::slice::from_ref(&provider),
+                &anyone
+            )
             .await,
         Err(Failure::OverQuota)
     );
@@ -759,7 +797,8 @@ async fn a_fetch_without_a_descriptor_cannot_start() {
                     content_id: [0xAB; 32]
                 },
                 [7u8; 16],
-                &[]
+                &[],
+                &anyone
             )
             .await,
         Err(Failure::UnknownContent)
@@ -796,7 +835,12 @@ async fn a_restart_reclaims_a_dead_transfer_and_keeps_what_was_installed() {
     .await
     .expect("admitted");
     fetcher(&seeker)
-        .fetch(&content, [40u8; 16], std::slice::from_ref(&provider))
+        .fetch(
+            &content,
+            [40u8; 16],
+            std::slice::from_ref(&provider),
+            &anyone,
+        )
         .await
         .expect("first fetch");
     let installed = {
@@ -848,7 +892,7 @@ async fn a_restart_reclaims_a_dead_transfer_and_keeps_what_was_installed() {
 
     // Re-fetching moves nothing: the whole content is already here.
     fetcher(&seeker)
-        .fetch(&content, [41u8; 16], &[])
+        .fetch(&content, [41u8; 16], &[], &anyone)
         .await
         .expect("nothing is missing, so no provider is needed");
 }
@@ -877,7 +921,12 @@ async fn a_restart_re_fetches_at_chunk_granularity() {
     .await
     .expect("admitted");
     fetcher(&seeker)
-        .fetch(&content, [42u8; 16], std::slice::from_ref(&provider))
+        .fetch(
+            &content,
+            [42u8; 16],
+            std::slice::from_ref(&provider),
+            &anyone,
+        )
         .await
         .expect("fetch");
 
@@ -922,7 +971,12 @@ async fn a_restart_re_fetches_at_chunk_granularity() {
     .await
     .expect("admitted");
     fetcher(&seeker)
-        .fetch(&content, [43u8; 16], std::slice::from_ref(&provider))
+        .fetch(
+            &content,
+            [43u8; 16],
+            std::slice::from_ref(&provider),
+            &anyone,
+        )
         .await
         .expect("the gap closes");
     assert_eq!(
@@ -988,6 +1042,201 @@ async fn housekeeping_reclaims_dead_staging_and_reports_what_it_cannot() {
         "and a live one is left alone"
     );
     drop(live);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_named_window_moves_and_the_rest_of_the_content_stays_missing() {
+    // What a playhead asks for. Answering "one second of this film" by moving
+    // the film is the defect this entry point exists to prevent, and the proof
+    // is that the chunks nobody asked about are still absent afterwards.
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "window-holder", [57u8; 32], true);
+    let seeker = node(&net, "window-seeker", [58u8; 32], false);
+    let chunk = replica::content::CHUNK_PLAINTEXT_LEN as usize;
+    let plaintext = filler(8, chunk * 3 + 90);
+    let content = seed_content(&holder, 1, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    let space = space();
+    let allow = |_: ContentAction| Ok(());
+    let policy = seeker.policy(&space, &allow);
+    let provider = connect_provider(
+        seeker.transport.as_ref(),
+        &space,
+        &seeker.station,
+        &holder.station,
+        [13u8; 16],
+    )
+    .await
+    .expect("admitted");
+
+    fetcher(&seeker)
+        .fetch_chunks(
+            &content,
+            &[2],
+            std::slice::from_ref(&provider),
+            [60u8; 16],
+            Acquisition::Keep,
+            &CancelToken::new(),
+            &anyone,
+        )
+        .await
+        .expect("the window arrives");
+
+    assert_eq!(
+        seeker.host.resident_indices(&policy, &content).unwrap(),
+        vec![2],
+        "one chunk was named, so one chunk moved"
+    );
+    assert_eq!(
+        seeker
+            .host
+            .read_range(&policy, &content, (chunk * 2) as u64, chunk)
+            .unwrap(),
+        plaintext[chunk * 2..chunk * 3],
+        "and it reads as the bytes that belong at that offset"
+    );
+    assert!(
+        matches!(
+            seeker.host.read_range(&policy, &content, 0, 16),
+            Err(runtime::content_host::Failure::NotResident)
+        ),
+        "the rest of the content is still a hole, and says so"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_is_admitted_where_the_whole_content_is_refused() {
+    // The blocker. Pricing admission on the whole content refuses a film
+    // outright on a Station whose cache would hold the scene being watched
+    // several times over, however few chunks the playhead actually needs.
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "window-quota-holder", [59u8; 32], true);
+    let seeker = node(&net, "window-quota-seeker", [60u8; 32], false);
+    let chunk = replica::content::CHUNK_PLAINTEXT_LEN as u64;
+    let plaintext = filler(9, chunk as usize * 3 + 50);
+    let content = seed_content(&holder, 1, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    let space = space();
+    let allow = |_: ContentAction| Ok(());
+    let policy = seeker.policy(&space, &allow);
+    let provider = connect_provider(
+        seeker.transport.as_ref(),
+        &space,
+        &seeker.station,
+        &holder.station,
+        [14u8; 16],
+    )
+    .await
+    .expect("admitted");
+
+    let mut fetch = fetcher(&seeker);
+    fetch.cache_quota_bytes = chunk + 65_536;
+    assert_eq!(
+        fetch
+            .fetch(
+                &content,
+                [61u8; 16],
+                std::slice::from_ref(&provider),
+                &anyone
+            )
+            .await,
+        Err(Failure::OverQuota),
+        "the whole content does not fit, and is refused before anything is staged"
+    );
+    assert_eq!(seeker.host.cache().staged_bytes(), 0);
+
+    fetch
+        .fetch_chunks(
+            &content,
+            &[1],
+            std::slice::from_ref(&provider),
+            [62u8; 16],
+            Acquisition::Keep,
+            &CancelToken::new(),
+            &anyone,
+        )
+        .await
+        .expect("one chunk of it fits, and that is what was asked for");
+    assert_eq!(
+        seeker.host.resident_indices(&policy, &content).unwrap(),
+        vec![1]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_fetch_leaves_no_staged_bytes_and_no_lease() {
+    // A withdrawal is its own answer. What it must not be is disk: an
+    // abandoned transfer that kept its staging and its lease is space nothing
+    // will ever reclaim, because nothing is left to say the operation is over.
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "cancel-holder", [61u8; 32], true);
+    let seeker = node(&net, "cancel-seeker", [62u8; 32], false);
+    let plaintext = filler(10, replica::content::CHUNK_PLAINTEXT_LEN as usize * 2 + 40);
+    let content = seed_content(&holder, 1, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    let space = space();
+    let allow = |_: ContentAction| Ok(());
+    let policy = seeker.policy(&space, &allow);
+    let operation = [63u8; 16];
+    let leased = {
+        let descriptor = seeker.host.descriptor_of(&policy, &content).unwrap();
+        replica::content::chunk_slot(&descriptor, 0)
+    };
+    seeker
+        .host
+        .cache()
+        .append_staged(&operation, 0, 0, b"half a chunk")
+        .unwrap();
+    seeker
+        .host
+        .cache()
+        .hold_operation(operation, leased)
+        .unwrap();
+
+    let provider = connect_provider(
+        seeker.transport.as_ref(),
+        &space,
+        &seeker.station,
+        &holder.station,
+        [15u8; 16],
+    )
+    .await
+    .expect("admitted");
+
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    assert_eq!(
+        fetcher(&seeker)
+            .fetch_chunks(
+                &content,
+                &[0, 1, 2],
+                std::slice::from_ref(&provider),
+                operation,
+                Acquisition::Keep,
+                &cancel,
+                &anyone,
+            )
+            .await,
+        Err(Failure::Cancelled),
+        "withdrawn, not incomplete — only one of those is worth retrying"
+    );
+    assert_eq!(
+        seeker.host.cache().staged_bytes(),
+        0,
+        "nothing staged survives the transfer that staged it"
+    );
+    assert!(
+        !seeker.host.cache().is_held(&leased).unwrap(),
+        "and the operation's lease went with it"
+    );
+    assert!(seeker
+        .host
+        .resident_indices(&policy, &content)
+        .unwrap()
+        .is_empty());
 }
 
 // ===========================================================================
@@ -1119,7 +1368,12 @@ async fn a_fetch_completes_under_a_paused_clock() {
             .expect("the provider admits the seeker");
 
             let fetched = fetcher(&seeker)
-                .fetch(&content, [1u8; 16], std::slice::from_ref(&provider))
+                .fetch(
+                    &content,
+                    [1u8; 16],
+                    std::slice::from_ref(&provider),
+                    &anyone,
+                )
                 .await;
             assert!(
                 fetched.is_ok(),
