@@ -306,7 +306,7 @@ pub struct Fetcher {
 impl Fetcher {
     fn policy<'a>(
         &'a self,
-        authorize: &'a dyn Fn(ContentAction) -> Result<(), Vec<u8>>,
+        authorize: &'a dyn for<'c> Fn(ContentAction<'c>) -> Result<(), Vec<u8>>,
     ) -> ContentPolicy<'a> {
         ContentPolicy {
             space: &self.space,

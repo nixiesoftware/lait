@@ -155,9 +155,13 @@ impl FreightService {
 /// hold no read grant on. It is ciphertext — the Body key still gates reading —
 /// but it is a real gap, and the fix is a `content.serve` grant slotting into
 /// exactly this closure without `ContentHost` changing shape.
+///
+/// The action now names the bytes, so scoping is expressible here. This
+/// predicate still does not scope: nobody holds `content.serve`, so gating on
+/// it would refuse everything.
 fn serve_predicate(
     peer: &AdmittedPeer,
-) -> impl Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>> + '_ {
+) -> impl for<'c> Fn(crate::content_host::ContentAction<'c>) -> Result<(), Vec<u8>> + '_ {
     move |action| {
         let _ = (peer, action);
         Ok(())
