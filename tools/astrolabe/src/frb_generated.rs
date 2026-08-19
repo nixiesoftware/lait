@@ -1544,11 +1544,19 @@ impl SseDecode for crate::api::WorldUpdateRow {
         let mut var_available = <Option<String>>::sse_decode(deserializer);
         let mut var_behind = <bool>::sse_decode(deserializer);
         let mut var_unmet = <Option<Vec<String>>>::sse_decode(deserializer);
+        let mut var_operation = <Option<String>>::sse_decode(deserializer);
+        let mut var_phase = <Option<String>>::sse_decode(deserializer);
+        let mut var_progress = <Option<String>>::sse_decode(deserializer);
+        let mut var_message = <Option<String>>::sse_decode(deserializer);
         return crate::api::WorldUpdateRow {
             serving: var_serving,
             available: var_available,
             behind: var_behind,
             unmet: var_unmet,
+            operation: var_operation,
+            phase: var_phase,
+            progress: var_progress,
+            message: var_message,
         };
     }
 }
@@ -2417,6 +2425,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::WorldUpdateRow {
             self.available.into_into_dart().into_dart(),
             self.behind.into_into_dart().into_dart(),
             self.unmet.into_into_dart().into_dart(),
+            self.operation.into_into_dart().into_dart(),
+            self.phase.into_into_dart().into_dart(),
+            self.progress.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -3482,6 +3494,10 @@ impl SseEncode for crate::api::WorldUpdateRow {
         <Option<String>>::sse_encode(self.available, serializer);
         <bool>::sse_encode(self.behind, serializer);
         <Option<Vec<String>>>::sse_encode(self.unmet, serializer);
+        <Option<String>>::sse_encode(self.operation, serializer);
+        <Option<String>>::sse_encode(self.phase, serializer);
+        <Option<String>>::sse_encode(self.progress, serializer);
+        <Option<String>>::sse_encode(self.message, serializer);
     }
 }
 

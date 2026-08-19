@@ -6,7 +6,8 @@ versions are fixed by source, golden fixtures, schemas, and `PROTOCOL.md`.
 
 ## 1. Coordinates of a committed view
 
-Every authorized World operation is evaluated at two explicit coordinates:
+Every authorized World operation is evaluated at two explicit request
+coordinates:
 
 ```text
 (authority frontier, Manifest root)
@@ -17,8 +18,30 @@ selects the complete authenticated Body view. Runtime pins both before invoking
 a World and compares both again inside the Station writer before committing.
 Either coordinate changing causes the local operation to commit nothing.
 
-A query is also pinned to both coordinates. Derived output must never combine
-Bodies from one Manifest with policy or Bodies from another.
+A query additionally pins the complete semantic identity of the World read
+image:
+
+```text
+PublicationId {
+    manifest_root,
+    implementation_digest,
+    extractor_schema_digest,
+}
+```
+
+The root alone is insufficient: activating another reviewed implementation can
+change the meaning or extraction of unchanged Bodies. `PublicationId` is the
+portable coordinate stored in semantic records and historical queries. A live
+Station extends it with a local monotonic `MaterializationId`, because arriving
+keys or authority material can make an opaque Body readable without changing
+the Manifest. Cursors and local cache leases bind that complete
+`WorldPublicationId`; a materialization mismatch expires rather than falling
+forward.
+
+Derived output must never combine Bodies, implementation semantics, extractor
+semantics, or policy from different coordinates. Authority remains a request
+coordinate: the shared corpus is principal-neutral, and disclosure gates are
+applied before traversal, ranking, counting, or packing.
 
 ## 2. Durable stores and journals
 
@@ -151,8 +174,33 @@ does not carry, and must never carry, a list of Bodies: an advertisement whose
 size grows with the store is how a Space stops being able to announce itself.
 
 A Body entry names its concurrent heads and the `ContentRef`s that Body
-references. Content references are Manifest data — they must survive a restart
-and reach every participant — while the bytes they name are not.
+references. Each signed head binds Fabric causal `Material`: one checkpoint,
+its bounded delta tail, history/version coordinates, and the content-addressed
+`ArtifactRef` closure needed to reconstruct it. Ordinary collaborative edits
+therefore transfer and persist update-sized causal artifacts rather than a
+second whole-Body export. Out-of-order and duplicate artifacts are admissible;
+the declared final version and complete dependency closure must verify before
+publication.
+
+Full checkpoints are the ordinary cold-start base. A shallow checkpoint is an
+explicit compaction operation with a retention frontier, never a routine
+checkpoint: peers that can still author concurrent pre-frontier changes need a
+full checkpoint or retained history. Historical generation records name causal
+Material and reconstruct the nearest visible Body; they do not store plaintext
+or repeated `BodyExport` snapshots.
+
+Checkpoint creation is prepared before a collaborative Body reaches the hard
+tail bound. Crossing the soft watermark captures an immutable causal seed and
+builds the full checkpoint away from the committing writer. A later edit may
+install that checkpoint together with only the deltas it did not cover. The
+256-delta/8-MiB target is a maintenance watermark, not an action-path snapshot
+trigger. If the bounded worker cannot catch up, the tail may advance only to
+the explicit 4096-delta/128-MiB emergency envelope; beyond it the write returns
+typed checkpoint backpressure. No edit synchronously serializes a full Body
+merely because it was the Nth edit.
+
+Content references are Manifest data — they must survive a restart and reach
+every participant — while the bytes they name are not.
 
 An advertisement carries **both** indexes or it is refused. A `ContentRef` is a
 name; asking for the bytes behind it needs the geometry, the epoch, and the
@@ -258,10 +306,18 @@ local intents. Sweeping removes only what neither reaches.
 
 Engine exposes two Body representation classes:
 
-- atomic Bodies contain canonical application bytes and use Replica's explicit
-  concurrent-head policy;
-- collaborative Bodies use one Loro document per Body behind the generic Engine
-  interface.
+- atomic Bodies contain Arc-shared canonical application bytes and use Replica's
+  explicit concurrent-head policy;
+- collaborative Bodies have one independent Loro history per Body behind the
+  generic Engine interface. Cold state is an Arc-shared canonical export plus a
+  compact causal Version; only a bounded least-recently-used set is inflated as
+  live `LoroDoc`s for mutation.
+
+An immutable read generation shares each unchanged Body payload with Engine and
+with prior generations. It does not retain a second projected collaborative
+view. Projection and anchor resolution decode only the explicitly visited Body;
+recovery proves material once and hands that verified frozen image to the
+long-lived Engine without a second import.
 
 The collaborative algebra includes:
 
@@ -314,9 +370,9 @@ validates the bound identity without executing the World.
 ## 9. IssuesWorld data
 
 IssuesWorld is the canonical first-party World, not a privileged lower layer.
-Its Catalog has one deterministic Body identity per `(SpaceId, WorldId)` and is
-created atomically by `InitializeTracker`. Missing, wrong, or duplicate semantic
-Catalog state is corruption; it is never synthesized during open.
+`InitializeTracker` creates bounded singleton metadata and the migration marker;
+there is no Space-wide product-state Body. Missing, wrong, or duplicate
+semantic identity is corruption and is never synthesized during open.
 
 An issue attachment is a `ContentRef` and a size, not bytes. The record names
 content the content plane already holds, and the Body declares that reference —
@@ -324,16 +380,13 @@ which is what makes reachability, prefetch, and progress attribution work
 without anything decoding product bytes. `size` means plaintext bytes in both
 record shapes.
 
-Records written before the cutover carry their payload inline as base64 and are
-**read forever**. They are in Bodies in the field; a reader that refused them
-would lose files rather than migrate them. Nothing writes that shape any more,
-and the only encoder for it is gone. A record carries one or the other, never
-both, and a record carrying neither is refused rather than defaulted — a missing
-payload silently read as empty produces a zero-byte file and a success message,
-which is worse than an error.
+The pre-v1 migration resolves legacy inline attachment payloads into Content and
+rewrites their exact references before v4 activation. A v4 record carries a
+valid `ContentRef` or is refused; normal readers do not retain a second inline
+payload grammar.
 
-Issue content currently uses one Body per issue. Product schema—not Engine—defines
-the meaning of each field. The canonical conflict contract is:
+Product schema—not Engine—defines the meaning and conflict rule of each field.
+The canonical conflict contract is:
 
 - title and priority may use explicit deterministic scalar winner semantics;
 - project movement must keep issue membership and board projection consistent;
@@ -341,55 +394,31 @@ the meaning of each field. The canonical conflict contract is:
   concurrent live heads are a typed conflict until an authorized successor
   resolves them;
 - descriptions use collaborative text where interleaving is acceptable;
-- assignees and labels use membership sets;
-- semantic history uses immutable events, not the Loro oplog.
+- assignee, label, team, initiative, and other membership changes are stable
+  relation records rather than an aggregate set owned by another entity;
+- semantic history is immutable activity records, not the Loro oplog and not a
+  truncated Issue log.
 
-Comments are a hierarchy on the Issue Body: `tree:comments`, one node per
-comment, a reply a child of what it answers. That is what makes concurrent
-replies and concurrent re-parenting converge on one thread rather than on
-whichever `parent` field was projected last, and it removes the placement index
-a flat list required — an index the writer could only compute against its own
-view, so a peer behind by fifty comments wrote into the middle of a conversation
-it had not finished reading.
+Each comment is a deterministic record Body. Its immutable parent comment is a
+stable id, so concurrent replies survive without a shared tail or a positional
+tree insertion. Siblings are ordered by `(created_at, comment id)` from record
+fields. A reaction is one LWW register Body keyed by the exact
+`(issue, comment, emoji, actor)` tuple; concurrent actors therefore never
+overwrite one another and repeated intent is idempotent.
 
-Thread order is not the sequence. Siblings are ordered by `(created_at, comment
-id)` from the records themselves, which every replica computes identically
-whatever it had synced when it wrote. Comments written into `list:comments`
-before the cutover are read forever and sort into the same order, so a thread
-spanning it reads as one thread; `issue` schema version 2 declares version 1
-readable for exactly that reason.
+Sub-issue parentage and project links are stable relation Bodies. The corpus
+maintains forward and reverse adjacency and Geometry detects SCCs explicitly;
+no project-wide tree or map is rewritten to add one edge. A request that needs
+acyclic semantics validates the exact predecessor/publication and records a
+typed conflict when concurrent edges close a cycle.
 
-Sub-issue parentage is a tree anchored by issue id. New edits live in the
-project's relation Body; parent trees and maps written on the Catalog by earlier
-builds remain readable inputs. The map of child to parent let two peers create a
-cycle by parenting each under the other concurrently — each check passed against
-its own view, and nothing rejected the merge. A tree cannot hold one: the engine
-refuses the move that would close it, wherever that move is applied.
+An activity cursor names the stable record/order tuple, not a count of rows.
+Paging is over the shared ordered corpus posting, so adding or removing another
+record cannot silently shift a numeric resume position. A pull that returns
+nothing retains the supplied continuation coordinate.
 
-Issue history is a log: the last 512 events in Body state plus an exact count of
-everything ever recorded. As a List, every event an issue ever had was carried
-by every checkpoint of it, without bound. Events older than the window leave
-state and cannot be read once a checkpoint compacts the history behind them —
-the count still reports them, so a reader can always say how much happened even
-where it can no longer say what. Ordering is by the clock each event carries,
-with sequence position breaking ties inside a second.
-
-An activity cursor names a row, not a count of rows. `seq` is an ordinal for
-display; resumption uses the opaque token in `cursor`, built from the event's
-stable log-entry identity, because a trimmed log renumbers every position behind
-what it dropped and a caller resuming from a count would skip exactly that many
-rows in silence. A pull that returns nothing returns the token it was given.
-
-Reactions are one add-wins set per issue, naming their comment in the value.
-One set per comment meant one root container per reacted-to comment, and the
-projection walks every root on every read of the issue — including the reads
-that only want a title.
-
-The merged implementation still represents status as a register. That is
-sufficient for deterministic scalar convergence, but it does not preserve
-concurrent transition branches, and comment revisions and moderation remain
-unaddressed. Before those features are claimed, comments become first-class
-Comment Bodies:
+Comment revision and moderation can extend the comment record family without
+making the Issue Body coarse:
 
 ```text
 Comment
@@ -401,8 +430,6 @@ Comment
 
 Concurrent comment creation and replies all survive. Comment edits name their
 predecessor revision; concurrent edits remain multiple heads until resolved.
-Reaction membership is keyed by reaction and ActorId so a repeated reaction is
-idempotent and concurrent actors do not overwrite each other.
 
 These product rules must not introduce comment, issue, workflow, or project
 types into Mechanics, Engine, Replica, Runtime, or Comms.
@@ -460,67 +487,152 @@ difference is *found* — adoption still runs the full validation path above.
 
 ## 12. Projections and caches
 
-Projections are deterministic views of one committed Manifest and authority
-frontier. They are not replicated truth.
+Projections are deterministic reads of one published World image under one
+request's authority frontier. They are not replicated truth.
 
-Every derived cache entry is keyed by the exact Manifest root whose Bodies it
-contains. Per-Body reuse across roots additionally requires a reader-issued
-version stamp that proves byte-equivalent constituent heads. A zero or unknown
-root is not cacheable. A root mismatch rebuilds or advances before serving.
+`WorldPublication` is the one atom readers pin: an immutable Replica snapshot,
+its principal-neutral extracted corpus, and their exact `WorldPublicationId`.
+The Station swaps that atom whole. It never publishes snapshot, corpus, or
+coordinate pointers separately, and never serves an old corpus under a new
+implementation or Manifest root. Retained publications are bounded; a cursor
+whose publication or materialization has expired receives a typed expiration
+and must resnapshot.
 
-Activity, inbox, boards, graphs, aliases, and policy views must be reconstructable
-from canonical Bodies and Mechanics history. Observation frames are doorbells;
-after a reset or overrun, clients re-query the projection.
+A continuation leases the exact retained publication it names. Leases have a
+bounded lifetime and station-wide retained-memory budget, charged once per
+unique publication rather than once per cursor. Admission is based on the
+compact corpus shape, so a million-link publication may be retained while a
+second equally large pin is refused if it would exceed the station budget.
+Expiry and capacity refusal are typed; neither may fall forward to current
+state or recompute a page against different coordinates.
+
+The governing cost rule is:
+
+> Pay bounded incremental work once per published generation; share it
+> immutably; make every subsequent operation proportional to explicitly visited
+> or returned material.
+
+The corpus uses generation-local compact node identities, persistent indexes,
+bidirectional edge postings, and late result materialization. Updating one Body
+retracts that Body's prior extraction and inserts its replacement while sharing
+unchanged roots. Find is the only query evaluator: viewer, CLI, controller,
+Exec, and agent access paths submit the same typed operator DAG through a
+Session. Disclosure gates run before traversal, ranking, counts, and packing, so
+unauthorized material cannot influence even an aggregate or order.
+An ordered interval is one `Seek::FieldRange` with explicit inclusive or
+exclusive endpoints. Corpus seeks to the lower endpoint and stops at the upper
+endpoint before evaluator work; expressing the upper bound as a later `Keep`
+is not equivalent because it can visit unrelated postings after the interval
+and violate both deep-lookup latency and bounded metering.
+
+Activity, inbox, boards, graphs, aliases, and policy views remain
+reconstructable from canonical Bodies and Mechanics history. An Observation
+carries only authenticated attribution plus bounded, value-free Body/path/range
+changes. Collaborative text ranges carry Fabric anchors together with scalar
+offsets stamped to the exact candidate publication. The anchors preserve the
+causal endpoints while the offsets let a viewer render immediately at that
+publication; a range that cannot be proven degrades to `Dirty` instead of
+guessing. Observations are actionable feedback, not another state source: a
+client may use the range for cursor/highlight movement and a `Seek::Bodies` Find
+to refresh all affected entities in one bounded query. Dirty, reset, overrun,
+or expired coordinates require a fresh projection read.
+
+Feedback has one operation-correlated phase contract across human and agent
+access paths. `Sending` is painted locally within one frame before network or
+action-sized work. `Accepted` exists only after a bounded durable operation
+receipt, and `Committed` carries the exact terminal `WorldPublicationId`.
+While work is pending, the client retains the prior exact projection, loaded
+pages, selection, cursor, scroll position, and any deterministic optimistic
+overlay; refresh may not blank, collapse, or fall back to a different
+publication. Bounded progress is transient and may be coalesced, but it keeps
+the same operation identity and runs off UI, reactor, Replica, and publication
+locks. A refusal visibly reconciles the optimistic overlay with its typed
+cause. Therefore action size may affect completion time but never bounded
+time-to-feedback, continued interaction, or visual continuity.
 
 Blueprint is the Issues World bundled in Lait, not another layer in the generic
-engine. Lait supplies immutable generation-addressed Body reads. Blueprint owns
-the meanings of Issue, relation, Plan, project, team, label, milestone, status,
-and closure.
+engine. Lait owns publication, extraction, gates, Find, and causal storage.
+Blueprint owns the meanings and physical sharding of Issue, relation, Plan,
+project, team, label, milestone, status, and closure.
 
-A Plan revision stores only a bounded set of Issue roots and the World
-generation against which the revision was composed. Empty roots mean the whole
-project. It never stores phases, issue membership, coordinates, progress, or a
-chosen global shape. Those emerge from Issue complexity at read time:
+An Issue remains the durable core anchor. Its existing Body key and
+collaborative history survive migration so range anchors retain their Body and
+operation identity. V4 adds stable identity and alias roots; current board truth
+is not one flat placement register. Every move authors an immutable,
+predecessor-bound `IssueTransitionRecord` whose placement names a project,
+workflow state, stable block, and local position. Issue metadata retains an
+add-wins set of self-authenticating transition heads. Exactly one head emits a
+board placement, zero means absent or migration-incomplete, and multiple
+causally maximal heads are an explicit visible conflict that is inert on the
+board until a successor resolves it. Enrichment does not accumulate inside the
+Issue core: comments, reactions, durable activity, labels, assignments,
+membership, and other independently edited relationships are record-addressed
+Bodies.
+
+Board order is two-level and exact-publication scoped. A lane carries
+predecessor-bound topology heads; each stable `BoardBlock` carries an
+authenticated block-order label; each sole Issue transition carries a local
+label within that block. A leaf holds at most 128 Issues. Splitting a full leaf
+relabels at most that leaf and publishes exact-transition-fenced Issue overlays
+atomically with the topology successor; block maintenance is likewise fenced to
+the exact block revision. A stale overlay is ignored if its transition,
+project, state, or block no longer matches. Public traversal orders workflow
+states by their declaration, then blocks by `(block_order, BlockId)`, then
+members by `(local_position, IssueId)`, using one exact-`WorldPublicationId`
+nested continuation. No flat `PROJECT_STATE_POSITION` projection is current
+board truth.
+
+The old Space-wide Catalog is not replaced by one merely smaller project blob,
+nor by shards whose size depends on an unenforceable concurrent tail counter.
+A durable entity or relationship that can be edited independently owns its own
+deterministic Body: milestone, cycle, update, triage submission/decision/
+resolution, hierarchy/link edge, comment, reaction, activity event, label,
+workflow/role revision, Spec/Baseline revision, and initiative/team membership.
+Compact project Bodies contain only genuinely bounded singleton metadata or
+heads. The shared corpus and its schema postings are the directory and ordering
+surface; aggregate maps are not a second authoritative catalog. A stable
+relation is extracted as its own node, so each corpus node has one source Body
+and reverse traversal does not require cross-Body row assembly.
+
+V3 to v4 is one launcher-authorized, crash-resumable migration protocol, not one
+unbounded transaction and not a public Issue intent. Accepting the exact World
+update mints an in-process step capability bound to the source, migrator, and
+target identities; the caller cannot supply its actor or invoke the protocol
+through MCP. Its durable marker, canonical cursor, and audit log advance in
+deterministic batches below Replica's operation and byte ceilings. Issue roots
+are added in place. New record Bodies have deterministic keys, so a retry cannot
+allocate a second home for the same fact. A completed migration activates
+v4-only interpretation; pre-v1 Worlds use one-time migrations instead of
+carrying compatibility branches indefinitely.
+
+A Plan remains `Spec::Kind::Plan` and uses the immutable Spec revision DAG,
+links, lifecycle, and baseline semantics. A Plan revision stores a bounded root
+selection and the full portable `PublicationId` against which it was composed,
+never a root alone. Empty roots select the project. Phases, issue membership,
+progress, cycles, and a chosen global shape are derived rather than copied into
+the revision.
+
+Exact Issue and relation facts live in the corpus. Geometry is a separately
+named immutable analytical artifact keyed by:
 
 ```text
-Plan roots + project Issues at Manifest G
-  -> relation-connected components
-  -> dependency SCCs and longest-path layers
-  -> hierarchy depths and metadata facets
-  -> closed / ready / blocked / cycle / stalled state
-  -> positional residual loci
+WorldPublicationId
+  + projection schema digest
+  + canonical project/root selection fingerprint
 ```
 
-The compiler is deterministic and bounded by the Issue graph: ordered maps and
-stable ids break ties, strongly connected components and layering are linear in
-nodes plus edges, and no all-pairs closure is materialized. Disconnected patches
-are a valid forest. Branching, convergence, nested organisms, loops, and sparse
-unattached cells can coexist; the data model does not prescribe a crystalline
-template. Layout is a disposable projection of these coordinates.
+It preserves dependency SCCs, layers, containment regions, closure, slack, and
+residual loci without caching full result rows. Reads return `Ready`, `NotReady`,
+`Unavailable`, or `Expired` for that exact key; they never silently substitute
+the current graph. Budget estimation happens before global compilation.
 
-Issue links and sub-issue parentage write to one `issue_relations` Body per
-project. This prevents one global Catalog Body from becoming the write and parse
-hotspot for every topology edit. The parent relation is an engine tree, so a
-cycle is structurally unrepresentable. Boolean edge entries preserve explicit
-removal across the legacy Catalog representation. Existing Catalog relations
-remain readable and are deterministically overlaid by the project Bodies.
-
-`structure_status` audits current heads and visible topology that still rely on
-those compatibility reads. `structure_migrate` is the idempotent,
-administrator-authorized cutover: one bounded World transaction materializes
-the visible relations and writes equivalent immutable Spec successors with
-generation coordinates and root-only Plan data. It emits no Issue activity and
-never rewrites historical Spec or Baseline revisions. Legacy issue prose uses
-the separate source-preserving document upgrade so range anchors survive.
-
-Current geometry is keyed by `(Manifest root, project, canonical roots)` and may
-reuse per-Body parses by Body stamp. Historical geometry runs over the exact
-immutable read generation named by the revision. The Session holds no writer
-mutex while a World query executes; an in-memory generation clone is constant
-time because its Body maps are persistent, while the first cold historical read
-replays only the retained ancestry deltas and is then cached. A Station keeps at
-most 64 reconstructed generations hot; eviction drops only shared RAM roots,
-never durable lineage.
+This separation is required for exactness at scale. A single edge can turn a
+long acyclic chain into one strongly connected component, changing geometry for
+every node. No memory layout can make that semantic blast radius constant. Core
+facts and local lookup still publish immediately; globally sensitive Geometry
+may reuse prior structure or build as an explicit artifact whose source
+publication is visible. Fact freshness and analytical readiness are therefore
+both honest instead of one being hidden behind stale output.
 
 Projection distinguishes valid, absent, unavailable, and corrupt data. It must
 not turn an unavailable query into false zero counts or silently coerce malformed
@@ -540,10 +652,11 @@ Reliable signals are delivered or they fail loudly, and they are durable in no
 other sense. `crates/runtime/src/signal.rs` may not name the Replica writer or
 the Observation ring, and a parser gate enforces that: privacy cannot, because
 `Broadcaster::publish` is `pub(crate)` and the signal module sits inside that
-crate, while `StationCore::with_replica` is outright `pub`. One line is the
-whole distance between the design and a violation — a `publish` from signal code
-would journal nothing and still emit an Observation, which `StationHost::frame_for`
-turns into `activity_advanced` for anything carrying scopes.
+crate, while StationCore's explicit metadata/control Replica seams are public
+to the Runtime composition. One line is the whole distance between the design
+and a violation — a `publish` from signal code would journal nothing and still
+emit an Observation, which `StationHost::frame_for` turns into
+`activity_advanced` for anything carrying scopes.
 
 The parser gate is half of it. The other half runs: ten thousand delivered
 signals leave the frontier, every byte under the store directory, and the

@@ -36,26 +36,24 @@ const NOT_A_PRODUCT_CACHE: &[&str] = &[
 ];
 
 const REGISTERED_CACHES: &[(&str, &str, &str)] = &[
-    (
-        "RootKeyedCache",
-        "snapshot: exact [u8; 32] Manifest root; per-issue memo: Body version stamp (chain frontier + sorted head transaction commitments)",
-        "the_issues_world_cache_never_serves_across_roots",
-    ),
-    (
-        "cache",
-        "field of IssuesWorld holding the RootKeyedCache",
-        "the_issues_world_cache_never_serves_across_roots",
-    ),
-    (
-        "CACHED_ROOTS",
-        "the bound on warm roots (current + previous)",
-        "the_issues_world_cache_never_serves_across_roots",
-    ),
-    (
-        "cached_stamp",
-        "the per-issue memo's stamp comparand",
-        "the_issues_world_cache_never_serves_across_roots",
-    ),
+    // Empty on purpose.
+    //
+    // The product layer held one derived cache — `RootKeyedCache`, a field of
+    // `IssuesWorld` keyed by the exact Manifest root, with a per-issue memo
+    // reused across roots only under a reader-issued Body version stamp. The
+    // query rebuild removed it: reads are answered from Runtime's immutable
+    // publication, and Runtime owns generation sharing, so there is no second
+    // root-keyed projection truth to mix.
+    //
+    // Its rejection proof (`issues_world_cache.rs`) went with it, because a
+    // test driving a cache that no longer exists proves nothing, and a
+    // registration naming a deleted identifier reads as coverage it no longer
+    // provides. The property is structural now rather than guarded: mixing two
+    // roots is unrepresentable when nothing derived is retained across them.
+    //
+    // The gate below is what still earns its place — the moment a product file
+    // reintroduces a cache identifier, it fails until that cache is registered
+    // here with the root tuple it is keyed by and the test that proves it.
 ];
 
 fn workspace_root() -> PathBuf {

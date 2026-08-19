@@ -675,6 +675,10 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
             "runtime",
             &[
                 "beacon",
+                // The bounded description of what one accepted operation did,
+                // which the product surfaces need in order to render an
+                // outcome without re-reading the store.
+                "change",
                 "coordinates",
                 // World-declared durable Runs and their Attempts. The module
                 // supplies the context; its own naming gate below prevents
@@ -704,6 +708,10 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 // documentation. If this list grows a second mechanism, that
                 // is the signal to give them a crate of their own instead.
                 "poison",
+                // The immutable read image an exact query is answered from.
+                // Public because a caller pins one and asks again later; the
+                // identity travels with every product page and receipt.
+                "publication",
                 "signal",
                 "transient",
                 "world",

@@ -149,8 +149,12 @@ impl World for KvWorld {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
-            bytes: ctx.read_body(&self.body(&key)).unwrap_or_default(),
+            bytes: ctx
+                .read_body(&self.body(&key))?
+                .map(|bytes| bytes.as_ref().to_vec())
+                .unwrap_or_default(),
             frontier: replica::frontier::ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }

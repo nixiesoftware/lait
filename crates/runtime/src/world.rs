@@ -24,13 +24,15 @@ use replica::body::Schema;
 use replica::body::{BodyKey, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub use crate::action::{IdempotencyKey, RequestId, SignedWorldAction, WorldActionHeader};
 pub use crate::implementation::Implementation;
 pub use crate::registry::{Builder, Catalog, Declaration, Refusal};
 pub use crate::session::{
-    CommittedEffect, Conflict, Failure, Interruption, Observation, ObservationCursor,
-    ObservationStream, WorldGeneration, WorldSnapshotId, DEFAULT_OBSERVATION_CAPACITY,
+    AffectedWorldPublication, CommittedEffect, Conflict, DurableOperationReceipt, Failure,
+    Interruption, Observation, ObservationCursor, ObservationStream, OperationPublication,
+    OperationStatus, WorldGeneration, WorldSnapshotId, DEFAULT_OBSERVATION_CAPACITY,
     MAX_OBSERVATION_CAPACITY,
 };
 
@@ -55,8 +57,16 @@ pub enum Rejection {
     /// thing. The remedy is `world_upgrade`, and only a message that names the
     /// cause can name the remedy.
     NoActiveImplementation,
+    /// Authority selected an exact implementation for which this Station has
+    /// no matching executable package. Runtime must never invoke other code
+    /// under that implementation's receipts.
+    ImplementationUnavailable,
     Conflict,
     LimitExceeded,
+    /// Runtime could not produce an exact Body image for this callback. This
+    /// remains typed so retryable capacity/key arrival is never rendered as a
+    /// product contract violation or durable-state corruption.
+    BodyRead(BodyReadFailure),
     StateCorrupt,
     ContractViolation,
 }
@@ -337,12 +347,23 @@ impl replica::transaction::Signer for LocalIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Version(pub u32);
 
-/// Bounded resource requirements a World declares. Concrete bounds are frozen in
-/// S1; S0 reserves the shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Absolute Runtime ceiling for one decoded World Intent or Query payload.
+/// Reviewed World packages must declare a nonzero ceiling no larger than this.
+pub const MAX_PAYLOAD_BYTES: u32 = 2 * 1024 * 1024;
+
+/// Bounded resource requirements a World declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limits {
-    /// Maximum decoded Intent/Query payload size in bytes (`0` = Runtime default).
+    /// Maximum decoded Intent/Query payload size in bytes. Zero is invalid.
     pub max_payload_bytes: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_payload_bytes: MAX_PAYLOAD_BYTES,
+        }
+    }
 }
 
 /// A transient scope a World declares under
@@ -414,7 +435,8 @@ pub struct Descriptor {
     /// that shipped before Find existed.
     pub find_schemas: Vec<crate::find::Schema>,
     /// Exact package bindings for the declared Body sources. These coordinates
-    /// are checked one-to-one at composition; F0 does not invoke them.
+    /// are checked one-to-one at composition and invoked only while building
+    /// an immutable publication corpus.
     pub find_extractors: Vec<crate::find::Extractor>,
     /// Callable Exec contracts. Empty omits the Exec descriptor section and
     /// preserves the implementation identity of Worlds that do not adopt it.
@@ -431,12 +453,29 @@ pub struct Intent {
     pub payload: Vec<u8>,
 }
 
+impl Intent {
+    /// The exact payload commitment Runtime places in a signed World action
+    /// and durable idempotency receipt. Products must use this helper (or
+    /// `Session::operation_status_for`) rather than duplicating the hash
+    /// algorithm/domain when reconciling an operation after transport loss.
+    pub fn payload_hash(&self) -> [u8; 32] {
+        crate::action::payload_hash(&self.payload)
+    }
+}
+
 /// A decoded application query handed to a World.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Query {
     pub schema: replica::body::SchemaId,
     pub schema_version: u32,
     pub payload: Vec<u8>,
+    /// Portable semantic read publication. `None` selects the authority-active
+    /// current publication; `Some` resolves the installed implementation and
+    /// extractor contract named here and never reinterprets the root with the
+    /// ambient package. Callers reconciling an acknowledged local read image
+    /// pass its full `WorldPublicationId` separately to `Session::query_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<crate::publication::PublicationId>,
 }
 
 /// A runtime-owned create declaration: the immutable schema binding for a Body
@@ -531,6 +570,11 @@ pub struct Projection {
     pub schema_version: u32,
     pub bytes: Vec<u8>,
     pub frontier: replica::frontier::ReplicaFrontier,
+    /// Runtime stamps the exact immutable read image after the World callback.
+    /// Worlds return `None`; a Projection returned by Session always carries
+    /// `Some`, including implementation, extractor, and local materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<crate::publication::WorldPublicationId>,
     /// The canonical read demand this query required (mandatory, non-empty).
     /// Runtime evaluates it at the pinned frontier and returns no projection
     /// on denial.
@@ -664,12 +708,225 @@ impl ContentStatus {
     }
 }
 
+/// Safe coordinates for a failed exact Body read. The material digest is a
+/// one-way identity over the signed causal closure; no ArtifactRef, key epoch,
+/// opening key, plaintext, or store location crosses the World boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyReadCoordinate {
+    pub body: BodyKey,
+    pub material: Option<[u8; 32]>,
+}
+
+impl BodyReadCoordinate {
+    pub fn new(body: BodyKey, material: Option<[u8; 32]>) -> Self {
+        Self { body, material }
+    }
+}
+
+/// Why an exact immutable publication could not produce one Body image.
+///
+/// `BodyReader::read_body` returns `Ok(None)` only when `body` is absent from
+/// that exact snapshot. These failures must remain distinct: capacity is
+/// retryable after eviction, a key may arrive through authority/contact and
+/// create a new materialization (never make this exact publication silently
+/// readable), and corrupt authenticated material is an integrity fault rather
+/// than a missing domain record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BodyReadFailure {
+    /// This callback was deliberately constructed without a Body projection
+    /// capability. It is not evidence that any requested Body, schema page,
+    /// or Runtime Outcome is absent from the publication.
+    CapabilityUnavailable,
+    Opaque(BodyReadCoordinate),
+    NotCollaborative(BodyReadCoordinate),
+    SchemaAhead(BodyReadCoordinate),
+    KeyUnavailable(BodyReadCoordinate),
+    Corrupt(BodyReadCoordinate),
+    Capacity(BodyReadCoordinate),
+    MaterialUnavailable(BodyReadCoordinate),
+    PublicationExpired(BodyReadCoordinate),
+    Interrupted(BodyReadCoordinate),
+}
+
+impl BodyReadFailure {
+    pub fn coordinate(&self) -> Option<&BodyReadCoordinate> {
+        match self {
+            Self::CapabilityUnavailable => None,
+            Self::Opaque(coordinate)
+            | Self::NotCollaborative(coordinate)
+            | Self::SchemaAhead(coordinate)
+            | Self::KeyUnavailable(coordinate)
+            | Self::Corrupt(coordinate)
+            | Self::Capacity(coordinate)
+            | Self::MaterialUnavailable(coordinate)
+            | Self::PublicationExpired(coordinate)
+            | Self::Interrupted(coordinate) => Some(coordinate),
+        }
+    }
+}
+
+impl std::fmt::Display for BodyReadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for BodyReadFailure {}
+
+impl From<BodyReadFailure> for Rejection {
+    fn from(failure: BodyReadFailure) -> Self {
+        Self::BodyRead(failure)
+    }
+}
+
+/// Canonical Atomic Body bytes pinned to their physical-memory authority.
+///
+/// Cloning this guard shares both the Arc bytes and the Runtime cache lease;
+/// LRU eviction cannot release accounting while a World is still decoding the
+/// image. The API intentionally exposes no consuming `Vec` conversion: Worlds
+/// decode from `&*bytes` and do not create an unmetered full copy by default.
+#[derive(Clone)]
+pub struct BodyBytes {
+    bytes: Arc<[u8]>,
+    _image: Option<crate::body_image::PinnedBodyImage>,
+}
+
+impl BodyBytes {
+    /// Construct bytes for a detached/custom BodyReader. Hosted Runtime reads
+    /// use publication- or cache-pinned constructors internally.
+    pub fn owned(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes: Arc::from(bytes),
+            _image: None,
+        }
+    }
+
+    pub(crate) fn cached(bytes: Arc<[u8]>, image: crate::body_image::PinnedBodyImage) -> Self {
+        Self {
+            bytes,
+            _image: Some(image),
+        }
+    }
+}
+
+impl std::ops::Deref for BodyBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl AsRef<[u8]> for BodyBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::fmt::Debug for BodyBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BodyBytes")
+            .field("len", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for BodyBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+impl Eq for BodyBytes {}
+
+/// One canonical collaborative projection pinned to the exact material image
+/// and its Runtime memory authority.
+///
+/// The projected view is shared between warm readers of the same material
+/// identity. Cloning this guard shares both the view and the cache/image
+/// lease; callers inspect it through `Deref`/`AsRef` and cannot detach a deep
+/// unmetered copy accidentally.
+#[derive(Clone)]
+pub struct CollaborativeBody {
+    view: Arc<fabric::CollaborativeView>,
+    _image: Option<crate::body_image::PinnedBodyImage>,
+}
+
+impl CollaborativeBody {
+    /// Construct a detached view for a custom/test BodyReader. Hosted Runtime
+    /// reads always use publication- or cache-pinned constructors internally.
+    pub fn owned(view: fabric::CollaborativeView) -> Self {
+        Self {
+            view: Arc::new(view),
+            _image: None,
+        }
+    }
+
+    pub(crate) fn cached(
+        view: Arc<fabric::CollaborativeView>,
+        image: crate::body_image::PinnedBodyImage,
+    ) -> Self {
+        Self {
+            view,
+            _image: Some(image),
+        }
+    }
+}
+
+impl std::ops::Deref for CollaborativeBody {
+    type Target = fabric::CollaborativeView;
+
+    fn deref(&self) -> &Self::Target {
+        &self.view
+    }
+}
+
+impl AsRef<fabric::CollaborativeView> for CollaborativeBody {
+    fn as_ref(&self) -> &fabric::CollaborativeView {
+        self
+    }
+}
+
+impl std::fmt::Debug for CollaborativeBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CollaborativeBody")
+            .field("registers", &self.view.registers.len())
+            .field("maps", &self.view.maps.len())
+            .field("lists", &self.view.lists.len())
+            .field("texts", &self.view.texts.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for CollaborativeBody {
+    fn eq(&self, other: &Self) -> bool {
+        self.view == other.view
+    }
+}
+
+impl Eq for CollaborativeBody {}
+
 /// A read view of the committed Body snapshot, handed to a World during a query.
 /// It exposes only authorized canonical reads — no CRDT internals, no mutation, no keys.
 /// Runtime backs it with the Station's Replica.
 pub trait BodyReader {
-    /// The committed canonical bytes of an atomic Body, if present.
-    fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>>;
+    /// The committed canonical bytes of an atomic Body. `Ok(None)` means only
+    /// that the BodyKey is absent from this exact snapshot; opaque material,
+    /// key loss, corruption, capacity and closure expiry remain typed.
+    ///
+    /// A cold exact image may require bounded protected-store I/O, decryption,
+    /// and verification. Runtime performs that work without a Station-state or
+    /// Replica-mutation lock and accounts it in the shared read-memory
+    /// governor. Hosts of this synchronous World ABI must run ordinary
+    /// dispatch on a bounded blocking lane rather than a reactor thread.
+    /// `BodyBytes` pins the admitted resident image while its bytes are held.
+    ///
+    /// TODO(hosting-after-shared-landing): enforce bounded blocking admission
+    /// in the orbital host and cover it with a reactor-heartbeat regression.
+    fn read_body(&self, key: &BodyKey) -> Result<Option<BodyBytes>, BodyReadFailure>;
     /// The committed collaborative view of a Body. List elements carry the
     /// stable ids `ListRemove`/`ListMove` take. A Body binding a collaborative
     /// type this build does not implement is `SchemaAhead`, never a view with
@@ -677,11 +934,31 @@ pub trait BodyReader {
     fn read_collaborative_body(
         &self,
         key: &BodyKey,
-    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure>;
+    ) -> Result<Option<CollaborativeBody>, BodyReadFailure>;
     /// Every interpreted Body of `world` bound to `schema` — the
     /// singleton-integrity seam (a World validating that exactly its one
     /// deterministic instance of a schema exists).
     fn bodies_with_schema(&self, world: &WorldId, schema: &SchemaId) -> Vec<BodyKey>;
+
+    /// One canonical page of readable Body keys at a World/schema coordinate.
+    ///
+    /// Production snapshot readers seek the persistent schema directory, so
+    /// work is proportional to schema versions plus returned keys rather than
+    /// all Bodies. The default preserves detached test readers without making
+    /// a performance promise; hosted [`Context`] values are backed by the
+    /// indexed implementation.
+    fn body_keys_page_with_schema(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        after: Option<&BodyKey>,
+        limit: usize,
+    ) -> Vec<BodyKey> {
+        let mut keys = self.bodies_with_schema(world, schema);
+        keys.sort();
+        let start = after.map_or(0, |after| keys.partition_point(|key| key <= after));
+        keys.into_iter().skip(start).take(limit).collect()
+    }
 
     /// A Body's position in its collaborative history.
     ///
@@ -695,14 +972,24 @@ pub trait BodyReader {
     /// This is the seam plan 14's carets and range-attached comments consume,
     /// and it is exposed here rather than there because only the algebra that
     /// moves a position can mint one that survives being moved.
-    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor>;
+    fn anchor_in_body(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Result<Option<fabric::Anchor>, BodyReadFailure>;
 
     /// Resolve an anchor against a Body's current state.
     ///
-    /// Total and read-only: a position whose material was deleted, or whose
-    /// anchor predates what this replica retains, is `Drifted`. Never an error,
-    /// never a mutation, and never a silently wrong index.
-    fn resolve_anchor(&self, key: &BodyKey, anchor: &fabric::Anchor) -> fabric::AnchorResolution;
+    /// Read-only: a position whose material was deleted, or whose anchor
+    /// predates what this exact image retains, is `Drifted`. Failure to obtain
+    /// or project that image remains typed; it must never be disguised as
+    /// ordinary positional drift.
+    fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &fabric::Anchor,
+    ) -> Result<fabric::AnchorResolution, BodyReadFailure>;
 
     /// What one content is, and how much of it is here.
     ///
@@ -720,8 +1007,8 @@ pub trait BodyReader {
         _world: &WorldId,
         _run: crate::exec::RunId,
         _attempt: crate::exec::AttemptId,
-    ) -> Option<OutcomeFacts> {
-        None
+    ) -> Result<Option<OutcomeFacts>, BodyReadFailure> {
+        Err(BodyReadFailure::CapabilityUnavailable)
     }
 
     /// An opaque per-Body VERSION STAMP: two reads returning the same stamp
@@ -734,6 +1021,197 @@ pub trait BodyReader {
     }
 }
 
+/// Runtime-owned, read-only access to the shared Find publication selected for
+/// one World callback. Implementations never receive a Corpus or authority
+/// object: the capability is already pinned to an immutable publication and
+/// its principal gates, and every call re-enters Runtime's bounded evaluator.
+pub(crate) trait FindLease: Send + Sync {}
+
+pub(crate) trait FindReader: Send + Sync {
+    fn publication(&self) -> crate::publication::WorldPublicationId;
+    fn find(&self, query: crate::find::Query) -> Result<crate::find::Answer, crate::find::Failure>;
+    fn acquire_deferred(&self) -> Result<Arc<dyn FindLease>, crate::find::Failure>;
+    fn reserve_analysis(
+        &self,
+        transient_bytes: u64,
+    ) -> Result<AnalyticalMemoryReservation, crate::find::Failure>;
+}
+
+/// A Runtime-admitted transient allocation for exact-publication analytical
+/// work. Product workers must acquire this before queueing or scanning facts;
+/// successful artifacts convert it into a retained lease.
+pub struct AnalyticalMemoryReservation {
+    inner: Option<crate::session::AnalyticalBuildReservation>,
+}
+
+impl std::fmt::Debug for AnalyticalMemoryReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AnalyticalMemoryReservation")
+            .finish_non_exhaustive()
+    }
+}
+
+impl AnalyticalMemoryReservation {
+    pub(crate) fn new(inner: crate::session::AnalyticalBuildReservation) -> Self {
+        Self { inner: Some(inner) }
+    }
+
+    /// Convert transient worker capacity into exact retained artifact bytes.
+    /// Dropping the returned lease releases those bytes to the same Runtime
+    /// governor that owns the source publication.
+    pub fn retain(
+        mut self,
+        retained_bytes: u64,
+    ) -> Result<AnalyticalMemoryLease, crate::find::Failure> {
+        self.inner
+            .take()
+            .ok_or(crate::find::Failure::CursorCapacityExceeded)?
+            .retain(retained_bytes)
+            .map(|inner| AnalyticalMemoryLease { _inner: inner })
+            .map_err(|_| crate::find::Failure::CursorCapacityExceeded)
+    }
+}
+
+/// Physical-memory authority retained beside one immutable analytical artifact.
+/// Clone the artifact, not this lease; the cache entry is its single owner.
+pub struct AnalyticalMemoryLease {
+    _inner: crate::session::AnalyticalRetainedLease,
+}
+
+impl std::fmt::Debug for AnalyticalMemoryLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AnalyticalMemoryLease")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Cloneable, read-only access to one already-authorized immutable Find image.
+///
+/// Unlike [`Context`], this handle may be moved to a bounded product worker.
+/// It owns the exact publication and evaluated gate set, so deferred analytics
+/// neither re-enter Session nor consult whatever publication is current later.
+/// Every read still crosses the declared Find evaluator and its admission
+/// bounds; no Corpus or ungated storage surface is exposed.
+#[derive(Clone)]
+pub struct FindHandle {
+    reader: Arc<dyn FindReader>,
+    _deferred_lease: Option<Arc<dyn FindLease>>,
+}
+
+impl std::fmt::Debug for FindHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FindHandle")
+            .field("publication", &self.publication())
+            .finish_non_exhaustive()
+    }
+}
+
+impl FindHandle {
+    pub(crate) fn new(reader: Arc<dyn FindReader>) -> Self {
+        Self {
+            reader,
+            _deferred_lease: None,
+        }
+    }
+
+    fn deferred(&self) -> Result<Self, crate::find::Failure> {
+        Ok(Self {
+            reader: self.reader.clone(),
+            _deferred_lease: Some(self.reader.acquire_deferred()?),
+        })
+    }
+
+    pub fn publication(&self) -> crate::publication::WorldPublicationId {
+        self.reader.publication()
+    }
+
+    pub fn find(
+        &self,
+        query: crate::find::Query,
+    ) -> Result<crate::find::Answer, crate::find::Failure> {
+        self.reader.find(query)
+    }
+
+    /// Reserve bounded analytical working memory against the Runtime and
+    /// Station that own this handle's exact source publication.
+    pub fn reserve_analysis(
+        &self,
+        transient_bytes: u64,
+    ) -> Result<AnalyticalMemoryReservation, crate::find::Failure> {
+        self.reader.reserve_analysis(transient_bytes)
+    }
+}
+
+/// Principal-neutral read capability supplied to a declared Find extractor.
+///
+/// Extraction may derive shared corpus facts from one immutable publication;
+/// it cannot see an actor, device, grant, clock, mutable Replica, or network.
+/// Disclosure is represented by Gate references on the emitted rows and is
+/// applied later for each requesting principal.
+pub struct ExtractionContext<'a> {
+    reads: &'a dyn BodyReader,
+    world: &'a WorldId,
+    publication: crate::publication::WorldPublicationId,
+}
+
+impl<'a> ExtractionContext<'a> {
+    pub(crate) fn new(
+        reads: &'a dyn BodyReader,
+        world: &'a WorldId,
+        publication: crate::publication::WorldPublicationId,
+    ) -> Self {
+        Self {
+            reads,
+            world,
+            publication,
+        }
+    }
+
+    pub fn manifest_root(&self) -> [u8; 32] {
+        self.publication.publication.manifest_root
+    }
+
+    /// The complete immutable read coordinate this extraction will publish
+    /// into. Manifest identity alone is insufficient because implementation,
+    /// extractor declaration, and Station-local readability may move
+    /// independently.
+    pub fn world_publication_id(&self) -> crate::publication::WorldPublicationId {
+        self.publication
+    }
+
+    pub fn read_body(&self, key: &BodyKey) -> Result<Option<BodyBytes>, BodyReadFailure> {
+        if key.world != *self.world {
+            return Err(BodyReadFailure::Opaque(BodyReadCoordinate::new(
+                key.clone(),
+                None,
+            )));
+        }
+        self.reads.read_body(key)
+    }
+
+    pub fn read_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<Option<CollaborativeBody>, BodyReadFailure> {
+        if key.world != *self.world {
+            return Err(BodyReadFailure::Opaque(BodyReadCoordinate::new(
+                key.clone(),
+                None,
+            )));
+        }
+        self.reads.read_collaborative_body(key)
+    }
+
+    pub fn body_stamp(&self, key: &BodyKey) -> Option<Vec<u8>> {
+        (key.world == *self.world)
+            .then(|| self.reads.body_stamp(key))
+            .flatten()
+    }
+}
+
 /// The bounded capability handed to World callbacks. It exposes the principal
 /// facts, authorized reads of the stable committed snapshot (during a query),
 /// and **nothing** below the boundary: no CRDT internals, no mutable storage, no keys, no
@@ -742,23 +1220,54 @@ pub trait BodyReader {
 pub struct Context<'a> {
     principal: &'a PrincipalFacts,
     reads: Option<&'a dyn BodyReader>,
+    /// Frozen lifecycle planning source, distinct from current commit-parent
+    /// reads. Only `submit_lifecycle_from` supplies it.
+    lifecycle_reads: Option<&'a dyn BodyReader>,
     outcome_world: Option<&'a WorldId>,
     request: Option<crate::action::RequestId>,
     /// The committed Manifest root this callback is pinned to (the parent of a
     /// submitted transaction; the snapshot root of a query).
     manifest_root: [u8; 32],
+    world_publication: Option<crate::publication::WorldPublicationId>,
+    find: Option<FindHandle>,
+    /// Non-serializable host provenance. Only the composition-owned lifecycle
+    /// Session entrypoint sets it; signed intent bytes cannot assert it.
+    lifecycle_upgrade: bool,
+    /// Exact immutable source used to prepare a lifecycle action. The local
+    /// materialization is intentionally callback-only; durable lifecycle
+    /// records persist the portable publication plus its frontier.
+    lifecycle_source: Option<LifecycleSourceCoordinate>,
+}
+
+/// Exact, immutable source admitted for one composition-owned lifecycle step.
+///
+/// `publication.publication` is portable across Station activations; the full
+/// `publication` coordinate pins one local materialization for this callback.
+/// `frontier` lets the product bind its deterministic plan to the same causal
+/// cut instead of silently scanning a moving current snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleSourceCoordinate {
+    pub publication: crate::publication::WorldPublicationId,
+    pub frontier: replica::frontier::ReplicaFrontier,
 }
 
 impl<'a> Context<'a> {
+    /// Largest durable migration/admin page accepted by one callback.
+    pub const MAX_BODY_KEY_PAGE: usize = 4_096;
     /// Construct a context over a principal's facts with no read access (submit
     /// authorizes and stages; it does not read the snapshot).
     pub fn new(principal: &'a PrincipalFacts) -> Self {
         Self {
             principal,
             reads: None,
+            lifecycle_reads: None,
             outcome_world: None,
             request: None,
             manifest_root: [0u8; 32],
+            world_publication: None,
+            find: None,
+            lifecycle_upgrade: false,
+            lifecycle_source: None,
         }
     }
 
@@ -772,9 +1281,14 @@ impl<'a> Context<'a> {
         Self {
             principal,
             reads: Some(reads),
+            lifecycle_reads: None,
             outcome_world: None,
             request: None,
             manifest_root,
+            world_publication: None,
+            find: None,
+            lifecycle_upgrade: false,
+            lifecycle_source: None,
         }
     }
 
@@ -783,15 +1297,42 @@ impl<'a> Context<'a> {
     pub(crate) fn with_world_reads(
         principal: &'a PrincipalFacts,
         reads: &'a dyn BodyReader,
+        publication: crate::publication::WorldPublicationId,
+        world: &'a WorldId,
+        find: FindHandle,
+    ) -> Self {
+        Self {
+            principal,
+            reads: Some(reads),
+            lifecycle_reads: None,
+            outcome_world: Some(world),
+            request: None,
+            manifest_root: publication.publication.manifest_root,
+            world_publication: Some(publication),
+            find: Some(find),
+            lifecycle_upgrade: false,
+            lifecycle_source: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_world_reads_for_test(
+        principal: &'a PrincipalFacts,
+        reads: &'a dyn BodyReader,
         manifest_root: [u8; 32],
         world: &'a WorldId,
     ) -> Self {
         Self {
             principal,
             reads: Some(reads),
+            lifecycle_reads: None,
             outcome_world: Some(world),
             request: None,
             manifest_root,
+            world_publication: None,
+            find: None,
+            lifecycle_upgrade: false,
+            lifecycle_source: None,
         }
     }
 
@@ -804,22 +1345,173 @@ impl<'a> Context<'a> {
     pub(crate) fn with_world_submission(
         principal: &'a PrincipalFacts,
         reads: &'a dyn BodyReader,
-        manifest_root: [u8; 32],
+        lifecycle_reads: Option<&'a dyn BodyReader>,
+        publication: crate::publication::WorldPublicationId,
         world: &'a WorldId,
         request: crate::action::RequestId,
+        find: FindHandle,
+        lifecycle_source: Option<LifecycleSourceCoordinate>,
     ) -> Self {
         Self {
             principal,
             reads: Some(reads),
+            lifecycle_reads,
             outcome_world: Some(world),
             request: Some(request),
-            manifest_root,
+            manifest_root: publication.publication.manifest_root,
+            world_publication: Some(publication),
+            find: Some(find),
+            lifecycle_upgrade: lifecycle_source.is_some(),
+            lifecycle_source,
         }
+    }
+
+    /// Construct a read-only lifecycle planning context over an exact retained
+    /// publication. Planning runs before mutation-lane admission; it cannot
+    /// stage or commit an effect through this capability.
+    pub(crate) fn with_lifecycle_reads(
+        principal: &'a PrincipalFacts,
+        reads: &'a dyn BodyReader,
+        source: LifecycleSourceCoordinate,
+        world: &'a WorldId,
+        find: FindHandle,
+    ) -> Self {
+        Self {
+            principal,
+            reads: Some(reads),
+            lifecycle_reads: Some(reads),
+            outcome_world: Some(world),
+            request: None,
+            manifest_root: source.publication.publication.manifest_root,
+            world_publication: Some(source.publication),
+            find: Some(find),
+            lifecycle_upgrade: true,
+            lifecycle_source: Some(source),
+        }
+    }
+
+    /// Whether this callback was entered by the composition-owned, durably
+    /// consented World lifecycle path. This provenance is not serialized and
+    /// cannot be supplied by an ordinary signed World action.
+    pub fn is_lifecycle_upgrade(&self) -> bool {
+        self.lifecycle_upgrade
+    }
+
+    /// Frozen causal source whose deterministic bounded plan this lifecycle
+    /// callback is validating. Ordinary World calls always return `None`.
+    pub fn lifecycle_source(&self) -> Option<&LifecycleSourceCoordinate> {
+        self.lifecycle_source.as_ref()
+    }
+
+    /// Read one Body from the exact frozen lifecycle source rather than the
+    /// moving commit parent. `Ok(None)` means absent from that exact source;
+    /// ordinary submissions receive `CapabilityUnavailable`.
+    pub fn read_lifecycle_source_body(
+        &self,
+        key: &BodyKey,
+    ) -> Result<Option<BodyBytes>, BodyReadFailure> {
+        let world = self
+            .outcome_world
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?;
+        if key.world != *world {
+            return Err(BodyReadFailure::Opaque(BodyReadCoordinate::new(
+                key.clone(),
+                None,
+            )));
+        }
+        self.lifecycle_reads
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?
+            .read_body(key)
+    }
+
+    /// Read one collaborative Body from the same frozen lifecycle source.
+    pub fn read_lifecycle_source_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<Option<CollaborativeBody>, BodyReadFailure> {
+        let world = self
+            .outcome_world
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?;
+        if key.world != *world {
+            return Err(BodyReadFailure::Opaque(BodyReadCoordinate::new(
+                key.clone(),
+                None,
+            )));
+        }
+        self.lifecycle_reads
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?
+            .read_collaborative_body(key)
+    }
+
+    /// One canonical page from the frozen lifecycle source. The same hard
+    /// per-callback page bound as ordinary Context paging applies.
+    pub fn lifecycle_source_body_keys_page_with_schema(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        after: Option<&BodyKey>,
+        limit: usize,
+    ) -> Result<Vec<BodyKey>, BodyReadFailure> {
+        let outcome_world = self
+            .outcome_world
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?;
+        if world != outcome_world || limit == 0 || limit > Self::MAX_BODY_KEY_PAGE {
+            return Err(BodyReadFailure::CapabilityUnavailable);
+        }
+        Ok(self
+            .lifecycle_reads
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?
+            .body_keys_page_with_schema(world, schema, after, limit))
     }
 
     /// The committed Manifest root this callback is pinned to.
     pub fn manifest_root(&self) -> [u8; 32] {
         self.manifest_root
+    }
+
+    /// The complete immutable World read coordinate selected for this hosted
+    /// callback. Detached fixture contexts do not claim one.
+    pub fn world_publication_id(&self) -> Option<crate::publication::WorldPublicationId> {
+        self.world_publication
+    }
+
+    /// Run one declared, bounded query against this callback's exact shared
+    /// publication and already-evaluated principal gates. No mutable or
+    /// ungated Corpus access crosses the World boundary.
+    pub fn find(
+        &self,
+        query: crate::find::Query,
+    ) -> Result<crate::find::Answer, crate::find::Failure> {
+        let find = self
+            .find
+            .as_ref()
+            .ok_or(crate::find::Failure::Unavailable)?;
+        if self.world_publication != Some(find.publication()) {
+            return Err(crate::find::Failure::Unavailable);
+        }
+        find.find(query)
+    }
+
+    /// Detach this callback's exact, gated Find capability for bounded
+    /// background projection work. Creating the handle is O(1); extraction or
+    /// traversal begins only when the worker calls [`FindHandle::find`].
+    pub fn deferred_find(&self) -> Result<Option<FindHandle>, Rejection> {
+        self.find
+            .as_ref()
+            .map(FindHandle::deferred)
+            .transpose()
+            .map_err(|failure| match failure {
+                crate::find::Failure::CursorCapacityExceeded => Rejection::LimitExceeded,
+                _ => Rejection::ContractViolation,
+            })
+    }
+
+    /// The authenticated persistent action coordinate for this submission.
+    /// Query and detached contexts return `None`. A World may use these bytes
+    /// only as deterministic input to its own domain-separated identity
+    /// derivation; Runtime still owns mutation admission and Body containment.
+    pub fn request_id(&self) -> Option<crate::action::RequestId> {
+        self.request
     }
 
     /// The stable Run id Runtime will assign to `command` in this submission.
@@ -850,6 +1542,26 @@ impl<'a> Context<'a> {
             .unwrap_or_default()
     }
 
+    /// Seek one bounded, publication-pinned page of Body keys for a schema.
+    /// `after` is an exclusive durable BodyKey cursor, not a process-local
+    /// iterator or Find cursor; callers persist `(phase, after)` and resubmit
+    /// the next batch explicitly.
+    pub fn body_keys_page_with_schema(
+        &self,
+        world: &WorldId,
+        schema: &SchemaId,
+        after: Option<&BodyKey>,
+        limit: usize,
+    ) -> Result<Vec<BodyKey>, Rejection> {
+        if limit == 0 || limit > Self::MAX_BODY_KEY_PAGE {
+            return Err(Rejection::LimitExceeded);
+        }
+        let reads = self
+            .reads
+            .ok_or_else(|| Rejection::BodyRead(BodyReadFailure::CapabilityUnavailable))?;
+        Ok(reads.body_keys_page_with_schema(world, schema, after, limit))
+    }
+
     /// The derived facts for the docked principal. A World authorizes against
     /// these; it cannot replace them.
     pub fn principal(&self) -> &PrincipalFacts {
@@ -857,12 +1569,19 @@ impl<'a> Context<'a> {
     }
 
     /// Read a World-owned atomic Body from the stable committed snapshot.
-    /// Returns `None` if the Body is absent, this context has no read access,
-    /// or its schema is Runtime-reserved. Runtime-owned Exec truth is exposed
-    /// only through typed, independently authorized facades such as the later
-    /// `Context::outcome`, never through raw Body decoding.
-    pub fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>> {
-        self.reads.and_then(|r| r.read_body(key))
+    /// `Ok(None)` means the Body is absent from the exact pinned snapshot.
+    /// Lack of read capability and Runtime-reserved/opaque material are typed
+    /// failures. Runtime-owned Exec truth remains available only through
+    /// independently authorized facades such as [`Context::outcome`].
+    pub fn read_body(&self, key: &BodyKey) -> Result<Option<BodyBytes>, BodyReadFailure> {
+        self.reads.map_or_else(
+            || {
+                Err(BodyReadFailure::MaterialUnavailable(
+                    BodyReadCoordinate::new(key.clone(), None),
+                ))
+            },
+            |reads| reads.read_body(key),
+        )
     }
 
     /// A Body's causal position, for comparison and for stamping anchors.
@@ -871,21 +1590,38 @@ impl<'a> Context<'a> {
     }
 
     /// Take an anchor at a position inside a collaborative value.
-    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
-        self.reads
-            .and_then(|r| r.anchor_in_body(key, path, position))
+    pub fn anchor(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Result<Option<fabric::Anchor>, BodyReadFailure> {
+        self.reads.map_or_else(
+            || {
+                Err(BodyReadFailure::MaterialUnavailable(
+                    BodyReadCoordinate::new(key.clone(), None),
+                ))
+            },
+            |reads| reads.anchor_in_body(key, path, position),
+        )
     }
 
-    /// Resolve an anchor. Total: `Drifted` rather than an error or a guess.
+    /// Resolve an anchor against the pinned publication. A genuinely deleted
+    /// position is `Ok(Drifted)`; key loss, capacity and corrupt material are
+    /// typed failures rather than counterfeit drift.
     pub fn resolve_anchor(
         &self,
         key: &BodyKey,
         anchor: &fabric::Anchor,
-    ) -> fabric::AnchorResolution {
-        match self.reads {
-            Some(reads) => reads.resolve_anchor(key, anchor),
-            None => fabric::AnchorResolution::Drifted,
-        }
+    ) -> Result<fabric::AnchorResolution, BodyReadFailure> {
+        self.reads.map_or_else(
+            || {
+                Err(BodyReadFailure::MaterialUnavailable(
+                    BodyReadCoordinate::new(key.clone(), None),
+                ))
+            },
+            |reads| reads.resolve_anchor(key, anchor),
+        )
     }
 
     /// What one content is, and how much of it is here.
@@ -894,16 +1630,19 @@ impl<'a> Context<'a> {
     }
 
     /// Read Runtime-decoded facts for one exactly-once returned Outcome from
-    /// the same committed snapshot as every other Context read.
+    /// the same committed snapshot as every other Context read. Protected Run
+    /// material enters the same governed Body-image resolver and therefore
+    /// preserves key/capacity/integrity failure instead of reporting absence.
     pub fn outcome(
         &self,
         run: crate::exec::RunId,
         attempt: crate::exec::AttemptId,
-    ) -> Option<OutcomeFacts> {
-        self.reads.and_then(|reads| {
-            self.outcome_world
-                .and_then(|world| reads.outcome(world, run, attempt))
-        })
+    ) -> Result<Option<OutcomeFacts>, BodyReadFailure> {
+        let reads = self.reads.ok_or(BodyReadFailure::CapabilityUnavailable)?;
+        let world = self
+            .outcome_world
+            .ok_or(BodyReadFailure::CapabilityUnavailable)?;
+        reads.outcome(world, run, attempt)
     }
 
     /// Read a World-owned collaborative Body's view from the stable committed
@@ -912,10 +1651,12 @@ impl<'a> Context<'a> {
     pub fn read_collaborative(
         &self,
         key: &BodyKey,
-    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
+    ) -> Result<Option<CollaborativeBody>, BodyReadFailure> {
         match self.reads {
             Some(reads) => reads.read_collaborative_body(key),
-            None => Err(fabric::projection::Failure::NotCollaborative),
+            None => Err(BodyReadFailure::MaterialUnavailable(
+                BodyReadCoordinate::new(key.clone(), None),
+            )),
         }
     }
 }
@@ -977,9 +1718,23 @@ pub trait World: Send + Sync + 'static {
     ///
     /// Runtime composition requires one binding for every declared source and
     /// refuses missing, extra, duplicated, or cross-wired coordinates. The
-    /// executable callback arrives with the evaluator after F0.
+    /// ABI and semantic digest are part of the extractor contract; changing
+    /// executable meaning changes the publication identity.
     fn find_extractors(&self) -> &[crate::find::Extractor] {
         &[]
+    }
+
+    /// Derive this package's principal-neutral Find rows for one exact Body
+    /// source binding. Runtime invokes it only for coordinates declared by
+    /// [`Self::find_extractors`] and validates the returned body/schema/gates
+    /// before a publication becomes ready.
+    fn extract(
+        &self,
+        _ctx: &ExtractionContext<'_>,
+        _extractor: &crate::find::Extractor,
+        _body: &BodyKey,
+    ) -> Result<crate::find::BodyExtraction, Rejection> {
+        Err(Rejection::ContractViolation)
     }
 
     /// Callable Exec Specs implemented by this World package.
@@ -1003,6 +1758,17 @@ pub trait World: Send + Sync + 'static {
 mod tests {
     use super::*;
 
+    fn principal() -> PrincipalFacts {
+        let device = mechanics::actor::device_from_seed(&[0x51; 32]);
+        PrincipalFacts {
+            actor: ActorId::from_incept_hash(&"51".repeat(32)),
+            station: Key::from_device(&device).expect("valid Station key"),
+            device,
+            space: mechanics::ids::SpaceId::from_digest([0x52; 16]),
+            authority_frontier: AuthorityFrontier::from_canonical_bytes(Vec::new()),
+        }
+    }
+
     #[test]
     fn effect_serde_round_trips_exec_through_the_canonical_command_codec() {
         let effect = Effect {
@@ -1021,5 +1787,25 @@ mod tests {
         let decoded: Effect = postcard::from_bytes(&bytes).unwrap();
 
         assert_eq!(decoded, effect);
+    }
+
+    #[test]
+    fn detached_context_never_reports_missing_schema_or_outcome_truth() {
+        let principal = principal();
+        let context = Context::new(&principal);
+        let world = WorldId::parse("com.example.detached").expect("valid World id");
+        let schema = SchemaId::parse("com.example.record").expect("valid Schema id");
+
+        assert!(matches!(
+            context.body_keys_page_with_schema(&world, &schema, None, 1),
+            Err(Rejection::BodyRead(BodyReadFailure::CapabilityUnavailable))
+        ));
+        assert!(matches!(
+            context.outcome(
+                crate::exec::RunId::from_bytes([0x53; 16]),
+                crate::exec::AttemptId::from_bytes([0x54; 16]),
+            ),
+            Err(BodyReadFailure::CapabilityUnavailable)
+        ));
     }
 }

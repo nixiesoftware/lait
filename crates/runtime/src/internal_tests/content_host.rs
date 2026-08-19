@@ -632,7 +632,7 @@ fn installing_one_staged_chunk_leaves_the_rest_of_the_transfer_alone() {
     assert_eq!(descriptor.chunk_count, 3);
     receiver
         .core
-        .with_replica(|replica| {
+        .with_replica_metadata(|replica| {
             replica.commit_content(
                 &commit_ctx(&signer, &space),
                 std::slice::from_ref(&descriptor),
@@ -826,7 +826,7 @@ fn an_ingest_holds_its_content_until_something_declares_it() {
     // readable afterwards — the bytes were never at risk, the descriptor was.
     let collected = fx
         .core
-        .with_replica(|replica| replica.sweep_unreferenced_content(&ctx, None))
+        .with_replica_metadata(|replica| replica.sweep_unreferenced_content(&ctx, None))
         .expect("sweep");
     assert!(
         collected.is_empty(),
@@ -840,14 +840,14 @@ fn an_ingest_holds_its_content_until_something_declares_it() {
     // Let go of the hold and the same sweep collects, so the window is a
     // window and not a permanent exemption.
     fx.core
-        .with_replica(|replica| {
+        .with_replica_control(|replica| {
             replica.release_content_hold(&content);
             Ok(())
         })
         .unwrap();
     assert_eq!(
         fx.core
-            .with_replica(|replica| replica.sweep_unreferenced_content(&ctx, None))
+            .with_replica_metadata(|replica| replica.sweep_unreferenced_content(&ctx, None))
             .unwrap(),
         vec![content]
     );

@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use crate::orbital::{
     BootstrapContext, FounderGrant, InitialScope, Invalidation, ObservationProjector,
-    StatusProjection, WorldLifecycle, WorldPackage, WorldPackages,
+    ReviewedImplementation, StatusProjection, WorldLifecycle, WorldPackage, WorldPackages,
+    WorldUpgradeAssessment, WorldUpgradeContext, WorldUpgradeProgress,
 };
 use runtime::poison::LockRecovering;
 use world_interface::WorldClientRegistry;
@@ -47,6 +48,25 @@ pub fn package() -> WorldPackage {
         .with_exec(exec)
         .with_projector(projector)
         .with_lifecycle(Arc::new(IssuesLifecycle))
+}
+
+/// The exact historical Issues package used only while the composition-owned
+/// lifecycle worker advances a consented store. It is installed for exact
+/// Session resolution but is never selected for a new Space.
+#[allow(clippy::expect_used)]
+fn issues_migrator_package() -> WorldPackage {
+    let world = IssuesWorld::migrator();
+    let implementation = IssuesWorld::migrator_implementation_descriptor()
+        .id()
+        .expect("canonical Issues migrator implementation descriptor");
+    let control = Arc::new(issues_app::IssuesCallHandler);
+    let projector = Arc::new(IssuesProjector::default());
+    let exec = runtime::exec::Package::new().with_spec(issues::contract::verify_spec());
+    WorldPackage::new(Arc::new(world), implementation)
+        .with_control(control)
+        .with_exec(exec)
+        .with_projector(projector)
+        .historical()
 }
 
 /// The Signage World's host-side semantic package. The shell only sees the
@@ -119,6 +139,7 @@ impl ObservationProjector for SignageProjector {
                 schema: signage::contract::program_schema(),
                 schema_version: signage::contract::PROGRAM_SCHEMA_VERSION,
                 payload: serde_json::to_vec(&signage::SignageQuery::Programs).ok()?,
+                publication: None,
             })
             .ok()?;
         let signage::SignageProjection::Programs { programs } =
@@ -236,12 +257,95 @@ impl WorldLifecycle for IssuesLifecycle {
             initial_project,
         )
     }
+
+    fn assess_upgrade(
+        &self,
+        active: Option<ReviewedImplementation>,
+        preferred: ReviewedImplementation,
+    ) -> anyhow::Result<WorldUpgradeAssessment> {
+        use issues_app::lifecycle::{ImplementationCoordinate, UpgradeAssessment};
+        let coordinate = |value: ReviewedImplementation| ImplementationCoordinate {
+            id: value.id,
+            version: value.version,
+        };
+        let reviewed = |value: ImplementationCoordinate| ReviewedImplementation {
+            id: value.id,
+            version: value.version,
+        };
+        Ok(
+            match issues_app::lifecycle::assess_upgrade(
+                active.map(coordinate),
+                coordinate(preferred),
+            ) {
+                UpgradeAssessment::Current => WorldUpgradeAssessment::Current,
+                UpgradeAssessment::Direct => WorldUpgradeAssessment::Direct,
+                UpgradeAssessment::ConsentRequired { migrator } => {
+                    WorldUpgradeAssessment::ConsentRequired {
+                        migrator: reviewed(migrator),
+                    }
+                }
+                UpgradeAssessment::InProgress { migrator } => WorldUpgradeAssessment::InProgress {
+                    migrator: reviewed(migrator),
+                },
+                UpgradeAssessment::Unsupported { reason } => {
+                    WorldUpgradeAssessment::Unsupported { reason }
+                }
+            },
+        )
+    }
+
+    fn verification_migrator(
+        &self,
+        _preferred: ReviewedImplementation,
+    ) -> Option<ReviewedImplementation> {
+        let migrator = issues_app::lifecycle::migrator_implementation();
+        Some(ReviewedImplementation {
+            id: migrator.id,
+            version: migrator.version,
+        })
+    }
+
+    fn upgrade_step(
+        &self,
+        context: WorldUpgradeContext<'_>,
+    ) -> anyhow::Result<WorldUpgradeProgress> {
+        use issues_app::lifecycle::{ImplementationCoordinate, UpgradeProgress};
+        let coordinate = |value: ReviewedImplementation| ImplementationCoordinate {
+            id: value.id,
+            version: value.version,
+        };
+        let progress =
+            issues_app::lifecycle::upgrade_step(issues_app::lifecycle::UpgradeContext {
+                space: context.space,
+                session: context.session,
+                identity: context.identity,
+                device: context.device,
+                active: coordinate(context.active),
+                migrator: coordinate(context.migrator),
+                preferred: coordinate(context.preferred),
+                source: context.source,
+                record: context.record,
+            })?;
+        Ok(match progress {
+            UpgradeProgress::Pending {
+                completed,
+                remaining,
+                record,
+            } => WorldUpgradeProgress::Pending {
+                completed,
+                remaining,
+                record,
+            },
+            UpgradeProgress::Verified { record } => WorldUpgradeProgress::Verified { record },
+        })
+    }
 }
 
 /// Every product World this build bundles, for the host side.
 pub fn bundled_packages() -> WorldPackages {
     WorldPackages::new()
         .with_package(package())
+        .with_package(issues_migrator_package())
         .with_package(signage_package())
 }
 

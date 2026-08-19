@@ -169,7 +169,7 @@ fn commit_register(
     r.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],
@@ -376,6 +376,11 @@ fn holdings(r: &Replica) -> std::collections::BTreeSet<(BodyKey, [u8; 32])> {
     r.head_commitments().into_iter().collect()
 }
 
+fn artifact_pack_count(pack: &[u8]) -> usize {
+    assert_eq!(pack.first(), Some(&1), "artifact pack version");
+    usize::from(u16::from_be_bytes([pack[1], pack[2]]))
+}
+
 fn second_body() -> BodyKey {
     BodyKey::new(world(), BodyId::from_bytes([10u8; 16]))
 }
@@ -401,7 +406,7 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
     a.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],
@@ -454,6 +459,47 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
     assert!(idle.bodies.is_empty(), "idle delta ships no bodies");
     let outcome = pull_staged(&mut b, &SEED_B, &idle).unwrap();
     assert!(!outcome.advanced(), "an empty delta changes nothing");
+}
+
+#[test]
+fn a_hot_body_pull_ships_only_the_new_artifact_and_converges() {
+    let mut a = keyed_replica();
+    let mut b = keyed_replica();
+    commit_register(&mut a, &SEED_A, [61u8; 16], "first", "alpha").unwrap();
+    pull(&mut b, &SEED_B, &a, &SEED_A);
+    let held = holdings(&b);
+
+    commit_register(&mut a, &SEED_A, [62u8; 16], "second", "beta").unwrap();
+    let full = stage(&a, &SEED_A);
+    let delta = stage_excluding(&a, &SEED_A, &held);
+
+    assert_eq!(full.bodies.len(), 1);
+    assert_eq!(delta.bodies.len(), 1);
+    let full_count = artifact_pack_count(&full.bodies[0].2);
+    let delta_count = artifact_pack_count(&delta.bodies[0].2);
+    eprintln!(
+        "hot-peer artifact delivery: full={full_count} artifacts/{} bytes, incremental={delta_count} artifact/{} bytes",
+        full.bodies[0].2.len(),
+        delta.bodies[0].2.len()
+    );
+    assert!(
+        full_count >= 2,
+        "the signed closure retains checkpoint/tail history"
+    );
+    assert_eq!(
+        delta_count, 1,
+        "a hot peer receives only the new content-addressed artifact"
+    );
+    assert!(
+        delta.bodies[0].2.len() < full.bodies[0].2.len(),
+        "the delivery pack must shrink with receiver holdings"
+    );
+
+    let outcome = pull_staged(&mut b, &SEED_B, &delta).unwrap();
+    assert!(outcome.advanced());
+    assert_eq!(register_of(&b, "first").as_deref(), Some("alpha"));
+    assert_eq!(register_of(&b, "second").as_deref(), Some("beta"));
+    assert_eq!(holdings(&a), holdings(&b));
 }
 
 /// An upgrade out of opaque merges every author's retained material.
@@ -546,7 +592,7 @@ fn an_honest_local_write_during_a_delta_pull_rejects_the_whole_root() {
     a.commit_action(
         &ctx,
         &CommitAuthorization {
-            actor: "actor",
+            actor: "act_0000000000000000000000000000000000000000000000000000000000000000",
             parent_manifest_root: [0u8; 32],
             demand: test_demand(),
             intent_digest: [7u8; 32],

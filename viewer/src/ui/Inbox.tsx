@@ -9,7 +9,7 @@ import {
   type InboxPreferences,
   visibleInboxEntries,
 } from "../core/inbox";
-import type { InboxEntry } from "../types";
+import type { InboxEntry, PublicationId } from "../types";
 import { ApplicationState, EmptyState, LoadingState } from "./AppState";
 import { Combobox } from "./Picker";
 import { Button, CheckboxInput, IconButton, Link, Popover } from "@astryxdesign/core";
@@ -20,6 +20,25 @@ import { short, when } from "./time";
  *  drift into two treatments again. `focus-within` is load-bearing: these are
  *  reachable by keyboard (`m`, `s`) and must be visible when they are. */
 const ROW_ACTION = "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100";
+
+const bytesHex = (bytes: readonly number[]) => bytes
+  .map((byte) => byte.toString(16).padStart(2, "0"))
+  .join("");
+const publicationKey = (publication: PublicationId) => [
+  bytesHex(publication.manifest_root),
+  bytesHex(publication.implementation_digest),
+  bytesHex(publication.extractor_schema_digest),
+].join(":");
+const publicationCoordinate = (publication: PublicationId) => ({
+  manifest_root: bytesHex(publication.manifest_root),
+  implementation_digest: bytesHex(publication.implementation_digest),
+  extractor_schema_digest: bytesHex(publication.extractor_schema_digest),
+});
+const appendUniqueInbox = (current: readonly InboxEntry[], incoming: readonly InboxEntry[]) => {
+  const entries = new Map(current.map((entry) => [inboxEntryKey(entry), entry]));
+  for (const entry of incoming) entries.set(inboxEntryKey(entry), entry);
+  return [...entries.values()];
+};
 
 /**
  * The inbox — changes addressed to *you*.
@@ -47,6 +66,8 @@ export function Inbox({
 }) {
   const [entries, setEntries] = useState<InboxEntry[] | null>(null);
   const [unread, setUnread] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [publication, setPublication] = useState<PublicationId | null>(null);
   const [error, setError] = useState("");
   const [overrides, setOverrides] = useState(() => loadOverrides(spaceId));
   const [preferences, setPreferences] = useState(() => loadPreferences(spaceId));
@@ -54,21 +75,37 @@ export function Inbox({
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(
-    async (clear: boolean) => {
+    async (
+      clear: boolean,
+      cursor: string | null = null,
+      pinned: PublicationId | null = null,
+      append = false,
+    ) => {
       try {
-        const r = await rpc(spaceId, { cmd: "inbox", clear });
+        const r = await rpc(spaceId, {
+          cmd: "inbox",
+          clear,
+          page: { limit: 100, cursor },
+          publication: pinned ? publicationCoordinate(pinned) : null,
+        });
         if (r.kind !== "inbox") return;
-        setEntries(r.entries);
+        if (pinned && publicationKey(r.page.publication.publication) !== publicationKey(pinned)) {
+          throw new Error("Inbox continuation crossed publications; refresh the inbox");
+        }
+        setEntries((current) => append
+          ? appendUniqueInbox(current ?? [], r.page.items)
+          : r.page.items);
+        setNextCursor(r.page.next_cursor ?? null);
+        setPublication(r.page.publication.publication);
         setError("");
-        // `unread` in the reply is a snapshot from *before* the clear: the daemon
-        // counts, then advances the watermark (`inbox::list` then
-        // `inbox::mark_read`), so a `clear: true` reply says "this is what you
-        // just marked read", not "this is what remains". Taking it literally
-        // leaves the badge lit over an inbox the daemon already considers read.
-        // Marking read has no doc to change, so no doorbell corrects it either.
-        const now = clear ? 0 : r.unread;
-        setUnread(now);
-        onCountChange(now);
+        setUnread((current) => {
+          // The host advances the local watermark only after this exact page
+          // succeeds. The response therefore says what this bounded page had
+          // before the clear, while the resulting local badge is zero.
+          const next = clear ? 0 : (append ? current : 0) + r.unread_on_page;
+          onCountChange(next);
+          return next;
+        });
         if (clear) {
           setOverrides({ read: [], unread: [] });
           saveOverrides(spaceId, { read: [], unread: [] });
@@ -85,7 +122,7 @@ export function Inbox({
   // advances the watermark (`inbox::mark_read`), which is a write wearing a
   // read's name; it happens when you *say* so, below.
   useEffect(() => {
-    void load(false);
+    void load(false, null, null, false);
   }, [load, revision]);
 
   useEffect(() => {
@@ -253,13 +290,13 @@ export function Inbox({
         </Popover>
       </div>
 
-      {entries.length === 0 ? (
+      {entries.length === 0 && !nextCursor ? (
         <EmptyState
           icon={<InboxIcon className="size-icon-lg" />}
           title="You’re all caught up"
           body="Nothing in this local space is currently addressed to you."
         />
-      ) : visible.length === 0 ? (
+      ) : visible.length === 0 && !nextCursor ? (
         <EmptyState icon={<InboxIcon className="size-icon-lg" />} title="No notifications match" body="Adjust local preferences or restore snoozed notifications." />
       ) : (
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
@@ -370,6 +407,16 @@ export function Inbox({
               </ul>
             </section>
           ))}
+          {nextCursor && publication && (
+            <div className="flex justify-center p-3">
+              <Button
+                onClick={() => void load(false, nextCursor, publication, true)}
+                label="Load more notifications"
+                variant="ghost"
+                size="sm"
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

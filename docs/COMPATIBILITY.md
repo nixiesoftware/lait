@@ -71,8 +71,8 @@ opening it is `Whoami` as a named agent.
 |---|---|---|---|
 | Store marker | `replica::marker::STORE_VERSION` | 1 | leading field |
 | Orbit generation pointer | `runtime::generation` | 1 | magic + canonical body + checksum |
-| Store manifest | `journal::STORE_FORMAT_VERSION` | 2 | leading field |
-| Replica store meta | `replica::STORE_META_FORMAT_VERSION` | 3 (reads 2) | leading field |
+| Store manifest | `journal::STORE_FORMAT_VERSION` | 4 | leading field |
+| Replica store meta | `replica::STORE_META_FORMAT_VERSION` | 6 (one-time migration from 2) | leading field |
 | Manifest root | `replica::manifest::MANIFEST_FORMAT_VERSION` | 2 | leading field + `lait/manifest/2` |
 | Content descriptor | `replica::content::CONTENT_FORMAT_VERSION` | 1 | leading field + `lait/content-id/1` |
 | Causal artifacts | `fabric::causal::CAUSAL_FORMAT_VERSION` | 1 | leading field |
@@ -82,7 +82,7 @@ opening it is `Whoami` as a named agent.
 | Ledger semantics | `mechanics::ledger::LEDGER_SEMANTICS_VERSION` | 1 | leading field |
 | World implementation descriptor | `runtime::implementation::DESCRIPTOR_VERSION_SECTIONED` | 2 | leading field |
 
-### Find F0 contract
+### Find contract
 
 `find::Grant` standalone bytes are implemented at version 1. They carry a
 leading version field, have a 65,536-byte ceiling, and commit under the
@@ -92,11 +92,14 @@ reference field order; the six operator bits; the two mode bits; and the ten
 unknown bits, absent or sentinel-unbounded ceilings, undeclared Schema
 references, trailing bytes, and widening composition reject.
 
-`find::Query` standalone bytes are also implemented at version 1. They have a
-262,144-byte ceiling and commit under the `lait/find/query/1\0` BLAKE3 domain.
-The Schema and optional requested root, mode, canonical topological Step order,
-typed inputs, six operator tags, output, per-Step and whole-Query Bounds, and
-optional cursor are fixture-frozen. Before corpus access, validation rejects
+`find::Query` standalone bytes are implemented at version 4. They have a
+262,144-byte ceiling and commit under the existing
+`lait/find/query/1\0` BLAKE3 domain. The version is in the committed bytes. The
+Schema and optional full `PublicationId`, mode, canonical topological Step
+order, typed inputs, six operator tags, output, per-Step and whole-Query Bounds,
+requested page size, and optional cursor are fixture-frozen. `Seek::Bodies` is
+the live-refresh producer and is bounded at 4,096 exact Body keys. Before corpus access,
+validation rejects
 cycles and forward inputs, non-contiguous or duplicate Step ids, missing and
 ill-typed inputs, unreachable Steps, unstable input or final output order,
 undeclared references, non-finite or widening Bounds, exact-mode feature use,
@@ -118,21 +121,42 @@ pre-Find implementation bytes and id unchanged. Unknown section tags, duplicate
 or cross-wired references, undeclared Body sources, and missing, extra, or
 duplicate extractor-coordinate bindings reject during package composition.
 
-`Session::find(Query)` is the implemented ordinary package seam. The caller
-supplies no ambient coordinates: Runtime derives the live Station epoch, Space,
-World, active implementation, fresh principal and authority frontier, retained
-Manifest root, and Station `find::Policy` through the same ambient helper used
-by `Session::submit`. The root is pinned under the Station writer, which is
-released before the one Runtime-owned Find path runs. F0 deliberately has no
-descriptor-declared evaluator, so a fully admitted request returns the typed
-`find::Failure::Unavailable` refusal rather than a fabricated empty Answer.
-World callbacks receive no Session or Find facade.
+`Session::find(Query)` is the single implemented evaluator seam. Runtime pins
+the live Station epoch, Space, World, exact active implementation, extractor
+schema digest, materialization, fresh principal and authority frontier, and
+Station `find::Policy` through the same Session used by submission. A query may
+omit `publication` to select the current image or name a retained full
+`PublicationId`; a root alone has no encoding. Cursors additionally bind the
+station-local materialization and expire rather than falling forward.
 
-These contracts do not claim that a working evaluator exists yet. The extractor
-list freezes package coordinates only; it is not a backend registry or an
-executable callback in F0. A change to standalone Grant or Query meaning requires
-a new leading version and digest domain; a versioned containing record may embed
-the same validated fields under its own generation.
+Package composition registers an executable extractor for every declared
+source coordinate and rejects missing, extra, or duplicate bindings. One
+immutable principal-neutral corpus is incrementally maintained per published
+World image. The evaluator supports source, Body, id, field, term, feature,
+predicate, walk, rank, merge, and pack flows over persistent forward and reverse
+indexes. Ordered direct postings support bounded pages and opaque continuations;
+their answers may include an exact gate-admitted `matched_total`. Operators
+without an honest resumable state refuse a request that would require partial
+results instead of presenting a truncated page as complete. Analyzed token
+terms are indexed; analyzed phrase and prefix terms refuse until positional or
+prefix structures with bounded amplification exist. Request-specific gates
+partition postings before traversal, ranking, lookahead, counts, packing, and
+metering, so denied population cannot influence either answers or resource
+refusal. Body decoding is charged at corpus materialization rather than again
+per query.
+
+Control v14 and the root MCP `find` tool carry Runtime's exact Query and Answer
+types through the authenticated Session. Product adapters and viewers use the
+same evaluator; a private projection cache is not an alternative query source.
+A change to standalone Grant or Query meaning requires a new leading version;
+the digest domain changes only if the commitment meaning itself changes.
+
+Issues exposes `issues_search` as a product presenter over that same Find
+request. Its envelope contains the complete publication coordinate, product
+field maps, an optional opaque base64url continuation, and an exact total only
+when the selected direct posting can provide one without hidden-row influence.
+Attaching the presenter changes response shaping only; the root `find` request
+and its canonical answer remain product-neutral.
 
 ### Exec contracts and reservations
 
@@ -204,12 +228,17 @@ prior-to-current recipe. The daemon releases its own placement for that Orbit
 first — the rebuild requires the Orbit to be vacant, and running it from a
 separate client was a store-lock race against whatever the daemon had open.
 
-Replica store meta 3 adds a persistent root for immutable read-generation
-deltas. Version 2 is an exact readable predecessor: activation projects its
-current committed state once, records it as the baseline generation without
-changing the Manifest or World facts, and writes version 3 metadata. Thereafter
-one commit writes one delta proportional to the Bodies it changed. Unknown or
-older store-meta formats still fail closed.
+Journal format 4 authenticates eager control objects and deferred causal
+payloads under separate roots, and Replica store meta 6 replaces rendered
+object maps with authenticated Body, generation, receipt, and ownership roots.
+A bounded prior reader recognizes the immediately preceding Journal/Replica
+representation only as a read-only migration source. It never rewrites an old
+whole-Body signed descriptor into a causal descriptor: those declarations have
+different signed meanings. After launcher update consent, the composition-owned
+migration job streams the prior committed facts into a fresh generation through
+authorized current transactions, verifies semantic Body and receipt evidence,
+and only then activates it. Unknown or older formats fail closed, and the normal
+current reader carries no predecessor branch.
 
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no
@@ -219,50 +248,33 @@ reason the section table exists: adding a section kind must not move the id of a
 World that declares nothing of that kind, which two more fields in a fixed-order
 tuple would have done to every id in the system.
 
-**`com.lait.issues` is in that set, and its id moved.** The Spec lifecycle cutoff
-adds the `spec` and `baseline` collaborative schemas, extends the capability
-registry, and advances the World implementation to version 2. Its descriptor is
-version 2 because it also declares the `assigned` and `commented` signal schemas.
-It moved again when the product's hand-encoded structures became collaborative
-types. `issue` is schema version 3 — comment threads as `tree:comments`, history
-as a `log` — and `catalog` is version 2. Project topology now writes to
-`issue_relations` version 1, one Body per project; its tree prevents parent
-cycles and its edge map carries explicit presence values so removal overrides a
-legacy Catalog edge. The current implementation also registers the exact
-predecessor bindings for `issue` versions 1 and 2 and `catalog` version 1.
-Readability alone is not writability: Runtime contains each mutation against a
-Body's immutable exact binding. Registering the supported predecessors lets
-current intents upgrade and edit those Bodies without changing their binding or
-weakening containment. The reviewed identity is now
-`3182716c0f0231410c594a1f1790d06c0d297cb31be47510b2093188746c2778`, pinned by
-`products/issues/tests/it/package_boundary.rs`. A Space formed against an earlier
-build activated a different id and refuses this one until the new implementation
-is explicitly activated. That is the mechanism working: the reviewed surface
-changed, and the identity says so.
+**`com.lait.issues` is in that set, and its id moves with the v4 cutoff.** V4 is
+a pre-v1 semantic migration, not a permanent predecessor-reading branch. It
+retains each existing Issue Body key and collaborative operation history so
+text anchors keep their meaning, then adds the stable identity and atomic board
+placement roots in place. Every independently edited enrichment or project
+entity moves to a deterministic record Body. Spec and Baseline revision DAGs
+retain their semantic hashes and exact references while their immutable
+revisions move to revision-sized Bodies. Plans remain Spec revisions and store
+the full portable publication identity.
 
-Those are the first schema versions to declare predecessors, and they mean it.
-`issue` version 3 reads 2 and 1, `catalog` version 2 reads 1: comments in
-`list:comments`, history in `list:events`, parentage in `map:parents` and
-reactions in `reactions/<comment>` are all read forever, alongside the shapes
-that replaced them, so a Body written at any version reads as one issue with one
-history. New relation edits land in the project topology Body; legacy Catalog
-relations remain input until an explicit presence value or hierarchy anchor
-overrides them. What the new versions do *not* promise is the other direction. A build
-whose collaborative algebra predates the tree and log types refuses to project a
-Body containing one — the whole Body, not just the new part, because a partial
-projection of material a build cannot interpret is the one thing the projection
-layer will not produce. For the Catalog that is every project, alias and board
-in the Space. Declaring the schema versions is what turns that into a refusal at
-schema gating, where it can be understood, rather than a Space that silently
-opens empty.
+The migration is one launcher-authorized, crash-resumable protocol executed in
+bounded deterministic transactions under an in-process capability bound to the
+exact source, migrator, and target implementations. It is not a public tracker
+intent and does not accept a caller-supplied actor. Its marker cannot claim completion
+until every aggregate Catalog, enrichment, schedule, hierarchy, update, triage,
+workflow, role, Spec, Baseline, and membership record has been materialized and
+audited. Only then may the v4-only implementation activate. Internal Spaces use
+the same one-time migration; no v3 compatibility promise survives the v4
+activation. Historical semantic coordinates either resolve the exact retained
+implementation/extractor package or fail typed — they are never reinterpreted
+by the current package.
 
-One behaviour changed rather than moved. An issue's history is now bounded at
-512 events in Body state; older events leave state and are gone once a
-checkpoint compacts the history behind them. The count survives exactly, so a
-reader can still say how much happened. This is the first place lait discards
-committed product data by policy, and it is the trade the `log` type exists to
-make: as a List, every event an issue ever had was in every checkpoint of it,
-forever.
+Durable activity is not truncated from product truth. An event, comment,
+reaction, decision, or relationship is a bounded record Body and remains
+recoverable after checkpoints. Paging and retention policies may bound a read
+or a local analytical artifact, but they do not silently erase older committed
+records.
 
 Worlds that declare nothing keep the ids they had, which the same test asserts by
 construction — a zero-section descriptor is byte-identical to what shipped before
@@ -347,7 +359,7 @@ generation above 1, because those are the ones that have already moved:
 | Domain | Covers |
 |---|---|
 | `lait/manifest/2` | the signed Manifest root, plus `…/body-key` and `…/content-key` index keys |
-| `lait/body-transaction/2` | the signed Body transaction envelope |
+| `lait/body-transaction/3` | the signed Body transaction envelope and protected Fabric Material closure |
 | `lait/coordinates/2` | Space coordinates |
 | `lait/space/1/ceremony/2` | ceremony material and authority grants |
 
@@ -448,7 +460,7 @@ use is a slot held open for nothing.
 |---|---|---|---|
 | Local DTOs | `runtime::dto::DTO_PROTOCOL_VERSION` | 1 | loopback control plane and viewer |
 
-| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 10 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 10, so the mixed-version window is currently empty |
+| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 15 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 15, so the mixed-version window is currently empty |
 
 DTOs are a local contract between the engine and its own clients. They are
 versioned because a stale viewer bundle is a real situation, not because they

@@ -75,6 +75,10 @@ pub enum Failure {
     /// refused everything reported the single word "Convergence" and there was
     /// no way, from inside or outside the process, to learn any more.
     Convergence(String),
+    /// The authoritative local incorporation may have crossed its durable
+    /// commit point. Reopen and compare the resulting frontier; never retry the
+    /// same transfer blindly as though it were known not to have committed.
+    OutcomeUnknown,
     /// A progress deadline lapsed mid-transfer: which step.
     ///
     /// Every carried string above exists for the same reason `Convergence`'s

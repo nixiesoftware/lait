@@ -105,8 +105,12 @@ impl World for KvWorld {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
-            bytes: ctx.read_body(&self.body(&key)).unwrap_or_default(),
+            bytes: ctx
+                .read_body(&self.body(&key))?
+                .map(|bytes| bytes.as_ref().to_vec())
+                .unwrap_or_default(),
             frontier: ReplicaFrontier::EMPTY,
+            publication: None,
         })
     }
 }
@@ -233,15 +237,22 @@ fn first_use_resets_then_each_durable_commit_publishes_exactly_once() {
     let mut stream = session.observe(None);
     let first = stream.try_next().unwrap().unwrap();
     assert!(first.reset, "first use rebaselines");
+    assert!(
+        first.publications.is_empty(),
+        "a reset forces a re-query and must not imply a narrower publication"
+    );
     assert!(stream.try_next().unwrap().is_none(), "exactly one reset");
 
     // A durable commit publishes exactly one record with its scopes.
-    session
+    let committed = session
         .submit(action(&session, &writer, RequestId::mint(), "a=1"))
         .unwrap();
     let record = stream.try_next().unwrap().unwrap();
     assert!(!record.reset);
     assert_eq!(record.bodies.len(), 1);
+    assert_eq!(record.publications.len(), 1);
+    assert_eq!(record.publications[0].world, session.world_id().clone());
+    assert_eq!(record.publications[0].publication, committed.publication);
     assert!(record.sequence > first.sequence, "monotonic");
     assert!(stream.try_next().unwrap().is_none(), "published ONCE");
 
@@ -378,6 +389,7 @@ fn restart_and_cross_epoch_cursors_reset() {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: b"a".to_vec(),
+            publication: None,
         })
         .unwrap();
     assert_eq!(projection.bytes, b"1");

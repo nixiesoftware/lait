@@ -34,6 +34,10 @@ const ROLE_DEFINITION_CONTEXT: &str = "lait.issues.role-definition.v1";
 pub const MAX_ROLE_ID: usize = 64;
 pub const MAX_ROLE_BODY: usize = 16 * 1024;
 pub const MAX_PREDECESSORS: usize = 8;
+/// The capability vocabulary is a closed product registry. A role can never
+/// expand beyond the larger of its two scope registries, which proves the
+/// non-paged AccessPlan response is bounded rather than merely expected small.
+pub const MAX_CAPABILITIES: usize = crate::contract::PROJECT_CAPABILITIES.len();
 
 /// A role's scope kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -131,6 +135,9 @@ pub fn build_revision(
 ) -> Result<RoleRevision, Invalid> {
     if body.role_id.is_empty() || body.role_id.len() > MAX_ROLE_ID {
         return Err(Invalid::BadRoleId);
+    }
+    if !super::contract::valid_name(&body.name) || !super::contract::valid_text(&body.description) {
+        return Err(Invalid::BodyTooLarge);
     }
     if predecessors.len() > MAX_PREDECESSORS {
         return Err(Invalid::TooManyPredecessors);

@@ -249,7 +249,8 @@ function MilestoneDocument({
   onError: (message: string) => void;
 }) {
   const store = useProjectViewerStore();
-  const milestones = useProjectMilestones(spaceId, projectId).data ?? [];
+  const resource = useProjectMilestones(spaceId, projectId);
+  const milestones = resource.data ?? [];
 
   const edit = async (id: string, patch: { name?: string; description?: string }) => {
     try {
@@ -275,6 +276,16 @@ function MilestoneDocument({
           />
         ))}
       </ol>
+      {resource.nextCursor && (
+        <div className="flex justify-center py-3">
+          <Button
+            onClick={() => void resource.loadMore()}
+            label="Load more milestones"
+            variant="ghost"
+            size="sm"
+          />
+        </div>
+      )}
     </section>
   );
 }
@@ -470,6 +481,16 @@ function Updates({
           );
         })}
       </ol>
+      {resource.nextCursor && (
+        <div className="flex justify-center py-3">
+          <Button
+            onClick={() => void resource.loadMore()}
+            label="Load more updates"
+            variant="ghost"
+            size="sm"
+          />
+        </div>
+      )}
     </section>
   );
 }

@@ -160,14 +160,80 @@ fn session_methods() -> BTreeMap<String, (bool, BTreeSet<String>, BTreeSet<Strin
     methods
 }
 
+fn session_method_reaches(
+    methods: &BTreeMap<String, (bool, BTreeSet<String>, BTreeSet<String>)>,
+    root: &str,
+    target: &str,
+) -> bool {
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    while let Some(method) = pending.pop() {
+        if !visited.insert(method) {
+            continue;
+        }
+        let Some((_, calls, _)) = methods.get(method) else {
+            continue;
+        };
+        if calls.contains(target) {
+            return true;
+        }
+        pending.extend(
+            calls
+                .iter()
+                .map(String::as_str)
+                .filter(|called| methods.contains_key(*called)),
+        );
+    }
+    false
+}
+
+fn has_wire_derive(attributes: &[syn::Attribute]) -> bool {
+    attributes
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("derive"))
+        .any(|attribute| {
+            let mut wire = false;
+            let _ = attribute.parse_nested_meta(|meta| {
+                wire |= meta.path.is_ident("Deserialize")
+                    || meta.path.is_ident("Serialize")
+                    || meta.path.is_ident("JsonSchema");
+                Ok(())
+            });
+            wire
+        })
+}
+
+fn wire_shape_find_paths(file: &syn::File) -> BTreeSet<String> {
+    let mut paths = FindPaths::default();
+    for item in &file.items {
+        match item {
+            syn::Item::Struct(item) if has_wire_derive(&item.attrs) => {
+                paths.visit_item_struct(item);
+            }
+            syn::Item::Enum(item) if has_wire_derive(&item.attrs) => {
+                paths.visit_item_enum(item);
+            }
+            _ => {}
+        }
+    }
+    paths.0
+}
+
 #[test]
 fn submit_and_find_share_the_runtime_owned_ambient_prefix() {
     let methods = session_methods();
     let submit = methods.get("submit").expect("Session::submit exists");
     let find = methods.get("find").expect("Session::find exists");
 
-    assert!(submit.1.contains("ambient"), "submit bypassed Ambient");
-    assert!(find.1.contains("ambient"), "find bypassed Ambient");
+    assert!(
+        session_method_reaches(&methods, "submit", "ambient"),
+        "submit bypassed Ambient"
+    );
+    assert!(submit.0, "Session::submit is not public");
+    assert!(
+        session_method_reaches(&methods, "find", "ambient"),
+        "find bypassed Ambient"
+    );
     assert!(find.0, "Session::find is not public");
     for required in ["find", "Query", "Answer", "Failure"] {
         assert!(
@@ -221,14 +287,18 @@ fn world_callbacks_receive_no_find_or_session_facade() {
 #[test]
 fn client_and_product_wire_cannot_transport_generic_find() {
     let root = workspace_root();
-    let hostile = syn::parse_file(
-        "use runtime::find::Query as GenericQuery; struct Frame { query: GenericQuery }",
-    )
-    .unwrap();
-    let mut detector = FindPaths::default();
-    detector.visit_file(&hostile);
-    assert_eq!(detector.0, BTreeSet::from(["runtime::find::Query".into()]));
+    let hostile =
+        syn::parse_file("#[derive(Deserialize)] struct Frame { query: runtime::find::Query }")
+            .unwrap();
+    assert_eq!(
+        wire_shape_find_paths(&hostile),
+        BTreeSet::from(["runtime::find::Query".into()])
+    );
+    let package_internal =
+        syn::parse_file("fn handler() { let _: runtime::find::Query = todo!(); }").unwrap();
+    assert!(wire_shape_find_paths(&package_internal).is_empty());
 
+    let product_mcp = root.join("products/issues-app/src/mcp.rs");
     let boundaries = [
         root.join("src/serve"),
         root.join("src/mcp.rs"),
@@ -243,9 +313,16 @@ fn client_and_product_wire_cannot_transport_generic_find() {
         for path in rust_sources(&boundary) {
             let text = std::fs::read_to_string(&path).expect("read client wire source");
             let file = syn::parse_file(&text).expect("parse client wire source");
-            let mut paths = FindPaths::default();
-            paths.visit_file(&file);
-            for generic in paths.0 {
+            let generics = if path == product_mcp {
+                // The package may construct generic Find internally, but its MCP
+                // arguments and replies remain product-owned serialized shapes.
+                wire_shape_find_paths(&file)
+            } else {
+                let mut paths = FindPaths::default();
+                paths.visit_file(&file);
+                paths.0
+            };
+            for generic in generics {
                 found.push(format!(
                     "{}: `{generic}`",
                     path.strip_prefix(&root)

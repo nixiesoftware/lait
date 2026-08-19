@@ -36,7 +36,10 @@ pub mod router;
 
 pub use protocol::{
     classify_failure, decode_call, decode_reply, encode_call, encode_reply, AccessAssignment,
-    BoardPos, Filter, IssuesErrorKind, IssuesRequest, IssuesResponse, OPERATION, VERSION,
+    BoardPos, ChangeEffect, ChangeLabel, ChangeOperation, ChangePosition, ChangeProject,
+    ChangeWorkAction, Filter, IssuesErrorKind, IssuesRequest, IssuesResponse, OperationPhase,
+    OperationReadiness, OperationReceipt, PublicationCoordinate, WorldPublicationCoordinate,
+    OPERATION, VERSION,
 };
 pub use router::{IssueRouter, IssuesCallHandler, RouterFacts};
 
@@ -207,7 +210,7 @@ mod tests {
             classify_failure(&bad).map(|(failure, _)| failure),
             Some(world_interface::Failure::invalid())
         );
-        let fine = serde_json::to_value(IssuesResponse::List { rows: Vec::new() }).unwrap();
+        let fine = serde_json::to_value(IssuesResponse::Ok { message: None }).unwrap();
         assert_eq!(classify_failure(&fine), None);
     }
 }

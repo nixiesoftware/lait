@@ -35,7 +35,7 @@ const board = (rows: Row[]): BoardView => ({
 describe("the overlay", () => {
   it("holds and returns a prediction per (doc, field)", () => {
     const o = new Overlay();
-    o.set("doc_1", "title", "predicted");
+    o.set("doc_1", "title", "predicted", "op");
     expect(o.get("doc_1", "title")).toBe("predicted");
     expect(o.get("doc_1", "status")).toBeUndefined();
     expect(o.has("doc_1")).toBe(true);
@@ -46,9 +46,9 @@ describe("the overlay", () => {
     // The doorbell names docs, not fields — `dirty` is doc-ids. So
     // clearing has to be doc-granular or it couldn't be driven by it.
     const o = new Overlay();
-    o.set("doc_1", "title", "a");
-    o.set("doc_1", "status", "done");
-    o.set("doc_2", "title", "b");
+    o.set("doc_1", "title", "a", "op");
+    o.set("doc_1", "status", "done", "op");
+    o.set("doc_2", "title", "b", "op");
     o.clearDoc("doc_1");
     expect(o.has("doc_1")).toBe(false);
     expect(o.has("doc_2")).toBe(true);
@@ -60,7 +60,7 @@ describe("the overlay", () => {
     // dropped fetch would otherwise show a value that exists nowhere, forever.
     const o = new Overlay();
     const t0 = 1_000_000;
-    o.set("doc_1", "title", "stuck", t0);
+    o.set("doc_1", "title", "stuck", "op", t0);
 
     expect(o.sweep(t0 + PREDICTION_TTL_MS - 1)).toBe(false);
     expect(o.has("doc_1")).toBe(true);
@@ -73,8 +73,8 @@ describe("the overlay", () => {
   it("sweeps only what is stale", () => {
     const o = new Overlay();
     const t0 = 1_000_000;
-    o.set("doc_1", "title", "old", t0);
-    o.set("doc_2", "title", "fresh", t0 + PREDICTION_TTL_MS);
+    o.set("doc_1", "title", "old", "old-op", t0);
+    o.set("doc_2", "title", "fresh", "fresh-op", t0 + PREDICTION_TTL_MS);
     o.sweep(t0 + PREDICTION_TTL_MS);
     expect(o.has("doc_1")).toBe(false);
     expect(o.has("doc_2")).toBe(true);
@@ -96,7 +96,7 @@ describe("applyOverlay", () => {
 
   it("makes the prediction the displayed value, not a hint", () => {
     const o = new Overlay();
-    o.set("doc_iss_1", "title", "Predicted title");
+    o.set("doc_iss_1", "title", "Predicted title", "op");
     const { board: out, optimistic } = applyOverlay(b, o);
     expect(out.columns[0]!.rows[0]!.title).toBe("Predicted title");
     // …and says so. A prediction that isn't marked is a lie.
@@ -107,7 +107,7 @@ describe("applyOverlay", () => {
     // The whole point: a card that claims to have moved must actually move, or
     // the optimism is worse than none.
     const o = new Overlay();
-    o.set("doc_iss_1", "status", "done");
+    o.set("doc_iss_1", "status", "done", "op");
     const { board: out } = applyOverlay(b, o);
     expect(out.columns[0]!.rows.map((r) => r.reff)).toEqual(["iss_2"]);
     expect(out.columns[1]!.rows.map((r) => r.reff)).toEqual(["iss_3", "iss_1"]);
@@ -116,7 +116,7 @@ describe("applyOverlay", () => {
   it("never disappears a row whose predicted status has no column", () => {
     // A wrong guess must be corrected by the doorbell, not vanish the issue.
     const o = new Overlay();
-    o.set("doc_iss_1", "status", "nonexistent_status");
+    o.set("doc_iss_1", "status", "nonexistent_status", "op");
     const { board: out } = applyOverlay(b, o);
     const all = out.columns.flatMap((c) => c.rows.map((r) => r.reff));
     expect(all).toContain("iss_1");
@@ -125,7 +125,7 @@ describe("applyOverlay", () => {
 
   it("leaves unpredicted rows untouched, in their column and order", () => {
     const o = new Overlay();
-    o.set("doc_iss_1", "title", "changed");
+    o.set("doc_iss_1", "title", "changed", "op");
     const { board: out } = applyOverlay(b, o);
     expect(out.columns[1]!.rows.map((r) => r.title)).toEqual(["Three"]);
     expect(out.columns[0]!.rows.map((r) => r.reff)).toEqual(["iss_1", "iss_2"]);
@@ -133,7 +133,7 @@ describe("applyOverlay", () => {
 
   it("predicts priority", () => {
     const o = new Overlay();
-    o.set("doc_iss_1", "priority", "urgent");
+    o.set("doc_iss_1", "priority", "urgent", "op");
     const { board: out } = applyOverlay(b, o);
     expect(out.columns[0]!.rows[0]!.priority).toBe("urgent");
   });
@@ -143,8 +143,8 @@ describe("overlayRow — the widened fields", () => {
   it("predicts array fields as whole replacements", () => {
     const o = new Overlay();
     const r = row({ reff: "iss_1", assignees: ["aaa"], label_names: ["infra"] });
-    o.set(r.doc_id, "assignees", ["aaa", "bbb"]);
-    o.set(r.doc_id, "labels", ["infra", "perf"]);
+    o.set(r.doc_id, "assignees", ["aaa", "bbb"], "op");
+    o.set(r.doc_id, "labels", ["infra", "perf"], "op");
     const out = overlayRow(r, o);
     expect(out.assignees).toEqual(["aaa", "bbb"]);
     expect(out.label_names).toEqual(["infra", "perf"]);
@@ -156,7 +156,7 @@ describe("overlayRow — the widened fields", () => {
     // with `hasField`.
     const o = new Overlay();
     const r = row({ reff: "iss_1", due_date: 1_800_000_000, estimate: 5 });
-    o.set(r.doc_id, "due", null);
+    o.set(r.doc_id, "due", null, "op");
     const out = overlayRow(r, o);
     expect(out.due_date).toBeNull();
     expect(out.estimate).toBe(5);
@@ -165,8 +165,8 @@ describe("overlayRow — the widened fields", () => {
   it("predicts due and estimate as the row's numbers", () => {
     const o = new Overlay();
     const r = row({ reff: "iss_1" });
-    o.set(r.doc_id, "due", 1_800_000_000);
-    o.set(r.doc_id, "estimate", 8);
+    o.set(r.doc_id, "due", 1_800_000_000, "op");
+    o.set(r.doc_id, "estimate", 8, "op");
     const out = overlayRow(r, o);
     expect(out.due_date).toBe(1_800_000_000);
     expect(out.estimate).toBe(8);
@@ -181,9 +181,9 @@ describe("overlayRow — the widened fields", () => {
     // The selectors memo on this string; a field it omitted would stop
     // invalidating the cached board the moment it became predictable.
     const o = new Overlay();
-    o.set("doc_1", "assignees", ["aaa"]);
+    o.set("doc_1", "assignees", ["aaa"], "op");
     const before = o.signature("doc_1");
-    o.set("doc_1", "due", null);
+    o.set("doc_1", "due", null, "op");
     expect(o.signature("doc_1")).not.toBe(before);
     expect(o.signature("doc_2")).toBe("");
   });

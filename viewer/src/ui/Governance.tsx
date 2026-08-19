@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowRight, ShieldCheck, X } from "lucide-react";
 
 import { rpc } from "../api";
-import type { StatusCategory } from "../types";
+import type { RoleProjection, StatusCategory } from "../types";
 import { catalogColor } from "./colors";
 import { StatusIcon } from "./icons";
 import { Dialog, IconButton } from "@astryxdesign/core";
@@ -12,9 +12,8 @@ import { Dialog, IconButton } from "@astryxdesign/core";
  *
  * These answer the question the errors couldn't: a gated transition refuses with
  * "that change conflicts…" or a demand failure, and until now the browser had no
- * way to see *what the rule was*. `workflow_show` / `role_list` reply as
- * `Response::Text` carrying the same pretty JSON the CLI prints, so this parses
- * that — one source of truth, two renderings.
+ * way to see *what the rule was*. `role_list` is an exact-publication page;
+ * continuation never falls forward to a newer policy generation.
  *
  * Read-only on purpose. Editing a workflow or a role is a CAS ceremony
  * (`expect_heads` / `expect_revision`) whose conflict flow deserves its own
@@ -65,6 +64,10 @@ interface RoleWire {
     };
   } | null;
   conflict_heads: string[];
+}
+
+function roleFromProjection({ summary, revision }: RoleProjection): RoleWire {
+  return { ...summary, revision: revision ?? null };
 }
 
 /** One sentence for a demand template: what the gate asks of the actor. */
@@ -247,14 +250,19 @@ export function WorkflowDialog({
 
 export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: () => void }) {
   const [roles, setRoles] = useState<RoleWire[] | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    void rpc(spaceId, { cmd: "role_list" })
+    void rpc(spaceId, { cmd: "role_list", page: { limit: 100, cursor: null } })
       .then((r) => {
         if (!alive) return;
-        if (r.kind === "text") setRoles(JSON.parse(r.text) as RoleWire[]);
+        if (r.kind === "roles") {
+          setRoles(r.page.items.map(roleFromProjection));
+          setNextCursor(r.page.next_cursor ?? null);
+        }
       })
       .catch((e) => {
         if (alive) setError(e instanceof Error ? e.message : String(e));
@@ -263,6 +271,30 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
       alive = false;
     };
   }, [spaceId]);
+
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const r = await rpc(spaceId, {
+        cmd: "role_list",
+        page: { limit: 100, cursor: nextCursor },
+      });
+      if (r.kind === "roles") {
+        setRoles((current) => [
+          ...(current ?? []),
+          ...r.page.items.map(roleFromProjection).filter(
+            (candidate) => !(current ?? []).some((role) => role.role_id === candidate.role_id),
+          ),
+        ]);
+        setNextCursor(r.page.next_cursor ?? null);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   return (
     <Shell title="Roles" onClose={onClose}>
@@ -299,10 +331,22 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
         </section>
       ))}
       {roles && (
-        <p className="text-mute text-xs">
-          Custom roles are authored with the <code className="font-mono">issues_role_create</code>{" "}
-          and <code className="font-mono">issues_role_edit</code> tools.
-        </p>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-mute text-xs">
+            Custom roles are authored with the <code className="font-mono">issues_role_create</code>{" "}
+            and <code className="font-mono">issues_role_edit</code> tools.
+          </p>
+          {nextCursor && (
+            <button
+              type="button"
+              className="border-line rounded-surface border px-3 py-1.5 text-xs"
+              disabled={loadingMore}
+              onClick={() => void loadMore()}
+            >
+              {loadingMore ? "Loading…" : "Load more"}
+            </button>
+          )}
+        </div>
       )}
     </Shell>
   );

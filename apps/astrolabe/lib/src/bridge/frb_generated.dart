@@ -1220,13 +1220,17 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
   WorldUpdateRow dco_decode_world_update_row(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return WorldUpdateRow(
       serving: dco_decode_opt_String(arr[0]),
       available: dco_decode_opt_String(arr[1]),
       behind: dco_decode_bool(arr[2]),
       unmet: dco_decode_opt_list_String(arr[3]),
+      operation: dco_decode_opt_String(arr[4]),
+      phase: dco_decode_opt_String(arr[5]),
+      progress: dco_decode_opt_String(arr[6]),
+      message: dco_decode_opt_String(arr[7]),
     );
   }
 
@@ -2516,11 +2520,19 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     var var_available = sse_decode_opt_String(deserializer);
     var var_behind = sse_decode_bool(deserializer);
     var var_unmet = sse_decode_opt_list_String(deserializer);
+    var var_operation = sse_decode_opt_String(deserializer);
+    var var_phase = sse_decode_opt_String(deserializer);
+    var var_progress = sse_decode_opt_String(deserializer);
+    var var_message = sse_decode_opt_String(deserializer);
     return WorldUpdateRow(
         serving: var_serving,
         available: var_available,
         behind: var_behind,
-        unmet: var_unmet);
+        unmet: var_unmet,
+        operation: var_operation,
+        phase: var_phase,
+        progress: var_progress,
+        message: var_message);
   }
 
   @protected
@@ -3583,5 +3595,9 @@ class CoreApiImpl extends CoreApiImplPlatform implements CoreApi {
     sse_encode_opt_String(self.available, serializer);
     sse_encode_bool(self.behind, serializer);
     sse_encode_opt_list_String(self.unmet, serializer);
+    sse_encode_opt_String(self.operation, serializer);
+    sse_encode_opt_String(self.phase, serializer);
+    sse_encode_opt_String(self.progress, serializer);
+    sse_encode_opt_String(self.message, serializer);
   }
 }

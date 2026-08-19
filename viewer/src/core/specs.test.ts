@@ -53,6 +53,11 @@ function spec(
       text: "",
       state,
       links: patch.links ?? [],
+      publication: {
+        manifest_root: Array(32).fill(1),
+        implementation_digest: Array(32).fill(2),
+        extractor_schema_digest: Array(32).fill(3),
+      },
       author: "act_1",
       ts: 1,
     },

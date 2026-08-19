@@ -164,6 +164,11 @@ pub struct WorldUpdateRow {
     /// requirement named. Shown, never offered — pressing an update that
     /// would be refused on arrival teaches a person to distrust the control.
     pub unmet: Option<Vec<String>>,
+    /// Durable native consent/progress, independent of channel standing.
+    pub operation: Option<String>,
+    pub phase: Option<String>,
+    pub progress: Option<String>,
+    pub message: Option<String>,
 }
 
 /// The artwork one World ships, as PNG bytes compiled into this build.
@@ -1130,6 +1135,10 @@ fn project(app: &App) -> ClientView {
                             available: standing.available.clone(),
                             behind: standing.behind,
                             unmet: standing.unmet.clone(),
+                            operation: standing.operation.clone(),
+                            phase: standing.phase.clone(),
+                            progress: standing.progress.clone(),
+                            message: standing.message.clone(),
                         }),
                 })
                 .collect()

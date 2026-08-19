@@ -18,8 +18,7 @@
 //! atomic multi-Body transaction (issue + catalog together — the legacy split
 //! `persist_issue_and_row` failure mode does not exist here).
 
-use runtime::poison::LockRecovering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use replica::body::BodyKey;
@@ -29,18 +28,20 @@ use runtime::{
     world::Query, world::Rejection, world::World,
 };
 
-use crate::dto::{ActivityEvent, CatalogScope, FieldChange, Priority, StatusCategory};
-use crate::ids::{ActorId, DocId};
+use crate::dto::{ActivityEvent, FieldChange, Priority, StatusCategory};
+use crate::ids::{ActorId, DocId, ProjectId};
+use crate::records::CanonicalRecord as _;
 
 use super::contract::{
-    self, baseline_key, board_path, catalog_key, issue_key, spec_key, EventChange, IssueEffect,
-    IssueEvent, IssueIntent, IssueQuery, NewLabel, Pos, StoredComment, WorkAction, DEFAULT_STATUS,
-    DOCUMENT_SCHEMA_VERSION, LINK_KINDS, VIEW_SCHEMA_VERSION,
+    self, catalog_key, issue_key, EventChange, IssueEffect, IssueEvent, IssueIntent, IssueQuery,
+    NewLabel, Pos, StoredComment, WorkAction, DEFAULT_STATUS, DOCUMENT_SCHEMA_VERSION, LINK_KINDS,
+    VIEW_SCHEMA_VERSION,
 };
 use super::rank;
 use super::views::{
-    board_view, canonical_for, derive_aliases, issue_view, label_dto, project_dto, project_row,
-    CatalogState, DerivedAliases, IssueState, Milestone, RelationState,
+    board_view, canonical_for, issue_view, label_dto, project_dto, project_row, CatalogState,
+    DerivedAliases, Initiative, IssueState, LabelMeta, Milestone, ProjectMeta, RelationState, Team,
+    TriageItem,
 };
 
 /// The order milestones read in, and the only place that decides it.
@@ -97,187 +98,271 @@ fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
     Some(rank::between(lo, hi))
 }
 
+/// Rows a neighbour probe asks for: the adjacent milestone, plus one in case
+/// the first is the milestone being moved.
+const NEIGHBOR_PAGE: u32 = 2;
+
+fn milestone_neighbor(
+    ctx: &Context<'_>,
+    project: &str,
+    moving: &str,
+    descending: bool,
+    pivot: Vec<u8>,
+) -> Result<Option<(String, String)>, Rejection> {
+    use runtime::find as find_api;
+    // Two rows are wanted and at most one of them is the milestone being
+    // moved, but the ordered scan that finds them walks whatever the index
+    // holds between the pivot and the answer. The hand-written budget here
+    // used to allow eight postings, which happened to cover a project with
+    // two milestones and refused the third with `LimitExceeded` -- reported
+    // to the operator as a corrupt catalog, because this call site also
+    // discarded the typed failure. Derive it the way every other paged
+    // helper in this file does instead, so it scales with the page rather
+    // than with the number of milestones that existed when it was written.
+    let candidates = u64::from(NEIGHBOR_PAGE).saturating_mul(8).max(64);
+    let bound = find_api::Bound {
+        decoded_bodies: 4,
+        postings_read: candidates.saturating_mul(8),
+        edges_visited: 1,
+        nodes_visited: candidates,
+        paths_retained: 1,
+        candidates_per_branch: candidates,
+        score_evaluations: 1,
+        projected_bytes: u64::from(NEIGHBOR_PAGE).saturating_mul(16 * 1_024),
+        packed_tokens: u64::from(NEIGHBOR_PAGE).saturating_mul(4_096),
+        wall_millis: 1_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let index = if descending {
+        crate::find::field::KIND_PROJECT_POSITION_DESC
+    } else {
+        crate::find::field::KIND_PROJECT_POSITION
+    };
+    let mut fields = [
+        crate::find::field::ID,
+        crate::find::field::KIND,
+        crate::find::field::TITLE,
+        crate::find::field::PROJECT,
+        crate::find::field::POSITION,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                        field: crate::find::field_ref(index),
+                        test: find_api::Test::Greater,
+                        value: find_api::Atom::Bytes(pivot),
+                    })),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![seek],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: NEIGHBOR_PAGE,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    for row in answer.rows() {
+        if result_text(row, crate::find::field::KIND).as_deref() != Some("milestone")
+            || result_text(row, crate::find::field::PROJECT).as_deref() != Some(project)
+        {
+            return Ok(None);
+        }
+        let id = result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+        if id == moving {
+            continue;
+        }
+        let position =
+            result_text(row, crate::find::field::POSITION).ok_or(Rejection::StateCorrupt)?;
+        return Ok(Some((id, position)));
+    }
+    Ok(None)
+}
+
+fn milestone_position(
+    ctx: &Context<'_>,
+    project: &str,
+    moving: &str,
+    pos: &Pos,
+) -> Result<String, Rejection> {
+    let (lower, upper) = match pos {
+        Pos::Top => {
+            let upper = milestone_neighbor(
+                ctx,
+                project,
+                moving,
+                false,
+                crate::find::composite_key(["milestone", project]),
+            )?;
+            (String::new(), upper.map(|(_, rank)| rank))
+        }
+        Pos::Bottom => {
+            let lower = milestone_neighbor(
+                ctx,
+                project,
+                moving,
+                true,
+                crate::find::composite_key(["milestone", project]),
+            )?;
+            (lower.map_or_else(String::new, |(_, rank)| rank), None)
+        }
+        Pos::Before { doc } | Pos::After { doc } => {
+            if doc == moving {
+                return Err(Rejection::InvalidRequest);
+            }
+            let mut catalog = CatalogState::default();
+            crate::record_store::apply_schedule_record(ctx, &mut catalog, project, doc)?;
+            let target = catalog
+                .milestones
+                .get(project)
+                .and_then(|records| records.get(doc))
+                .filter(|record| !record.tombstone && !record.rank.is_empty())
+                .ok_or(Rejection::InvalidRequest)?;
+            let rank = target.rank.clone();
+            match pos {
+                Pos::Before { .. } => {
+                    let lower = milestone_neighbor(
+                        ctx,
+                        project,
+                        moving,
+                        true,
+                        crate::find::entity_position_desc_key("milestone", project, &rank, doc),
+                    )?;
+                    (lower.map_or_else(String::new, |(_, rank)| rank), Some(rank))
+                }
+                Pos::After { .. } => {
+                    let upper = milestone_neighbor(
+                        ctx,
+                        project,
+                        moving,
+                        false,
+                        crate::find::entity_position_key("milestone", project, &rank, doc),
+                    )?;
+                    (rank, upper.map(|(_, rank)| rank))
+                }
+                _ => return Err(Rejection::InvalidRequest),
+            }
+        }
+    };
+    rank::try_between(&lower, upper.as_deref()).ok_or(Rejection::LimitExceeded)
+}
+
 /// The registered product World.
 pub struct IssuesWorld {
     id: replica::body::WorldId,
     schemas: Vec<Schema>,
+    find_schemas: Vec<runtime::find::Schema>,
+    find_extractors: Vec<runtime::find::Extractor>,
     exec_specs: Vec<runtime::exec::Spec>,
+    geometry: crate::geometry::GeometryRegistry,
     /// Owned rather than built on demand, because the trait hands back a slice
     /// and the registry compares it against the registration byte for byte —
     /// two constructions of "the same" list is how they come to differ.
     signal_schemas: Vec<runtime::world::SignalSchema>,
-    /// The derived read-model cache, keyed by the EXACT Manifest root each
-    /// query is pinned to — registered in `tests/mixed_root_guard.rs` with its
-    /// mixed-root rejection proof. A hit is only ever the same root, so output
-    /// mixing two roots is unrepresentable; per-issue entries are additionally
-    /// reused across roots ONLY under a reader-issued version stamp
-    /// ([`runtime::world::BodyReader::body_stamp`]) that guarantees
-    /// byte-equivalence.
-    cache: std::sync::Mutex<RootKeyedCache>,
+    package: IssuesPackage,
 }
 
-/// See [`IssuesWorld::cache`].
-#[derive(Default)]
-struct RootKeyedCache {
-    /// `(manifest root, derived snapshot)` — a bounded, most-recent-last list.
-    roots: Vec<([u8; 32], Arc<DerivedSnapshot>)>,
-    /// Per-issue parsed state: `doc -> (stamp, state)`.
-    issues: std::collections::HashMap<String, (Vec<u8>, Arc<IssueState>)>,
-    /// Project topology parses, reused across generations under Body stamps.
-    relations: std::collections::HashMap<String, (Vec<u8>, Arc<RelationState>)>,
-    /// Fully compiled Plan morphologies. Compilation is linear, but a warm
-    /// reader should pay only serialization; the exact generation is part of
-    /// the key, so historical and current phenotypes cannot contaminate one
-    /// another.
-    geometries: Vec<GeometryCacheEntry>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssuesPackage {
+    /// The preferred implementation installed after the one-time rewrite.
+    /// It has no authority to decode aggregate Catalog/Spec/Baseline state or
+    /// to advance migration markers.
+    Preferred,
+    /// Historical implementation used only by the resumable migration job.
+    Migrator,
 }
 
-struct GeometryCacheEntry {
-    root: [u8; 32],
-    project: String,
-    roots: Vec<String>,
-    view: Arc<crate::geometry::GeometryView>,
-}
-
-/// The immutable read model every query arm consumes: the integrity-checked
-/// catalog, its derived aliases, and every issue's parsed state — all from ONE
-/// committed snapshot (one Manifest root).
-struct DerivedSnapshot {
-    catalog: Arc<CatalogState>,
-    aliases: Arc<DerivedAliases>,
+/// A request-local working set selected from Runtime's immutable publication
+/// corpus. Runtime owns generation sharing; Issues never caches a second
+/// root-keyed projection truth.
+struct IssueReadSet {
+    aliases: DerivedAliases,
     issues: BTreeMap<String, Arc<IssueState>>,
 }
 
-/// How many recent roots stay warm: the current root plus the previous one
-/// (a doorbell-raced query may still be pinned to the prior root).
-const CACHED_ROOTS: usize = 2;
-const CACHED_GEOMETRIES: usize = 16;
-
 impl IssuesWorld {
-    /// The derived read model for THIS context's Manifest root: served from
-    /// the cache when the root is warm, else built from the committed snapshot
-    /// (reusing per-issue parses whose reader stamp is unchanged) and cached
-    /// under the root. A zero root (fixture contexts without a snapshot
-    /// identity) is never cached.
-    fn derived_snapshot(&self, ctx: &Context<'_>) -> Result<Arc<DerivedSnapshot>, Rejection> {
-        let root = ctx.manifest_root();
-        let identified = root != [0u8; 32];
-        if identified {
-            let cache = self.cache.lock_recovering();
-            if let Some((_, snap)) = cache.roots.iter().find(|(r, _)| r == &root) {
-                return Ok(snap.clone());
-            }
-        }
-        let mut catalog = catalog_state(ctx)?;
-        let mut cache = self.cache.lock_recovering();
-        let relation_keys =
-            ctx.bodies_with_schema(&contract::world_id(), &contract::relation_schema());
-        let mut live_relations = std::collections::HashSet::new();
-        for key in relation_keys {
-            let rendered = key.body.render();
-            live_relations.insert(rendered.clone());
-            let stamp = ctx.body_stamp(&key);
-            let state = match (&stamp, cache.relations.get(&rendered)) {
-                (Some(stamp), Some((cached_stamp, state))) if stamp == cached_stamp => {
-                    state.clone()
-                }
-                _ => {
-                    let Ok(view) = ctx.read_collaborative(&key) else {
-                        continue;
-                    };
-                    Arc::new(RelationState::from_view(&view))
-                }
-            };
-            if let Some(stamp) = stamp {
-                cache.relations.insert(rendered, (stamp, state.clone()));
-            }
-            state.apply_to(&mut catalog);
-        }
-        cache
-            .relations
-            .retain(|body, _| live_relations.contains(body));
-        let catalog = Arc::new(catalog);
-        let mut issues: BTreeMap<String, Arc<IssueState>> = BTreeMap::new();
-        for doc in catalog.doc_ids() {
-            let stamp = ctx.body_stamp(&issue_key(&doc));
-            let state = match (&stamp, cache.issues.get(&doc)) {
-                (Some(stamp), Some((cached_stamp, state))) if stamp == cached_stamp => {
-                    state.clone()
-                }
-                _ => match issue_state(ctx, &doc) {
-                    Some(state) => Arc::new(state),
-                    None => continue,
-                },
-            };
-            if let Some(stamp) = stamp {
-                cache.issues.insert(doc.clone(), (stamp, state.clone()));
-            }
-            issues.insert(doc, state);
-        }
-        let aliases = Arc::new(derive_aliases(&catalog, |doc| {
-            issues.get(doc).map(|issue| issue.project.as_str())
-        }));
-        // Registered docs are the live set: drop parses for departed docs.
-        cache.issues.retain(|doc, _| issues.contains_key(doc));
-        let snap = Arc::new(DerivedSnapshot {
-            catalog,
-            aliases,
-            issues,
-        });
-        if identified {
-            cache.roots.retain(|(r, _)| r != &root);
-            cache.roots.push((root, snap.clone()));
-            if cache.roots.len() > CACHED_ROOTS {
-                let drop_count = cache.roots.len() - CACHED_ROOTS;
-                cache.roots.drain(..drop_count);
-            }
-        }
-        Ok(snap)
-    }
-
-    fn geometry_view(
+    fn portable_publication(
         &self,
         ctx: &Context<'_>,
-        snap: &DerivedSnapshot,
+    ) -> Result<runtime::publication::PublicationId, Rejection> {
+        ctx.world_publication_id()
+            .map(|publication| publication.publication)
+            .ok_or(Rejection::ContractViolation)
+    }
+
+    fn geometry_projection(
+        &self,
+        ctx: &Context<'_>,
         project: &str,
         roots: &[String],
-    ) -> Arc<crate::geometry::GeometryView> {
-        let root = ctx.manifest_root();
-        let identified = root != [0u8; 32];
-        if identified {
-            let cache = self.cache.lock_recovering();
-            if let Some(entry) = cache.geometries.iter().rev().find(|entry| {
-                entry.root == root && entry.project == project && entry.roots == roots
-            }) {
-                return entry.view.clone();
-            }
-        }
-        let generation = data_encoding::HEXLOWER.encode(&root);
-        let view = Arc::new(crate::geometry::compile(
-            &snap.catalog,
-            &snap.aliases,
-            &snap.issues,
+        page: Option<crate::geometry::GeometryPageRequest>,
+    ) -> Result<contract::GeometryProjection, Rejection> {
+        let source = ctx
+            .world_publication_id()
+            .ok_or(Rejection::ContractViolation)?;
+        let request = crate::geometry::GeometryRequest::new(
+            source,
             project,
-            roots,
-            generation,
-        ));
-        if identified {
-            let mut cache = self.cache.lock_recovering();
-            cache.geometries.retain(|entry| {
-                !(entry.root == root && entry.project == project && entry.roots == roots)
-            });
-            cache.geometries.push(GeometryCacheEntry {
-                root,
-                project: project.into(),
-                roots: roots.to_vec(),
-                view: view.clone(),
-            });
-            if cache.geometries.len() > CACHED_GEOMETRIES {
-                let drop_count = cache.geometries.len() - CACHED_GEOMETRIES;
-                cache.geometries.drain(..drop_count);
+            roots.to_vec(),
+            crate::geometry::GeometryBudget::default(),
+        );
+        let artifact = if let Some(artifact) = self.geometry.get(&request.key()) {
+            artifact
+        } else {
+            let find = ctx.deferred_find()?.ok_or(Rejection::ContractViolation)?;
+            let worker_request = request.clone();
+            self.geometry.materialize_cached_with_memory(
+                &request,
+                crate::geometry::GeometryEstimate::default(),
+                &find,
+                {
+                    let find = find.clone();
+                    move || crate::geometry::facts_from_find(&find, &worker_request)
+                },
+            )
+        };
+        let key = artifact.key();
+        let summary = artifact.summary(&key).ok();
+        let page = match page {
+            Some(page)
+                if matches!(
+                    artifact.readiness(),
+                    crate::geometry::GeometryReadiness::Ready
+                ) =>
+            {
+                Some(
+                    artifact
+                        .page(&key, page)
+                        .map_err(|_| Rejection::InvalidRequest)?,
+                )
             }
-        }
-        view
+            _ => None,
+        };
+        Ok(contract::GeometryProjection {
+            key,
+            source: artifact.source(),
+            estimate: artifact.estimate(),
+            readiness: artifact.readiness().clone(),
+            summary,
+            page,
+        })
     }
 }
 
@@ -288,96 +373,313 @@ impl Default for IssuesWorld {
 }
 
 impl IssuesWorld {
+    /// Product-owned read-only planner for one exact frozen migration window.
+    /// The lifecycle host invokes this through `Session::with_lifecycle_source`
+    /// before it signs or admits a mutation.
+    pub fn prepare_v4_migration_plan(
+        ctx: &Context<'_>,
+        previous_batch: u64,
+        previous_cursor: String,
+        timestamp: u64,
+    ) -> Result<contract::V4MigrationPlan, Rejection> {
+        prepare_v4_migration_plan(ctx, previous_batch, previous_cursor, timestamp)
+    }
+
     pub fn new() -> Self {
+        Self::preferred()
+    }
+
+    /// The package activated for ordinary human and agent work after the
+    /// migration audit succeeds.  Its descriptor is intentionally unable to
+    /// open the old aggregate schemas.
+    pub fn preferred() -> Self {
         Self {
             id: contract::world_id(),
-            cache: std::sync::Mutex::new(RootKeyedCache::default()),
             signal_schemas: contract::signal_schemas(),
+            find_schemas: crate::find::preferred_schemas(),
+            find_extractors: crate::find::preferred_extractors(),
             exec_specs: vec![contract::verify_spec()],
-            schemas: vec![
-                Schema {
+            geometry: crate::geometry::GeometryRegistry::default(),
+            schemas: {
+                // The anchored description Body is the only non-v4 physical
+                // binding retained by the preferred package.  It is the
+                // current content store, has no readable predecessors, and its
+                // extractor requires the v4 issue coordinate root.
+                let mut schemas = vec![Schema {
                     id: contract::issue_schema(),
                     version: contract::ISSUE_SCHEMA_VERSION,
                     encoding: contract::issue_encoding(),
                     mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
-                    // Both predecessors are read by this version: v1 keeps its
-                    // comments in `list:comments` and its history in
-                    // `list:events`, v2 moved the comments, and the readers
-                    // take every home. Writing always uses this version's shape.
-                    readable_predecessors: vec![1, 2],
-                },
-                // Current intents may still update Bodies created under either
-                // readable predecessor. Runtime contains every operation
-                // against the Body's immutable *exact* binding, so readable
-                // predecessors also have to be registered here; otherwise the
-                // compatibility reader can open an old issue but no migration
-                // or ordinary edit can ever advance it.
-                Schema {
-                    id: contract::issue_schema(),
-                    version: 2,
-                    encoding: contract::issue_encoding(),
-                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
-                    readable_predecessors: vec![1],
-                },
-                Schema {
-                    id: contract::issue_schema(),
-                    version: 1,
-                    encoding: contract::issue_encoding(),
-                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
                     readable_predecessors: vec![],
-                },
-                Schema {
-                    id: contract::spec_schema(),
-                    version: contract::SPEC_SCHEMA_VERSION,
-                    encoding: contract::spec_encoding(),
-                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
-                    readable_predecessors: vec![],
-                },
-                Schema {
-                    id: contract::baseline_schema(),
-                    version: contract::BASELINE_SCHEMA_VERSION,
-                    encoding: contract::baseline_encoding(),
-                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
-                    readable_predecessors: vec![],
-                },
-                Schema {
-                    id: contract::relation_schema(),
-                    version: contract::RELATION_SCHEMA_VERSION,
-                    encoding: contract::relation_encoding(),
-                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
-                    readable_predecessors: vec![],
-                },
-                Schema {
-                    id: contract::catalog_schema(),
-                    version: contract::CATALOG_SCHEMA_VERSION,
-                    encoding: contract::catalog_encoding(),
-                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
-                    // v1 Catalogs are read: their `map:parents` entries still
-                    // supply parentage for issues the tree says nothing about.
-                    readable_predecessors: vec![1],
-                },
-                Schema {
-                    id: contract::catalog_schema(),
-                    version: 1,
-                    encoding: contract::catalog_encoding(),
-                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
-                    readable_predecessors: vec![],
-                },
-            ],
+                }];
+                schemas.extend(crate::records::preferred_schemas());
+                schemas
+            },
+            package: IssuesPackage::Preferred,
         }
+    }
+
+    /// Historical package kept installable solely for the offline migration
+    /// worker.  It is a separate implementation identity and therefore cannot
+    /// silently lend its decoders to the preferred v4 publication.
+    pub fn migrator() -> Self {
+        let mut world = Self::preferred();
+        world.package = IssuesPackage::Migrator;
+        world.find_schemas = crate::find::schemas();
+        world.find_extractors = crate::find::extractors();
+        world.schemas = legacy_and_v4_schemas();
+        world
     }
 
     /// The reviewed implementation descriptor this build ships. Its canonical
     /// id is the authority identity the founder activates and every product
     /// transaction pins.
     pub fn implementation_descriptor() -> runtime::world::Implementation {
-        let world = Self::new();
+        let world = Self::preferred();
+        runtime::world::Implementation::from_registration(
+            &world.descriptor(),
+            4,
+            *blake3::hash(b"lait.issues.policy-table.v4").as_bytes(),
+            *blake3::hash(b"lait.issues.physical-records.v4").as_bytes(),
+        )
+    }
+
+    pub fn migrator_implementation_descriptor() -> runtime::world::Implementation {
+        let world = Self::migrator();
         runtime::world::Implementation::from_registration(
             &world.descriptor(),
             3,
-            *blake3::hash(b"lait.issues.policy-table.v3").as_bytes(),
-            *blake3::hash(b"lait.issues.spec-lifecycle.v3").as_bytes(),
+            *blake3::hash(b"lait.issues.policy-table.v3-migrator").as_bytes(),
+            *blake3::hash(b"lait.issues.v3-to-v4-migrator").as_bytes(),
         )
+    }
+}
+
+fn legacy_and_v4_schemas() -> Vec<Schema> {
+    let mut schemas = vec![
+        Schema {
+            id: contract::issue_schema(),
+            version: contract::ISSUE_SCHEMA_VERSION,
+            encoding: contract::issue_encoding(),
+            mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+            // The preferred and migrator packages share this exact current
+            // content binding. Historical v1/v2 are declared independently
+            // below; claiming them as implicit predecessors here would make
+            // the same `(World,Schema,v3)` coordinate mean two different
+            // contracts across installed implementations.
+            readable_predecessors: vec![],
+        },
+        Schema {
+            id: contract::issue_schema(),
+            version: 2,
+            encoding: contract::issue_encoding(),
+            mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+            readable_predecessors: vec![1],
+        },
+        Schema {
+            id: contract::issue_schema(),
+            version: 1,
+            encoding: contract::issue_encoding(),
+            mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+            readable_predecessors: vec![],
+        },
+        Schema {
+            id: contract::spec_schema(),
+            version: contract::SPEC_SCHEMA_VERSION,
+            encoding: contract::spec_encoding(),
+            mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+            readable_predecessors: vec![],
+        },
+        Schema {
+            id: contract::baseline_schema(),
+            version: contract::BASELINE_SCHEMA_VERSION,
+            encoding: contract::baseline_encoding(),
+            mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+            readable_predecessors: vec![],
+        },
+        Schema {
+            id: contract::relation_schema(),
+            version: contract::RELATION_SCHEMA_VERSION,
+            encoding: contract::relation_encoding(),
+            mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+            readable_predecessors: vec![],
+        },
+        Schema {
+            id: contract::catalog_schema(),
+            version: contract::CATALOG_SCHEMA_VERSION,
+            encoding: contract::catalog_encoding(),
+            mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+            readable_predecessors: vec![1],
+        },
+        Schema {
+            id: contract::catalog_schema(),
+            version: 1,
+            encoding: contract::catalog_encoding(),
+            mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+            readable_predecessors: vec![],
+        },
+    ];
+    schemas.extend(crate::records::schemas());
+    // The migrator intentionally combines the historical package with every
+    // physical v4 declaration. Keep that union explicit and canonical even if
+    // a current content schema is also represented in the physical catalog;
+    // Runtime admits one declaration per exact schema/version coordinate.
+    schemas.sort_by(|left, right| {
+        left.id
+            .as_str()
+            .cmp(right.id.as_str())
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    schemas.dedup_by(|left, right| left.id == right.id && left.version == right.version);
+    schemas
+}
+
+#[cfg(test)]
+mod package_descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn preferred_descriptor_cannot_open_aggregate_or_predecessor_schemas() {
+        let descriptor = IssuesWorld::preferred().descriptor();
+        assert_eq!(
+            descriptor.limits.max_payload_bytes,
+            contract::MAX_PAYLOAD_BYTES
+        );
+        assert_eq!(contract::MAX_PAYLOAD_BYTES, 1_572_864);
+        assert!(descriptor.schemas.iter().all(|schema| {
+            schema.id != contract::catalog_schema()
+                && schema.id != contract::spec_schema()
+                && schema.id != contract::baseline_schema()
+                && schema.id != contract::relation_schema()
+        }));
+        let issue: Vec<_> = descriptor
+            .schemas
+            .iter()
+            .filter(|schema| schema.id == contract::issue_schema())
+            .collect();
+        assert_eq!(issue.len(), 1);
+        assert_eq!(issue[0].version, contract::ISSUE_SCHEMA_VERSION);
+        assert!(issue[0].readable_predecessors.is_empty());
+        assert!(descriptor.find_extractors.iter().all(|extractor| {
+            extractor.source.name != contract::spec_schema()
+                && extractor.source.name != contract::baseline_schema()
+                && !(extractor.source.name == contract::issue_schema()
+                    && extractor.source.version != contract::ISSUE_SCHEMA_VERSION)
+        }));
+    }
+
+    #[test]
+    fn migrator_has_a_distinct_identity_and_the_historical_decoders() {
+        let preferred = IssuesWorld::implementation_descriptor();
+        let migrator = IssuesWorld::migrator_implementation_descriptor();
+        assert_ne!(preferred.id().unwrap(), migrator.id().unwrap());
+        let descriptor = IssuesWorld::migrator().descriptor();
+        assert!(descriptor
+            .schemas
+            .iter()
+            .any(|schema| schema.id == contract::catalog_schema()));
+        assert!(descriptor
+            .schemas
+            .iter()
+            .any(|schema| schema.id == contract::spec_schema()));
+        assert!(crate::record_store::migration_source_coverage_complete());
+    }
+}
+
+#[cfg(test)]
+mod migration_window_order_tests {
+    use super::*;
+
+    fn enumerate(phase: &str, view: &fabric::CollaborativeView) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut after = String::new();
+        while let Some(next) =
+            next_lifecycle_subitem(phase, view, &after).expect("bounded migration subitem")
+        {
+            assert!(next > after, "migration cursor must advance monotonically");
+            after = next.clone();
+            out.push(next);
+            assert!(out.len() < 64, "fixture must terminate");
+        }
+        out
+    }
+
+    #[test]
+    fn every_revision_record_precedes_its_final_head_projection() {
+        // The child ids sort before their parents. Record order is therefore
+        // deliberately non-causal; the separate final head subitem is what
+        // makes the resulting projection causal.
+        let mut catalog = fabric::CollaborativeView::default();
+        catalog
+            .maps
+            .entry("role_revisions".into())
+            .or_default()
+            .extend([
+                ("role.example/00".into(), Vec::new()),
+                ("role.example/ff".into(), Vec::new()),
+            ]);
+        catalog
+            .maps
+            .entry("workflow_revisions".into())
+            .or_default()
+            .extend([
+                ("prj_example/00".into(), Vec::new()),
+                ("prj_example/ff".into(), Vec::new()),
+            ]);
+        let catalog_items = enumerate("catalog", &catalog);
+        let governance_head = catalog_items
+            .iter()
+            .position(|item| item == "07:governance-heads:role.example")
+            .expect("governance head projection");
+        let workflow_head = catalog_items
+            .iter()
+            .position(|item| item == "11z:workflow-heads:prj_example")
+            .expect("workflow head projection");
+        assert!(catalog_items[..governance_head]
+            .iter()
+            .any(|item| item == "06:governance:role.example/ff"));
+        assert!(catalog_items[..workflow_head]
+            .iter()
+            .any(|item| item == "11:workflow:prj_example/ff"));
+
+        let mut document = fabric::CollaborativeView::default();
+        document
+            .maps
+            .entry("revisions".into())
+            .or_default()
+            .extend([("00".into(), Vec::new()), ("ff".into(), Vec::new())]);
+        let spec_items = enumerate("spec", &document);
+        let spec_head = spec_items
+            .iter()
+            .position(|item| item == "11c:heads")
+            .expect("Spec head projection");
+        assert!(spec_items[..spec_head]
+            .iter()
+            .any(|item| item == "11a:revision:ff"));
+        assert_eq!(spec_items.last().map(String::as_str), Some("11d:issued"));
+
+        let baseline_items = enumerate("baseline", &document);
+        let baseline_head = baseline_items
+            .iter()
+            .position(|item| item == "11e:heads")
+            .expect("Baseline head projection");
+        assert!(baseline_items[..baseline_head]
+            .iter()
+            .any(|item| item == "11d:revision:ff"));
+        assert_eq!(
+            baseline_items.last().map(String::as_str),
+            Some("11f:issued")
+        );
+    }
+
+    #[test]
+    fn every_phase_has_an_explicit_terminal_subitem_or_exhausts() {
+        let empty = fabric::CollaborativeView::default();
+        assert_eq!(enumerate("catalog", &empty), ["00:space"]);
+        assert_eq!(enumerate("issue", &empty), ["20:base"]);
+        assert!(enumerate("coordinates", &empty).is_empty());
+        assert_eq!(enumerate("spec", &empty), ["11c:heads", "11d:issued"]);
+        assert_eq!(enumerate("baseline", &empty), ["11e:heads", "11f:issued"]);
     }
 }
 
@@ -406,9 +708,38 @@ struct Staging {
     exec: Vec<runtime::exec::Cmd>,
     /// Stable product target binding returned to the application adapter.
     run: Option<String>,
+    results: Vec<contract::ChangeResult>,
 }
 
 impl Staging {
+    fn absorb_records(&mut self, batch: crate::record_store::Batch) {
+        let already_declared: std::collections::BTreeSet<BodyKey> = self
+            .declarations
+            .iter()
+            .map(|declaration| declaration.key.clone())
+            .collect();
+        for declaration in batch.declarations {
+            if !self
+                .declarations
+                .iter()
+                .any(|existing| existing.key == declaration.key)
+            {
+                self.declarations.push(declaration);
+            }
+        }
+        for body in batch.bodies {
+            if !self.bodies.contains(&body) {
+                self.bodies.push(body);
+            }
+        }
+        self.ops.extend(batch.operations.into_iter().filter(|(body, op)| {
+            !(already_declared.contains(body)
+                && (matches!(op, Op::Create)
+                    || matches!(op, Op::RegisterSet { path, .. } if path == crate::records::roots::IDENTITY)))
+        }));
+        self.declared.extend(batch.content_refs);
+    }
+
     fn for_space(space: mechanics::ids::SpaceId, declare_catalog_on_use: bool) -> Self {
         Self {
             space,
@@ -420,6 +751,7 @@ impl Staging {
             demand: None,
             exec: Vec::new(),
             run: None,
+            results: Vec::new(),
         }
     }
 }
@@ -587,6 +919,7 @@ impl Staging {
                 doc,
                 run: self.run,
                 unchanged: false,
+                results: self.results,
             }
             .to_json(),
             declarations: self.declarations,
@@ -650,75 +983,79 @@ fn require_both(left: Vec<u8>, right: Vec<u8>) -> Result<Vec<u8>, Rejection> {
 /// that does not count toward the cap, cannot be detached, and — worst — is
 /// missing from a declaration that is supposed to name everything this Body
 /// references.
-fn raw_attachments(ctx: &Context<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
-    ctx.read_collaborative(&issue_key(doc))
-        .ok()
-        .and_then(|view| view.maps.get("attachments").cloned())
-        .unwrap_or_default()
-}
-
-fn raw_checks(ctx: &Context<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
-    ctx.read_collaborative(&issue_key(doc))
-        .ok()
-        .and_then(|view| view.maps.get("checks").cloned())
-        .unwrap_or_default()
-}
-
-/// The content set a record map references, refusing rather than guessing.
-///
-/// Fail-closed: a record that does not decode, or names a content id that is not
-///32 bytes of hex, refuses the whole transaction. The alternative is to skip it
-/// — and skipping means publishing a declaration that omits content the Body
-/// still references, which makes those bytes collectable while something still
-/// points at them.
-fn content_of(
-    records: &BTreeMap<String, Vec<u8>>,
-) -> Result<Vec<replica::content::ContentRef>, Rejection> {
-    let mut refs = Vec::new();
-    for value in records.values() {
-        let record: serde_json::Value =
-            serde_json::from_slice(value).map_err(|_| Rejection::ContractViolation)?;
-        let Some(content) = record.get("content").and_then(|c| c.as_str()) else {
-            // A legacy record carries its bytes inline and references no
-            // content at all. That is not a failure to decode; it is a record
-            // from before the content plane, and it declares nothing.
-            continue;
-        };
-        let reference = parse_content_ref(content).ok_or(Rejection::ContractViolation)?;
-        if !refs.contains(&reference) {
-            refs.push(reference);
+fn raw_attachments(ctx: &Context<'_>, doc: &str) -> Result<BTreeMap<String, Vec<u8>>, Rejection> {
+    let mut records = BTreeMap::new();
+    let answer = find_source_created_page(
+        ctx,
+        "issue_attachment",
+        doc,
+        false,
+        &contract::PageRequest {
+            limit: u32::try_from(contract::MAX_ATTACHMENTS_PER_ISSUE + 1)
+                .map_err(|_| Rejection::ContractViolation)?,
+            cursor: None,
+        },
+        Vec::new(),
+        Vec::new(),
+    )?;
+    if answer.next_cursor().is_some() || answer.rows().len() > contract::MAX_ATTACHMENTS_PER_ISSUE {
+        return Err(Rejection::StateCorrupt);
+    }
+    for row in answer.rows() {
+        let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+        let record = crate::records::IssueAttachmentRecord::decode_canonical(&raw)
+            .map_err(|_| Rejection::StateCorrupt)?;
+        if record.issue != doc {
+            return Err(Rejection::StateCorrupt);
+        }
+        if !record.tombstone
+            && records
+                .insert(
+                    record.id.clone(),
+                    serde_json::to_vec(&record).map_err(|_| Rejection::StateCorrupt)?,
+                )
+                .is_some()
+        {
+            return Err(Rejection::StateCorrupt);
         }
     }
-    Ok(refs)
+    Ok(records)
 }
 
-fn check_content_of(
-    records: &BTreeMap<String, Vec<u8>>,
-) -> Result<Vec<replica::content::ContentRef>, Rejection> {
-    let mut refs = Vec::new();
-    for value in records.values() {
-        let record: contract::CheckRecord =
-            serde_json::from_slice(value).map_err(|_| Rejection::ContractViolation)?;
-        for raw in std::iter::once(Some(record.source.as_str())).chain([record.report.as_deref()]) {
-            let Some(raw) = raw else { continue };
-            let reference = parse_content_ref(raw).ok_or(Rejection::ContractViolation)?;
-            if !refs.contains(&reference) {
-                refs.push(reference);
-            }
+fn raw_checks(ctx: &Context<'_>, doc: &str) -> Result<BTreeMap<String, Vec<u8>>, Rejection> {
+    let mut records = BTreeMap::new();
+    let answer = find_source_created_page(
+        ctx,
+        "issue_check",
+        doc,
+        false,
+        &contract::PageRequest {
+            limit: u32::try_from(contract::MAX_CHECKS_PER_ISSUE + 1)
+                .map_err(|_| Rejection::ContractViolation)?,
+            cursor: None,
+        },
+        Vec::new(),
+        Vec::new(),
+    )?;
+    if answer.next_cursor().is_some() || answer.rows().len() > contract::MAX_CHECKS_PER_ISSUE {
+        return Err(Rejection::StateCorrupt);
+    }
+    for row in answer.rows() {
+        let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+        let record = crate::records::IssueCheckRecord::decode_canonical(&raw)
+            .map_err(|_| Rejection::StateCorrupt)?;
+        if record.issue != doc
+            || records
+                .insert(
+                    record.run,
+                    serde_json::to_vec(&record.check).map_err(|_| Rejection::StateCorrupt)?,
+                )
+                .is_some()
+        {
+            return Err(Rejection::StateCorrupt);
         }
     }
-    Ok(refs)
-}
-
-fn issue_content_of(
-    attachments: &BTreeMap<String, Vec<u8>>,
-    checks: &BTreeMap<String, Vec<u8>>,
-) -> Result<Vec<replica::content::ContentRef>, Rejection> {
-    let mut refs = content_of(attachments)?;
-    refs.extend(check_content_of(checks)?);
-    refs.sort_unstable();
-    refs.dedup();
-    Ok(refs)
+    Ok(records)
 }
 
 fn reg(path: &str, value: impl Into<Vec<u8>>) -> Op {
@@ -749,6 +1086,7 @@ fn unchanged_effect(doc: Option<String>) -> Effect {
             doc,
             run: None,
             unchanged: true,
+            results: Vec::new(),
         }
         .to_json(),
         declarations: vec![],
@@ -764,25 +1102,498 @@ fn unchanged_effect(doc: Option<String>) -> Effect {
 /// duplicate semantic Catalog, an unrelated Catalog-shaped Body — is typed
 /// [`Rejection::StateCorrupt`]; the World never selects among, merges,
 /// repairs, or silently recreates Catalogs.
-fn checked_catalog_view(ctx: &Context<'_>) -> Result<Option<fabric::CollaborativeView>, Rejection> {
+fn checked_catalog_view(
+    ctx: &Context<'_>,
+) -> Result<Option<runtime::world::CollaborativeBody>, Rejection> {
     let expected = catalog_key(&ctx.principal().space);
     let catalogs = ctx.bodies_with_schema(&contract::world_id(), &contract::catalog_schema());
     match catalogs.as_slice() {
         [] => Ok(None),
-        [one] if one == &expected => match ctx.read_collaborative(&expected) {
-            Ok(view) => Ok(Some(view)),
-            // Bound as a catalog but unreadable: a wrong-model/encoding Body,
-            // or one carrying a collaborative type this build cannot project.
-            // Either way not a missing catalog.
-            Err(_) => Err(Rejection::StateCorrupt),
-        },
+        [one] if one == &expected => ctx.read_collaborative(&expected).map_err(Into::into),
         _ => Err(Rejection::StateCorrupt),
     }
 }
 
 /// Load the catalog state from the committed snapshot (integrity-checked).
 fn catalog_state(ctx: &Context<'_>) -> Result<CatalogState, Rejection> {
-    Ok(CatalogState::from_view(checked_catalog_view(ctx)?.as_ref()))
+    let view = checked_catalog_view(ctx)?;
+    Ok(CatalogState::from_view(view.as_deref()))
+}
+
+fn migration_cursor_body(cursor: &str) -> Option<(String, Option<BodyKey>, String)> {
+    if cursor.is_empty() {
+        return Some((String::new(), None, String::new()));
+    }
+    let (phase, body, subitem) = contract::V4MigrationWindow::parse_cursor(cursor)?;
+    Some((
+        phase,
+        body.map(|body| BodyKey::new(contract::world_id(), body)),
+        subitem,
+    ))
+}
+
+fn lifecycle_window_digest(
+    ctx: &Context<'_>,
+    phase: &str,
+    body: Option<&BodyKey>,
+    subitem: &str,
+) -> Result<[u8; 32], Rejection> {
+    let source = ctx.lifecycle_source().ok_or(Rejection::ContractViolation)?;
+    let mut hasher = blake3::Hasher::new_derive_key("lait.issues.v4-migration-window.v1");
+    hasher.update(
+        &postcard::to_stdvec(&source.publication.publication)
+            .map_err(|_| Rejection::StateCorrupt)?,
+    );
+    hasher.update(&postcard::to_stdvec(&source.frontier).map_err(|_| Rejection::StateCorrupt)?);
+    hasher.update(phase.as_bytes());
+    hasher.update(subitem.as_bytes());
+    if let Some(body) = body {
+        hasher.update(&body.body.as_bytes());
+        let view = ctx
+            .read_lifecycle_source_collaborative(body)
+            .map_err(Rejection::BodyRead)?
+            .ok_or(Rejection::StateCorrupt)?;
+        let encoded = postcard::to_stdvec(&*view).map_err(|_| Rejection::StateCorrupt)?;
+        if encoded.len() > contract::MAX_PAYLOAD_BYTES as usize {
+            return Err(Rejection::LimitExceeded);
+        }
+        hasher.update(&encoded);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn select_subitem(best: &mut Option<String>, after: &str, candidate: String) {
+    if candidate.as_str() > after
+        && best
+            .as_ref()
+            .is_none_or(|current| candidate.as_str() < current.as_str())
+    {
+        *best = Some(candidate);
+    }
+}
+
+fn next_lifecycle_subitem(
+    phase: &str,
+    view: &fabric::CollaborativeView,
+    after: &str,
+) -> Result<Option<String>, Rejection> {
+    let mut best = None;
+    match phase {
+        "catalog" => {
+            select_subitem(&mut best, after, "00:space".into());
+            for (path, prefix) in [
+                ("labels", "02:label"),
+                ("roles", "05:governance"),
+                ("role_revisions", "06:governance"),
+                ("projects", "10:project"),
+                ("workflow_revisions", "11:workflow"),
+                ("project_milestones", "12:milestone"),
+                ("cycles", "13:cycle"),
+                ("project_updates", "40:update"),
+                ("initiatives", "50:initiative"),
+                ("teams", "60:team"),
+                ("triage", "70:triage"),
+            ] {
+                if let Some(entries) = view.maps.get(path) {
+                    for key in entries.keys() {
+                        select_subitem(&mut best, after, format!("{prefix}:{key}"));
+                    }
+                }
+            }
+            if let Some(entries) = view.maps.get("initiatives") {
+                for (id, raw) in entries {
+                    let initiative: Initiative =
+                        serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+                    if initiative.id != *id {
+                        return Err(Rejection::StateCorrupt);
+                    }
+                    for project in &initiative.projects {
+                        select_subitem(
+                            &mut best,
+                            after,
+                            format!("51:initiative-project:{id}:{project}"),
+                        );
+                    }
+                }
+            }
+            if let Some(entries) = view.maps.get("teams") {
+                for (id, raw) in entries {
+                    let team: Team =
+                        serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+                    if team.id != *id {
+                        return Err(Rejection::StateCorrupt);
+                    }
+                    for member in &team.members {
+                        select_subitem(&mut best, after, format!("61:team-member:{id}:{member}"));
+                    }
+                }
+            }
+            let mut governance = BTreeSet::new();
+            if let Some(entries) = view.maps.get("roles") {
+                governance.extend(entries.keys().cloned());
+            }
+            if let Some(entries) = view.maps.get("role_revisions") {
+                for key in entries.keys() {
+                    let (role, _) = key.rsplit_once('/').ok_or(Rejection::StateCorrupt)?;
+                    governance.insert(role.into());
+                }
+            }
+            for role in governance {
+                select_subitem(&mut best, after, format!("07:governance-heads:{role}"));
+            }
+            if let Some(entries) = view.maps.get("workflow_revisions") {
+                let mut projects = BTreeSet::new();
+                for key in entries.keys() {
+                    let (project, _) = key.rsplit_once('/').ok_or(Rejection::StateCorrupt)?;
+                    projects.insert(project);
+                }
+                for project in projects {
+                    select_subitem(&mut best, after, format!("11z:workflow-heads:{project}"));
+                }
+            }
+        }
+        "coordinates" => {
+            for (path, prefix) in [("seqs", "14:identity"), ("tombstones", "15:tombstone")] {
+                if let Some(entries) = view.maps.get(path) {
+                    for key in entries.keys() {
+                        select_subitem(&mut best, after, format!("{prefix}:{key}"));
+                    }
+                }
+            }
+            for (path, entries) in &view.lists {
+                if path.starts_with("board/") {
+                    for (ordinal, _entry) in entries.iter().enumerate() {
+                        select_subitem(&mut best, after, format!("16:board:{path}:{ordinal:020}"));
+                    }
+                }
+            }
+            for (ordinal, _node) in view
+                .trees
+                .get(contract::HIERARCHY_PATH)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                select_subitem(&mut best, after, format!("30:tree:{ordinal:020}"));
+            }
+            if let Some(parents) = view.maps.get("parents") {
+                for child in parents.keys() {
+                    select_subitem(&mut best, after, format!("30:map:{child}"));
+                }
+            }
+            if let Some(edges) = view.maps.get("edges") {
+                for key in edges.keys() {
+                    select_subitem(&mut best, after, format!("31:link:{key}"));
+                }
+            }
+            if let Some(triage) = view.maps.get("triage") {
+                for (id, raw) in triage {
+                    let item: TriageItem =
+                        serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+                    if item.id != *id {
+                        return Err(Rejection::StateCorrupt);
+                    }
+                    if !item.outcome.is_empty() {
+                        select_subitem(&mut best, after, format!("71:triage-decision:{id}"));
+                    }
+                }
+            }
+        }
+        "issue" => {
+            select_subitem(&mut best, after, "20:base".into());
+            for (path, prefix) in [("attachments", "24:attachment"), ("checks", "25:check")] {
+                if let Some(entries) = view.maps.get(path) {
+                    for key in entries.keys() {
+                        select_subitem(&mut best, after, format!("{prefix}:{key}"));
+                    }
+                }
+            }
+            for (path, values) in &view.sets {
+                let prefix = if path == "assignees" {
+                    Some("23:relation:assignee".to_string())
+                } else if path == "followers" {
+                    Some("23:relation:follower".to_string())
+                } else if path == "labels" {
+                    Some("23:relation:label".to_string())
+                } else if path == contract::REACTIONS_PATH {
+                    Some("22:reaction:current".to_string())
+                } else {
+                    path.strip_prefix("reactions/").map(return_reaction_prefix)
+                };
+                if let Some(prefix) = prefix {
+                    for (ordinal, _value) in values.iter().enumerate() {
+                        select_subitem(&mut best, after, format!("{prefix}:{ordinal:020}"));
+                    }
+                }
+            }
+            for (kind, value) in [
+                ("milestone", view.registers.get("milestone")),
+                ("cycle", view.registers.get("cycle")),
+                ("baseline", view.registers.get("baseline")),
+            ] {
+                if value.is_some_and(|value| !value.is_empty()) {
+                    select_subitem(&mut best, after, format!("23:relation:{kind}:single"));
+                }
+            }
+            for (path, prefix) in [("comments", "21:comment"), ("events", "26:activity")] {
+                for (ordinal, _entry) in view.lists.get(path).into_iter().flatten().enumerate() {
+                    select_subitem(&mut best, after, format!("{prefix}:list:{ordinal:020}"));
+                }
+            }
+            for (ordinal, _node) in view.trees.get("comments").into_iter().flatten().enumerate() {
+                select_subitem(&mut best, after, format!("21:comment:tree:{ordinal:020}"));
+            }
+            for (ordinal, _entry) in view
+                .logs
+                .get(contract::EVENTS_PATH)
+                .into_iter()
+                .flat_map(|log| &log.entries)
+                .enumerate()
+            {
+                select_subitem(&mut best, after, format!("26:activity:log:{ordinal:020}"));
+            }
+        }
+        "spec" => {
+            if let Some(revisions) = view.maps.get("revisions") {
+                for key in revisions.keys() {
+                    select_subitem(&mut best, after, format!("11a:revision:{key}"));
+                }
+            }
+            for (ordinal, _value) in view
+                .sets
+                .get("observations")
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                select_subitem(&mut best, after, format!("11b:observation:{ordinal:020}"));
+            }
+            select_subitem(&mut best, after, "11c:heads".into());
+            select_subitem(&mut best, after, "11d:issued".into());
+        }
+        "baseline" => {
+            if let Some(revisions) = view.maps.get("revisions") {
+                for key in revisions.keys() {
+                    select_subitem(&mut best, after, format!("11d:revision:{key}"));
+                }
+            }
+            select_subitem(&mut best, after, "11e:heads".into());
+            select_subitem(&mut best, after, "11f:issued".into());
+        }
+        _ => return Err(Rejection::InvalidRequest),
+    }
+    Ok(best)
+}
+
+fn return_reaction_prefix(comment: &str) -> String {
+    format!("22:reaction:{comment}")
+}
+
+fn first_lifecycle_body(
+    ctx: &Context<'_>,
+    schema: &replica::body::SchemaId,
+    after: Option<&BodyKey>,
+) -> Result<Option<BodyKey>, Rejection> {
+    let page = ctx
+        .lifecycle_source_body_keys_page_with_schema(&contract::world_id(), schema, after, 1)
+        .map_err(Rejection::BodyRead)?;
+    Ok(page.into_iter().next())
+}
+
+/// Select one compact exact-source migration window outside mutation-lane
+/// admission. Exactly one logical source fact is selected; a later callback
+/// reopens this one Body and recomputes the digest before staging it.
+pub fn prepare_v4_migration_plan(
+    ctx: &Context<'_>,
+    previous_batch: u64,
+    previous_cursor: String,
+    timestamp: u64,
+) -> Result<contract::V4MigrationPlan, Rejection> {
+    let source = ctx.lifecycle_source().ok_or(Rejection::ContractViolation)?;
+    if timestamp == 0 || previous_cursor.len() > 512 {
+        return Err(Rejection::InvalidRequest);
+    }
+    let (previous_phase, previous_body, previous_subitem) =
+        migration_cursor_body(&previous_cursor).ok_or(Rejection::InvalidRequest)?;
+    if previous_phase == contract::V4MigrationWindow::TERMINAL_PHASE {
+        return Err(Rejection::Conflict);
+    }
+    let phases = [
+        ("catalog", contract::catalog_schema()),
+        ("issue", contract::issue_schema()),
+        ("coordinates", contract::catalog_schema()),
+        ("spec", contract::spec_schema()),
+        ("baseline", contract::baseline_schema()),
+    ];
+    let start = phases
+        .iter()
+        .position(|(phase, _)| *phase == previous_phase)
+        .unwrap_or(0);
+    if !previous_phase.is_empty()
+        && phases
+            .get(start)
+            .is_none_or(|(phase, _)| *phase != previous_phase)
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    let mut selected = None;
+    for (index, (candidate_phase, schema)) in phases.iter().enumerate().skip(start) {
+        if previous_phase == *candidate_phase {
+            let body = previous_body.as_ref().ok_or(Rejection::InvalidRequest)?;
+            let view = ctx
+                .read_lifecycle_source_collaborative(body)
+                .map_err(Rejection::BodyRead)?
+                .ok_or(Rejection::StateCorrupt)?;
+            if let Some(subitem) =
+                next_lifecycle_subitem(candidate_phase, &view, &previous_subitem)?
+            {
+                selected = Some((*candidate_phase, Some(body.clone()), subitem));
+                break;
+            }
+        }
+        let after = (previous_phase == *candidate_phase)
+            .then_some(previous_body.as_ref())
+            .flatten();
+        if let Some(body) = first_lifecycle_body(ctx, schema, after)? {
+            if matches!(*candidate_phase, "catalog" | "coordinates") {
+                let expected = contract::catalog_key(&ctx.principal().space);
+                if body != expected || first_lifecycle_body(ctx, schema, Some(&body))?.is_some() {
+                    return Err(Rejection::StateCorrupt);
+                }
+            }
+            let view = ctx
+                .read_lifecycle_source_collaborative(&body)
+                .map_err(Rejection::BodyRead)?
+                .ok_or(Rejection::StateCorrupt)?;
+            let subitem = next_lifecycle_subitem(candidate_phase, &view, "")?
+                .unwrap_or_else(|| "$empty".into());
+            selected = Some((*candidate_phase, Some(body), subitem));
+            break;
+        }
+        if index == start && previous_phase == *candidate_phase && previous_body.is_none() {
+            return Err(Rejection::InvalidRequest);
+        }
+    }
+    let (phase, body, subitem) = selected.unwrap_or((
+        contract::V4MigrationWindow::TERMINAL_PHASE,
+        None,
+        String::new(),
+    ));
+    let cursor = contract::V4MigrationWindow::render_cursor(&phase, body.as_ref(), &subitem)
+        .ok_or(Rejection::StateCorrupt)?;
+    let digest = lifecycle_window_digest(ctx, phase, body.as_ref(), &subitem)?;
+    let plan = contract::V4MigrationPlan {
+        version: contract::V4MigrationPlan::VERSION,
+        source: source.publication.publication,
+        source_frontier: source.frontier,
+        previous_batch,
+        previous_cursor,
+        window: contract::V4MigrationWindow {
+            phase: phase.into(),
+            body,
+            subitem,
+            digest,
+            cursor,
+        },
+        timestamp,
+    };
+    plan.valid().then_some(plan).ok_or(Rejection::StateCorrupt)
+}
+
+/// The v4 catalog projection. Record Bodies are authoritative; the legacy
+/// singleton only supplies fields not yet represented by the migration while
+/// its completion marker is false.
+fn live_catalog(ctx: &Context<'_>) -> Result<CatalogState, Rejection> {
+    let mut catalog = catalog_state(ctx)?;
+    crate::record_store::apply_catalog(ctx, &mut catalog)?;
+    Ok(catalog)
+}
+
+fn issue_read_set(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    project: Option<&str>,
+) -> Result<IssueReadSet, Rejection> {
+    // Whether the read is scoped to a project or not, the row wanted is the
+    // issue node: it carries both the project and the id. The project-scoped
+    // branch used to look for `issue_placement`, which no extractor in this
+    // package emits, so scoping this read to a project answered with nothing.
+    // Only the unscoped caller exists today, which is the only reason that
+    // never showed.
+    let rows = find_rows_equal(
+        ctx,
+        project.map_or(crate::find::field::KIND, |_| crate::find::field::PROJECT),
+        project.unwrap_or("issue"),
+    )?;
+    let docs = rows
+        .into_iter()
+        .filter(|row| result_text(row, crate::find::field::KIND).as_deref() == Some("issue"))
+        .map(|row| result_text(&row, crate::find::field::ID).ok_or(Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    issue_read_docs(ctx, catalog, docs)
+}
+
+fn issue_read_docs(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    docs: impl IntoIterator<Item = String>,
+) -> Result<IssueReadSet, Rejection> {
+    let mut issues = BTreeMap::new();
+    let mut aliases = DerivedAliases::default();
+    let mut coordinates = BTreeMap::new();
+    for doc in docs {
+        let mut issue = issue_state(ctx, &doc).ok_or(Rejection::StateCorrupt)?;
+        if let Some(coordinate) = crate::record_store::issue_coordinate_for(ctx, &doc)? {
+            crate::record_store::apply_issue_coordinate(&mut issue, &coordinate);
+            let project = catalog
+                .projects
+                .get(&coordinate.placement.project)
+                .ok_or(Rejection::StateCorrupt)?;
+            let rendered = coordinate
+                .identity
+                .alias
+                .render(&project.key)
+                .map_err(|_| Rejection::StateCorrupt)?;
+            if aliases
+                .by_alias
+                .insert(rendered.to_ascii_lowercase(), doc.clone())
+                .is_some()
+            {
+                return Err(Rejection::StateCorrupt);
+            }
+            aliases.by_doc.insert(doc.clone(), rendered);
+            coordinates.insert(doc.clone(), coordinate);
+        }
+        aliases.canonical.insert(
+            doc.clone(),
+            DocId::parse(&doc)
+                .map(|id| id.short(7))
+                .unwrap_or_else(|| doc.clone()),
+        );
+        issues.insert(doc, Arc::new(issue));
+    }
+    crate::record_store::apply_issue_catalog(catalog, &coordinates);
+    Ok(IssueReadSet { aliases, issues })
+}
+
+fn issue_detail_read(
+    ctx: &Context<'_>,
+    doc: &str,
+) -> Result<(CatalogState, IssueReadSet), Rejection> {
+    let coordinate =
+        crate::record_store::issue_coordinate_for(ctx, doc)?.ok_or(Rejection::InvalidRequest)?;
+    let mut catalog = CatalogState::default();
+    crate::record_store::apply_project(ctx, &mut catalog, &coordinate.placement.project)?;
+    let read = issue_read_docs(ctx, &mut catalog, [doc.to_owned()])?;
+    let labels = read
+        .issues
+        .get(doc)
+        .map(|issue| issue.labels.clone())
+        .unwrap_or_default();
+    for label in labels {
+        crate::record_store::apply_label(ctx, &mut catalog, &label)?;
+    }
+    Ok((catalog, read))
 }
 
 /// Resolve caller-proposed new labels against the catalog this write actually
@@ -844,30 +1655,3565 @@ fn reconcile_new_labels(
     (create, apply)
 }
 
-fn issue_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
-    ctx.read_collaborative(&issue_key(doc))
+fn load_labels_for_write(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    ids: impl IntoIterator<Item = String>,
+    names: impl IntoIterator<Item = String>,
+) -> Result<(), Rejection> {
+    for id in ids {
+        crate::record_store::apply_label(ctx, catalog, &id)?;
+    }
+    for name in names {
+        let canonical = name.trim().to_ascii_lowercase();
+        if let Some(row) = unique_find_row(
+            ctx,
+            crate::find::field::EXACT_NAME,
+            &canonical,
+            "label",
+            None,
+        )? {
+            let id = result_text(&row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+            crate::record_store::apply_label(ctx, catalog, &id)?;
+        }
+    }
+    Ok(())
+}
+
+fn project_key_exists(ctx: &Context<'_>, key: &str) -> Result<bool, Rejection> {
+    Ok(unique_find_row(
+        ctx,
+        crate::find::field::ENTITY_KEY,
+        &key.trim().to_ascii_uppercase(),
+        "project",
+        None,
+    )?
+    .is_some())
+}
+
+fn find_exists_bytes(ctx: &Context<'_>, field: &str, value: Vec<u8>) -> Result<bool, Rejection> {
+    use runtime::find as find_api;
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: 2,
+        edges_visited: 1,
+        nodes_visited: 2,
+        paths_retained: 1,
+        candidates_per_branch: 1,
+        score_evaluations: 1,
+        projected_bytes: 1_024,
+        packed_tokens: 4,
+        wall_millis: 250,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![find_api::Step {
+                id: seek,
+                input: Vec::new(),
+                op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                    field: crate::find::field_ref(field),
+                    test: find_api::Test::Equal,
+                    value: find_api::Atom::Bytes(value),
+                })),
+                bound,
+            }],
+            output: seek,
+            bound,
+            page_size: 1,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    Ok(answer.matched_total().unwrap_or(0) != 0)
+}
+
+fn find_rows_equal(
+    ctx: &Context<'_>,
+    field: &str,
+    value: &str,
+) -> Result<Vec<runtime::find::ResultRow>, Rejection> {
+    use runtime::find as find_api;
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: 20_000,
+        edges_visited: 1,
+        nodes_visited: 20_000,
+        paths_retained: 1,
+        candidates_per_branch: 10_000,
+        score_evaluations: 1,
+        projected_bytes: 8 * 1_024 * 1_024,
+        packed_tokens: 32_768,
+        wall_millis: 5_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let mut fields = [
+        crate::find::field::ID,
+        crate::find::field::KIND,
+        crate::find::field::TITLE,
+        crate::find::field::RELATION_KIND,
+        crate::find::field::SOURCE_ID,
+        crate::find::field::TARGET_ID,
+        crate::find::field::STATE,
+        crate::find::field::AUTHOR,
+        crate::find::field::CREATED_AT,
+        crate::find::field::EXACT_NAME,
+        crate::find::field::ENTITY_KEY,
+        crate::find::field::PROJECT,
+        crate::find::field::TOMBSTONE,
+        crate::find::field::ALIAS_COORDINATE,
+        crate::find::field::REVISION,
+        crate::find::field::HEAD_REVISIONS,
+        crate::find::field::CONFLICTED,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                        field: crate::find::field_ref(field),
+                        test: find_api::Test::Equal,
+                        value: find_api::Atom::Text(value.into()),
+                    })),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![seek],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: 10_000,
+            cursor: None,
+        })
+        // Through the canonical mapping, like every other Find call site. A
+        // blanket `StateCorrupt` here said "your stored state is corrupt"
+        // for every reason a Find can fail — including the capability simply
+        // not being available, which is not a statement about the store at
+        // all. Corrupt is the most severe verdict this World can return and
+        // the one thing a Space cannot recover from by retrying.
+        .map_err(find_rejection)?;
+    if answer.next_cursor().is_some() {
+        // The legacy Issue DTO has no continuation coordinate. Truncating
+        // would silently lie, so oversized enrichment is explicit until the
+        // paged Issue-detail adapter replaces it.
+        return Err(Rejection::LimitExceeded);
+    }
+    Ok(answer.rows().to_vec())
+}
+
+fn page_cursor(
+    request: &contract::PageRequest,
+) -> Result<Option<runtime::find::Cursor>, Rejection> {
+    if !request.validate() {
+        return Err(Rejection::InvalidRequest);
+    }
+    request
+        .cursor
+        .as_ref()
+        .map(|cursor| {
+            let (_, cursor) =
+                contract::decode_page_cursor(cursor).ok_or(Rejection::InvalidRequest)?;
+            data_encoding::BASE64URL_NOPAD
+                .decode(cursor.as_bytes())
+                .map_err(|_| Rejection::InvalidRequest)
+                .and_then(|bytes| {
+                    runtime::find::Cursor::new(bytes).map_err(|_| Rejection::InvalidRequest)
+                })
+        })
+        .transpose()
+}
+
+fn page_from_answer<T>(answer: &runtime::find::Answer, items: Vec<T>) -> contract::Page<T> {
+    let publication = answer.coordinates().world_publication();
+    contract::Page {
+        publication: publication.clone(),
+        items,
+        next_cursor: answer.next_cursor().and_then(|cursor| {
+            contract::encode_page_cursor(
+                publication,
+                data_encoding::BASE64URL_NOPAD.encode(cursor.as_bytes()),
+            )
+        }),
+        exact_total: answer.matched_total(),
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct InboxPageCursor {
+    filter: [u8; 32],
+    find: String,
+}
+
+fn inbox_filter_digest(exclude_device: Option<&str>) -> [u8; 32] {
+    blake3::derive_key(
+        "lait.issues.inbox-filter.v1",
+        exclude_device.unwrap_or_default().as_bytes(),
+    )
+}
+
+fn inbox_find_request(
+    request: &contract::PageRequest,
+    exclude_device: Option<&str>,
+) -> Result<contract::PageRequest, Rejection> {
+    if !request.validate() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let cursor = request
+        .cursor
+        .as_ref()
+        .map(|cursor| {
+            let (publication, cursor) =
+                contract::decode_page_cursor(cursor).ok_or(Rejection::InvalidRequest)?;
+            let bytes = data_encoding::BASE64URL_NOPAD
+                .decode(cursor.as_bytes())
+                .map_err(|_| Rejection::InvalidRequest)?;
+            let cursor: InboxPageCursor =
+                postcard::from_bytes(&bytes).map_err(|_| Rejection::InvalidRequest)?;
+            if cursor.filter != inbox_filter_digest(exclude_device) {
+                return Err(Rejection::InvalidRequest);
+            }
+            contract::encode_page_cursor(publication, cursor.find).ok_or(Rejection::InvalidRequest)
+        })
+        .transpose()?;
+    Ok(contract::PageRequest {
+        limit: request.limit,
+        cursor,
+    })
+}
+
+fn inbox_next_cursor(
+    answer: &runtime::find::Answer,
+    exclude_device: Option<&str>,
+) -> Option<String> {
+    let find = answer
+        .next_cursor()
+        .map(|cursor| data_encoding::BASE64URL_NOPAD.encode(cursor.as_bytes()))?;
+    let cursor = InboxPageCursor {
+        filter: inbox_filter_digest(exclude_device),
+        find,
+    };
+    let filtered = postcard::to_stdvec(&cursor)
         .ok()
-        .map(|v| IssueState::from_view(&v))
+        .map(|bytes| data_encoding::BASE64URL_NOPAD.encode(&bytes))?;
+    contract::encode_page_cursor(answer.coordinates().world_publication(), filtered)
+}
+
+fn find_rejection(failure: runtime::find::Failure) -> Rejection {
+    match failure {
+        runtime::find::Failure::Invalid(_) => Rejection::InvalidRequest,
+        runtime::find::Failure::PrincipalDenied => {
+            Rejection::Denied(runtime::world::DeniedCause::ReadRefused)
+        }
+        runtime::find::Failure::NoActiveImplementation => Rejection::NoActiveImplementation,
+        runtime::find::Failure::ImplementationUnavailable => Rejection::ImplementationUnavailable,
+        runtime::find::Failure::AuthorityUnavailable(_) => Rejection::ImplementationUnavailable,
+        runtime::find::Failure::Interrupted
+        | runtime::find::Failure::PolicyExceeded
+        | runtime::find::Failure::PublicationUnavailable
+        | runtime::find::Failure::PublicationExpired
+        | runtime::find::Failure::PaginationUnsupported
+        | runtime::find::Failure::CursorCapacityExceeded
+        | runtime::find::Failure::Unavailable => Rejection::LimitExceeded,
+    }
+}
+
+/// Bounded collection primitive used by every ordinary Issues page. It is an
+/// adapter over the same publication Corpus as the generic Find invocation;
+/// the product contributes only stable kinds, filters and packed fields.
+fn find_kind_page(
+    ctx: &Context<'_>,
+    kind: &str,
+    project: Option<&str>,
+    request: &contract::PageRequest,
+    additional: Vec<runtime::find::Predicate>,
+    mut fields: Vec<runtime::find::FieldRef>,
+) -> Result<runtime::find::Answer, Rejection> {
+    use runtime::find as find_api;
+    let cursor = page_cursor(request)?;
+    let candidates = u64::from(request.limit).saturating_mul(8).max(64);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: candidates.saturating_mul(8),
+        edges_visited: candidates,
+        nodes_visited: candidates,
+        paths_retained: candidates,
+        candidates_per_branch: candidates,
+        score_evaluations: candidates,
+        projected_bytes: u64::from(request.limit).saturating_mul(64 * 1_024),
+        packed_tokens: u64::from(request.limit).saturating_mul(4_096),
+        wall_millis: 5_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let mut steps = vec![find_api::Step {
+        id: seek,
+        input: Vec::new(),
+        op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+            field: if project.is_some() {
+                crate::find::field_ref(crate::find::field::KIND_PROJECT)
+            } else {
+                crate::find::field_ref(crate::find::field::KIND)
+            },
+            test: find_api::Test::Equal,
+            value: project.map_or_else(
+                || find_api::Atom::Text(kind.into()),
+                |project| find_api::Atom::Bytes(crate::find::composite_key([kind, project])),
+            ),
+        })),
+        bound,
+    }];
+    let mut output = seek;
+    let has_additional = !additional.is_empty();
+    if has_additional {
+        let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+        steps.push(find_api::Step {
+            id: keep,
+            input: vec![seek],
+            op: find_api::Op::Keep(find_api::Keep {
+                predicates: additional,
+            }),
+            bound,
+        });
+        output = keep;
+    }
+    let pack =
+        find_api::StepId::new(if has_additional { 3 } else { 2 }).ok_or(Rejection::StateCorrupt)?;
+    fields.extend([
+        crate::find::field_ref(crate::find::field::ID),
+        crate::find::field_ref(crate::find::field::KIND),
+        crate::find::field_ref(crate::find::field::SOURCE_ID),
+    ]);
+    fields.sort();
+    fields.dedup();
+    steps.push(find_api::Step {
+        id: pack,
+        input: vec![output],
+        op: find_api::Op::Pack(find_api::Pack { fields }),
+        bound,
+    });
+    ctx.find(find_api::Query {
+        schema: crate::find::entity_schema_ref(),
+        publication: ctx.world_publication_id().map(|id| id.publication),
+        mode: find_api::Mode::Exact,
+        steps,
+        output: pack,
+        bound,
+        page_size: request.limit,
+        cursor,
+    })
+    .map_err(find_rejection)
+}
+
+fn find_field_page(
+    ctx: &Context<'_>,
+    field: &str,
+    value: runtime::find::Atom,
+    request: &contract::PageRequest,
+    additional: Vec<runtime::find::Predicate>,
+    fields: Vec<runtime::find::FieldRef>,
+) -> Result<runtime::find::Answer, Rejection> {
+    find_field_test_page(
+        ctx,
+        field,
+        runtime::find::Test::Equal,
+        value,
+        request,
+        additional,
+        fields,
+    )
+}
+
+fn find_field_test_page(
+    ctx: &Context<'_>,
+    field: &str,
+    test: runtime::find::Test,
+    value: runtime::find::Atom,
+    request: &contract::PageRequest,
+    additional: Vec<runtime::find::Predicate>,
+    mut fields: Vec<runtime::find::FieldRef>,
+) -> Result<runtime::find::Answer, Rejection> {
+    use runtime::find as find_api;
+    let cursor = page_cursor(request)?;
+    let candidates = u64::from(request.limit).saturating_mul(8).max(64);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: candidates.saturating_mul(8),
+        edges_visited: candidates,
+        nodes_visited: candidates,
+        paths_retained: candidates,
+        candidates_per_branch: candidates,
+        score_evaluations: candidates,
+        // This helper packs only bounded identity/relation coordinates; large
+        // text values are hydrated from the returned source Body by the
+        // dedicated detail paths. Keep the 129th cap-detection row inside the
+        // schema's honest 8 MiB grant without claiming a 64 KiB tuple.
+        projected_bytes: u64::from(request.limit).saturating_mul(16 * 1_024),
+        packed_tokens: u64::from(request.limit).saturating_mul(4_096),
+        wall_millis: 5_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let mut output = seek;
+    let mut steps = vec![find_api::Step {
+        id: seek,
+        input: Vec::new(),
+        op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+            field: crate::find::field_ref(field),
+            test,
+            value,
+        })),
+        bound,
+    }];
+    let has_additional = !additional.is_empty();
+    if has_additional {
+        let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+        steps.push(find_api::Step {
+            id: keep,
+            input: vec![seek],
+            op: find_api::Op::Keep(find_api::Keep {
+                predicates: additional,
+            }),
+            bound,
+        });
+        output = keep;
+    }
+    let pack =
+        find_api::StepId::new(if has_additional { 3 } else { 2 }).ok_or(Rejection::StateCorrupt)?;
+    fields.extend([
+        crate::find::field_ref(crate::find::field::ID),
+        crate::find::field_ref(crate::find::field::KIND),
+        crate::find::field_ref(crate::find::field::SOURCE_ID),
+    ]);
+    fields.sort();
+    fields.dedup();
+    steps.push(find_api::Step {
+        id: pack,
+        input: vec![output],
+        op: find_api::Op::Pack(find_api::Pack { fields }),
+        bound,
+    });
+    ctx.find(find_api::Query {
+        schema: crate::find::entity_schema_ref(),
+        publication: ctx.world_publication_id().map(|id| id.publication),
+        mode: find_api::Mode::Exact,
+        steps,
+        output: pack,
+        bound,
+        page_size: request.limit,
+        cursor,
+    })
+    .map_err(find_rejection)
+}
+
+fn issue_relation_targets(
+    ctx: &Context<'_>,
+    doc: &str,
+    kind: &str,
+    maximum: usize,
+) -> Result<std::collections::BTreeSet<String>, Rejection> {
+    let limit = u32::try_from(maximum.saturating_add(1)).map_err(|_| Rejection::LimitExceeded)?;
+    let request = contract::PageRequest {
+        limit,
+        cursor: None,
+    };
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::RELATION_SOURCE_KIND,
+        runtime::find::Atom::Bytes(crate::find::composite_key([kind, doc])),
+        &request,
+        Vec::new(),
+        [
+            crate::find::field::RELATION_KIND,
+            crate::find::field::TARGET_ID,
+        ]
+        .into_iter()
+        .map(crate::find::field_ref)
+        .collect(),
+    )?;
+    if answer.next_cursor().is_some()
+        || answer
+            .matched_total()
+            .is_some_and(|count| count > maximum as u64)
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    let mut targets = std::collections::BTreeSet::new();
+    for row in answer.rows() {
+        if result_text(row, crate::find::field::KIND).as_deref() != Some("relation")
+            || result_text(row, crate::find::field::RELATION_KIND).as_deref() != Some(kind)
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+        targets.insert(
+            result_text(row, crate::find::field::TARGET_ID).ok_or(Rejection::StateCorrupt)?,
+        );
+    }
+    if targets.len() > maximum {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(targets)
+}
+
+fn issue_notification_audience(
+    ctx: &Context<'_>,
+    doc: &str,
+) -> Result<std::collections::BTreeSet<String>, Rejection> {
+    let mut audience = issue_relation_targets(ctx, doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?;
+    audience.extend(issue_relation_targets(
+        ctx,
+        doc,
+        "follower",
+        contract::MAX_ISSUE_FOLLOWERS,
+    )?);
+    if audience.len() > contract::MAX_ISSUE_AUDIENCE {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(audience)
+}
+
+/// Newest-first page for record feeds. The ordered composite posting scopes
+/// the scan to one kind (and optionally one project) before visiting rows, so
+/// a tracker with millions of unrelated activity records does not tax a
+/// one-project update or history pull.
+fn find_created_page(
+    ctx: &Context<'_>,
+    kind: &str,
+    project: Option<&str>,
+    request: &contract::PageRequest,
+    mut additional: Vec<runtime::find::Predicate>,
+    mut fields: Vec<runtime::find::FieldRef>,
+) -> Result<runtime::find::Answer, Rejection> {
+    use runtime::find as find_api;
+    let cursor = page_cursor(request)?;
+    let candidates = u64::from(request.limit).saturating_mul(4).max(64);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: candidates.saturating_mul(8),
+        edges_visited: candidates,
+        nodes_visited: candidates,
+        paths_retained: candidates,
+        candidates_per_branch: candidates,
+        score_evaluations: candidates,
+        projected_bytes: u64::from(request.limit).saturating_mul(64 * 1_024),
+        packed_tokens: u64::from(request.limit).saturating_mul(4_096),
+        wall_millis: 5_000,
+    };
+    let ordered_field = project.map_or(crate::find::field::KIND_CREATED_DESC, |_| {
+        crate::find::field::KIND_PROJECT_CREATED_DESC
+    });
+    let lower = project.map_or_else(
+        || crate::find::composite_key([kind]),
+        |project| crate::find::composite_key([kind, project]),
+    );
+    let upper =
+        crate::find::composite_prefix_upper(lower.clone()).ok_or(Rejection::StateCorrupt)?;
+    additional.insert(
+        0,
+        find_api::Predicate {
+            field: crate::find::field_ref(ordered_field),
+            test: find_api::Test::Less,
+            value: find_api::Atom::Bytes(upper),
+        },
+    );
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    fields.extend([
+        crate::find::field_ref(crate::find::field::ID),
+        crate::find::field_ref(crate::find::field::KIND),
+        crate::find::field_ref(crate::find::field::SOURCE_ID),
+    ]);
+    fields.sort();
+    fields.dedup();
+    ctx.find(find_api::Query {
+        schema: crate::find::entity_schema_ref(),
+        publication: ctx.world_publication_id().map(|id| id.publication),
+        mode: find_api::Mode::Exact,
+        steps: vec![
+            find_api::Step {
+                id: seek,
+                input: Vec::new(),
+                op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                    field: crate::find::field_ref(ordered_field),
+                    test: find_api::Test::GreaterOrEqual,
+                    value: find_api::Atom::Bytes(lower),
+                })),
+                bound,
+            },
+            find_api::Step {
+                id: keep,
+                input: vec![seek],
+                op: find_api::Op::Keep(find_api::Keep {
+                    predicates: additional,
+                }),
+                bound,
+            },
+            find_api::Step {
+                id: pack,
+                input: vec![keep],
+                op: find_api::Op::Pack(find_api::Pack { fields }),
+                bound,
+            },
+        ],
+        output: pack,
+        bound,
+        page_size: request.limit,
+        cursor,
+    })
+    .map_err(find_rejection)
+}
+
+/// Rank-ordered page of one project's hand-ordered entities.
+///
+/// `find_kind_page` seeks `(kind, project)` with `Test::Equal`, so every row
+/// in a project shares one key and the page comes back in whatever order the
+/// index breaks ties in -- which is not the order somebody arranged. A
+/// milestone list is an arrangement; drawing it in index order silently
+/// discards the arrangement, and the DTO carries no rank for a client to
+/// re-derive it from.
+///
+/// So seek the ordered `(kind, project, position, id)` posting as a range,
+/// the way `find_created_page` seeks the ordered time posting. Rank order is
+/// then the page order, and the cursor resumes inside it.
+///
+/// A row whose position is empty sorts first rather than last. That is the
+/// pre-backfill legacy shape only: every rank this product writes comes from
+/// `rank::between`.
+fn find_kind_position_page(
+    ctx: &Context<'_>,
+    kind: &str,
+    project: &str,
+    request: &contract::PageRequest,
+    mut additional: Vec<runtime::find::Predicate>,
+    mut fields: Vec<runtime::find::FieldRef>,
+) -> Result<runtime::find::Answer, Rejection> {
+    use runtime::find as find_api;
+    let cursor = page_cursor(request)?;
+    let candidates = u64::from(request.limit).saturating_mul(4).max(64);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: candidates.saturating_mul(8),
+        edges_visited: candidates,
+        nodes_visited: candidates,
+        paths_retained: candidates,
+        candidates_per_branch: candidates,
+        score_evaluations: candidates,
+        projected_bytes: u64::from(request.limit).saturating_mul(64 * 1_024),
+        packed_tokens: u64::from(request.limit).saturating_mul(4_096),
+        wall_millis: 5_000,
+    };
+    let lower = crate::find::composite_key([kind, project]);
+    let upper =
+        crate::find::composite_prefix_upper(lower.clone()).ok_or(Rejection::StateCorrupt)?;
+    additional.insert(
+        0,
+        find_api::Predicate {
+            field: crate::find::field_ref(crate::find::field::KIND_PROJECT_POSITION),
+            test: find_api::Test::Less,
+            value: find_api::Atom::Bytes(upper),
+        },
+    );
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    fields.extend([
+        crate::find::field_ref(crate::find::field::ID),
+        crate::find::field_ref(crate::find::field::KIND),
+        crate::find::field_ref(crate::find::field::PROJECT),
+    ]);
+    fields.sort();
+    fields.dedup();
+    ctx.find(find_api::Query {
+        schema: crate::find::entity_schema_ref(),
+        publication: ctx.world_publication_id().map(|id| id.publication),
+        mode: find_api::Mode::Exact,
+        steps: vec![
+            find_api::Step {
+                id: seek,
+                input: Vec::new(),
+                op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                    field: crate::find::field_ref(crate::find::field::KIND_PROJECT_POSITION),
+                    test: find_api::Test::GreaterOrEqual,
+                    value: find_api::Atom::Bytes(lower),
+                })),
+                bound,
+            },
+            find_api::Step {
+                id: keep,
+                input: vec![seek],
+                op: find_api::Op::Keep(find_api::Keep {
+                    predicates: additional,
+                }),
+                bound,
+            },
+            find_api::Step {
+                id: pack,
+                input: vec![keep],
+                op: find_api::Op::Pack(find_api::Pack { fields }),
+                bound,
+            },
+        ],
+        output: pack,
+        bound,
+        page_size: request.limit,
+        cursor,
+    })
+    .map_err(find_rejection)
+}
+
+/// Ordered record page owned by one durable entity. This is the detail-plane
+/// equivalent of `find_created_page`: it seeks the `(kind, source, timestamp,
+/// id)` posting directly, so a busy tracker cannot tax one issue's history or
+/// discussion with unrelated records.
+fn find_source_created_page(
+    ctx: &Context<'_>,
+    kind: &str,
+    source: &str,
+    descending: bool,
+    request: &contract::PageRequest,
+    mut additional: Vec<runtime::find::Predicate>,
+    mut fields: Vec<runtime::find::FieldRef>,
+) -> Result<runtime::find::Answer, Rejection> {
+    use runtime::find as find_api;
+    let cursor = page_cursor(request)?;
+    let candidates = u64::from(request.limit).saturating_mul(4).max(64);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: candidates.saturating_mul(4),
+        edges_visited: 1,
+        nodes_visited: candidates,
+        paths_retained: 1,
+        candidates_per_branch: candidates,
+        score_evaluations: 1,
+        projected_bytes: u64::from(request.limit).saturating_mul(64 * 1_024),
+        packed_tokens: u64::from(request.limit).saturating_mul(4_096),
+        wall_millis: 5_000,
+    };
+    let field = if descending {
+        crate::find::field::KIND_SOURCE_CREATED_DESC
+    } else {
+        crate::find::field::KIND_SOURCE_CREATED
+    };
+    let lower = crate::find::composite_key([kind, source]);
+    let upper =
+        crate::find::composite_prefix_upper(lower.clone()).ok_or(Rejection::StateCorrupt)?;
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    fields.extend([
+        crate::find::field_ref(crate::find::field::ID),
+        crate::find::field_ref(crate::find::field::KIND),
+        crate::find::field_ref(crate::find::field::SOURCE_ID),
+        crate::find::field_ref(crate::find::field::CREATED_AT),
+    ]);
+    fields.sort();
+    fields.dedup();
+    additional.insert(
+        0,
+        find_api::Predicate {
+            field: crate::find::field_ref(field),
+            test: find_api::Test::Less,
+            value: find_api::Atom::Bytes(upper),
+        },
+    );
+    ctx.find(find_api::Query {
+        schema: crate::find::entity_schema_ref(),
+        publication: ctx.world_publication_id().map(|id| id.publication),
+        mode: find_api::Mode::Exact,
+        steps: vec![
+            find_api::Step {
+                id: seek,
+                input: Vec::new(),
+                op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                    field: crate::find::field_ref(field),
+                    test: find_api::Test::GreaterOrEqual,
+                    value: find_api::Atom::Bytes(lower),
+                })),
+                bound,
+            },
+            find_api::Step {
+                id: keep,
+                input: vec![seek],
+                op: find_api::Op::Keep(find_api::Keep {
+                    predicates: additional,
+                }),
+                bound,
+            },
+            find_api::Step {
+                id: pack,
+                input: vec![keep],
+                op: find_api::Op::Pack(find_api::Pack { fields }),
+                bound,
+            },
+        ],
+        output: pack,
+        bound,
+        page_size: request.limit,
+        cursor,
+    })
+    .map_err(find_rejection)
+}
+
+/// Members a roll-up will resolve. `issue_relation_targets` asks for one more
+/// than this to detect overflow, so it has to stay under the page ceiling.
+const MAX_ROLLUP_MEMBERS: usize = 256;
+
+/// How many member issues a collection row will be enriched over.
+///
+/// Not a product guess: [`runtime::find::MAX_SEEK_IDS`] is the ceiling the
+/// Find layer itself declares for resolving a set of nodes by id, and that
+/// resolution is the second half of every count below.
+const ENRICHMENT_CEILING: u64 = runtime::find::MAX_SEEK_IDS as u64;
+
+/// Live and Done-category issue counts for a collection — the issues whose
+/// `kind` membership relation points at `target`. `None` means the collection
+/// was not measured, which is a different fact from measuring zero.
+///
+/// Two seeks, both linear, because a linear plan is the only shape the
+/// runtime answers with an exact `matched_total` and an honest continuation.
+///
+/// The first is a bare posting count on the reverse membership coordinate. It
+/// visits no rows, so asking it is cheap even for a collection far too large
+/// to enrich — which is exactly what makes it the right gate.
+///
+/// The second resolves those members by id, because it needs two facts the
+/// relation Body cannot hold. An issue's workflow state and its tombstone
+/// both live in the issue's own Bodies, and by design no extractor overlays
+/// them onto a relation node; a soft-deleted issue keeps its membership
+/// precisely so that restoring it restores the membership too.
+///
+/// Above the ceiling this answers `None` rather than counting the first page.
+/// It is the same rule the row-page handler states where it post-filters:
+/// a partial count is not the count.
+fn membership_counts(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    kind: &str,
+    target: &str,
+) -> Result<Option<(u32, u32)>, Rejection> {
+    let coordinate = || runtime::find::Atom::Bytes(crate::find::composite_key([kind, target]));
+    let counted = find_field_page(
+        ctx,
+        crate::find::field::RELATION_TARGET_KIND,
+        coordinate(),
+        &contract::PageRequest {
+            limit: 1,
+            cursor: None,
+        },
+        Vec::new(),
+        Vec::new(),
+    )?;
+    // An absent total is the runtime declining to answer, never a zero.
+    let Some(members) = counted.matched_total() else {
+        return Ok(None);
+    };
+    if members > ENRICHMENT_CEILING {
+        return Ok(None);
+    }
+    let limit = u32::try_from(members).map_err(|_| Rejection::StateCorrupt)?;
+    if limit == 0 {
+        return Ok(Some((0, 0)));
+    }
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::RELATION_TARGET_KIND,
+        coordinate(),
+        &contract::PageRequest {
+            limit,
+            cursor: None,
+        },
+        Vec::new(),
+        [crate::find::field::SOURCE_ID]
+            .into_iter()
+            .map(crate::find::field_ref)
+            .collect(),
+    )?;
+    // The count said this many members exist and the page asked for exactly
+    // that many. A continuation means the two disagree, so measure nothing.
+    if answer.next_cursor().is_some() {
+        return Ok(None);
+    }
+    let mut ids = Vec::with_capacity(answer.rows().len());
+    for row in answer.rows() {
+        ids.push(result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?);
+    }
+    let rows = find_issue_rows_by_ids(ctx, ids)?;
+    let mut total = 0u32;
+    let mut done = 0u32;
+    for row in rows.values() {
+        if row.tombstone {
+            continue;
+        }
+        total = total.saturating_add(1);
+        let project = row.project_id.as_str();
+        apply_project_workflow(ctx, catalog, project)?;
+        if issue_status_category(catalog, project, &row.status)? == StatusCategory::Done {
+            done = done.saturating_add(1);
+        }
+    }
+    Ok(Some((total, done)))
+}
+
+fn find_issue_rows_by_ids(
+    ctx: &Context<'_>,
+    ids: impl IntoIterator<Item = String>,
+) -> Result<std::collections::BTreeMap<String, crate::dto::Row>, Rejection> {
+    use runtime::find as find_api;
+    let ids = ids.into_iter().collect::<std::collections::BTreeSet<_>>();
+    if ids.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    if ids.len() > usize::try_from(contract::MAX_PAGE_SIZE).unwrap_or(usize::MAX) {
+        return Err(Rejection::LimitExceeded);
+    }
+    // `Seek::Ids` admits `MAX_SEEK_IDS`, which is well under a page. Resolving
+    // a full page in one query would be refused outright, so walk it in the
+    // runtime's own units rather than declaring a ceiling this cannot honour.
+    if ids.len() > runtime::find::MAX_SEEK_IDS {
+        let mut merged = std::collections::BTreeMap::new();
+        let ordered = ids.into_iter().collect::<Vec<_>>();
+        for chunk in ordered.chunks(runtime::find::MAX_SEEK_IDS) {
+            merged.extend(find_issue_rows_by_ids(ctx, chunk.to_vec())?);
+        }
+        return Ok(merged);
+    }
+    let count = u64::try_from(ids.len()).unwrap_or(u64::MAX);
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: count.saturating_mul(16),
+        edges_visited: 1,
+        nodes_visited: count.saturating_mul(2),
+        paths_retained: 1,
+        candidates_per_branch: count.saturating_mul(2),
+        score_evaluations: 1,
+        projected_bytes: count.saturating_mul(64 * 1_024),
+        packed_tokens: count.saturating_mul(4_096),
+        wall_millis: 5_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let mut fields = [
+        crate::find::field::ID,
+        crate::find::field::KIND,
+        crate::find::field::TITLE,
+        crate::find::field::PROJECT,
+        crate::find::field::STATE,
+        crate::find::field::PRIORITY,
+        crate::find::field::TOMBSTONE,
+        crate::find::field::DUE_AT,
+        crate::find::field::ESTIMATE,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    // Pack takes a canonical set, and a hand-written list is not one: this
+    // array reads in the order a Row is built, which is not sorted order, so
+    // the query was refused as `InvalidSet("pack fields")` for every caller.
+    // Sorting here rather than reordering the literal keeps the list readable
+    // and stops the next field appended to it from reintroducing this.
+    fields.sort();
+    fields.dedup();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Ids(
+                        ids.iter()
+                            .map(|id| find_api::NodeId::new(id.as_bytes().to_vec()))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|_| Rejection::InvalidRequest)?,
+                    )),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![seek],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: u32::try_from(ids.len()).map_err(|_| Rejection::LimitExceeded)?,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    let mut rows = std::collections::BTreeMap::new();
+    for result in answer.rows() {
+        if result_text(result, crate::find::field::KIND).as_deref() != Some("issue") {
+            return Err(Rejection::StateCorrupt);
+        }
+        let row = issue_page_row(result)?;
+        rows.insert(row.doc_id.to_string(), row);
+    }
+    Ok(rows)
+}
+
+const BOARD_PAGE_CURSOR_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoardPageCursor {
+    version: u8,
+    filter: [u8; 32],
+    state_index: u32,
+    block: String,
+    block_order: String,
+    member_position: String,
+    member_issue: String,
+}
+
+#[derive(Debug)]
+struct BoardPageItem {
+    row: crate::dto::Row,
+    state_index: usize,
+    block: String,
+    block_order: String,
+    member_position: String,
+    member_issue: String,
+}
+
+fn board_page_filter(project: &str) -> [u8; 32] {
+    blake3::derive_key("lait.issues.board-page-filter.v1", project.as_bytes())
+}
+
+fn valid_board_digest(value: &str) -> bool {
+    value.len() == 64
+        && data_encoding::HEXLOWER
+            .decode(value.as_bytes())
+            .is_ok_and(|bytes| bytes.len() == 32)
+}
+
+fn decode_board_page_cursor(
+    ctx: &Context<'_>,
+    project: &str,
+    request: &contract::PageRequest,
+) -> Result<Option<BoardPageCursor>, Rejection> {
+    if !request.validate() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let Some(encoded) = request.cursor.as_deref() else {
+        return Ok(None);
+    };
+    let (publication, inner) =
+        contract::decode_page_cursor(encoded).ok_or(Rejection::InvalidRequest)?;
+    if ctx.world_publication_id().as_ref() != Some(&publication) {
+        return Err(Rejection::InvalidRequest);
+    }
+    let bytes = data_encoding::BASE64URL_NOPAD
+        .decode(inner.as_bytes())
+        .map_err(|_| Rejection::InvalidRequest)?;
+    let cursor: BoardPageCursor =
+        postcard::from_bytes(&bytes).map_err(|_| Rejection::InvalidRequest)?;
+    if postcard::to_stdvec(&cursor).map_err(|_| Rejection::InvalidRequest)? != bytes
+        || cursor.version != BOARD_PAGE_CURSOR_VERSION
+        || cursor.filter != board_page_filter(project)
+        || !valid_board_digest(&cursor.block)
+        || !crate::rank::valid(&cursor.block_order)
+        || !crate::rank::valid(&cursor.member_position)
+        || crate::ids::DocId::parse(&cursor.member_issue).is_none()
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    Ok(Some(cursor))
+}
+
+fn board_find_bound(rows: u32) -> runtime::find::Bound {
+    const BOARD_ROW_BYTES: u64 = 8 * 1_024;
+    let candidates = u64::from(rows).saturating_mul(4).max(8);
+    let output_rows = u64::from(rows).max(1);
+    runtime::find::Bound {
+        decoded_bodies: 1,
+        postings_read: candidates.saturating_mul(8),
+        edges_visited: 1,
+        nodes_visited: candidates,
+        paths_retained: 1,
+        candidates_per_branch: candidates,
+        score_evaluations: 1,
+        // Board rows retain the <=4 KiB title plus bounded scalar and exact
+        // topology coordinates. Candidate slack governs visited postings; it
+        // must not be multiplied into the bytes returned by Pack.
+        projected_bytes: output_rows.saturating_mul(BOARD_ROW_BYTES),
+        packed_tokens: output_rows.saturating_mul(BOARD_ROW_BYTES),
+        wall_millis: 5_000,
+    }
+}
+
+fn board_lane_available(ctx: &Context<'_>, project: &str, state: &str) -> Result<bool, Rejection> {
+    use runtime::find as find_api;
+    let bound = board_find_bound(2);
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let mut fields = [
+        crate::find::field::ID,
+        crate::find::field::KIND,
+        crate::find::field::PROJECT,
+        crate::find::field::STATE,
+        crate::find::field::CONFLICTED,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    let lane = format!("lane:{project}:{state}");
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Ids(vec![find_api::NodeId::new(
+                        lane.as_bytes().to_vec(),
+                    )
+                    .map_err(|_| Rejection::StateCorrupt)?])),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![seek],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: 2,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    let ([] | [_]) = answer.rows() else {
+        return Err(Rejection::StateCorrupt);
+    };
+    let Some(row) = answer.rows().first() else {
+        return Ok(false);
+    };
+    if result_text(row, crate::find::field::KIND).as_deref() != Some("board_lane")
+        || result_text(row, crate::find::field::PROJECT).as_deref() != Some(project)
+        || result_text(row, crate::find::field::STATE).as_deref() != Some(state)
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    if result_bool(row, crate::find::field::CONFLICTED) != Some(false) {
+        return Err(Rejection::Conflict);
+    }
+    Ok(true)
+}
+
+fn next_board_block(
+    ctx: &Context<'_>,
+    project: &str,
+    state: &str,
+    after: Option<(&str, &str)>,
+) -> Result<Option<(String, String)>, Rejection> {
+    use runtime::find as find_api;
+    let bound = board_find_bound(2);
+    let prefix = crate::find::composite_key([project, state]);
+    let upper =
+        crate::find::composite_prefix_upper(prefix.clone()).ok_or(Rejection::StateCorrupt)?;
+    let lower = after.map_or_else(
+        || find_api::RangeEndpoint::Inclusive(find_api::Atom::Bytes(prefix)),
+        |(order, block)| {
+            find_api::RangeEndpoint::Exclusive(find_api::Atom::Bytes(
+                crate::find::board_block_order_key(project, state, order, block),
+            ))
+        },
+    );
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let mut fields = [
+        crate::find::field::KIND,
+        crate::find::field::PROJECT,
+        crate::find::field::STATE,
+        crate::find::field::BLOCK,
+        crate::find::field::POSITION,
+        crate::find::field::CONFLICTED,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::FieldRange(find_api::FieldRange {
+                        field: crate::find::field_ref(
+                            crate::find::field::PROJECT_STATE_BLOCK_ORDER,
+                        ),
+                        lower,
+                        upper: find_api::RangeEndpoint::Exclusive(find_api::Atom::Bytes(upper)),
+                    })),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![seek],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: 1,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    let Some(row) = answer.rows().first() else {
+        return Ok(None);
+    };
+    if result_text(row, crate::find::field::KIND).as_deref() != Some("board_block")
+        || result_text(row, crate::find::field::PROJECT).as_deref() != Some(project)
+        || result_text(row, crate::find::field::STATE).as_deref() != Some(state)
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    if result_bool(row, crate::find::field::CONFLICTED) != Some(false) {
+        return Err(Rejection::Conflict);
+    }
+    let block = result_text(row, crate::find::field::BLOCK).ok_or(Rejection::StateCorrupt)?;
+    let order = result_text(row, crate::find::field::POSITION).ok_or(Rejection::StateCorrupt)?;
+    if !valid_board_digest(&block) || !crate::rank::valid(&order) {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(Some((block, order)))
+}
+
+fn exact_board_block(
+    ctx: &Context<'_>,
+    project: &str,
+    state: &str,
+    block: &str,
+) -> Result<(String, String), Rejection> {
+    use runtime::find as find_api;
+    let bound = board_find_bound(2);
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let mut fields = [
+        crate::find::field::KIND,
+        crate::find::field::PROJECT,
+        crate::find::field::STATE,
+        crate::find::field::BLOCK,
+        crate::find::field::POSITION,
+        crate::find::field::CONFLICTED,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Ids(vec![find_api::NodeId::new(
+                        block.as_bytes().to_vec(),
+                    )
+                    .map_err(|_| Rejection::StateCorrupt)?])),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![seek],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: 2,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    let [row] = answer.rows() else {
+        return Err(Rejection::StateCorrupt);
+    };
+    if result_text(row, crate::find::field::KIND).as_deref() != Some("board_block")
+        || result_text(row, crate::find::field::PROJECT).as_deref() != Some(project)
+        || result_text(row, crate::find::field::STATE).as_deref() != Some(state)
+        || result_text(row, crate::find::field::BLOCK).as_deref() != Some(block)
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    if result_bool(row, crate::find::field::CONFLICTED) != Some(false) {
+        return Err(Rejection::Conflict);
+    }
+    let order = result_text(row, crate::find::field::POSITION).ok_or(Rejection::StateCorrupt)?;
+    if !crate::rank::valid(&order) {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok((block.into(), order))
+}
+
+fn board_member_rows(
+    ctx: &Context<'_>,
+    project: &str,
+    state: &str,
+    block: &str,
+    after: Option<(&str, &str)>,
+    limit: u32,
+) -> Result<Vec<BoardPageItem>, Rejection> {
+    use runtime::find as find_api;
+    let bound = board_find_bound(limit);
+    let prefix = crate::find::composite_key([project, state, block]);
+    let upper =
+        crate::find::composite_prefix_upper(prefix.clone()).ok_or(Rejection::StateCorrupt)?;
+    let lower = after.map_or_else(
+        || find_api::RangeEndpoint::Inclusive(find_api::Atom::Bytes(prefix)),
+        |(position, issue)| {
+            find_api::RangeEndpoint::Exclusive(find_api::Atom::Bytes(
+                crate::find::board_block_member_key(project, state, block, position, issue),
+            ))
+        },
+    );
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    let mut fields = [
+        crate::find::field::ID,
+        crate::find::field::KIND,
+        crate::find::field::TITLE,
+        crate::find::field::PROJECT,
+        crate::find::field::STATE,
+        crate::find::field::BLOCK,
+        crate::find::field::POSITION,
+        crate::find::field::PLACEMENT_TRANSITION,
+        crate::find::field::PRIORITY,
+        crate::find::field::TOMBSTONE,
+        crate::find::field::CONFLICTED,
+        crate::find::field::DUE_AT,
+        crate::find::field::ESTIMATE,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    let mut predicates = vec![
+        find_api::Predicate {
+            field: crate::find::field_ref(crate::find::field::KIND),
+            test: find_api::Test::Equal,
+            value: find_api::Atom::Text("issue".into()),
+        },
+        find_api::Predicate {
+            field: crate::find::field_ref(crate::find::field::TOMBSTONE),
+            test: find_api::Test::Equal,
+            value: find_api::Atom::Bool(false),
+        },
+        find_api::Predicate {
+            field: crate::find::field_ref(crate::find::field::CONFLICTED),
+            test: find_api::Test::Equal,
+            value: find_api::Atom::Bool(false),
+        },
+    ];
+    predicates.sort();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::FieldRange(find_api::FieldRange {
+                        field: crate::find::field_ref(
+                            crate::find::field::PROJECT_STATE_BLOCK_MEMBER,
+                        ),
+                        lower,
+                        upper: find_api::RangeEndpoint::Exclusive(find_api::Atom::Bytes(upper)),
+                    })),
+                    bound,
+                },
+                find_api::Step {
+                    id: keep,
+                    input: vec![seek],
+                    op: find_api::Op::Keep(find_api::Keep { predicates }),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![keep],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: limit,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    let mut rows = Vec::with_capacity(answer.rows().len());
+    for result in answer.rows() {
+        let issue = result_text(result, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+        let position =
+            result_text(result, crate::find::field::POSITION).ok_or(Rejection::StateCorrupt)?;
+        if result_text(result, crate::find::field::KIND).as_deref() != Some("issue")
+            || result_text(result, crate::find::field::PROJECT).as_deref() != Some(project)
+            || result_text(result, crate::find::field::STATE).as_deref() != Some(state)
+            || result_text(result, crate::find::field::BLOCK).as_deref() != Some(block)
+            || !crate::rank::valid(&position)
+            || crate::ids::DocId::parse(&issue).is_none()
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+        rows.push(BoardPageItem {
+            row: issue_page_row(result)?,
+            state_index: 0,
+            block: block.into(),
+            block_order: String::new(),
+            member_position: position,
+            member_issue: issue,
+        });
+    }
+    Ok(rows)
+}
+
+fn find_board_page(
+    ctx: &Context<'_>,
+    project: &str,
+    workflow: &[crate::dto::WorkflowState],
+    request: &contract::PageRequest,
+) -> Result<contract::Page<crate::dto::Row>, Rejection> {
+    let cursor = decode_board_page_cursor(ctx, project, request)?;
+    let publication = ctx
+        .world_publication_id()
+        .ok_or(Rejection::NoActiveImplementation)?;
+    let mut state_index = cursor.as_ref().map_or(0, |cursor| {
+        usize::try_from(cursor.state_index).unwrap_or(usize::MAX)
+    });
+    if state_index >= workflow.len() && cursor.is_some() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let target = usize::try_from(request.limit)
+        .map_err(|_| Rejection::LimitExceeded)?
+        .saturating_add(1);
+    let mut items = Vec::with_capacity(target);
+    while state_index < workflow.len() && items.len() < target {
+        let state = workflow[state_index].id.as_str();
+        if !board_lane_available(ctx, project, state)? {
+            state_index += 1;
+            continue;
+        }
+        let resume = cursor
+            .as_ref()
+            .filter(|cursor| usize::try_from(cursor.state_index).ok() == Some(state_index));
+        let mut block = if let Some(cursor) = resume {
+            let current = exact_board_block(ctx, project, state, &cursor.block)?;
+            if current.1 != cursor.block_order {
+                return Err(Rejection::InvalidRequest);
+            }
+            Some(current)
+        } else {
+            next_board_block(ctx, project, state, None)?
+        };
+        let mut member_after =
+            resume.map(|cursor| (cursor.member_position.clone(), cursor.member_issue.clone()));
+        while let Some((block_id, block_order)) = block {
+            let remaining = target.saturating_sub(items.len());
+            if remaining == 0 {
+                break;
+            }
+            let mut members = board_member_rows(
+                ctx,
+                project,
+                state,
+                &block_id,
+                member_after
+                    .as_ref()
+                    .map(|(position, issue)| (position.as_str(), issue.as_str())),
+                u32::try_from(remaining).map_err(|_| Rejection::LimitExceeded)?,
+            )?;
+            let returned = members.len();
+            for member in &mut members {
+                member.state_index = state_index;
+                member.block_order.clone_from(&block_order);
+            }
+            items.extend(members);
+            if items.len() >= target {
+                break;
+            }
+            if returned >= remaining {
+                return Err(Rejection::StateCorrupt);
+            }
+            block = next_board_block(ctx, project, state, Some((&block_order, &block_id)))?;
+            member_after = None;
+        }
+        state_index += 1;
+    }
+    let limit = usize::try_from(request.limit).map_err(|_| Rejection::LimitExceeded)?;
+    let has_more = items.len() > limit;
+    if has_more {
+        items.truncate(limit);
+    }
+    let next_cursor = if has_more {
+        let last = items.last().ok_or(Rejection::StateCorrupt)?;
+        let cursor = BoardPageCursor {
+            version: BOARD_PAGE_CURSOR_VERSION,
+            filter: board_page_filter(project),
+            state_index: u32::try_from(last.state_index).map_err(|_| Rejection::StateCorrupt)?,
+            block: last.block.clone(),
+            block_order: last.block_order.clone(),
+            member_position: last.member_position.clone(),
+            member_issue: last.member_issue.clone(),
+        };
+        let inner = data_encoding::BASE64URL_NOPAD
+            .encode(&postcard::to_stdvec(&cursor).map_err(|_| Rejection::StateCorrupt)?);
+        Some(
+            contract::encode_page_cursor(publication.clone(), inner)
+                .ok_or(Rejection::StateCorrupt)?,
+        )
+    } else {
+        None
+    };
+    Ok(contract::Page {
+        publication,
+        items: items.into_iter().map(|item| item.row).collect(),
+        next_cursor,
+        exact_total: None,
+    })
+}
+
+fn load_role_for_write(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    role: &str,
+) -> Result<(), Rejection> {
+    // A role being created has no head yet, and that absence is this loader's
+    // ordinary case rather than an error: it leaves the catalog without an
+    // entry, which is exactly what the create path's `contains_key` guard
+    // reads as "the id is free". Refusing here made `RoleCreate` impossible
+    // for every role -- it minted a fresh id and then demanded Find already
+    // know it -- and left the `Conflict` branch below unreachable.
+    let Some(projection) = optional_role_projection(ctx, role)? else {
+        return Ok(());
+    };
+    if !projection.summary.conflict_heads.is_empty() {
+        return Err(Rejection::Conflict);
+    }
+    if projection.summary.built_in {
+        let revision = crate::roles::built_in(role).ok_or(Rejection::StateCorrupt)?;
+        catalog.roles.insert(
+            role.to_string(),
+            crate::views::StoredRoleRevision {
+                revision_id: data_encoding::HEXLOWER.encode(&revision.revision_id),
+                predecessor_ids: revision
+                    .predecessor_ids
+                    .iter()
+                    .map(|digest| data_encoding::HEXLOWER.encode(digest))
+                    .collect(),
+                body: revision.body,
+            },
+        );
+    } else if let Some(revision) = projection.revision {
+        catalog
+            .role_revisions
+            .entry(role.to_string())
+            .or_default()
+            .push(revision);
+    }
+    Ok(())
+}
+
+fn load_workflow_for_write(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    project: &str,
+) -> Result<(), Rejection> {
+    crate::record_store::apply_project(ctx, catalog, project)?;
+    let projection = workflow_projection(ctx, project)?;
+    if !projection.conflict_heads.is_empty() {
+        return Err(Rejection::Conflict);
+    }
+    if let Some(revision) = projection.revision {
+        catalog
+            .workflow_revisions
+            .entry(project.to_string())
+            .or_default()
+            .push(revision);
+    }
+    Ok(())
+}
+
+fn triage_submission(
+    ctx: &Context<'_>,
+    id: &str,
+) -> Result<Option<crate::views::TriageItem>, Rejection> {
+    let Some(row) = unique_find_row(ctx, crate::find::field::ID, id, "triage_fact", None)? else {
+        return Ok(None);
+    };
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let crate::records::TriageRecord::Submission(record) =
+        crate::records::TriageRecord::decode_canonical(&envelope.record)
+            .map_err(|_| Rejection::StateCorrupt)?
+    else {
+        return Err(Rejection::StateCorrupt);
+    };
+    if record.triage != id || envelope.identity.record != id {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(Some(crate::views::TriageItem {
+        id: record.triage,
+        title: record.title,
+        body: record.body,
+        source: record.source,
+        submitted_by: record.submitted_by,
+        ts: record.timestamp,
+        ..Default::default()
+    }))
+}
+
+fn triage_has_decision(ctx: &Context<'_>, id: &str) -> Result<bool, Rejection> {
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::TARGET_ID,
+        runtime::find::Atom::Text(id.into()),
+        &contract::PageRequest {
+            limit: 1,
+            cursor: None,
+        },
+        vec![runtime::find::Predicate {
+            field: crate::find::field_ref(crate::find::field::RELATION_KIND),
+            test: runtime::find::Test::Equal,
+            value: runtime::find::Atom::Text("triage".into()),
+        }],
+        Vec::new(),
+    )?;
+    Ok(!answer.rows().is_empty())
+}
+
+fn result_text(row: &runtime::find::ResultRow, name: &str) -> Option<String> {
+    row.fields.iter().find_map(|field| {
+        (field.reference == crate::find::field_ref(name))
+            .then_some(&field.value)
+            .and_then(|value| match value {
+                runtime::find::Value::Text(value) => Some(value.to_string()),
+                _ => None,
+            })
+    })
+}
+
+fn result_u64(row: &runtime::find::ResultRow, name: &str) -> Option<u64> {
+    row.fields.iter().find_map(|field| {
+        (field.reference == crate::find::field_ref(name))
+            .then_some(&field.value)
+            .and_then(|value| match value {
+                runtime::find::Value::Unsigned(value) => Some(*value),
+                _ => None,
+            })
+    })
+}
+
+fn result_bool(row: &runtime::find::ResultRow, name: &str) -> Option<bool> {
+    row.fields.iter().find_map(|field| {
+        (field.reference == crate::find::field_ref(name))
+            .then_some(&field.value)
+            .and_then(|value| match value {
+                runtime::find::Value::Bool(value) => Some(*value),
+                _ => None,
+            })
+    })
+}
+
+fn result_bytes(row: &runtime::find::ResultRow, name: &str) -> Option<Vec<u8>> {
+    row.fields.iter().find_map(|field| {
+        (field.reference == crate::find::field_ref(name))
+            .then_some(&field.value)
+            .and_then(|value| match value {
+                runtime::find::Value::Bytes(value) => Some(value.to_vec()),
+                _ => None,
+            })
+    })
+}
+
+fn revision_set(row: &runtime::find::ResultRow, name: &str) -> Result<Vec<String>, Rejection> {
+    let bytes = result_bytes(row, name).ok_or(Rejection::StateCorrupt)?;
+    let revisions: Vec<String> =
+        serde_json::from_slice(&bytes).map_err(|_| Rejection::StateCorrupt)?;
+    if revisions.len() > crate::records::MAX_CONCURRENT_HEADS
+        || revisions.windows(2).any(|pair| pair[0] >= pair[1])
+        || revisions
+            .iter()
+            .any(|revision| crate::spec::decode_revision(revision).is_none())
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(revisions)
+}
+
+fn revision_head_strings(row: &runtime::find::ResultRow) -> Result<Vec<String>, Rejection> {
+    let bytes =
+        result_bytes(row, crate::find::field::HEAD_REVISIONS).ok_or(Rejection::StateCorrupt)?;
+    let heads: Vec<String> = serde_json::from_slice(&bytes).map_err(|_| Rejection::StateCorrupt)?;
+    if heads.len() > crate::records::MAX_CONCURRENT_HEADS
+        || heads.windows(2).any(|pair| pair[0] >= pair[1])
+        || heads.iter().any(|head| head.is_empty() || head.len() > 256)
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(heads)
+}
+
+fn role_summary_row(row: &runtime::find::ResultRow) -> Result<contract::RoleSummary, Rejection> {
+    let heads = revision_head_strings(row)?;
+    let sole = (heads.len() == 1).then(|| heads[0].clone());
+    Ok(contract::RoleSummary {
+        role_id: result_text(row, crate::find::field::ENTITY_KEY).ok_or(Rejection::StateCorrupt)?,
+        built_in: result_text(row, crate::find::field::STATE).as_deref() == Some("built_in"),
+        revision: sole.clone(),
+        conflict_heads: if sole.is_some() { Vec::new() } else { heads },
+    })
+}
+
+/// Read a role that must exist. A reader asking for a role by id is naming
+/// one it believes in, so an absent row is a bad request.
+fn role_projection(ctx: &Context<'_>, role: &str) -> Result<contract::RoleProjection, Rejection> {
+    optional_role_projection(ctx, role)?.ok_or(Rejection::InvalidRequest)
+}
+
+/// The same read, for the one caller that must be able to learn the role is
+/// not there: creating it.
+fn optional_role_projection(
+    ctx: &Context<'_>,
+    role: &str,
+) -> Result<Option<contract::RoleProjection>, Rejection> {
+    let Some(row) = unique_find_row(ctx, crate::find::field::ENTITY_KEY, role, "role_head", None)?
+    else {
+        return Ok(None);
+    };
+    let summary = role_summary_row(&row)?;
+    let revision = if summary.built_in {
+        crate::roles::built_in(role).map(|revision| crate::views::StoredRoleRevision {
+            revision_id: data_encoding::HEXLOWER.encode(&revision.revision_id),
+            predecessor_ids: revision
+                .predecessor_ids
+                .iter()
+                .map(|digest| data_encoding::HEXLOWER.encode(digest))
+                .collect(),
+            body: revision.body,
+        })
+    } else if let Some(head) = &summary.revision {
+        let row = unique_find_row(
+            ctx,
+            crate::find::field::REVISION,
+            head,
+            "governance_revision",
+            None,
+        )?
+        .ok_or(Rejection::StateCorrupt)?;
+        if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(role) {
+            return Err(Rejection::StateCorrupt);
+        }
+        let (_, bytes) = immutable_record_bytes(
+            ctx,
+            &row,
+            crate::records::PhysicalSchema::GovernanceRevision,
+        )?;
+        let record = crate::records::GovernanceRevisionRecord::decode_canonical(&bytes)
+            .map_err(|_| Rejection::StateCorrupt)?;
+        if record.role != role || record.revision.revision_id != *head {
+            return Err(Rejection::StateCorrupt);
+        }
+        Some(record.revision)
+    } else {
+        None
+    };
+    Ok(Some(contract::RoleProjection { summary, revision }))
+}
+
+fn workflow_projection(
+    ctx: &Context<'_>,
+    project: &str,
+) -> Result<contract::WorkflowProjection, Rejection> {
+    let row = unique_find_row(
+        ctx,
+        crate::find::field::SOURCE_ID,
+        project,
+        "workflow_head",
+        Some(project),
+    )?
+    .ok_or(Rejection::InvalidRequest)?;
+    let heads = revision_head_strings(&row)?;
+    let revision = if heads.len() == 1 {
+        let head = &heads[0];
+        let revision_node = format!("workflow-revision:{project}:{head}");
+        let row = unique_find_row(
+            ctx,
+            crate::find::field::ID,
+            &revision_node,
+            "workflow_revision",
+            Some(project),
+        )?
+        .ok_or(Rejection::StateCorrupt)?;
+        let (_, bytes) =
+            immutable_record_bytes(ctx, &row, crate::records::PhysicalSchema::WorkflowRevision)?;
+        let record = crate::records::ProjectWorkflowRevisionRecord::decode_canonical(&bytes)
+            .map_err(|_| Rejection::StateCorrupt)?;
+        if record.project != project || record.revision.revision_id != *head {
+            return Err(Rejection::StateCorrupt);
+        }
+        Some(record.revision)
+    } else {
+        None
+    };
+    Ok(contract::WorkflowProjection {
+        project_id: project.into(),
+        revision,
+        conflict_heads: if heads.len() == 1 { Vec::new() } else { heads },
+    })
+}
+
+fn spec_summary_row(row: &runtime::find::ResultRow) -> Result<crate::spec::SpecSummary, Rejection> {
+    let heads = revision_set(row, crate::find::field::HEAD_REVISIONS)?;
+    let issued = revision_set(row, crate::find::field::ISSUED_REVISIONS)?;
+    Ok(crate::spec::SpecSummary {
+        spec: result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
+        project: result_text(row, crate::find::field::PROJECT).ok_or(Rejection::StateCorrupt)?,
+        kind: crate::spec::Kind::parse(
+            &result_text(row, crate::find::field::ENTITY_KEY).ok_or(Rejection::StateCorrupt)?,
+        )
+        .ok_or(Rejection::StateCorrupt)?,
+        conflicted: result_bool(row, crate::find::field::CONFLICTED)
+            .ok_or(Rejection::StateCorrupt)?,
+        heads,
+        issued,
+        view: None,
+    })
+}
+
+fn baseline_summary_row(
+    row: &runtime::find::ResultRow,
+) -> Result<crate::spec::BaselineSummary, Rejection> {
+    let heads = revision_set(row, crate::find::field::HEAD_REVISIONS)?;
+    let issued = revision_set(row, crate::find::field::ISSUED_REVISIONS)?;
+    Ok(crate::spec::BaselineSummary {
+        baseline: result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
+        project: result_text(row, crate::find::field::PROJECT).ok_or(Rejection::StateCorrupt)?,
+        conflicted: result_bool(row, crate::find::field::CONFLICTED)
+            .ok_or(Rejection::StateCorrupt)?,
+        heads,
+        issued,
+        view: None,
+    })
+}
+
+/// The Spec revision a row names, or `None` when the row is not one.
+///
+/// `extract_spec_revision` emits two nodes from one record: the revision
+/// itself, and a relation from the Spec to it so the graph can be walked.
+/// Both carry the Spec as their source and both are tagged `spec_revision`,
+/// so a seek on those two coordinates matches each revision twice. Only the
+/// revision node carries [`crate::find::field::REVISION`], and a row without
+/// one is not a revision -- it is the edge pointing at it.
+fn spec_revision_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<Option<crate::spec::Revision>, Rejection> {
+    if result_text(row, crate::find::field::REVISION).is_none() {
+        return Ok(None);
+    }
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    if result_text(row, crate::find::field::REVISION).as_deref()
+        != Some(record.revision.revision.as_str())
+        || result_text(row, crate::find::field::SOURCE_ID).as_deref()
+            != Some(record.revision.body.spec.as_str())
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(Some(record.revision))
+}
+
+/// The Baseline revision a row names, or `None` when the row is the relation
+/// beside it. Same twin-node shape as `spec_revision_page_row`.
+fn baseline_revision_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<Option<crate::spec::BaselineRevision>, Rejection> {
+    if result_text(row, crate::find::field::REVISION).is_none() {
+        return Ok(None);
+    }
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::BaselineRevisionRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    if result_text(row, crate::find::field::REVISION).as_deref()
+        != Some(record.revision.revision.as_str())
+        || result_text(row, crate::find::field::SOURCE_ID).as_deref()
+            != Some(record.revision.body.baseline.as_str())
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(Some(record.revision))
+}
+
+fn triage_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<crate::records::TriageRecord, Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    crate::records::TriageRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)
+}
+
+fn spec_reference_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<crate::spec::SpecReferenceFact, Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let relation = result_text(row, crate::find::field::RELATION_KIND)
+        .and_then(|value| crate::spec::Rel::parse(&value))
+        .ok_or(Rejection::StateCorrupt)?;
+    let target = result_text(row, crate::find::field::TARGET_ID).ok_or(Rejection::StateCorrupt)?;
+    let link = record
+        .revision
+        .body
+        .links
+        .iter()
+        .find(|link| {
+            let rendered = match &link.target {
+                crate::spec::Target::Spec { revision, .. }
+                | crate::spec::Target::Baseline { revision, .. } => revision.as_str(),
+                crate::spec::Target::Issue { issue } => issue.as_str(),
+            };
+            link.rel == relation && rendered == target
+        })
+        .cloned()
+        .ok_or(Rejection::StateCorrupt)?;
+    Ok(crate::spec::SpecReferenceFact {
+        spec: record.revision.body.spec,
+        revision: record.revision.revision,
+        kind: record.revision.body.kind,
+        title: record.revision.body.title,
+        link,
+    })
+}
+
+/// The observation a `spec_observation_fact` row asserts.
+///
+/// The page is a page of observations, not of the records that carry them:
+/// projecting the record put its storage tag on the wire and made the answer
+/// undecodable as what it claims to be. A retraction is a fact about an
+/// observation rather than one itself, and posts its own node kind, so it
+/// does not appear here.
+fn spec_observation_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<Option<crate::spec::Observation>, Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::SpecObservationRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let crate::records::SpecObservationRecord::Assert { observation, .. } = record else {
+        return Ok(None);
+    };
+    // A retracted observation is not one. The retraction posts its own node
+    // beside the assertion rather than erasing it -- the assertion is an
+    // immutable record and stays readable as history -- so the page has to
+    // ask, exactly as `spec_observation_state` asks for a single one.
+    if unique_find_row(
+        ctx,
+        crate::find::field::ID,
+        &format!("observation-retraction:{}", observation.observation),
+        "spec_observation_fact",
+        None,
+    )?
+    .is_some()
+    {
+        return Ok(None);
+    }
+    Ok(Some(observation))
+}
+
+fn issue_page_row(row: &runtime::find::ResultRow) -> Result<crate::dto::Row, Rejection> {
+    let doc = result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+    Ok(crate::dto::Row {
+        reff: doc.clone(),
+        doc_id: DocId::parse(&doc).ok_or(Rejection::StateCorrupt)?,
+        project_id: ProjectId::parse(
+            &result_text(row, crate::find::field::PROJECT).ok_or(Rejection::StateCorrupt)?,
+        )
+        .ok_or(Rejection::StateCorrupt)?,
+        key_alias: None,
+        title: result_text(row, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?,
+        status: result_text(row, crate::find::field::STATE).ok_or(Rejection::StateCorrupt)?,
+        priority: Priority::parse(
+            &result_text(row, crate::find::field::PRIORITY).ok_or(Rejection::StateCorrupt)?,
+        )
+        .ok_or(Rejection::StateCorrupt)?,
+        assignee_summary: String::new(),
+        assignees: Vec::new(),
+        enrichment_complete: false,
+        tombstone: result_bool(row, crate::find::field::TOMBSTONE)
+            .ok_or(Rejection::StateCorrupt)?,
+        provisional: false,
+        due_date: result_u64(row, crate::find::field::DUE_AT),
+        estimate: result_u64(row, crate::find::field::ESTIMATE)
+            .map(|value| value.try_into().map_err(|_| Rejection::StateCorrupt))
+            .transpose()?,
+        label_names: Vec::new(),
+        milestone: None,
+        child_done: None,
+        child_total: None,
+    })
+}
+
+fn project_page_row(row: &runtime::find::ResultRow) -> Result<crate::dto::ProjectDto, Rejection> {
+    let id = result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+    Ok(crate::dto::ProjectDto {
+        id: ProjectId::parse(&id).ok_or(Rejection::StateCorrupt)?,
+        name: result_text(row, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?,
+        key: result_text(row, crate::find::field::ENTITY_KEY).ok_or(Rejection::StateCorrupt)?,
+        color: result_text(row, crate::find::field::HEALTH).unwrap_or_default(),
+        description: String::new(),
+        lead: result_text(row, crate::find::field::AUTHOR).unwrap_or_default(),
+        start_date: result_u64(row, crate::find::field::CREATED_AT),
+        target_date: result_u64(row, crate::find::field::TARGET_DATE),
+        archived: result_bool(row, crate::find::field::ARCHIVED).unwrap_or(false),
+        team: result_text(row, crate::find::field::SOURCE_ID).unwrap_or_default(),
+        enrichment_complete: false,
+    })
+}
+
+fn label_page_row(row: &runtime::find::ResultRow) -> Result<crate::dto::LabelDto, Rejection> {
+    let id = result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+    Ok(crate::dto::LabelDto {
+        id: crate::ids::LabelId::parse(&id).ok_or(Rejection::StateCorrupt)?,
+        name: result_text(row, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?,
+        color: result_text(row, crate::find::field::HEALTH).unwrap_or_default(),
+    })
+}
+
+fn update_page_row(
+    row: &runtime::find::ResultRow,
+) -> Result<crate::dto::ProjectUpdateDto, Rejection> {
+    Ok(crate::dto::ProjectUpdateDto {
+        id: result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
+        author: result_text(row, crate::find::field::AUTHOR).ok_or(Rejection::StateCorrupt)?,
+        ts: result_u64(row, crate::find::field::CREATED_AT).ok_or(Rejection::StateCorrupt)?,
+        body: result_text(row, crate::find::field::TEXT).ok_or(Rejection::StateCorrupt)?,
+        health: result_text(row, crate::find::field::HEALTH).unwrap_or_default(),
+    })
+}
+
+fn activity_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<ActivityEvent, Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::ActivityRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let id = result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+    let doc = result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?;
+    if record.issue != doc || id != format!("activity:{doc}:{}", envelope.identity.record) {
+        return Err(Rejection::StateCorrupt);
+    }
+    let event = record.event;
+    Ok(ActivityEvent {
+        // Sequence numbers belonged to the retired per-Issue append log. The
+        // immutable record id and the publication cursor are the stable
+        // coordinates now; zero prevents callers from mistaking a local count
+        // for a resumable offset.
+        seq: 0,
+        cursor: id,
+        doc_id: DocId::parse(&doc),
+        reff: doc,
+        kind: event.k,
+        changes: event
+            .c
+            .into_iter()
+            .map(|change| FieldChange {
+                field: change.f,
+                from: change.from,
+                to: change.to,
+            })
+            .collect(),
+        actor: ActorId::parse(&event.a),
+        actor_nick: String::new(),
+        text: event.x,
+        ts: event.t,
+        collision: false,
+    })
+}
+
+fn inbox_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+    recipient: &ActorId,
+) -> Result<crate::dto::InboxEntry, Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let record = crate::records::ActivityRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let doc = result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?;
+    let kind = result_text(row, crate::find::field::STATE).ok_or(Rejection::StateCorrupt)?;
+    if record.issue != doc
+        || record.event.inbox_kind() != Some(kind.as_str())
+        || record
+            .recipients
+            .binary_search_by(|actor| actor.as_str().cmp(recipient.as_str()))
+            .is_err()
+        || result_text(row, crate::find::field::DEVICE).as_deref() != Some(record.event.d.as_str())
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    let issue = unique_find_row(ctx, crate::find::field::ID, &doc, "issue", None)?
+        .ok_or(Rejection::StateCorrupt)?;
+    let title = result_text(&issue, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?;
+    let coordinate =
+        crate::record_store::issue_coordinate_for(ctx, &doc)?.ok_or(Rejection::StateCorrupt)?;
+    let project = unique_find_row(
+        ctx,
+        crate::find::field::ID,
+        &coordinate.placement.project,
+        "project",
+        None,
+    )?
+    .ok_or(Rejection::StateCorrupt)?;
+    let project_key =
+        result_text(&project, crate::find::field::ENTITY_KEY).ok_or(Rejection::StateCorrupt)?;
+    let reff = coordinate
+        .identity
+        .alias
+        .render(&project_key)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    Ok(crate::dto::InboxEntry {
+        ts: record.event.t,
+        kind,
+        reff,
+        doc_id: doc,
+        title,
+        detail: record.event.x,
+        actor: Some(record.event.a),
+        actor_nick: None,
+    })
+}
+
+fn immutable_record_bytes(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+    schema: crate::records::PhysicalSchema,
+) -> Result<(crate::records::RecordBodyIdentityRecord, Vec<u8>), Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    if crate::records::immutable_record_key(schema, &bytes) != row.source {
+        return Err(Rejection::StateCorrupt);
+    }
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    Ok((envelope.identity, envelope.record))
+}
+
+fn comment_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+    doc: &str,
+    issue: &IssueState,
+) -> Result<crate::dto::CommentDto, Rejection> {
+    let (identity, bytes) =
+        immutable_record_bytes(ctx, row, crate::records::PhysicalSchema::IssueComment)?;
+    let crate::records::DiscussionRecord::Comment(comment) =
+        crate::records::DiscussionRecord::decode_canonical(&bytes)
+            .map_err(|_| Rejection::StateCorrupt)?
+    else {
+        return Err(Rejection::StateCorrupt);
+    };
+    let id = comment.id.clone().ok_or(Rejection::StateCorrupt)?;
+    if identity.owner != doc
+        || identity.record != id
+        || result_text(row, crate::find::field::SOURCE_ID).as_deref() != Some(doc)
+    {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(crate::dto::CommentDto {
+        author: ActorId::parse(&comment.a).ok_or(Rejection::StateCorrupt)?,
+        author_nick: None,
+        ts: comment.t,
+        body: comment.b.clone(),
+        id: Some(id),
+        parent: comment.parent.clone(),
+        reactions: Vec::new(),
+        anchor: resolve_comment_anchor(ctx, doc, issue, &comment)?,
+    })
+}
+
+fn reaction_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<crate::records::ReactionRecord, Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let crate::records::DiscussionRecord::Reaction(record) =
+        crate::records::DiscussionRecord::decode_canonical(&bytes)
+            .map_err(|_| Rejection::StateCorrupt)?
+    else {
+        return Err(Rejection::StateCorrupt);
+    };
+    record.validate().map_err(|_| Rejection::StateCorrupt)?;
+    Ok(record)
+}
+
+fn attachment_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<crate::dto::AttachmentMetaDto, Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let record = crate::records::IssueAttachmentRecord::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    record.validate().map_err(|_| Rejection::StateCorrupt)?;
+    Ok(crate::dto::AttachmentMetaDto {
+        id: record.id,
+        name: record.name,
+        mime: record.mime,
+        size: record.size,
+        by: record.by,
+        ts: record.timestamp,
+        comment: record.comment.unwrap_or_default(),
+    })
+}
+
+fn check_page_row(
+    ctx: &Context<'_>,
+    row: &runtime::find::ResultRow,
+) -> Result<crate::dto::CheckDto, Rejection> {
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let record = crate::records::IssueCheckRecord::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    record.validate().map_err(|_| Rejection::StateCorrupt)?;
+    let check = record.check;
+    Ok(crate::dto::CheckDto {
+        run: record.run,
+        spec: check.spec,
+        version: check.v,
+        build: check.build,
+        source: check.source,
+        state: check.state,
+        by: check.by,
+        ts: check.ts,
+        attempt: check.attempt,
+        report: check.report,
+        verdict: check.verdict,
+    })
+}
+
+fn issue_relations_page(
+    ctx: &Context<'_>,
+    doc: &str,
+    direction: crate::dto::RelationDirection,
+    page: &contract::PageRequest,
+) -> Result<contract::Page<crate::dto::IssueRelationDto>, Rejection> {
+    let endpoint = match direction {
+        crate::dto::RelationDirection::Out => crate::find::field::GRAPH_SOURCE_ID,
+        crate::dto::RelationDirection::In => crate::find::field::GRAPH_TARGET_ID,
+    };
+    let answer = find_field_page(
+        ctx,
+        endpoint,
+        runtime::find::Atom::Text(doc.into()),
+        page,
+        Vec::new(),
+        [
+            crate::find::field::RELATION_KIND,
+            crate::find::field::SOURCE_ID,
+            crate::find::field::TARGET_ID,
+            crate::find::field::PROJECT,
+        ]
+        .into_iter()
+        .map(crate::find::field_ref)
+        .collect(),
+    )?;
+    let other_field = match direction {
+        crate::dto::RelationDirection::Out => crate::find::field::TARGET_ID,
+        crate::dto::RelationDirection::In => crate::find::field::SOURCE_ID,
+    };
+    let other_ids = answer
+        .rows()
+        .iter()
+        .map(|row| result_text(row, other_field).ok_or(Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    let rows_by_id = find_issue_rows_by_ids(ctx, other_ids)?;
+    let items = answer
+        .rows()
+        .iter()
+        .map(|relation| {
+            let other = result_text(relation, other_field).ok_or(Rejection::StateCorrupt)?;
+            Ok(crate::dto::IssueRelationDto {
+                kind: result_text(relation, crate::find::field::RELATION_KIND)
+                    .ok_or(Rejection::StateCorrupt)?,
+                direction,
+                row: rows_by_id
+                    .get(&other)
+                    .cloned()
+                    .ok_or(Rejection::StateCorrupt)?,
+            })
+        })
+        .collect::<Result<Vec<_>, Rejection>>()?;
+    Ok(page_from_answer(&answer, items))
+}
+
+fn issue_comments_page(
+    ctx: &Context<'_>,
+    doc: &str,
+    page: &contract::PageRequest,
+) -> Result<contract::Page<crate::dto::CommentDto>, Rejection> {
+    let issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
+    let answer = find_source_created_page(
+        ctx,
+        "comment",
+        doc,
+        false,
+        page,
+        Vec::new(),
+        [crate::find::field::TARGET_ID]
+            .into_iter()
+            .map(crate::find::field_ref)
+            .collect(),
+    )?;
+    let items = answer
+        .rows()
+        .iter()
+        .map(|row| comment_page_row(ctx, row, doc, &issue))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(page_from_answer(&answer, items))
+}
+
+fn issue_reactions_page(
+    ctx: &Context<'_>,
+    doc: &str,
+    page: &contract::PageRequest,
+) -> Result<contract::Page<crate::records::ReactionRecord>, Rejection> {
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::TARGET_ID,
+        runtime::find::Atom::Text(doc.into()),
+        page,
+        vec![runtime::find::Predicate {
+            field: crate::find::field_ref(crate::find::field::KIND),
+            test: runtime::find::Test::Equal,
+            value: runtime::find::Atom::Text("reaction".into()),
+        }],
+        [
+            crate::find::field::STATE,
+            crate::find::field::AUTHOR,
+            crate::find::field::RELATION_KIND,
+            crate::find::field::SOURCE_ID,
+        ]
+        .into_iter()
+        .map(crate::find::field_ref)
+        .collect(),
+    )?;
+    let items = answer
+        .rows()
+        .iter()
+        .map(|row| reaction_page_row(ctx, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(page_from_answer(&answer, items))
+}
+
+fn issue_attachments_page(
+    ctx: &Context<'_>,
+    doc: &str,
+    page: &contract::PageRequest,
+) -> Result<contract::Page<crate::dto::AttachmentMetaDto>, Rejection> {
+    let answer = find_source_created_page(
+        ctx,
+        "issue_attachment",
+        doc,
+        false,
+        page,
+        vec![runtime::find::Predicate {
+            field: crate::find::field_ref(crate::find::field::TOMBSTONE),
+            test: runtime::find::Test::Equal,
+            value: runtime::find::Atom::Bool(false),
+        }],
+        [crate::find::field::TITLE, crate::find::field::TOMBSTONE]
+            .into_iter()
+            .map(crate::find::field_ref)
+            .collect(),
+    )?;
+    let items = answer
+        .rows()
+        .iter()
+        .map(|row| attachment_page_row(ctx, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(page_from_answer(&answer, items))
+}
+
+fn issue_checks_page(
+    ctx: &Context<'_>,
+    doc: &str,
+    page: &contract::PageRequest,
+) -> Result<contract::Page<crate::dto::CheckDto>, Rejection> {
+    let answer = find_source_created_page(
+        ctx,
+        "issue_check",
+        doc,
+        true,
+        page,
+        Vec::new(),
+        [crate::find::field::STATE, crate::find::field::AUTHOR]
+            .into_iter()
+            .map(crate::find::field_ref)
+            .collect(),
+    )?;
+    let items = answer
+        .rows()
+        .iter()
+        .map(|row| check_page_row(ctx, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(page_from_answer(&answer, items))
+}
+
+fn milestone_page_row(
+    row: &runtime::find::ResultRow,
+) -> Result<crate::dto::MilestoneDto, Rejection> {
+    Ok(crate::dto::MilestoneDto {
+        id: result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
+        name: result_text(row, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?,
+        // A milestone's body is its own bounded prose, not the independently
+        // stored large description an issue or project carries, so the
+        // collection page packs it rather than omitting it.
+        description: result_text(row, crate::find::field::TEXT).unwrap_or_default(),
+        target_date: result_u64(row, crate::find::field::TARGET_DATE),
+        total: 0,
+        done: 0,
+        enrichment_complete: false,
+    })
+}
+
+fn cycle_page_row(row: &runtime::find::ResultRow) -> Result<crate::dto::CycleDto, Rejection> {
+    Ok(crate::dto::CycleDto {
+        id: result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
+        name: result_text(row, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?,
+        start: result_u64(row, crate::find::field::CREATED_AT).unwrap_or(0),
+        end: result_u64(row, crate::find::field::DUE_AT).unwrap_or(0),
+        total: 0,
+        done: 0,
+        enrichment_complete: false,
+    })
+}
+
+fn initiative_page_row(
+    row: &runtime::find::ResultRow,
+) -> Result<crate::dto::InitiativeDto, Rejection> {
+    Ok(crate::dto::InitiativeDto {
+        id: result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
+        name: result_text(row, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?,
+        description: String::new(),
+        owner: result_text(row, crate::find::field::AUTHOR).unwrap_or_default(),
+        health: result_text(row, crate::find::field::HEALTH).unwrap_or_default(),
+        target_date: result_u64(row, crate::find::field::TARGET_DATE),
+        projects: Vec::new(),
+        total: 0,
+        done: 0,
+        enrichment_complete: false,
+    })
+}
+
+fn team_page_row(row: &runtime::find::ResultRow) -> Result<crate::dto::TeamDto, Rejection> {
+    Ok(crate::dto::TeamDto {
+        id: result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
+        name: result_text(row, crate::find::field::TITLE).ok_or(Rejection::StateCorrupt)?,
+        key: result_text(row, crate::find::field::ENTITY_KEY).ok_or(Rejection::StateCorrupt)?,
+        icon: result_text(row, crate::find::field::HEALTH).unwrap_or_default(),
+        lead: result_text(row, crate::find::field::AUTHOR).unwrap_or_default(),
+        members: Vec::new(),
+        projects: Vec::new(),
+        enrichment_complete: false,
+    })
+}
+
+fn live_predicate() -> runtime::find::Predicate {
+    runtime::find::Predicate {
+        field: crate::find::field_ref(crate::find::field::TOMBSTONE),
+        test: runtime::find::Test::Equal,
+        value: runtime::find::Atom::Bool(false),
+    }
+}
+
+fn unique_find_row(
+    ctx: &Context<'_>,
+    field: &str,
+    value: &str,
+    kind: &str,
+    project: Option<&str>,
+) -> Result<Option<runtime::find::ResultRow>, Rejection> {
+    use runtime::find as find_api;
+    let bound = find_api::Bound {
+        decoded_bodies: 1,
+        postings_read: 16,
+        edges_visited: 1,
+        nodes_visited: 4,
+        paths_retained: 1,
+        candidates_per_branch: 4,
+        score_evaluations: 1,
+        projected_bytes: 64 * 1_024,
+        // A unique head row can carry the bounded 64-way revision-head set
+        // plus project/title coordinates. Runtime counts canonical packed
+        // bytes, so this must match the explicit projection byte ceiling.
+        packed_tokens: 64 * 1_024,
+        wall_millis: 1_000,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    let (seek_field, seek_value) = if field == crate::find::field::SOURCE_ID
+        && project.is_some_and(|project| project == value)
+    {
+        (
+            crate::find::field::KIND_PROJECT,
+            find_api::Atom::Bytes(crate::find::composite_key([kind, value])),
+        )
+    } else {
+        (field, find_api::Atom::Text(value.into()))
+    };
+    let mut predicates = vec![find_api::Predicate {
+        field: crate::find::field_ref(crate::find::field::KIND),
+        test: find_api::Test::Equal,
+        value: find_api::Atom::Text(kind.into()),
+    }];
+    if let Some(project) = project {
+        predicates.push(find_api::Predicate {
+            field: crate::find::field_ref(crate::find::field::PROJECT),
+            test: find_api::Test::Equal,
+            value: find_api::Atom::Text(project.into()),
+        });
+    }
+    let mut fields = [
+        crate::find::field::ID,
+        crate::find::field::KIND,
+        crate::find::field::TITLE,
+        crate::find::field::RELATION_KIND,
+        crate::find::field::SOURCE_ID,
+        crate::find::field::TARGET_ID,
+        crate::find::field::STATE,
+        crate::find::field::AUTHOR,
+        crate::find::field::CREATED_AT,
+        crate::find::field::EXACT_NAME,
+        crate::find::field::ENTITY_KEY,
+        crate::find::field::PROJECT,
+        crate::find::field::TOMBSTONE,
+        crate::find::field::ALIAS_COORDINATE,
+        crate::find::field::REVISION,
+        crate::find::field::HEAD_REVISIONS,
+        crate::find::field::CONFLICTED,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect::<Vec<_>>();
+    fields.sort();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                        field: crate::find::field_ref(seek_field),
+                        test: find_api::Test::Equal,
+                        value: seek_value,
+                    })),
+                    bound,
+                },
+                find_api::Step {
+                    id: keep,
+                    input: vec![seek],
+                    op: find_api::Op::Keep(find_api::Keep { predicates }),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![keep],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: 2,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    if answer.next_cursor().is_some() || answer.matched_total().is_some_and(|count| count > 1) {
+        return Err(Rejection::Conflict);
+    }
+    let mut rows = answer.rows().to_vec();
+    if rows.len() > 1 {
+        return Err(Rejection::Conflict);
+    }
+    Ok(rows.pop())
+}
+
+/// The one Issue in `project` whose alias ordinal is `ordinal`.
+///
+/// Ordinals are derived rather than counted, so two Issues in a project can
+/// share one. That is the trade the short reference buys, and this is where
+/// it is paid: a short reference naming more than one Issue is refused, and
+/// the refusal is the signal to use the full form, which always resolves.
+///
+/// The scan is the ordinal's own prefix of the alias coordinate. Every alias
+/// under it is `<ordinal>-<32 lowercase hex>`, and a longer ordinal sorts
+/// above the upper bound because a digit is greater than `-`, so the range
+/// holds exactly the Issues sharing this ordinal -- a handful at worst, and
+/// one almost always.
+fn unique_doc_for_ordinal(
+    ctx: &Context<'_>,
+    project: &str,
+    ordinal: u64,
+) -> Result<String, Rejection> {
+    let request = contract::PageRequest {
+        limit: ALIAS_ORDINAL_SCAN,
+        cursor: None,
+    };
+    // Seek the prefix, not a half-open range closed by a `Keep`. A `Keep`
+    // does not bound a scan: the runtime charges its meter for every row it
+    // visits and only then discards, and a discarded row does not fill the
+    // page either -- so the scan runs to the end of the field and trips the
+    // bound instead of stopping. `Test::Prefix` is bounded by the corpus.
+    let answer = find_field_test_page(
+        ctx,
+        crate::find::field::ALIAS_COORDINATE,
+        runtime::find::Test::Prefix,
+        runtime::find::Atom::Text(format!("{ordinal}-")),
+        &request,
+        Vec::new(),
+        vec![crate::find::field_ref(crate::find::field::SOURCE_ID)],
+    )?;
+    // More sharing one ordinal than the scan admits is not something to
+    // resolve by taking the first: say the reference is not usable.
+    if answer.next_cursor().is_some() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let mut found = None;
+    for row in answer.rows() {
+        if result_text(row, crate::find::field::KIND).as_deref() != Some("issue_identity") {
+            continue;
+        }
+        let doc = result_text(row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?;
+        let Some(coordinate) = crate::record_store::issue_coordinate_for(ctx, &doc)? else {
+            continue;
+        };
+        if coordinate.placement.project != project {
+            continue;
+        }
+        if found.replace(doc).is_some() {
+            // Ambiguous inside one project. The full form is what names it.
+            return Err(Rejection::InvalidRequest);
+        }
+    }
+    found.ok_or(Rejection::InvalidRequest)
+}
+
+/// The one node of `kind` whose id begins with `prefix`.
+fn unique_id_by_prefix(ctx: &Context<'_>, kind: &str, prefix: &str) -> Result<String, Rejection> {
+    let request = contract::PageRequest {
+        limit: ALIAS_ORDINAL_SCAN,
+        cursor: None,
+    };
+    // Bounded by the prefix itself. The `id` field is posted by every entity
+    // node, so a half-open range would scan every kind that sorts after this
+    // one -- most of the corpus -- and trip the bound rather than answering.
+    let answer = find_field_test_page(
+        ctx,
+        crate::find::field::ID,
+        runtime::find::Test::Prefix,
+        runtime::find::Atom::Text(prefix.to_string()),
+        &request,
+        Vec::new(),
+        Vec::new(),
+    )?;
+    if answer.next_cursor().is_some() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let mut found = None;
+    for row in answer.rows() {
+        if result_text(row, crate::find::field::KIND).as_deref() != Some(kind) {
+            continue;
+        }
+        let id = result_text(row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+        if found.replace(id).is_some() {
+            return Err(Rejection::InvalidRequest);
+        }
+    }
+    found.ok_or(Rejection::InvalidRequest)
+}
+
+/// Rows one short reference may touch before it is called unusable.
+const ALIAS_ORDINAL_SCAN: u32 = 32;
+
+fn resolve_entity(
+    ctx: &Context<'_>,
+    entity: contract::ResolveEntity,
+    selector: &str,
+    project: Option<&str>,
+) -> Result<contract::ResolvedEntity, Rejection> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Err(Rejection::InvalidRequest);
+    }
+    if entity == contract::ResolveEntity::Issue {
+        let (doc, requested_project) = if DocId::parse(selector).is_some() {
+            let row = unique_find_row(ctx, crate::find::field::ID, selector, "issue", None)?
+                .ok_or(Rejection::InvalidRequest)?;
+            (
+                result_text(&row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?,
+                None,
+            )
+        } else if selector.starts_with(DocId::PREFIX) {
+            // A canonical id somebody stopped typing. Unambiguous prefixes
+            // resolve; an ambiguous one is refused rather than guessed.
+            (unique_id_by_prefix(ctx, "issue", selector)?, None)
+        } else {
+            // `KEY-ORDINAL`, the reference a person is shown, or
+            // `KEY-ORDINAL-SUFFIX`, the full form that names the
+            // collision-proof component outright.
+            let (key, rest) = selector.split_once('-').ok_or(Rejection::InvalidRequest)?;
+            let (ordinal, suffix) = match rest.split_once('-') {
+                Some((ordinal, suffix)) => (ordinal, Some(suffix)),
+                None => (rest, None),
+            };
+            // Reparse rather than carrying the typed text through: a padded
+            // `ENG-000483102` validates and then matches no posting, because
+            // the coordinate is written from the number.
+            let Some(canonical_ordinal) = ordinal.parse::<u64>().ok().filter(|value| *value > 0)
+            else {
+                return Err(Rejection::InvalidRequest);
+            };
+            if suffix.is_some_and(|suffix| {
+                suffix.len() != 32 || data_encoding::HEXLOWER.decode(suffix.as_bytes()).is_err()
+            }) {
+                return Err(Rejection::InvalidRequest);
+            }
+            let project_row = unique_find_row(
+                ctx,
+                crate::find::field::ENTITY_KEY,
+                &key.to_ascii_uppercase(),
+                "project",
+                None,
+            )?
+            .ok_or(Rejection::InvalidRequest)?;
+            let project =
+                result_text(&project_row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+            let doc = match suffix {
+                Some(suffix) => {
+                    let alias = format!("{ordinal}-{}", suffix.to_ascii_lowercase());
+                    let identity = unique_find_row(
+                        ctx,
+                        crate::find::field::ALIAS_COORDINATE,
+                        &alias,
+                        "issue_identity",
+                        None,
+                    )?
+                    .ok_or(Rejection::InvalidRequest)?;
+                    result_text(&identity, crate::find::field::SOURCE_ID)
+                        .ok_or(Rejection::StateCorrupt)?
+                }
+                None => unique_doc_for_ordinal(ctx, &project, canonical_ordinal)?,
+            };
+            (doc, Some(project))
+        };
+        let coordinate = crate::record_store::issue_coordinate_for(ctx, &doc)?
+            .ok_or(Rejection::InvalidRequest)?;
+        if requested_project
+            .as_ref()
+            .is_some_and(|project| project != &coordinate.placement.project)
+        {
+            return Err(Rejection::InvalidRequest);
+        }
+        let mut catalog = CatalogState::default();
+        crate::record_store::apply_project(ctx, &mut catalog, &coordinate.placement.project)?;
+        let project_meta = catalog
+            .projects
+            .get(&coordinate.placement.project)
+            .ok_or(Rejection::StateCorrupt)?;
+        let display = coordinate
+            .identity
+            .alias
+            .render_short(&project_meta.key)
+            .map_err(|_| Rejection::StateCorrupt)?;
+        return Ok(contract::ResolvedEntity {
+            id: doc,
+            display,
+            record: serde_json::Value::Null,
+        });
+    }
+
+    let (kind, prefix, name_field) = match entity {
+        contract::ResolveEntity::Project => (
+            "project",
+            crate::ids::ProjectId::PREFIX,
+            crate::find::field::ENTITY_KEY,
+        ),
+        contract::ResolveEntity::Label => (
+            "label",
+            crate::ids::LabelId::PREFIX,
+            crate::find::field::EXACT_NAME,
+        ),
+        contract::ResolveEntity::Milestone => (
+            "milestone",
+            crate::ids::MilestoneId::PREFIX,
+            crate::find::field::EXACT_NAME,
+        ),
+        contract::ResolveEntity::Cycle => (
+            "cycle",
+            crate::ids::CycleId::PREFIX,
+            crate::find::field::EXACT_NAME,
+        ),
+        contract::ResolveEntity::Initiative => (
+            "initiative",
+            crate::ids::InitiativeId::PREFIX,
+            crate::find::field::EXACT_NAME,
+        ),
+        contract::ResolveEntity::Team => (
+            "team",
+            crate::ids::TeamId::PREFIX,
+            crate::find::field::EXACT_NAME,
+        ),
+        contract::ResolveEntity::Issue => return Err(Rejection::InvalidRequest),
+    };
+    let row = if selector.starts_with(prefix) {
+        unique_find_row(ctx, crate::find::field::ID, selector, kind, project)?
+    } else {
+        let lookup = if entity == contract::ResolveEntity::Project
+            || entity == contract::ResolveEntity::Team
+        {
+            selector.to_ascii_uppercase()
+        } else {
+            selector.to_ascii_lowercase()
+        };
+        unique_find_row(ctx, name_field, &lookup, kind, project)?.or_else(|| {
+            (entity == contract::ResolveEntity::Team)
+                .then(|| {
+                    unique_find_row(ctx, crate::find::field::ENTITY_KEY, &lookup, kind, project)
+                })
+                .transpose()
+                .ok()
+                .flatten()
+                .flatten()
+        })
+    }
+    .ok_or(Rejection::InvalidRequest)?;
+    let id = result_text(&row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+    Ok(contract::ResolvedEntity {
+        display: result_text(&row, crate::find::field::ENTITY_KEY)
+            .or_else(|| result_text(&row, crate::find::field::TITLE))
+            .unwrap_or_else(|| id.clone()),
+        id,
+        record: serde_json::Value::Null,
+    })
+}
+
+fn hydrate_issue_enrichment(
+    ctx: &Context<'_>,
+    doc: &str,
+    issue: &mut IssueState,
+) -> Result<(), Rejection> {
+    issue.assignees.clear();
+    issue.followers.clear();
+    issue.labels.clear();
+    issue.milestone = None;
+    issue.cycle = None;
+    issue.baseline = None;
+    issue.comments.clear();
+    issue.reactions.clear();
+    issue.events.clear();
+    issue.events_recorded = 0;
+    issue.attachments.clear();
+    issue.checks.clear();
+    issue.check_corrupt_records.clear();
+
+    for row in find_rows_equal(ctx, crate::find::field::SOURCE_ID, doc)? {
+        match result_text(&row, crate::find::field::KIND).as_deref() {
+            Some("relation") => {
+                let Some(kind) = result_text(&row, crate::find::field::RELATION_KIND) else {
+                    continue;
+                };
+                if !matches!(
+                    kind.as_str(),
+                    "assignee" | "follower" | "label" | "milestone" | "cycle" | "baseline"
+                ) {
+                    continue;
+                }
+                let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+                let relation = crate::records::IssueRelationRecord::decode_canonical(&raw)
+                    .map_err(|_| Rejection::StateCorrupt)?;
+                if relation.issue != doc || relation.kind != kind || !relation.present {
+                    return Err(Rejection::StateCorrupt);
+                }
+                match relation.kind.as_str() {
+                    "assignee" => issue
+                        .assignees
+                        .push(ActorId::parse(&relation.target).ok_or(Rejection::StateCorrupt)?),
+                    "follower" => issue
+                        .followers
+                        .push(ActorId::parse(&relation.target).ok_or(Rejection::StateCorrupt)?),
+                    "label" => issue.labels.push(relation.target),
+                    "milestone" => issue.milestone = Some(relation.target),
+                    "cycle" => issue.cycle = Some(relation.target),
+                    "baseline" => {
+                        issue.baseline = serde_json::from_str(&relation.target)
+                            .map(Some)
+                            .map_err(|_| Rejection::StateCorrupt)?
+                    }
+                    _ => return Err(Rejection::StateCorrupt),
+                }
+            }
+            Some("comment") => {
+                let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+                let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+                    .map_err(|_| Rejection::StateCorrupt)?;
+                let crate::records::DiscussionRecord::Comment(comment) =
+                    crate::records::DiscussionRecord::decode_canonical(&envelope.record)
+                        .map_err(|_| Rejection::StateCorrupt)?
+                else {
+                    return Err(Rejection::StateCorrupt);
+                };
+                issue.comments.push(comment);
+            }
+            Some("activity") => {
+                let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+                let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+                    .map_err(|_| Rejection::StateCorrupt)?;
+                let mut event = crate::records::ActivityRecord::decode_canonical(&envelope.record)
+                    .map_err(|_| Rejection::StateCorrupt)?
+                    .event;
+                event.entry =
+                    result_text(&row, crate::find::field::ID).ok_or(Rejection::StateCorrupt)?;
+                issue.events.push(event);
+            }
+            Some("issue_attachment") => {
+                let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+                let record = crate::records::IssueAttachmentRecord::decode_canonical(&raw)
+                    .map_err(|_| Rejection::StateCorrupt)?;
+                if record.issue != doc {
+                    return Err(Rejection::StateCorrupt);
+                }
+                if !record.tombstone {
+                    issue.attachments.push(crate::views::AttachmentMeta {
+                        id: record.id,
+                        name: record.name,
+                        mime: record.mime,
+                        size: record.size,
+                        by: record.by,
+                        ts: record.timestamp,
+                        comment: record.comment.unwrap_or_default(),
+                    });
+                }
+            }
+            Some("issue_check") => {
+                let raw = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+                let record = crate::records::IssueCheckRecord::decode_canonical(&raw)
+                    .map_err(|_| Rejection::StateCorrupt)?;
+                if record.issue != doc {
+                    return Err(Rejection::StateCorrupt);
+                }
+                issue.checks.push((record.run, record.check));
+            }
+            _ => {}
+        }
+    }
+    for row in find_rows_equal(ctx, crate::find::field::TARGET_ID, doc)? {
+        if result_text(&row, crate::find::field::KIND).as_deref() != Some("reaction")
+            || result_text(&row, crate::find::field::STATE).as_deref() != Some("on")
+        {
+            continue;
+        }
+        let comment =
+            result_text(&row, crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?;
+        let emoji =
+            result_text(&row, crate::find::field::RELATION_KIND).ok_or(Rejection::StateCorrupt)?;
+        let actor = result_text(&row, crate::find::field::AUTHOR).ok_or(Rejection::StateCorrupt)?;
+        issue
+            .reactions
+            .entry(comment)
+            .or_default()
+            .push((emoji, actor));
+    }
+    issue.assignees.sort();
+    issue.assignees.dedup();
+    issue.followers.sort();
+    issue.followers.dedup();
+    issue.labels.sort();
+    issue.labels.dedup();
+    issue
+        .attachments
+        .sort_by(|left, right| left.ts.cmp(&right.ts).then_with(|| left.id.cmp(&right.id)));
+    issue.checks.sort_by(|left, right| left.0.cmp(&right.0));
+    issue
+        .comments
+        .sort_by(|left, right| left.t.cmp(&right.t).then_with(|| left.id.cmp(&right.id)));
+    for reactions in issue.reactions.values_mut() {
+        reactions.sort();
+        reactions.dedup();
+    }
+    issue.events.sort_by(|left, right| {
+        left.t
+            .cmp(&right.t)
+            .then_with(|| left.entry.cmp(&right.entry))
+    });
+    issue.events_recorded = u64::try_from(issue.events.len()).unwrap_or(u64::MAX);
+    Ok(())
+}
+
+fn issue_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
+    let mut issue = issue_core_state(ctx, doc)?;
+    hydrate_issue_enrichment(ctx, doc, &mut issue).ok()?;
+    Some(issue)
+}
+
+/// The bounded Issue anchor used by action validation. Enrichment is stored in
+/// independently addressed record Bodies and must never be hydrated merely to
+/// edit a title, move a card, or authorize a workflow transition.
+fn issue_core_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
+    let view = ctx.read_collaborative(&issue_key(doc)).ok()??;
+    let mut issue = IssueState::from_view(&view);
+    let coordinate = crate::record_store::issue_coordinate_for(ctx, doc).ok()??;
+    crate::record_store::apply_issue_coordinate(&mut issue, &coordinate);
+    crate::record_store::apply_issue_meta(ctx, &mut issue, doc).ok()?;
+    // V3 aggregate roots are migration input, never live enrichment truth.
+    issue.assignees.clear();
+    issue.followers.clear();
+    issue.labels.clear();
+    issue.milestone = None;
+    issue.cycle = None;
+    issue.baseline = None;
+    issue.comments.clear();
+    issue.reactions.clear();
+    issue.events.clear();
+    issue.events_recorded = 0;
+    Some(issue)
+}
+
+/// Put an Issue's relation-held facts back onto the state a view is drawn
+/// from.
+///
+/// `issue_core_state` clears these deliberately: what it decodes are the v3
+/// aggregate roots, which are migration input and not live truth. The live
+/// truth is one `issue_relation` Body per fact, and until something reads
+/// those back an `IssueView` reports an issue with no assignees, no labels,
+/// no milestone, no cycle and no baseline -- which reads as an issue that
+/// has none, rather than as one nobody asked about.
+///
+/// Set-valued kinds come from the bounded membership posting. The three
+/// singleton kinds are read as records instead, for two reasons: their
+/// physical identity ignores the target, so one probe finds the current one
+/// whatever it points at; and a baseline is stored as a `BaselineRef`, whose
+/// revision the relation node does not carry -- it indexes the baseline id
+/// alone.
+fn enrich_issue_relations(
+    ctx: &Context<'_>,
+    issue: &mut IssueState,
+    doc: &str,
+) -> Result<(), Rejection> {
+    let actors = |targets: std::collections::BTreeSet<String>| {
+        targets
+            .into_iter()
+            .map(|target| ActorId::parse(&target).ok_or(Rejection::StateCorrupt))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    issue.assignees = actors(issue_relation_targets(
+        ctx,
+        doc,
+        "assignee",
+        contract::MAX_ISSUE_ASSIGNEES,
+    )?)?;
+    issue.followers = actors(issue_relation_targets(
+        ctx,
+        doc,
+        "follower",
+        contract::MAX_ISSUE_FOLLOWERS,
+    )?)?;
+    issue.labels = issue_relation_targets(ctx, doc, "label", contract::MAX_ISSUE_LABELS)?
+        .into_iter()
+        .collect();
+    let singleton = |kind: &str| -> Result<Option<String>, Rejection> {
+        Ok(
+            crate::record_store::read_issue_relation(ctx, doc, kind, "")?
+                .filter(|record| record.present)
+                .map(|record| record.target),
+        )
+    };
+    issue.milestone = singleton("milestone")?;
+    issue.cycle = singleton("cycle")?;
+    issue.baseline = singleton("baseline")?
+        .map(|raw| {
+            serde_json::from_str::<crate::spec::BaselineRef>(&raw)
+                .map_err(|_| Rejection::StateCorrupt)
+        })
+        .transpose()?;
+    Ok(())
+}
+
+/// The alias table for exactly one Issue.
+///
+/// The view paths built an empty one, so every Issue answered with no human
+/// reference at all -- `key_alias` absent and `reff` a bare id prefix, which
+/// is not a reference somebody can use or type back. One Issue needs one
+/// entry, and both halves of it are already at hand: the coordinate the
+/// resolver reads, and the project key the handler has loaded to draw the
+/// row.
+fn aliases_for_issue(
+    ctx: &Context<'_>,
+    catalog: &CatalogState,
+    doc: &str,
+) -> Result<crate::views::DerivedAliases, Rejection> {
+    let mut aliases = crate::views::DerivedAliases::default();
+    let Some(coordinate) = crate::record_store::issue_coordinate_for(ctx, doc)? else {
+        return Ok(aliases);
+    };
+    let Some(project) = catalog.projects.get(&coordinate.placement.project) else {
+        return Ok(aliases);
+    };
+    let Ok(alias) = coordinate.identity.alias.render_short(&project.key) else {
+        return Ok(aliases);
+    };
+    aliases
+        .by_alias
+        .insert(alias.to_ascii_lowercase(), doc.to_string());
+    aliases.by_doc.insert(doc.to_string(), alias.clone());
+    aliases.canonical.insert(doc.to_string(), alias);
+    Ok(aliases)
+}
+
+/// Live and Done-category Issue counts for one project.
+///
+/// The sibling of `membership_counts`, for the roll-ups whose members are
+/// projects rather than Issues. Same two seeks and the same rule: a bare
+/// posting count decides whether measuring is affordable, and a project too
+/// large to measure reports itself unmeasured rather than counting one page.
+fn project_issue_counts(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    project: &str,
+) -> Result<Option<(u32, u32)>, Rejection> {
+    let probe = contract::PageRequest {
+        limit: 1,
+        cursor: None,
+    };
+    let counted = find_kind_page(ctx, "issue", Some(project), &probe, Vec::new(), Vec::new())?;
+    let Some(members) = counted.matched_total() else {
+        return Ok(None);
+    };
+    if members > ENRICHMENT_CEILING {
+        return Ok(None);
+    }
+    let limit = u32::try_from(members).map_err(|_| Rejection::StateCorrupt)?;
+    if limit == 0 {
+        return Ok(Some((0, 0)));
+    }
+    let answer = find_kind_page(
+        ctx,
+        "issue",
+        Some(project),
+        &contract::PageRequest {
+            limit,
+            cursor: None,
+        },
+        Vec::new(),
+        [
+            crate::find::field::STATE,
+            crate::find::field::TOMBSTONE,
+            crate::find::field::PROJECT,
+            crate::find::field::TITLE,
+            crate::find::field::PRIORITY,
+        ]
+        .into_iter()
+        .map(crate::find::field_ref)
+        .collect(),
+    )?;
+    if answer.next_cursor().is_some() {
+        return Ok(None);
+    }
+    apply_project_workflow(ctx, catalog, project)?;
+    let mut total = 0u32;
+    let mut done = 0u32;
+    for row in answer.rows() {
+        if result_bool(row, crate::find::field::TOMBSTONE).unwrap_or(false) {
+            continue;
+        }
+        let Some(state) = result_text(row, crate::find::field::STATE) else {
+            continue;
+        };
+        total = total.saturating_add(1);
+        if issue_status_category(catalog, project, &state)? == StatusCategory::Done {
+            done = done.saturating_add(1);
+        }
+    }
+    Ok(Some((total, done)))
+}
+
+/// Put the relation-held facts a list row shows onto one row.
+///
+/// `issue_page_row` builds from one Find row, which carries the Issue's own
+/// coordinates and none of its memberships -- so assignees, labels and
+/// milestone came back empty on every list and board. A tracker list that
+/// does not say who an Issue is assigned to is not a list of Issues, so this
+/// is enrichment the collection page owes rather than one it may omit.
+///
+/// Three bounded exact seeks per row, on the membership posting that exists
+/// for exactly this. They are index lookups returning a handful of rows each,
+/// not scans, and the page that calls this is already bounded.
+fn enrich_issue_row(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    row: &mut crate::dto::Row,
+    me: Option<&ActorId>,
+) -> Result<(), Rejection> {
+    let doc = row.doc_id.to_string();
+    row.assignees = issue_relation_targets(ctx, &doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?
+        .into_iter()
+        .map(|target| ActorId::parse(&target).ok_or(Rejection::StateCorrupt))
+        .collect::<Result<Vec<_>, _>>()?;
+    row.assignee_summary = crate::views::assignee_summary(&row.assignees, me);
+    // A row carries label NAMES, so an id that has no registry entry renders
+    // as itself rather than disappearing -- the same rule the assembled view
+    // applies.
+    let mut names = Vec::new();
+    for label in issue_relation_targets(ctx, &doc, "label", contract::MAX_ISSUE_LABELS)? {
+        crate::record_store::apply_label(ctx, catalog, &label)?;
+        names.push(
+            catalog
+                .labels
+                .get(&label)
+                .map_or_else(|| label.clone(), |meta| meta.name.clone()),
+        );
+    }
+    row.label_names = names;
+    row.milestone = crate::record_store::read_issue_relation(ctx, &doc, "milestone", "")?
+        .filter(|record| record.present)
+        .map(|record| record.target);
+    row.enrichment_complete = true;
+    Ok(())
+}
+
+/// The KEYs of the projects a team owns.
+///
+/// A project records its team as its own source coordinate, so this is the
+/// `(kind, source)` posting read in the one direction it already answers --
+/// no reverse coordinate and no scan over projects.
+fn team_project_keys(ctx: &Context<'_>, team: &str) -> Result<Vec<String>, Rejection> {
+    let limit = u32::try_from(MAX_ROLLUP_MEMBERS.saturating_add(1))
+        .map_err(|_| Rejection::LimitExceeded)?;
+    let answer = find_field_page(
+        ctx,
+        crate::find::field::KIND_SOURCE,
+        runtime::find::Atom::Bytes(crate::find::composite_key(["project", team])),
+        &contract::PageRequest {
+            limit,
+            cursor: None,
+        },
+        Vec::new(),
+        vec![crate::find::field_ref(crate::find::field::ENTITY_KEY)],
+    )?;
+    if answer.next_cursor().is_some() {
+        return Err(Rejection::LimitExceeded);
+    }
+    let mut keys = Vec::new();
+    for row in answer.rows() {
+        if result_text(row, crate::find::field::KIND).as_deref() != Some("project") {
+            continue;
+        }
+        if let Some(key) = result_text(row, crate::find::field::ENTITY_KEY) {
+            keys.push(key);
+        }
+    }
+    keys.sort();
+    Ok(keys)
+}
+
+fn apply_project_workflow(
+    ctx: &Context<'_>,
+    catalog: &mut CatalogState,
+    project: &str,
+) -> Result<(), Rejection> {
+    let projection = workflow_projection(ctx, project)?;
+    if !projection.conflict_heads.is_empty() {
+        return Err(Rejection::Conflict);
+    }
+    let revision = projection.revision.ok_or(Rejection::Conflict)?;
+    let revisions = catalog
+        .workflow_revisions
+        .entry(project.to_string())
+        .or_default();
+    if !revisions
+        .iter()
+        .any(|current| current.revision_id == revision.revision_id)
+    {
+        revisions.push(revision);
+    }
+    Ok(())
+}
+
+fn issue_write_state(
+    ctx: &Context<'_>,
+    doc: &str,
+    workflow: bool,
+) -> Result<(CatalogState, IssueState), Rejection> {
+    let issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
+    let mut catalog = CatalogState::default();
+    crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
+    if !catalog.projects.contains_key(&issue.project) {
+        return Err(Rejection::StateCorrupt);
+    }
+    let coordinate =
+        crate::record_store::issue_coordinate_for(ctx, doc)?.ok_or(Rejection::StateCorrupt)?;
+    crate::record_store::apply_issue_catalog(
+        &mut catalog,
+        &BTreeMap::from([(doc.to_owned(), coordinate)]),
+    );
+    if workflow {
+        apply_project_workflow(ctx, &mut catalog, &issue.project)?;
+    }
+    Ok((catalog, issue))
 }
 
 fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
-    ctx.read_collaborative(&spec_key(spec))
-        .ok()
-        .map(|view| crate::spec::Spec::from_view(&view))
+    let spec_id = crate::ids::SpecId::parse(spec)?;
+    let heads = ctx
+        .read_collaborative(&crate::records::spec_heads_key(&spec_id))
+        .ok()??;
+    if heads
+        .registers
+        .get(crate::records::roots::IDENTITY)
+        .is_none_or(|identity| identity.as_slice() != spec.as_bytes())
+    {
+        return None;
+    }
+    let decode_set = |path: &str| -> Option<Vec<String>> {
+        let mut values = heads
+            .sets
+            .get(path)
+            .into_iter()
+            .flatten()
+            .map(|value| String::from_utf8(value.clone()).ok())
+            .collect::<Option<Vec<_>>>()?;
+        values.sort();
+        values.dedup();
+        Some(values)
+    };
+    let explicit_heads = decode_set(crate::records::roots::HEADS)?;
+    let explicit_issued = decode_set(crate::records::roots::ISSUED_HEADS)?;
+    if explicit_heads.is_empty() {
+        return None;
+    }
+    let mut wanted = explicit_heads
+        .iter()
+        .chain(&explicit_issued)
+        .cloned()
+        .collect::<Vec<_>>();
+    wanted.sort();
+    wanted.dedup();
+    let mut revisions = Vec::with_capacity(wanted.len());
+    for revision in wanted {
+        let mut matching = None;
+        for kind in ["requirement", "design", "proof", "runbook", "plan"] {
+            let row = match unique_find_row(ctx, crate::find::field::ID, &revision, kind, None) {
+                Ok(row) => row,
+                Err(_) => return None,
+            };
+            let Some(row) = row else { continue };
+            if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(spec)
+                || matching.replace(row).is_some()
+            {
+                return None;
+            }
+        }
+        let Some(row) = matching else {
+            return None;
+        };
+        let bytes = ctx.read_body(&row.source).ok()??;
+        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
+        let record = crate::records::SpecRevisionRecord::decode_canonical(&envelope.record).ok()?;
+        if record.revision.revision != revision || record.revision.body.spec != spec {
+            return None;
+        }
+        revisions.push(record.revision);
+    }
+    revisions.sort_by(|left, right| left.revision.cmp(&right.revision));
+    Some(crate::spec::Spec {
+        revisions,
+        observations: Vec::new(),
+        explicit_heads,
+        explicit_issued,
+    })
 }
 
 fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Baseline> {
-    ctx.read_collaborative(&baseline_key(baseline))
-        .ok()
-        .map(|view| crate::spec::Baseline::from_view(&view))
+    let baseline_id = crate::ids::BaselineId::parse(baseline)?;
+    let heads = ctx
+        .read_collaborative(&crate::records::baseline_heads_key(&baseline_id))
+        .ok()??;
+    if heads
+        .registers
+        .get(crate::records::roots::IDENTITY)
+        .is_none_or(|identity| identity.as_slice() != baseline.as_bytes())
+    {
+        return None;
+    }
+    let decode_set = |path: &str| -> Option<Vec<String>> {
+        let mut values = heads
+            .sets
+            .get(path)
+            .into_iter()
+            .flatten()
+            .map(|value| String::from_utf8(value.clone()).ok())
+            .collect::<Option<Vec<_>>>()?;
+        values.sort();
+        values.dedup();
+        Some(values)
+    };
+    let explicit_heads = decode_set(crate::records::roots::HEADS)?;
+    let explicit_issued = decode_set(crate::records::roots::ISSUED_HEADS)?;
+    if explicit_heads.is_empty() {
+        return None;
+    }
+    let mut wanted = explicit_heads
+        .iter()
+        .chain(&explicit_issued)
+        .cloned()
+        .collect::<Vec<_>>();
+    wanted.sort();
+    wanted.dedup();
+    let mut revisions = Vec::with_capacity(wanted.len());
+    for revision in wanted {
+        let row = unique_find_row(
+            ctx,
+            crate::find::field::ID,
+            &revision,
+            "baseline_revision",
+            None,
+        )
+        .ok()??;
+        if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(baseline) {
+            return None;
+        }
+        let bytes = ctx.read_body(&row.source).ok()??;
+        let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes).ok()?;
+        let record =
+            crate::records::BaselineRevisionRecord::decode_canonical(&envelope.record).ok()?;
+        if record.revision.revision != revision || record.revision.body.baseline != baseline {
+            return None;
+        }
+        revisions.push(record.revision);
+    }
+    revisions.sort_by(|left, right| left.revision.cmp(&right.revision));
+    Some(crate::spec::Baseline {
+        revisions,
+        explicit_heads,
+        explicit_issued,
+    })
 }
 
+fn spec_observation_state(
+    ctx: &Context<'_>,
+    spec: &str,
+    observation: &str,
+) -> Result<Option<crate::spec::Observation>, Rejection> {
+    let Some(row) = unique_find_row(
+        ctx,
+        crate::find::field::ID,
+        observation,
+        "spec_observation_fact",
+        None,
+    )?
+    else {
+        return Ok(None);
+    };
+    if result_text(&row, crate::find::field::SOURCE_ID).as_deref() != Some(spec) {
+        return Err(Rejection::InvalidRequest);
+    }
+    if unique_find_row(
+        ctx,
+        crate::find::field::ID,
+        &format!("observation-retraction:{observation}"),
+        "spec_observation_fact",
+        None,
+    )?
+    .is_some()
+    {
+        return Ok(None);
+    }
+    let bytes = ctx.read_body(&row.source)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let crate::records::SpecObservationRecord::Assert {
+        project: _,
+        observation: record,
+    } = crate::records::SpecObservationRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?
+    else {
+        return Err(Rejection::StateCorrupt);
+    };
+    Ok(Some(record))
+}
+
+/// Every Spec in the Space.
+///
+/// Enumerating `spec_schema()` Bodies answers nothing: no such Body is
+/// written any more. A Spec is a heads Body plus its revision records, which
+/// is what `spec_state` reads and what `baseline_state` reads for its own
+/// kind -- so enumerate the heads and assemble each the same way. Reading the
+/// retired kind is why a Packet reported every governing Spec as missing.
 fn all_specs(ctx: &Context<'_>) -> Vec<crate::spec::Spec> {
     let mut specs: Vec<_> = ctx
-        .bodies_with_schema(&contract::world_id(), &contract::spec_schema())
+        .bodies_with_schema(
+            &contract::world_id(),
+            &crate::records::PhysicalSchema::SpecHeads.declaration().id,
+        )
         .iter()
-        .filter_map(|key| ctx.read_collaborative(key).ok())
-        .map(|view| crate::spec::Spec::from_view(&view))
+        .filter_map(|key| ctx.read_collaborative(key).ok().flatten())
+        .filter_map(|view| {
+            let id = view.registers.get(crate::records::roots::IDENTITY)?;
+            String::from_utf8(id.clone()).ok()
+        })
+        .filter_map(|spec| spec_state(ctx, &spec))
         .filter(|spec| !spec.revisions.is_empty())
         .collect();
     specs.sort_by(|a, b| {
@@ -884,12 +5230,22 @@ fn all_specs(ctx: &Context<'_>) -> Vec<crate::spec::Spec> {
     specs
 }
 
+/// Every Baseline in the Space, read the way `baseline_state` reads one.
 fn all_baselines(ctx: &Context<'_>) -> Vec<crate::spec::Baseline> {
     let mut baselines: Vec<_> = ctx
-        .bodies_with_schema(&contract::world_id(), &contract::baseline_schema())
+        .bodies_with_schema(
+            &contract::world_id(),
+            &crate::records::PhysicalSchema::BaselineHeads
+                .declaration()
+                .id,
+        )
         .iter()
-        .filter_map(|key| ctx.read_collaborative(key).ok())
-        .map(|view| crate::spec::Baseline::from_view(&view))
+        .filter_map(|key| ctx.read_collaborative(key).ok().flatten())
+        .filter_map(|view| {
+            let id = view.registers.get(crate::records::roots::IDENTITY)?;
+            String::from_utf8(id.clone()).ok()
+        })
+        .filter_map(|baseline| baseline_state(ctx, &baseline))
         .filter(|baseline| !baseline.revisions.is_empty())
         .collect();
     baselines.sort_by(|a, b| {
@@ -910,6 +5266,7 @@ fn relation_state(ctx: &Context<'_>, project: &str) -> Option<RelationState> {
     let key = contract::relation_key(project);
     ctx.read_collaborative(&key)
         .ok()
+        .flatten()
         .map(|view| RelationState::from_view(&view))
 }
 
@@ -917,32 +5274,505 @@ fn count(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-fn migrated_spec_body(
-    head: &crate::spec::Revision,
-    generation: &str,
-    actor: &str,
+/// V3-only decoder used exclusively by the one-time v4 migrator. The
+/// canonical [`crate::spec::Body`] has no root-only coordinate and therefore
+/// cannot accidentally serialize this shape back into durable truth.
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySpecBody {
+    spec: String,
+    project: String,
+    kind: crate::spec::Kind,
+    #[serde(default)]
+    generation: String,
+    title: String,
+    #[serde(default)]
+    text: String,
+    state: crate::spec::State,
+    #[serde(default)]
+    links: Vec<crate::spec::Link>,
+    #[serde(default)]
+    plan: Option<crate::spec::PlanData>,
+    author: String,
     ts: u64,
-) -> Option<crate::spec::Body> {
-    let plan_pending = head.body.kind == crate::spec::Kind::Plan && head.body.plan.is_none();
-    if !head.body.generation.is_empty() && !plan_pending {
-        return None;
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySpecRevision {
+    revision: String,
+    #[serde(default)]
+    predecessors: Vec<String>,
+    body: LegacySpecBody,
+}
+
+fn ordered_spec_revisions(
+    revisions: BTreeMap<String, crate::spec::Revision>,
+) -> Result<Vec<crate::spec::Revision>, Rejection> {
+    let ids = revisions.keys().cloned().collect::<BTreeSet<_>>();
+    let mut pending = revisions;
+    let mut ordered = Vec::new();
+    while !pending.is_empty() {
+        let ready = pending.iter().find_map(|(id, revision)| {
+            revision
+                .predecessors
+                .iter()
+                .all(|predecessor| ids.contains(predecessor) && !pending.contains_key(predecessor))
+                .then(|| id.clone())
+        });
+        let Some(ready) = ready else {
+            return Err(Rejection::StateCorrupt);
+        };
+        ordered.push(pending.remove(&ready).ok_or(Rejection::StateCorrupt)?);
     }
-    let mut body = head.body.clone();
-    body.generation = generation.into();
-    if plan_pending {
-        body.plan = Some(crate::spec::PlanData { roots: Vec::new() });
+    Ok(ordered)
+}
+
+fn ordered_baseline_revisions(
+    revisions: BTreeMap<String, crate::spec::BaselineRevision>,
+) -> Result<Vec<crate::spec::BaselineRevision>, Rejection> {
+    let ids = revisions.keys().cloned().collect::<BTreeSet<_>>();
+    let mut pending = revisions;
+    let mut ordered = Vec::new();
+    while !pending.is_empty() {
+        let ready = pending.iter().find_map(|(id, revision)| {
+            revision
+                .predecessors
+                .iter()
+                .all(|predecessor| ids.contains(predecessor) && !pending.contains_key(predecessor))
+                .then(|| id.clone())
+        });
+        let Some(ready) = ready else {
+            return Err(Rejection::StateCorrupt);
+        };
+        ordered.push(pending.remove(&ready).ok_or(Rejection::StateCorrupt)?);
     }
-    body.author = actor.into();
-    body.ts = ts;
-    Some(body)
+    Ok(ordered)
+}
+
+fn spec_issued_ids(spec: &crate::spec::Spec) -> Vec<String> {
+    match spec.issued() {
+        crate::spec::Issued::None => Vec::new(),
+        crate::spec::Issued::One(revision) => vec![revision.revision.clone()],
+        crate::spec::Issued::Conflict(revisions) => revisions
+            .into_iter()
+            .map(|revision| revision.revision.clone())
+            .collect(),
+    }
+}
+
+fn baseline_issued_ids(baseline: &crate::spec::Baseline) -> Vec<String> {
+    match baseline.issued() {
+        crate::spec::BaselineIssued::None => Vec::new(),
+        crate::spec::BaselineIssued::One(revision) => vec![revision.revision.clone()],
+        crate::spec::BaselineIssued::Conflict(revisions) => revisions
+            .into_iter()
+            .map(|revision| revision.revision.clone())
+            .collect(),
+    }
+}
+
+fn migration_spec_revisions(
+    ctx: &Context<'_>,
+    body_key: &BodyKey,
+    view: &fabric::CollaborativeView,
+    publication: runtime::publication::PublicationId,
+) -> Result<(BTreeMap<String, crate::spec::Revision>, bool), Rejection> {
+    let records = view.maps.get("revisions").ok_or(Rejection::StateCorrupt)?;
+    let mut canonical = BTreeMap::<String, crate::spec::Revision>::new();
+    let mut legacy = BTreeMap::<String, LegacySpecRevision>::new();
+    for (stored_id, raw) in records {
+        if let Ok(revision) = serde_json::from_slice::<crate::spec::Revision>(raw) {
+            if stored_id != &revision.revision
+                || contract::spec_key(&revision.body.spec) != *body_key
+                || canonical.insert(stored_id.clone(), revision).is_some()
+            {
+                return Err(Rejection::StateCorrupt);
+            }
+        } else {
+            let revision: LegacySpecRevision =
+                serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+            if stored_id != &revision.revision
+                || contract::spec_key(&revision.body.spec) != *body_key
+                || legacy.insert(stored_id.clone(), revision).is_some()
+            {
+                return Err(Rejection::StateCorrupt);
+            }
+        }
+    }
+    if !canonical.is_empty() && !legacy.is_empty() {
+        return Err(Rejection::StateCorrupt);
+    }
+    if !canonical.is_empty() {
+        let ordered = ordered_spec_revisions(canonical)?;
+        return Ok((
+            ordered
+                .into_iter()
+                .map(|revision| (revision.revision.clone(), revision))
+                .collect(),
+            false,
+        ));
+    }
+    let legacy_ids = legacy.keys().cloned().collect::<BTreeSet<_>>();
+    let mut mapped = BTreeMap::<String, crate::spec::Revision>::new();
+    while !legacy.is_empty() {
+        let ready = legacy.iter().find_map(|(id, revision)| {
+            revision
+                .predecessors
+                .iter()
+                .all(|predecessor| {
+                    !legacy_ids.contains(predecessor) || mapped.contains_key(predecessor)
+                })
+                .then(|| id.clone())
+        });
+        let old = ready.ok_or(Rejection::StateCorrupt)?;
+        let revision = legacy.remove(&old).ok_or(Rejection::StateCorrupt)?;
+        if !revision.body.generation.is_empty()
+            && (revision.body.generation.len() != 64
+                || data_encoding::HEXLOWER
+                    .decode(revision.body.generation.as_bytes())
+                    .is_err())
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+        let plan = if revision.body.kind == crate::spec::Kind::Plan {
+            Some(
+                revision
+                    .body
+                    .plan
+                    .unwrap_or(crate::spec::PlanData { roots: Vec::new() }),
+            )
+        } else {
+            revision.body.plan
+        };
+        validate_plan(
+            ctx,
+            &CatalogState::default(),
+            &revision.body.project,
+            plan.as_ref(),
+        )?;
+        let body = crate::spec::Body {
+            spec: revision.body.spec,
+            project: revision.body.project,
+            kind: revision.body.kind,
+            publication,
+            title: revision.body.title,
+            text: revision.body.text,
+            state: revision.body.state,
+            links: revision.body.links,
+            plan,
+            author: revision.body.author,
+            ts: revision.body.ts,
+        };
+        let predecessors = revision
+            .predecessors
+            .iter()
+            .map(|predecessor| {
+                let canonical = mapped
+                    .get(predecessor)
+                    .map_or(predecessor.as_str(), |revision| revision.revision.as_str());
+                crate::spec::decode_revision(canonical).ok_or(Rejection::StateCorrupt)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let migrated =
+            crate::spec::build_revision(body, predecessors).map_err(|_| Rejection::StateCorrupt)?;
+        mapped.insert(old, migrated);
+    }
+    Ok((mapped, true))
+}
+
+fn migration_spec_window(
+    ctx: &Context<'_>,
+    body_key: &BodyKey,
+    subitem: &str,
+    view: &fabric::CollaborativeView,
+    publication: runtime::publication::PublicationId,
+) -> Result<crate::record_store::Batch, Rejection> {
+    let (revisions, legacy) = migration_spec_revisions(ctx, body_key, view, publication)?;
+    if subitem == "$empty" {
+        return Ok(crate::record_store::Batch::default());
+    }
+    if let Some(stored_id) = subitem.strip_prefix("11a:revision:") {
+        let revision = revisions.get(stored_id).ok_or(Rejection::StateCorrupt)?;
+        let stored = crate::records::SpecRevisionRecord {
+            revision: revision.clone(),
+        };
+        let present = crate::record_store::migration_immutable_present(
+            ctx,
+            crate::records::PhysicalSchema::SpecRevision,
+            crate::records::RecordBodyIdentityRecord {
+                owner: revision.body.spec.clone(),
+                record: revision.revision.clone(),
+            },
+            stored
+                .encode_canonical()
+                .map_err(|_| Rejection::StateCorrupt)?,
+            crate::find::field::REVISION,
+            &revision.revision,
+            &[
+                (crate::find::field::SOURCE_ID, &revision.body.spec),
+                (crate::find::field::RELATION_KIND, "spec_revision"),
+            ],
+        )?;
+        let mut batch = if present {
+            crate::record_store::Batch::default()
+        } else {
+            crate::record_store::write_spec_revision_record(ctx, revision)?
+        };
+        if legacy {
+            let alias = crate::records::RevisionAliasRecord {
+                spec: revision.body.spec.clone(),
+                legacy_revision: stored_id.into(),
+                canonical_revision: revision.revision.clone(),
+            };
+            if !crate::record_store::migration_immutable_present(
+                ctx,
+                crate::records::PhysicalSchema::RevisionAlias,
+                crate::records::RecordBodyIdentityRecord {
+                    owner: alias.spec.clone(),
+                    record: alias.legacy_revision.clone(),
+                },
+                alias
+                    .encode_canonical()
+                    .map_err(|_| Rejection::StateCorrupt)?,
+                crate::find::field::SOURCE_ID,
+                &alias.legacy_revision,
+                &[
+                    (crate::find::field::KIND, "relation"),
+                    (crate::find::field::RELATION_KIND, "revision_alias"),
+                ],
+            )? {
+                batch.absorb(crate::record_store::write_revision_alias(ctx, &alias)?);
+            }
+        }
+        return Ok(batch);
+    }
+    let first = revisions.values().next().ok_or(Rejection::StateCorrupt)?;
+    if let Some(raw) = subitem.strip_prefix("11b:observation:") {
+        let ordinal = raw.parse::<usize>().map_err(|_| Rejection::StateCorrupt)?;
+        let observation: crate::spec::Observation = serde_json::from_slice(
+            view.sets
+                .get("observations")
+                .and_then(|records| records.get(ordinal))
+                .ok_or(Rejection::StateCorrupt)?,
+        )
+        .map_err(|_| Rejection::StateCorrupt)?;
+        if observation.spec != first.body.spec {
+            return Err(Rejection::StateCorrupt);
+        }
+        let semantic_id = observation.observation.clone();
+        let record = crate::records::SpecObservationRecord::Assert {
+            project: first.body.project.clone(),
+            observation,
+        };
+        let identity = record.identity();
+        if crate::record_store::migration_immutable_present(
+            ctx,
+            crate::records::PhysicalSchema::SpecObservation,
+            crate::records::RecordBodyIdentityRecord {
+                owner: record.spec().into(),
+                record: identity,
+            },
+            record
+                .encode_canonical()
+                .map_err(|_| Rejection::StateCorrupt)?,
+            crate::find::field::ID,
+            &semantic_id,
+            &[
+                (crate::find::field::KIND, "spec_observation_fact"),
+                (crate::find::field::SOURCE_ID, record.spec()),
+                (crate::find::field::STATE, "assert"),
+            ],
+        )? {
+            return Ok(crate::record_store::Batch::default());
+        }
+        return crate::record_store::write_spec_observation(ctx, &record);
+    }
+    if subitem == "11c:heads" {
+        let ids = revisions
+            .values()
+            .map(|revision| revision.revision.clone())
+            .collect::<BTreeSet<_>>();
+        let predecessors = revisions
+            .values()
+            .flat_map(|revision| revision.predecessors.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if !predecessors.is_subset(&ids) {
+            return Err(Rejection::StateCorrupt);
+        }
+        let heads = ids.difference(&predecessors).cloned().collect();
+        let spec = crate::ids::SpecId::parse(&first.body.spec).ok_or(Rejection::StateCorrupt)?;
+        return crate::record_store::migration_exact_set(
+            ctx,
+            crate::records::PhysicalSchema::SpecHeads,
+            &crate::records::spec_heads_key(&spec),
+            &first.body.spec,
+            &[
+                (crate::records::roots::PROJECT, first.body.project.as_str()),
+                (crate::records::roots::KIND, first.body.kind.as_str()),
+            ],
+            crate::records::roots::HEADS,
+            &heads,
+            true,
+        );
+    }
+    if subitem == "11d:issued" {
+        let state = crate::spec::Spec {
+            revisions: revisions.values().cloned().collect(),
+            observations: Vec::new(),
+            explicit_heads: Vec::new(),
+            explicit_issued: Vec::new(),
+        };
+        let issued = spec_issued_ids(&state);
+        if issued.len() > crate::records::MAX_CONCURRENT_HEADS {
+            return Err(Rejection::Conflict);
+        }
+        let issued = issued.into_iter().collect::<BTreeSet<_>>();
+        let spec = crate::ids::SpecId::parse(&first.body.spec).ok_or(Rejection::StateCorrupt)?;
+        return crate::record_store::migration_exact_set(
+            ctx,
+            crate::records::PhysicalSchema::SpecHeads,
+            &crate::records::spec_heads_key(&spec),
+            &first.body.spec,
+            &[
+                (crate::records::roots::PROJECT, first.body.project.as_str()),
+                (crate::records::roots::KIND, first.body.kind.as_str()),
+            ],
+            crate::records::roots::ISSUED_HEADS,
+            &issued,
+            false,
+        );
+    }
+    Err(Rejection::ContractViolation)
+}
+
+fn migration_baseline_window(
+    ctx: &Context<'_>,
+    body_key: &BodyKey,
+    subitem: &str,
+    view: &fabric::CollaborativeView,
+) -> Result<crate::record_store::Batch, Rejection> {
+    let records = view.maps.get("revisions").ok_or(Rejection::StateCorrupt)?;
+    let mut revisions = BTreeMap::<String, crate::spec::BaselineRevision>::new();
+    for (stored_id, raw) in records {
+        let revision: crate::spec::BaselineRevision =
+            serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
+        if stored_id != &revision.revision
+            || contract::baseline_key(&revision.body.baseline) != *body_key
+            || revisions.insert(stored_id.clone(), revision).is_some()
+        {
+            return Err(Rejection::StateCorrupt);
+        }
+    }
+    let ordered = ordered_baseline_revisions(revisions)?;
+    if subitem == "$empty" {
+        return Ok(crate::record_store::Batch::default());
+    }
+    if let Some(stored_id) = subitem.strip_prefix("11d:revision:") {
+        let revision = ordered
+            .iter()
+            .find(|revision| revision.revision == stored_id)
+            .ok_or(Rejection::StateCorrupt)?;
+        let stored = crate::records::BaselineRevisionRecord {
+            revision: revision.clone(),
+        };
+        return if crate::record_store::migration_immutable_present(
+            ctx,
+            crate::records::PhysicalSchema::BaselineRevision,
+            crate::records::RecordBodyIdentityRecord {
+                owner: revision.body.baseline.clone(),
+                record: revision.revision.clone(),
+            },
+            stored
+                .encode_canonical()
+                .map_err(|_| Rejection::StateCorrupt)?,
+            crate::find::field::REVISION,
+            &revision.revision,
+            &[
+                (crate::find::field::KIND, "baseline_revision"),
+                (crate::find::field::SOURCE_ID, &revision.body.baseline),
+                (crate::find::field::RELATION_KIND, "baseline_revision"),
+            ],
+        )? {
+            Ok(crate::record_store::Batch::default())
+        } else {
+            crate::record_store::write_baseline_revision_record(ctx, revision)
+        };
+    }
+    let baseline = ordered
+        .first()
+        .map(|revision| revision.body.baseline.clone())
+        .ok_or(Rejection::StateCorrupt)?;
+    if subitem == "11e:heads" {
+        let ids = ordered
+            .iter()
+            .map(|revision| revision.revision.clone())
+            .collect::<BTreeSet<_>>();
+        let predecessors = ordered
+            .iter()
+            .flat_map(|revision| revision.predecessors.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if !predecessors.is_subset(&ids) {
+            return Err(Rejection::StateCorrupt);
+        }
+        let heads = ids.difference(&predecessors).cloned().collect();
+        let first = ordered.first().ok_or(Rejection::StateCorrupt)?;
+        let baseline_id =
+            crate::ids::BaselineId::parse(&baseline).ok_or(Rejection::StateCorrupt)?;
+        return crate::record_store::migration_exact_set(
+            ctx,
+            crate::records::PhysicalSchema::BaselineHeads,
+            &crate::records::baseline_heads_key(&baseline_id),
+            &baseline,
+            &[
+                (crate::records::roots::PROJECT, first.body.project.as_str()),
+                (crate::records::roots::KIND, "baseline"),
+            ],
+            crate::records::roots::HEADS,
+            &heads,
+            true,
+        );
+    }
+    if subitem == "11f:issued" {
+        let state = crate::spec::Baseline {
+            revisions: ordered,
+            explicit_heads: Vec::new(),
+            explicit_issued: Vec::new(),
+        };
+        let issued = baseline_issued_ids(&state);
+        if issued.len() > crate::records::MAX_CONCURRENT_HEADS {
+            return Err(Rejection::Conflict);
+        }
+        let issued = issued.into_iter().collect::<BTreeSet<_>>();
+        let first = state.revisions.first().ok_or(Rejection::StateCorrupt)?;
+        let baseline_id =
+            crate::ids::BaselineId::parse(&baseline).ok_or(Rejection::StateCorrupt)?;
+        return crate::record_store::migration_exact_set(
+            ctx,
+            crate::records::PhysicalSchema::BaselineHeads,
+            &crate::records::baseline_heads_key(&baseline_id),
+            &baseline,
+            &[
+                (crate::records::roots::PROJECT, first.body.project.as_str()),
+                (crate::records::roots::KIND, "baseline"),
+            ],
+            crate::records::roots::ISSUED_HEADS,
+            &issued,
+            false,
+        );
+    }
+    Err(Rejection::ContractViolation)
 }
 
 /// Audit the current representation without treating immutable history as work
 /// still to do. The derived catalog is the visible truth; relation Bodies are
 /// checked against it to find facts still supplied only by the compatibility
 /// overlay.
-fn structure_report(ctx: &Context<'_>, snap: &DerivedSnapshot) -> contract::StructureReport {
-    let catalog = &snap.catalog;
+fn structure_report(
+    ctx: &Context<'_>,
+    catalog: &CatalogState,
+    read: &IssueReadSet,
+) -> Result<contract::StructureReport, Rejection> {
     let mut relation_bodies = 0u64;
     let mut relation_projects_pending = 0u64;
     let mut relation_edges_pending = 0u64;
@@ -955,7 +5785,7 @@ fn structure_report(ctx: &Context<'_>, snap: &DerivedSnapshot) -> contract::Stru
         }
         let mut project_pending = false;
         for edge in &catalog.edges {
-            let belongs = snap
+            let belongs = read
                 .issues
                 .get(&edge.0)
                 .is_some_and(|issue| &issue.project == project);
@@ -965,7 +5795,7 @@ fn structure_report(ctx: &Context<'_>, snap: &DerivedSnapshot) -> contract::Stru
             }
         }
         for (child, parent) in &catalog.parents {
-            let belongs = snap
+            let belongs = read
                 .issues
                 .get(child)
                 .is_some_and(|issue| &issue.project == project);
@@ -983,41 +5813,17 @@ fn structure_report(ctx: &Context<'_>, snap: &DerivedSnapshot) -> contract::Stru
     }
 
     let specs = all_specs(ctx);
-    let mut spec_heads_pending = 0u64;
+    let spec_heads_pending = 0u64;
     let mut spec_conflicts = 0u64;
-    let mut plans_without_roots = 0u64;
+    let plans_without_roots = 0u64;
     for spec in &specs {
         let heads = spec.heads();
         if heads.len() != 1 {
             spec_conflicts = spec_conflicts.saturating_add(1);
-            let pending = heads.iter().any(|head| {
-                head.body.generation.is_empty()
-                    || (head.body.kind == crate::spec::Kind::Plan && head.body.plan.is_none())
-            });
-            if pending {
-                spec_heads_pending = spec_heads_pending.saturating_add(1);
-            }
-            plans_without_roots = plans_without_roots.saturating_add(count(
-                heads
-                    .iter()
-                    .filter(|head| {
-                        head.body.kind == crate::spec::Kind::Plan && head.body.plan.is_none()
-                    })
-                    .count(),
-            ));
-            continue;
-        }
-        let body = &heads[0].body;
-        let plan_pending = body.kind == crate::spec::Kind::Plan && body.plan.is_none();
-        if plan_pending {
-            plans_without_roots = plans_without_roots.saturating_add(1);
-        }
-        if body.generation.is_empty() || plan_pending {
-            spec_heads_pending = spec_heads_pending.saturating_add(1);
         }
     }
     let issue_documents_pending = count(
-        snap.issues
+        read.issues
             .values()
             .filter(|issue| issue.document_schema != DOCUMENT_SCHEMA_VERSION)
             .count(),
@@ -1027,10 +5833,10 @@ fn structure_report(ctx: &Context<'_>, snap: &DerivedSnapshot) -> contract::Stru
         && spec_heads_pending == 0
         && issue_documents_pending == 0;
 
-    contract::StructureReport {
+    Ok(contract::StructureReport {
         generation: data_encoding::HEXLOWER.encode(&ctx.manifest_root()),
         projects: count(catalog.projects.len()),
-        issues: count(snap.issues.len()),
+        issues: count(read.issues.len()),
         visible_edges: count(catalog.edges.len()),
         visible_parents: count(catalog.parents.len()),
         relation_bodies,
@@ -1043,8 +5849,9 @@ fn structure_report(ctx: &Context<'_>, snap: &DerivedSnapshot) -> contract::Stru
         plans_without_roots,
         issue_documents_pending,
         baselines: count(all_baselines(ctx).len()),
+        migration: crate::record_store::migration_verification(ctx)?,
         complete,
-    }
+    })
 }
 
 fn spec_view(spec: &crate::spec::Spec) -> Option<crate::spec::SpecView> {
@@ -1100,14 +5907,39 @@ fn baseline_view(baseline: &crate::spec::Baseline) -> Option<crate::spec::Baseli
     })
 }
 
+fn canonical_spec_revision(
+    ctx: &Context<'_>,
+    spec: &str,
+    revision: &str,
+) -> Result<String, Rejection> {
+    let key = crate::records::revision_alias_key(spec, revision);
+    if ctx.body_version(&key).is_none() {
+        return Ok(revision.into());
+    }
+    let bytes = ctx.read_body(&key)?.ok_or(Rejection::StateCorrupt)?;
+    let envelope = crate::records::ImmutableRecordEnvelope::decode_canonical(&bytes)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    let identity = envelope.identity;
+    if identity.owner != spec || identity.record != revision {
+        return Err(Rejection::StateCorrupt);
+    }
+    let alias = crate::records::RevisionAliasRecord::decode_canonical(&envelope.record)
+        .map_err(|_| Rejection::StateCorrupt)?;
+    if alias.spec != spec || alias.legacy_revision != revision {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(alias.canonical_revision)
+}
+
 fn validate_spec_ref(
     ctx: &Context<'_>,
     member: &crate::spec::SpecRef,
     project: &str,
 ) -> Result<(), Rejection> {
     let spec = spec_state(ctx, &member.spec).ok_or(Rejection::InvalidRequest)?;
+    let revision_id = canonical_spec_revision(ctx, &member.spec, &member.revision)?;
     let revision = spec
-        .revision(&member.revision)
+        .revision(&revision_id)
         .ok_or(Rejection::InvalidRequest)?;
     if revision.body.project != project || revision.body.state != crate::spec::State::Issued {
         return Err(Rejection::InvalidRequest);
@@ -1120,7 +5952,8 @@ fn validate_spec_links(ctx: &Context<'_>, links: &[crate::spec::Link]) -> Result
         match &link.target {
             crate::spec::Target::Spec { spec, revision } => {
                 let target = spec_state(ctx, spec).ok_or(Rejection::InvalidRequest)?;
-                if target.revision(revision).is_none() {
+                let revision = canonical_spec_revision(ctx, spec, revision)?;
+                if target.revision(&revision).is_none() {
                     return Err(Rejection::InvalidRequest);
                 }
             }
@@ -1131,7 +5964,7 @@ fn validate_spec_links(ctx: &Context<'_>, links: &[crate::spec::Link]) -> Result
                 }
             }
             crate::spec::Target::Issue { issue } => {
-                if issue_state(ctx, issue).is_none() {
+                if issue_core_state(ctx, issue).is_none() {
                     return Err(Rejection::InvalidRequest);
                 }
             }
@@ -1149,7 +5982,7 @@ fn validate_plan(
     let Some(plan) = plan else { return Ok(()) };
     plan.validate().map_err(|_| Rejection::InvalidRequest)?;
     for issue in &plan.roots {
-        let target = issue_state(ctx, issue).ok_or(Rejection::InvalidRequest)?;
+        let target = issue_core_state(ctx, issue).ok_or(Rejection::InvalidRequest)?;
         if target.project != project {
             return Err(Rejection::InvalidRequest);
         }
@@ -1158,7 +5991,12 @@ fn validate_plan(
 }
 
 fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection> {
-    let issue = issue_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
+    let mut issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
+    // A Packet is built around the issue's baseline binding, which is one of
+    // the relation-held facts the core state clears. `issue_state` would put
+    // it back, but by scanning every record that names this doc; this needs
+    // one bounded read of one singleton relation.
+    enrich_issue_relations(ctx, &mut issue, doc)?;
     let specs = all_specs(ctx);
     let mut exact: BTreeMap<
         (String, String),
@@ -1214,7 +6052,8 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                 });
                 continue;
             };
-            let Some(revision) = spec.revision(&member.revision) else {
+            let canonical = canonical_spec_revision(ctx, &member.spec, &member.revision)?;
+            let Some(revision) = spec.revision(&canonical) else {
                 conflicts.push(crate::spec::PacketConflict::MissingSpecRevision {
                     spec: member.spec.clone(),
                     revision: member.revision.clone(),
@@ -1222,7 +6061,7 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                 continue;
             };
             exact.insert(
-                (member.spec.clone(), member.revision.clone()),
+                (member.spec.clone(), canonical),
                 (
                     revision,
                     crate::spec::PacketSource::Baseline {
@@ -1284,12 +6123,13 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                 else {
                     continue;
                 };
-                if exact.contains_key(&(spec.clone(), target_revision.clone())) {
+                let canonical = canonical_spec_revision(ctx, spec, target_revision)?;
+                if exact.contains_key(&(spec.clone(), canonical.clone())) {
                     continue;
                 }
                 let Some(target) = specs
                     .iter()
-                    .find_map(|candidate| candidate.revision(target_revision))
+                    .find_map(|candidate| candidate.revision(&canonical))
                     .filter(|candidate| candidate.body.spec == *spec)
                 else {
                     conflicts.push(crate::spec::PacketConflict::MissingIncorporated {
@@ -1299,7 +6139,7 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                     continue;
                 };
                 exact.insert(
-                    (spec.clone(), target_revision.clone()),
+                    (spec.clone(), canonical),
                     (
                         target,
                         crate::spec::PacketSource::Incorporated {
@@ -1371,18 +6211,15 @@ fn check_comment(
     ctx: &Context<'_>,
     doc: &str,
     body: &str,
-    actor: &str,
     id: Option<&str>,
     parent: Option<&str>,
 ) -> Result<(IssueState, Option<String>), Rejection> {
-    if body.is_empty() || ActorId::parse(actor).is_none() {
+    if body.is_empty() || body.len() > 1024 * 1024 {
         return Err(Rejection::InvalidRequest);
     }
-    let issue = issue_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
+    let issue = issue_core_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
     if let Some(id) = id {
-        if !contract::is_comment_id(id)
-            || issue.comments.iter().any(|c| c.id.as_deref() == Some(id))
-        {
+        if !contract::is_comment_id(id) || find_comment(ctx, id)?.is_some() {
             return Err(Rejection::InvalidRequest);
         }
     }
@@ -1392,10 +6229,8 @@ fn check_comment(
     // A reply needs an addressable target: an existing comment that carries
     // an id (pre-identity comments cannot anchor threads) and is itself a
     // root — one level, no ladders.
-    let target = issue
-        .comments
-        .iter()
-        .find(|c| c.id.as_deref() == Some(parent))
+    let target = find_comment(ctx, parent)?
+        .filter(|target| target.issue == doc)
         .ok_or(Rejection::InvalidRequest)?;
     // A root is a comment that answers nothing by either account. Both are
     // checked, not just the hierarchy, because they can legitimately disagree:
@@ -1404,11 +6239,109 @@ fn check_comment(
     // edge there would read that reply as a root and let a reply hang off it —
     // the ladder the one-level rule exists to refuse, rebuilt through the one
     // case the cutover creates.
-    if id.is_none() || target.parent.is_some() || target.parent_node.is_some() {
+    if id.is_none() || target.parent.is_some() {
         return Err(Rejection::InvalidRequest);
     }
-    let node = target.node.clone();
-    Ok((issue, node))
+    Ok((issue, None))
+}
+
+struct FoundComment {
+    issue: String,
+    parent: Option<String>,
+}
+
+/// Resolve one comment through the publication corpus. This is used on the
+/// write path as well as reads: uniqueness and one-level reply validation are
+/// exact indexed seeks, never a decode of the entire thread.
+fn find_comment(ctx: &Context<'_>, id: &str) -> Result<Option<FoundComment>, Rejection> {
+    use runtime::find as find_api;
+    let bound = find_api::Bound {
+        decoded_bodies: 2,
+        postings_read: 8,
+        edges_visited: 1,
+        nodes_visited: 8,
+        paths_retained: 1,
+        candidates_per_branch: 2,
+        score_evaluations: 1,
+        projected_bytes: 16 * 1024,
+        packed_tokens: 256,
+        wall_millis: 250,
+    };
+    let seek = find_api::StepId::new(1).ok_or(Rejection::StateCorrupt)?;
+    let keep = find_api::StepId::new(2).ok_or(Rejection::StateCorrupt)?;
+    let pack = find_api::StepId::new(3).ok_or(Rejection::StateCorrupt)?;
+    let fields = [
+        crate::find::field::KIND,
+        crate::find::field::SOURCE_ID,
+        crate::find::field::TARGET_ID,
+    ]
+    .into_iter()
+    .map(crate::find::field_ref)
+    .collect();
+    let answer = ctx
+        .find(find_api::Query {
+            schema: crate::find::entity_schema_ref(),
+            publication: ctx.world_publication_id().map(|id| id.publication),
+            mode: find_api::Mode::Exact,
+            steps: vec![
+                find_api::Step {
+                    id: seek,
+                    input: Vec::new(),
+                    op: find_api::Op::Seek(find_api::Seek::Field(find_api::Predicate {
+                        field: crate::find::field_ref(crate::find::field::ID),
+                        test: find_api::Test::Equal,
+                        value: find_api::Atom::Text(id.into()),
+                    })),
+                    bound,
+                },
+                find_api::Step {
+                    id: keep,
+                    input: vec![seek],
+                    op: find_api::Op::Keep(find_api::Keep {
+                        predicates: vec![find_api::Predicate {
+                            field: crate::find::field_ref(crate::find::field::KIND),
+                            test: find_api::Test::Equal,
+                            value: find_api::Atom::Text("comment".into()),
+                        }],
+                    }),
+                    bound,
+                },
+                find_api::Step {
+                    id: pack,
+                    input: vec![keep],
+                    op: find_api::Op::Pack(find_api::Pack { fields }),
+                    bound,
+                },
+            ],
+            output: pack,
+            bound,
+            page_size: 2,
+            cursor: None,
+        })
+        .map_err(find_rejection)?;
+    if answer.rows().len() > 1 {
+        return Err(Rejection::StateCorrupt);
+    }
+    let Some(row) = answer.rows().first() else {
+        return Ok(None);
+    };
+    let text = |name: &str| {
+        row.fields.iter().find_map(|field| {
+            (field.reference == crate::find::field_ref(name))
+                .then_some(&field.value)
+                .and_then(|value| match value {
+                    find_api::Value::Text(value) => Some(value.to_string()),
+                    _ => None,
+                })
+        })
+    };
+    if text(crate::find::field::KIND).as_deref() != Some("comment") {
+        return Err(Rejection::StateCorrupt);
+    }
+    Ok(Some(FoundComment {
+        issue: text(crate::find::field::SOURCE_ID).ok_or(Rejection::StateCorrupt)?,
+        parent: text(crate::find::field::TARGET_ID),
+    }))
 }
 
 /// File a comment into the thread and record its history event.
@@ -1434,26 +6367,17 @@ fn stage_comment(
     staging: &mut Staging,
     ctx: &Context<'_>,
     doc: &str,
-    parent_node: Option<String>,
+    _parent_node: Option<String>,
     record: StoredComment,
     device: &str,
     ts: u64,
-) {
+) -> Result<String, Rejection> {
     let mut ev = event("commented", device, ts);
     ev.x = record.b.clone();
-    staging.issue(
-        &issue_key(doc),
-        Op::TreeInsert {
-            path: "comments".into(),
-            parent: parent_node,
-            // Placement is the writer's own view either way, so there is
-            // nothing to gain by naming a sibling — the read side orders the
-            // thread by each record's own clock. See `views::read_comments`.
-            after: None,
-            value: serde_json::to_vec(&record).expect("comment json"),
-        },
-    );
-    push_event(staging, ctx, doc, &ev);
+    let (batch, id) = crate::record_store::write_comment(ctx, doc, record)?;
+    staging.absorb_records(batch);
+    push_event(staging, ctx, doc, &ev)?;
+    Ok(id)
 }
 
 /// Mint the durable anchors for a range-attached comment, or refuse.
@@ -1505,6 +6429,7 @@ fn mint_comment_anchor(
     let key = issue_key(doc);
     let mint = |position: u64| -> Result<String, Rejection> {
         ctx.anchor(&key, field, position)
+            .map_err(Rejection::BodyRead)?
             .map(|anchor| data_encoding::HEXLOWER.encode(&anchor.encode()))
             .ok_or(Rejection::InvalidRequest)
     };
@@ -1536,9 +6461,11 @@ fn resolve_comment_anchor(
     doc: &str,
     issue: &IssueState,
     comment: &StoredComment,
-) -> Option<crate::dto::CommentAnchorDto> {
+) -> Result<Option<crate::dto::CommentAnchorDto>, Rejection> {
     use crate::dto::CommentAnchorState;
-    let at = comment.at.as_ref()?;
+    let Some(at) = comment.at.as_ref() else {
+        return Ok(None);
+    };
     let dto = |state| {
         Some(crate::dto::CommentAnchorDto {
             field: at.field.clone(),
@@ -1549,30 +6476,39 @@ fn resolve_comment_anchor(
         // A field with no text in it has no positions for the algebra to move.
         // That is not a lost position — this reader has no answer at all, and
         // `Drifted` would assert one.
-        None => return dto(CommentAnchorState::Unresolved),
+        None => return Ok(dto(CommentAnchorState::Unresolved)),
         // The mint side's rule, applied to the material as it stands rather
         // than as it stood: a span of an empty text names nothing.
-        Some("") => return dto(CommentAnchorState::Drifted),
+        Some("") => return Ok(dto(CommentAnchorState::Drifted)),
         Some(_) => {}
     }
     let key = issue_key(doc);
-    let one = |hex: &str| -> Option<fabric::AnchorResolution> {
-        let raw = data_encoding::HEXLOWER.decode(hex.as_bytes()).ok()?;
-        let anchor = fabric::Anchor::decode_canonical(&raw).ok()?;
+    let one = |hex: &str| -> Result<Option<fabric::AnchorResolution>, Rejection> {
+        let Some(raw) = data_encoding::HEXLOWER.decode(hex.as_bytes()).ok() else {
+            return Ok(None);
+        };
+        let Some(anchor) = fabric::Anchor::decode_canonical(&raw).ok() else {
+            return Ok(None);
+        };
         // The record names a field and so does the anchor inside it. This
         // build writes them together and they always agree; a record from
         // anywhere else that disagrees cannot say which one its writer meant,
         // and resolving the anchor while reporting the record's field would
         // hand back the right offset of the wrong value.
-        (anchor.path == at.field).then_some(())?;
-        Some(ctx.resolve_anchor(&key, &anchor))
+        if anchor.path != at.field {
+            return Ok(None);
+        }
+        Ok(Some(
+            ctx.resolve_anchor(&key, &anchor)
+                .map_err(Rejection::BodyRead)?,
+        ))
     };
-    let Some(head) = one(&at.start) else {
-        return dto(CommentAnchorState::Unresolved);
+    let Some(head) = one(&at.start)? else {
+        return Ok(dto(CommentAnchorState::Unresolved));
     };
     let tail = match &at.end {
         None => Some(head),
-        Some(hex) => one(hex),
+        Some(hex) => one(hex)?,
     };
     let state = match (head, tail) {
         (fabric::AnchorResolution::Resolved(h), Some(fabric::AnchorResolution::Resolved(t))) => {
@@ -1596,7 +6532,7 @@ fn resolve_comment_anchor(
         (_, Some(_)) => CommentAnchorState::Drifted,
         (_, None) => CommentAnchorState::Unresolved,
     };
-    dto(state)
+    Ok(dto(state))
 }
 
 /// The resumable token for one activity row: `(ts, doc, ordinal, entry id)`.
@@ -1633,24 +6569,52 @@ fn actor_of(event: &IssueEvent) -> Option<ActorId> {
 }
 
 /// Append one history event to an issue's `events` list.
-fn push_event(staging: &mut Staging, ctx: &Context<'_>, doc: &str, event: &IssueEvent) {
-    // Stamped here rather than at each construction site, which is why the
-    // eleven of them and the intents carrying `device` are untouched. The actor
-    // is the Session's own, re-derived by the authority view at every submit —
-    // never a string the caller supplied, which is the whole reason it is worth
-    // showing.
+fn push_event(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    doc: &str,
+    event: &IssueEvent,
+) -> Result<(), Rejection> {
+    // Both attribution coordinates come from the authenticated outer action.
+    // Adapter JSON may carry legacy actor/device fields during this cutover,
+    // but neither can become durable authorship by construction.
     let event = &IssueEvent {
         a: ctx.principal().actor.as_str().to_string(),
+        d: ctx.principal().device.as_str().to_string(),
         ..event.clone()
     };
-    staging.issue(
-        &issue_key(doc),
-        Op::LogAppend {
-            path: contract::EVENTS_PATH.into(),
-            value: serde_json::to_vec(event).expect("event json"),
-            retain: contract::EVENTS_RETAINED,
-        },
-    );
+    let mut recipients = if event.inbox_kind().is_some() {
+        issue_notification_audience(ctx, doc)?
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    // An assignment's target relation is staged in this same transaction and
+    // therefore absent from the pinned pre-action Corpus. Include the explicit
+    // successor actors so the assignment notification is causal and does not
+    // require a second publication/read loop.
+    if event.k == "assigned" {
+        recipients.extend(
+            event
+                .c
+                .iter()
+                .filter(|change| change.f == "assignees")
+                .filter_map(|change| change.to.clone()),
+        );
+    }
+    if recipients.len() > contract::MAX_ISSUE_AUDIENCE
+        || recipients
+            .iter()
+            .any(|actor| ActorId::parse(actor).is_none())
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    staging.absorb_records(crate::record_store::write_activity(
+        ctx,
+        doc,
+        event,
+        &recipients.into_iter().collect::<Vec<_>>(),
+    )?);
+    Ok(())
 }
 
 /// Resolve the deterministic transition gate `from -> to` for a project: the
@@ -1690,10 +6654,54 @@ fn transition_gate(
     Ok((bytes, evidence))
 }
 
+fn issue_transition_successor(
+    ctx: &Context<'_>,
+    doc: &str,
+    placement: crate::records::BoardPlacement,
+    evidence: &str,
+    timestamp: u64,
+) -> Result<crate::record_store::Batch, Rejection> {
+    let heads = crate::record_store::issue_transition_heads(ctx, doc)?;
+    let predecessors = match heads.as_slice() {
+        [(head, _)] => vec![head.clone()],
+        [] => return Err(Rejection::StateCorrupt),
+        _ => return Err(Rejection::Conflict),
+    };
+    crate::record_store::write_issue_transition(
+        ctx,
+        doc,
+        &predecessors,
+        &placement,
+        evidence,
+        timestamp,
+    )
+    .map(|(batch, _)| batch)
+}
+
+fn workflow_rejection(error: super::views::Failure) -> Rejection {
+    match error {
+        super::views::Failure::Missing => Rejection::StateCorrupt,
+        super::views::Failure::Conflicted => Rejection::Conflict,
+    }
+}
+
+/// Resolve completion semantics from the issue's project workflow.  Unknown
+/// stored states are corrupt rather than silently reclassified as backlog.
+fn issue_status_category(
+    catalog: &CatalogState,
+    project: &str,
+    status: &str,
+) -> Result<StatusCategory, Rejection> {
+    catalog
+        .status_category(project, status)
+        .map_err(workflow_rejection)?
+        .ok_or(Rejection::StateCorrupt)
+}
+
 /// Whether every capability id is registered for the declared scope kind
 /// (sorted, unique, non-empty).
 fn validate_role_caps(caps: &[String], scope: crate::roles::ScopeKind) -> Result<(), Rejection> {
-    if caps.is_empty() {
+    if caps.is_empty() || caps.len() > crate::roles::MAX_CAPABILITIES {
         return Err(Rejection::InvalidRequest);
     }
     let mut sorted = caps.to_vec();
@@ -1738,8 +6746,13 @@ fn decode_hex32(hex: &str) -> Result<[u8; 32], Rejection> {
         .map_err(|_| Rejection::InvalidRequest)
 }
 
-/// Stage one role revision into the grow-only log.
-fn stage_role_revision(staging: &mut Staging, revision: &crate::roles::RoleRevision) {
+/// Stage one immutable role revision. The shared corpus is the revision log;
+/// there is no aggregate governance map on the user action path.
+fn stage_role_revision(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    revision: &crate::roles::RoleRevision,
+) -> Result<(), Rejection> {
     let stored = crate::views::StoredRoleRevision {
         revision_id: data_encoding::HEXLOWER.encode(&revision.revision_id),
         predecessor_ids: revision
@@ -1749,11 +6762,10 @@ fn stage_role_revision(staging: &mut Staging, revision: &crate::roles::RoleRevis
             .collect(),
         body: revision.body.clone(),
     };
-    staging.catalog(map_set(
-        "role_revisions",
-        format!("{}/{}", revision.body.role_id, stored.revision_id),
-        serde_json::to_vec(&stored).expect("role revision json"),
-    ));
+    staging.absorb_records(crate::record_store::write_governance_revision(
+        ctx, &stored,
+    )?);
+    Ok(())
 }
 
 fn event(kind: &str, device: &str, ts: u64) -> IssueEvent {
@@ -1770,104 +6782,6 @@ fn event(kind: &str, device: &str, ts: u64) -> IssueEvent {
         // Filled by the projection from the log entry this lands in — there is
         // no entry until it is committed.
         entry: String::new(),
-    }
-}
-
-/// Board helpers, staged against the CURRENT catalog view.
-fn board_entries(catalog: &CatalogState, project: &str) -> Vec<(String, String)> {
-    catalog.boards.get(project).cloned().unwrap_or_default()
-}
-
-fn board_insert_top(staging: &mut Staging, catalog: &CatalogState, project: &str, doc: &str) {
-    if board_entries(catalog, project)
-        .iter()
-        .any(|(_, d)| d == doc)
-    {
-        return;
-    }
-    staging.catalog(Op::ListInsert {
-        path: board_path(project),
-        index: 0,
-        value: doc.as_bytes().to_vec(),
-    });
-}
-
-fn board_remove(staging: &mut Staging, catalog: &CatalogState, project: &str, doc: &str) {
-    if let Some((element, _)) = board_entries(catalog, project)
-        .into_iter()
-        .find(|(_, d)| d == doc)
-    {
-        staging.catalog(Op::ListRemove {
-            path: board_path(project),
-            element,
-        });
-    }
-}
-
-/// The legacy `board_move` index math over the current entries.
-fn board_move(
-    staging: &mut Staging,
-    catalog: &CatalogState,
-    project: &str,
-    doc: &str,
-    anchor: &str,
-    after: bool,
-) {
-    let entries = board_entries(catalog, project);
-    let len = entries.len();
-    let doc_pos = entries.iter().position(|(_, d)| d == doc);
-    let anchor_pos = entries.iter().position(|(_, d)| d == anchor);
-    match (doc_pos, anchor_pos) {
-        (Some(from), Some(a)) => {
-            use std::cmp::Ordering;
-            let to = match from.cmp(&a) {
-                Ordering::Equal => return,
-                Ordering::Greater => {
-                    if after {
-                        a + 1
-                    } else {
-                        a
-                    }
-                }
-                Ordering::Less => {
-                    if after {
-                        a
-                    } else {
-                        a.saturating_sub(1)
-                    }
-                }
-            };
-            let to = to.min(len.saturating_sub(1));
-            staging.catalog(Op::ListMove {
-                path: board_path(project),
-                element: entries[from].0.clone(),
-                index: to as u64,
-            });
-        }
-        (None, Some(a)) => {
-            let at = if after { a + 1 } else { a }.min(len);
-            staging.catalog(Op::ListInsert {
-                path: board_path(project),
-                index: at as u64,
-                value: doc.as_bytes().to_vec(),
-            });
-        }
-        (Some(from), None) => {
-            if len > 0 {
-                staging.catalog(Op::ListMove {
-                    path: board_path(project),
-                    element: entries[from].0.clone(),
-                    index: (len - 1) as u64,
-                });
-            }
-        }
-        (None, None) => {
-            staging.catalog(Op::ListInsert {
-                path: board_path(project),
-                index: len as u64,
-                value: doc.as_bytes().to_vec(),
-            });
-        }
     }
 }
 
@@ -1900,32 +6814,1146 @@ fn text_splice(old: &str, new: &str) -> Option<(u64, u64, String)> {
 
 /// Walk the parent map from `start` upward, returning true if `needle` is an
 /// ancestor (cycle-safe).
-fn is_ancestor(catalog: &CatalogState, start: &str, needle: &str) -> bool {
+fn is_ancestor_live(
+    ctx: &Context<'_>,
+    project: &str,
+    start: &str,
+    needle: &str,
+) -> Result<bool, Rejection> {
+    const MAX_PARENT_WALK: usize = 4_096;
     let mut seen = std::collections::BTreeSet::new();
     let mut cursor = start.to_string();
-    while let Some(parent) = catalog.parents.get(&cursor) {
+    for _ in 0..MAX_PARENT_WALK {
+        let Some(record) = crate::record_store::read_parent(ctx, project, &cursor)? else {
+            return Ok(false);
+        };
+        let Some(parent) = record.parent else {
+            return Ok(false);
+        };
         if !seen.insert(parent.clone()) {
-            return false; // pre-existing cycle: stop, do not loop
+            return Err(Rejection::StateCorrupt);
         }
         if parent == needle {
-            return true;
+            return Ok(true);
         }
-        cursor = parent.clone();
+        cursor = parent;
     }
-    false
+    Err(Rejection::LimitExceeded)
+}
+
+fn change_identity(ctx: &Context<'_>, operation: u16, kind: &str) -> Result<[u8; 16], Rejection> {
+    let request = ctx.request_id().ok_or(Rejection::ContractViolation)?;
+    let mut material = Vec::with_capacity(18 + kind.len());
+    material.extend_from_slice(&request.as_bytes());
+    material.extend_from_slice(&operation.to_be_bytes());
+    material.extend_from_slice(kind.as_bytes());
+    let digest = blake3::derive_key("lait.issues.change-identity.v1", &material);
+    digest[..16]
+        .try_into()
+        .map_err(|_| Rejection::ContractViolation)
+}
+
+fn stage_project_create(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    catalog: &CatalogState,
+    id: &str,
+    name: &str,
+    key: &str,
+    color: &str,
+) -> Result<ProjectMeta, Rejection> {
+    let key = key.trim().to_ascii_uppercase();
+    if crate::ids::ProjectId::parse(id).is_none()
+        || !contract::valid_name(name)
+        || color.len() > contract::MAX_PRESENTATION_TOKEN_BYTES
+        || key.is_empty()
+        || key.len() > 8
+        || !key.bytes().all(|byte| byte.is_ascii_alphabetic())
+        || catalog.projects.values().any(|project| project.key == key)
+        || project_key_exists(ctx, &key)?
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    let meta = ProjectMeta {
+        name: name.trim().into(),
+        key,
+        color: color.into(),
+        ..ProjectMeta::default()
+    };
+    staging.absorb_records(crate::record_store::write_project(
+        ctx,
+        catalog,
+        id,
+        &meta,
+        false,
+        Some(&meta.description),
+    )?);
+    let workflow = crate::workflow::default_workflow_revision(id);
+    staging.absorb_records(crate::record_store::write_workflow_revision(
+        ctx, id, &workflow,
+    )?);
+    Ok(meta)
+}
+
+fn stage_label_create(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    id: &str,
+    name: String,
+    color: String,
+) -> Result<Vec<u8>, Rejection> {
+    let mut catalog = CatalogState::default();
+    load_labels_for_write(ctx, &mut catalog, Vec::new(), [name.clone()])?;
+    if crate::ids::LabelId::parse(id).is_none()
+        || !contract::valid_name(&name)
+        || color.len() > contract::MAX_PRESENTATION_TOKEN_BYTES
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    if catalog
+        .labels
+        .values()
+        .any(|label| label.name.eq_ignore_ascii_case(&name))
+    {
+        return Err(Rejection::Conflict);
+    }
+    staging.absorb_records(crate::record_store::write_label(
+        ctx,
+        &catalog,
+        id,
+        &LabelMeta { name, color },
+        false,
+    )?);
+    Ok(contract::demand_space_any("catalog.label.configure"))
+}
+
+fn stage_label_edit(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    label: &str,
+    name: Option<String>,
+    color: Option<String>,
+) -> Result<(String, Vec<u8>, bool), Rejection> {
+    if name.is_none() && color.is_none() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let id = resolve_entity(ctx, contract::ResolveEntity::Label, label, None)?.id;
+    let mut catalog = CatalogState::default();
+    crate::record_store::apply_label(ctx, &mut catalog, &id)?;
+    if let Some(name) = &name {
+        load_labels_for_write(ctx, &mut catalog, Vec::new(), [name.clone()])?;
+    }
+    let current = catalog
+        .labels
+        .get(&id)
+        .cloned()
+        .ok_or(Rejection::InvalidRequest)?;
+    let mut meta = current.clone();
+    if let Some(name) = name {
+        let name = name.trim().to_string();
+        if !contract::valid_name(&name) {
+            return Err(Rejection::InvalidRequest);
+        }
+        if catalog
+            .labels
+            .iter()
+            .any(|(other, label)| other != &id && label.name.eq_ignore_ascii_case(&name))
+        {
+            return Err(Rejection::Conflict);
+        }
+        meta.name = name;
+    }
+    if let Some(color) = color {
+        if color.len() > contract::MAX_PRESENTATION_TOKEN_BYTES {
+            return Err(Rejection::InvalidRequest);
+        }
+        meta.color = color;
+    }
+    if meta == current {
+        return Ok((
+            id,
+            contract::demand_space_any("catalog.label.configure"),
+            false,
+        ));
+    }
+    staging.absorb_records(crate::record_store::write_label(
+        ctx, &catalog, &id, &meta, false,
+    )?);
+    Ok((
+        id,
+        contract::demand_space_any("catalog.label.configure"),
+        true,
+    ))
+}
+
+fn stage_label_delete(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    label: &str,
+) -> Result<(String, Vec<u8>), Rejection> {
+    let id = resolve_entity(ctx, contract::ResolveEntity::Label, label, None)?.id;
+    let mut catalog = CatalogState::default();
+    crate::record_store::apply_label(ctx, &mut catalog, &id)?;
+    let meta = catalog
+        .labels
+        .get(&id)
+        .cloned()
+        .ok_or(Rejection::InvalidRequest)?;
+    staging.absorb_records(crate::record_store::write_label(
+        ctx, &catalog, &id, &meta, true,
+    )?);
+    Ok((id, contract::demand_space_any("catalog.label.configure")))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_issue_create(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    doc: &str,
+    project: &str,
+    title: String,
+    priority: String,
+    requested_status: Option<String>,
+    parent: Option<String>,
+    assignees: Vec<String>,
+    labels: Vec<String>,
+    created_labels: &BTreeSet<String>,
+    body: Option<String>,
+    due: Option<u64>,
+    estimate: Option<u32>,
+    ts: u64,
+) -> Result<Vec<u8>, Rejection> {
+    let parent = parent
+        .map(|parent| {
+            resolve_entity(ctx, contract::ResolveEntity::Issue, &parent, None).map(|row| row.id)
+        })
+        .transpose()?;
+    if let Some(parent) = &parent {
+        let state = issue_core_state(ctx, parent).ok_or(Rejection::InvalidRequest)?;
+        if state.project != project {
+            return Err(Rejection::InvalidRequest);
+        }
+    }
+    let mut catalog = CatalogState::default();
+    load_workflow_for_write(ctx, &mut catalog, project)?;
+    load_labels_for_write(
+        ctx,
+        &mut catalog,
+        labels
+            .iter()
+            .filter(|label| !created_labels.contains(*label))
+            .cloned(),
+        Vec::<String>::new(),
+    )?;
+    if crate::ids::DocId::parse(doc).is_none()
+        || !contract::valid_title(&title)
+        || body
+            .as_deref()
+            .is_some_and(|body| !contract::valid_text(body))
+        || !catalog.projects.contains_key(project)
+        || due == Some(0)
+        || estimate.is_some_and(|value| value > contract::MAX_ESTIMATE)
+        || assignees.len() > contract::MAX_ISSUE_ASSIGNEES
+        || assignees
+            .iter()
+            .any(|actor| ActorId::parse(actor).is_none())
+        || labels.len() > contract::MAX_ISSUE_LABELS
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    let priority = Priority::parse(&priority).ok_or(Rejection::InvalidRequest)?;
+    for label in &labels {
+        if !catalog.labels.contains_key(label) && !created_labels.contains(label) {
+            return Err(Rejection::InvalidRequest);
+        }
+    }
+    if let Some(parent) = &parent {
+        staging.absorb_records(crate::record_store::write_parent(
+            ctx,
+            project,
+            doc,
+            Some(parent.clone()),
+        )?);
+    }
+    let status = match requested_status {
+        Some(status) => {
+            if catalog
+                .workflow_state(project, &status)
+                .map_err(workflow_rejection)?
+                .is_none()
+            {
+                return Err(Rejection::InvalidRequest);
+            }
+            status
+        }
+        None => catalog
+            .first_state_in(project, StatusCategory::Backlog)
+            .map_err(workflow_rejection)?
+            .ok_or(Rejection::Conflict)?
+            .state_id
+            .clone(),
+    };
+    let key = issue_key(doc);
+    if ctx.body_version(&key).is_some() {
+        return Err(Rejection::Conflict);
+    }
+    staging.issue(&key, Op::Create);
+    staging.issue(
+        &key,
+        reg(crate::records::roots::ISSUE_ID, doc.as_bytes().to_vec()),
+    );
+    if body
+        .as_deref()
+        .is_some_and(|body| body.starts_with(contract::DOCUMENT_PREFIX))
+    {
+        staging.issue(
+            &key,
+            reg(
+                "document_schema",
+                DOCUMENT_SCHEMA_VERSION.to_string().into_bytes(),
+            ),
+        );
+    }
+    if let Some(body) = body.filter(|body| !body.is_empty()) {
+        staging.issue(
+            &key,
+            Op::TextSplice {
+                path: "description".into(),
+                index: 0,
+                delete: 0,
+                insert: body,
+            },
+        );
+    }
+    for actor in &assignees {
+        staging.absorb_records(crate::record_store::write_issue_relation(
+            ctx, doc, project, "assignee", actor, true,
+        )?);
+    }
+    for label in &labels {
+        staging.absorb_records(crate::record_store::write_issue_relation(
+            ctx, doc, project, "label", label, true,
+        )?);
+    }
+    let ordinal = crate::records::IssueAliasCoordinate::deterministic_for_issue(
+        &DocId::parse(doc).expect("validated Issue id"),
+    )
+    .ordinal;
+    let placement_plan =
+        crate::record_store::board_placement(ctx, project, &status, doc, Some(&Pos::Top))?;
+    let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
+    staging.absorb_records(placement_plan.maintenance);
+    let mut batch = crate::record_store::Batch::default();
+    crate::record_store::write_issue_identity(ctx, &mut batch, doc, ordinal)?;
+    staging.absorb_records(batch);
+    let meta = IssueState {
+        project: project.into(),
+        title,
+        status,
+        priority,
+        created_by: Some(ctx.principal().actor.clone()),
+        created_at: ts,
+        duedate: due,
+        estimate,
+        ..IssueState::default()
+    };
+    staging.absorb_records(crate::record_store::write_issue_meta(
+        ctx, doc, &meta, false,
+    )?);
+    let (transition, _) =
+        crate::record_store::write_issue_transition(ctx, doc, &[], &placement, "", ts)?;
+    staging.absorb_records(transition);
+    push_event(staging, ctx, doc, &event("created", "", ts))?;
+    let create = contract::demand_project_work("issue.create", project);
+    if parent.is_some() {
+        require_both(
+            create,
+            contract::demand_project_work("issue.parent", project),
+        )
+    } else {
+        Ok(create)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_spec_create(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    catalog: &CatalogState,
+    publication: runtime::publication::PublicationId,
+    spec: &str,
+    project: &str,
+    kind: crate::spec::Kind,
+    title: String,
+    text: String,
+    links: Vec<crate::spec::Link>,
+    ts: u64,
+) -> Result<(), Rejection> {
+    if crate::ids::SpecId::parse(spec).is_none()
+        || !catalog.projects.contains_key(project)
+        || spec_state(ctx, spec).is_some()
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    validate_spec_links(ctx, &links)?;
+    let plan =
+        (kind == crate::spec::Kind::Plan).then(|| crate::spec::PlanData { roots: Vec::new() });
+    let revision = crate::spec::build_revision(
+        crate::spec::Body {
+            spec: spec.into(),
+            project: project.into(),
+            kind,
+            publication,
+            title,
+            text,
+            state: crate::spec::State::Draft,
+            links,
+            plan,
+            author: ctx.principal().actor.to_string(),
+            ts,
+        },
+        vec![],
+    )
+    .map_err(|_| Rejection::InvalidRequest)?;
+    staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
+    Ok(())
+}
+
+fn change_position(
+    ctx: &Context<'_>,
+    position: contract::ChangePosition,
+) -> Result<Pos, Rejection> {
+    Ok(match position {
+        contract::ChangePosition::Top => Pos::Top,
+        contract::ChangePosition::Bottom => Pos::Bottom,
+        contract::ChangePosition::Before { issue } => Pos::Before {
+            doc: resolve_entity(ctx, contract::ResolveEntity::Issue, &issue, None)?.id,
+        },
+        contract::ChangePosition::After { issue } => Pos::After {
+            doc: resolve_entity(ctx, contract::ResolveEntity::Issue, &issue, None)?.id,
+        },
+    })
+}
+
+/// Stage one atomic Board change over the exact publication pinned by this
+/// ChangeSet. State and rank become one predecessor-bound transition, so a
+/// cross-column drag cannot expose the adapter's former half-committed state.
+fn stage_issue_board_change(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    status: Option<String>,
+    position: Option<contract::ChangePosition>,
+    ts: u64,
+) -> Result<(String, String, Vec<u8>), Rejection> {
+    if status.is_none() && position.is_none() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let (catalog, held) = issue_write_state(ctx, &doc, status.is_some())?;
+    let target_status = status.unwrap_or_else(|| held.status.clone());
+    if catalog
+        .workflow_state(&held.project, &target_status)
+        .map_err(workflow_rejection)?
+        .is_none()
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    let changed_status = target_status != held.status;
+    let position = position
+        .map(|position| change_position(ctx, position))
+        .transpose()?;
+    let placement = crate::record_store::board_placement(
+        ctx,
+        &held.project,
+        &target_status,
+        &doc,
+        position.as_ref(),
+    )?;
+    let mut evidence = String::new();
+    let mut demand = contract::demand_project_work("issue.write", &held.project);
+    if changed_status {
+        let (transition_demand, transition_evidence) =
+            transition_gate(&catalog, &held.project, &held.status, &target_status)?;
+        demand = require_both(demand, transition_demand)?;
+        evidence = serde_json::to_string(&transition_evidence)
+            .map_err(|_| Rejection::ContractViolation)?;
+    }
+    let mut batch = placement.maintenance;
+    batch.absorb(issue_transition_successor(
+        ctx,
+        &doc,
+        placement.placement.ok_or(Rejection::StateCorrupt)?,
+        &evidence,
+        ts,
+    )?);
+    staging.absorb_records(batch);
+    let mut change = event("board_changed", "", ts);
+    if changed_status {
+        change.c.push(EventChange {
+            f: "status".into(),
+            from: Some(held.status),
+            to: Some(target_status),
+        });
+        change.x = evidence;
+    }
+    push_event(staging, ctx, &doc, &change)?;
+    Ok((doc, held.project, demand))
+}
+
+fn stage_issue_work(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    action: WorkAction,
+    ts: u64,
+) -> Result<(String, Vec<u8>, bool), Rejection> {
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let (catalog, held) = issue_write_state(ctx, &doc, true)?;
+    let actor = ctx.principal().actor.to_string();
+    let (category, kind) = match action {
+        WorkAction::Start => (StatusCategory::Active, "started"),
+        WorkAction::Done => (StatusCategory::Done, "finished"),
+        WorkAction::Stop => (StatusCategory::Backlog, "stopped"),
+    };
+    let target = catalog
+        .first_state_in(&held.project, category)
+        .map_err(workflow_rejection)?
+        .ok_or(Rejection::Conflict)?
+        .clone();
+    let mut demand = contract::demand_project_work("issue.write", &held.project);
+    let mut changes = Vec::new();
+    let mut transition_evidence = None;
+    if held.status != target.state_id {
+        let (transition_demand, evidence) =
+            transition_gate(&catalog, &held.project, &held.status, &target.state_id)?;
+        demand = require_both(demand, transition_demand)?;
+        changes.push(EventChange {
+            f: "status".into(),
+            from: Some(held.status.clone()),
+            to: Some(target.state_id.clone()),
+        });
+        let placement =
+            crate::record_store::board_placement(ctx, &held.project, &target.state_id, &doc, None)?;
+        let evidence_json =
+            serde_json::to_string(&evidence).map_err(|_| Rejection::ContractViolation)?;
+        let mut batch = placement.maintenance;
+        batch.absorb(issue_transition_successor(
+            ctx,
+            &doc,
+            placement.placement.ok_or(Rejection::StateCorrupt)?,
+            &evidence_json,
+            ts,
+        )?);
+        staging.absorb_records(batch);
+        transition_evidence = Some(evidence_json);
+    }
+    let assigned = crate::record_store::read_issue_relation(ctx, &doc, "assignee", &actor)?
+        .is_some_and(|relation| relation.present);
+    match action {
+        WorkAction::Start if !assigned => {
+            changes.push(EventChange {
+                f: "assignees".into(),
+                from: None,
+                to: Some("@me".into()),
+            });
+            staging.absorb_records(crate::record_store::write_issue_relation(
+                ctx,
+                &doc,
+                &held.project,
+                "assignee",
+                &actor,
+                true,
+            )?);
+        }
+        WorkAction::Stop if assigned => {
+            changes.push(EventChange {
+                f: "assignees".into(),
+                from: Some("@me".into()),
+                to: None,
+            });
+            staging.absorb_records(crate::record_store::write_issue_relation(
+                ctx,
+                &doc,
+                &held.project,
+                "assignee",
+                &actor,
+                false,
+            )?);
+        }
+        _ => {}
+    }
+    if changes.is_empty() {
+        return Ok((doc, demand, false));
+    }
+    let mut event = event(kind, "", ts);
+    event.c = changes;
+    event.x = transition_evidence.unwrap_or_default();
+    push_event(staging, ctx, &doc, &event)?;
+    Ok((doc, demand, true))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_issue_patch(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    title: Option<String>,
+    status: Option<String>,
+    priority: Option<String>,
+    due: Option<u64>,
+    clear_due: bool,
+    estimate: Option<u32>,
+    clear_estimate: bool,
+    assignees: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
+    ts: u64,
+) -> Result<(String, Vec<u8>), Rejection> {
+    if title.is_none()
+        && status.is_none()
+        && priority.is_none()
+        && due.is_none()
+        && !clear_due
+        && estimate.is_none()
+        && !clear_estimate
+        && assignees.is_none()
+        && labels.is_none()
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    if due.is_some() && clear_due || estimate.is_some() && clear_estimate {
+        return Err(Rejection::InvalidRequest);
+    }
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let (catalog, mut held) = issue_write_state(ctx, &doc, status.is_some())?;
+    let project = held.project.clone();
+    let mut demand = contract::demand_project_work("issue.write", &project);
+    if let Some(status) = status {
+        let (_, _, transition_demand) =
+            stage_issue_board_change(staging, ctx, &doc, Some(status), None, ts)?;
+        demand = require_both(demand, transition_demand)?;
+    }
+    let mut changes = Vec::new();
+    let mut meta_changed = false;
+    if let Some(title) = title {
+        if !contract::valid_title(&title) {
+            return Err(Rejection::InvalidRequest);
+        }
+        changes.push(EventChange {
+            f: "title".into(),
+            from: Some(held.title),
+            to: Some(title.clone()),
+        });
+        held.title = title;
+        meta_changed = true;
+    }
+    if let Some(priority) = priority {
+        let priority = Priority::parse(&priority).ok_or(Rejection::InvalidRequest)?;
+        changes.push(EventChange {
+            f: "priority".into(),
+            from: Some(held.priority.as_str().to_owned()),
+            to: Some(priority.as_str().to_owned()),
+        });
+        held.priority = priority;
+        meta_changed = true;
+    }
+    if due == Some(0) || estimate.is_some_and(|value| value > contract::MAX_ESTIMATE) {
+        return Err(Rejection::InvalidRequest);
+    }
+    if due.is_some() || clear_due {
+        let next = if clear_due { None } else { due };
+        changes.push(EventChange {
+            f: "duedate".into(),
+            from: held.duedate.map(|value| value.to_string()),
+            to: next.map(|value| value.to_string()),
+        });
+        held.duedate = next;
+        meta_changed = true;
+    }
+    if estimate.is_some() || clear_estimate {
+        let next = if clear_estimate { None } else { estimate };
+        changes.push(EventChange {
+            f: "estimate".into(),
+            from: held.estimate.map(|value| value.to_string()),
+            to: next.map(|value| value.to_string()),
+        });
+        held.estimate = next;
+        meta_changed = true;
+    }
+    if meta_changed {
+        staging.absorb_records(crate::record_store::write_issue_meta(
+            ctx,
+            &doc,
+            &held,
+            catalog.tombstones.contains(&doc),
+        )?);
+    }
+    if let Some(assignees) = assignees {
+        if assignees.len() > contract::MAX_ISSUE_ASSIGNEES
+            || assignees
+                .iter()
+                .any(|actor| ActorId::parse(actor).is_none())
+        {
+            return Err(Rejection::LimitExceeded);
+        }
+        let next = assignees.into_iter().collect::<BTreeSet<_>>();
+        let current = issue_relation_targets(ctx, &doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?;
+        for actor in current.union(&next) {
+            let on = next.contains(actor);
+            if current.contains(actor) != on {
+                staging.absorb_records(crate::record_store::write_issue_relation(
+                    ctx, &doc, &project, "assignee", actor, on,
+                )?);
+            }
+        }
+        changes.push(EventChange {
+            f: "assignees".into(),
+            from: None,
+            to: None,
+        });
+    }
+    if let Some(labels) = labels {
+        if labels.len() > contract::MAX_ISSUE_LABELS {
+            return Err(Rejection::LimitExceeded);
+        }
+        let mut next = BTreeSet::new();
+        for label in labels {
+            if crate::ids::LabelId::parse(&label).is_none() {
+                return Err(Rejection::InvalidRequest);
+            }
+            next.insert(label);
+        }
+        let current = issue_relation_targets(ctx, &doc, "label", contract::MAX_ISSUE_LABELS)?;
+        for label in current.union(&next) {
+            let on = next.contains(label);
+            if current.contains(label) != on {
+                staging.absorb_records(crate::record_store::write_issue_relation(
+                    ctx, &doc, &project, "label", label, on,
+                )?);
+            }
+        }
+        changes.push(EventChange {
+            f: "labels".into(),
+            from: None,
+            to: None,
+        });
+    }
+    if !changes.is_empty() {
+        let mut edit = event("edited", "", ts);
+        edit.c = changes;
+        push_event(staging, ctx, &doc, &edit)?;
+    }
+    Ok((doc, demand))
+}
+
+fn stage_issue_tombstone(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    on: bool,
+    ts: u64,
+) -> Result<(String, Vec<u8>), Rejection> {
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let held = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+    staging.absorb_records(crate::record_store::write_issue_meta(ctx, &doc, &held, on)?);
+    push_event(
+        staging,
+        ctx,
+        &doc,
+        &event(if on { "deleted" } else { "restored" }, "", ts),
+    )?;
+    Ok((
+        doc,
+        contract::demand_project_work(
+            if on { "issue.delete" } else { "issue.restore" },
+            &held.project,
+        ),
+    ))
+}
+
+/// Stage one comment, minting its id when the caller did not name one.
+///
+/// A client is allowed to choose the id -- that is how a retry lands on the
+/// same comment rather than a second one -- but it is not required to, and
+/// `write_comment` derives one from the request when it is absent, which is
+/// equally stable under replay. Refusing an unnamed comment made the
+/// optional field in the protocol a lie: every value it could take other
+/// than `Some` was rejected.
+fn stage_issue_comment(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    id: Option<String>,
+    body: String,
+    parent: Option<String>,
+    ts: u64,
+) -> Result<(String, Vec<u8>), Rejection> {
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let (held, parent_node) = check_comment(ctx, &doc, &body, id.as_deref(), parent.as_deref())?;
+    let id = stage_comment(
+        staging,
+        ctx,
+        &doc,
+        parent_node,
+        StoredComment {
+            a: ctx.principal().actor.to_string(),
+            t: ts,
+            b: body,
+            id,
+            parent,
+            at: None,
+            node: None,
+            parent_node: None,
+        },
+        "",
+        ts,
+    )?;
+    Ok((
+        id,
+        contract::demand_project_work("comment.create", &held.project),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_issue_comment_at(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    id: String,
+    body: String,
+    field: String,
+    start: u64,
+    end: Option<u64>,
+    parent: Option<String>,
+    source: runtime::publication::WorldPublicationId,
+    ts: u64,
+) -> Result<(String, Vec<u8>), Rejection> {
+    if ctx.world_publication_id().as_ref() != Some(&source) {
+        return Err(Rejection::Conflict);
+    }
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let (held, parent_node) = check_comment(ctx, &doc, &body, Some(&id), parent.as_deref())?;
+    let at = mint_comment_anchor(ctx, &doc, &held, &field, start, end)?;
+    stage_comment(
+        staging,
+        ctx,
+        &doc,
+        parent_node,
+        StoredComment {
+            a: ctx.principal().actor.to_string(),
+            t: ts,
+            b: body,
+            id: Some(id.clone()),
+            parent,
+            at: Some(at),
+            node: None,
+            parent_node: None,
+        },
+        "",
+        ts,
+    )?;
+    Ok((
+        id,
+        contract::demand_project_work("comment.create", &held.project),
+    ))
+}
+
+fn stage_issue_reaction(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    comment: String,
+    emoji: String,
+    on: bool,
+) -> Result<(String, Vec<u8>), Rejection> {
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let held = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+    if !contract::is_comment_id(&comment)
+        || !contract::is_reaction_emoji(&emoji)
+        || find_comment(ctx, &comment)?.is_none_or(|found| found.issue != doc)
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    staging.absorb_records(crate::record_store::write_reaction(
+        ctx,
+        &doc,
+        &comment,
+        &emoji,
+        ctx.principal().actor.as_str(),
+        on,
+    )?);
+    Ok((
+        doc,
+        contract::demand_project_work("comment.create", &held.project),
+    ))
+}
+
+fn stage_issue_link(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    kind: String,
+    target: &str,
+    on: bool,
+    ts: u64,
+) -> Result<(String, Vec<u8>), Rejection> {
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let target = resolve_entity(ctx, contract::ResolveEntity::Issue, target, None)?.id;
+    let kind = kind.to_ascii_lowercase();
+    if !LINK_KINDS.contains(&kind.as_str()) || doc == target {
+        return Err(Rejection::InvalidRequest);
+    }
+    let held = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+    let other = issue_core_state(ctx, &target).ok_or(Rejection::InvalidRequest)?;
+    let (from, to) = if kind == "relates" && target < doc {
+        (target.clone(), doc.clone())
+    } else {
+        (doc.clone(), target.clone())
+    };
+    let relation_project = if from == doc {
+        &held.project
+    } else {
+        &other.project
+    };
+    if !on
+        && !crate::record_store::read_link(ctx, relation_project, &from, &kind, &to)?
+            .is_some_and(|record| record.present)
+    {
+        return Err(Rejection::InvalidRequest);
+    }
+    staging.absorb_records(crate::record_store::write_link(
+        ctx,
+        relation_project,
+        &from,
+        &kind,
+        &to,
+        on,
+    )?);
+    let mut change = event(if on { "linked" } else { "unlinked" }, "", ts);
+    change.x = format!("{kind} {target}");
+    push_event(staging, ctx, &doc, &change)?;
+    Ok((
+        doc,
+        contract::demand_project_work("issue.link", &held.project),
+    ))
+}
+
+fn stage_issue_parent(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    parent: Option<String>,
+    ts: u64,
+) -> Result<(String, Vec<u8>), Rejection> {
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let held = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+    let parent = parent
+        .map(|parent| {
+            resolve_entity(ctx, contract::ResolveEntity::Issue, &parent, None).map(|row| row.id)
+        })
+        .transpose()?;
+    if let Some(parent) = &parent {
+        if parent == &doc {
+            return Err(Rejection::Conflict);
+        }
+        let parent_issue = issue_core_state(ctx, parent).ok_or(Rejection::InvalidRequest)?;
+        if parent_issue.project != held.project {
+            return Err(Rejection::InvalidRequest);
+        }
+        if is_ancestor_live(ctx, &held.project, parent, &doc)? {
+            return Err(Rejection::Conflict);
+        }
+    }
+    staging.absorb_records(crate::record_store::write_parent(
+        ctx,
+        &held.project,
+        &doc,
+        parent.clone(),
+    )?);
+    let mut change = event("parented", "", ts);
+    change.x = parent.unwrap_or_else(|| "unparented".into());
+    push_event(staging, ctx, &doc, &change)?;
+    Ok((
+        doc,
+        contract::demand_project_work("issue.parent", &held.project),
+    ))
+}
+
+fn stage_issue_move(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    project: Option<String>,
+    position: Option<contract::ChangePosition>,
+    ts: u64,
+) -> Result<(String, Vec<u8>, bool), Rejection> {
+    if project.is_none() && position.is_none() {
+        return Err(Rejection::InvalidRequest);
+    }
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let (mut catalog, mut held) = issue_write_state(ctx, &doc, false)?;
+    let mut effective = held.project.clone();
+    let mut target_status = held.status.clone();
+    let mut demand = contract::demand_project_work("issue.move_out", &held.project);
+    let project_changed = project
+        .as_ref()
+        .is_some_and(|project| project != &held.project);
+    if let Some(target) = &project {
+        load_workflow_for_write(ctx, &mut catalog, target)?;
+        if !catalog.projects.contains_key(target) {
+            return Err(Rejection::InvalidRequest);
+        }
+        if project_changed {
+            effective.clone_from(target);
+            if catalog
+                .workflow_state(target, &target_status)
+                .map_err(workflow_rejection)?
+                .is_none()
+            {
+                target_status = catalog
+                    .first_state_in(target, StatusCategory::Backlog)
+                    .map_err(workflow_rejection)?
+                    .ok_or(Rejection::Conflict)?
+                    .state_id
+                    .clone();
+            }
+            demand = require_both(
+                demand,
+                contract::demand_project_work("issue.move_in", target),
+            )?;
+        }
+    }
+    let position = position
+        .map(|position| change_position(ctx, position))
+        .transpose()?
+        .or_else(|| project_changed.then_some(Pos::Top));
+    let placement = crate::record_store::board_placement(
+        ctx,
+        &effective,
+        &target_status,
+        &doc,
+        position.as_ref(),
+    )?;
+    if project_changed {
+        held.project.clone_from(&effective);
+        held.status.clone_from(&target_status);
+        staging.absorb_records(crate::record_store::write_issue_meta(
+            ctx,
+            &doc,
+            &held,
+            catalog.tombstones.contains(&doc),
+        )?);
+    }
+    let mut batch = placement.maintenance;
+    batch.absorb(issue_transition_successor(
+        ctx,
+        &doc,
+        placement.placement.ok_or(Rejection::StateCorrupt)?,
+        "",
+        ts,
+    )?);
+    staging.absorb_records(batch);
+    push_event(staging, ctx, &doc, &event("moved", "", ts))?;
+    Ok((doc, demand, true))
+}
+
+fn stage_issue_milestone(
+    staging: &mut Staging,
+    ctx: &Context<'_>,
+    issue: &str,
+    milestone: Option<String>,
+    ts: u64,
+) -> Result<(String, Vec<u8>, bool), Rejection> {
+    let doc = resolve_entity(ctx, contract::ResolveEntity::Issue, issue, None)?.id;
+    let held = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+    let milestone = milestone
+        .map(|milestone| {
+            resolve_entity(
+                ctx,
+                contract::ResolveEntity::Milestone,
+                &milestone,
+                Some(&held.project),
+            )
+            .map(|row| row.id)
+        })
+        .transpose()?;
+    if held.milestone == milestone {
+        return Ok((
+            doc,
+            contract::demand_project_work("issue.bind", &held.project),
+            false,
+        ));
+    }
+    let mut catalog = CatalogState::default();
+    let label = match &milestone {
+        Some(milestone) => {
+            crate::record_store::apply_schedule_record(
+                ctx,
+                &mut catalog,
+                &held.project,
+                milestone,
+            )?;
+            let record = catalog
+                .milestones
+                .get(&held.project)
+                .and_then(|records| records.get(milestone))
+                .filter(|record| !record.tombstone)
+                .ok_or(Rejection::InvalidRequest)?;
+            if let Some(previous) = held.milestone.as_deref() {
+                staging.absorb_records(crate::record_store::write_issue_relation(
+                    ctx,
+                    &doc,
+                    &held.project,
+                    "milestone",
+                    previous,
+                    false,
+                )?);
+            }
+            staging.absorb_records(crate::record_store::write_issue_relation(
+                ctx,
+                &doc,
+                &held.project,
+                "milestone",
+                milestone,
+                true,
+            )?);
+            record.name.clone()
+        }
+        None => {
+            staging.absorb_records(crate::record_store::write_issue_relation(
+                ctx,
+                &doc,
+                &held.project,
+                "milestone",
+                held.milestone.as_deref().ok_or(Rejection::StateCorrupt)?,
+                false,
+            )?);
+            "none".into()
+        }
+    };
+    let mut change = event("milestoned", "", ts);
+    change.x = label;
+    push_event(staging, ctx, &doc, &change)?;
+    Ok((
+        doc,
+        contract::demand_project_work("issue.bind", &held.project),
+        true,
+    ))
 }
 
 impl World for IssuesWorld {
     fn descriptor(&self) -> runtime::world::Descriptor {
         runtime::world::Descriptor {
             id: self.id.clone(),
-            implementation_version: runtime::world::Version(3),
+            implementation_version: runtime::world::Version(4),
             schemas: self.schemas.clone(),
-            limits: runtime::world::Limits::default(),
+            limits: runtime::world::Limits {
+                max_payload_bytes: contract::MAX_PAYLOAD_BYTES,
+            },
             scope_schemas: Vec::new(),
             signal_schemas: self.signal_schemas.clone(),
-            find_schemas: Vec::new(),
-            find_extractors: Vec::new(),
+            find_schemas: self.find_schemas.clone(),
+            find_extractors: self.find_extractors.clone(),
             exec_specs: self.exec_specs.clone(),
         }
     }
@@ -1942,21 +7970,567 @@ impl World for IssuesWorld {
         &self.signal_schemas
     }
 
+    fn find_schemas(&self) -> &[runtime::find::Schema] {
+        &self.find_schemas
+    }
+
+    fn find_extractors(&self) -> &[runtime::find::Extractor] {
+        &self.find_extractors
+    }
+
+    fn extract(
+        &self,
+        ctx: &runtime::world::ExtractionContext<'_>,
+        extractor: &runtime::find::Extractor,
+        body: &replica::body::BodyKey,
+    ) -> Result<runtime::find::BodyExtraction, Rejection> {
+        crate::find::extract(ctx, extractor, body)
+    }
+
     fn exec_specs(&self) -> &[runtime::exec::Spec] {
         &self.exec_specs
     }
 
     fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let intent = IssueIntent::from_json(&intent.payload).ok_or(Rejection::InvalidRequest)?;
-        let catalog_view = checked_catalog_view(ctx)?;
-        // Writes validate against the same composed topology that reads expose.
-        // The Catalog remains the compatibility source for older Worlds, while
-        // project relation Bodies override its links and hierarchy.
-        let derived = self.derived_snapshot(ctx)?;
-        let catalog = derived.catalog.clone();
-        let mut staging = Staging::for_space(ctx.principal().space.clone(), catalog_view.is_none());
-        drop(catalog_view);
+        if self.package == IssuesPackage::Preferred
+            && matches!(&intent, IssueIntent::V4Migrate { .. })
+        {
+            return Err(Rejection::InvalidRequest);
+        }
+        let mut staging = Staging::for_space(
+            ctx.principal().space.clone(),
+            ctx.body_version(&catalog_key(&ctx.principal().space))
+                .is_none(),
+        );
         match intent {
+            IssueIntent::ChangeSet { operations, ts } => {
+                // A ChangeSet validates against an in-action overlay plus
+                // exact v4 records. It never assembles the tracker catalog.
+                let mut catalog_storage = CatalogState::default();
+                let catalog = &mut catalog_storage;
+                if operations.is_empty()
+                    || operations.len() > contract::CHANGE_SET_MAX_OPERATIONS
+                    || serde_json::to_vec(&operations)
+                        .map_err(|_| Rejection::InvalidRequest)?
+                        .len()
+                        > contract::CHANGE_SET_MAX_BYTES
+                    || ts == 0
+                {
+                    return Err(Rejection::LimitExceeded);
+                }
+                let publication = self.portable_publication(ctx)?;
+                let mut created_projects = BTreeMap::<u16, String>::new();
+                let mut created_labels = BTreeMap::<u16, String>::new();
+                let mut demand: Option<Vec<u8>> = None;
+                for (index, operation) in operations.into_iter().enumerate() {
+                    let ordinal = u16::try_from(index).map_err(|_| Rejection::LimitExceeded)?;
+                    match operation {
+                        contract::ChangeOperation::ProjectCreate { name, key, color } => {
+                            let id = crate::ids::ProjectId::from_digest(change_identity(
+                                ctx, ordinal, "project",
+                            )?)
+                            .as_str()
+                            .to_owned();
+                            let meta = stage_project_create(
+                                &mut staging,
+                                ctx,
+                                &catalog,
+                                &id,
+                                &name,
+                                &key,
+                                &color,
+                            )?;
+                            catalog.projects.insert(id.clone(), meta);
+                            created_projects.insert(ordinal, id.clone());
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "project".into(),
+                                id,
+                            });
+                            let next = contract::demand_space_any("project.create");
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::SpecCreate {
+                            project,
+                            kind,
+                            title,
+                            text,
+                            links,
+                        } => {
+                            let project = match project {
+                                contract::ChangeProject::Existing { project } => {
+                                    let project = resolve_entity(
+                                        ctx,
+                                        contract::ResolveEntity::Project,
+                                        &project,
+                                        None,
+                                    )?
+                                    .id;
+                                    crate::record_store::apply_project(ctx, catalog, &project)?;
+                                    project
+                                }
+                                contract::ChangeProject::Created { operation } => {
+                                    if operation >= ordinal {
+                                        return Err(Rejection::InvalidRequest);
+                                    }
+                                    created_projects
+                                        .get(&operation)
+                                        .cloned()
+                                        .ok_or(Rejection::InvalidRequest)?
+                                }
+                            };
+                            let spec = crate::ids::SpecId::from_digest(change_identity(
+                                ctx, ordinal, "spec",
+                            )?)
+                            .as_str()
+                            .to_owned();
+                            stage_spec_create(
+                                &mut staging,
+                                ctx,
+                                &catalog,
+                                publication,
+                                &spec,
+                                &project,
+                                kind,
+                                title,
+                                text,
+                                links,
+                                ts,
+                            )?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "spec".into(),
+                                id: spec,
+                            });
+                            let next = contract::demand_project_work("spec.write", &project);
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueCreate {
+                            project,
+                            title,
+                            priority,
+                            status,
+                            parent,
+                            assignees,
+                            labels,
+                            body,
+                            due,
+                            estimate,
+                        } => {
+                            let project = match project {
+                                contract::ChangeProject::Existing { project } => {
+                                    resolve_entity(
+                                        ctx,
+                                        contract::ResolveEntity::Project,
+                                        &project,
+                                        None,
+                                    )?
+                                    .id
+                                }
+                                contract::ChangeProject::Created { operation } => {
+                                    if operation >= ordinal {
+                                        return Err(Rejection::InvalidRequest);
+                                    }
+                                    created_projects
+                                        .get(&operation)
+                                        .cloned()
+                                        .ok_or(Rejection::InvalidRequest)?
+                                }
+                            };
+                            let doc = crate::ids::DocId::from_digest(change_identity(
+                                ctx, ordinal, "issue",
+                            )?)
+                            .as_str()
+                            .to_owned();
+                            let labels = labels
+                                .into_iter()
+                                .map(|label| match label {
+                                    contract::ChangeLabel::Existing { label } => resolve_entity(
+                                        ctx,
+                                        contract::ResolveEntity::Label,
+                                        &label,
+                                        None,
+                                    )
+                                    .map(|row| row.id),
+                                    contract::ChangeLabel::Created { operation } => {
+                                        if operation >= ordinal {
+                                            return Err(Rejection::InvalidRequest);
+                                        }
+                                        created_labels
+                                            .get(&operation)
+                                            .cloned()
+                                            .ok_or(Rejection::InvalidRequest)
+                                    }
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            let next = stage_issue_create(
+                                &mut staging,
+                                ctx,
+                                &doc,
+                                &project,
+                                title,
+                                priority,
+                                status,
+                                parent,
+                                assignees,
+                                labels,
+                                &created_labels.values().cloned().collect(),
+                                body,
+                                due,
+                                estimate,
+                                ts,
+                            )?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueBoard {
+                            issue,
+                            status,
+                            position,
+                        } => {
+                            let (doc, _project, next) = stage_issue_board_change(
+                                &mut staging,
+                                ctx,
+                                &issue,
+                                status,
+                                position,
+                                ts,
+                            )?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssuePatch {
+                            issue,
+                            title,
+                            status,
+                            priority,
+                            due,
+                            clear_due,
+                            estimate,
+                            clear_estimate,
+                            assignees,
+                            labels,
+                        } => {
+                            let labels = labels
+                                .map(|labels| {
+                                    labels
+                                        .into_iter()
+                                        .map(|label| match label {
+                                            contract::ChangeLabel::Existing { label } => {
+                                                resolve_entity(
+                                                    ctx,
+                                                    contract::ResolveEntity::Label,
+                                                    &label,
+                                                    None,
+                                                )
+                                                .map(|row| row.id)
+                                            }
+                                            contract::ChangeLabel::Created { operation } => {
+                                                if operation >= ordinal {
+                                                    return Err(Rejection::InvalidRequest);
+                                                }
+                                                created_labels
+                                                    .get(&operation)
+                                                    .cloned()
+                                                    .ok_or(Rejection::InvalidRequest)
+                                            }
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()
+                                })
+                                .transpose()?;
+                            let (doc, next) = stage_issue_patch(
+                                &mut staging,
+                                ctx,
+                                &issue,
+                                title,
+                                status,
+                                priority,
+                                due,
+                                clear_due,
+                                estimate,
+                                clear_estimate,
+                                assignees,
+                                labels,
+                                ts,
+                            )?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueWork { issue, action } => {
+                            let (doc, next, _changed) =
+                                stage_issue_work(&mut staging, ctx, &issue, action, ts)?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueTombstone { issue, on } => {
+                            let (doc, next) =
+                                stage_issue_tombstone(&mut staging, ctx, &issue, on, ts)?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueComment {
+                            issue,
+                            body,
+                            parent,
+                        } => {
+                            let id = crate::ids::CommentId::from_digest(change_identity(
+                                ctx, ordinal, "comment",
+                            )?)
+                            .as_str()
+                            .to_ascii_lowercase();
+                            let (id, next) = stage_issue_comment(
+                                &mut staging,
+                                ctx,
+                                &issue,
+                                Some(id),
+                                body,
+                                parent,
+                                ts,
+                            )?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "comment".into(),
+                                id,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueCommentAt {
+                            issue,
+                            body,
+                            field,
+                            start,
+                            end,
+                            parent,
+                            source,
+                        } => {
+                            let id = crate::ids::CommentId::from_digest(change_identity(
+                                ctx, ordinal, "comment",
+                            )?)
+                            .as_str()
+                            .to_ascii_lowercase();
+                            let (id, next) = stage_issue_comment_at(
+                                &mut staging,
+                                ctx,
+                                &issue,
+                                id,
+                                body,
+                                field,
+                                start,
+                                end,
+                                parent,
+                                source,
+                                ts,
+                            )?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "comment".into(),
+                                id,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueReaction {
+                            issue,
+                            comment,
+                            emoji,
+                            on,
+                        } => {
+                            let (doc, next) = stage_issue_reaction(
+                                &mut staging,
+                                ctx,
+                                &issue,
+                                comment,
+                                emoji,
+                                on,
+                            )?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueLink {
+                            issue,
+                            kind,
+                            target,
+                            on,
+                        } => {
+                            let (doc, next) =
+                                stage_issue_link(&mut staging, ctx, &issue, kind, &target, on, ts)?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueParent { issue, parent } => {
+                            let (doc, next) =
+                                stage_issue_parent(&mut staging, ctx, &issue, parent, ts)?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueMove {
+                            issue,
+                            project,
+                            position,
+                        } => {
+                            let project = project
+                                .map(|project| match project {
+                                    contract::ChangeProject::Existing { project } => {
+                                        resolve_entity(
+                                            ctx,
+                                            contract::ResolveEntity::Project,
+                                            &project,
+                                            None,
+                                        )
+                                        .map(|row| row.id)
+                                    }
+                                    contract::ChangeProject::Created { operation } => {
+                                        if operation >= ordinal {
+                                            return Err(Rejection::InvalidRequest);
+                                        }
+                                        created_projects
+                                            .get(&operation)
+                                            .cloned()
+                                            .ok_or(Rejection::InvalidRequest)
+                                    }
+                                })
+                                .transpose()?;
+                            let (doc, next, _changed) =
+                                stage_issue_move(&mut staging, ctx, &issue, project, position, ts)?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::IssueMilestone { issue, milestone } => {
+                            let (doc, next, _changed) =
+                                stage_issue_milestone(&mut staging, ctx, &issue, milestone, ts)?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "issue".into(),
+                                id: doc,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::LabelCreate { name, color } => {
+                            let id = crate::ids::LabelId::from_digest(change_identity(
+                                ctx, ordinal, "label",
+                            )?)
+                            .as_str()
+                            .to_owned();
+                            let next = stage_label_create(&mut staging, ctx, &id, name, color)?;
+                            created_labels.insert(ordinal, id.clone());
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "label".into(),
+                                id,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::LabelEdit { label, name, color } => {
+                            let (id, next, _changed) =
+                                stage_label_edit(&mut staging, ctx, &label, name, color)?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "label".into(),
+                                id,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                        contract::ChangeOperation::LabelDelete { label } => {
+                            let (id, next) = stage_label_delete(&mut staging, ctx, &label)?;
+                            staging.results.push(contract::ChangeResult {
+                                operation: ordinal,
+                                kind: "label".into(),
+                                id,
+                            });
+                            demand = Some(match demand {
+                                Some(current) => require_both(current, next)?,
+                                None => next,
+                            });
+                        }
+                    }
+                }
+                staging.require(demand.ok_or(Rejection::InvalidRequest)?);
+                Ok(staging.into_effect(None))
+            }
             IssueIntent::InitializeTracker {
                 name,
                 ts,
@@ -1972,7 +8546,8 @@ impl World for IssuesWorld {
                 // arrives in the intent (the composition root persisted the
                 // signed bytes); the World calls no clock and mints no id.
                 let project_key = project_key.trim().to_ascii_uppercase();
-                if project_name.trim().is_empty()
+                if !contract::valid_name(&name)
+                    || !contract::valid_name(&project_name)
                     || project_key.is_empty()
                     || project_key.len() > 8
                     || !project_key.bytes().all(|b| b.is_ascii_alphabetic())
@@ -2004,152 +8579,137 @@ impl World for IssuesWorld {
                 if built_in_roles != goldens {
                     return Err(Rejection::InvalidRequest);
                 }
-                // The deterministic Catalog must not exist yet: joiners adopt
-                // it through Manifest synchronization and never create it, and
-                // a second initialization never merges into the first. An
-                // exact replay is answered by the request receipt before the
-                // World runs; a content-identical re-run is a no-op.
-                if let Some(view) = checked_catalog_view(ctx)? {
-                    let initialized = view.lists.get("workflow").is_some_and(|l| !l.is_empty());
-                    if initialized {
-                        return Ok(unchanged_effect(None));
-                    }
+                let initial_project = ProjectMeta {
+                    name: project_name.trim().into(),
+                    key: project_key.clone(),
+                    color: "blue".into(),
+                    ..ProjectMeta::default()
+                };
+                let mut initial_catalog = CatalogState {
+                    name: name.clone(),
+                    ..CatalogState::default()
+                };
+                initial_catalog
+                    .projects
+                    .insert(project_id.clone(), initial_project.clone());
+                // The preferred implementation has no aggregate Catalog
+                // schema. Initialization therefore commits only the v4
+                // entity-sized records below; the historical Catalog is an
+                // input to the separately installed migrator, never a shadow
+                // truth recreated by a fresh tracker.
+                let directory = crate::records::space_directory_key(&ctx.principal().space);
+                if ctx.body_version(&directory).is_some() {
                     return Err(Rejection::Conflict);
                 }
-                // ---- one atomic Catalog transaction: display name, legacy
-                // workflow states, the workflow revision, the initial project,
-                // the built-in role definitions, and the registry commitment.
-                staging.catalog(reg("name", name.into_bytes()));
-                staging.catalog(reg("initialized_at", ts.to_string().into_bytes()));
-                staging.catalog(reg(
-                    "capability_registry",
-                    registry_hex.clone().into_bytes(),
-                ));
-                for (i, state) in contract::default_workflow().into_iter().enumerate() {
-                    staging.catalog(Op::ListInsert {
-                        path: "workflow".into(),
-                        index: i as u64,
-                        value: serde_json::to_vec(&state).expect("workflow json"),
-                    });
-                }
-                staging.catalog(map_set(
-                    "workflow_revisions",
-                    format!("{project_id}/{}", workflow_revision.revision_id),
-                    serde_json::to_vec(&workflow_revision).expect("workflow revision json"),
-                ));
-                staging.catalog(map_set(
-                    "projects",
-                    project_id.clone(),
-                    serde_json::to_vec(&serde_json::json!({
-                        "name": project_name.trim(),
-                        "key": project_key,
-                        "color": "blue",
-                    }))
-                    .expect("project json"),
-                ));
+                let mut batch = crate::record_store::write_space(
+                    ctx,
+                    &initial_catalog,
+                    &initial_catalog.name,
+                    Some(&initial_catalog.description),
+                )?;
+                batch.absorb(crate::record_store::write_project(
+                    ctx,
+                    &initial_catalog,
+                    &project_id,
+                    &initial_project,
+                    false,
+                    Some(&initial_project.description),
+                )?);
+                batch.absorb(crate::record_store::write_workflow_revision(
+                    ctx,
+                    &project_id,
+                    &workflow_revision,
+                )?);
                 for id in crate::roles::BUILT_IN_ROLE_IDS {
-                    let rev = crate::roles::built_in(id).expect("built-in role");
-                    staging.catalog(map_set(
-                        "roles",
-                        id,
-                        serde_json::to_vec(&serde_json::json!({
-                            "revision_id": data_encoding::HEXLOWER.encode(&rev.revision_id),
-                            "predecessor_ids": [],
-                            "body": serde_json::from_slice::<serde_json::Value>(
-                                &rev.body.canonical_json()
-                            )
-                            .expect("role body json"),
-                        }))
-                        .expect("role json"),
-                    ));
+                    let revision = crate::roles::built_in(id).expect("built-in role");
+                    let stored = crate::views::StoredRoleRevision {
+                        revision_id: data_encoding::HEXLOWER.encode(&revision.revision_id),
+                        predecessor_ids: Vec::new(),
+                        body: revision.body,
+                    };
+                    batch.absorb(crate::record_store::write_governance_revision(
+                        ctx, &stored,
+                    )?);
                 }
+                staging.absorb_records(batch);
                 // Tracker initialization is a founder-composition admin action.
                 staging.require(contract::demand_admin());
                 Ok(staging.into_effect(None))
             }
-            IssueIntent::StructureMigrate {
-                actor,
-                device: _,
-                ts,
-            } => {
-                if ActorId::parse(&actor).is_none() || ts == 0 {
-                    return Err(Rejection::InvalidRequest);
+            IssueIntent::V4Migrate { plan } => {
+                let Some(source) = ctx.lifecycle_source() else {
+                    return Err(Rejection::Denied(
+                        runtime::world::DeniedCause::DemandUnsatisfied,
+                    ));
+                };
+                if !plan.valid()
+                    || plan.source != source.publication.publication
+                    || plan.source_frontier != source.frontier
+                {
+                    return Err(Rejection::ContractViolation);
                 }
-
-                // Copy only facts that are visible after every existing
-                // relation overlay has been applied. Re-running therefore
-                // cannot resurrect a legacy edge that a newer Body removed.
-                for project in catalog.projects.keys() {
-                    let key = contract::relation_key(project);
-                    let create = ctx.body_version(&key).is_none();
-                    let state = relation_state(ctx, project).unwrap_or_default();
-                    for edge in &catalog.edges {
-                        let belongs = derived
-                            .issues
-                            .get(&edge.0)
-                            .is_some_and(|issue| issue.project == *project);
-                        if belongs && state.edges.get(edge) != Some(&true) {
-                            staging.relation(
-                                project,
-                                create,
-                                map_set("edges", format!("{}|{}|{}", edge.0, edge.1, edge.2), "1"),
-                            );
-                        }
-                    }
-                    for (child, parent) in &catalog.parents {
-                        let belongs = derived
-                            .issues
-                            .get(child)
-                            .is_some_and(|issue| issue.project == *project);
-                        if belongs
-                            && state.parents.get(child).and_then(Option::as_deref)
-                                != Some(parent.as_str())
-                        {
-                            staging.relation(
-                                project,
-                                create,
-                                Op::TreeAnchor {
-                                    path: contract::HIERARCHY_PATH.into(),
-                                    anchor: child.clone(),
-                                    parent: Some(parent.clone()),
-                                },
-                            );
-                        }
-                    }
+                crate::record_store::validate_migration_plan(ctx, &plan)?;
+                // The signed plan is only a compact coordinate. Recompute the
+                // canonical next window from the same frozen publication and
+                // reject any substituted Body/subitem/digest before staging.
+                let expected = prepare_v4_migration_plan(
+                    ctx,
+                    plan.previous_batch,
+                    plan.previous_cursor.clone(),
+                    plan.timestamp,
+                )?;
+                if expected != plan {
+                    return Err(Rejection::ContractViolation);
                 }
-
-                // Current heads receive equivalent immutable successors. The
-                // predecessor remains exact history, lifecycle state is kept,
-                // and a Plan that predates structured seeds becomes the
-                // canonical empty-roots form (the whole project).
-                let generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
-                for spec in all_specs(ctx) {
-                    let heads = spec.heads();
-                    if heads.len() != 1 {
-                        continue;
-                    }
-                    let head = heads[0];
-                    let Some(body) = migrated_spec_body(head, &generation, &actor, ts) else {
-                        continue;
-                    };
-                    validate_plan(ctx, &catalog, &body.project, body.plan.as_ref())?;
-                    let predecessor = crate::spec::decode_revision(&head.revision)
+                let item = if plan.window.terminal() {
+                    crate::record_store::Batch::default()
+                } else {
+                    let body = plan
+                        .window
+                        .body
+                        .as_ref()
+                        .ok_or(Rejection::ContractViolation)?;
+                    let view = ctx
+                        .read_lifecycle_source_collaborative(body)
+                        .map_err(Rejection::BodyRead)?
                         .ok_or(Rejection::StateCorrupt)?;
-                    let revision = crate::spec::build_revision(body, vec![predecessor])
-                        .map_err(|_| Rejection::StateCorrupt)?;
-                    staging.spec(
-                        &spec_key(&head.body.spec),
-                        map_set(
-                            "revisions",
-                            revision.revision.clone(),
-                            serde_json::to_vec(&revision).expect("Spec revision JSON"),
-                        ),
-                    );
-                }
-
-                if staging.ops.is_empty() {
-                    return Ok(unchanged_effect(None));
-                }
+                    match plan.window.phase.as_str() {
+                        "catalog" => crate::record_store::migration_catalog_window(
+                            ctx,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                        )?,
+                        "issue" => crate::record_store::migration_issue_window(
+                            ctx,
+                            body,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                        )?,
+                        "coordinates" => crate::record_store::migration_coordinate_window(
+                            ctx,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                        )?,
+                        "spec" => migration_spec_window(
+                            ctx,
+                            body,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                            plan.source,
+                        )?,
+                        "baseline" => migration_baseline_window(
+                            ctx,
+                            body,
+                            &plan.window.subitem,
+                            view.as_ref(),
+                        )?,
+                        "terminal" => return Err(Rejection::ContractViolation),
+                        _ => return Err(Rejection::ContractViolation),
+                    }
+                };
+                staging.absorb_records(crate::record_store::finalize_migration_window(
+                    ctx, &plan, item,
+                )?);
                 staging.require(contract::demand_admin());
                 Ok(staging.into_effect(None))
             }
@@ -2164,11 +8724,25 @@ impl World for IssuesWorld {
                 body,
                 duedate,
                 estimate,
-                actor,
+                actor: _,
                 device,
                 ts,
             } => {
-                if title.trim().is_empty() || DocId::parse(&doc).is_none() {
+                let mut catalog = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog, &project)?;
+                load_labels_for_write(
+                    ctx,
+                    &mut catalog,
+                    labels.iter().cloned(),
+                    new_labels.iter().map(|label| label.name.clone()),
+                )?;
+                if !contract::valid_title(&title)
+                    || body
+                        .as_deref()
+                        .is_some_and(|body| !contract::valid_text(body))
+                    || DocId::parse(&doc).is_none()
+                    || ts == 0
+                {
                     return Err(Rejection::InvalidRequest);
                 }
                 if !catalog.projects.contains_key(&project) {
@@ -2182,17 +8756,29 @@ impl World for IssuesWorld {
                         return Err(Rejection::InvalidRequest);
                     }
                 }
+                if new_labels.iter().any(|label| {
+                    crate::ids::LabelId::parse(&label.id).is_none()
+                        || !contract::valid_name(&label.name)
+                        || label.color.len() > contract::MAX_PRESENTATION_TOKEN_BYTES
+                }) {
+                    return Err(Rejection::InvalidRequest);
+                }
                 if duedate == Some(0) || estimate.is_some_and(|e| e > contract::MAX_ESTIMATE) {
+                    return Err(Rejection::InvalidRequest);
+                }
+                if assignees.len() > contract::MAX_ISSUE_ASSIGNEES
+                    || assignees
+                        .iter()
+                        .any(|actor| ActorId::parse(actor).is_none())
+                {
                     return Err(Rejection::InvalidRequest);
                 }
                 let key = issue_key(&doc);
                 staging.issue(&key, Op::Create);
-                staging.issue(&key, reg("projectid", project.as_bytes().to_vec()));
-                staging.issue(&key, reg("title", title.as_bytes().to_vec()));
-                staging.issue(&key, reg("status", DEFAULT_STATUS.as_bytes().to_vec()));
-                staging.issue(&key, reg("priority", priority.as_bytes().to_vec()));
-                staging.issue(&key, reg("createdby", actor.as_bytes().to_vec()));
-                staging.issue(&key, reg("createdat", ts.to_string().into_bytes()));
+                staging.issue(
+                    &key,
+                    reg(crate::records::roots::ISSUE_ID, doc.as_bytes().to_vec()),
+                );
                 if body
                     .as_deref()
                     .is_some_and(|body| body.starts_with(contract::DOCUMENT_PREFIX))
@@ -2204,12 +8790,6 @@ impl World for IssuesWorld {
                             DOCUMENT_SCHEMA_VERSION.to_string().into_bytes(),
                         ),
                     );
-                }
-                if let Some(due) = duedate {
-                    staging.issue(&key, reg("duedate", due.to_string().into_bytes()));
-                }
-                if let Some(points) = estimate {
-                    staging.issue(&key, reg("estimate", points.to_string().into_bytes()));
                 }
                 if let Some(body) = body.filter(|b| !b.is_empty()) {
                     staging.issue(
@@ -2223,41 +8803,70 @@ impl World for IssuesWorld {
                     );
                 }
                 for who in &assignees {
-                    staging.issue(
-                        &key,
-                        Op::SetAdd {
-                            path: "assignees".into(),
-                            value: who.as_bytes().to_vec(),
-                        },
-                    );
+                    staging.absorb_records(crate::record_store::write_issue_relation(
+                        ctx, &doc, &project, "assignee", who, true,
+                    )?);
                 }
                 let (new_labels, label_ids) = reconcile_new_labels(&catalog, &labels, &new_labels);
                 for new_label in &new_labels {
-                    staging.catalog(map_set(
-                        "labels",
-                        new_label.id.clone(),
-                        serde_json::to_vec(&serde_json::json!({
-                            "name": new_label.name,
-                            "color": new_label.color,
-                        }))
-                        .expect("label json"),
-                    ));
+                    staging.absorb_records(crate::record_store::write_label(
+                        ctx,
+                        &catalog,
+                        &new_label.id,
+                        &LabelMeta {
+                            name: new_label.name.clone(),
+                            color: new_label.color.clone(),
+                        },
+                        false,
+                    )?);
                 }
                 for label in &label_ids {
-                    staging.issue(
-                        &key,
-                        Op::SetAdd {
-                            path: "labels".into(),
-                            value: label.as_bytes().to_vec(),
-                        },
-                    );
+                    staging.absorb_records(crate::record_store::write_issue_relation(
+                        ctx, &doc, &project, "label", label, true,
+                    )?);
                 }
-                // Alias seq + board, in the same atomic transaction.
-                let next = catalog.aliases.get(&project).copied().unwrap_or(0) + 1;
-                staging.catalog(map_set("aliases", project.clone(), next.to_string()));
-                staging.catalog(map_set("seqs", doc.clone(), next.to_string()));
-                board_insert_top(&mut staging, &catalog, &project, &doc);
-                push_event(&mut staging, ctx, &doc, &event("created", &device, ts));
+                // Alias allocation is Issue-id-derived: creation never
+                // contends on the Space Catalog or a per-project counter.
+                let ordinal = crate::records::IssueAliasCoordinate::deterministic_for_issue(
+                    &DocId::parse(&doc).expect("validated Issue id"),
+                )
+                .ordinal;
+                let placement_plan = crate::record_store::board_placement(
+                    ctx,
+                    &project,
+                    DEFAULT_STATUS,
+                    &doc,
+                    Some(&Pos::Top),
+                )?;
+                let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
+                staging.absorb_records(placement_plan.maintenance);
+                let mut batch = crate::record_store::Batch::default();
+                crate::record_store::write_issue_identity(ctx, &mut batch, &doc, ordinal)?;
+                staging.absorb_records(batch);
+                let meta = IssueState {
+                    project: project.clone(),
+                    title: title.clone(),
+                    status: DEFAULT_STATUS.into(),
+                    priority: Priority::parse(&priority).ok_or(Rejection::InvalidRequest)?,
+                    created_by: Some(ctx.principal().actor.clone()),
+                    created_at: ts,
+                    duedate,
+                    estimate,
+                    ..IssueState::default()
+                };
+                staging.absorb_records(crate::record_store::write_issue_meta(
+                    ctx, &doc, &meta, false,
+                )?);
+                let (transition, _) = crate::record_store::write_issue_transition(
+                    ctx,
+                    &doc,
+                    &[],
+                    &placement,
+                    "",
+                    ts,
+                )?;
+                staging.absorb_records(transition);
+                push_event(&mut staging, ctx, &doc, &event("created", &device, ts))?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::IssueEdit {
@@ -2271,13 +8880,22 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let (catalog, mut issue) = issue_write_state(ctx, &doc, status.is_some())?;
                 if title.is_none()
                     && status.is_none()
                     && priority.is_none()
                     && description.is_none()
                     && duedate.is_none()
                     && estimate.is_none()
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                if title
+                    .as_deref()
+                    .is_some_and(|title| !contract::valid_title(title))
+                    || description
+                        .as_deref()
+                        .is_some_and(|description| !contract::valid_text(description))
                 {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -2289,7 +8907,11 @@ impl World for IssuesWorld {
                     return Err(Rejection::InvalidRequest);
                 }
                 if let Some(status) = &status {
-                    if catalog.workflow_state(status).is_none() {
+                    if catalog
+                        .workflow_state(&issue.project, status)
+                        .map_err(workflow_rejection)?
+                        .is_none()
+                    {
                         return Err(Rejection::InvalidRequest);
                     }
                 }
@@ -2300,17 +8922,20 @@ impl World for IssuesWorld {
                 }
                 let key = issue_key(&doc);
                 let mut changes = Vec::new();
+                let mut meta_changed = false;
                 if let Some(title) = &title {
                     changes.push(EventChange {
                         f: "title".into(),
                         from: Some(issue.title.clone()),
                         to: Some(title.clone()),
                     });
-                    staging.issue(&key, reg("title", title.as_bytes().to_vec()));
+                    issue.title.clone_from(title);
+                    meta_changed = true;
                 }
                 let mut transition_evidence = None;
                 if let Some(status) = &status {
-                    if *status != issue.status {
+                    let changed = *status != issue.status;
+                    if changed {
                         // The deterministic transition gate: the demand
                         // template stored on the workflow's selected edge, and
                         // the evidence the receipt binds through the demand,
@@ -2325,14 +8950,28 @@ impl World for IssuesWorld {
                         from: Some(issue.status.clone()),
                         to: Some(status.clone()),
                     });
-                    staging.issue(&key, reg("status", status.as_bytes().to_vec()));
-                    let was_done = catalog.status_category(&issue.status) == StatusCategory::Done;
-                    let is_done = catalog.status_category(status) == StatusCategory::Done;
-                    if is_done && !was_done {
-                        board_remove(&mut staging, &catalog, &issue.project, &doc);
-                    } else if was_done && !is_done {
-                        board_insert_top(&mut staging, &catalog, &issue.project, &doc);
+                    let placement_plan = crate::record_store::board_placement(
+                        ctx,
+                        &issue.project,
+                        status,
+                        &doc,
+                        None,
+                    )?;
+                    let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
+                    let mut batch = crate::record_store::Batch::default();
+                    batch.absorb(placement_plan.maintenance);
+                    if changed {
+                        let evidence = transition_evidence
+                            .as_ref()
+                            .map(|value| {
+                                serde_json::to_string(value).expect("transition evidence JSON")
+                            })
+                            .unwrap_or_default();
+                        let transition =
+                            issue_transition_successor(ctx, &doc, placement, &evidence, ts)?;
+                        batch.absorb(transition);
                     }
+                    staging.absorb_records(batch);
                 }
                 if let Some(priority) = &priority {
                     changes.push(EventChange {
@@ -2340,7 +8979,8 @@ impl World for IssuesWorld {
                         from: Some(issue.priority.as_str().to_string()),
                         to: Some(priority.clone()),
                     });
-                    staging.issue(&key, reg("priority", priority.as_bytes().to_vec()));
+                    issue.priority = Priority::parse(priority).ok_or(Rejection::InvalidRequest)?;
+                    meta_changed = true;
                 }
                 if let Some(description) = &description {
                     if let Some((index, delete, insert)) =
@@ -2369,17 +9009,8 @@ impl World for IssuesWorld {
                             from: issue.duedate.map(|d| d.to_string()),
                             to: duedate.map(|d| d.to_string()),
                         });
-                        match duedate {
-                            Some(due) => {
-                                staging.issue(&key, reg("duedate", due.to_string().into_bytes()))
-                            }
-                            None => staging.issue(
-                                &key,
-                                Op::RegisterClear {
-                                    path: "duedate".into(),
-                                },
-                            ),
-                        }
+                        issue.duedate = duedate;
+                        meta_changed = true;
                     }
                 }
                 if let Some(estimate) = estimate {
@@ -2389,17 +9020,17 @@ impl World for IssuesWorld {
                             from: issue.estimate.map(|e| e.to_string()),
                             to: estimate.map(|e| e.to_string()),
                         });
-                        match estimate {
-                            Some(points) => staging
-                                .issue(&key, reg("estimate", points.to_string().into_bytes())),
-                            None => staging.issue(
-                                &key,
-                                Op::RegisterClear {
-                                    path: "estimate".into(),
-                                },
-                            ),
-                        }
+                        issue.estimate = estimate;
+                        meta_changed = true;
                     }
+                }
+                if meta_changed {
+                    staging.absorb_records(crate::record_store::write_issue_meta(
+                        ctx,
+                        &doc,
+                        &issue,
+                        catalog.tombstones.contains(&doc),
+                    )?);
                 }
                 if staging.ops.is_empty() {
                     return Ok(unchanged_effect(Some(doc)));
@@ -2411,7 +9042,7 @@ impl World for IssuesWorld {
                     // inside the operations digest the receipt binds.
                     ev.x = serde_json::to_string(evidence).expect("transition evidence json");
                 }
-                push_event(&mut staging, ctx, &doc, &ev);
+                push_event(&mut staging, ctx, &doc, &ev)?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::IssueTextSplice {
@@ -2421,7 +9052,7 @@ impl World for IssuesWorld {
                 insert,
                 base_len,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if delete == 0 && insert.is_empty() {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -2467,7 +9098,7 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 // Two jobs, one mechanism. A schema-0 body being moved onto the
                 // document schema, and a schema-1 document being rewritten into
                 // the form an editor can address positionally — both are
@@ -2528,18 +9159,18 @@ impl World for IssuesWorld {
                     ctx,
                     &doc,
                     &event("document_upgraded", &device, ts),
-                );
+                )?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::IssueTextCheckpoint { doc, device, ts } => {
-                issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let mut ev = event("edited", &device, ts);
                 ev.c.push(EventChange {
                     f: "description".into(),
                     from: None,
                     to: None,
                 });
-                push_event(&mut staging, ctx, &doc, &ev);
+                push_event(&mut staging, ctx, &doc, &ev)?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::IssueMove {
@@ -2549,49 +9180,19 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let mut effective = issue.project.clone();
-                if let Some(target) = &project {
-                    if !catalog.projects.contains_key(target) {
-                        return Err(Rejection::InvalidRequest);
-                    }
-                    if target != &issue.project {
-                        staging.issue(
-                            &issue_key(&doc),
-                            reg("projectid", target.as_bytes().to_vec()),
-                        );
-                        board_remove(&mut staging, &catalog, &issue.project, &doc);
-                        board_insert_top(&mut staging, &catalog, target, &doc);
-                        effective = target.clone();
-                    }
-                }
-                match pos {
-                    None => {}
-                    Some(Pos::Top) => board_insert_top(&mut staging, &catalog, &effective, &doc),
-                    Some(Pos::Bottom) => {
-                        board_remove(&mut staging, &catalog, &effective, &doc);
-                        // Insert computed against the current view minus doc.
-                        let len = board_entries(&catalog, &effective)
-                            .iter()
-                            .filter(|(_, d)| d != &doc)
-                            .count();
-                        staging.catalog(Op::ListInsert {
-                            path: board_path(&effective),
-                            index: len as u64,
-                            value: doc.as_bytes().to_vec(),
-                        });
-                    }
-                    Some(Pos::Before { doc: anchor }) => {
-                        board_move(&mut staging, &catalog, &effective, &doc, &anchor, false)
-                    }
-                    Some(Pos::After { doc: anchor }) => {
-                        board_move(&mut staging, &catalog, &effective, &doc, &anchor, true)
-                    }
-                }
-                if staging.ops.is_empty() {
+                let position = pos.map(|position| match position {
+                    Pos::Top => contract::ChangePosition::Top,
+                    Pos::Bottom => contract::ChangePosition::Bottom,
+                    Pos::Before { doc } => contract::ChangePosition::Before { issue: doc },
+                    Pos::After { doc } => contract::ChangePosition::After { issue: doc },
+                });
+                let (_doc, demand, changed) =
+                    stage_issue_move(&mut staging, ctx, &doc, project, position, ts)?;
+                let _ = device;
+                if !changed {
                     return Ok(unchanged_effect(Some(doc)));
                 }
-                push_event(&mut staging, ctx, &doc, &event("moved", &device, ts));
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::Assign {
@@ -2601,24 +9202,29 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let key = issue_key(&doc);
+                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let mut resulting =
+                    issue_relation_targets(ctx, &doc, "assignee", contract::MAX_ISSUE_ASSIGNEES)?;
                 for actor in &who {
                     if ActorId::parse(actor).is_none() {
                         return Err(Rejection::InvalidRequest);
                     }
-                    let op = if add {
-                        Op::SetAdd {
-                            path: "assignees".into(),
-                            value: actor.as_bytes().to_vec(),
-                        }
+                    if add {
+                        resulting.insert(actor.clone());
                     } else {
-                        Op::SetRemove {
-                            path: "assignees".into(),
-                            value: actor.as_bytes().to_vec(),
-                        }
-                    };
-                    staging.issue(&key, op);
+                        resulting.remove(actor);
+                    }
+                    staging.absorb_records(crate::record_store::write_issue_relation(
+                        ctx,
+                        &doc,
+                        &issue.project,
+                        "assignee",
+                        actor,
+                        add,
+                    )?);
+                }
+                if resulting.len() > contract::MAX_ISSUE_ASSIGNEES {
+                    return Err(Rejection::LimitExceeded);
                 }
                 let mut ev = event(if add { "assigned" } else { "unassigned" }, &device, ts);
                 ev.c = who
@@ -2629,7 +9235,7 @@ impl World for IssuesWorld {
                         to: add.then(|| w.clone()),
                     })
                     .collect();
-                push_event(&mut staging, ctx, &doc, &ev);
+                push_event(&mut staging, ctx, &doc, &ev)?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::Label {
@@ -2640,7 +9246,14 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let mut catalog = CatalogState::default();
+                load_labels_for_write(
+                    ctx,
+                    &mut catalog,
+                    add.iter().chain(&remove).cloned(),
+                    new_labels.iter().map(|label| label.name.clone()),
+                )?;
                 for label in &add {
                     if !catalog.labels.contains_key(label) {
                         return Err(Rejection::InvalidRequest);
@@ -2651,38 +9264,40 @@ impl World for IssuesWorld {
                         return Err(Rejection::InvalidRequest);
                     }
                 }
-                let key = issue_key(&doc);
                 let (new_labels, label_ids) = reconcile_new_labels(&catalog, &add, &new_labels);
                 for new_label in &new_labels {
-                    staging.catalog(map_set(
-                        "labels",
-                        new_label.id.clone(),
-                        serde_json::to_vec(&serde_json::json!({
-                            "name": new_label.name,
-                            "color": new_label.color,
-                        }))
-                        .expect("label json"),
-                    ));
+                    staging.absorb_records(crate::record_store::write_label(
+                        ctx,
+                        &catalog,
+                        &new_label.id,
+                        &LabelMeta {
+                            name: new_label.name.clone(),
+                            color: new_label.color.clone(),
+                        },
+                        false,
+                    )?);
                 }
                 for label in &label_ids {
-                    staging.issue(
-                        &key,
-                        Op::SetAdd {
-                            path: "labels".into(),
-                            value: label.as_bytes().to_vec(),
-                        },
-                    );
+                    staging.absorb_records(crate::record_store::write_issue_relation(
+                        ctx,
+                        &doc,
+                        &issue.project,
+                        "label",
+                        label,
+                        true,
+                    )?);
                 }
                 for label in &remove {
-                    staging.issue(
-                        &key,
-                        Op::SetRemove {
-                            path: "labels".into(),
-                            value: label.as_bytes().to_vec(),
-                        },
-                    );
+                    staging.absorb_records(crate::record_store::write_issue_relation(
+                        ctx,
+                        &doc,
+                        &issue.project,
+                        "label",
+                        label,
+                        false,
+                    )?);
                 }
-                push_event(&mut staging, ctx, &doc, &event("labeled", &device, ts));
+                push_event(&mut staging, ctx, &doc, &event("labeled", &device, ts))?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::Comment {
@@ -2690,30 +9305,14 @@ impl World for IssuesWorld {
                 body,
                 id,
                 parent,
-                actor,
+                actor: _,
                 device,
                 ts,
             } => {
-                let (_issue, parent_node) =
-                    check_comment(ctx, &doc, &body, &actor, id.as_deref(), parent.as_deref())?;
-                stage_comment(
-                    &mut staging,
-                    ctx,
-                    &doc,
-                    parent_node,
-                    StoredComment {
-                        a: actor,
-                        t: ts,
-                        b: body,
-                        id,
-                        parent,
-                        at: None,
-                        node: None,
-                        parent_node: None,
-                    },
-                    &device,
-                    ts,
-                );
+                let (_id, demand) =
+                    stage_issue_comment(&mut staging, ctx, &doc, id, body, parent, ts)?;
+                let _ = device;
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::CommentAt {
@@ -2724,84 +9323,40 @@ impl World for IssuesWorld {
                 end,
                 id,
                 parent,
-                actor,
+                source,
+                actor: _,
                 device,
                 ts,
             } => {
-                let (issue, parent_node) =
-                    check_comment(ctx, &doc, &body, &actor, Some(&id), parent.as_deref())?;
-                let at = mint_comment_anchor(ctx, &doc, &issue, &field, start, end)?;
-                stage_comment(
+                let (_id, demand) = stage_issue_comment_at(
                     &mut staging,
                     ctx,
                     &doc,
-                    parent_node,
-                    StoredComment {
-                        a: actor,
-                        t: ts,
-                        b: body,
-                        id: Some(id),
-                        parent,
-                        at: Some(at),
-                        node: None,
-                        parent_node: None,
-                    },
-                    &device,
+                    id,
+                    body,
+                    field,
+                    start,
+                    end,
+                    parent,
+                    source,
                     ts,
-                );
+                )?;
+                let _ = device;
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::React {
                 doc,
                 comment,
                 emoji,
-                actor,
+                actor: _,
                 on,
                 device: _,
                 ts: _,
             } => {
-                if ActorId::parse(&actor).is_none()
-                    || !contract::is_comment_id(&comment)
-                    || !contract::is_reaction_emoji(&emoji)
-                {
-                    return Err(Rejection::InvalidRequest);
-                }
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                if !issue
-                    .comments
-                    .iter()
-                    .any(|c| c.id.as_deref() == Some(comment.as_str()))
-                {
-                    return Err(Rejection::InvalidRequest);
-                }
-                let value = contract::reaction_value(&comment, &emoji, &actor);
-                let path = contract::REACTIONS_PATH.to_string();
-                // Un-reacting has to reach the old home too. A reaction added
-                // before the sets were collapsed lives in `reactions/<comment>`,
-                // and removing only from the new set would leave it standing —
-                // the button would report the reaction gone and the next read
-                // would bring it back. Both removes in one atomic batch; the
-                // one with nothing to remove is a no-op, not an error.
-                if on {
-                    staging.issue(&issue_key(&doc), Op::SetAdd { path, value });
-                } else {
-                    staging.issue(
-                        &issue_key(&doc),
-                        Op::SetRemove {
-                            path,
-                            value: value.clone(),
-                        },
-                    );
-                    staging.issue(
-                        &issue_key(&doc),
-                        Op::SetRemove {
-                            path: contract::reaction_path(&comment),
-                            value: contract::reaction_value_legacy(&emoji, &actor),
-                        },
-                    );
-                }
-                // No history event, deliberately — see the intent's contract
-                // note: a reaction is a social signal, not a change of record.
+                let (_doc, demand) =
+                    stage_issue_reaction(&mut staging, ctx, &doc, comment, emoji, on)?;
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::SetTombstone {
@@ -2810,23 +9365,9 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                staging.catalog(map_set(
-                    "tombstones",
-                    doc.clone(),
-                    if on { "1" } else { "0" },
-                ));
-                if on {
-                    board_remove(&mut staging, &catalog, &issue.project, &doc);
-                } else {
-                    board_insert_top(&mut staging, &catalog, &issue.project, &doc);
-                }
-                push_event(
-                    &mut staging,
-                    ctx,
-                    &doc,
-                    &event(if on { "deleted" } else { "restored" }, &device, ts),
-                );
+                let (_doc, demand) = stage_issue_tombstone(&mut staging, ctx, &doc, on, ts)?;
+                let _ = device;
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::Link {
@@ -2837,41 +9378,10 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let kind = kind.to_ascii_lowercase();
-                if !LINK_KINDS.contains(&kind.as_str()) || doc == target {
-                    return Err(Rejection::InvalidRequest);
-                }
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let other = issue_state(ctx, &target).ok_or(Rejection::InvalidRequest)?;
-                // `relates` is symmetric: canonicalize by sorted endpoints.
-                let (from, to) = if kind == "relates" && target < doc {
-                    (target.clone(), doc.clone())
-                } else {
-                    (doc.clone(), target.clone())
-                };
-                let edge = format!("{from}|{kind}|{to}");
-                if !add {
-                    if !catalog
-                        .edges
-                        .contains(&(from.clone(), kind.clone(), to.clone()))
-                    {
-                        return Err(Rejection::InvalidRequest);
-                    }
-                }
-                let relation_project = if from == doc {
-                    &issue.project
-                } else {
-                    &other.project
-                };
-                let relation_key = contract::relation_key(relation_project);
-                staging.relation(
-                    relation_project,
-                    ctx.body_version(&relation_key).is_none(),
-                    map_set("edges", edge, if add { "1" } else { "0" }),
-                );
-                let mut ev = event(if add { "linked" } else { "unlinked" }, &device, ts);
-                ev.x = format!("{kind} {target}");
-                push_event(&mut staging, ctx, &doc, &ev);
+                let (_doc, demand) =
+                    stage_issue_link(&mut staging, ctx, &doc, kind, &target, add, ts)?;
+                let _ = device;
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::Parent {
@@ -2880,129 +9390,24 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                if let Some(parent) = &parent {
-                    if parent == &doc {
-                        return Err(Rejection::Conflict);
-                    }
-                    let parent_issue = issue_state(ctx, parent).ok_or(Rejection::InvalidRequest)?;
-                    if parent_issue.project != issue.project {
-                        return Err(Rejection::InvalidRequest);
-                    }
-                    // Kept as a fast, local refusal so the caller gets
-                    // `Conflict` for the obvious case rather than a commit
-                    // failure. It is no longer the guarantee: this walks the
-                    // catalog as THIS replica has it, so two peers parenting
-                    // A under B and B under A concurrently both passed it and
-                    // the merge held a cycle. The hierarchy is now a tree, and
-                    // the engine refuses the cycle on whichever replica applies
-                    // the second move — including one that arrives by sync.
-                    if is_ancestor(&catalog, parent, &doc) {
-                        return Err(Rejection::Conflict);
-                    }
-                }
-                let relation_key = contract::relation_key(&issue.project);
-                staging.relation(
-                    &issue.project,
-                    ctx.body_version(&relation_key).is_none(),
-                    Op::TreeAnchor {
-                        path: contract::HIERARCHY_PATH.into(),
-                        anchor: doc.clone(),
-                        parent: parent.clone(),
-                    },
-                );
-                let mut ev = event("parented", &device, ts);
-                ev.x = parent.unwrap_or_else(|| "unparented".into());
-                push_event(&mut staging, ctx, &doc, &ev);
+                let (_doc, demand) = stage_issue_parent(&mut staging, ctx, &doc, parent, ts)?;
+                let _ = device;
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::WorkState {
                 doc,
                 action,
-                actor,
-                device,
+                actor: _,
+                device: _,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                if ActorId::parse(&actor).is_none() {
-                    return Err(Rejection::InvalidRequest);
-                }
-                let (category, kind) = match action {
-                    WorkAction::Start => (StatusCategory::Active, "started"),
-                    WorkAction::Done => (StatusCategory::Done, "finished"),
-                    WorkAction::Stop => (StatusCategory::Backlog, "stopped"),
-                };
-                let target = catalog
-                    .first_state_in(category)
-                    .ok_or(Rejection::Conflict)?
-                    .clone();
-                let key = issue_key(&doc);
-                let mut changes = Vec::new();
-                let mut transition_evidence = None;
-                if issue.status != target.id {
-                    // The category target's resulting edge must exist in the
-                    // project's workflow revision and authorize.
-                    let (demand, evidence) =
-                        transition_gate(&catalog, &issue.project, &issue.status, &target.id)?;
-                    staging.require(demand);
-                    transition_evidence = Some(evidence);
-                    changes.push(EventChange {
-                        f: "status".into(),
-                        from: Some(issue.status.clone()),
-                        to: Some(target.id.clone()),
-                    });
-                    staging.issue(&key, reg("status", target.id.as_bytes().to_vec()));
-                    let was_done = catalog.status_category(&issue.status) == StatusCategory::Done;
-                    let is_done = category == StatusCategory::Done;
-                    if is_done && !was_done {
-                        board_remove(&mut staging, &catalog, &issue.project, &doc);
-                    } else if was_done && !is_done {
-                        board_insert_top(&mut staging, &catalog, &issue.project, &doc);
-                    }
-                }
-                let me = ActorId::parse(&actor).expect("validated above");
-                let assigned = issue.assignees.contains(&me);
-                match action {
-                    WorkAction::Start if !assigned => {
-                        changes.push(EventChange {
-                            f: "assignees".into(),
-                            from: None,
-                            to: Some("@me".into()),
-                        });
-                        staging.issue(
-                            &key,
-                            Op::SetAdd {
-                                path: "assignees".into(),
-                                value: actor.as_bytes().to_vec(),
-                            },
-                        );
-                    }
-                    WorkAction::Stop if assigned => {
-                        changes.push(EventChange {
-                            f: "assignees".into(),
-                            from: Some("@me".into()),
-                            to: None,
-                        });
-                        staging.issue(
-                            &key,
-                            Op::SetRemove {
-                                path: "assignees".into(),
-                                value: actor.as_bytes().to_vec(),
-                            },
-                        );
-                    }
-                    _ => {}
-                }
-                if staging.ops.is_empty() {
+                let (doc, demand, changed) = stage_issue_work(&mut staging, ctx, &doc, action, ts)?;
+                if !changed {
                     // The idempotent no-op: nothing committed, nothing rung.
                     return Ok(unchanged_effect(Some(doc)));
                 }
-                let mut ev = event(kind, &device, ts);
-                ev.c = changes;
-                if let Some(evidence) = &transition_evidence {
-                    ev.x = serde_json::to_string(evidence).expect("transition evidence json");
-                }
-                push_event(&mut staging, ctx, &doc, &ev);
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::Verify {
@@ -3010,17 +9415,12 @@ impl World for IssuesWorld {
                 run,
                 source,
                 build,
-                actor,
-                device,
+                actor: _,
+                device: _,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                if DocId::parse(&doc).is_none()
-                    || catalog.tombstones.contains(&doc)
-                    || actor != ctx.principal().actor.as_str()
-                    || device != ctx.principal().device.as_str()
-                    || ts == 0
-                {
+                let (catalog, issue) = issue_write_state(ctx, &doc, true)?;
+                if DocId::parse(&doc).is_none() || catalog.tombstones.contains(&doc) || ts == 0 {
                     return Err(Rejection::InvalidRequest);
                 }
                 let run_id = parse_run_id(&run).ok_or(Rejection::InvalidRequest)?;
@@ -3044,8 +9444,7 @@ impl World for IssuesWorld {
                     return Err(Rejection::InvalidRequest);
                 }
 
-                let attachments = raw_attachments(ctx, &doc);
-                let mut checks = raw_checks(ctx, &doc);
+                let checks = raw_checks(ctx, &doc)?;
                 if checks.contains_key(&run) {
                     return Err(Rejection::Conflict);
                 }
@@ -3058,27 +9457,28 @@ impl World for IssuesWorld {
                     build: build.clone(),
                     source: source.clone(),
                     state: "started".into(),
-                    by: actor,
+                    by: ctx.principal().actor.to_string(),
                     ts,
                     attempt: None,
                     report: None,
                     verdict: None,
                 };
-                let record_bytes = serde_json::to_vec(&record).expect("check record JSON");
-                checks.insert(run.clone(), record_bytes.clone());
-                let key = issue_key(&doc);
-                staging.issue(
-                    &key,
-                    Op::MapSet {
-                        path: "checks".into(),
-                        key: run.clone(),
-                        value: record_bytes,
-                    },
+                let stored = crate::records::IssueCheckRecord {
+                    issue: doc.clone(),
+                    run: run.clone(),
+                    check: record,
+                };
+                staging.absorb_records(crate::record_store::write_check(ctx, &stored)?);
+                staging.declare(
+                    &crate::records::issue_check_key(
+                        &DocId::parse(&doc).ok_or(Rejection::InvalidRequest)?,
+                        &run,
+                    ),
+                    vec![source_ref],
                 );
-                staging.declare(&key, issue_content_of(&attachments, &checks)?);
-                let mut ev = event("check_started", &device, ts);
+                let mut ev = event("check_started", ctx.principal().device.as_str(), ts);
                 ev.x = run.clone();
-                push_event(&mut staging, ctx, &doc, &ev);
+                push_event(&mut staging, ctx, &doc, &ev)?;
                 staging.require(contract::demand_project_work(
                     "issue.verify",
                     &issue.project,
@@ -3115,15 +9515,13 @@ impl World for IssuesWorld {
                 verdict,
                 move_to_done,
                 id,
-                actor,
-                device,
+                actor: _,
+                device: _,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let (catalog, issue) = issue_write_state(ctx, &doc, move_to_done)?;
                 if DocId::parse(&doc).is_none()
                     || catalog.tombstones.contains(&doc)
-                    || actor != ctx.principal().actor.as_str()
-                    || device != ctx.principal().device.as_str()
                     || ts == 0
                     || !matches!(verdict.as_str(), "pass" | "fail")
                     || (move_to_done && verdict != "pass")
@@ -3140,6 +9538,7 @@ impl World for IssuesWorld {
                     .ok_or(Rejection::InvalidRequest)?;
                 let facts = ctx
                     .outcome(run_id, attempt_id)
+                    .map_err(Rejection::BodyRead)?
                     .ok_or(Rejection::InvalidRequest)?;
                 let expected_output =
                     contract::verify_candidate(&verdict, report_ref, report_status.plaintext_len)
@@ -3163,17 +9562,16 @@ impl World for IssuesWorld {
                     return Err(Rejection::InvalidRequest);
                 }
 
-                let mut attachments = raw_attachments(ctx, &doc);
+                let attachments = raw_attachments(ctx, &doc)?;
                 if attachments.contains_key(&id) {
                     return Err(Rejection::Conflict);
                 }
                 if attachments.len() >= contract::MAX_ATTACHMENTS_PER_ISSUE {
                     return Err(Rejection::LimitExceeded);
                 }
-                let mut checks = raw_checks(ctx, &doc);
-                let stored = checks.get(&run).ok_or(Rejection::InvalidRequest)?;
-                let mut check: contract::CheckRecord =
-                    serde_json::from_slice(stored).map_err(|_| Rejection::ContractViolation)?;
+                let mut check = crate::record_store::read_check(ctx, &doc, &run)?
+                    .ok_or(Rejection::InvalidRequest)?
+                    .check;
                 let actual_build = data_encoding::HEXLOWER.encode(&facts.build.as_bytes());
                 if check.spec != contract::VERIFY_SPEC
                     || check.v != contract::VERIFY_SPEC_VERSION
@@ -3189,41 +9587,28 @@ impl World for IssuesWorld {
                 check.attempt = Some(attempt.clone());
                 check.report = Some(report.clone());
                 check.verdict = Some(verdict.clone());
-                let check_bytes = serde_json::to_vec(&check).expect("accepted check JSON");
-                checks.insert(run.clone(), check_bytes.clone());
-
-                let attachment = serde_json::json!({
-                    "id": id,
-                    "name": format!("verification-{run}.json"),
-                    "mime": "application/json",
-                    "size": report_status.plaintext_len,
-                    "by": actor,
-                    "ts": ts,
-                    "comment": "",
-                    "content": report,
-                });
-                let attachment_bytes =
-                    serde_json::to_vec(&attachment).expect("verification report attachment JSON");
-                attachments.insert(id.clone(), attachment_bytes.clone());
-                let key = issue_key(&doc);
+                let source_ref = parse_content_ref(&check.source).ok_or(Rejection::StateCorrupt)?;
+                let check_record = crate::records::IssueCheckRecord {
+                    issue: doc.clone(),
+                    run: run.clone(),
+                    check,
+                };
+                staging.absorb_records(crate::record_store::write_check(ctx, &check_record)?);
+                let attachment = crate::records::IssueAttachmentRecord {
+                    issue: doc.clone(),
+                    id: id.clone(),
+                    name: format!("verification-{run}.json"),
+                    mime: "application/json".into(),
+                    size: report_status.plaintext_len,
+                    by: ctx.principal().actor.to_string(),
+                    timestamp: ts,
+                    comment: None,
+                    content: report.clone(),
+                    tombstone: false,
+                };
+                staging.absorb_records(crate::record_store::write_attachment(ctx, &attachment)?);
                 let mut acceptance_demand =
                     contract::demand_project_work("issue.verify", &issue.project);
-                staging.issue(
-                    &key,
-                    Op::MapSet {
-                        path: "checks".into(),
-                        key: run.clone(),
-                        value: check_bytes,
-                    },
-                );
-                staging.issue(
-                    &key,
-                    Op::MapSet {
-                        path: "attachments".into(),
-                        key: id,
-                        value: attachment_bytes,
-                    },
-                );
                 let mut changes = Vec::new();
                 let mut transition_evidence = None;
                 if move_to_done {
@@ -3250,19 +9635,48 @@ impl World for IssuesWorld {
                             from: Some(issue.status.clone()),
                             to: Some(done.state_id.clone()),
                         });
-                        staging.issue(&key, reg("status", done.state_id.as_bytes().to_vec()));
-                        board_remove(&mut staging, &catalog, &issue.project, &doc);
+                        let placement_plan = crate::record_store::board_placement(
+                            ctx,
+                            &issue.project,
+                            &done.state_id,
+                            &doc,
+                            None,
+                        )?;
+                        let mut batch = crate::record_store::Batch::default();
+                        batch.absorb(placement_plan.maintenance);
+                        let evidence = transition_evidence
+                            .as_ref()
+                            .map(|value| {
+                                serde_json::to_string(value).expect("transition evidence JSON")
+                            })
+                            .unwrap_or_default();
+                        batch.absorb(issue_transition_successor(
+                            ctx,
+                            &doc,
+                            placement_plan.placement.ok_or(Rejection::StateCorrupt)?,
+                            &evidence,
+                            ts,
+                        )?);
+                        staging.absorb_records(batch);
                     }
                 }
                 staging.require(acceptance_demand);
-                staging.declare(&key, issue_content_of(&attachments, &checks)?);
-                let mut ev = event("check_accepted", &device, ts);
+                let parsed_doc = DocId::parse(&doc).ok_or(Rejection::InvalidRequest)?;
+                staging.declare(
+                    &crate::records::issue_check_key(&parsed_doc, &run),
+                    vec![source_ref, report_ref],
+                );
+                staging.declare(
+                    &crate::records::issue_attachment_key(&parsed_doc, &id),
+                    vec![report_ref],
+                );
+                let mut ev = event("check_accepted", ctx.principal().device.as_str(), ts);
                 ev.c = changes;
                 ev.x = transition_evidence.map_or_else(
                     || verdict.clone(),
                     |evidence| serde_json::to_string(&evidence).expect("transition evidence JSON"),
                 );
-                push_event(&mut staging, ctx, &doc, &ev);
+                push_event(&mut staging, ctx, &doc, &ev)?;
                 staging.bind_run(
                     run.clone(),
                     runtime::exec::Cmd::Accept {
@@ -3280,36 +9694,9 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
-                let key = key.trim().to_ascii_uppercase();
-                if name.trim().is_empty()
-                    || key.is_empty()
-                    || key.len() > 8
-                    || !key.bytes().all(|b| b.is_ascii_alphabetic())
-                {
-                    return Err(Rejection::InvalidRequest);
-                }
-                if catalog.projects.values().any(|p| p.key == key) {
-                    return Err(Rejection::Conflict);
-                }
-                staging.catalog(map_set(
-                    "projects",
-                    id.clone(),
-                    serde_json::to_vec(&serde_json::json!({
-                        "name": name.trim(),
-                        "key": key,
-                        "color": color,
-                    }))
-                    .expect("project json"),
-                ));
-                // Every project carries a workflow revision from birth: the
-                // deterministic default (free movement, every edge an explicit
-                // replaceable gate).
-                let revision = crate::workflow::default_workflow_revision(&id);
-                staging.catalog(map_set(
-                    "workflow_revisions",
-                    format!("{id}/{}", revision.revision_id),
-                    serde_json::to_vec(&revision).expect("workflow revision json"),
-                ));
+                let catalog = CatalogState::default();
+                stage_project_create(&mut staging, ctx, &catalog, &id, &name, &key, &color)?;
+                staging.require(contract::demand_space_any("project.create"));
                 Ok(staging.into_effect(None))
             }
             IssueIntent::LabelNew {
@@ -3319,25 +9706,8 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
-                if name.trim().is_empty() {
-                    return Err(Rejection::InvalidRequest);
-                }
-                if catalog
-                    .labels
-                    .values()
-                    .any(|l| l.name.eq_ignore_ascii_case(&name))
-                {
-                    return Err(Rejection::Conflict);
-                }
-                staging.catalog(map_set(
-                    "labels",
-                    id,
-                    serde_json::to_vec(&serde_json::json!({
-                        "name": name,
-                        "color": color,
-                    }))
-                    .expect("label json"),
-                ));
+                let demand = stage_label_create(&mut staging, ctx, &id, name, color)?;
+                staging.require(demand);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::ProjectEdit {
@@ -3353,12 +9723,19 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog_storage, &id)?;
+                if let Some(team) = team.as_deref().filter(|team| !team.is_empty()) {
+                    crate::record_store::apply_team(ctx, &mut catalog_storage, team)?;
+                }
+                let catalog = &mut catalog_storage;
                 staging.require(contract::demand_space_any("project.configure"));
                 let current = catalog.projects.get(&id).ok_or(Rejection::InvalidRequest)?;
                 let mut meta = current.clone();
+                let description_changed = description.is_some();
                 if let Some(name) = name {
                     let name = name.trim().to_string();
-                    if name.is_empty() {
+                    if !contract::valid_name(&name) {
                         return Err(Rejection::InvalidRequest);
                     }
                     // No name-uniqueness guard: projects are unique on KEY, not
@@ -3366,9 +9743,15 @@ impl World for IssuesWorld {
                     meta.name = name;
                 }
                 if let Some(color) = color {
+                    if color.len() > contract::MAX_PRESENTATION_TOKEN_BYTES {
+                        return Err(Rejection::InvalidRequest);
+                    }
                     meta.color = color;
                 }
                 if let Some(description) = description {
+                    if !contract::valid_text(&description) {
+                        return Err(Rejection::InvalidRequest);
+                    }
                     meta.description = description;
                 }
                 if let Some(lead) = lead {
@@ -3396,43 +9779,44 @@ impl World for IssuesWorld {
                 }
                 // Serialize the whole record so an edit never drops a field the
                 // caller didn't touch.
-                staging.catalog(map_set(
-                    "projects",
-                    id.clone(),
-                    serde_json::to_vec(&meta).expect("project json"),
-                ));
+                staging.absorb_records(crate::record_store::write_project(
+                    ctx,
+                    &catalog,
+                    &id,
+                    &meta,
+                    false,
+                    description_changed.then_some(meta.description.as_str()),
+                )?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::ProjectUpdatePost {
                 project_id,
                 id,
-                author,
+                author: _,
                 body,
                 health,
                 device: _,
                 ts,
             } => {
+                let mut catalog = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog, &project_id)?;
                 staging.require(contract::demand_space_any("project.configure"));
                 if !catalog.projects.contains_key(&project_id) {
                     return Err(Rejection::InvalidRequest);
                 }
                 let body = body.trim();
-                if body.is_empty() {
+                if body.is_empty() || !contract::valid_text(body) {
                     return Err(Rejection::InvalidRequest);
                 }
                 let update = crate::views::ProjectUpdate {
                     id: id.clone(),
                     project_id: project_id.clone(),
-                    author,
+                    author: ctx.principal().actor.to_string(),
                     ts,
                     body: body.to_string(),
                     health,
                 };
-                staging.catalog(map_set(
-                    "project_updates",
-                    format!("{project_id}/{id}"),
-                    serde_json::to_vec(&update).expect("project update json"),
-                ));
+                staging.absorb_records(crate::record_store::write_project_update(ctx, &update)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::LabelEdit {
@@ -3442,40 +9826,11 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
-                staging.require(contract::demand_space_any("catalog.label.configure"));
-                let current = catalog.labels.get(&id).ok_or(Rejection::InvalidRequest)?;
-                let mut meta = current.clone();
-                if let Some(name) = name {
-                    let name = name.trim().to_string();
-                    if name.is_empty() {
-                        return Err(Rejection::InvalidRequest);
-                    }
-                    // Case-insensitive uniqueness against the OTHER labels — the
-                    // same guard `LabelNew` applies, minus this label itself.
-                    if catalog
-                        .labels
-                        .iter()
-                        .any(|(lid, l)| lid != &id && l.name.eq_ignore_ascii_case(&name))
-                    {
-                        return Err(Rejection::Conflict);
-                    }
-                    meta.name = name;
-                }
-                if let Some(color) = color {
-                    meta.color = color;
-                }
-                if meta == *current {
+                let (_id, demand, changed) = stage_label_edit(&mut staging, ctx, &id, name, color)?;
+                staging.require(demand);
+                if !changed {
                     return Ok(staging.into_effect(None));
                 }
-                staging.catalog(map_set(
-                    "labels",
-                    id.clone(),
-                    serde_json::to_vec(&serde_json::json!({
-                        "name": meta.name,
-                        "color": meta.color,
-                    }))
-                    .expect("label json"),
-                ));
                 Ok(staging.into_effect(None))
             }
             IssueIntent::LabelDelete {
@@ -3483,14 +9838,8 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
-                staging.require(contract::demand_space_any("catalog.label.configure"));
-                if !catalog.labels.contains_key(&id) {
-                    return Err(Rejection::InvalidRequest);
-                }
-                staging.catalog(Op::MapRemove {
-                    path: "labels".into(),
-                    key: id,
-                });
+                let (_id, demand) = stage_label_delete(&mut staging, ctx, &id)?;
+                staging.require(demand);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::SpaceRename {
@@ -3498,15 +9847,19 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                crate::record_store::apply_space(ctx, &mut catalog_storage)?;
+                let catalog = &mut catalog_storage;
                 staging.require(contract::demand_admin());
                 let name = name.trim();
-                if name.is_empty() {
+                if !contract::valid_name(name) {
                     return Err(Rejection::InvalidRequest);
                 }
                 if catalog.name == name {
                     return Ok(staging.into_effect(None));
                 }
-                staging.catalog(reg("name", name.to_string().into_bytes()));
+                staging
+                    .absorb_records(crate::record_store::write_space(ctx, &catalog, name, None)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::SpaceDescribe {
@@ -3514,13 +9867,24 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                crate::record_store::apply_space(ctx, &mut catalog_storage)?;
+                let catalog = &mut catalog_storage;
                 staging.require(contract::demand_admin());
                 // Empty clears; no trim so intentional leading/trailing prose is
                 // preserved. LWW on the catalog `description` register.
                 if catalog.description == description {
                     return Ok(staging.into_effect(None));
                 }
-                staging.catalog(reg("description", description.into_bytes()));
+                if !contract::valid_text(&description) {
+                    return Err(Rejection::InvalidRequest);
+                }
+                staging.absorb_records(crate::record_store::write_space(
+                    ctx,
+                    &catalog,
+                    &catalog.name,
+                    Some(&description),
+                )?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::RoleCreate {
@@ -3532,6 +9896,12 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                load_role_for_write(ctx, &mut catalog_storage, &role_id)?;
+                if let Some(project) = &scope_project {
+                    crate::record_store::apply_project(ctx, &mut catalog_storage, project)?;
+                }
+                let catalog = &mut catalog_storage;
                 // Custom ids only: `role_<ULID>`; built-in ids and free-form
                 // ids reject. The daemon mints the id; the World re-validates.
                 if !role_id.starts_with("role_")
@@ -3565,7 +9935,7 @@ impl World for IssuesWorld {
                 };
                 let revision = crate::roles::build_revision(body, vec![])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                stage_role_revision(&mut staging, &revision);
+                stage_role_revision(&mut staging, ctx, &revision)?;
                 staging.require(contract::demand_space_any("policy.configure"));
                 Ok(staging.into_effect(None))
             }
@@ -3578,6 +9948,9 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                load_role_for_write(ctx, &mut catalog_storage, &role_id)?;
+                let catalog = &mut catalog_storage;
                 if catalog.roles.contains_key(&role_id) {
                     // Built-ins are immutable in every field.
                     return Err(Rejection::InvalidRequest);
@@ -3597,7 +9970,7 @@ impl World for IssuesWorld {
                 let predecessor = decode_hex32(&expected_revision)?;
                 let revision = crate::roles::build_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                stage_role_revision(&mut staging, &revision);
+                stage_role_revision(&mut staging, ctx, &revision)?;
                 staging.require(contract::demand_space_any("policy.configure"));
                 Ok(staging.into_effect(None))
             }
@@ -3607,6 +9980,9 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                load_role_for_write(ctx, &mut catalog_storage, &role_id)?;
+                let catalog = &mut catalog_storage;
                 if catalog.roles.contains_key(&role_id) {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -3616,7 +9992,7 @@ impl World for IssuesWorld {
                 let predecessor = decode_hex32(&expected_revision)?;
                 let revision = crate::roles::build_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                stage_role_revision(&mut staging, &revision);
+                stage_role_revision(&mut staging, ctx, &revision)?;
                 staging.require(contract::demand_space_any("policy.configure"));
                 Ok(staging.into_effect(None))
             }
@@ -3627,6 +10003,9 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                load_role_for_write(ctx, &mut catalog_storage, &role_id)?;
+                let catalog = &mut catalog_storage;
                 if catalog.roles.contains_key(&role_id) {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -3654,7 +10033,7 @@ impl World for IssuesWorld {
                     .collect::<Result<_, _>>()?;
                 let revision = crate::roles::build_revision(body, predecessors)
                     .map_err(|_| Rejection::InvalidRequest)?;
-                stage_role_revision(&mut staging, &revision);
+                stage_role_revision(&mut staging, ctx, &revision)?;
                 staging.require(contract::demand_space_any("policy.configure"));
                 Ok(staging.into_effect(None))
             }
@@ -3665,6 +10044,9 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                load_workflow_for_write(ctx, &mut catalog_storage, &project_id)?;
+                let catalog = &mut catalog_storage;
                 if !catalog.projects.contains_key(&project_id) {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -3691,11 +10073,11 @@ impl World for IssuesWorld {
                     .collect::<Result<_, _>>()?;
                 let revision = crate::workflow::build_revision(body, predecessors)
                     .map_err(|_| Rejection::InvalidRequest)?;
-                staging.catalog(map_set(
-                    "workflow_revisions",
-                    format!("{project_id}/{}", revision.revision_id),
-                    serde_json::to_vec(&revision).expect("workflow revision json"),
-                ));
+                staging.absorb_records(crate::record_store::write_workflow_revision(
+                    ctx,
+                    &project_id,
+                    &revision,
+                )?);
                 staging.require(contract::demand_space_any("catalog.workflow.configure"));
                 Ok(staging.into_effect(None))
             }
@@ -3706,47 +10088,25 @@ impl World for IssuesWorld {
                 title,
                 text,
                 links,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if crate::ids::SpecId::parse(&spec).is_none()
-                    || ActorId::parse(&actor).is_none()
-                    || !catalog.projects.contains_key(&project)
-                    || spec_state(ctx, &spec).is_some()
-                {
-                    return Err(Rejection::InvalidRequest);
-                }
-                validate_spec_links(ctx, &links)?;
-                let plan = (kind == crate::spec::Kind::Plan)
-                    .then(|| crate::spec::PlanData { roots: Vec::new() });
-                let revision = crate::spec::build_revision(
-                    crate::spec::Body {
-                        spec: spec.clone(),
-                        project: project.clone(),
-                        kind,
-                        generation: data_encoding::HEXLOWER.encode(&ctx.manifest_root()),
-                        title,
-                        text,
-                        state: crate::spec::State::Draft,
-                        links,
-                        plan,
-                        author: actor,
-                        ts,
-                    },
-                    vec![],
-                )
-                .map_err(|_| Rejection::InvalidRequest)?;
-                let key = spec_key(&spec);
-                staging.spec(&key, Op::Create);
-                staging.spec(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
-                    ),
-                );
+                let mut catalog = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog, &project)?;
+                stage_spec_create(
+                    &mut staging,
+                    ctx,
+                    &catalog,
+                    self.portable_publication(ctx)?,
+                    &spec,
+                    &project,
+                    kind,
+                    title,
+                    text,
+                    links,
+                    ts,
+                )?;
                 staging.require(contract::demand_project_work("spec.write", &project));
                 Ok(staging.into_effect(Some(spec)))
             }
@@ -3757,13 +10117,11 @@ impl World for IssuesWorld {
                 text,
                 links,
                 plan,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if ActorId::parse(&actor).is_none() {
-                    return Err(Rejection::InvalidRequest);
-                }
+                let catalog = CatalogState::default();
                 let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
                 let heads = current.heads();
                 if heads.len() != 1 || heads[0].revision != expected {
@@ -3785,23 +10143,15 @@ impl World for IssuesWorld {
                     body.plan = plan;
                 }
                 validate_plan(ctx, &catalog, &body.project, body.plan.as_ref())?;
-                body.generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
+                body.publication = self.portable_publication(ctx)?;
                 body.state = crate::spec::State::Draft;
-                body.author = actor;
+                body.author = ctx.principal().actor.to_string();
                 body.ts = ts;
                 let predecessor =
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                let key = spec_key(&spec);
-                staging.spec(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
-                    ),
-                );
+                staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
                 staging.require(contract::demand_project_work(
                     "spec.write",
                     &head.body.project,
@@ -3812,12 +10162,11 @@ impl World for IssuesWorld {
                 spec,
                 expected,
                 text,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if ActorId::parse(&actor).is_none() || !text.starts_with(contract::DOCUMENT_PREFIX)
-                {
+                if !text.starts_with(contract::DOCUMENT_PREFIX) {
                     return Err(Rejection::InvalidRequest);
                 }
                 let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
@@ -3831,22 +10180,14 @@ impl World for IssuesWorld {
                 }
                 let mut body = head.body.clone();
                 body.text = text;
-                body.generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
-                body.author = actor;
+                body.publication = self.portable_publication(ctx)?;
+                body.author = ctx.principal().actor.to_string();
                 body.ts = ts;
                 let predecessor =
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                let key = spec_key(&spec);
-                staging.spec(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
-                    ),
-                );
+                staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
                 let demand = if matches!(
                     head.body.state,
                     crate::spec::State::Issued | crate::spec::State::Withdrawn
@@ -3862,11 +10203,11 @@ impl World for IssuesWorld {
                 spec,
                 expected,
                 state,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if ActorId::parse(&actor).is_none() || state == crate::spec::State::Draft {
+                if state == crate::spec::State::Draft {
                     return Err(Rejection::InvalidRequest);
                 }
                 let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
@@ -3891,22 +10232,33 @@ impl World for IssuesWorld {
                 }
                 let mut body = head.body.clone();
                 body.state = state;
-                body.generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
-                body.author = actor;
+                body.publication = self.portable_publication(ctx)?;
+                body.author = ctx.principal().actor.to_string();
                 body.ts = ts;
                 let predecessor =
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                let key = spec_key(&spec);
-                staging.spec(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
-                    ),
-                );
+                staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
+                if matches!(
+                    state,
+                    crate::spec::State::Issued | crate::spec::State::Withdrawn
+                ) {
+                    let issued = match current.issued() {
+                        crate::spec::Issued::None => Vec::new(),
+                        crate::spec::Issued::One(current) => vec![current.revision.clone()],
+                        crate::spec::Issued::Conflict(current) => current
+                            .into_iter()
+                            .map(|revision| revision.revision.clone())
+                            .collect(),
+                    };
+                    staging.absorb_records(crate::record_store::write_spec_issued_heads(
+                        ctx,
+                        &spec,
+                        &issued,
+                        (state == crate::spec::State::Issued).then_some(revision.revision.as_str()),
+                    )?);
+                }
                 let capability = if state == crate::spec::State::Review {
                     "spec.write"
                 } else {
@@ -3924,13 +10276,11 @@ impl World for IssuesWorld {
                 spec,
                 expected_heads,
                 body_json,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if ActorId::parse(&actor).is_none() {
-                    return Err(Rejection::InvalidRequest);
-                }
+                let catalog = CatalogState::default();
                 let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
                 let mut heads: Vec<String> = current
                     .heads()
@@ -3955,9 +10305,9 @@ impl World for IssuesWorld {
                 }
                 validate_spec_links(ctx, &body.links)?;
                 validate_plan(ctx, &catalog, &body.project, body.plan.as_ref())?;
-                body.generation = data_encoding::HEXLOWER.encode(&ctx.manifest_root());
+                body.publication = self.portable_publication(ctx)?;
                 body.state = crate::spec::State::Draft;
-                body.author = actor;
+                body.author = ctx.principal().actor.to_string();
                 body.ts = ts;
                 let predecessors = expected
                     .iter()
@@ -3967,15 +10317,7 @@ impl World for IssuesWorld {
                     .collect::<Result<Vec<_>, _>>()?;
                 let revision = crate::spec::build_revision(body, predecessors)
                     .map_err(|_| Rejection::InvalidRequest)?;
-                let key = spec_key(&spec);
-                staging.spec(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
-                    ),
-                );
+                staging.absorb_records(crate::record_store::write_spec_revision(ctx, &revision)?);
                 staging.require(contract::demand_project_work(
                     "spec.write",
                     &first.body.project,
@@ -3988,14 +10330,24 @@ impl World for IssuesWorld {
                 rel,
                 target,
                 note,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if crate::ids::ObservationId::parse(&observation).is_none()
-                    || ActorId::parse(&actor).is_none()
-                {
+                if crate::ids::ObservationId::parse(&observation).is_none() {
                     return Err(Rejection::InvalidRequest);
+                }
+                if spec_observation_state(ctx, &spec, &observation)?.is_some()
+                    || unique_find_row(
+                        ctx,
+                        crate::find::field::ID,
+                        &format!("observation-retraction:{observation}"),
+                        "spec_observation_fact",
+                        None,
+                    )?
+                    .is_some()
+                {
+                    return Err(Rejection::Conflict);
                 }
                 let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
                 let first = current.revisions.first().ok_or(Rejection::InvalidRequest)?;
@@ -4012,20 +10364,20 @@ impl World for IssuesWorld {
                 let entry = crate::spec::Observation {
                     observation,
                     spec: spec.clone(),
-                    observer: actor,
+                    observer: ctx.principal().actor.to_string(),
                     ts,
                     rel,
                     target,
                     note,
                 };
                 entry.validate().map_err(|_| Rejection::InvalidRequest)?;
-                staging.spec(
-                    &spec_key(&spec),
-                    Op::SetAdd {
-                        path: "observations".into(),
-                        value: serde_json::to_vec(&entry).expect("Observation JSON"),
+                staging.absorb_records(crate::record_store::write_spec_observation(
+                    ctx,
+                    &crate::records::SpecObservationRecord::Assert {
+                        project: first.body.project.clone(),
+                        observation: entry,
                     },
-                );
+                )?);
                 // Ordinary contributor standing. Noticing that two documents
                 // disagree is not an act of authority over either, and pricing
                 // it at the issuing capability would mean the people who read
@@ -4039,31 +10391,26 @@ impl World for IssuesWorld {
             IssueIntent::SpecRetract {
                 spec,
                 observation,
-                actor,
+                actor: _,
                 device: _,
-                ts: _,
+                ts,
             } => {
-                if ActorId::parse(&actor).is_none() {
-                    return Err(Rejection::InvalidRequest);
-                }
                 let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
                 let first = current.revisions.first().ok_or(Rejection::InvalidRequest)?;
-                let entry = current
-                    .observation(&observation)
+                let entry = spec_observation_state(ctx, &spec, &observation)?
                     .ok_or(Rejection::InvalidRequest)?;
-                // `SetRemove` matches the exact member, so the retraction has to
-                // name the bytes that were added — re-encoding the entry we just
-                // read is what makes that exact rather than approximate.
-                let value = serde_json::to_vec(entry).expect("Observation JSON");
                 let project = first.body.project.clone();
-                let own = entry.observer == actor;
-                staging.spec(
-                    &spec_key(&spec),
-                    Op::SetRemove {
-                        path: "observations".into(),
-                        value,
+                let own = entry.observer == ctx.principal().actor.as_str();
+                staging.absorb_records(crate::record_store::write_spec_observation(
+                    ctx,
+                    &crate::records::SpecObservationRecord::Retract {
+                        project: project.clone(),
+                        observation,
+                        spec: spec.clone(),
+                        actor: ctx.principal().actor.to_string(),
+                        timestamp: ts,
                     },
-                );
+                )?);
                 // Taking your own note back is part of writing it. Removing
                 // somebody else's is a judgement about the record, which is the
                 // same authority that decides what governs.
@@ -4079,12 +10426,13 @@ impl World for IssuesWorld {
                 project,
                 name,
                 members,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
+                let mut catalog = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog, &project)?;
                 if crate::ids::BaselineId::parse(&baseline).is_none()
-                    || ActorId::parse(&actor).is_none()
                     || !catalog.projects.contains_key(&project)
                     || baseline_state(ctx, &baseline).is_some()
                 {
@@ -4100,22 +10448,15 @@ impl World for IssuesWorld {
                         name,
                         state: crate::spec::State::Draft,
                         members,
-                        author: actor,
+                        author: ctx.principal().actor.to_string(),
                         ts,
                     },
                     vec![],
                 )
                 .map_err(|_| Rejection::InvalidRequest)?;
-                let key = baseline_key(&baseline);
-                staging.baseline(&key, Op::Create);
-                staging.baseline(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Baseline revision JSON"),
-                    ),
-                );
+                staging.absorb_records(crate::record_store::write_baseline_revision(
+                    ctx, &revision,
+                )?);
                 staging.require(contract::demand_project_work("baseline.write", &project));
                 Ok(staging.into_effect(Some(baseline)))
             }
@@ -4124,13 +10465,10 @@ impl World for IssuesWorld {
                 expected,
                 name,
                 members,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if ActorId::parse(&actor).is_none() {
-                    return Err(Rejection::InvalidRequest);
-                }
                 let current = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
                 let heads = current.heads();
                 if heads.len() != 1 || heads[0].revision != expected {
@@ -4148,21 +10486,15 @@ impl World for IssuesWorld {
                     body.members = members;
                 }
                 body.state = crate::spec::State::Draft;
-                body.author = actor;
+                body.author = ctx.principal().actor.to_string();
                 body.ts = ts;
                 let predecessor =
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_baseline_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                let key = baseline_key(&baseline);
-                staging.baseline(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Baseline revision JSON"),
-                    ),
-                );
+                staging.absorb_records(crate::record_store::write_baseline_revision(
+                    ctx, &revision,
+                )?);
                 staging.require(contract::demand_project_work(
                     "baseline.write",
                     &head.body.project,
@@ -4173,11 +10505,11 @@ impl World for IssuesWorld {
                 baseline,
                 expected,
                 state,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if ActorId::parse(&actor).is_none() || state == crate::spec::State::Draft {
+                if state == crate::spec::State::Draft {
                     return Err(Rejection::InvalidRequest);
                 }
                 let current = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
@@ -4207,21 +10539,34 @@ impl World for IssuesWorld {
                 }
                 let mut body = head.body.clone();
                 body.state = state;
-                body.author = actor;
+                body.author = ctx.principal().actor.to_string();
                 body.ts = ts;
                 let predecessor =
                     crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
                 let revision = crate::spec::build_baseline_revision(body, vec![predecessor])
                     .map_err(|_| Rejection::InvalidRequest)?;
-                let key = baseline_key(&baseline);
-                staging.baseline(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Baseline revision JSON"),
-                    ),
-                );
+                staging.absorb_records(crate::record_store::write_baseline_revision(
+                    ctx, &revision,
+                )?);
+                if matches!(
+                    state,
+                    crate::spec::State::Issued | crate::spec::State::Withdrawn
+                ) {
+                    let issued = match current.issued() {
+                        crate::spec::BaselineIssued::None => Vec::new(),
+                        crate::spec::BaselineIssued::One(current) => vec![current.revision.clone()],
+                        crate::spec::BaselineIssued::Conflict(current) => current
+                            .into_iter()
+                            .map(|revision| revision.revision.clone())
+                            .collect(),
+                    };
+                    staging.absorb_records(crate::record_store::write_baseline_issued_heads(
+                        ctx,
+                        &baseline,
+                        &issued,
+                        (state == crate::spec::State::Issued).then_some(revision.revision.as_str()),
+                    )?);
+                }
                 let demand = if state == crate::spec::State::Review {
                     contract::demand_project_work("baseline.write", &head.body.project)
                 } else {
@@ -4234,13 +10579,10 @@ impl World for IssuesWorld {
                 baseline,
                 expected_heads,
                 body_json,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if ActorId::parse(&actor).is_none() {
-                    return Err(Rejection::InvalidRequest);
-                }
                 let current = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
                 let mut heads: Vec<String> = current
                     .heads()
@@ -4264,7 +10606,7 @@ impl World for IssuesWorld {
                     validate_spec_ref(ctx, member, &body.project)?;
                 }
                 body.state = crate::spec::State::Draft;
-                body.author = actor;
+                body.author = ctx.principal().actor.to_string();
                 body.ts = ts;
                 let predecessors = expected
                     .iter()
@@ -4274,15 +10616,9 @@ impl World for IssuesWorld {
                     .collect::<Result<Vec<_>, _>>()?;
                 let revision = crate::spec::build_baseline_revision(body, predecessors)
                     .map_err(|_| Rejection::InvalidRequest)?;
-                let key = baseline_key(&baseline);
-                staging.baseline(
-                    &key,
-                    map_set(
-                        "revisions",
-                        revision.revision.clone(),
-                        serde_json::to_vec(&revision).expect("Baseline revision JSON"),
-                    ),
-                );
+                staging.absorb_records(crate::record_store::write_baseline_revision(
+                    ctx, &revision,
+                )?);
                 staging.require(contract::demand_project_work(
                     "baseline.write",
                     &first.body.project,
@@ -4295,7 +10631,7 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if let Some(binding) = &baseline {
                     let baseline_state =
                         baseline_state(ctx, &binding.baseline).ok_or(Rejection::InvalidRequest)?;
@@ -4308,24 +10644,25 @@ impl World for IssuesWorld {
                         return Err(Rejection::InvalidRequest);
                     }
                 }
-                staging.issue(
-                    &issue_key(&doc),
-                    reg(
-                        "baseline",
-                        baseline
-                            .as_ref()
-                            .map(|binding| {
-                                serde_json::to_vec(binding).expect("Baseline binding JSON")
-                            })
-                            .unwrap_or_default(),
-                    ),
-                );
+                let baseline_target = baseline
+                    .as_ref()
+                    .or(issue.baseline.as_ref())
+                    .map(|binding| serde_json::to_string(binding).expect("Baseline binding JSON"))
+                    .unwrap_or_else(|| "none".into());
+                staging.absorb_records(crate::record_store::write_issue_relation(
+                    ctx,
+                    &doc,
+                    &issue.project,
+                    "baseline",
+                    &baseline_target,
+                    baseline.is_some(),
+                )?);
                 staging.require(contract::demand_project_any("issue.bind", &issue.project));
                 let mut event = event("baseline", &device, ts);
                 event.x = baseline
                     .map(|binding| format!("{}@{}", binding.baseline, binding.revision))
                     .unwrap_or_default();
-                push_event(&mut staging, ctx, &doc, &event);
+                push_event(&mut staging, ctx, &doc, &event)?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::ProjectDelete {
@@ -4334,90 +10671,61 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 staging.require(contract::demand_project_any("project.delete", &id));
-                if !catalog.projects.contains_key(&id) {
+                let mut catalog = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog, &id)?;
+                let Some(meta) = catalog.projects.get(&id).cloned() else {
                     return Err(Rejection::InvalidRequest);
-                }
+                };
                 // The safe v1 (CUSTOM-10): a project still referenced by ANY
                 // issue — live or tombstoned — refuses. Every doc's alias keys
                 // off its project; deleting under one would orphan it
                 // silently. Reassign (`issue move`) or archive instead.
-                let referenced = ctx
-                    .bodies_with_schema(&contract::world_id(), &contract::issue_schema())
-                    .iter()
-                    .filter_map(|key| ctx.read_collaborative(key).ok())
-                    .any(|view| IssueState::from_view(&view).project == id);
+                //
+                // This asked for `issue_placement`, a migration-only node no
+                // extractor in this package emits, so the guard answered
+                // "unreferenced" for every project and deleted one out from
+                // under its issues.
+                let referenced = find_exists_bytes(
+                    ctx,
+                    crate::find::field::KIND_PROJECT,
+                    crate::find::composite_key(["issue", id.as_str()]),
+                )?;
                 if referenced {
                     return Err(Rejection::Conflict);
                 }
-                let map_remove = |path: &str, key: String| Op::MapRemove {
-                    path: path.into(),
-                    key,
-                };
-                staging.catalog(map_remove("projects", id.clone()));
-                if catalog.aliases.contains_key(&id) {
-                    staging.catalog(map_remove("aliases", id.clone()));
-                }
-                for rev in catalog.workflow_revisions.get(&id).into_iter().flatten() {
-                    staging.catalog(map_remove(
-                        "workflow_revisions",
-                        format!("{id}/{}", rev.revision_id),
-                    ));
-                }
-                for update in catalog.project_updates.get(&id).into_iter().flatten() {
-                    staging.catalog(map_remove("project_updates", format!("{id}/{}", update.id)));
-                }
-                for mid in catalog
-                    .milestones
-                    .get(&id)
-                    .into_iter()
-                    .flat_map(|m| m.keys())
-                {
-                    staging.catalog(map_remove("project_milestones", format!("{id}/{mid}")));
-                }
-                for cid in catalog.cycles.get(&id).into_iter().flat_map(|c| c.keys()) {
-                    staging.catalog(map_remove("cycles", format!("{id}/{cid}")));
-                }
-                // Initiatives referencing the project drop it from their
-                // member list in the same transaction.
-                for (iid, initiative) in &catalog.initiatives {
-                    if initiative.projects.contains(&id) {
-                        let mut updated = initiative.clone();
-                        updated.projects.retain(|p| p != &id);
-                        staging.catalog(map_set(
-                            "initiatives",
-                            iid.clone(),
-                            serde_json::to_vec(&updated).expect("initiative json"),
-                        ));
-                    }
-                }
+                staging.absorb_records(crate::record_store::write_project(
+                    ctx, &catalog, &id, &meta, true, None,
+                )?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::Follow {
                 doc,
-                actor,
+                actor: _,
                 on,
                 device: _,
                 ts: _,
             } => {
-                if ActorId::parse(&actor).is_none() {
-                    return Err(Rejection::InvalidRequest);
+                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                if on {
+                    let mut followers = issue_relation_targets(
+                        ctx,
+                        &doc,
+                        "follower",
+                        contract::MAX_ISSUE_FOLLOWERS,
+                    )?;
+                    followers.insert(ctx.principal().actor.as_str().to_string());
+                    if followers.len() > contract::MAX_ISSUE_FOLLOWERS {
+                        return Err(Rejection::LimitExceeded);
+                    }
                 }
-                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let value = actor.into_bytes();
-                staging.issue(
-                    &issue_key(&doc),
-                    if on {
-                        Op::SetAdd {
-                            path: "followers".into(),
-                            value,
-                        }
-                    } else {
-                        Op::SetRemove {
-                            path: "followers".into(),
-                            value,
-                        }
-                    },
-                );
+                staging.absorb_records(crate::record_store::write_issue_relation(
+                    ctx,
+                    &doc,
+                    &issue.project,
+                    "follower",
+                    ctx.principal().actor.as_str(),
+                    on,
+                )?);
                 // No history event, like `React` — following is a personal
                 // signal, not a change of record.
                 Ok(staging.into_effect(Some(doc)))
@@ -4433,45 +10741,25 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog_storage, &project_id)?;
+                crate::record_store::apply_schedule_record(
+                    ctx,
+                    &mut catalog_storage,
+                    &project_id,
+                    &id,
+                )?;
+                let catalog = &mut catalog_storage;
                 staging.require(contract::demand_space_any("project.configure"));
                 if !catalog.projects.contains_key(&project_id) || id.is_empty() {
                     return Err(Rejection::InvalidRequest);
                 }
 
-                // The project's live milestones in the order a reader sees them,
-                // and the backfill that makes that order durable.
-                //
-                // Records written before ranks existed have none, and a list that
-                // was half hand-ordered and half date-ordered would have no
-                // answer to "where does this one go". So the first milestone
-                // write in a project stamps a rank on every one of its
-                // milestones, taken from the legacy order they are already being
-                // read in — nothing moves, the order just stops being derived.
-                let mut ordered: Vec<crate::views::Milestone> = catalog
+                let current = catalog
                     .milestones
                     .get(&project_id)
-                    .into_iter()
-                    .flat_map(|m| m.values())
-                    .filter(|m| !m.tombstone)
-                    .cloned()
-                    .collect();
-                ordered.sort_by(milestone_order);
-                let backfilling = ordered.iter().any(|m| m.rank.is_empty());
-                if backfilling {
-                    let mut previous = String::new();
-                    for milestone in ordered.iter_mut() {
-                        previous = rank::between(&previous, None);
-                        milestone.rank = previous.clone();
-                    }
-                }
-
-                let current = ordered.iter().find(|m| m.id == id).cloned().or_else(|| {
-                    catalog
-                        .milestones
-                        .get(&project_id)
-                        .and_then(|m| m.get(&id))
-                        .cloned()
-                });
+                    .and_then(|records| records.get(&id))
+                    .cloned();
                 let mut record = match current.clone() {
                     Some(m) => m,
                     None => {
@@ -4488,15 +10776,20 @@ impl World for IssuesWorld {
                             // Appended, so a new milestone lands where you can
                             // see it rather than sorted into the middle by a date
                             // you have not set yet.
-                            rank: rank::after_all(
-                                &ordered.iter().map(|m| m.rank.clone()).collect::<Vec<_>>(),
-                            ),
+                            rank: milestone_position(
+                                ctx,
+                                &project_id,
+                                &id,
+                                pos.as_ref().unwrap_or(&Pos::Bottom),
+                            )?,
                             tombstone: false,
                         }
                     }
                 };
                 if let Some(pos) = &pos {
-                    record.rank = place(&ordered, &id, pos).ok_or(Rejection::InvalidRequest)?;
+                    record.rank = milestone_position(ctx, &project_id, &id, pos)?;
+                } else if record.rank.is_empty() {
+                    record.rank = milestone_position(ctx, &project_id, &id, &Pos::Bottom)?;
                 }
                 if current.is_some() {
                     if let Some(name) = &name {
@@ -4515,28 +10808,10 @@ impl World for IssuesWorld {
                 if let Some(tombstone) = tombstone {
                     record.tombstone = tombstone;
                 }
-                if current.as_ref() == Some(&record) && !backfilling {
+                if current.as_ref() == Some(&record) {
                     return Ok(staging.into_effect(None));
                 }
-                if backfilling {
-                    // Every sibling whose rank we just derived, so the order this
-                    // write assumes is the order the next reader gets.
-                    for milestone in &ordered {
-                        if milestone.id == id {
-                            continue;
-                        }
-                        staging.catalog(map_set(
-                            "project_milestones",
-                            format!("{project_id}/{}", milestone.id),
-                            serde_json::to_vec(milestone).expect("milestone json"),
-                        ));
-                    }
-                }
-                staging.catalog(map_set(
-                    "project_milestones",
-                    format!("{project_id}/{id}"),
-                    serde_json::to_vec(&record).expect("milestone json"),
-                ));
+                staging.absorb_records(crate::record_store::write_milestone(ctx, &record)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::IssueMilestone {
@@ -4545,34 +10820,13 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let label = match &milestone {
-                    Some(m) => {
-                        let record = catalog
-                            .milestones
-                            .get(&issue.project)
-                            .and_then(|ms| ms.get(m))
-                            .filter(|r| !r.tombstone)
-                            .ok_or(Rejection::InvalidRequest)?;
-                        staging.issue(&issue_key(&doc), reg("milestone", m.as_bytes().to_vec()));
-                        record.name.clone()
-                    }
-                    None => {
-                        staging.issue(
-                            &issue_key(&doc),
-                            Op::RegisterClear {
-                                path: "milestone".into(),
-                            },
-                        );
-                        "none".into()
-                    }
-                };
-                if issue.milestone == milestone {
+                let (_doc, demand, changed) =
+                    stage_issue_milestone(&mut staging, ctx, &doc, milestone, ts)?;
+                let _ = device;
+                if !changed {
                     return Ok(unchanged_effect(Some(doc)));
                 }
-                let mut ev = event("milestoned", &device, ts);
-                ev.x = label;
-                push_event(&mut staging, ctx, &doc, &ev);
+                staging.require(demand);
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::CycleSet {
@@ -4585,6 +10839,15 @@ impl World for IssuesWorld {
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog_storage, &project_id)?;
+                crate::record_store::apply_schedule_record(
+                    ctx,
+                    &mut catalog_storage,
+                    &project_id,
+                    &id,
+                )?;
+                let catalog = &mut catalog_storage;
                 staging.require(contract::demand_space_any("project.configure"));
                 if !catalog.projects.contains_key(&project_id) || id.is_empty() {
                     return Err(Rejection::InvalidRequest);
@@ -4634,11 +10897,7 @@ impl World for IssuesWorld {
                 if current.as_ref() == Some(&record) {
                     return Ok(staging.into_effect(None));
                 }
-                staging.catalog(map_set(
-                    "cycles",
-                    format!("{project_id}/{id}"),
-                    serde_json::to_vec(&record).expect("cycle json"),
-                ));
+                staging.absorb_records(crate::record_store::write_cycle(ctx, &record)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::IssueCycle {
@@ -4647,7 +10906,16 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let mut catalog = CatalogState::default();
+                if let Some(cycle) = &cycle {
+                    crate::record_store::apply_schedule_record(
+                        ctx,
+                        &mut catalog,
+                        &issue.project,
+                        cycle,
+                    )?;
+                }
                 let label = match &cycle {
                     Some(c) => {
                         let record = catalog
@@ -4656,16 +10924,25 @@ impl World for IssuesWorld {
                             .and_then(|cs| cs.get(c))
                             .filter(|r| !r.tombstone)
                             .ok_or(Rejection::InvalidRequest)?;
-                        staging.issue(&issue_key(&doc), reg("cycle", c.as_bytes().to_vec()));
+                        staging.absorb_records(crate::record_store::write_issue_relation(
+                            ctx,
+                            &doc,
+                            &issue.project,
+                            "cycle",
+                            c,
+                            true,
+                        )?);
                         record.name.clone()
                     }
                     None => {
-                        staging.issue(
-                            &issue_key(&doc),
-                            Op::RegisterClear {
-                                path: "cycle".into(),
-                            },
-                        );
+                        staging.absorb_records(crate::record_store::write_issue_relation(
+                            ctx,
+                            &doc,
+                            &issue.project,
+                            "cycle",
+                            issue.cycle.as_deref().unwrap_or("none"),
+                            false,
+                        )?);
                         "none".into()
                     }
                 };
@@ -4674,7 +10951,7 @@ impl World for IssuesWorld {
                 }
                 let mut ev = event("cycled", &device, ts);
                 ev.x = label;
-                push_event(&mut staging, ctx, &doc, &ev);
+                push_event(&mut staging, ctx, &doc, &ev)?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::InitiativeSet {
@@ -4684,12 +10961,17 @@ impl World for IssuesWorld {
                 owner,
                 health,
                 target_date,
-                projects,
+                add_projects,
+                remove_projects,
                 tombstone,
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                let catalog = &mut catalog_storage;
+                crate::record_store::apply_initiative(ctx, catalog, &id)?;
                 staging.require(contract::demand_space_any("project.create"));
+                let description_changed = description.is_some();
                 if id.is_empty() {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -4734,25 +11016,44 @@ impl World for IssuesWorld {
                 if let Some(target) = target_date {
                     record.target_date = target;
                 }
-                if let Some(projects) = projects {
-                    for project in &projects {
-                        if !catalog.projects.contains_key(project) {
-                            return Err(Rejection::InvalidRequest);
-                        }
+                for project in add_projects.iter().chain(&remove_projects) {
+                    crate::record_store::apply_project(ctx, catalog, project)?;
+                    if !catalog.projects.contains_key(project) {
+                        return Err(Rejection::InvalidRequest);
                     }
-                    record.projects = projects;
                 }
                 if let Some(tombstone) = tombstone {
                     record.tombstone = tombstone;
                 }
-                if current.as_ref() == Some(&record) {
+                if current.as_ref() == Some(&record)
+                    && add_projects.is_empty()
+                    && remove_projects.is_empty()
+                {
                     return Ok(staging.into_effect(None));
                 }
-                staging.catalog(map_set(
-                    "initiatives",
-                    id.clone(),
-                    serde_json::to_vec(&record).expect("initiative json"),
-                ));
+                staging.absorb_records(crate::record_store::write_initiative(
+                    ctx,
+                    &record,
+                    description_changed.then_some(record.description.as_str()),
+                )?);
+                for project in add_projects {
+                    staging.absorb_records(crate::record_store::write_entity_relation(
+                        ctx,
+                        &record.id,
+                        "initiative_project",
+                        &project,
+                        true,
+                    )?);
+                }
+                for project in remove_projects {
+                    staging.absorb_records(crate::record_store::write_entity_relation(
+                        ctx,
+                        &record.id,
+                        "initiative_project",
+                        &project,
+                        false,
+                    )?);
+                }
                 Ok(staging.into_effect(None))
             }
             IssueIntent::TeamSet {
@@ -4761,11 +11062,15 @@ impl World for IssuesWorld {
                 key,
                 icon,
                 lead,
-                members,
+                add_members,
+                remove_members,
                 tombstone,
                 device: _,
                 ts: _,
             } => {
+                let mut catalog_storage = CatalogState::default();
+                let catalog = &mut catalog_storage;
+                crate::record_store::apply_team(ctx, catalog, &id)?;
                 staging.require(contract::demand_admin());
                 if id.is_empty() {
                     return Err(Rejection::InvalidRequest);
@@ -4783,7 +11088,9 @@ impl World for IssuesWorld {
                         {
                             return Err(Rejection::InvalidRequest);
                         }
-                        if catalog.teams.values().any(|t| !t.tombstone && t.key == key) {
+                        if unique_find_row(ctx, crate::find::field::ENTITY_KEY, &key, "team", None)?
+                            .is_some()
+                        {
                             return Err(Rejection::Conflict);
                         }
                         crate::views::Team {
@@ -4815,27 +11122,41 @@ impl World for IssuesWorld {
                     }
                     record.lead = lead;
                 }
-                if let Some(mut members) = members {
-                    for member in &members {
-                        if ActorId::parse(member).is_none() {
-                            return Err(Rejection::InvalidRequest);
-                        }
-                    }
-                    members.sort();
-                    members.dedup();
-                    record.members = members;
+                if add_members
+                    .iter()
+                    .chain(&remove_members)
+                    .any(|member| ActorId::parse(member).is_none())
+                {
+                    return Err(Rejection::InvalidRequest);
                 }
                 if let Some(tombstone) = tombstone {
                     record.tombstone = tombstone;
                 }
-                if current.as_ref() == Some(&record) {
+                if current.as_ref() == Some(&record)
+                    && add_members.is_empty()
+                    && remove_members.is_empty()
+                {
                     return Ok(staging.into_effect(None));
                 }
-                staging.catalog(map_set(
-                    "teams",
-                    id.clone(),
-                    serde_json::to_vec(&record).expect("team json"),
-                ));
+                staging.absorb_records(crate::record_store::write_team(ctx, &record)?);
+                for member in add_members {
+                    staging.absorb_records(crate::record_store::write_entity_relation(
+                        ctx,
+                        &record.id,
+                        "team_member",
+                        &member,
+                        true,
+                    )?);
+                }
+                for member in remove_members {
+                    staging.absorb_records(crate::record_store::write_entity_relation(
+                        ctx,
+                        &record.id,
+                        "team_member",
+                        &member,
+                        false,
+                    )?);
+                }
                 Ok(staging.into_effect(None))
             }
             IssueIntent::TriageSubmit {
@@ -4843,14 +11164,14 @@ impl World for IssuesWorld {
                 title,
                 body,
                 source,
-                actor,
+                actor: _,
                 device: _,
                 ts,
             } => {
-                if title.trim().is_empty()
+                if !contract::valid_name(title.trim())
+                    || !contract::valid_text(&body)
                     || id.is_empty()
-                    || ActorId::parse(&actor).is_none()
-                    || catalog.triage.contains_key(&id)
+                    || triage_submission(ctx, &id)?.is_some()
                 {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -4859,15 +11180,11 @@ impl World for IssuesWorld {
                     title: title.trim().to_string(),
                     body,
                     source,
-                    submitted_by: actor,
+                    submitted_by: ctx.principal().actor.to_string(),
                     ts,
                     ..Default::default()
                 };
-                staging.catalog(map_set(
-                    "triage",
-                    id,
-                    serde_json::to_vec(&item).expect("triage json"),
-                ));
+                staging.absorb_records(crate::record_store::write_triage_submission(ctx, &item)?);
                 Ok(staging.into_effect(None))
             }
             IssueIntent::TriageDecide {
@@ -4876,26 +11193,25 @@ impl World for IssuesWorld {
                 project,
                 doc,
                 note,
-                actor,
+                actor: _,
                 device,
                 ts,
             } => {
                 staging.require(contract::demand_space_any("project.create"));
-                if !contract::TRIAGE_OUTCOMES.contains(&outcome.as_str())
-                    || ActorId::parse(&actor).is_none()
-                {
+                if !contract::TRIAGE_OUTCOMES.contains(&outcome.as_str()) {
                     return Err(Rejection::InvalidRequest);
                 }
-                let item = catalog.triage.get(&id).ok_or(Rejection::InvalidRequest)?;
+                let item = triage_submission(ctx, &id)?.ok_or(Rejection::InvalidRequest)?;
                 // Decided exactly once.
-                if !item.outcome.is_empty() {
+                if triage_has_decision(ctx, &id)? {
                     return Err(Rejection::Conflict);
                 }
                 let mut decided = item.clone();
                 decided.outcome = outcome.clone();
-                decided.decided_by = actor.clone();
+                decided.decided_by = ctx.principal().actor.to_string();
                 decided.decided_ts = ts;
                 decided.note = note;
+                let mut accepted_project = None;
                 match outcome.as_str() {
                     "accepted" => {
                         // Atomically create the issue in the same transaction
@@ -4903,21 +11219,19 @@ impl World for IssuesWorld {
                         // happen.
                         let project = project.ok_or(Rejection::InvalidRequest)?;
                         let doc = doc.ok_or(Rejection::InvalidRequest)?;
-                        if !catalog.projects.contains_key(&project) || DocId::parse(&doc).is_none()
+                        let mut project_catalog = CatalogState::default();
+                        crate::record_store::apply_project(ctx, &mut project_catalog, &project)?;
+                        if !project_catalog.projects.contains_key(&project)
+                            || DocId::parse(&doc).is_none()
                         {
                             return Err(Rejection::InvalidRequest);
                         }
                         let key = issue_key(&doc);
                         staging.issue(&key, Op::Create);
-                        staging.issue(&key, reg("projectid", project.as_bytes().to_vec()));
-                        staging.issue(&key, reg("title", item.title.as_bytes().to_vec()));
-                        staging.issue(&key, reg("status", DEFAULT_STATUS.as_bytes().to_vec()));
-                        staging.issue(&key, reg("priority", "none".as_bytes().to_vec()));
                         staging.issue(
                             &key,
-                            reg("createdby", item.submitted_by.as_bytes().to_vec()),
+                            reg(crate::records::roots::ISSUE_ID, doc.as_bytes().to_vec()),
                         );
-                        staging.issue(&key, reg("createdat", ts.to_string().into_bytes()));
                         if !item.body.is_empty() {
                             staging.issue(
                                 &key,
@@ -4929,25 +11243,61 @@ impl World for IssuesWorld {
                                 },
                             );
                         }
-                        let next = catalog.aliases.get(&project).copied().unwrap_or(0) + 1;
-                        staging.catalog(map_set("aliases", project.clone(), next.to_string()));
-                        staging.catalog(map_set("seqs", doc.clone(), next.to_string()));
-                        board_insert_top(&mut staging, &catalog, &project, &doc);
-                        push_event(&mut staging, ctx, &doc, &event("created", &device, ts));
+                        let ordinal =
+                            crate::records::IssueAliasCoordinate::deterministic_for_issue(
+                                &DocId::parse(&doc).expect("validated Issue id"),
+                            )
+                            .ordinal;
+                        let placement_plan = crate::record_store::board_placement(
+                            ctx,
+                            &project,
+                            DEFAULT_STATUS,
+                            &doc,
+                            Some(&Pos::Top),
+                        )?;
+                        let placement = placement_plan.placement.ok_or(Rejection::StateCorrupt)?;
+                        staging.absorb_records(placement_plan.maintenance);
+                        let mut batch = crate::record_store::Batch::default();
+                        crate::record_store::write_issue_identity(ctx, &mut batch, &doc, ordinal)?;
+                        staging.absorb_records(batch);
+                        let meta = IssueState {
+                            project: project.clone(),
+                            title: item.title.clone(),
+                            status: DEFAULT_STATUS.into(),
+                            priority: Priority::None,
+                            created_by: ActorId::parse(&item.submitted_by),
+                            created_at: ts,
+                            ..IssueState::default()
+                        };
+                        staging.absorb_records(crate::record_store::write_issue_meta(
+                            ctx, &doc, &meta, false,
+                        )?);
+                        let (transition, _) = crate::record_store::write_issue_transition(
+                            ctx,
+                            &doc,
+                            &[],
+                            &placement,
+                            "",
+                            ts,
+                        )?;
+                        staging.absorb_records(transition);
+                        push_event(&mut staging, ctx, &doc, &event("created", &device, ts))?;
+                        accepted_project = Some(project);
                         decided.doc = doc;
                     }
                     "duplicate" => {
                         let doc = doc.ok_or(Rejection::InvalidRequest)?;
-                        let _target = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                        let _target =
+                            issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                         decided.doc = doc;
                     }
                     _ => {}
                 }
-                staging.catalog(map_set(
-                    "triage",
-                    id,
-                    serde_json::to_vec(&decided).expect("triage json"),
-                ));
+                staging.absorb_records(crate::record_store::write_triage_decision(
+                    ctx,
+                    &decided,
+                    accepted_project.as_deref(),
+                )?);
                 let doc = (!decided.doc.is_empty() && decided.outcome == "accepted")
                     .then(|| decided.doc.clone());
                 Ok(staging.into_effect(doc))
@@ -4960,7 +11310,7 @@ impl World for IssuesWorld {
                 content,
                 size,
                 comment,
-                actor,
+                actor: _,
                 device,
                 ts,
             } => {
@@ -4970,8 +11320,7 @@ impl World for IssuesWorld {
                 // where the proposer is remote and refusing would let them make
                 // their own attachment unsaveable.
                 let name = name.trim();
-                if ActorId::parse(&actor).is_none()
-                    || !id.starts_with("att_")
+                if !id.starts_with("att_")
                     || name.is_empty()
                     || name.len() > contract::MAX_ATTACHMENT_NAME_BYTES
                     || name.chars().any(|c| c.is_control())
@@ -4984,9 +11333,8 @@ impl World for IssuesWorld {
                 if size == 0 {
                     return Err(Rejection::InvalidRequest);
                 }
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let existing = raw_attachments(ctx, &doc);
-                let checks = raw_checks(ctx, &doc);
+                let issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let existing = raw_attachments(ctx, &doc)?;
                 if existing.contains_key(&id) {
                     return Err(Rejection::InvalidRequest);
                 }
@@ -5006,42 +11354,29 @@ impl World for IssuesWorld {
                     }
                 }
                 let name = name.to_string();
-                let record = serde_json::json!({
-                    "id": id,
-                    "name": name,
-                    "mime": mime,
-                    "size": size,
-                    "by": actor,
-                    "ts": ts,
-                    "comment": comment.unwrap_or_default(),
-                    "content": content,
-                });
-                let key = issue_key(&doc);
-                staging.issue(
-                    &key,
-                    Op::MapSet {
-                        path: "attachments".into(),
-                        key: id.clone(),
-                        value: serde_json::to_vec(&record).expect("attachment json"),
-                    },
+                let record = crate::records::IssueAttachmentRecord {
+                    issue: doc.clone(),
+                    id: id.clone(),
+                    name: name.clone(),
+                    mime,
+                    size,
+                    by: ctx.principal().actor.to_string(),
+                    timestamp: ts,
+                    comment,
+                    content,
+                    tombstone: false,
+                };
+                staging.absorb_records(crate::record_store::write_attachment(ctx, &record)?);
+                staging.declare(
+                    &crate::records::issue_attachment_key(
+                        &DocId::parse(&doc).ok_or(Rejection::InvalidRequest)?,
+                        &id,
+                    ),
+                    vec![content_ref],
                 );
-                // The Body's whole content set, re-derived over the map this
-                // operation is about to change.
-                //
-                // Whole rather than incremental, because a declaration replaces
-                // rather than adds: an entry naming only the new file would
-                // silently detach every earlier one. Fail-closed for the same
-                // reason the cap counts raw records — a record that does not
-                // decode is content this Body still references, and leaving it
-                // out of the declaration would make those bytes collectable.
-                let mut refs = issue_content_of(&existing, &checks)?;
-                if !refs.contains(&content_ref) {
-                    refs.push(content_ref);
-                }
-                staging.declare(&key, refs);
                 let mut ev = event("attached", &device, ts);
                 ev.x = name;
-                push_event(&mut staging, ctx, &doc, &ev);
+                push_event(&mut staging, ctx, &doc, &ev)?;
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::Detach {
@@ -5050,26 +11385,29 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
-                let Some(meta) = issue.attachments.iter().find(|a| a.id == id) else {
+                // The attachment's own record is the one that says whether it
+                // exists, and it carries the name too. Asking the Issue's
+                // in-memory attachment list first refused every detach: that
+                // list is enrichment the core state no longer holds, so it is
+                // always empty and the record read below never ran.
+                let mut record = crate::record_store::read_attachment(ctx, &doc, &id)?
+                    .ok_or(Rejection::InvalidRequest)?;
+                if record.tombstone || record.issue != doc {
                     return Err(Rejection::InvalidRequest);
-                };
-                let name = meta.name.clone();
-                let mut attachments = raw_attachments(ctx, &doc);
-                attachments.remove(&id);
-                let checks = raw_checks(ctx, &doc);
-                let key = issue_key(&doc);
-                staging.issue(
-                    &key,
-                    Op::MapRemove {
-                        path: "attachments".into(),
-                        key: id,
-                    },
+                }
+                let name = record.name.clone();
+                record.tombstone = true;
+                staging.absorb_records(crate::record_store::write_attachment(ctx, &record)?);
+                staging.declare(
+                    &crate::records::issue_attachment_key(
+                        &DocId::parse(&doc).ok_or(Rejection::InvalidRequest)?,
+                        &id,
+                    ),
+                    Vec::new(),
                 );
-                staging.declare(&key, issue_content_of(&attachments, &checks)?);
                 let mut ev = event("detached", &device, ts);
                 ev.x = name;
-                push_event(&mut staging, ctx, &doc, &ev);
+                push_event(&mut staging, ctx, &doc, &ev)?;
                 Ok(staging.into_effect(Some(doc)))
             }
         }
@@ -5077,58 +11415,109 @@ impl World for IssuesWorld {
 
     fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
         let query = IssueQuery::from_json(&query.payload).ok_or(Rejection::InvalidRequest)?;
-        // ONE derived read model per Manifest root; every arm below reads the
-        // same immutable snapshot (see [`IssuesWorld::derived_snapshot`]).
-        let snap = self.derived_snapshot(ctx)?;
-        let catalog: &CatalogState = &snap.catalog;
-        let aliases: &DerivedAliases = &snap.aliases;
+        if self.package == IssuesPackage::Preferred
+            && matches!(
+                &query,
+                IssueQuery::V4MigrationStatus | IssueQuery::StructureStatus
+            )
+        {
+            return Err(Rejection::InvalidRequest);
+        }
+        let load_catalog = || live_catalog(ctx);
         let projection = |bytes: Vec<u8>| Projection {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             bytes,
             frontier: replica::frontier::ReplicaFrontier::EMPTY, // stamped by Runtime
+            publication: None, // stamped by Runtime with the exact immutable read image
             demand: contract::demand_read(),
         };
         match query {
-            IssueQuery::Snapshot => {
-                let value = serde_json::json!({
-                    "catalog": catalog,
-                    "aliases": {
-                        "by_doc": aliases.by_doc,
-                        "by_alias": aliases.by_alias,
-                        "canonical": aliases.canonical,
-                    },
-                });
-                Ok(projection(serde_json::to_vec(&value).expect("snapshot")))
-            }
-            IssueQuery::StructureStatus => Ok(projection(
-                serde_json::to_vec(&structure_report(ctx, &snap)).expect("structure report JSON"),
+            IssueQuery::V4MigrationStatus => Ok(projection(
+                serde_json::to_vec(&crate::record_store::migration_verification(ctx)?)
+                    .expect("migration verification JSON"),
             )),
+            IssueQuery::Resolve {
+                entity,
+                selector,
+                project,
+            } => Ok(projection(
+                serde_json::to_vec(&resolve_entity(ctx, entity, &selector, project.as_deref())?)
+                    .expect("resolved entity JSON"),
+            )),
+            IssueQuery::StructureStatus => {
+                let mut catalog = load_catalog()?;
+                let catalog: &mut CatalogState = &mut catalog;
+                let read = issue_read_set(ctx, catalog, None)?;
+                Ok(projection(
+                    serde_json::to_vec(&structure_report(ctx, catalog, &read)?)
+                        .expect("structure report JSON"),
+                ))
+            }
             IssueQuery::View { doc, me } => {
-                let me = me.and_then(|m| ActorId::parse(&m));
-                let issue = snap.issues.get(&doc);
-                let view = match issue {
-                    Some(issue) => {
-                        // The space id rides in the projection consumer; the
-                        // World does not know it — stamp a placeholder the
-                        // daemon replaces? No: the daemon supplies it in the
-                        // query. Provisional views come from the row path.
-                        let resolve = |comment: &StoredComment| {
-                            resolve_comment_anchor(ctx, &doc, issue, comment)
-                        };
-                        issue_view(
-                            catalog,
-                            aliases,
-                            &space_placeholder(),
-                            &doc,
-                            issue,
-                            &resolve,
-                        )
-                    }
-                    None => provisional_view(catalog, aliases, &doc),
-                };
+                let mut issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                enrich_issue_relations(ctx, &mut issue, &doc)?;
+                let mut catalog = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
+                apply_project_workflow(ctx, &mut catalog, &issue.project)?;
+                let aliases = aliases_for_issue(ctx, &catalog, &doc)?;
+                // View is the bounded issue/content summary. Discussion,
+                // relations, attachments, checks and activity are independent
+                // pages and therefore are intentionally empty here.
+                let resolve = |_comment: &StoredComment| None;
+                let view = issue_view(
+                    &catalog,
+                    &aliases,
+                    &space_placeholder(),
+                    &doc,
+                    &issue,
+                    &resolve,
+                );
                 let _ = me;
                 Ok(projection(serde_json::to_vec(&view).expect("view json")))
+            }
+            IssueQuery::Detail { doc, me, pages } => {
+                let mut issue = issue_core_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                enrich_issue_relations(ctx, &mut issue, &doc)?;
+                let mut catalog = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog, &issue.project)?;
+                apply_project_workflow(ctx, &mut catalog, &issue.project)?;
+                let aliases = aliases_for_issue(ctx, &catalog, &doc)?;
+                let resolve = |_comment: &StoredComment| None;
+                let issue = issue_view(
+                    &catalog,
+                    &aliases,
+                    &space_placeholder(),
+                    &doc,
+                    &issue,
+                    &resolve,
+                );
+                let detail = contract::IssueDetailProjection {
+                    publication: ctx
+                        .world_publication_id()
+                        .ok_or(Rejection::ImplementationUnavailable)?,
+                    issue,
+                    comments: issue_comments_page(ctx, &doc, &pages.comments)?,
+                    reactions: issue_reactions_page(ctx, &doc, &pages.reactions)?,
+                    attachments: issue_attachments_page(ctx, &doc, &pages.attachments)?,
+                    checks: issue_checks_page(ctx, &doc, &pages.checks)?,
+                    outgoing_relations: issue_relations_page(
+                        ctx,
+                        &doc,
+                        crate::dto::RelationDirection::Out,
+                        &pages.outgoing_relations,
+                    )?,
+                    incoming_relations: issue_relations_page(
+                        ctx,
+                        &doc,
+                        crate::dto::RelationDirection::In,
+                        &pages.incoming_relations,
+                    )?,
+                };
+                let _ = me;
+                Ok(projection(
+                    serde_json::to_vec(&detail).expect("issue detail json"),
+                ))
             }
             IssueQuery::List {
                 project,
@@ -5138,453 +11527,700 @@ impl World for IssuesWorld {
                 mine,
                 all,
                 me,
+                page,
             } => {
-                let me = me.and_then(|m| ActorId::parse(&m));
-                let mine = mine.and_then(|m| ActorId::parse(&m));
-                let mut rows: Vec<(String, Row2)> = Vec::new();
-                for (doc, issue) in &snap.issues {
-                    if let Some(project) = &project {
-                        if &issue.project != project {
-                            continue;
-                        }
-                    } else if catalog
-                        .projects
-                        .get(&issue.project)
-                        .is_some_and(|m| m.archived)
-                    {
-                        // No explicit project: an archived project's issues stay
-                        // out of the all-project list (CUSTOM-9). Opening the
-                        // project by ref passes `project` and bypasses this.
+                // A relation filter asks the reverse membership question --
+                // "which issues carry this label" -- so it is seeked on the
+                // reverse coordinate rather than post-filtered out of a page
+                // of every issue. One coordinate leads and any others narrow
+                // the result, because a page can only be bounded by one
+                // posting; which one leads changes what the scan costs, never
+                // what it answers.
+                let lead = label
+                    .as_ref()
+                    .map(|value| ("label", value.clone()))
+                    .or_else(|| milestone.as_ref().map(|value| ("milestone", value.clone())))
+                    .or_else(|| mine.as_ref().map(|value| ("assignee", value.clone())));
+                let mut narrowing: Vec<(&str, String, usize)> = Vec::new();
+                for (kind, value, maximum) in [
+                    ("label", label.clone(), contract::MAX_ISSUE_LABELS),
+                    ("milestone", milestone.clone(), 1),
+                    ("assignee", mine.clone(), contract::MAX_ISSUE_ASSIGNEES),
+                ] {
+                    let Some(value) = value else { continue };
+                    if lead.as_ref().is_some_and(|(led, _)| *led == kind) {
                         continue;
                     }
-                    let tomb = catalog.tombstones.contains(doc);
-                    let done = catalog.status_category(&issue.status) == StatusCategory::Done;
-                    if !all && (tomb || done) {
-                        continue;
-                    }
-                    if let Some(status) = &status {
-                        if &issue.status != status {
-                            continue;
-                        }
-                    }
-                    if let Some(label) = &label {
-                        if !issue.labels.contains(label) {
-                            continue;
-                        }
-                    }
-                    if let Some(milestone) = &milestone {
-                        if issue.milestone.as_deref() != Some(milestone.as_str()) {
-                            continue;
-                        }
-                    }
-                    if let Some(mine) = &mine {
-                        if !issue.assignees.contains(mine) {
-                            continue;
-                        }
-                    }
-                    rows.push((
-                        doc.clone(),
-                        Row2 {
-                            row: project_row(catalog, aliases, doc, Some(issue), me.as_ref()),
-                            priority: issue.priority,
-                        },
-                    ));
+                    narrowing.push((kind, value, maximum));
                 }
-                rows.sort_by(|(da, a), (db, b)| {
-                    b.priority.cmp(&a.priority).then_with(|| da.cmp(db))
-                });
-                let rows: Vec<crate::dto::Row> = rows.into_iter().map(|(_, r)| r.row).collect();
-                Ok(projection(serde_json::to_vec(&rows).expect("rows json")))
+                let mut predicates = vec![runtime::find::Predicate {
+                    field: crate::find::field_ref(crate::find::field::CONFLICTED),
+                    test: runtime::find::Test::Equal,
+                    value: runtime::find::Atom::Bool(false),
+                }];
+                if !all {
+                    predicates.push(runtime::find::Predicate {
+                        field: crate::find::field_ref(crate::find::field::TOMBSTONE),
+                        test: runtime::find::Test::Equal,
+                        value: runtime::find::Atom::Bool(false),
+                    });
+                }
+                if let Some(status) = &status {
+                    predicates.push(runtime::find::Predicate {
+                        field: crate::find::field_ref(crate::find::field::STATE),
+                        test: runtime::find::Test::Equal,
+                        value: runtime::find::Atom::Text(status.clone()),
+                    });
+                }
+                let (answer, candidates) = match &lead {
+                    Some((kind, value)) => {
+                        let answer = find_field_page(
+                            ctx,
+                            crate::find::field::RELATION_TARGET_KIND,
+                            runtime::find::Atom::Bytes(crate::find::composite_key([
+                                *kind,
+                                value.as_str(),
+                            ])),
+                            &page,
+                            Vec::new(),
+                            Vec::new(),
+                        )?;
+                        let ids = answer
+                            .rows()
+                            .iter()
+                            .map(|row| {
+                                result_text(row, crate::find::field::SOURCE_ID)
+                                    .ok_or(Rejection::StateCorrupt)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let resolved = find_issue_rows_by_ids(ctx, ids.clone())?;
+                        // Keep the posting order the page was cut in: the
+                        // cursor resumes against that order, so re-sorting
+                        // here would make the next page overlap this one.
+                        let rows = ids
+                            .iter()
+                            .filter_map(|id| resolved.get(id).cloned())
+                            .collect::<Vec<_>>();
+                        (answer, rows)
+                    }
+                    None => {
+                        let answer = find_kind_page(
+                            ctx,
+                            "issue",
+                            project.as_deref(),
+                            &page,
+                            predicates,
+                            [
+                                crate::find::field::TITLE,
+                                crate::find::field::PROJECT,
+                                crate::find::field::STATE,
+                                crate::find::field::PRIORITY,
+                                crate::find::field::TOMBSTONE,
+                                crate::find::field::DUE_AT,
+                                crate::find::field::ESTIMATE,
+                            ]
+                            .into_iter()
+                            .map(crate::find::field_ref)
+                            .collect(),
+                        )?;
+                        let rows = answer
+                            .rows()
+                            .iter()
+                            .map(issue_page_row)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        (answer, rows)
+                    }
+                };
+                let mut catalog = CatalogState::default();
+                let mut rows = Vec::new();
+                for row in candidates {
+                    let project_id = row.project_id.as_str();
+                    if lead.is_some() {
+                        // A relation posting carries membership and nothing
+                        // else, so every scalar the other branch expressed as
+                        // a predicate is applied here instead.
+                        if project.as_ref().is_some_and(|want| want != project_id) {
+                            continue;
+                        }
+                        if status.as_ref().is_some_and(|want| want != &row.status) {
+                            continue;
+                        }
+                        if !all && row.tombstone {
+                            continue;
+                        }
+                        let doc = row.doc_id.to_string();
+                        let mut carries_all = true;
+                        for (kind, value, maximum) in &narrowing {
+                            if !issue_relation_targets(ctx, &doc, kind, *maximum)?.contains(value) {
+                                carries_all = false;
+                                break;
+                            }
+                        }
+                        if !carries_all {
+                            continue;
+                        }
+                    }
+                    if project.is_none() {
+                        crate::record_store::apply_project(ctx, &mut catalog, project_id)?;
+                        if catalog
+                            .projects
+                            .get(project_id)
+                            .is_some_and(|meta| meta.archived)
+                        {
+                            continue;
+                        }
+                    }
+                    if !all {
+                        apply_project_workflow(ctx, &mut catalog, project_id)?;
+                        if issue_status_category(&catalog, project_id, &row.status)?
+                            == StatusCategory::Done
+                        {
+                            continue;
+                        }
+                    }
+                    rows.push(row);
+                }
+                let me_actor = me.as_deref().and_then(ActorId::parse);
+                for row in &mut rows {
+                    enrich_issue_row(ctx, &mut catalog, row, me_actor.as_ref())?;
+                }
+                let mut page = page_from_answer(&answer, rows);
+                if !all || project.is_none() || lead.is_some() {
+                    // Post-filtered totals are not the source posting total.
+                    // A relation page is always in that position: its total
+                    // counts membership, and every scalar above narrows it.
+                    page.exact_total = None;
+                }
+                Ok(projection(
+                    serde_json::to_vec(&page).expect("rows page json"),
+                ))
             }
-            IssueQuery::Board { project, me } => {
-                let me = me.and_then(|m| ActorId::parse(&m));
-                let view = board_view(catalog, aliases, &project, &snap.issues, me.as_ref())
+            IssueQuery::Board { project, me, page } => {
+                let mut catalog = CatalogState::default();
+                crate::record_store::apply_project(ctx, &mut catalog, &project)?;
+                apply_project_workflow(ctx, &mut catalog, &project)?;
+                let project_view = catalog
+                    .projects
+                    .get(&project)
+                    .and_then(|meta| project_dto(&project, meta))
                     .ok_or(Rejection::InvalidRequest)?;
-                Ok(projection(serde_json::to_vec(&view).expect("board json")))
-            }
-            IssueQuery::Graph { doc, me } => {
-                let me = me.and_then(|m| ActorId::parse(&m));
-                let view = graph_view(catalog, aliases, &doc, &snap.issues, me.as_ref());
-                Ok(projection(serde_json::to_vec(&view).expect("graph json")))
-            }
-            IssueQuery::History { doc } => {
-                let issue = snap.issues.get(&doc).ok_or(Rejection::InvalidRequest)?;
-                let reff = canonical_for(aliases, &doc);
-                // The ordinal counts from where the retained history begins, so
-                // a trimmed issue's rows keep the numbers they had rather than
-                // restarting at one. `events_recorded` is the total ever; the
-                // rows in hand are its tail.
-                let trimmed = issue
-                    .events_recorded
-                    .saturating_sub(issue.events.len() as u64);
-                let events: Vec<ActivityEvent> = issue
-                    .events
+                let revision = catalog
+                    .resolved_workflow(&project)
+                    .map_err(workflow_rejection)?;
+                let workflow = revision
+                    .body
+                    .states
                     .iter()
-                    .enumerate()
-                    .map(|(i, e)| ActivityEvent {
-                        seq: trimmed.saturating_add(i as u64).saturating_add(1),
-                        cursor: activity_cursor(e, &doc, trimmed.saturating_add(i as u64)),
-                        doc_id: DocId::parse(&doc),
-                        reff: reff.clone(),
-                        kind: e.k.clone(),
-                        changes: e
-                            .c
-                            .iter()
-                            .map(|c| FieldChange {
-                                field: c.f.clone(),
-                                from: c.from.clone(),
-                                to: c.to.clone(),
-                            })
-                            .collect(),
-                        actor: actor_of(e),
-                        actor_nick: String::new(),
-                        text: e.x.clone(),
-                        ts: e.t,
-                        collision: false,
+                    .map(|state| {
+                        Ok(crate::dto::WorkflowState {
+                            id: state.state_id.clone(),
+                            name: state.name.clone(),
+                            category: StatusCategory::parse(&state.category)
+                                .ok_or(Rejection::StateCorrupt)?,
+                            color: state.color.clone(),
+                        })
                     })
-                    .collect();
-                let last = events.last().map(|e| e.cursor.clone()).unwrap_or_default();
-                let value = serde_json::json!({ "events": events, "last": last });
-                Ok(projection(serde_json::to_vec(&value).expect("history")))
+                    .collect::<Result<Vec<_>, Rejection>>()?;
+                let rows = find_board_page(ctx, &project, &workflow, &page)?;
+                let view = crate::dto::BoardPage {
+                    schema_version: VIEW_SCHEMA_VERSION,
+                    project: project_view,
+                    workflow,
+                    rows,
+                };
+                let _ = me;
+                Ok(projection(
+                    serde_json::to_vec(&view).expect("board page json"),
+                ))
             }
-            IssueQuery::Activity { since } => {
-                // The whole-space feed: every event of every issue (tombstoned
-                // issues keep their history — the rows already happened),
-                // ordered deterministically by `(ts, doc, per-doc index)` so
-                // every converged replica derives the identical sequence. The
-                // cursor is a position in that total order: `since = last`
-                // resumes exactly after the previously served tail.
-                // Sorted by the cursor itself, so the order rows are served in
-                // and the order `since` compares in are the same order by
-                // construction rather than by two definitions agreeing.
-                let mut feed: Vec<(String, u64, &String, &IssueEvent)> = Vec::new();
-                for (doc, issue) in &snap.issues {
-                    let trimmed = issue
-                        .events_recorded
-                        .saturating_sub(issue.events.len() as u64);
-                    for (i, e) in issue.events.iter().enumerate() {
-                        let ordinal = trimmed.saturating_add(i as u64);
-                        feed.push((activity_cursor(e, doc, ordinal), ordinal, doc, e));
-                    }
-                }
-                feed.sort_by(|a, b| a.0.cmp(&b.0));
-                let events: Vec<ActivityEvent> = feed
+            IssueQuery::History { doc, page } => {
+                let answer = find_source_created_page(
+                    ctx,
+                    "activity",
+                    &doc,
+                    // Oldest first. An Issue's history is a trail read from
+                    // where it starts -- the first row is the creation and
+                    // carries sequence one. The newest-first ordering belongs
+                    // to the cross-Issue activity feed, which is a different
+                    // question: "what just happened", not "what happened".
+                    false,
+                    &page,
+                    Vec::new(),
+                    [
+                        crate::find::field::STATE,
+                        crate::find::field::AUTHOR,
+                        crate::find::field::TEXT,
+                        crate::find::field::CREATED_AT,
+                        crate::find::field::SOURCE_ID,
+                    ]
                     .into_iter()
-                    .map(|(cursor, ordinal, doc, e)| ActivityEvent {
-                        seq: ordinal.saturating_add(1),
-                        cursor,
-                        doc_id: DocId::parse(doc),
-                        reff: canonical_for(aliases, doc),
-                        kind: e.k.clone(),
-                        changes: e
-                            .c
-                            .iter()
-                            .map(|c| FieldChange {
-                                field: c.f.clone(),
-                                from: c.from.clone(),
-                                to: c.to.clone(),
-                            })
-                            .collect(),
-                        actor: actor_of(e),
-                        actor_nick: String::new(),
-                        text: e.x.clone(),
-                        ts: e.t,
-                        collision: false,
-                    })
-                    // Strictly after the named row, in the feed's own order.
-                    // Comparing the token rather than a count is what makes a
-                    // resume safe across a trim: the row the caller names keeps
-                    // its identity even when the rows in front of it are gone.
-                    .filter(|e| {
-                        since
-                            .as_deref()
-                            .is_none_or(|since| e.cursor.as_str() > since)
-                    })
-                    .collect();
-                // A pull that found nothing hands back the cursor it was given.
-                // Returning an empty token there would tell a polling caller it
-                // had reached the start of the feed, and its next pull would
-                // replay the entire history — the failure mode is silent, and
-                // it happens on the most common pull there is.
-                let last = events
-                    .last()
-                    .map(|e| e.cursor.clone())
-                    .or(since)
-                    .unwrap_or_default();
-                let value = serde_json::json!({ "events": events, "last": last });
-                Ok(projection(serde_json::to_vec(&value).expect("activity")))
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(|row| activity_page_row(ctx, row))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("history page json"),
+                ))
+            }
+            IssueQuery::Relations {
+                doc,
+                direction,
+                page,
+            } => Ok(projection(
+                serde_json::to_vec(&issue_relations_page(ctx, &doc, direction, &page)?)
+                    .expect("relation page json"),
+            )),
+            IssueQuery::Comments { doc, page } => Ok(projection(
+                serde_json::to_vec(&issue_comments_page(ctx, &doc, &page)?)
+                    .expect("comment page json"),
+            )),
+            IssueQuery::Reactions { doc, page } => Ok(projection(
+                serde_json::to_vec(&issue_reactions_page(ctx, &doc, &page)?)
+                    .expect("reaction page json"),
+            )),
+            IssueQuery::Attachments { doc, page } => Ok(projection(
+                serde_json::to_vec(&issue_attachments_page(ctx, &doc, &page)?)
+                    .expect("attachment page json"),
+            )),
+            IssueQuery::Checks { doc, page } => Ok(projection(
+                serde_json::to_vec(&issue_checks_page(ctx, &doc, &page)?).expect("check page json"),
+            )),
+            IssueQuery::Activity { page } => {
+                let answer = find_created_page(
+                    ctx,
+                    "activity",
+                    None,
+                    &page,
+                    Vec::new(),
+                    [
+                        crate::find::field::STATE,
+                        crate::find::field::AUTHOR,
+                        crate::find::field::TEXT,
+                        crate::find::field::CREATED_AT,
+                        crate::find::field::SOURCE_ID,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(|row| activity_page_row(ctx, row))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("activity page json"),
+                ))
             }
             IssueQuery::Inbox {
-                actor,
                 exclude_device,
+                page,
             } => {
-                let actor = ActorId::parse(&actor).ok_or(Rejection::InvalidRequest)?;
-                let mut entries: Vec<serde_json::Value> = Vec::new();
-                for (doc, issue) in &snap.issues {
-                    // Addressed-to-you: assigned, or subscribed (INBOX-9) —
-                    // followers receive the same event kinds without holding
-                    // the assignment.
-                    if !issue.assignees.contains(&actor) && !issue.followers.contains(&actor) {
-                        continue;
-                    }
-                    let reff = canonical_for(aliases, doc);
-                    for e in &issue.events {
-                        let kind = match e.k.as_str() {
-                            "assigned" => "assigned",
-                            "commented" => "comment",
-                            "started" | "finished" | "stopped" => "status",
-                            "edited" if e.c.iter().any(|c| c.f == "status") => "status",
-                            _ => continue,
-                        };
-                        if exclude_device.as_deref() == Some(e.d.as_str()) {
-                            continue;
-                        }
-                        entries.push(serde_json::json!({
-                            "ts": e.t,
-                            "kind": kind,
-                            "reff": reff,
-                            "doc_id": doc,
-                            "title": issue.title,
-                            "detail": e.x,
-                            "actor": e.d,
-                        }));
-                    }
-                }
-                entries.sort_by(|a, b| b["ts"].as_u64().cmp(&a["ts"].as_u64()));
-                entries.truncate(500);
-                Ok(projection(serde_json::to_vec(&entries).expect("inbox")))
-            }
-            IssueQuery::RingDigest => Ok(projection(
-                serde_json::to_vec(&ring_digest(ctx, catalog)).expect("ring digest json"),
-            )),
-            IssueQuery::Projects => {
-                let projects: Vec<crate::dto::ProjectDto> = catalog
-                    .projects
-                    .iter()
-                    .filter_map(|(id, meta)| project_dto(id, meta))
-                    .collect();
-                let mut projects = projects;
-                projects.sort_by(|a, b| a.key.cmp(&b.key));
-                Ok(projection(
-                    serde_json::to_vec(&projects).expect("projects json"),
-                ))
-            }
-            IssueQuery::ProjectUpdates { project } => {
-                let mut updates: Vec<crate::dto::ProjectUpdateDto> = catalog
-                    .project_updates
-                    .get(&project)
+                let actor = ctx.principal().actor.clone();
+                let find_page = inbox_find_request(&page, exclude_device.as_deref())?;
+                let answer = find_field_test_page(
+                    ctx,
+                    crate::find::field::INBOX_ORDER,
+                    runtime::find::Test::Prefix,
+                    runtime::find::Atom::Bytes(crate::find::composite_key([actor.as_str()])),
+                    &find_page,
+                    Vec::new(),
+                    [
+                        crate::find::field::STATE,
+                        crate::find::field::AUTHOR,
+                        crate::find::field::DEVICE,
+                        crate::find::field::CREATED_AT,
+                        crate::find::field::SOURCE_ID,
+                    ]
                     .into_iter()
-                    .flatten()
-                    .map(|u| crate::dto::ProjectUpdateDto {
-                        id: u.id.clone(),
-                        author: u.author.clone(),
-                        ts: u.ts,
-                        body: u.body.clone(),
-                        health: u.health.clone(),
-                    })
-                    .collect();
-                // Newest first; ids are ULIDs so id order is time order, a stable
-                // tiebreak when two updates share a second.
-                updates.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| b.id.cmp(&a.id)));
-                Ok(projection(
-                    serde_json::to_vec(&updates).expect("project updates json"),
-                ))
-            }
-            IssueQuery::Labels => {
-                let labels: Vec<crate::dto::LabelDto> = catalog
-                    .labels
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
                     .iter()
-                    .filter_map(|(id, meta)| label_dto(id, meta))
-                    .collect();
-                let mut labels = labels;
-                labels.sort_by(|a, b| a.name.cmp(&b.name));
+                    .filter(|row| {
+                        exclude_device.as_deref()
+                            != result_text(row, crate::find::field::DEVICE).as_deref()
+                    })
+                    .map(|row| inbox_page_row(ctx, row, &actor))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let page = contract::Page {
+                    publication: answer.coordinates().world_publication(),
+                    items,
+                    next_cursor: inbox_next_cursor(&answer, exclude_device.as_deref()),
+                    // Filtering the caller's current device changes the
+                    // cardinality after the ordered posting seek. Do not claim
+                    // the posting total is an exact visible total.
+                    exact_total: exclude_device
+                        .is_none()
+                        .then(|| answer.matched_total())
+                        .flatten(),
+                };
+                Ok(projection(serde_json::to_vec(&page).expect("inbox page")))
+            }
+            IssueQuery::Projects { page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "project",
+                    None,
+                    &page,
+                    vec![live_predicate()],
+                    [
+                        crate::find::field::TITLE,
+                        crate::find::field::ENTITY_KEY,
+                        crate::find::field::HEALTH,
+                        crate::find::field::AUTHOR,
+                        crate::find::field::CREATED_AT,
+                        crate::find::field::TARGET_DATE,
+                        crate::find::field::ARCHIVED,
+                        crate::find::field::SOURCE_ID,
+                        crate::find::field::TOMBSTONE,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(project_page_row)
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(projection(
-                    serde_json::to_vec(&labels).expect("labels json"),
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("projects page json"),
                 ))
             }
-            IssueQuery::Roles => {
-                let mut roles: Vec<serde_json::Value> = Vec::new();
-                for (id, rev) in &catalog.roles {
-                    roles.push(serde_json::json!({
-                        "role_id": id,
-                        "built_in": true,
-                        "revision": rev,
-                        "conflict_heads": [],
-                    }));
-                }
-                for id in catalog.role_revisions.keys() {
-                    let heads = catalog.role_heads(id);
-                    let head = catalog.role_head(id);
-                    roles.push(serde_json::json!({
-                        "role_id": id,
-                        "built_in": false,
-                        "revision": head,
-                        "conflict_heads": if head.is_some() {
-                            Vec::new()
-                        } else {
-                            heads.iter().map(|h| h.revision_id.clone()).collect()
-                        },
-                    }));
-                }
-                roles.sort_by(|a, b| a["role_id"].as_str().cmp(&b["role_id"].as_str()));
-                Ok(projection(serde_json::to_vec(&roles).expect("roles json")))
+            IssueQuery::ProjectUpdates { project, page } => {
+                let answer = find_created_page(
+                    ctx,
+                    "project_update",
+                    Some(&project),
+                    &page,
+                    Vec::new(),
+                    [
+                        crate::find::field::TEXT,
+                        crate::find::field::AUTHOR,
+                        crate::find::field::CREATED_AT,
+                        crate::find::field::HEALTH,
+                        crate::find::field::PROJECT,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(update_page_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("project updates page json"),
+                ))
+            }
+            IssueQuery::Labels { page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "label",
+                    None,
+                    &page,
+                    vec![live_predicate()],
+                    [
+                        crate::find::field::TITLE,
+                        crate::find::field::HEALTH,
+                        crate::find::field::TOMBSTONE,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(label_page_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("labels page json"),
+                ))
+            }
+            IssueQuery::Label { label } => {
+                let row = unique_find_row(ctx, crate::find::field::ID, &label, "label", None)?
+                    .ok_or(Rejection::InvalidRequest)?;
+                let label = if result_bool(&row, crate::find::field::TOMBSTONE).unwrap_or(false) {
+                    None
+                } else {
+                    Some(label_page_row(&row)?)
+                };
+                let result = contract::LabelProjection {
+                    publication: ctx
+                        .world_publication_id()
+                        .ok_or(Rejection::ImplementationUnavailable)?,
+                    label,
+                };
+                Ok(projection(
+                    serde_json::to_vec(&result).expect("label projection json"),
+                ))
+            }
+            IssueQuery::Roles { page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "role_head",
+                    None,
+                    &page,
+                    Vec::new(),
+                    [
+                        crate::find::field::ENTITY_KEY,
+                        crate::find::field::STATE,
+                        crate::find::field::HEAD_REVISIONS,
+                        crate::find::field::CONFLICTED,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(|row| {
+                        let summary = role_summary_row(row)?;
+                        role_projection(ctx, &summary.role_id)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items)).expect("role page json"),
+                ))
             }
             IssueQuery::RoleShow { role } => {
-                let heads = catalog.role_heads(&role);
-                let head = catalog.role_head(&role);
-                if head.is_none() && heads.is_empty() {
-                    return Err(Rejection::InvalidRequest);
-                }
-                let view = serde_json::json!({
-                    "role_id": role,
-                    "built_in": catalog.roles.contains_key(&role),
-                    "revision": head,
-                    "conflict_heads": if head.is_some() {
-                        Vec::new()
-                    } else {
-                        heads.iter().map(|h| h.revision_id.clone()).collect()
-                    },
-                });
+                let view = role_projection(ctx, &role)?;
                 Ok(projection(serde_json::to_vec(&view).expect("role json")))
             }
             IssueQuery::Workflow { project } => {
-                if !catalog.projects.contains_key(&project) {
-                    return Err(Rejection::InvalidRequest);
-                }
-                let heads = catalog.workflow_heads(&project);
-                let head = catalog.workflow_head(&project);
-                let view = serde_json::json!({
-                    "project_id": project,
-                    "revision": head,
-                    "conflict_heads": if head.is_some() {
-                        Vec::new()
-                    } else {
-                        heads.iter().map(|h| h.revision_id.clone()).collect()
-                    },
-                });
+                let view = workflow_projection(ctx, &project)?;
                 Ok(projection(
                     serde_json::to_vec(&view).expect("workflow json"),
                 ))
             }
-            IssueQuery::Specs { project } => {
-                let mut specs: Vec<crate::spec::SpecView> = all_specs(ctx)
+            IssueQuery::Specs { project, page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "spec",
+                    project.as_deref(),
+                    &page,
+                    vec![runtime::find::Predicate {
+                        field: crate::find::field_ref(crate::find::field::RELATION_KIND),
+                        test: runtime::find::Test::Equal,
+                        value: runtime::find::Atom::Text("spec_document".into()),
+                    }],
+                    [
+                        crate::find::field::PROJECT,
+                        crate::find::field::ENTITY_KEY,
+                        crate::find::field::HEAD_REVISIONS,
+                        crate::find::field::ISSUED_REVISIONS,
+                        crate::find::field::CONFLICTED,
+                        crate::find::field::RELATION_KIND,
+                    ]
                     .into_iter()
-                    .filter_map(|spec| spec_view(&spec))
-                    .filter(|spec| {
-                        project
-                            .as_ref()
-                            .is_none_or(|project| &spec.project == project)
-                    })
-                    .collect();
-                specs.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.spec.cmp(&b.spec)));
-                Ok(projection(serde_json::to_vec(&specs).expect("specs json")))
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let mut items = answer
+                    .rows()
+                    .iter()
+                    .map(spec_summary_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                for item in &mut items {
+                    if !item.conflicted {
+                        item.view = spec_state(ctx, &item.spec)
+                            .and_then(|spec| spec_view(&spec))
+                            .map(Box::new);
+                    }
+                }
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items)).expect("specs page json"),
+                ))
             }
             IssueQuery::Spec { spec } => {
                 let spec = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
                 let view = spec_view(&spec).ok_or(Rejection::InvalidRequest)?;
                 Ok(projection(serde_json::to_vec(&view).expect("spec json")))
             }
-            IssueQuery::SpecHistory { spec } => {
-                let spec = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
-                // Oldest first. `Spec::from_view` sorts by revision id, which is
-                // a stable order but not a readable one; predecessors give the
-                // real one, and a client that wants the DAG still has it.
-                let revisions = crate::spec::ordered(&spec.revisions, |revision| {
-                    (&revision.revision, &revision.predecessors)
-                });
-                Ok(projection(
-                    serde_json::to_vec(&revisions).expect("spec history json"),
-                ))
-            }
-            IssueQuery::SpecReferences { project } => {
-                let mut references: Vec<crate::spec::SpecReference> = Vec::new();
-                for spec in all_specs(ctx) {
-                    let heads: std::collections::BTreeSet<&str> = spec
-                        .heads()
-                        .into_iter()
-                        .map(|revision| revision.revision.as_str())
-                        .collect();
-                    let issued: std::collections::BTreeSet<&str> = match spec.issued() {
-                        crate::spec::Issued::One(revision) => {
-                            [revision.revision.as_str()].into_iter().collect()
-                        }
-                        // A conflict has no effective revision, so none of the
-                        // candidates may claim to be it.
-                        crate::spec::Issued::Conflict(_) | crate::spec::Issued::None => {
-                            std::collections::BTreeSet::new()
-                        }
-                    };
-                    for revision in &spec.revisions {
-                        if project
-                            .as_ref()
-                            .is_some_and(|project| &revision.body.project != project)
-                        {
-                            continue;
-                        }
-                        for link in &revision.body.links {
-                            references.push(crate::spec::SpecReference {
-                                spec: revision.body.spec.clone(),
-                                revision: revision.revision.clone(),
-                                kind: revision.body.kind,
-                                title: revision.body.title.clone(),
-                                link: link.clone(),
-                                head: heads.contains(revision.revision.as_str()),
-                                issued: issued.contains(revision.revision.as_str()),
-                            });
-                        }
-                    }
-                }
-                Ok(projection(
-                    serde_json::to_vec(&references).expect("spec references json"),
-                ))
-            }
-            IssueQuery::SpecObservations { project } => {
-                let mut observations: Vec<crate::spec::Observation> = Vec::new();
-                for spec in all_specs(ctx) {
-                    // The project is a fact about the document the note is filed
-                    // against, since an Observation carries no project of its
-                    // own — it is a note, not a document.
-                    let Some(first) = spec.revisions.first() else {
-                        continue;
-                    };
-                    if project
-                        .as_ref()
-                        .is_some_and(|project| &first.body.project != project)
-                    {
-                        continue;
-                    }
-                    observations.extend(spec.observations.iter().cloned());
-                }
-                Ok(projection(
-                    serde_json::to_vec(&observations).expect("spec observations json"),
-                ))
-            }
-            IssueQuery::BaselineHistory { baseline } => {
-                let baseline = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
-                let revisions = crate::spec::ordered(&baseline.revisions, |revision| {
-                    (&revision.revision, &revision.predecessors)
-                });
-                Ok(projection(
-                    serde_json::to_vec(&revisions).expect("baseline history json"),
-                ))
-            }
-            IssueQuery::Baselines { project } => {
-                let mut baselines: Vec<crate::spec::BaselineView> = all_baselines(ctx)
+            IssueQuery::SpecHistory { spec, page } => {
+                let answer = find_field_page(
+                    ctx,
+                    crate::find::field::SOURCE_ID,
+                    runtime::find::Atom::Text(spec.into()),
+                    &page,
+                    vec![runtime::find::Predicate {
+                        field: crate::find::field_ref(crate::find::field::RELATION_KIND),
+                        test: runtime::find::Test::Equal,
+                        value: runtime::find::Atom::Text("spec_revision".into()),
+                    }],
+                    [
+                        crate::find::field::REVISION,
+                        crate::find::field::SOURCE_ID,
+                        crate::find::field::RELATION_KIND,
+                    ]
                     .into_iter()
-                    .filter_map(|baseline| baseline_view(&baseline))
-                    .filter(|baseline| {
-                        project
-                            .as_ref()
-                            .is_none_or(|project| &baseline.project == project)
-                    })
-                    .collect();
-                baselines.sort_by(|a, b| {
-                    a.name
-                        .cmp(&b.name)
-                        .then_with(|| a.baseline.cmp(&b.baseline))
-                });
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(|row| spec_revision_page_row(ctx, row))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 Ok(projection(
-                    serde_json::to_vec(&baselines).expect("baselines json"),
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("spec history page json"),
+                ))
+            }
+            IssueQuery::SpecReferences { project, page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "relation",
+                    project.as_deref(),
+                    &page,
+                    vec![runtime::find::Predicate {
+                        field: crate::find::field_ref(crate::find::field::ENTITY_KEY),
+                        test: runtime::find::Test::Equal,
+                        value: runtime::find::Atom::Text("spec_reference".into()),
+                    }],
+                    [
+                        crate::find::field::RELATION_KIND,
+                        crate::find::field::SOURCE_ID,
+                        crate::find::field::TARGET_ID,
+                        crate::find::field::PROJECT,
+                        crate::find::field::ENTITY_KEY,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(|row| spec_reference_page_row(ctx, row))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("spec references page json"),
+                ))
+            }
+            IssueQuery::SpecObservations { project, page } => {
+                let answer = find_created_page(
+                    ctx,
+                    "spec_observation_fact",
+                    project.as_deref(),
+                    &page,
+                    Vec::new(),
+                    [
+                        crate::find::field::STATE,
+                        crate::find::field::PROJECT,
+                        crate::find::field::SOURCE_ID,
+                        crate::find::field::TARGET_ID,
+                        crate::find::field::RELATION_KIND,
+                        crate::find::field::AUTHOR,
+                        crate::find::field::TEXT,
+                        crate::find::field::CREATED_AT,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(|row| spec_observation_page_row(ctx, row))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("spec observations page json"),
+                ))
+            }
+            IssueQuery::BaselineHistory { baseline, page } => {
+                let answer = find_field_page(
+                    ctx,
+                    crate::find::field::SOURCE_ID,
+                    runtime::find::Atom::Text(baseline.into()),
+                    &page,
+                    vec![runtime::find::Predicate {
+                        field: crate::find::field_ref(crate::find::field::RELATION_KIND),
+                        test: runtime::find::Test::Equal,
+                        value: runtime::find::Atom::Text("baseline_revision".into()),
+                    }],
+                    [
+                        crate::find::field::REVISION,
+                        crate::find::field::SOURCE_ID,
+                        crate::find::field::RELATION_KIND,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(|row| baseline_revision_page_row(ctx, row))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("baseline history page json"),
+                ))
+            }
+            IssueQuery::Baselines { project, page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "baseline",
+                    project.as_deref(),
+                    &page,
+                    vec![runtime::find::Predicate {
+                        field: crate::find::field_ref(crate::find::field::RELATION_KIND),
+                        test: runtime::find::Test::Equal,
+                        value: runtime::find::Atom::Text("baseline_document".into()),
+                    }],
+                    [
+                        crate::find::field::PROJECT,
+                        crate::find::field::HEAD_REVISIONS,
+                        crate::find::field::ISSUED_REVISIONS,
+                        crate::find::field::CONFLICTED,
+                        crate::find::field::RELATION_KIND,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let mut items = answer
+                    .rows()
+                    .iter()
+                    .map(baseline_summary_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                for item in &mut items {
+                    if !item.conflicted {
+                        item.view = baseline_state(ctx, &item.baseline)
+                            .and_then(|baseline| baseline_view(&baseline))
+                            .map(Box::new);
+                    }
+                }
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("baselines page json"),
                 ))
             }
             IssueQuery::Baseline { baseline } => {
@@ -5600,103 +12236,52 @@ impl World for IssuesWorld {
                     serde_json::to_vec(&packet).expect("packet json"),
                 ))
             }
-            IssueQuery::Milestones { project } => {
-                if !catalog.projects.contains_key(&project) {
-                    return Err(Rejection::InvalidRequest);
-                }
-                // Derived progress: live issues of the project targeting each
-                // milestone, done = a Done-category status.
-                let counts = |mid: &str| -> (u32, u32) {
-                    let mut total = 0;
-                    let mut done = 0;
-                    for (doc, issue) in &snap.issues {
-                        if issue.project != project
-                            || issue.milestone.as_deref() != Some(mid)
-                            || catalog.tombstones.contains(doc)
-                        {
-                            continue;
-                        }
-                        total += 1;
-                        if catalog.status_category(&issue.status) == StatusCategory::Done {
-                            done += 1;
-                        }
+            IssueQuery::Milestones { project, page } => {
+                let answer = find_kind_position_page(
+                    ctx,
+                    "milestone",
+                    &project,
+                    &page,
+                    vec![live_predicate()],
+                    [
+                        crate::find::field::TITLE,
+                        crate::find::field::TEXT,
+                        crate::find::field::TARGET_DATE,
+                        crate::find::field::POSITION,
+                        crate::find::field::TOMBSTONE,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let mut catalog = CatalogState::default();
+                let mut items = Vec::with_capacity(answer.rows().len());
+                for row in answer.rows() {
+                    let mut item = milestone_page_row(row)?;
+                    // A milestone's progress is the whole reason the row is
+                    // drawn, so measure it where it can be measured exactly
+                    // and say so where it cannot. Reporting the unmeasured
+                    // case as `0 of 0` would render as a complete milestone.
+                    if let Some((total, done)) =
+                        membership_counts(ctx, &mut catalog, "milestone", &item.id)?
+                    {
+                        item.total = total;
+                        item.done = done;
+                        item.enrichment_complete = true;
                     }
-                    (done, total)
-                };
-                // Sorted as records, then projected: the DTO carries no rank —
-                // a client renders the order it is given and has no business
-                // re-deriving it — so the ordering has to happen while the field
-                // still exists.
-                let mut records: Vec<&Milestone> = catalog
-                    .milestones
-                    .get(&project)
-                    .into_iter()
-                    .flat_map(|m| m.values())
-                    .filter(|m| !m.tombstone)
-                    .collect();
-                records.sort_by(|a, b| milestone_order(a, b));
-                let rows: Vec<crate::dto::MilestoneDto> = records
-                    .into_iter()
-                    .map(|m| {
-                        let (done, total) = counts(&m.id);
-                        crate::dto::MilestoneDto {
-                            id: m.id.clone(),
-                            name: m.name.clone(),
-                            description: m.description.clone(),
-                            target_date: m.target_date,
-                            total,
-                            done,
-                        }
-                    })
-                    .collect();
-                Ok(projection(serde_json::to_vec(&rows).expect("milestones")))
-            }
-            IssueQuery::ProjectGraph { project } => {
-                if !catalog.projects.contains_key(&project) {
-                    return Err(Rejection::InvalidRequest);
+                    items.push(item);
                 }
-                // "Live issue of this project" is the whole filter, applied to
-                // both ends of every edge. An edge to a tombstoned issue, or one
-                // reaching into another project, cannot be drawn on this
-                // project's chart — and shipping it would only make the client
-                // re-derive a fact the catalog already holds.
-                let mine = |doc: &String| -> bool {
-                    !catalog.tombstones.contains(doc)
-                        && snap.issues.get(doc).is_some_and(|i| i.project == project)
-                };
-                let edges: Vec<crate::dto::GraphEdgeDto> = catalog
-                    .edges
-                    .iter()
-                    .filter(|(from, _, to)| mine(from) && mine(to))
-                    .map(|(from, kind, to)| crate::dto::GraphEdgeDto {
-                        from: from.clone(),
-                        kind: kind.clone(),
-                        to: to.clone(),
-                    })
-                    .collect();
-                let parents: Vec<(String, String)> = catalog
-                    .parents
-                    .iter()
-                    .filter(|(child, parent)| mine(child) && mine(parent))
-                    .map(|(child, parent)| (child.clone(), parent.clone()))
-                    .collect();
-                // `catalog.edges` is a BTreeSet and `parents` a BTreeMap, so both
-                // arrive sorted and this projection is deterministic without a
-                // sort of its own — which matters, because an identical graph
-                // must serialize identically or every client re-renders on a
-                // poll that changed nothing.
-                let view = crate::dto::ProjectGraphView {
-                    schema_version: VIEW_SCHEMA_VERSION,
-                    project: project.clone(),
-                    edges,
-                    parents,
-                };
                 Ok(projection(
-                    serde_json::to_vec(&view).expect("project graph"),
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("milestones page json"),
                 ))
             }
-            IssueQuery::Geometry { project, roots } => {
-                if !catalog.projects.contains_key(&project)
+            IssueQuery::Geometry {
+                project,
+                roots,
+                page,
+            } => {
+                if crate::ids::ProjectId::parse(&project).is_none()
                     || roots.len() > crate::spec::MAX_PLAN_ROOTS
                     || roots.iter().any(|root| DocId::parse(root).is_none())
                 {
@@ -5705,165 +12290,171 @@ impl World for IssuesWorld {
                 let mut canonical_roots = roots;
                 canonical_roots.sort();
                 canonical_roots.dedup();
-                let view = self.geometry_view(ctx, &snap, &project, &canonical_roots);
+                let view = self.geometry_projection(ctx, &project, &canonical_roots, page)?;
                 Ok(projection(
-                    serde_json::to_vec(view.as_ref()).expect("Issue geometry"),
+                    serde_json::to_vec(&view).expect("Issue geometry"),
                 ))
             }
-            IssueQuery::Cycles { project } => {
-                if !catalog.projects.contains_key(&project) {
-                    return Err(Rejection::InvalidRequest);
-                }
-                let counts = |cid: &str| -> (u32, u32) {
-                    let mut total = 0;
-                    let mut done = 0;
-                    for (doc, issue) in &snap.issues {
-                        if issue.project != project
-                            || issue.cycle.as_deref() != Some(cid)
-                            || catalog.tombstones.contains(doc)
-                        {
-                            continue;
-                        }
-                        total += 1;
-                        if catalog.status_category(&issue.status) == StatusCategory::Done {
-                            done += 1;
-                        }
-                    }
-                    (done, total)
-                };
-                let mut rows: Vec<crate::dto::CycleDto> = catalog
-                    .cycles
-                    .get(&project)
+            IssueQuery::Cycles { project, page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "cycle",
+                    Some(&project),
+                    &page,
+                    vec![live_predicate()],
+                    [
+                        crate::find::field::TITLE,
+                        crate::find::field::CREATED_AT,
+                        crate::find::field::DUE_AT,
+                        crate::find::field::TOMBSTONE,
+                    ]
                     .into_iter()
-                    .flat_map(|c| c.values())
-                    .filter(|c| !c.tombstone)
-                    .map(|c| {
-                        let (done, total) = counts(&c.id);
-                        crate::dto::CycleDto {
-                            id: c.id.clone(),
-                            name: c.name.clone(),
-                            start: c.start,
-                            end: c.end,
-                            total,
-                            done,
-                        }
-                    })
-                    .collect();
-                rows.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.name.cmp(&b.name)));
-                Ok(projection(serde_json::to_vec(&rows).expect("cycles")))
-            }
-            IssueQuery::Initiatives => {
-                let mut rows: Vec<crate::dto::InitiativeDto> = catalog
-                    .initiatives
-                    .values()
-                    .filter(|i| !i.tombstone)
-                    .map(|i| {
-                        let mut total = 0;
-                        let mut done = 0;
-                        for (doc, issue) in &snap.issues {
-                            if !i.projects.contains(&issue.project)
-                                || catalog.tombstones.contains(doc)
-                            {
-                                continue;
-                            }
-                            total += 1;
-                            if catalog.status_category(&issue.status) == StatusCategory::Done {
-                                done += 1;
-                            }
-                        }
-                        crate::dto::InitiativeDto {
-                            id: i.id.clone(),
-                            name: i.name.clone(),
-                            description: i.description.clone(),
-                            owner: i.owner.clone(),
-                            health: i.health.clone(),
-                            target_date: i.target_date,
-                            projects: i
-                                .projects
-                                .iter()
-                                .filter_map(|p| catalog.projects.get(p).map(|m| m.key.clone()))
-                                .collect(),
-                            total,
-                            done,
-                        }
-                    })
-                    .collect();
-                rows.sort_by(|a, b| a.name.cmp(&b.name));
-                Ok(projection(serde_json::to_vec(&rows).expect("initiatives")))
-            }
-            IssueQuery::Teams => {
-                let mut rows: Vec<crate::dto::TeamDto> = catalog
-                    .teams
-                    .values()
-                    .filter(|t| !t.tombstone)
-                    .map(|t| crate::dto::TeamDto {
-                        id: t.id.clone(),
-                        name: t.name.clone(),
-                        key: t.key.clone(),
-                        icon: t.icon.clone(),
-                        lead: t.lead.clone(),
-                        members: t.members.clone(),
-                        projects: catalog
-                            .projects
-                            .values()
-                            .filter(|p| p.team == t.id)
-                            .map(|p| p.key.clone())
-                            .collect(),
-                    })
-                    .collect();
-                rows.sort_by(|a, b| a.key.cmp(&b.key));
-                Ok(projection(serde_json::to_vec(&rows).expect("teams")))
-            }
-            IssueQuery::Triage => {
-                let reff_of = |doc: &str| -> String {
-                    if doc.is_empty() {
-                        String::new()
-                    } else {
-                        aliases
-                            .by_doc
-                            .get(doc)
-                            .cloned()
-                            .unwrap_or_else(|| canonical_for(aliases, doc))
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let mut catalog = CatalogState::default();
+                let mut items = Vec::with_capacity(answer.rows().len());
+                for row in answer.rows() {
+                    let mut item = cycle_page_row(row)?;
+                    // Same as a milestone: the progress is the reason the row
+                    // is drawn, and `0 of 0` renders as a finished cycle.
+                    if let Some((total, done)) =
+                        membership_counts(ctx, &mut catalog, "cycle", &item.id)?
+                    {
+                        item.total = total;
+                        item.done = done;
+                        item.enrichment_complete = true;
                     }
-                };
-                let mut rows: Vec<crate::dto::TriageDto> = catalog
-                    .triage
-                    .values()
-                    .map(|t| crate::dto::TriageDto {
-                        id: t.id.clone(),
-                        title: t.title.clone(),
-                        body: t.body.clone(),
-                        source: t.source.clone(),
-                        submitted_by: t.submitted_by.clone(),
-                        ts: t.ts,
-                        outcome: t.outcome.clone(),
-                        reff: reff_of(&t.doc),
-                        decided_by: t.decided_by.clone(),
-                        note: t.note.clone(),
-                    })
-                    .collect();
-                // Pending first (newest first); decided after (newest first).
-                rows.sort_by(|a, b| {
-                    (!a.outcome.is_empty())
-                        .cmp(&(!b.outcome.is_empty()))
-                        .then_with(|| b.ts.cmp(&a.ts))
-                        .then_with(|| a.id.cmp(&b.id))
-                });
-                Ok(projection(serde_json::to_vec(&rows).expect("triage")))
+                    items.push(item);
+                }
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("cycles page json"),
+                ))
+            }
+            IssueQuery::Initiatives { page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "initiative",
+                    None,
+                    &page,
+                    vec![live_predicate()],
+                    [
+                        crate::find::field::TITLE,
+                        crate::find::field::AUTHOR,
+                        crate::find::field::HEALTH,
+                        crate::find::field::TARGET_DATE,
+                        crate::find::field::TOMBSTONE,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let mut catalog = CatalogState::default();
+                let mut items = Vec::with_capacity(answer.rows().len());
+                for row in answer.rows() {
+                    let mut item = initiative_page_row(row)?;
+                    // An initiative IS its member projects and what they add
+                    // up to; a row without them is a name and nothing else.
+                    let members =
+                        issue_relation_targets(ctx, &item.id, "project", MAX_ROLLUP_MEMBERS)?;
+                    let mut total = 0u32;
+                    let mut done = 0u32;
+                    let mut measured = true;
+                    for project in &members {
+                        crate::record_store::apply_project(ctx, &mut catalog, project)?;
+                        if let Some(meta) = catalog.projects.get(project) {
+                            item.projects.push(meta.key.clone());
+                        }
+                        match project_issue_counts(ctx, &mut catalog, project)? {
+                            Some((project_total, project_done)) => {
+                                total = total.saturating_add(project_total);
+                                done = done.saturating_add(project_done);
+                            }
+                            // One unmeasurable member makes the roll-up
+                            // unmeasured. A partial sum is not a smaller sum.
+                            None => measured = false,
+                        }
+                    }
+                    if measured {
+                        item.total = total;
+                        item.done = done;
+                        item.enrichment_complete = true;
+                    }
+                    items.push(item);
+                }
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("initiatives page json"),
+                ))
+            }
+            IssueQuery::Teams { page } => {
+                let answer = find_kind_page(
+                    ctx,
+                    "team",
+                    None,
+                    &page,
+                    vec![live_predicate()],
+                    [
+                        crate::find::field::TITLE,
+                        crate::find::field::ENTITY_KEY,
+                        crate::find::field::HEALTH,
+                        crate::find::field::AUTHOR,
+                        crate::find::field::TOMBSTONE,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let mut items = Vec::with_capacity(answer.rows().len());
+                for row in answer.rows() {
+                    let mut item = team_page_row(row)?;
+                    // A team is who is on it and what it owns. Both are
+                    // bounded exact seeks: membership from the relation
+                    // posting, ownership from the project's own source
+                    // coordinate, which is where a project records its team.
+                    item.members =
+                        issue_relation_targets(ctx, &item.id, "member", MAX_ROLLUP_MEMBERS)?
+                            .into_iter()
+                            .collect();
+                    item.projects = team_project_keys(ctx, &item.id)?;
+                    item.enrichment_complete = true;
+                    items.push(item);
+                }
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items)).expect("teams page json"),
+                ))
+            }
+            IssueQuery::Triage { page } => {
+                let answer = find_created_page(
+                    ctx,
+                    "triage_fact",
+                    None,
+                    &page,
+                    Vec::new(),
+                    [
+                        crate::find::field::STATE,
+                        crate::find::field::HEALTH,
+                        crate::find::field::CREATED_AT,
+                    ]
+                    .into_iter()
+                    .map(crate::find::field_ref)
+                    .collect(),
+                )?;
+                let items = answer
+                    .rows()
+                    .iter()
+                    .map(|row| triage_page_row(ctx, row))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(projection(
+                    serde_json::to_vec(&page_from_answer(&answer, items))
+                        .expect("triage fact page json"),
+                ))
             }
             IssueQuery::Attachment { doc, id } => {
-                // The one read that serves file bytes: straight off the Body
-                // map, bypassing the metadata-only snapshot cache.
-                let view = ctx
-                    .read_collaborative(&issue_key(&doc))
-                    .map_err(|_| Rejection::InvalidRequest)?;
-                let raw = view
-                    .maps
-                    .get("attachments")
-                    .and_then(|m| m.get(&id))
+                let record = crate::record_store::read_attachment(ctx, &doc, &id)?
+                    .filter(|record| !record.tombstone)
                     .ok_or(Rejection::InvalidRequest)?;
-                let record: serde_json::Value =
-                    serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
                 Ok(projection(serde_json::to_vec(&record).expect("attachment")))
             }
         }
@@ -5916,284 +12507,6 @@ fn provisional_view(
         checks: vec![],
         provisional: true,
         corrupt_records: vec![],
-    }
-}
-
-fn graph_view(
-    catalog: &CatalogState,
-    aliases: &DerivedAliases,
-    doc: &str,
-    issues: &BTreeMap<String, Arc<IssueState>>,
-    me: Option<&ActorId>,
-) -> crate::dto::GraphView {
-    let live = |d: &str| issues.contains_key(d) && !catalog.tombstones.contains(d);
-    let row = |d: &str| project_row(catalog, aliases, d, issues.get(d).map(|i| i.as_ref()), me);
-    let parent = catalog.parents.get(doc).filter(|p| live(p)).map(|p| row(p));
-    let mut children: Vec<crate::dto::Row> = catalog
-        .parents
-        .iter()
-        .filter(|(c, p)| {
-            #[cfg(test)]
-            scan_observation::edge();
-            p.as_str() == doc && live(c)
-        })
-        .map(|(c, _)| row(c))
-        .collect();
-    children.sort_by(|a, b| a.doc_id.cmp(&b.doc_id));
-    let mut links = Vec::new();
-    for (from, kind, to) in &catalog.edges {
-        #[cfg(test)]
-        scan_observation::edge();
-        if from == doc && live(to) {
-            links.push(crate::dto::LinkDto {
-                kind: kind.clone(),
-                direction: "out".into(),
-                row: row(to),
-            });
-        } else if to == doc && live(from) {
-            links.push(crate::dto::LinkDto {
-                kind: kind.clone(),
-                direction: "in".into(),
-                row: row(from),
-            });
-        }
-    }
-    // Transitive open blockers via BFS backward over `blocks` edges.
-    let mut blocked_by = Vec::new();
-    let mut visited = std::collections::BTreeSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(doc.to_string());
-    visited.insert(doc.to_string());
-    while let Some(cursor) = queue.pop_front() {
-        for (from, kind, to) in &catalog.edges {
-            #[cfg(test)]
-            scan_observation::edge();
-            if kind == "blocks" && to == &cursor && visited.insert(from.clone()) {
-                let open = issues
-                    .get(from)
-                    .is_some_and(|i| catalog.status_category(&i.status) != StatusCategory::Done);
-                if live(from) && open {
-                    blocked_by.push(row(from));
-                    queue.push_back(from.clone());
-                }
-            }
-        }
-    }
-    crate::dto::GraphView {
-        schema_version: VIEW_SCHEMA_VERSION,
-        reff: canonical_for(aliases, doc),
-        doc_id: DocId::parse(doc).expect("doc id"),
-        parent,
-        children,
-        links,
-        blocked_by,
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod scan_observation {
-    use std::cell::Cell;
-
-    thread_local! {
-        static EDGE_VISITS: Cell<Option<u64>> = const { Cell::new(None) };
-    }
-
-    pub(crate) fn edge() {
-        let _ = EDGE_VISITS.try_with(|visits| {
-            if let Some(value) = visits.get() {
-                visits.set(Some(value.saturating_add(1)));
-            }
-        });
-    }
-
-    struct Active(Option<u64>);
-
-    impl Drop for Active {
-        fn drop(&mut self) {
-            let previous = self.0;
-            let _ = EDGE_VISITS.try_with(|visits| visits.set(previous));
-        }
-    }
-
-    pub(crate) fn measure<T>(operation: impl FnOnce() -> T) -> (T, u64) {
-        let previous = EDGE_VISITS.with(|visits| visits.replace(Some(0)));
-        let guard = Active(previous);
-        let value = operation();
-        let visits = EDGE_VISITS.with(|observed| observed.get().unwrap_or(0));
-        drop(guard);
-        (value, visits)
-    }
-}
-
-/// The doorbell's view of one committed state: a digest per catalog plane, plus
-/// the doc→project index the dirty-set is keyed by.
-///
-/// The plane taxonomy lives here because the catalog's schema does. Every plane
-/// is a distinct region of `CatalogState`, and the ones whose data is grouped by
-/// project get one digest *per project* — so editing ENG's milestones does not
-/// invalidate DSN's. The daemon compares these between rings; it never decodes
-/// them, and it learns nothing about what a milestone is.
-///
-/// Digest inputs are `BTreeMap`/`BTreeSet` serializations, which are ordered, so
-/// equal state always digests equal. A plane absent from the map digests as its
-/// empty form rather than being omitted — "emptied" has to be distinguishable
-/// from "unchanged".
-fn ring_digest(ctx: &Context<'_>, catalog: &CatalogState) -> contract::RingDigestView {
-    let mut planes: Vec<contract::PlaneDigest> = Vec::new();
-    let mut plane = |plane: CatalogScope, value: serde_json::Value| {
-        let bytes = serde_json::to_vec(&value).expect("plane json");
-        planes.push(contract::PlaneDigest {
-            plane,
-            digest: blake3::hash(&bytes).to_hex().to_string(),
-        });
-    };
-
-    plane(
-        CatalogScope::Space,
-        serde_json::json!([&catalog.name, &catalog.description]),
-    );
-    plane(CatalogScope::Projects, serde_json::json!(&catalog.projects));
-    plane(CatalogScope::Labels, serde_json::json!(&catalog.labels));
-    plane(
-        CatalogScope::Workflow,
-        serde_json::json!([
-            serde_json::json!(&catalog.workflow),
-            serde_json::json!(&catalog.workflow_revisions)
-        ]),
-    );
-    plane(
-        CatalogScope::Initiatives,
-        serde_json::json!(&catalog.initiatives),
-    );
-    plane(CatalogScope::Teams, serde_json::json!(&catalog.teams));
-    plane(CatalogScope::Triage, serde_json::json!(&catalog.triage));
-    plane(
-        CatalogScope::Roles,
-        serde_json::json!([
-            serde_json::json!(&catalog.roles),
-            serde_json::json!(&catalog.role_revisions)
-        ]),
-    );
-    // The row index: which docs exist, what they are numbered, what is deleted.
-    plane(
-        CatalogScope::Docs,
-        serde_json::json!([
-            serde_json::json!(&catalog.aliases),
-            serde_json::json!(&catalog.seqs),
-            serde_json::json!(&catalog.tombstones)
-        ]),
-    );
-    plane(
-        CatalogScope::Relations,
-        serde_json::json!([
-            serde_json::json!(&catalog.edges),
-            serde_json::json!(&catalog.parents)
-        ]),
-    );
-    // The one plane whose contents are not in the catalog. Specs and Baselines
-    // are Bodies of their own, so there is no region here to hash — but a Body's
-    // version stamp moves exactly when the Body does, and reading stamps costs
-    // no decode. Digesting `(key, stamp)` pairs gets the same "did this plane
-    // move" answer for the price of an enumeration.
-    let mut stamps: Vec<(String, Option<Vec<u8>>)> = Vec::new();
-    for schema in [contract::spec_schema(), contract::baseline_schema()] {
-        for key in ctx.bodies_with_schema(&contract::world_id(), &schema) {
-            stamps.push((key.body.render(), ctx.body_stamp(&key)));
-        }
-    }
-    stamps.sort();
-    plane(CatalogScope::Specs, serde_json::json!(stamps));
-
-    // Per-project planes, and the doc index, from the same pinned catalog: one
-    // pass, one root. Each names the project by its stable id AND its display
-    // key — a dependency matches on the id, which a rename cannot move.
-    let mut docs: Vec<contract::RingDoc> = Vec::new();
-    for (id, meta) in &catalog.projects {
-        let (project_id, project_key) = (id.clone(), meta.key.clone());
-        plane(
-            CatalogScope::Boards {
-                project_id: project_id.clone(),
-                project_key: project_key.clone(),
-            },
-            serde_json::json!(catalog.boards.get(id)),
-        );
-        plane(
-            CatalogScope::Milestones {
-                project_id: project_id.clone(),
-                project_key: project_key.clone(),
-            },
-            serde_json::json!(catalog.milestones.get(id)),
-        );
-        plane(
-            CatalogScope::Cycles {
-                project_id: project_id.clone(),
-                project_key: project_key.clone(),
-            },
-            serde_json::json!(catalog.cycles.get(id)),
-        );
-        plane(
-            CatalogScope::Updates {
-                project_id: project_id.clone(),
-                project_key: project_key.clone(),
-            },
-            serde_json::json!(catalog.project_updates.get(id)),
-        );
-        for (_element, doc) in catalog.boards.get(id).into_iter().flatten() {
-            docs.push(contract::RingDoc {
-                doc: doc.clone(),
-                project_id: project_id.clone(),
-                project_key: project_key.clone(),
-            });
-        }
-    }
-    contract::RingDigestView { planes, docs }
-}
-
-#[cfg(test)]
-mod structure_migration_tests {
-    use super::*;
-
-    fn legacy_plan(state: crate::spec::State) -> crate::spec::Revision {
-        crate::spec::Revision {
-            revision: "11".repeat(32),
-            predecessors: Vec::new(),
-            body: crate::spec::Body {
-                spec: "spc_01k1k8q6c6t0g0000000000000".into(),
-                project: "prj_01k1k8q6c6t0g0000000000000".into(),
-                kind: crate::spec::Kind::Plan,
-                generation: String::new(),
-                title: "Plan".into(),
-                text: format!("{}Plan", contract::DOCUMENT_PREFIX),
-                state,
-                links: Vec::new(),
-                plan: None,
-                author: "act_86a32a40c88b66b026bd7567542e228bd727e0488feaf4d8b528a7a79aa1ee30"
-                    .into(),
-                ts: 1,
-            },
-        }
-    }
-
-    #[test]
-    fn migration_coordinates_a_plan_without_changing_issued_truth() {
-        let head = legacy_plan(crate::spec::State::Issued);
-        let actor = "act_12a03af5f8de402e33baffbe9a1dfd8321cdebb63af195bd94d7c169325f31fb";
-        let body = migrated_spec_body(&head, &"ab".repeat(32), actor, 9).unwrap();
-
-        assert_eq!(body.state, crate::spec::State::Issued);
-        assert_eq!(body.generation, "ab".repeat(32));
-        assert_eq!(body.plan.unwrap().roots, Vec::<String>::new());
-        assert_eq!(body.author, actor);
-        assert_eq!(body.ts, 9);
-    }
-
-    #[test]
-    fn migration_is_a_no_op_once_the_head_is_native() {
-        let mut head = legacy_plan(crate::spec::State::Draft);
-        head.body.generation = "cd".repeat(32);
-        head.body.plan = Some(crate::spec::PlanData { roots: Vec::new() });
-
-        assert!(migrated_spec_body(&head, &"ef".repeat(32), &head.body.author, 9).is_none());
     }
 }
 
@@ -6318,14 +12631,18 @@ mod comment_anchor_tests {
     }
 
     impl runtime::world::BodyReader for ScriptedReader {
-        fn read_body(&self, _key: &replica::body::BodyKey) -> Option<Vec<u8>> {
-            None
+        fn read_body(
+            &self,
+            _key: &replica::body::BodyKey,
+        ) -> Result<Option<runtime::world::BodyBytes>, runtime::world::BodyReadFailure> {
+            Ok(None)
         }
         fn read_collaborative_body(
             &self,
             _key: &replica::body::BodyKey,
-        ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
-            Err(fabric::projection::Failure::NotCollaborative)
+        ) -> Result<Option<runtime::world::CollaborativeBody>, runtime::world::BodyReadFailure>
+        {
+            Ok(None)
         }
         fn bodies_with_schema(
             &self,
@@ -6342,19 +12659,20 @@ mod comment_anchor_tests {
             _key: &replica::body::BodyKey,
             _path: &str,
             _position: u64,
-        ) -> Option<fabric::Anchor> {
-            None
+        ) -> Result<Option<fabric::Anchor>, runtime::world::BodyReadFailure> {
+            Ok(None)
         }
         fn resolve_anchor(
             &self,
             _key: &replica::body::BodyKey,
             anchor: &fabric::Anchor,
-        ) -> fabric::AnchorResolution {
+        ) -> Result<fabric::AnchorResolution, runtime::world::BodyReadFailure> {
             self.asked.fetch_add(1, Ordering::SeqCst);
-            self.by_offset
+            Ok(self
+                .by_offset
                 .get(&anchor.offset)
                 .copied()
-                .unwrap_or(fabric::AnchorResolution::Drifted)
+                .unwrap_or(fabric::AnchorResolution::Drifted))
         }
         fn content_status(
             &self,
@@ -6433,7 +12751,7 @@ mod comment_anchor_tests {
     ) -> Option<crate::dto::CommentAnchorDto> {
         let facts = facts();
         let ctx = Context::with_reads(&facts, reader, [0u8; 32]);
-        resolve_comment_anchor(&ctx, "iss_x", issue, &comment(at))
+        resolve_comment_anchor(&ctx, "iss_x", issue, &comment(at)).unwrap()
     }
 
     /// An unattached comment has no anchor to report, which is not a state of
