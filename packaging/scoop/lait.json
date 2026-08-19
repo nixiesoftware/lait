@@ -2,7 +2,7 @@
     "version": "0.4.1",
     "description": "A local-first, peer-to-peer, end-to-end-encrypted issue tracker built on iroh + Loro CRDTs.",
     "homepage": "https://github.com/nixiesoftware/lait",
-    "license": "MIT OR Apache-2.0",
+    "license": "PolyForm-Noncommercial-1.0.0",
     "architecture": {
         "64bit": {
             "url": "https://github.com/nixiesoftware/lait/releases/download/v0.4.1/lait-x86_64-pc-windows-msvc.zip",

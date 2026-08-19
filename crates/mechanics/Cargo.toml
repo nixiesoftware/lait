@@ -4,7 +4,7 @@ version = "0.7.8"
 edition = "2021"
 rust-version = "1.92"
 description = "The lait kernel: identity, trust regimes, and derivation rules — the roots lait grows from, depending on no scaffold (no CRDT engine, no transport)."
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 # Not published. These are lait's internal boundaries, not a library surface —
 # the descriptions above say so ("the ONLY crate that names loro", "the ONLY
 # crate that names iroh"), and those are architecture invariants rather than a

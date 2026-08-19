@@ -611,7 +611,7 @@ fn the_notices_say_they_are_generated_and_name_what_generates_them() {
     );
     // The claim the whole file exists to support.
     assert!(
-        notices.contains("MIT OR Apache-2.0"),
+        notices.contains("PolyForm-Noncommercial-1.0.0"),
         "the notices do not state what lait itself is offered under"
     );
 }
@@ -647,5 +647,136 @@ fn the_client_and_its_sidecar_agree_about_the_layout() {
         lait::update::custody_of(&found),
         lait::update::Custody::Managed { by: client },
         "and that lait must know it is a component, not a self-managing install"
+    );
+}
+
+// --- The terms --------------------------------------------------------------
+//
+// PolyForm's Notices section makes carrying the terms an obligation on whoever
+// distributes a copy, not a courtesy. Each channel is asserted separately
+// because each stages independently — and this is the failure mode that does
+// not announce itself: nothing errors, the install simply lacks a file, and
+// the omission is invisible until someone asks what terms they hold.
+
+fn build_workflow() -> String {
+    let path = repo_root().join(".github/workflows/build-astrolabe.yml");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
+/// Windows ships the terms and shows them before anything is installed. A
+/// person installing a noncommercial-licensed client on a work machine is
+/// precisely who needs to read them at that moment rather than discover them
+/// afterwards, which is why this is a page and not only a file.
+#[test]
+fn the_installer_ships_and_shows_the_licence() {
+    let script = installer();
+    assert!(
+        script.contains(r#"File "${STAGE}\LICENSE""#),
+        "the installer carries the binaries and not the terms they are offered under"
+    );
+    assert!(
+        directives().contains(r#"MUI_PAGE_LICENSE "${STAGE}\LICENSE""#),
+        "the installer never shows the terms it is installing under"
+    );
+    assert!(
+        repo_root().join("LICENSE").is_file(),
+        "there is nothing for the installer to carry"
+    );
+}
+
+/// A drag-install copies the .app and nothing else — the same reasoning as the
+/// notices, and so the same placement. Loose in the DMG, the terms stay behind
+/// on an unmounted image and were never really shipped.
+///
+/// Placement alone is not the property. Signing the .app seals the state of
+/// everything under it, so a file copied in *after* the seal does not ride
+/// along quietly — it invalidates the signature. Both files must therefore be
+/// staged before the bundle is signed, which is what is asserted here: the
+/// Linux and Windows analogues check ordering too, and macOS is the platform
+/// where getting it wrong is caught last and costs most.
+#[test]
+fn the_dmg_stages_the_terms_inside_the_bundle_before_it_is_sealed() {
+    let script = dmg_directives();
+    let at = |needle: &str| -> usize {
+        script
+            .find(needle)
+            .unwrap_or_else(|| panic!("the DMG script no longer contains {needle:?}"))
+    };
+
+    // The bundle seal: the last `sign`, the one that takes `$STAGED` itself.
+    let seal = at(
+        r#"sign --entitlements "$REPO/apps/astrolabe/macos/Runner/Release.entitlements" "$STAGED""#,
+    );
+
+    assert!(
+        at("Contents/Resources/LICENSE") < seal,
+        "the terms are staged after the bundle is sealed, which breaks the signature"
+    );
+    assert!(
+        at("Contents/Resources/THIRD-PARTY-NOTICES.md") < seal,
+        "the notices are staged after the bundle is sealed, which breaks the signature"
+    );
+}
+
+/// The tarball carries the terms into `current/`, beside the notices, and
+/// refuses to build without them — the same guard the notices already had.
+#[test]
+fn the_linux_package_ships_the_licence() {
+    let script = linux_directives();
+    assert!(
+        script.contains(r#"cp "$REPO/LICENSE""#),
+        "the Linux package ships binaries without the terms they are offered under"
+    );
+    assert!(
+        script.contains(r#"[ -f "$REPO/LICENSE" ]"#),
+        "a missing LICENSE is not refused, so the package can ship without one"
+    );
+}
+
+/// The one that actually regressed, and the reason it is asserted against the
+/// workflow rather than against any packaging script.
+///
+/// `make-tree.sh` packs the *bundle directory*, and the tree it produces is
+/// what a self-update swaps into `current/`. So a file added afterwards by an
+/// installer survives the install and not the first upgrade. Windows and macOS
+/// staged into their bundle and were fine; Linux staged only inside
+/// `make-tarball`, which writes to the tarball's own root — so its update tree
+/// carried no notices at all, and would have carried no terms either.
+///
+/// Ordering is the property, so ordering is what is checked: the staging step
+/// must appear before the `make-tree` call that consumes the directory.
+#[test]
+fn every_platform_stages_the_terms_where_the_update_tree_will_find_them() {
+    let workflow = build_workflow();
+
+    let at = |needle: &str| -> usize {
+        workflow
+            .find(needle)
+            .unwrap_or_else(|| panic!("the workflow no longer contains {needle:?}"))
+    };
+
+    // Windows and Linux both pack a plain bundle directory, so both must place
+    // the terms in it first.
+    assert!(
+        at("Copy-Item LICENSE $stage")
+            < at(r#"--stage "apps/astrolabe/build/windows/x64/runner/Release""#),
+        "Windows packs its update tree before staging the terms into the bundle"
+    );
+    assert!(
+        at("cp THIRD-PARTY-NOTICES.md LICENSE")
+            < at("--stage apps/astrolabe/build/linux/x64/release/bundle"),
+        "Linux packs its update tree before staging the terms into the bundle — \
+         the tarball would carry them and the first upgrade would drop them"
+    );
+
+    // macOS stages by a different route and is correct for a different reason:
+    // `make-dmg` puts the terms inside the .app, and the tree is packed from
+    // that staged copy rather than from the raw build output. Packing the build
+    // output instead would reintroduce exactly the Linux defect.
+    assert!(
+        workflow.contains(r#"--stage "$RUNNER_TEMP/dmg/Astrolabe.app""#),
+        "the macOS tree is packed from the build output, which has neither the \
+         notices nor the terms staged into it"
     );
 }

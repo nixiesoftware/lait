@@ -58,16 +58,20 @@ edition = "2021"
 rust-version = "1.92"
 description = "A local-first, peer-to-peer, end-to-end-encrypted issue tracker built on iroh + Loro CRDTs"
 authors = ["onnixi <omar@onnixi.com>"]
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
+# crates.io will not carry a noncommercial crate as a dependency anyone can
+# resolve, and publishing one invites a permissive-by-assumption misread. The
+# binary is distributed through the release feed instead. Every other package
+# in the workspace already declares this.
+publish = false
 # GitHub is the canonical home: source of record, release host, and issue tracker.
 repository = "https://github.com/nixiesoftware/lait"
 homepage = "https://github.com/nixiesoftware/lait"
 readme = "README.md"
 keywords = ["iroh", "p2p", "gossip", "crdt", "issue-tracker"]
 categories = ["command-line-utilities", "network-programming"]
-# Keep the published crate lean: ship the crate sources, docs, and licenses;
-# drop the web viewer, packaging scaffolding, CI, and editor/agent tooling that
-# only matter in the repo. (`target/` and `.git/` are always excluded by cargo.)
+# Retained though the crate is no longer published: `cargo package`/`vendor`
+# still read it, and it costs nothing to keep the set honest.
 exclude = [
     "viewer/",
     "packaging/",
@@ -590,6 +594,16 @@ from_iter_instead_of_collect = "allow"      # 1
 for_kv_map = "allow"                        # 1
 equatable_if_let = "allow"                  # 1
 enum_variant_names = "allow"                # 1
+
+# `publish = false` above is Cargo's switch AND cargo-dist's signal that a
+# package is not an App to release — so setting it emptied the release plan
+# ("This workspace doesn't have anything for dist to Release!"), which fails
+# ci.yml's `release-dry-run`, produces no archives or installers on a tag, and
+# leaves every `workflow_run` publisher (homebrew, scoop, winget, sbom, and the
+# whole Astrolabe bundle job) waiting on a Release that never succeeded. This
+# is the opt-in dist's own diagnostic prescribes: not published, still shipped.
+[package.metadata.dist]
+dist = true
 
 [lints]
 workspace = true

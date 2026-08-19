@@ -98,6 +98,7 @@ done
 # DMG), because a drag-install copies the .app and nothing else — notices that
 # stay behind on an unmounted disk image were never really shipped.
 cp "$REPO/THIRD-PARTY-NOTICES.md" "$STAGED/Contents/Resources/THIRD-PARTY-NOTICES.md"
+cp "$REPO/LICENSE" "$STAGED/Contents/Resources/LICENSE"
 
 # --- Sign inside-out ---------------------------------------------------------
 #

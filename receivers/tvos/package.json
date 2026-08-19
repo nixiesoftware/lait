@@ -2,6 +2,7 @@
   "name": "@nixie/astrolabe-tvos-receiver",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Production Apple tvOS receiver for Astrolabe Display",
   "scripts": {
     "test": "node --test"

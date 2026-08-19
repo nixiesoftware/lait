@@ -74,11 +74,13 @@ allow = [
     "Unlicense",
     "0BSD",
 ]
-# The iOS client is AGPL by decision (RustDesk's license); the exception is
-# scoped to that one crate so the allowlist above stays the workspace's story.
-exceptions = [
-    { name = "astrolabe-ios", allow = ["AGPL-3.0-only"] },
-]
+# The allow list above governs the DEPENDENCY closure, which stays permissive so
+# it carries no obligation we did not choose. This workspace's own crates are
+# PolyForm-Noncommercial and must not widen it: putting that licence in `allow`
+# would have let a third-party crate adopt it and pass silently. Every
+# first-party package is `publish = false`, which is precisely what `private`
+# selects, so they are skipped as ours rather than allowed as anyone's.
+private = { ignore = true }
 
 [sources]
 unknown-registry = "deny"
