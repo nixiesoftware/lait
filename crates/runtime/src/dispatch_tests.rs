@@ -6073,3 +6073,273 @@ fn retention_disabled_is_the_default_and_collects_nothing() {
     accept_run(&session, &identity, 0xC3, run, attempt);
     assert!(session.sweep_resolved_runs().unwrap().is_empty());
 }
+
+// ===== Interactive input, shape (a): the probe ===========================
+//
+// The fork probe for Run-addressed input, built entirely from shipped
+// primitives. What it demonstrates: an Interactive-style loop where the
+// Attempt yields by RETURNING ITS QUESTION as an honest Outcome (the Spec's
+// output is the union "final result or question" — "progress is never an
+// Outcome" holds because a question is not progress, it is the product), and
+// the authorized answer is CONTROL-SHAPED: the adapter resumes from the
+// committed checkpoint to approve, or cancels to deny. The resumption *is*
+// the answer.
+//
+// What the probe deliberately does NOT do — and this is the recorded finding
+// — is deliver data-shaped input to the resumed Attempt. An answer committed
+// after Started is invisible to the Attempt's Find (pinned to the Run's
+// parent Manifest root: "latest" never enters a Run) and refused by its
+// content facet (which admits only Started inputs and the lease's own
+// checkpoint). Both refusals are correct, which is the point: parameterized
+// input cannot ride shape (a) without either violating root pinning or
+// extending vocabulary — and the minimal honest extension is the
+// continuation Try carrying bounded, root-stamped additional input (the
+// bound `max_additional_input_bytes` already declares), not a new event
+// kind. That extension waits for the wire's input flow to inform it.
+
+#[test]
+fn an_interactive_run_yields_its_question_and_an_authorized_resume_is_the_answer() {
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xD1; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"plain".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+
+    // Pass 1: the Attempt does its work up to the decision point, commits
+    // its state, and returns its question as the Outcome.
+    let first = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    assert!(first.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0xD2; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert!(state.unresolved, "a question is not acceptance");
+    assert_eq!(state.attempts.len(), 1);
+    assert_eq!(state.attempts[0].returned.len(), 1);
+    // The legibility gap, pinned as a fact rather than papered over: at the
+    // generic surface, "yielded awaiting an answer" and "done awaiting
+    // acceptance" are the same shape — unresolved, returned, checkpointed.
+    // Only the product knows which. This is the cost shape (a) carries.
+    let checkpoint = state.attempts[0].checkpoints[0].checkpoint.content;
+
+    // The adapter-chained answer: an authorized resume from the committed
+    // checkpoint. Who may answer is the product's question — the adapter
+    // sits behind the product's own authorization, exactly like the RunId
+    // minting precedent.
+    session
+        .work(
+            crate::exec::WorkRequest::Resume {
+                world: world_id.clone(),
+                run,
+                checkpoint,
+            },
+            [0xD3; 16],
+        )
+        .unwrap();
+
+    // Pass 2: the resumed Attempt reads its own committed state back and
+    // completes. The resumption itself carried the approval.
+    let second = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    assert!(second.steps.iter().any(|step| matches!(
+        step,
+        crate::exec::PerformStep::Returned { run: returned, .. } if *returned == run
+    )));
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0xD4; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert_eq!(state.attempts.len(), 2);
+    let resumed = state
+        .attempts
+        .iter()
+        .find(|attempt| attempt.checkpoint.is_some())
+        .expect("the answering Attempt bound the committed checkpoint");
+    assert_eq!(
+        resumed.checkpoint.as_ref().map(|c| c.content),
+        Some(checkpoint),
+        "the lease bound exactly the state the question was asked from"
+    );
+    assert!(!resumed.returned.is_empty());
+}
+
+#[test]
+fn a_denied_question_is_a_cancellation_not_a_silent_stall() {
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let request = crate::action::RequestId::from_bytes([0xD5; 16]);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    request,
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload: b"plain".to_vec(),
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let run = crate::exec::derive_run_id(
+        station.space_id(),
+        &world_id,
+        identity.device(),
+        request.as_bytes(),
+        0,
+    );
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+    session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+
+    // Denial is the other control verb: a committed cancellation request,
+    // visible on the Run — never an answer that simply fails to arrive.
+    session
+        .work(
+            crate::exec::WorkRequest::Cancel {
+                world: world_id.clone(),
+                run,
+            },
+            [0xD6; 16],
+        )
+        .unwrap();
+    let crate::exec::WorkReply::State(state) = session
+        .work(
+            crate::exec::WorkRequest::Inspect {
+                world: world_id.clone(),
+                run,
+            },
+            [0xD7; 16],
+        )
+        .unwrap()
+    else {
+        panic!("inspect returns lifecycle state");
+    };
+    assert!(
+        !state.cancel_asked.is_empty(),
+        "the denial is durable and named"
+    );
+    // And the drain honors it: a cancel-asked Run gets no further Attempt.
+    let after = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    assert!(
+        after.steps.is_empty(),
+        "a denied question is not retried behind the denier's back"
+    );
+}
+
+#[test]
+fn an_answer_committed_after_started_is_invisible_to_the_pinned_attempt() {
+    // The boundary probe: shape (a)'s data-input ceiling, asserted as a
+    // FEATURE of root pinning rather than discovered as a surprise in some
+    // product. The Attempt's Find evaluates at the Run's parent Manifest
+    // root; a Body committed after Started does not exist there.
+    let build = checkpoint_build(&WorldId::parse("com.example.exec-checkpoint").unwrap());
+    let world = Arc::new(CheckpointWorld::new(build.id));
+    let world_id = world.id();
+    let station = station_with(world.descriptor(), world);
+    let identity = writer();
+    let session = station.dock(&world_id, &identity).unwrap();
+    let input = station
+        .content_write(
+            &identity,
+            crate::world::RequestId::mint().as_bytes(),
+            &mut std::io::Cursor::new(b"the commissioned repository".to_vec()),
+        )
+        .unwrap();
+    // A ref sealed AFTER the Run starts — the "late answer".
+    let mut payload = b"with-input:".to_vec();
+    payload.extend_from_slice(&input.content_id);
+    payload.extend_from_slice(&(b"the commissioned repository".len() as u64).to_be_bytes());
+    let late = station
+        .content_write(
+            &identity,
+            crate::world::RequestId::mint().as_bytes(),
+            &mut std::io::Cursor::new(b"the late answer".to_vec()),
+        )
+        .unwrap();
+    payload.extend_from_slice(&late.content_id);
+    session
+        .submit(
+            identity
+                .sign_action(
+                    &session,
+                    crate::action::RequestId::from_bytes([0xD8; 16]),
+                    Intent {
+                        schema: SchemaId::parse("agent.request").unwrap(),
+                        schema_version: 1,
+                        payload,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let package = checkpoint_package(&build);
+    let (mut put, read) = checkpoint_perform_io(&station, &identity);
+    // The handler's with-input arm asserts the commissioned ref reads and
+    // the un-named ref refuses — the late answer is exactly an un-named ref.
+    let report = session
+        .perform_with(&package, &mut put, Some(&read))
+        .unwrap();
+    assert!(report
+        .steps
+        .iter()
+        .any(|step| matches!(step, crate::exec::PerformStep::Returned { .. })));
+}
