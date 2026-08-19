@@ -5,10 +5,10 @@
 //! generation, operator policy, member standing, replay recognition, and
 //! revocation-driven close all come from `plane_driver`/`admission` — and an
 //! admitted connection is held. The typed `control`, `output`, `input`, and
-//! `link` flows are owned by the remaining E3 issues; until they land, every
-//! flow a peer opens is stopped loudly rather than left to time out, so an
-//! admitted peer learns "nothing is served here yet" at its first write, not
-//! at its deadline.
+//! `link` flows are owned by the remaining E3 deliverables; until they land,
+//! every flow a peer opens is stopped loudly rather than left to time out,
+//! so an admitted peer learns "nothing is served here yet" at its first
+//! write, not at its deadline.
 //!
 //! What this deliberately does not do yet: read a byte of any flow, name a
 //! Spec or Build, mint an Attempt, or answer a readiness challenge. An
