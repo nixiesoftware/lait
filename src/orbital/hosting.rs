@@ -614,7 +614,11 @@ impl StationHost {
                         // between two already-updated machines.
                         runtime::correspondence::CORRESPONDENCE_ALPN,
                     ],
-                    session: &[runtime::plane::FREIGHT_ALPN, runtime::plane::LIVE_ALPN],
+                    session: &[
+                        runtime::plane::FREIGHT_ALPN,
+                        runtime::plane::LIVE_ALPN,
+                        runtime::plane::EXEC_ALPN,
+                    ],
                 },
                 &space,
             )

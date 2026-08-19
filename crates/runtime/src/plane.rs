@@ -25,6 +25,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod contact;
+pub mod exec;
 pub mod freight;
 pub mod live;
 
@@ -35,6 +36,8 @@ pub use crate::lifecycle::Activation;
 pub const FREIGHT_ALPN: &[u8] = b"lait/freight/1";
 /// Long-lived realtime session.
 pub const LIVE_ALPN: &[u8] = b"lait/session/1";
+/// Direct Station work and bounded lifecycle flows.
+pub const EXEC_ALPN: &[u8] = b"lait/exec/1";
 
 /// The protocol generation each ALPN speaks.
 ///
@@ -47,6 +50,7 @@ pub const LIVE_ALPN: &[u8] = b"lait/session/1";
 /// capability as a feature bit instead.
 pub const FREIGHT_PROTOCOL_VERSION: u16 = 1;
 pub const LIVE_PROTOCOL_VERSION: u16 = 1;
+pub const EXEC_PROTOCOL_VERSION: u16 = 1;
 
 /// Typed stream kinds within one live connection.
 ///
@@ -238,6 +242,16 @@ pub enum Plane {
     Freight,
     Live,
     Contact,
+    /// Appended to an existing encoding, exactly as `Contact` was, and safe
+    /// for the same reason: a `Plane` value only ever rides the connection of
+    /// its own ALPN, and an older peer that does not advertise `lait/exec/1`
+    /// never completes the negotiation that would hand it this discriminant.
+    /// The ALPN is the version gate — a mixed pair fails at the transport
+    /// with no common protocol, the same legible refusal any unshared
+    /// generation meets today. A peer that smuggles this discriminant into
+    /// another plane's opening fails `judge`'s plane-matches-ALPN check and
+    /// is refused as malformed.
+    Exec,
 }
 
 impl Plane {
@@ -251,6 +265,9 @@ impl Plane {
             Self::Freight => false,
             Self::Live => true,
             Self::Contact => false,
+            // Exec types its own control/output/input/Link flows in its own
+            // vocabulary; the shared lane grant is Live's.
+            Self::Exec => false,
         }
     }
 
@@ -259,6 +276,7 @@ impl Plane {
             Plane::Freight => FREIGHT_ALPN,
             Plane::Live => LIVE_ALPN,
             Plane::Contact => b"lait/contact/2",
+            Plane::Exec => EXEC_ALPN,
         }
     }
 
@@ -267,6 +285,7 @@ impl Plane {
             Plane::Freight => FREIGHT_PROTOCOL_VERSION,
             Plane::Live => LIVE_PROTOCOL_VERSION,
             Plane::Contact => 2,
+            Plane::Exec => EXEC_PROTOCOL_VERSION,
         }
     }
 }

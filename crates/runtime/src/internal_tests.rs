@@ -5,6 +5,7 @@ mod content_host;
 mod convergence_simulation;
 mod driver_beat;
 mod dto_schema;
+mod exec_plane;
 mod freight_transfer;
 mod freight_two_node;
 mod freight_wire;

@@ -380,7 +380,7 @@ old one.
 | `lait/neighbor-presence/1` | liveness probe | implemented |
 | `lait/freight/1` | Freight — reliable exact-object request and response | implemented and **mounted** |
 | `lait/session/1` | Live — transient collaboration and reliable signals | implemented and **mounted**, inbound and outbound; carries the control lane and the reliable-signal lane |
-| `lait/exec/1` | Exec — direct Station work and bounded lifecycle flows | reserved; not registered, advertised, or mounted |
+| `lait/exec/1` | Exec — direct Station work and bounded lifecycle flows | implemented and **mounted**: registered at both composition sites, openings judged by the shared admission path; the typed control/output/input/Link flows are loud refusals until their E3 issues land |
 
 **What "implemented" means in this column.** It means a dial on that ALPN
 reaches a handler that reads the opening, judges it, and answers — not that
@@ -416,13 +416,18 @@ reading a bare refusal must not read it as a version problem.
 Gossip rides iroh's own ALPN inside `crates/comms` and is transport plumbing, not
 a LAIT protocol generation.
 
-`lait/exec/1` is a reservation, not a compatibility promise that code can dial.
-It becomes implemented only when a real opening is bounded and decoded, an
-admitted peer is independently authorized, and a mounted driver answers it.
-Advertising it earlier would repeat the false-positive service state described
-above. Additive optional behavior uses negotiated feature bits; a peer that
-would misinterpret changed command, flow, or refusal semantics requires a new
-ALPN generation.
+`lait/exec/1` crossed the bar this column measures: a real opening is bounded
+and decoded, an admitted peer is independently authorized through the same
+`judge` every plane uses, and a mounted driver answers — Accept for a member on
+an enabled plane, the coarse refusal otherwise. What it does not yet serve is
+any flow: control, output, input, and Link are stopped loudly at the first
+write until their E3 issues land, so an admitted connection confers standing to
+converse, never work. `Plane::Exec` was appended to the opening encoding the
+way `Contact` was, and is safe the same way: a `Plane` value only rides its own
+ALPN's connection, and a peer without `lait/exec/1` never completes the
+negotiation that could hand it the discriminant. Additive optional behavior
+uses negotiated feature bits; a peer that would misinterpret changed command,
+flow, or refusal semantics requires a new ALPN generation.
 
 `PROTOCOL.md` — "Delivery planes" — has the full contract, including the frozen
 bounds and which of them are LAIT policy rather than observations of the pinned

@@ -98,6 +98,12 @@ pub struct PlanePolicy {
     /// able to say so without refusing them one at a time — and a plane that
     /// cannot be turned off is a plane whose cost an operator cannot decline.
     pub live_enabled: bool,
+    /// Whether this Station answers on the Exec plane at all.
+    ///
+    /// The same kind of operator switch as `live_enabled`: a Station that
+    /// performs no remote work declines the plane's cost here rather than
+    /// refusing Attempts one at a time.
+    pub exec_enabled: bool,
     /// Whether a file offered by one of this identity's own devices may land on
     /// disk without anyone clicking.
     ///
@@ -116,6 +122,7 @@ impl Default for PlanePolicy {
             serve_enabled: true,
             fetch_enabled: true,
             live_enabled: true,
+            exec_enabled: true,
             // The one switch here that defaults to off. Every other field
             // enables something a peer asked for; this one writes to a disk
             // nobody asked about at the moment it happens.
@@ -177,7 +184,7 @@ pub fn judge(
 
     let resolution = match context.plane {
         Plane::Contact => authority.admit_contact_peer(&context.peer),
-        Plane::Freight | Plane::Live => authority.admit_peer(&context.peer),
+        Plane::Freight | Plane::Live | Plane::Exec => authority.admit_peer(&context.peer),
     };
     let Some(resolution) = resolution else {
         return Admission::refuse();
@@ -252,6 +259,7 @@ fn policy_admits(plane: Plane, policy: &PlanePolicy) -> bool {
         Plane::Freight => policy.serve_enabled || policy.fetch_enabled,
         Plane::Live => policy.live_enabled,
         Plane::Contact => true,
+        Plane::Exec => policy.exec_enabled,
     }
 }
 

@@ -6149,7 +6149,7 @@ impl Session {
             world: self.world_id.clone(),
             body: crate::exec::derive_build_body_id(id),
         };
-        let mut inner = self.core.lock();
+        let inner = self.core.lock();
         if inner.closed {
             return Err(Failure::Interrupted);
         }

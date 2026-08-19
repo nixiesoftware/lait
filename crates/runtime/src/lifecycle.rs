@@ -282,6 +282,8 @@ pub struct PlaneOptions {
     pub freight_enabled: bool,
     /// Whether this Station answers on the Live plane.
     pub live_enabled: bool,
+    /// Whether this Station answers on the Exec plane.
+    pub exec_enabled: bool,
     /// Whether a file offered by one of this identity's own devices may land on
     /// disk without anyone clicking.
     ///
@@ -297,6 +299,7 @@ impl Default for PlaneOptions {
         Self {
             freight_enabled: true,
             live_enabled: true,
+            exec_enabled: true,
             auto_accept_offers: false,
         }
     }
@@ -308,6 +311,7 @@ impl PlaneOptions {
             serve_enabled: self.freight_enabled,
             fetch_enabled: self.freight_enabled,
             live_enabled: self.live_enabled,
+            exec_enabled: self.exec_enabled,
             auto_accept_offers: self.auto_accept_offers,
         }
     }
@@ -801,6 +805,29 @@ impl Orbit {
                     // Spawned tracked, so `drain_tasks` joins it rather than
                     // leaving a thread holding a queue after the Station is
                     // gone.
+                    station.spawn_tracked(move |_cancel| {
+                        crate::plane_driver::run_driver(context, queue, service)
+                    })?;
+                }
+            }
+
+            // The exec plane's driver: opening and admission only in this
+            // foundation — an admitted connection is held and every flow is
+            // stopped loudly until the typed flow vocabulary lands. Same
+            // shared driver, same replay table, same revocation watch.
+            if options.planes.exec_enabled {
+                if let Some(queue) = plane_transport.take_session_queue(crate::plane::EXEC_ALPN) {
+                    let context = crate::plane_driver::PlaneContext {
+                        plane: crate::plane::Plane::Exec,
+                        space: station.store.space().clone(),
+                        local_station: local_station.clone(),
+                        authority: station.authority.clone(),
+                        policy: options.planes.policy(),
+                        cancel: station.cancel.clone(),
+                        drain_deadline,
+                        authority_tick: Some(station.core.authority_tick()),
+                    };
+                    let service = crate::plane::exec::Service::new();
                     station.spawn_tracked(move |_cancel| {
                         crate::plane_driver::run_driver(context, queue, service)
                     })?;

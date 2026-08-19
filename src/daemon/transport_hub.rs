@@ -1042,7 +1042,11 @@ mod tests {
         runtime::neighbor::PRESENCE_ALPN,
         runtime::correspondence::CORRESPONDENCE_ALPN,
     ];
-    const SESSION_ALPNS: &[Alpn] = &[runtime::plane::FREIGHT_ALPN, runtime::plane::LIVE_ALPN];
+    const SESSION_ALPNS: &[Alpn] = &[
+        runtime::plane::FREIGHT_ALPN,
+        runtime::plane::LIVE_ALPN,
+        runtime::plane::EXEC_ALPN,
+    ];
     fn protocols() -> comms::Protocols<'static> {
         comms::Protocols {
             framed: ALPNS,

@@ -253,6 +253,7 @@ fn operator_policy_and_membership_answer_different_questions() {
         serve_enabled: false,
         fetch_enabled: false,
         live_enabled: false,
+        exec_enabled: false,
     };
     assert_eq!(
         judge(
@@ -281,6 +282,7 @@ fn operator_policy_and_membership_answer_different_questions() {
         serve_enabled: true,
         fetch_enabled: true,
         live_enabled: false,
+        exec_enabled: false,
     };
     assert_eq!(
         judge(
@@ -291,6 +293,16 @@ fn operator_policy_and_membership_answer_different_questions() {
         ),
         Admission::Refuse(Refusal::Refused),
         "declining Live must not require declining Freight"
+    );
+    assert_eq!(
+        judge(
+            &opening(&space, Plane::Exec),
+            &context(&space, Plane::Exec),
+            &member(),
+            &files_only
+        ),
+        Admission::Refuse(Refusal::Refused),
+        "declining Exec must not require declining Freight"
     );
     assert!(
         !matches!(
@@ -530,5 +542,78 @@ fn asking_for_only_unservable_lanes_is_still_a_refusal_where_lanes_exist() {
             &PlanePolicy::default()
         ),
         Admission::Refuse(Refusal::Refused)
+    );
+}
+
+#[test]
+fn a_member_is_admitted_on_the_exec_plane() {
+    let space = space();
+    let outcome = judge(
+        &opening(&space, Plane::Exec),
+        &context(&space, Plane::Exec),
+        &member(),
+        &PlanePolicy::default(),
+    );
+    let Admission::Accept(accept, admitted) = outcome else {
+        panic!("a member on an enabled exec plane is admitted");
+    };
+    assert_eq!(accept.capability.plane, Plane::Exec);
+    assert_eq!(
+        accept.capability.protocol_version,
+        Plane::Exec.protocol_version()
+    );
+    // Exec serves no shared lanes: its flows are typed in its own vocabulary.
+    assert!(accept.granted_lanes.is_empty());
+    assert_eq!(admitted.station, station(&PEER_SEED));
+}
+
+#[test]
+fn an_exec_opening_on_another_generation_names_the_supported_one() {
+    let space = space();
+    let mut open = opening(&space, Plane::Exec);
+    open.protocol_version = 2;
+    assert_eq!(
+        judge(
+            &open,
+            &context(&space, Plane::Exec),
+            &member(),
+            &PlanePolicy::default()
+        ),
+        Admission::Refuse(Refusal::UnsupportedVersion {
+            supported: Plane::Exec.protocol_version()
+        }),
+    );
+}
+
+#[test]
+fn a_stranger_is_refused_on_the_exec_plane() {
+    let space = space();
+    let mut open = opening(&space, Plane::Exec);
+    open.initiator_station = station(&STRANGER_SEED).key_bytes();
+    let mut context = context(&space, Plane::Exec);
+    context.peer = station(&STRANGER_SEED);
+    assert_eq!(
+        judge(&open, &context, &member(), &PlanePolicy::default()),
+        Admission::Refuse(Refusal::Refused),
+        "a non-member meets the same coarse refusal every plane gives"
+    );
+}
+
+#[test]
+fn an_exec_discriminant_inside_another_planes_opening_is_malformed() {
+    // The one place an older or hostile peer could meet Plane::Exec is inside
+    // a different plane's opening — and judge's plane-matches-ALPN check
+    // refuses it before any standing is consulted.
+    let space = space();
+    let mut open = opening(&space, Plane::Exec);
+    open.protocol_version = Plane::Freight.protocol_version();
+    assert_eq!(
+        judge(
+            &open,
+            &context(&space, Plane::Freight),
+            &member(),
+            &PlanePolicy::default()
+        ),
+        Admission::Refuse(Refusal::Malformed),
     );
 }
