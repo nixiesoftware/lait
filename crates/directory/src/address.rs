@@ -65,9 +65,54 @@ impl Address {
         Ok(Self(trimmed.to_owned()))
     }
 
+    /// Mint one address from 16 bytes the *service* drew.
+    ///
+    /// Entropy is passed in rather than drawn here for the reason
+    /// `crypto::DrawnEntropy` gives: a function that reaches for randomness
+    /// cannot be tested against a known value, and the one property worth
+    /// testing about minting is that a given draw always spells the same
+    /// address.
+    ///
+    /// Word indices take 11 bits each, which is exact for a 2048-entry list and
+    /// so unbiased. The numeric tail is a modulo, whose bias against a 64-bit
+    /// draw is about 2^-50 — negligible, and negligible in the direction that
+    /// does not matter anyway: an address is a *locator*, not a secret, and its
+    /// sparseness argument is about occupancy rather than unpredictability.
+    #[must_use]
+    pub fn mint(entropy: &[u8; 16]) -> Self {
+        let mut drawn = u128::from_be_bytes(*entropy);
+        let mut words = [""; WORDS];
+        for word in &mut words {
+            // 2048 = 2^11, so masking is a uniform draw over the list.
+            *word = crate::words::WORDS[(drawn & 0x7FF) as usize];
+            drawn >>= 11;
+        }
+        let number = (drawn % u128::from(NUMBER_RANGE)) as u32;
+        Self(format!(
+            "{}-{}-{}-{number:04}",
+            words[0], words[1], words[2]
+        ))
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether every word is one this build would mint.
+    ///
+    /// Deliberately **not** part of [`Address::parse`]. Membership is a
+    /// minting-time question: an address issued under this word list has to keep
+    /// parsing if the list is ever revised, and a parser that rejected a word
+    /// retired from a later edition would break addresses already spoken aloud
+    /// and written on cards. So this exists for the minter to check its own
+    /// output, and for a test to prove the two agree.
+    #[must_use]
+    pub fn is_mintable(&self) -> bool {
+        self.0
+            .split('-')
+            .take(WORDS)
+            .all(|word| crate::words::WORDS.binary_search(&word).is_ok())
     }
 }
 
@@ -106,6 +151,43 @@ mod tests {
                 "{raw} is not canonical, and says so rather than answering about existence"
             );
         }
+    }
+
+    /// One draw always spells one address — the property that lets a mint be
+    /// retried on collision without wondering whether it moved.
+    #[test]
+    fn a_draw_mints_the_same_address_every_time_and_parses_as_one() {
+        let minted = Address::mint(&[0x5A; 16]);
+        assert_eq!(minted, Address::mint(&[0x5A; 16]));
+        let reparsed = Address::parse(minted.as_str()).expect("a minted address is canonical");
+        assert_eq!(reparsed, minted);
+        assert!(minted.is_mintable(), "{minted} uses words off the list");
+    }
+
+    /// Minting and parsing have to agree over the whole space, not at one point.
+    /// A draw that produced a spelling the parser refused would be an address
+    /// the service could issue and nobody could type back.
+    #[test]
+    fn every_minted_address_parses_and_uses_only_listed_words() {
+        for seed in 0u8..=255 {
+            let minted = Address::mint(&[seed; 16]);
+            assert!(
+                Address::parse(minted.as_str()).is_ok(),
+                "{minted} was minted and does not parse"
+            );
+            assert!(minted.is_mintable(), "{minted} uses words off the list");
+        }
+    }
+
+    /// The example the design Spec spells is not one this build would mint —
+    /// `tin` and `quiet` are not on the list. That is not a defect in either:
+    /// parsing checks shape so an address outlives a revision of the list, and
+    /// this test is here so the difference is a recorded decision rather than a
+    /// discrepancy somebody trips over.
+    #[test]
+    fn an_address_off_the_word_list_still_parses_and_says_it_is_not_mintable() {
+        let address = Address::parse("tin-harbor-quiet-4417").expect("well formed");
+        assert!(!address.is_mintable());
     }
 
     /// The sparseness the no-enumeration position leans on, asserted rather than

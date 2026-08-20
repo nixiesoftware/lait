@@ -39,6 +39,20 @@
 #![forbid(unsafe_code)]
 
 pub mod address;
+pub mod client;
+pub mod firestore;
+pub mod http;
+pub mod service;
+pub mod store;
+pub mod wire;
+mod words;
+
+pub use address::Address;
+pub use client::Remote;
+pub use firestore::{Credentials, FirestoreStore};
+pub use service::{Service, Shared};
+pub use store::{MemStore, Published, Store};
+pub use wire::{sign, Challenge, SignedPublish, SignedResolve};
 
 /// Why the directory would not answer.
 ///
@@ -107,29 +121,82 @@ pub trait Directory {
     /// Issue a single-use nonce for `device`. Free and unauthenticated: it
     /// proves nothing and grants nothing, and needing no prior agreement is why
     /// a challenge is used rather than a signed timestamp.
-    fn challenge(&mut self, device: &mechanics::ids::DeviceId) -> Result<[u8; 32], Refusal>;
+    fn challenge(
+        &mut self,
+        device: &mechanics::ids::DeviceId,
+        now: u64,
+    ) -> Result<Challenge, Refusal>;
 
     /// Publish a profile's signed device events, verified on their own terms.
     ///
     /// Returns the address this profile answers to — minted on first publish and
     /// stable afterwards. The service chooses it; the publisher does not.
-    fn publish(
-        &mut self,
-        announcement: &addressbook::Announcement,
-        nonce: &[u8; 32],
-        signature: &[u8; 64],
-    ) -> Result<address::Address, Refusal>;
+    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal>;
 
-    /// Resolve one exact address to the devices its profile currently avows.
+    /// Resolve one exact address to the announcement its profile published.
     ///
     /// Never a listing and never a prefix. The asker signs a statement naming
     /// the operation, the subject and a nonce this service issued, so a captured
     /// resolution cannot be replayed by whoever saw it.
-    fn resolve(
-        &self,
-        address: &address::Address,
-        asker: &mechanics::ids::DeviceId,
-        nonce: &[u8; 32],
-        signature: &[u8; 64],
-    ) -> Result<addressbook::Announcement, Refusal>;
+    ///
+    /// Answers the announcement's own bytes rather than a decoded value: the
+    /// publisher's signature covered exactly those, and the *reader* is the party
+    /// that must anchor them to a genesis it already holds.
+    fn resolve(&mut self, request: &SignedResolve, now: u64) -> Result<Vec<u8>, Refusal>;
+}
+
+impl<S: Store> Directory for Service<S> {
+    fn challenge(
+        &mut self,
+        device: &mechanics::ids::DeviceId,
+        now: u64,
+    ) -> Result<Challenge, Refusal> {
+        Service::challenge(self, device, now)
+    }
+
+    fn publish(&mut self, request: &SignedPublish, now: u64) -> Result<Address, Refusal> {
+        Service::publish(self, request, now)
+    }
+
+    fn resolve(&mut self, request: &SignedResolve, now: u64) -> Result<Vec<u8>, Refusal> {
+        Service::resolve(self, request, now)
+    }
+}
+
+/// Publish `announcement` and learn the address it answers to.
+///
+/// The round trip in one call, because challenge-then-sign-then-send is the
+/// *protocol* and a caller reimplementing it is a caller that can get the order
+/// wrong. Takes a seed and runs in the caller's process; nothing here is the
+/// service's.
+pub fn publish_as(
+    directory: &mut dyn Directory,
+    seed: &[u8; 32],
+    announcement: &addressbook::Announcement,
+    now: u64,
+) -> Result<Address, Refusal> {
+    let device = mechanics::actor::device_from_seed(seed);
+    let challenge = directory.challenge(&device, now)?;
+    let encoded = announcement.encode().map_err(|_| Refusal::TooLarge)?;
+    let request = wire::sign::publish(seed, &challenge, encoded);
+    directory.publish(&request, now)
+}
+
+/// Ask for one exact address, and get back what its holder published.
+///
+/// The answer is **not** trusted here. It is an announcement the caller must
+/// anchor against a genesis it already holds — which is what makes the directory
+/// a mirror rather than an authority, and what stops a substituted answer from
+/// becoming a seal to the wrong key (AUTH-18).
+pub fn resolve_as(
+    directory: &mut dyn Directory,
+    seed: &[u8; 32],
+    address: &Address,
+    now: u64,
+) -> Result<addressbook::Announcement, Refusal> {
+    let device = mechanics::actor::device_from_seed(seed);
+    let challenge = directory.challenge(&device, now)?;
+    let request = wire::sign::resolve(seed, &challenge, address);
+    let bytes = directory.resolve(&request, now)?;
+    addressbook::Announcement::decode(&bytes).map_err(|_| Refusal::NotAuthentic)
 }

@@ -4,7 +4,7 @@ version = "0.7.8"
 edition = "2021"
 rust-version = "1.92"
 description = "The lait correspondence seam: reaching a person who shares no Space with you, with the carrier as a contractor behind it. The ONLY crate that may name a delivery protocol."
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 # Not published, for the reason `comms` and `journal` give: these are lait's
 # internal boundaries rather than a library surface, and the description above is
 # an architecture invariant, not a contract for strangers to build on.

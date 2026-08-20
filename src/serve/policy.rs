@@ -168,6 +168,7 @@ pub fn is_read(req: &Request) -> bool {
         // None of them is a read, however much they feel like looking.
         | Request::ReachShare
         | Request::ReachLearn { .. }
+        | Request::ReachResolve { .. }
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
         | Request::CorrespondInvite { .. } => false,
@@ -259,6 +260,7 @@ pub fn is_host_plane(req: &Request) -> bool {
         | Request::ReachShare
         | Request::ReachLearn { .. }
         | Request::ReachView
+        | Request::ReachResolve { .. }
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
         | Request::CorrespondInvite { .. }

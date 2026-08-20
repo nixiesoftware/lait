@@ -17,5 +17,32 @@ workspace = true
 # of its own — verifying what a publisher signed is its whole authorization
 # model, and it is what keeps a compromise a denial rather than a forgery.
 mechanics = { path = "../mechanics" }
-# The announcement is the published artifact; the directory carries it unchanged.
+# The announcement is the published artifact; the directory carries it unchanged,
+# and `Registry::absorb` is the one implementation of "anchor this projection to
+# its genesis" — verifying with a scratch registry keeps a second one from
+# existing here.
 addressbook = { path = "../addressbook" }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+data-encoding = "2.6"
+getrandom = "0.3"
+tracing = "0.1"
+
+# The HTTP surface. `axum` because this router merges with `lait_post`'s inside
+# one service (AUTH-25), and two routers from two stacks would be two servers.
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+# The one outbound client in this tree: pure Rust, no reqwest, no native-tls, no
+# OpenSSL. Used by the Firestore store to reach Google's REST API and the
+# instance metadata server, which is also why no cloud SDK appears here.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+[dev-dependencies]
+# The two-profile and replay properties need real keys and a real registry.
+tempfile = "3"
+# `over_http` serves the real router on an ephemeral port and drives it with the
+# same blocking client the Firestore store uses, so the test exercises the
+# surface rather than a second one written for it.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }

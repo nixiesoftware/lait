@@ -579,7 +579,14 @@ fn compatibility_source_vocabulary_is_absent() {
             .replace('\\', "/");
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         let lower = text.to_ascii_lowercase();
-        if lower.contains(concat!("bri", "dge")) {
+        // The word list is data, not vocabulary. It carries 2048 ordinary
+        // English nouns and one of them is the banned term — a word a person
+        // says out loud as part of their address, with no architectural claim
+        // anywhere near it. Exempting the file rather than editing the list is
+        // the only honest option: the list is reproduced verbatim, its 2048
+        // entries are what the address keyspace is measured against, and a
+        // codebase's naming discipline has no business reaching into English.
+        if lower.contains(concat!("bri", "dge")) && rel != "crates/directory/src/words.rs" {
             found.push(format!("{rel}: retired boundary vocabulary"));
         }
         if lower.contains("#[path") || lower.contains("#[ path") {
@@ -639,7 +646,13 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
             // mechanics' domain — a concept crate names its concepts. What must not
             // appear is a *delivery-mechanism* opinion leaking up from a contractor
             // into the seam, which is the thing the seam exists not to have.
-            &["letter", "mailbox", "mem", "post", "watch"],
+            //
+            // `plane` joins them: the reach itself — announcing, learning,
+            // resolving and sending — which moved down here from the client so
+            // that products and the daemon are callers rather than owners. It is
+            // a concept of this crate for the same reason the others are, and
+            // it names no delivery mechanism.
+            &["letter", "mailbox", "mem", "plane", "post", "watch"],
         ),
         ("fabric", &[]),
         ("journal", &[]),

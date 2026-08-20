@@ -37,7 +37,7 @@ const GENESIS_EPOCH: u64 = 1;
 
 /// Why a plane operation did not apply.
 #[derive(Debug)]
-pub enum ReachError {
+pub enum Failure {
     /// The plane needs at least two device seeds to found a profile — a device
     /// set is assembled by mutual link, and a single device cannot link to
     /// itself.
@@ -58,7 +58,7 @@ pub enum ReachError {
     Egress(String),
 }
 
-impl std::fmt::Display for ReachError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooFewDevices => write!(f, "a profile needs two devices to be founded"),
@@ -71,7 +71,7 @@ impl std::fmt::Display for ReachError {
     }
 }
 
-impl From<registry::Failure> for ReachError {
+impl From<registry::Failure> for Failure {
     fn from(error: registry::Failure) -> Self {
         Self::Kinship(error)
     }
@@ -120,6 +120,20 @@ pub struct Collected {
 /// tests, a hosted Post today, a direct peer later — keeps it behind `dyn`, and
 /// a `Sized` bound would refuse exactly that holder while claiming the plane is
 /// indifferent to where material waits.
+/// What learning an announcement would change about a profile already held.
+///
+/// Carries both sets rather than a boolean, because the person answering
+/// "accept this?" is being asked to notice a substitution, and a question that
+/// does not say what changed is a question that gets answered yes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceChange {
+    pub profile: ProfileId,
+    /// What this identity currently believes.
+    pub held: Vec<DeviceId>,
+    /// What the announcement avows.
+    pub incoming: Vec<DeviceId>,
+}
+
 pub struct ReachPlane {
     /// This identity's device seeds. All of them collect and open; the
     /// **canonical** one composes letters and proves egress.
@@ -141,6 +155,9 @@ pub struct ReachPlane {
     /// letter once it is acknowledged, so this is the only durable copy of the
     /// half a person wrote.
     sent: std::collections::BTreeMap<String, Vec<addressbook::reach_store::Sent>>,
+    /// The address a directory issued, if one has. Never minted locally: an
+    /// address a holder could choose is one a holder could squat.
+    address: Option<String>,
 }
 
 impl ReachPlane {
@@ -150,7 +167,7 @@ impl ReachPlane {
     ///
     /// `_now` is reserved: the genesis carries a fixed epoch today, and the
     /// daemon-backed path will stamp it from the wall clock.
-    pub fn found(seeds: Vec<[u8; 32]>, now: u64) -> Result<Self, ReachError> {
+    pub fn found(seeds: Vec<[u8; 32]>, now: u64) -> Result<Self, Failure> {
         Self::restore(seeds, None, now)
     }
 
@@ -164,15 +181,15 @@ impl ReachPlane {
         seeds: Vec<[u8; 32]>,
         state: Option<addressbook::ReachState>,
         _now: u64,
-    ) -> Result<Self, ReachError> {
+    ) -> Result<Self, Failure> {
         if seeds.len() < 2 {
-            return Err(ReachError::TooFewDevices);
+            return Err(Failure::TooFewDevices);
         }
         // Named rather than indexed: the length check above is what makes the
         // pair present, and a bare index asks the reader to hold that in their
         // head at every later edit.
         let (Some(first), Some(second)) = (seeds.first(), seeds.get(1)) else {
-            return Err(ReachError::TooFewDevices);
+            return Err(Failure::TooFewDevices);
         };
         let (first, second) = (*first, *second);
         // The nonce and epoch are fixed, and that is load-bearing: the profile
@@ -181,11 +198,13 @@ impl ReachPlane {
         // naming them. Changing either constant invalidates every issued
         // address in existence.
         let genesis = DeviceLink::seal(&first, &second, GENESIS_NONCE, GENESIS_EPOCH)
-            .map_err(|e| ReachError::Kinship(registry::Failure::Kinship(e)))?;
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
         let mut sent = std::collections::BTreeMap::new();
+        let mut address = None;
         let (mut registry, epoch, canonical) = match state {
             Some(held) => {
                 sent = held.sent;
+                address = held.address;
                 (held.registry, held.epoch, held.canonical)
             }
             None => (Registry::new(), 1, 0),
@@ -202,7 +221,7 @@ impl ReachPlane {
                 GENESIS_NONCE,
                 GENESIS_EPOCH.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
             )
-            .map_err(|e| ReachError::Kinship(registry::Failure::Kinship(e)))?;
+            .map_err(|e| Failure::Kinship(registry::Failure::Kinship(e)))?;
             registry.extend(&profile, Entry::Link(link))?;
         }
 
@@ -215,7 +234,7 @@ impl ReachPlane {
             // different key than the state recorded, silently.
             canonical: {
                 if canonical >= seeds.len() {
-                    return Err(ReachError::NotReachable);
+                    return Err(Failure::NotReachable);
                 }
                 canonical
             },
@@ -229,6 +248,7 @@ impl ReachPlane {
             mailbox: Mailbox::new(),
             epoch,
             sent,
+            address,
         })
     }
 
@@ -240,7 +260,60 @@ impl ReachPlane {
             canonical: self.canonical,
             registry: self.registry.clone(),
             sent: self.sent.clone(),
+            address: self.address.clone(),
         }
+    }
+
+    /// The short address a directory issued this identity, if one has.
+    #[must_use]
+    pub fn address(&self) -> Option<&str> {
+        self.address.as_deref()
+    }
+
+    /// Record the address a directory issued.
+    ///
+    /// Takes what the service answered rather than deriving anything: issuance
+    /// is the directory's act, and a plane that could compute its own address
+    /// would be a plane that could choose one.
+    pub fn issued(&mut self, address: String) {
+        self.address = Some(address);
+    }
+
+    /// What `announcement` would change about a profile this identity already
+    /// holds, without absorbing it.
+    ///
+    /// AUTH-18's v1 rung, and the reason it is a *question* rather than a
+    /// side effect: a directory that answered with a substituted key must not
+    /// be able to cause a seal to it. Learning is what commits, so a caller asks
+    /// this first and a person answers.
+    ///
+    /// `None` when this profile is new, or when the avowed set is unchanged —
+    /// both of which are safe to take silently. `Some` names the two sets, and a
+    /// caller must **block** rather than badge: field studies put manual
+    /// verification at 13 to 14 percent, so a warning nobody reads is a warning
+    /// that does not exist.
+    #[must_use]
+    pub fn change_on_learning(
+        &self,
+        announcement: &Announcement,
+        reader: &Standing,
+    ) -> Option<DeviceChange> {
+        let held = self.registry.resolve(&announcement.profile)?;
+        let mut scratch = Registry::new();
+        let absorbed = scratch
+            .absorb(
+                announcement.projection.clone(),
+                &announcement.genesis,
+                reader,
+            )
+            .ok()?;
+        let incoming = scratch.resolve(&absorbed).unwrap_or_default();
+        let same = held.len() == incoming.len() && held.iter().all(|d| incoming.contains(d));
+        (!same).then(|| DeviceChange {
+            profile: announcement.profile.clone(),
+            held,
+            incoming,
+        })
     }
 
     /// This identity's own profile — the address a correspondent reaches it by.
@@ -266,7 +339,7 @@ impl ReachPlane {
         &mut self,
         audience: Audience,
         reader: &Standing,
-    ) -> Result<Announcement, ReachError> {
+    ) -> Result<Announcement, Failure> {
         self.epoch = self.epoch.saturating_add(1);
         // Derived from the epoch rather than sampled, so a republication is
         // reproducible from durable state alone. It carries 8 bits and repeats
@@ -320,7 +393,7 @@ impl ReachPlane {
         &mut self,
         announcement: Announcement,
         reader: &Standing,
-    ) -> Result<ProfileId, ReachError> {
+    ) -> Result<ProfileId, Failure> {
         Ok(self
             .registry
             .absorb(announcement.projection, &announcement.genesis, reader)?)
@@ -384,12 +457,12 @@ impl ReachPlane {
     ///
     /// The profile is unchanged — it is the hash of a genesis link that names no
     /// primary. Refuses a device this identity does not hold the seed for.
-    pub fn make_canonical(&mut self, device: &DeviceId) -> Result<(), ReachError> {
+    pub fn make_canonical(&mut self, device: &DeviceId) -> Result<(), Failure> {
         let at = self
             .seeds
             .iter()
             .position(|seed| &device_from_seed(seed) == device)
-            .ok_or(ReachError::NotReachable)?;
+            .ok_or(Failure::NotReachable)?;
         self.canonical = at;
         Ok(())
     }
@@ -416,7 +489,7 @@ impl ReachPlane {
         recipient: &ProfileId,
         body: &str,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         self.send_content(
             carrier,
             recipient,
@@ -435,7 +508,7 @@ impl ReachPlane {
         recipient: &ProfileId,
         content: Content,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         let remembered = match &content {
             Content::Message { body } => Some(addressbook::reach_store::Sent {
                 at: now,
@@ -465,7 +538,7 @@ impl ReachPlane {
         recipient: &ProfileId,
         content: Content,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         let mut carrier = contractor.carrier_for(&self.canonical_seed());
         self.send_content(&mut *carrier, recipient, content, now)
     }
@@ -506,9 +579,9 @@ impl ReachPlane {
         recipient: &ProfileId,
         content: Content,
         now: u64,
-    ) -> Result<String, ReachError> {
-        let devices = self.resolve(recipient).ok_or(ReachError::NotReachable)?;
-        let addressed = devices.first().ok_or(ReachError::NotReachable)?.clone();
+    ) -> Result<String, Failure> {
+        let devices = self.resolve(recipient).ok_or(Failure::NotReachable)?;
+        let addressed = devices.first().ok_or(Failure::NotReachable)?.clone();
         self.send_addressed(carrier, recipient, &addressed, content, now)
     }
 
@@ -525,21 +598,21 @@ impl ReachPlane {
         addressed: &DeviceId,
         content: Content,
         now: u64,
-    ) -> Result<String, ReachError> {
-        let devices = self.resolve(recipient).ok_or(ReachError::NotReachable)?;
+    ) -> Result<String, Failure> {
+        let devices = self.resolve(recipient).ok_or(Failure::NotReachable)?;
         if !devices.contains(addressed) {
-            return Err(ReachError::NotReachable);
+            return Err(Failure::NotReachable);
         }
         let letter = Letter::compose(&self.canonical_seed(), content, now);
         let sealed = letter
             .seal_to_devices(&devices, addressed, now.saturating_add(RETENTION))
-            .map_err(ReachError::Seal)?;
+            .map_err(Failure::Seal)?;
         let plane = actor::replay(&self.egress_space, &self.egress_events);
         let witness = egress::authorize(&plane, &self.egress_actor, &self.canonical_device())
-            .map_err(|refused| ReachError::Egress(refused.to_string()))?;
+            .map_err(|refused| Failure::Egress(refused.to_string()))?;
         carrier
             .deposit(&witness, &sealed, now)
-            .map_err(ReachError::Carrier)
+            .map_err(Failure::Carrier)
     }
 
     /// Collect on exactly one device, with the seed that opens for it — what a
@@ -679,7 +752,7 @@ pub struct PostReach {
 
 impl PostReach {
     /// Stand up the plane from this identity's device seeds, pointed at a Post.
-    pub fn found(seeds: Vec<[u8; 32]>, base: String, now: u64) -> Result<Self, ReachError> {
+    pub fn found(seeds: Vec<[u8; 32]>, base: String, now: u64) -> Result<Self, Failure> {
         Ok(Self {
             plane: ReachPlane::found(seeds, now)?,
             base,
@@ -710,7 +783,7 @@ impl PostReach {
     /// Addressed at the primary device — the same device the egress authorizes
     /// and the same one `collect` fetches on — so signer, sender, and reader all
     /// agree under the hosted carrier's custody fence.
-    pub fn send_self(&self, body: &str, now: u64) -> Result<String, ReachError> {
+    pub fn send_self(&self, body: &str, now: u64) -> Result<String, Failure> {
         use crate::post::{PostCarrier, Signer};
         let seed = self.plane.canonical_seed();
         let primary = self.plane.canonical_device();
@@ -733,7 +806,7 @@ impl PostReach {
         state: Option<addressbook::ReachState>,
         base: String,
         now: u64,
-    ) -> Result<Self, ReachError> {
+    ) -> Result<Self, Failure> {
         Ok(Self {
             plane: ReachPlane::restore(seeds, state, now)?,
             base,
@@ -752,7 +825,7 @@ impl PostReach {
         &mut self,
         audience: Audience,
         reader: &Standing,
-    ) -> Result<Announcement, ReachError> {
+    ) -> Result<Announcement, Failure> {
         self.plane.announce(audience, reader)
     }
 
@@ -761,7 +834,7 @@ impl PostReach {
         &mut self,
         announcement: Announcement,
         reader: &Standing,
-    ) -> Result<ProfileId, ReachError> {
+    ) -> Result<ProfileId, Failure> {
         self.plane.learn(announcement, reader)
     }
 
@@ -821,7 +894,7 @@ impl PostReach {
         recipient: &ProfileId,
         body: &str,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         use crate::post::{PostCarrier, Signer};
         let mut carrier =
             PostCarrier::new(self.base.clone(), Signer::new(self.plane.canonical_seed()));
@@ -838,13 +911,10 @@ impl PostReach {
         recipient: &ProfileId,
         coordinates: Vec<u8>,
         now: u64,
-    ) -> Result<String, ReachError> {
+    ) -> Result<String, Failure> {
         use crate::post::{PostCarrier, Signer};
-        let devices = self
-            .plane
-            .resolve(recipient)
-            .ok_or(ReachError::NotReachable)?;
-        let addressed = devices.first().ok_or(ReachError::NotReachable)?.clone();
+        let devices = self.plane.resolve(recipient).ok_or(Failure::NotReachable)?;
+        let addressed = devices.first().ok_or(Failure::NotReachable)?.clone();
         let mut carrier =
             PostCarrier::new(self.base.clone(), Signer::new(self.plane.canonical_seed()));
         self.plane.send_addressed(
@@ -1013,6 +1083,50 @@ mod tests {
     /// canonical device leaves the rest of the mail to expire unread — which a
     /// surface cannot tell from nobody having written.
     #[test]
+    fn a_device_set_that_grew_is_a_change_a_person_has_to_answer_for() {
+        // Ada, on two devices, announced once and learned by Bob.
+        let mut ada = ReachPlane::found(vec![[71u8; 32], [72u8; 32]], NOW).expect("found");
+        let mut bob = ReachPlane::found(vec![[81u8; 32], [82u8; 32]], NOW).expect("found");
+        let first = ada
+            .announce(Audience::Public, &bob.standing())
+            .expect("announce");
+        bob.learn(first.clone(), &bob.standing()).expect("learn");
+
+        // Nothing changed: re-announcing the same set is not a question.
+        let unchanged = ada
+            .announce(Audience::Public, &bob.standing())
+            .expect("announce again");
+        assert_eq!(
+            bob.change_on_learning(&unchanged, &bob.standing()),
+            None,
+            "an unchanged device set was raised as a change, which trains a person to say yes"
+        );
+
+        // A third device joins, and now it is.
+        let mut wider =
+            ReachPlane::found(vec![[71u8; 32], [72u8; 32], [73u8; 32]], NOW).expect("found");
+        let grown = wider
+            .announce(Audience::Public, &bob.standing())
+            .expect("announce");
+        let change = bob
+            .change_on_learning(&grown, &bob.standing())
+            .expect("a device set that grew is a change");
+        assert_eq!(change.profile, *ada.profile());
+        assert!(
+            change.incoming.len() > change.held.len(),
+            "the change did not carry both sets: {change:?}"
+        );
+
+        // And asking is not learning — the answer must not have been absorbed
+        // as a side effect of the question.
+        assert_eq!(
+            bob.resolve(ada.profile()).map(|d| d.len()),
+            Some(change.held.len()),
+            "asking about a change absorbed it"
+        );
+    }
+
+    #[test]
     fn a_collect_asks_every_device_the_identity_holds() {
         let mut carrier = MemCarrier::new();
         let mut alice = ReachPlane::found(vec![ALICE_A, ALICE_B], NOW).expect("alice");
@@ -1147,7 +1261,7 @@ mod tests {
         let mut carrier = MemCarrier::new();
         assert!(matches!(
             alice.send(&mut carrier, &stranger.profile().clone(), "hi", NOW),
-            Err(ReachError::NotReachable)
+            Err(Failure::NotReachable)
         ));
     }
 
@@ -1193,7 +1307,7 @@ mod tests {
     fn one_device_cannot_found_a_profile() {
         assert!(matches!(
             ReachPlane::found(vec![ALICE_A], NOW),
-            Err(ReachError::TooFewDevices)
+            Err(Failure::TooFewDevices)
         ));
     }
 }

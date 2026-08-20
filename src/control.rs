@@ -740,6 +740,20 @@ pub enum Request {
     },
     /// The correspondents this identity holds, and its own reach.
     ReachView,
+    /// Learn a correspondent by the short address a directory issued.
+    ///
+    /// The directory is a mirror, so what comes back is verified here rather
+    /// than trusted: the announcement anchors to its own genesis, and a profile
+    /// this identity already holds whose device set has *changed* is refused
+    /// unless `accept_change` says a person looked at it. That refusal is
+    /// AUTH-18's v1 rung — a substituted key must block sending rather than
+    /// badge it, because field studies put manual verification at 13 to 14
+    /// percent and a warning nobody reads is not a defence.
+    ReachResolve {
+        address: String,
+        #[serde(default)]
+        accept_change: bool,
+    },
     /// Seal a message to a learned correspondent and deposit it.
     CorrespondSend {
         to: String,
@@ -1716,6 +1730,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::ReachShare
         | Request::ReachLearn { .. }
         | Request::ReachView
+        | Request::ReachResolve { .. }
         | Request::CorrespondSend { .. }
         | Request::CorrespondCollect
         | Request::CorrespondInvite { .. }
@@ -2111,6 +2126,12 @@ pub struct ReachView {
     pub announcement: Option<String>,
     /// This identity's own address on the plane.
     pub profile: String,
+    /// The short, speakable address a directory issued — `act-ion-zoo-4417`.
+    /// `None` until this identity has published to one, which is optional: the
+    /// plane works on profile ids alone and a directory only makes them
+    /// sayable.
+    #[serde(default)]
+    pub address: Option<String>,
     /// The correspondents it holds, as address spellings.
     pub correspondents: Vec<String>,
     /// One transcript per correspondent, in send order.
