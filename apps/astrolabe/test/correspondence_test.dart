@@ -34,6 +34,7 @@ ClientView _view({
 int _nowSecs() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
 ChatMessageRow _message({
+  String? id,
   bool mine = false,
   String kind = 'message',
   String? body = 'hello',
@@ -42,6 +43,7 @@ ChatMessageRow _message({
   bool provenanceAgrees = true,
 }) =>
     ChatMessageRow(
+      id: id,
       mine: mine,
       kind: kind,
       body: body,
@@ -198,12 +200,64 @@ void main() {
     expect(find.text('Open'), findsOneWidget);
   });
 
+  testWidgets('Open asks to enter the Space the invitation names',
+      (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        correspondence: _facts(messages: [
+          _message(id: 'dep_1', mine: false, kind: 'invitation', body: null),
+        ]),
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('invitation-open')));
+    await tester.pump();
+    expect(asked, [const ActionRequest.openInvitation(message: 'dep_1')]);
+  });
+
+  testWidgets('an invitation with no id cannot be opened', (tester) async {
+    // A letter this identity sent has no deposit id. Nothing addresses it, so
+    // the control must not pretend it can.
+    final asked = await _pump(
+      tester,
+      _view(
+        correspondence: _facts(messages: [
+          _message(mine: true, kind: 'invitation', body: null),
+        ]),
+      ),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('invitation-open')),
+      warnIfMissed: false,
+    );
+    await tester.pump();
+    expect(asked, isEmpty);
+  });
+
+  testWidgets('entering already under way does not ask twice', (tester) async {
+    final asked = await _pump(
+      tester,
+      _view(
+        correspondence: _facts(messages: [
+          _message(id: 'dep_1', mine: false, kind: 'invitation', body: null),
+        ]),
+        inFlight: [ActionKeys.openInvitation('dep_1')],
+      ),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('invitation-open')),
+      warnIfMissed: false,
+    );
+    await tester.pump();
+    expect(asked, isEmpty);
+  });
+
   testWidgets(
       'an unbuilt control is drawn disabled, and pressing it asks for nothing',
       (tester) async {
-    // The three controls on this surface with nothing behind them yet: the
-    // invitation's Open and Decline (no action carries entering a Space), and
-    // the composer's attach (`Content` has no attachment variant).
+    // The controls on this surface with nothing behind them yet: the
+    // invitation's Decline (nowhere to remember a dismissal) and the composer's
+    // attach (`Content` has no attachment variant). Open is wired now.
     //
     // Each was previously wired to an empty closure, which draws a control that
     // looks live, accepts the press, and does nothing — the failure this suite
@@ -218,7 +272,6 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('Open'), warnIfMissed: false);
     await tester.tap(find.text('Decline'), warnIfMissed: false);
     await tester.tap(
       find.bySemanticsLabel(RegExp('^Attach a file')),

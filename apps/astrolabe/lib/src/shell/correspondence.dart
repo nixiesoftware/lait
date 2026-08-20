@@ -748,6 +748,11 @@ class _InvitationCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final client = ClientScope.of(context);
+    final entering = message.id != null &&
+        ClientScope.watch(context)
+            .inFlight
+            .contains(ActionKeys.openInvitation(message.id!));
     return Align(
       alignment: message.mine ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
@@ -777,20 +782,24 @@ class _InvitationCard extends StatelessWidget {
               ),
               t.gap.y(Space.xs),
               Text(
-                'Signed by the sender. Opening it comes next.',
+                'Signed by the sender, and it verifies against its own '
+                'Space. Opening it asks that Space to admit you.',
                 style: context.proseStyle,
               ),
               t.gap.y(Space.sm),
-              // Both disabled, and the prose above already says why: an
-              // invitation verifies against its Space on its own, but nothing
-              // downstream carries the act yet — there is no `ActionRequest`
-              // for entering a Space, so `Action::SpaceEnter` is handled in the
-              // runtime and reachable from nowhere. An enabled button here
-              // would be a promise the whole chain cannot keep.
+              // Open enters the Space the invitation names. Decline is drawn
+              // and inert: dismissing one letter needs somewhere to remember
+              // the dismissal, and this backend has no such place yet — saying
+              // so is better than a control that forgets.
               Row(
                 children: [
                   Button(
-                    onPressed: null,
+                    key: const ValueKey('invitation-open'),
+                    onPressed: (message.id == null || entering)
+                        ? null
+                        : () => client.dispatch(
+                              ActionRequest.openInvitation(message: message.id!),
+                            ),
                     label: 'Open',
                     variant: ButtonVariant.primary,
                     size: ButtonSize.sm,
@@ -799,6 +808,7 @@ class _InvitationCard extends StatelessWidget {
                   Button(
                     onPressed: null,
                     label: 'Decline',
+                    tooltip: 'Declining is not available yet',
                     variant: ButtonVariant.ghost,
                     size: ButtonSize.sm,
                   ),

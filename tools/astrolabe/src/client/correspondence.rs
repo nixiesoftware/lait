@@ -303,6 +303,7 @@ impl DemoCarrier {
             .entry(person_id.to_owned())
             .or_default()
             .push(ChatMessage {
+                id: None,
                 mine: true,
                 kind: "message".into(),
                 body: Some(body.to_owned()),
@@ -340,6 +341,7 @@ impl DemoCarrier {
                 .entry(person_id)
                 .or_default()
                 .push(ChatMessage {
+                    id: None,
                     mine: false,
                     kind: kind.to_owned(),
                     body,
@@ -505,6 +507,7 @@ impl DemoCarrier {
             .entry(person_id.to_owned())
             .or_default()
             .push(ChatMessage {
+                id: None,
                 mine: true,
                 kind: "message".into(),
                 body: Some(body.to_owned()),
@@ -741,6 +744,33 @@ impl PostBackend {
         Ok(profile.as_str().to_owned())
     }
 
+    /// The coordinates one arriving invitation carries, by deposit id.
+    #[must_use]
+    pub fn invitation(&self, message: &str) -> Option<Vec<u8>> {
+        self.reach.invitation(message)
+    }
+
+    /// Carry an invitation to a learned correspondent.
+    pub fn send_invitation(
+        &mut self,
+        to: &str,
+        coordinates: Vec<u8>,
+        now: u64,
+    ) -> Result<(), ClientError> {
+        let profile = mechanics::kinship::ProfileId::parse(to)
+            .ok_or_else(|| ClientError::invalid("that is not an address"))?;
+        match self.reach.send_invitation(&profile, coordinates, now) {
+            Ok(_) => Ok(()),
+            Err(crate::client::reach::ReachError::NotReachable) => Err(ClientError::refused(
+                "we do not know how to reach them yet — add their address first",
+            )),
+            Err(error @ crate::client::reach::ReachError::Carrier(_)) => Err(
+                ClientError::unreachable(format!("send an invitation: {error}")),
+            ),
+            Err(error) => Err(ClientError::refused(format!("send an invitation: {error}"))),
+        }
+    }
+
     /// What has to survive a restart.
     #[must_use]
     pub fn state(&self) -> addressbook::ReachState {
@@ -807,6 +837,7 @@ impl PostBackend {
             .sent
             .iter()
             .map(|(sent_at, body)| ChatMessage {
+                id: None,
                 mine: true,
                 kind: "message".into(),
                 body: Some(body.clone()),
@@ -819,14 +850,22 @@ impl PostBackend {
         // each into the conversation of whoever avows the signer, so mail from a
         // correspondent does not pile into this identity's own transcript.
         let mut received: BTreeMap<String, Vec<ChatMessage>> = BTreeMap::new();
-        for (from, body, sent_at, provenance_agrees) in self.reach.inbox() {
+        for opened in self.reach.opened() {
+            let (kind, body) = match &opened.content {
+                correspondence::Content::Message { body } => ("message", Some(body.clone())),
+                // Drawn as its own widget rather than a text bubble, and it
+                // carries no body: an invitation is acted on, not read.
+                correspondence::Content::Invitation { .. } => ("invitation", None),
+            };
+            let from = opened.from.clone();
             let message = ChatMessage {
+                id: Some(opened.id.clone()),
                 mine: false,
-                kind: "message".into(),
-                body: Some(body),
-                sent_at,
+                kind: kind.into(),
+                body,
+                sent_at: opened.sent_at,
                 from_device: from.as_str().to_owned(),
-                provenance_agrees,
+                provenance_agrees: opened.provenance_agrees,
             };
             match self.reach.profile_of_device(&from) {
                 Some(profile) if profile.as_str() != me => {
@@ -882,6 +921,7 @@ impl PostBackend {
             let mut transcript: Vec<ChatMessage> = sent
                 .iter()
                 .map(|(sent_at, body)| ChatMessage {
+                    id: None,
                     mine: true,
                     kind: "message".into(),
                     body: Some(body.clone()),
@@ -934,6 +974,31 @@ impl Correspondent {
         match self {
             Self::Demo(demo) => demo.send(to, body, now),
             Self::Post(post) => post.send(to, body, now),
+        }
+    }
+
+    /// The coordinates one arriving invitation carries. The fixture's are a
+    /// stand-in payload and verify against nothing, so it offers none.
+    #[must_use]
+    pub fn invitation(&self, message: &str) -> Option<Vec<u8>> {
+        match self {
+            Self::Demo(_) => None,
+            Self::Post(post) => post.invitation(message),
+        }
+    }
+
+    /// Carry an invitation to a correspondent.
+    pub fn send_invitation(
+        &mut self,
+        to: &str,
+        coordinates: Vec<u8>,
+        now: u64,
+    ) -> Result<(), ClientError> {
+        match self {
+            Self::Demo(_) => Err(ClientError::refused(
+                "the demo fixture cannot carry an invitation",
+            )),
+            Self::Post(post) => post.send_invitation(to, coordinates, now),
         }
     }
 

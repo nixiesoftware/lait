@@ -78,6 +78,23 @@ impl From<registry::Failure> for ReachError {
     }
 }
 
+/// One letter this identity has opened and verified.
+///
+/// Every kind, not only the ones a transcript knows how to draw — dropping an
+/// invitation here is what made it invisible to the hosted arm while the
+/// component to draw it already existed.
+#[derive(Debug, Clone)]
+pub struct Opened {
+    /// The carrier's deposit id. The handle an action names.
+    pub id: String,
+    /// The device that signed it, proven by the letter itself.
+    pub from: DeviceId,
+    pub sent_at: u64,
+    /// Whether the carrier's word about the sender matched the proof.
+    pub provenance_agrees: bool,
+    pub content: Content,
+}
+
 /// What one pass over a carrier learned.
 ///
 /// Two facts, because they are two facts. A carrier that answered and is holding
@@ -368,7 +385,15 @@ impl ReachPlane {
     ) -> Result<String, ReachError> {
         let devices = self.resolve(recipient).ok_or(ReachError::NotReachable)?;
         let addressed = devices.first().ok_or(ReachError::NotReachable)?.clone();
-        self.send_addressed(carrier, recipient, &addressed, body, now)
+        self.send_addressed(
+            carrier,
+            recipient,
+            &addressed,
+            Content::Message {
+                body: body.to_owned(),
+            },
+            now,
+        )
     }
 
     /// Seal to a recipient, keyed at a chosen one of their devices.
@@ -382,20 +407,14 @@ impl ReachPlane {
         carrier: &mut impl Carrier,
         recipient: &ProfileId,
         addressed: &DeviceId,
-        body: &str,
+        content: Content,
         now: u64,
     ) -> Result<String, ReachError> {
         let devices = self.resolve(recipient).ok_or(ReachError::NotReachable)?;
         if !devices.contains(addressed) {
             return Err(ReachError::NotReachable);
         }
-        let letter = Letter::compose(
-            &self.canonical_seed(),
-            Content::Message {
-                body: body.to_owned(),
-            },
-            now,
-        );
+        let letter = Letter::compose(&self.canonical_seed(), content, now);
         let sealed = letter
             .seal_to_devices(&devices, addressed, now + RETENTION)
             .map_err(ReachError::Seal)?;
@@ -469,6 +488,37 @@ impl ReachPlane {
                 Content::Invitation { .. } => None,
             })
             .collect()
+    }
+
+    /// One opened letter, as a surface draws it.
+    ///
+    /// Carries the deposit id because acting on an invitation means naming
+    /// *which* one, and a transcript row has no other handle a person could
+    /// point at.
+    #[must_use]
+    pub fn opened(&self) -> Vec<Opened> {
+        self.mailbox
+            .letters()
+            .into_iter()
+            .map(|received| Opened {
+                id: received.id.clone(),
+                from: received.letter.from.clone(),
+                sent_at: received.letter.sent_at,
+                provenance_agrees: received.provenance_agrees(),
+                content: received.letter.content.clone(),
+            })
+            .collect()
+    }
+
+    /// The coordinates carried by one opened invitation, by deposit id.
+    #[must_use]
+    pub fn invitation(&self, id: &str) -> Option<Vec<u8>> {
+        self.mailbox.letters().into_iter().find_map(|received| {
+            match (&received.letter.content, received.id == id) {
+                (Content::Invitation { coordinates }, true) => Some(coordinates.clone()),
+                _ => None,
+            }
+        })
     }
 
     /// The opened text messages in the richest form a surface draws:
@@ -550,8 +600,15 @@ impl PostReach {
         let primary = self.plane.canonical_device();
         let mut carrier = PostCarrier::new(self.base.clone(), Signer::new(seed));
         let profile = self.plane.profile().clone();
-        self.plane
-            .send_addressed(&mut carrier, &profile, &primary, body, now)
+        self.plane.send_addressed(
+            &mut carrier,
+            &profile,
+            &primary,
+            Content::Message {
+                body: body.to_owned(),
+            },
+            now,
+        )
     }
 
     /// Reuse durable state when founding the hosted plane.
@@ -653,6 +710,46 @@ impl PostReach {
         let mut carrier =
             PostCarrier::new(self.base.clone(), Signer::new(self.plane.canonical_seed()));
         self.plane.send(&mut carrier, recipient, body, now)
+    }
+
+    /// Seal an invitation to a learned correspondent and deposit it.
+    ///
+    /// The coordinates are opaque bytes here, exactly as they are to the carrier
+    /// and to `crates/correspondence`: an invitation verifies against its own
+    /// Space and needs no prior state, which is what lets it ride anything.
+    pub fn send_invitation(
+        &mut self,
+        recipient: &ProfileId,
+        coordinates: Vec<u8>,
+        now: u64,
+    ) -> Result<String, ReachError> {
+        use correspondence::post::{PostCarrier, Signer};
+        let devices = self
+            .plane
+            .resolve(recipient)
+            .ok_or(ReachError::NotReachable)?;
+        let addressed = devices.first().ok_or(ReachError::NotReachable)?.clone();
+        let mut carrier =
+            PostCarrier::new(self.base.clone(), Signer::new(self.plane.canonical_seed()));
+        self.plane.send_addressed(
+            &mut carrier,
+            recipient,
+            &addressed,
+            Content::Invitation { coordinates },
+            now,
+        )
+    }
+
+    /// Every letter this identity has opened, invitations included.
+    #[must_use]
+    pub fn opened(&self) -> Vec<Opened> {
+        self.plane.opened()
+    }
+
+    /// The coordinates one opened invitation carries.
+    #[must_use]
+    pub fn invitation(&self, id: &str) -> Option<Vec<u8>> {
+        self.plane.invitation(id)
     }
 
     /// Fetch anything waiting for you over the hosted Post, open it, and file it.
@@ -818,7 +915,9 @@ mod tests {
             &mut carrier,
             &alice.profile().clone(),
             &elsewhere,
-            "addressed to your other device",
+            Content::Message {
+                body: "addressed to your other device".into(),
+            },
             NOW,
         )
         .expect("send");

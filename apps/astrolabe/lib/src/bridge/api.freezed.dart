@@ -65,6 +65,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(ActionRequest_SendMessage value)? sendMessage,
     TResult Function(ActionRequest_ShareReach value)? shareReach,
     TResult Function(ActionRequest_AddCorrespondent value)? addCorrespondent,
+    TResult Function(ActionRequest_OpenInvitation value)? openInvitation,
+    TResult Function(ActionRequest_SendInvitation value)? sendInvitation,
     TResult Function(ActionRequest_CollectMail value)? collectMail,
     TResult Function(ActionRequest_BlockSender value)? blockSender,
     TResult Function(ActionRequest_AcceptContact value)? acceptContact,
@@ -134,6 +136,10 @@ extension ActionRequestPatterns on ActionRequest {
         return shareReach(_that);
       case ActionRequest_AddCorrespondent() when addCorrespondent != null:
         return addCorrespondent(_that);
+      case ActionRequest_OpenInvitation() when openInvitation != null:
+        return openInvitation(_that);
+      case ActionRequest_SendInvitation() when sendInvitation != null:
+        return sendInvitation(_that);
       case ActionRequest_CollectMail() when collectMail != null:
         return collectMail(_that);
       case ActionRequest_BlockSender() when blockSender != null:
@@ -234,6 +240,10 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(ActionRequest_ShareReach value) shareReach,
     required TResult Function(ActionRequest_AddCorrespondent value)
         addCorrespondent,
+    required TResult Function(ActionRequest_OpenInvitation value)
+        openInvitation,
+    required TResult Function(ActionRequest_SendInvitation value)
+        sendInvitation,
     required TResult Function(ActionRequest_CollectMail value) collectMail,
     required TResult Function(ActionRequest_BlockSender value) blockSender,
     required TResult Function(ActionRequest_AcceptContact value) acceptContact,
@@ -310,6 +320,10 @@ extension ActionRequestPatterns on ActionRequest {
         return shareReach(_that);
       case ActionRequest_AddCorrespondent():
         return addCorrespondent(_that);
+      case ActionRequest_OpenInvitation():
+        return openInvitation(_that);
+      case ActionRequest_SendInvitation():
+        return sendInvitation(_that);
       case ActionRequest_CollectMail():
         return collectMail(_that);
       case ActionRequest_BlockSender():
@@ -400,6 +414,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(ActionRequest_SendMessage value)? sendMessage,
     TResult? Function(ActionRequest_ShareReach value)? shareReach,
     TResult? Function(ActionRequest_AddCorrespondent value)? addCorrespondent,
+    TResult? Function(ActionRequest_OpenInvitation value)? openInvitation,
+    TResult? Function(ActionRequest_SendInvitation value)? sendInvitation,
     TResult? Function(ActionRequest_CollectMail value)? collectMail,
     TResult? Function(ActionRequest_BlockSender value)? blockSender,
     TResult? Function(ActionRequest_AcceptContact value)? acceptContact,
@@ -468,6 +484,10 @@ extension ActionRequestPatterns on ActionRequest {
         return shareReach(_that);
       case ActionRequest_AddCorrespondent() when addCorrespondent != null:
         return addCorrespondent(_that);
+      case ActionRequest_OpenInvitation() when openInvitation != null:
+        return openInvitation(_that);
+      case ActionRequest_SendInvitation() when sendInvitation != null:
+        return sendInvitation(_that);
       case ActionRequest_CollectMail() when collectMail != null:
         return collectMail(_that);
       case ActionRequest_BlockSender() when blockSender != null:
@@ -565,6 +585,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult Function(String to, String body)? sendMessage,
     TResult Function()? shareReach,
     TResult Function(String announcement)? addCorrespondent,
+    TResult Function(String message)? openInvitation,
+    TResult Function(String to, String link)? sendInvitation,
     TResult Function()? collectMail,
     TResult Function(String person)? blockSender,
     TResult Function(String person)? acceptContact,
@@ -645,6 +667,10 @@ extension ActionRequestPatterns on ActionRequest {
         return shareReach();
       case ActionRequest_AddCorrespondent() when addCorrespondent != null:
         return addCorrespondent(_that.announcement);
+      case ActionRequest_OpenInvitation() when openInvitation != null:
+        return openInvitation(_that.message);
+      case ActionRequest_SendInvitation() when sendInvitation != null:
+        return sendInvitation(_that.to, _that.link);
       case ActionRequest_CollectMail() when collectMail != null:
         return collectMail();
       case ActionRequest_BlockSender() when blockSender != null:
@@ -757,6 +783,8 @@ extension ActionRequestPatterns on ActionRequest {
     required TResult Function(String to, String body) sendMessage,
     required TResult Function() shareReach,
     required TResult Function(String announcement) addCorrespondent,
+    required TResult Function(String message) openInvitation,
+    required TResult Function(String to, String link) sendInvitation,
     required TResult Function() collectMail,
     required TResult Function(String person) blockSender,
     required TResult Function(String person) acceptContact,
@@ -845,6 +873,10 @@ extension ActionRequestPatterns on ActionRequest {
         return shareReach();
       case ActionRequest_AddCorrespondent():
         return addCorrespondent(_that.announcement);
+      case ActionRequest_OpenInvitation():
+        return openInvitation(_that.message);
+      case ActionRequest_SendInvitation():
+        return sendInvitation(_that.to, _that.link);
       case ActionRequest_CollectMail():
         return collectMail();
       case ActionRequest_BlockSender():
@@ -949,6 +981,8 @@ extension ActionRequestPatterns on ActionRequest {
     TResult? Function(String to, String body)? sendMessage,
     TResult? Function()? shareReach,
     TResult? Function(String announcement)? addCorrespondent,
+    TResult? Function(String message)? openInvitation,
+    TResult? Function(String to, String link)? sendInvitation,
     TResult? Function()? collectMail,
     TResult? Function(String person)? blockSender,
     TResult? Function(String person)? acceptContact,
@@ -1028,6 +1062,10 @@ extension ActionRequestPatterns on ActionRequest {
         return shareReach();
       case ActionRequest_AddCorrespondent() when addCorrespondent != null:
         return addCorrespondent(_that.announcement);
+      case ActionRequest_OpenInvitation() when openInvitation != null:
+        return openInvitation(_that.message);
+      case ActionRequest_SendInvitation() when sendInvitation != null:
+        return sendInvitation(_that.to, _that.link);
       case ActionRequest_CollectMail() when collectMail != null:
         return collectMail();
       case ActionRequest_BlockSender() when blockSender != null:
@@ -1933,6 +1971,146 @@ class _$ActionRequest_AddCorrespondentCopyWithImpl<$Res>
       announcement: null == announcement
           ? _self.announcement
           : announcement // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_OpenInvitation extends ActionRequest {
+  const ActionRequest_OpenInvitation({required this.message}) : super._();
+
+  final String message;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_OpenInvitationCopyWith<ActionRequest_OpenInvitation>
+      get copyWith => _$ActionRequest_OpenInvitationCopyWithImpl<
+          ActionRequest_OpenInvitation>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_OpenInvitation &&
+            (identical(other.message, message) || other.message == message));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, message);
+
+  @override
+  String toString() {
+    return 'ActionRequest.openInvitation(message: $message)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_OpenInvitationCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_OpenInvitationCopyWith(
+          ActionRequest_OpenInvitation value,
+          $Res Function(ActionRequest_OpenInvitation) _then) =
+      _$ActionRequest_OpenInvitationCopyWithImpl;
+  @useResult
+  $Res call({String message});
+}
+
+/// @nodoc
+class _$ActionRequest_OpenInvitationCopyWithImpl<$Res>
+    implements $ActionRequest_OpenInvitationCopyWith<$Res> {
+  _$ActionRequest_OpenInvitationCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_OpenInvitation _self;
+  final $Res Function(ActionRequest_OpenInvitation) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? message = null,
+  }) {
+    return _then(ActionRequest_OpenInvitation(
+      message: null == message
+          ? _self.message
+          : message // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ActionRequest_SendInvitation extends ActionRequest {
+  const ActionRequest_SendInvitation({required this.to, required this.link})
+      : super._();
+
+  final String to;
+  final String link;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ActionRequest_SendInvitationCopyWith<ActionRequest_SendInvitation>
+      get copyWith => _$ActionRequest_SendInvitationCopyWithImpl<
+          ActionRequest_SendInvitation>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ActionRequest_SendInvitation &&
+            (identical(other.to, to) || other.to == to) &&
+            (identical(other.link, link) || other.link == link));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, to, link);
+
+  @override
+  String toString() {
+    return 'ActionRequest.sendInvitation(to: $to, link: $link)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ActionRequest_SendInvitationCopyWith<$Res>
+    implements $ActionRequestCopyWith<$Res> {
+  factory $ActionRequest_SendInvitationCopyWith(
+          ActionRequest_SendInvitation value,
+          $Res Function(ActionRequest_SendInvitation) _then) =
+      _$ActionRequest_SendInvitationCopyWithImpl;
+  @useResult
+  $Res call({String to, String link});
+}
+
+/// @nodoc
+class _$ActionRequest_SendInvitationCopyWithImpl<$Res>
+    implements $ActionRequest_SendInvitationCopyWith<$Res> {
+  _$ActionRequest_SendInvitationCopyWithImpl(this._self, this._then);
+
+  final ActionRequest_SendInvitation _self;
+  final $Res Function(ActionRequest_SendInvitation) _then;
+
+  /// Create a copy of ActionRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? to = null,
+    Object? link = null,
+  }) {
+    return _then(ActionRequest_SendInvitation(
+      to: null == to
+          ? _self.to
+          : to // ignore: cast_nullable_to_non_nullable
+              as String,
+      link: null == link
+          ? _self.link
+          : link // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

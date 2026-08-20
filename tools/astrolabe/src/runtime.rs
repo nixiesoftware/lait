@@ -137,6 +137,15 @@ pub enum Action {
     AddCorrespondent {
         announcement: String,
     },
+    /// Enter the Space an arriving invitation names, by its deposit id.
+    OpenInvitation {
+        message: String,
+    },
+    /// Carry an invitation this identity holds to a correspondent.
+    SendInvitation {
+        to: String,
+        link: String,
+    },
     BlockSender(String),
     AcceptContact(String),
     OpenConversation(String),
@@ -251,6 +260,8 @@ impl Action {
             Self::CollectMail => "correspondence.collect".into(),
             Self::ShareReach => "reach.share".into(),
             Self::AddCorrespondent { .. } => "reach.add".into(),
+            Self::OpenInvitation { message } => format!("invitation.open:{message}"),
+            Self::SendInvitation { to, .. } => format!("invitation.send:{to}"),
             Self::BlockSender(person) => format!("correspondence.block:{person}"),
             Self::AcceptContact(person) => format!("correspondence.accept:{person}"),
             Self::OpenConversation(person) => format!("correspondence.open:{person}"),
@@ -306,6 +317,8 @@ impl Action {
             Self::Refresh => "re-read this machine".into(),
             Self::ShareReach => "publish how to reach you".into(),
             Self::AddCorrespondent { .. } => "add a correspondent".into(),
+            Self::OpenInvitation { .. } => "enter the Space you were invited to".into(),
+            Self::SendInvitation { .. } => "send an invitation".into(),
             Self::OpenWorld { world, .. } => format!("open {world}"),
             Self::UpdateWorld { world } => format!("update {world}"),
             Self::StartDevice(id) => format!("start {id}"),
@@ -1097,6 +1110,49 @@ impl Worker {
                 // able to show it.
                 self.correspond(|correspondence| correspondence.announce().map(|_| ()))?;
                 Ok(Outcome::Said("ready to hand over".into()))
+            }
+            // An invitation is opaque here, exactly as it is to the carrier and
+            // to `crates/correspondence`: it verifies against its own Space at
+            // the receiver and needs no prior state. So this converts between
+            // the bytes a letter carries and the link body `space_enter` takes,
+            // and refuses nothing on its own — `host_space_enter` is what judges
+            // an invitation, and it is the only thing that should.
+            Action::OpenInvitation { message } => {
+                let coordinates = self
+                    .correspondence
+                    .as_ref()
+                    .ok_or_else(|| ClientError::refused("correspondence is not connected yet"))?
+                    .lock()
+                    .map_err(|_| ClientError::internal("the correspondence lock is poisoned"))?
+                    .invitation(message)
+                    .ok_or_else(|| {
+                        ClientError::refused("that invitation is no longer in the transcript")
+                    })?;
+                let link = data_encoding::BASE32_NOPAD
+                    .encode(&coordinates)
+                    .to_lowercase();
+                let context = client.host_context().await?;
+                client
+                    .space_enter(&link, &context.spaces_root, None)
+                    .await?;
+                Ok(Outcome::Said(
+                    "entered the Space you were invited to".into(),
+                ))
+            }
+            Action::SendInvitation { to, link } => {
+                let body = link
+                    .trim()
+                    .strip_prefix("lait://join/")
+                    .unwrap_or_else(|| link.trim());
+                let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+                let coordinates = data_encoding::BASE32_NOPAD
+                    .decode(cleaned.to_uppercase().as_bytes())
+                    .map_err(|_| ClientError::invalid("that is not an invite link"))?;
+                let now = now_secs();
+                self.correspond(|correspondence| {
+                    correspondence.send_invitation(to, coordinates.clone(), now)
+                })?;
+                Ok(Outcome::Said("invitation sent".into()))
             }
             Action::AddCorrespondent { announcement } => {
                 let mut learned = String::new();

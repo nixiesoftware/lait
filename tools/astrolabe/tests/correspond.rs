@@ -18,7 +18,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use astrolabe::client::correspondence::{Correspondent, PostBackend};
+use astrolabe::client::correspondence::Correspondent;
 use lait_post::http::{router, Shared};
 use lait_post::{FsStore, Post};
 
@@ -301,6 +301,78 @@ fn walkdir(root: &Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+/// An invitation crosses as an invitation, and arrives as one.
+///
+/// The carry half of CORR-24. Accepting it is `space_enter`, which needs a real
+/// daemon and is proven where daemons are; what is proven here is the half that
+/// was silently broken — an invitation was discarded in both projections, so it
+/// could never reach a surface from the hosted arm however well it travelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invitation_crosses_the_post_and_arrives_as_an_invitation() {
+    let (base, _post) = serve().await;
+    let root = tempfile::tempdir().expect("root");
+    let ada_home = machine(root.path(), "ada");
+    let grace_home = machine(root.path(), "grace");
+
+    let mut ada = client(&ada_home, &base);
+    let mut grace = client(&grace_home, &base);
+    let ada_address = address(&ada);
+    let grace_address = address(&grace);
+
+    let ada_card = ada.announce().expect("publish");
+    let grace_card = grace.announce().expect("publish");
+    ada.learn(&grace_card).expect("learn");
+    grace.learn(&ada_card).expect("learn");
+
+    // A link as a person receives one. Opaque to everything on this path: the
+    // carrier cannot read it, `crates/correspondence` will not decode it, and
+    // this client only re-spells it. It verifies at the Space or nowhere.
+    let link = "lait://join/aebagbafaydqqcikbmga";
+    ada.send_invitation(&grace_address, decode_link(link), now())
+        .expect("Ada carries an invitation to Grace");
+    grace.collect(now() + 1).expect("Grace asks the Post");
+
+    let arrived: Vec<_> = grace
+        .snapshot()
+        .conversations
+        .into_iter()
+        .find(|c| c.peer_id == ada_address)
+        .expect("a conversation with Ada")
+        .messages
+        .into_iter()
+        .filter(|m| !m.mine)
+        .collect();
+
+    assert_eq!(arrived.len(), 1, "one letter arrived");
+    let invitation = &arrived[0];
+    assert_eq!(invitation.kind, "invitation", "and it arrived as one");
+    assert!(
+        invitation.body.is_none(),
+        "an invitation is acted on, not read"
+    );
+    let id = invitation
+        .id
+        .clone()
+        .expect("a received letter names itself");
+    assert_eq!(
+        grace.invitation(&id).as_deref(),
+        Some(decode_link(link).as_slice()),
+        "the coordinates crossed intact, which is what lets the Space judge them"
+    );
+    assert!(
+        grace.invitation("iss_not_a_deposit").is_none(),
+        "and an id no letter carries names nothing"
+    );
+}
+
+/// The bare base32 body of an invite link, as bytes.
+fn decode_link(link: &str) -> Vec<u8> {
+    let body = link.trim().strip_prefix("lait://join/").unwrap_or(link);
+    data_encoding::BASE32_NOPAD
+        .decode(body.to_uppercase().as_bytes())
+        .expect("a base32 link body")
 }
 
 /// An address nobody has handed over is *not reachable* — which is a different

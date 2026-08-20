@@ -137,6 +137,24 @@ sealed class ActionRequest with _$ActionRequest {
     required String announcement,
   }) = ActionRequest_AddCorrespondent;
 
+  /// Enter the Space an arriving invitation names.
+  ///
+  /// `message` is the invitation's deposit id in the transcript. Its
+  /// coordinates verify against their own Space, so accepting is the same act
+  /// as following an invite link — delivery was never admission.
+  const factory ActionRequest.openInvitation({
+    required String message,
+  }) = ActionRequest_OpenInvitation;
+
+  /// Carry an invitation this identity already holds to a correspondent.
+  ///
+  /// `link` is an invite as a person receives one. Minting one is the Space's
+  /// authority and stays there; this only carries what somebody was given.
+  const factory ActionRequest.sendInvitation({
+    required String to,
+    required String link,
+  }) = ActionRequest_SendInvitation;
+
   /// Ask the carrier for anything waiting, and file it into conversations.
   const factory ActionRequest.collectMail() = ActionRequest_CollectMail;
 
@@ -418,6 +436,10 @@ class CardRow {
 
 /// One message in a conversation. The chat draws a custom component per `kind`.
 class ChatMessageRow {
+  /// The deposit id for a received letter; `None` for one this identity sent.
+  /// An invitation is acted on by naming this.
+  final String? id;
+
   /// True if this identity sent it — which side of the chat it is drawn on.
   final bool mine;
 
@@ -439,6 +461,7 @@ class ChatMessageRow {
   final bool provenanceAgrees;
 
   const ChatMessageRow({
+    this.id,
     required this.mine,
     required this.kind,
     this.body,
@@ -449,6 +472,7 @@ class ChatMessageRow {
 
   @override
   int get hashCode =>
+      id.hashCode ^
       mine.hashCode ^
       kind.hashCode ^
       body.hashCode ^
@@ -461,6 +485,7 @@ class ChatMessageRow {
       identical(this, other) ||
       other is ChatMessageRow &&
           runtimeType == other.runtimeType &&
+          id == other.id &&
           mine == other.mine &&
           kind == other.kind &&
           body == other.body &&

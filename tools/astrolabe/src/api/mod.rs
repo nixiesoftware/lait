@@ -639,6 +639,9 @@ pub struct ConversationRow {
 /// One message in a conversation. The chat draws a custom component per `kind`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessageRow {
+    /// The deposit id for a received letter; `None` for one this identity sent.
+    /// An invitation is acted on by naming this.
+    pub id: Option<String>,
     /// True if this identity sent it — which side of the chat it is drawn on.
     pub mine: bool,
     /// `message` (text) or `invitation`. The chat draws each with its own
@@ -784,6 +787,22 @@ pub enum ActionRequest {
     /// the person rather than for the artifact.
     AddCorrespondent {
         announcement: String,
+    },
+    /// Enter the Space an arriving invitation names.
+    ///
+    /// `message` is the invitation's deposit id in the transcript. Its
+    /// coordinates verify against their own Space, so accepting is the same act
+    /// as following an invite link — delivery was never admission.
+    OpenInvitation {
+        message: String,
+    },
+    /// Carry an invitation this identity already holds to a correspondent.
+    ///
+    /// `link` is an invite as a person receives one. Minting one is the Space's
+    /// authority and stays there; this only carries what somebody was given.
+    SendInvitation {
+        to: String,
+        link: String,
     },
     /// Ask the carrier for anything waiting, and file it into conversations.
     CollectMail,
@@ -955,6 +974,8 @@ impl ActionRequest {
             Self::SendMessage { to, body } => Action::SendMessage { to, body },
             Self::ShareReach => Action::ShareReach,
             Self::AddCorrespondent { announcement } => Action::AddCorrespondent { announcement },
+            Self::OpenInvitation { message } => Action::OpenInvitation { message },
+            Self::SendInvitation { to, link } => Action::SendInvitation { to, link },
             Self::CollectMail => Action::CollectMail,
             Self::BlockSender { person } => Action::BlockSender(person),
             Self::AcceptContact { person } => Action::AcceptContact(person),
@@ -1829,6 +1850,7 @@ fn project(app: &App) -> ClientView {
                         .messages
                         .iter()
                         .map(|message| ChatMessageRow {
+                            id: message.id.clone(),
                             mine: message.mine,
                             kind: message.kind.clone(),
                             body: message.body.clone(),

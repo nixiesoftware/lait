@@ -108,6 +108,10 @@ pub struct Conversation {
 /// One message in a conversation, sent or received.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
+    /// The carrier's deposit id, for a message that arrived. `None` for one this
+    /// identity composed — a sent letter has no deposit until it lands, and
+    /// nothing acts on one. What acts on an invitation names this.
+    pub id: Option<String>,
     /// True if this identity sent it, false if it was received. Drives which
     /// side of the chat it is drawn on.
     pub mine: bool,
